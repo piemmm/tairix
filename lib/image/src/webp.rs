@@ -722,41 +722,14 @@ impl Chain {
                 .iter_mut()
                 .zip(from.as_chunks::<RGBA_BYTES>().0)
             {
-                if blend_over {
-                    blend(target, incoming);
+                *target = if blend_over {
+                    crate::picture::over(*target, *incoming)
                 } else {
-                    target.copy_from_slice(incoming);
-                }
+                    *incoming
+                };
             }
         }
     }
-}
-
-/// Composite one straight-alpha pixel over another.
-///
-/// The specification's own formula, with the colour normalised against the
-/// alpha actually stored so the two cannot disagree.
-fn blend(target: &mut [u8], incoming: &[u8]) {
-    let source_alpha = u32::from(incoming[3]);
-    if source_alpha == u32::from(u8::MAX) {
-        target.copy_from_slice(incoming);
-        return;
-    }
-    if source_alpha == 0 {
-        return;
-    }
-    let kept = u32::from(target[3]) * (u32::from(u8::MAX) - source_alpha);
-    let alpha = source_alpha + kept / u32::from(u8::MAX);
-    if alpha == 0 {
-        target.fill(0);
-        return;
-    }
-    for channel in 0..3 {
-        let mixed = u32::from(incoming[channel]) * source_alpha * u32::from(u8::MAX)
-            + u32::from(target[channel]) * kept;
-        target[channel] = u8::try_from(mixed / (alpha * u32::from(u8::MAX))).unwrap_or(u8::MAX);
-    }
-    target[3] = u8::try_from(alpha).unwrap_or(u8::MAX);
 }
 
 impl FrameSource for Chain {

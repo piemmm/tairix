@@ -3768,7 +3768,7 @@ fn aw3_click_through_produces_the_staged_outcomes() {
 
 use crate::picker::{PickAccess, PickEnd, PickStep, PickerSlot, SessionPicker, PICKER_ORIGIN};
 use tairix_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode};
-use tairix_abi::window_ipc::{DocumentName, PickPurpose};
+use tairix_abi::window_ipc::{DocumentName, PickPurpose, SaveEndings};
 use tairix_browse::render::chrome_height;
 use tairix_browse::{DirectorySource, Entry, Listing};
 
@@ -3943,10 +3943,16 @@ fn pressed(key: KeyValue) -> KeyInput {
 /// A pick choosing a file to open.
 const OPEN: PickPurpose = PickPurpose::Open;
 
-/// A pick choosing where to save, offering `name`.
+/// A pick choosing where to save, offering `name`, under any name.
 fn save_as(name: &str) -> PickPurpose {
+    save_held(name, SaveEndings::ANY)
+}
+
+/// A pick choosing where to save, offering `name`, held to `endings`.
+fn save_held(name: &str, endings: SaveEndings) -> PickPurpose {
     PickPurpose::Save {
         suggested: DocumentName::new(name).expect("a valid name"),
+        endings,
     }
 }
 
@@ -4718,6 +4724,88 @@ fn a_save_offers_its_name_and_creates_the_file() {
         })
     );
     assert_eq!(picker.wm_id(), None);
+}
+
+/// A save held to the endings its requester writes refuses another ending
+/// before any file is made, and gives a name with none the first.
+#[test]
+fn a_save_holds_the_name_to_what_the_requester_writes() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker: SessionPicker<TreeSource, fn() -> TreeSource> =
+        SessionPicker::new(TreeSource::fixture);
+    let mut endings = SaveEndings::ANY;
+    endings.push('.', "png").expect("an extension");
+    endings.push(',', "b60").expect("a RISC OS file type");
+    picker
+        .begin(7, &save_held("picture.bmp", endings), &mut shell, &mut comp)
+        .expect("accepted");
+    let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+    assert_eq!(
+        picker.handle_key(&enter, &mut shell, &mut comp),
+        None,
+        "an ending the requester cannot write makes no file"
+    );
+    assert!(picker.wm_id().is_some(), "the save stays up to say why");
+
+    let backspace = pressed(KeyValue::Named(NamedKeyCode::Backspace));
+    for _ in 0..".bmp".len() {
+        picker.handle_key(&backspace, &mut shell, &mut comp);
+    }
+    let (_, path, access) = asked(picker.handle_key(&enter, &mut shell, &mut comp));
+    assert_eq!(
+        (path.as_str(), access),
+        ("/picture.png", PickAccess::Create),
+        "a name with no ending takes the first"
+    );
+}
+
+/// A name already ending as the requester asks is taken as typed, whatever
+/// its case.
+#[test]
+fn a_save_takes_a_name_ending_as_asked_as_typed() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker: SessionPicker<TreeSource, fn() -> TreeSource> =
+        SessionPicker::new(TreeSource::fixture);
+    let mut endings = SaveEndings::ANY;
+    endings.push('.', "png").expect("an extension");
+    endings.push(',', "b60").expect("a RISC OS file type");
+    picker
+        .begin(7, &save_held("Logo,B60", endings), &mut shell, &mut comp)
+        .expect("accepted");
+    let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+    let (_, path, _) = asked(picker.handle_key(&enter, &mut shell, &mut comp));
+    assert_eq!(path, "/Logo,B60");
+}
+
+/// A save held to endings still goes into a folder named, its name ending in
+/// none of them, and a name whose comma starts no file type takes the first
+/// ending rather than being refused.
+#[test]
+fn a_save_held_to_endings_goes_into_a_folder_named() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker: SessionPicker<TreeSource, fn() -> TreeSource> =
+        SessionPicker::new(TreeSource::fixture);
+    let mut endings = SaveEndings::ANY;
+    endings.push('.', "png").expect("an extension");
+    picker
+        .begin(7, &save_held("Docs", endings), &mut shell, &mut comp)
+        .expect("accepted");
+    let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+    assert_eq!(
+        picker.handle_key(&enter, &mut shell, &mut comp),
+        None,
+        "the folder is gone into, not made a file"
+    );
+    let backspace = pressed(KeyValue::Named(NamedKeyCode::Backspace));
+    for _ in 0.."Docs".len() {
+        picker.handle_key(&backspace, &mut shell, &mut comp);
+    }
+    type_into(&mut picker, "Smith, J", &mut shell, &mut comp);
+    let (_, path, access) = asked(picker.handle_key(&enter, &mut shell, &mut comp));
+    assert_eq!(
+        (path.as_str(), access),
+        ("/Docs/Smith, J.png", PickAccess::Create)
+    );
 }
 
 /// A name that already names a file is replaced only once the user says so;

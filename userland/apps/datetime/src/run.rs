@@ -35,7 +35,6 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
-    extern crate alloc;
 
     use core::cell::Cell;
 
@@ -50,31 +49,16 @@ mod program {
     use tairix_datetime::{Editor, Status};
     use tairix_geometry::Scale;
     use tairix_input::{InputEvent, Key, NamedKey};
-    use tairix_rt::io::{Stderr, Write};
+
     use tairix_theme::ThemeRegistry;
-    use tairix_window::app::{self, AppWindow, ShellError, Wake, EXIT_CHANNEL_LOST};
+    use tairix_window::app::{self, AppWindow, Wake, EXIT_CHANNEL_LOST};
     use tairix_window::{
         key_input_event, pointer_point, Desktop, EventDrain, EventError, EventMailbox, EventSource,
         Parked, WindowClient, WindowEvents,
     };
 
-    /// State a reason on `stderr`: an exit code alone is not a diagnosis, and
-    /// a refused optional step still says so.
-    fn report(reason: &str) {
-        let _ = writeln!(Stderr, "datetime: {reason}");
-    }
-
-    /// State the abnormal-exit reason and hand `code` back for `main`.
-    fn fail(code: i32, reason: &str) -> i32 {
-        report(reason);
-        code
-    }
-
-    /// State a shared-shell bring-up refusal and hand its reserved code back.
-    fn fail_shell(err: ShellError) -> i32 {
-        report(&alloc::format!("{err}"));
-        err.code()
-    }
+    /// The name this program states its refusals under.
+    const APP_NAME: &str = "datetime";
 
     /// Declare this application's presence on the desktop's icon bar: the
     /// shared convention's two rows — the session-drawn information row and
@@ -90,7 +74,7 @@ mod program {
     fn declare_app_bar(client: &mut WindowClient<app::RtWindowTransport>, endpoint: u64) {
         let declared = tairix_window::info_and_quit(endpoint, AppBarClick::Raise);
         if let Err(refused) = tairix_window::declare_app_bar(client, declared) {
-            report(&alloc::format!("{refused}"));
+            app::report(APP_NAME, format_args!("{refused}"));
         }
     }
 
@@ -151,7 +135,7 @@ mod program {
         match app::adopt_desktop(desktop, themes) {
             Ok(changed) => changed,
             Err(err) => {
-                report(&alloc::format!("desktop change refused: {err}"));
+                app::report(APP_NAME, format_args!("desktop change refused: {err}"));
                 false
             }
         }
@@ -198,7 +182,7 @@ mod program {
         let instant = match editor.compose() {
             Ok(instant) => instant,
             Err(fault) => {
-                report(fault.message());
+                app::report(APP_NAME, fault.message());
                 editor.set_status(Status::Rejected(fault));
                 return;
             }
@@ -217,7 +201,7 @@ mod program {
         // Loud on both channels: the window states it for the user in front
         // of it, `stderr` for whoever started the app.
         if let Some(message) = status.message() {
-            report(message);
+            app::report(APP_NAME, message);
         }
         editor.set_status(status);
     }
@@ -268,13 +252,13 @@ mod program {
         let mut window = AppWindow::new();
         let (mut desktop, mut themes) = match app::bring_up_desktop(window.client()) {
             Ok(pair) => pair,
-            Err(err) => return fail_shell(err),
+            Err(err) => return app::fail(APP_NAME, err.code(), err),
         };
 
         // --- The event mailbox the app parks on.
         let binding = match app::bind_event_mailbox() {
             Ok(binding) => binding,
-            Err(err) => return fail_shell(err),
+            Err(err) => return app::fail(APP_NAME, err.code(), err),
         };
 
         // --- The icon-bar presence first: a declared presence belongs to the
@@ -288,10 +272,10 @@ mod program {
         let server = match window.open(binding.endpoint(), &mode, view::TITLE, WindowSizing::Fixed)
         {
             Ok(server) => server,
-            Err(err) => return fail_shell(err),
+            Err(err) => return app::fail(APP_NAME, err.code(), err),
         };
         if repaint(&mut window, &editor, themes.active(), desktop.scale()).is_err() {
-            return fail(EXIT_CHANNEL_LOST, "first present refused");
+            return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "first present refused");
         }
 
         // --- The event loop: park, apply, repaint. A dead channel ends the
@@ -319,12 +303,12 @@ mod program {
                     if adopt_desktop(&mut desktop, &mut themes, &desktop_moved)
                         && repaint(&mut window, &editor, themes.active(), desktop.scale()).is_err()
                     {
-                        return fail(EXIT_CHANNEL_LOST, "present refused");
+                        return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused");
                     }
                     continue;
                 }
                 Err(EventError::Mailbox(_)) => {
-                    return fail(EXIT_CHANNEL_LOST, "event channel lost")
+                    return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "event channel lost")
                 }
             };
 
@@ -358,7 +342,7 @@ mod program {
                 // carried names no command and is ignored (fail closed).
                 WindowEvent::CloseRequested { .. } => {
                     if window.close().is_err() {
-                        return fail(EXIT_CHANNEL_LOST, "close refused");
+                        return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "close refused");
                     }
                     continue;
                 }
@@ -373,11 +357,11 @@ mod program {
                     {
                         // A refused re-open is a click that did not work, not
                         // a fault: the application stays on the bar.
-                        report(&alloc::format!("{err}"));
+                        app::report(APP_NAME, format_args!("{err}"));
                         continue;
                     }
                     if repaint(&mut window, &editor, themes.active(), desktop.scale()).is_err() {
-                        return fail(EXIT_CHANNEL_LOST, "present refused");
+                        return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused");
                     }
                     continue;
                 }
@@ -395,7 +379,7 @@ mod program {
             }
 
             if repaint(&mut window, &editor, themes.active(), desktop.scale()).is_err() {
-                return fail(EXIT_CHANNEL_LOST, "present refused");
+                return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused");
             }
         }
     }

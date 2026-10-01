@@ -472,7 +472,7 @@ impl Life {
     /// Repaint every cell `rect` covers: the gap black, a cell in its colour
     /// at its brightness.
     fn paint(&self, surface: &mut Surface, rect: Rect) {
-        let (Ok(x), Ok(y)) = (u32::try_from(rect.left()), u32::try_from(rect.top())) else {
+        let Some((x, y)) = rect.surface_origin() else {
             return;
         };
         surface.fill_rect(x, y, rect.width, rect.height, Color::rgb(0, 0, 0));

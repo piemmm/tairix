@@ -13,6 +13,7 @@ use super::{
 };
 use crate::loopback::LoopbackSession;
 use crate::proto::{Channel, ProtoError, FRAME_HEADER_LEN, MAX_FRAME};
+use crate::testing::NullSink;
 use crate::worker::ServeEnd;
 use alloc::rc::Rc;
 use alloc::vec;
@@ -38,13 +39,6 @@ impl Sink for RecordingSink {
     fn write_event(&self, event: &Event<'_>) {
         self.events.borrow_mut().push((event.id, event.level));
     }
-}
-
-/// Discards every event.
-struct SilentSink;
-
-impl Sink for SilentSink {
-    fn write_event(&self, _event: &Event<'_>) {}
 }
 
 /// Echoes each request back with a `>` prefix: one frame in, one out.
@@ -195,7 +189,7 @@ fn drain<T: SessionTransport, K: Sink>(
 #[test]
 fn frames_cross_in_order_in_both_directions() {
     let mut session =
-        SandboxSession::new(LoopbackSession::new(Tagger), bounds(), SilentSink).expect("committed");
+        SandboxSession::new(LoopbackSession::new(Tagger), bounds(), NullSink).expect("committed");
     session.send(b"alpha").expect("queued");
     session.send(b"beta").expect("queued");
     // Two frames are in flight at once: the seam is not request/reply-locked.
@@ -218,12 +212,9 @@ fn frames_cross_in_order_in_both_directions() {
 
 #[test]
 fn one_inbound_frame_may_answer_with_many() {
-    let mut session = SandboxSession::new(
-        LoopbackSession::new(FanOut { fan: 5 }),
-        bounds(),
-        SilentSink,
-    )
-    .expect("committed");
+    let mut session =
+        SandboxSession::new(LoopbackSession::new(FanOut { fan: 5 }), bounds(), NullSink)
+            .expect("committed");
     session.send(b"x").expect("queued");
     turn(&mut session).expect("no failure");
     let frames = drain(&mut session).expect("no failure");
@@ -242,7 +233,7 @@ fn a_frame_split_across_reads_is_assembled_before_it_is_delivered() {
     // whole of it has arrived.
     let mut transport = Scripted::over(framed(b"hello"));
     transport.chunk = 1;
-    let mut session = SandboxSession::new(transport, bounds(), SilentSink).expect("committed");
+    let mut session = SandboxSession::new(transport, bounds(), NullSink).expect("committed");
     for _ in 0..FRAME_HEADER_LEN + b"hello".len() - 1 {
         session.on_readable().expect("no failure");
         assert_eq!(session.recv(<[u8]>::to_vec).expect("no failure"), None);
@@ -258,7 +249,7 @@ fn a_frame_split_across_reads_is_assembled_before_it_is_delivered() {
 #[test]
 fn an_empty_payload_is_a_legal_frame_in_both_directions() {
     let mut session =
-        SandboxSession::new(Scripted::over(framed(b"")), bounds(), SilentSink).expect("committed");
+        SandboxSession::new(Scripted::over(framed(b"")), bounds(), NullSink).expect("committed");
     session.send(b"").expect("queued");
     session.on_writable().expect("no failure");
     session.on_readable().expect("no failure");
@@ -299,7 +290,7 @@ fn the_send_ceiling_is_derived_from_the_bound_and_never_exceeds_the_frame_cap() 
 #[test]
 fn an_over_ceiling_payload_is_permanently_refused_and_queues_nothing() {
     let mut session =
-        SandboxSession::new(Scripted::over(Vec::new()), bounds(), SilentSink).expect("committed");
+        SandboxSession::new(Scripted::over(Vec::new()), bounds(), NullSink).expect("committed");
     let oversize = vec![0u8; session.bounds().max_send_payload() + 1];
     assert_eq!(session.send(&oversize), Err(SessionError::FrameTooLarge));
     assert!(!session.wants_write(), "nothing was queued");
@@ -313,7 +304,7 @@ fn a_full_queue_refuses_transiently_and_leaves_the_queue_untouched() {
     let mut session = SandboxSession::new(
         Scripted::over(Vec::new()),
         SessionBounds::new(32, 32).expect("workable"),
-        SilentSink,
+        NullSink,
     )
     .expect("committed");
     let payload = vec![b'z'; 8];
@@ -342,7 +333,7 @@ fn wants_write_tracks_the_queue_and_wants_read_tracks_the_back_pressure() {
     let mut transport = Scripted::over(Vec::new());
     // Accept one byte per write, so the queue drains slowly.
     transport.write_cap = Some(1);
-    let mut session = SandboxSession::new(transport, bounds(), SilentSink).expect("committed");
+    let mut session = SandboxSession::new(transport, bounds(), NullSink).expect("committed");
     assert!(!session.wants_write(), "nothing queued yet");
     assert!(session.wants_read(), "the accumulator starts empty");
     session.send(b"ab").expect("queued");
@@ -371,7 +362,7 @@ fn a_full_accumulator_withdraws_read_readiness_until_the_owner_drains() {
     let mut session = SandboxSession::new(
         Scripted::over(stream),
         SessionBounds::new(BOUND, limit).expect("workable"),
-        SilentSink,
+        NullSink,
     )
     .expect("committed");
     session.on_readable().expect("no failure");
@@ -444,7 +435,7 @@ fn a_worker_frame_above_the_inbound_ceiling_is_refused_before_it_is_copied() {
     let mut session = SandboxSession::new(
         Scripted::over(at_ceiling),
         SessionBounds::new(BOUND, limit).expect("workable"),
-        SilentSink,
+        NullSink,
     )
     .expect("committed");
     session.on_readable().expect("no failure");
@@ -527,12 +518,12 @@ fn a_would_block_report_is_a_no_op_not_a_failure() {
 fn dropping_a_live_session_reaps_its_worker() {
     let transport = Scripted::over(Vec::new());
     let disposed = Rc::clone(&transport.disposed);
-    let session = SandboxSession::new(transport, bounds(), SilentSink).expect("committed");
+    let session = SandboxSession::new(transport, bounds(), NullSink).expect("committed");
     drop(session);
     assert_eq!(*disposed.borrow(), 1);
     // Ending one explicitly reports the worker's exit code.
     let transport = Scripted::over(Vec::new());
-    let session = SandboxSession::new(transport, bounds(), SilentSink).expect("committed");
+    let session = SandboxSession::new(transport, bounds(), NullSink).expect("committed");
     assert_eq!(session.end(), Some(139));
 }
 
@@ -550,7 +541,7 @@ fn the_queues_do_not_grow_across_a_long_session() {
     // place, never reallocated or left accumulating a consumed prefix
     // (which would exhaust memory over a long-lived connection).
     let mut session =
-        SandboxSession::new(LoopbackSession::new(Tagger), bounds(), SilentSink).expect("committed");
+        SandboxSession::new(LoopbackSession::new(Tagger), bounds(), NullSink).expect("committed");
     let baseline = (session.outbound.storage(), session.inbound.storage());
     assert_eq!(baseline, (BOUND, BOUND));
     for _ in 0..10_000 {

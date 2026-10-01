@@ -494,6 +494,11 @@ family drawn *below* a documented floor of its own is not held to it (a title
 band narrower than `TitleBar::min_band_width` abuts its clusters by design);
 the table names the rectangle each family is contracted to be drawn in.
 
+An application drawing its own content takes the same gate — `withheld` is
+public — and fills or composites a logical rectangle with `fill_area` and
+`blend_area`, so no application converts a `Rect` into surface pixels, or
+skips a rectangle that starts off the surface, in a copy of its own.
+
 ## Where it sits
 
 `#![no_std]`. The `scroll` and `state` modules are pure logic with no
@@ -519,13 +524,18 @@ The remaining drawn families are also complete: the value controls
 engine), the window-manager furniture (`window` — `WindowFrame`/`TitleBar`/
 `WindowControl`/`ResizeGrabber`/`ScrollCorner`), the shell surfaces (`shell` —
 `Notification`/`TaskbarItem`/`TraySignal`), the decision surfaces
-(`decision` — `Dialog`/`Tooltip`/`HelpTip`), and the form fields
+(`decision` — `Dialog`/`Tooltip`/`HelpTip`, with `Dialog::save_changes`, the
+one question a document window asks before closing over changes, whose actions
+`SaveChanges::of` reads), and the form fields
 (`form` — `FieldRow`/`FieldGroup`, the one settings-form shape, composing
 the `collection` row chrome and a real control in each row's slot, a
 `FlagSet` of labelled checkboxes among them; `stack` is the one plate column
 its groups are stacked down), the picture choice (`picture` —
 `PictureChoice`, a one-of-several setting chosen by its picture, seated in a
-`FieldGroup` beneath its rows), and the
+`FieldGroup` beneath its rows), the colour wells (`swatch_grid` —
+`SwatchGrid`, a grid of wells with a primary and an optional secondary mark,
+chosen by pointer or arrow keys, a translucent well shown over the one
+`checker` — `Checker` — every surface shows transparency over), and the
 credential question (`credential` — `CredentialSheet`, the one surface that
 asks for an account and its password so a more-privileged program can be
 started as that account: the desktop session's prompt window and the settings

@@ -764,8 +764,16 @@ drift apart (`AGENTS.md` §2.2):
   round-trip it, case-insensitively. The enum is **closed** — an unrecognised
   spelling is simply not one the registry knows (`None`, never a free-form
   string at a draw or association site).
-- `media_for_name(name)` maps a filename extension to its type,
-  ASCII-case-insensitively and without allocating; `media_for_named(name, kind,
+- `Ending::of(name)` is what ends a name: a RISC OS file type after its last
+  comma (`,ff9`, three hex digits) and an extension after the last dot before
+  it, each only after a stem, so `.png` and `,b60` alone end in nothing; its
+  `stem` is what they follow. The Trash numbers a clashing name before its
+  ending (`Logo (2),b60`), the kind sort clusters by its extension, and Paint
+  names a sprite after a file's stem, all by this one rule.
+  `media_for_name(name)` maps that ending to its type — a file type the
+  registry knows first, else the extension — ASCII-case-insensitively and
+  without allocating, and `name_endings(media)` lists the endings a type is
+  known by, the ones a save holds a name to; `media_for_named(name, kind,
   service_store)` classifies a node known only by its name and kind —
   `inode/directory` for a directory whatever its name,
   `application/x-tairix-service` for a `<Name>.app` in the system service store
@@ -796,8 +804,8 @@ Offering a file to a chosen application is a second pure engine model, the
 `open_with` module (`plans/NEW-FILEMANAGER.md` FM6b), host-proven ahead of the
 app-side spawn exactly as the `Activation` decision was:
 
-- `media_for_name(name)` derives a file's content type from its filename
-  extension through the shared content-type registry above — the one bridge
+- `media_for_name(name)` derives a file's content type from the ending of its
+  name through the shared content-type registry above — the one bridge
   from a name (all a VFS listing gives) to the MIME vocabulary a bundle's
   signed `AppInfo` declares its associations in. An unknown or absent extension
   yields `None`, never a guess.
@@ -2554,8 +2562,10 @@ itself — all three installed by the unprivileged `fd_redeem`. A `Path` open
 target it cannot act on at all, and says so on `stderr` rather than pretending
 to: it holds no authority to open a name with.
 
-`CAP_PROC_SPAWN` is what lets the viewer re-enter its own binary as a
-capability-empty decoder. A document is untrusted input and is **never**
+`CAP_SANDBOX_SPAWN` is what lets the viewer re-enter its own binary as a
+capability-empty decoder: the capability starts no child but one holding
+nothing beyond its two wired pipes, whatever binary it runs. A document is
+untrusted input and is **never**
 decoded in the viewer's address space: `Run` measures the descriptor, streams
 it to the worker in `MAX_DOCUMENT_CHUNK` pieces under a fixed input-byte
 ceiling, and drives `open_view` / `select_page` / `render_page` against it.

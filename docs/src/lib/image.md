@@ -1,16 +1,18 @@
-# `tairix-image` — raster-image decoding
+# `tairix-image` — raster images
 
 `lib/image` turns an untrusted raster-image byte stream into a validated,
 straight-alpha RGBA8 [`RasterImage`], or a typed refusal — never a panic,
-and never more memory than the caller allows. The desktop's sandboxed
+and never more memory than the caller allows — and writes PNG, JPEG and
+RISC OS sprite areas for an editor ([Writing](#writing)). The desktop's sandboxed
 image-rendering service is the reason this crate exists: an application
 bundle's icon artwork (SVG or PNG) and the desktop wallpaper (a shipped
 master, or a photograph the user picked) are each decoded inside a
 minimum-capability parser sandbox before they ever reach the compositor,
 because neither ships from the system. This crate is the raster half of
 that pipeline (the vector half is `lib/svg`). The picture viewer
-(`plans/VIEW.md`) is the crate's other consumer, and every format it claims
-lands here rather than beside it — being the one raster registry is what
+(`plans/VIEW.md`) and the image editor (`plans/PAINT.md`) are the crate's
+other consumers, and every format they claim
+lands here rather than beside them — being the one raster registry is what
 keeps a format's decoder in a single place. *Admitting* a format is still each
 consumer's own decision: the icon pipeline deliberately takes only PNG and
 SVG (`plans/ICONS.md`), and the wallpaper catalog only its own extensions.
@@ -362,12 +364,13 @@ module's own rustdoc:
 
 - **A sprite with no palette does not state its colours.** RISC OS resolves
   those against whatever palette the display holds, so a file decoded away
-  from a display has none to resolve against; the decoder adopts the palette
-  the OS itself assigns on entering a mode of that depth. At eight bits that
-  is not a table at all but the arrangement the Programmer's Reference Manual
-  gives for a screen-memory byte — four bits per channel with the low two
-  shared as the tint — so an 8bpp sprite needs no palette of its own to decode
-  exactly.
+  from a display has none to resolve against; the decoder shows the desktop's
+  own colours (`desktop_palette`), never a PC palette: two colours are Wimp
+  colours 0 and 7, four are 0, 2, 4 and 7, and sixteen are the sixteen Wimp
+  colours. At eight bits that is not a table at all but the arrangement the
+  Programmer's Reference Manual gives for a screen-memory byte — four bits per
+  channel with the low two shared as the tint — so an 8bpp sprite needs no
+  palette of its own to decode exactly.
 - **A short palette is the VIDC1 arrangement, not a truncated one.** VIDC
   holds sixteen palette registers, so most 256-colour sprites carry sixteen
   entries and those written by `*ScreenSave` carry sixty-four; RISC OS passes
@@ -384,8 +387,8 @@ layout and wastage, and only whether a pixel's bits are all clear is read; a
 new-format mask is one bit per pixel from bit zero of rows of its own; and a
 wide mask — the mode word's top bit — is eight bits of alpha per pixel.
 
-Sprite names are read over rather than reported: nothing addresses a sprite by
-name yet, and a page index is what the shared sequence shape offers. The CMYK,
+The shared sequence shape addresses a sprite by page index; its name, mode
+and palette are what `open_native` reports ([Writing](#writing)). The CMYK,
 JPEG-data, and YCbCr sprite types are refused by name rather than half-read,
 because none is a depth the decoder claims — as are Teletext and third-party
 extension mode numbers, whose depth only the module that defined them knows.
@@ -629,6 +632,49 @@ property of the formats rather than a gap in this crate: a caller that wants
 a smaller one resamples the decoded image through `lib/raster`'s one shared
 resampler, exactly as it must to hit any size no JPEG scale lands on.
 `decode` keeps its meaning for every format: natural size.
+
+## Writing
+
+An editor reads a picture as its file stores it. `open_native` answers a
+paletted PNG as its indices and palette, a sprite area through
+`SpriteAreaReader` — each sprite's `SpriteName`, `SpriteMode` (its eigen
+factors, `pixel_aspect` and alpha-mask form) and `SpritePalette` (`Implied`,
+`Stored` exactly as read, or `Full`), a sprite it cannot read handed back as
+its bytes (`OpaqueSprite`) — and every other format as RGBA.
+
+A sprite area is written back exactly. A PNG or JPEG may hold what its picture
+does not, and `Unkept` says so, so an editor can refuse to write such a file
+back over itself: `precision` for a 16-bit PNG narrowed to 8, and `extras` for
+data beside the picture — any PNG chunk but the header, palette, transparency
+and image data, and any JPEG application or comment segment but a JFIF header
+that states square pixels and no thumbnail, which is all the encoder writes. A
+format this crate does not write reports neither.
+
+`encode_png`, `encode_jpeg` and `encode_sprite_area` read a `PictureSource`
+a row at a time — `Picture` is the one this crate owns — and refuse what their
+format cannot state (`EncodeError`) rather than approximate it:
+
+- **PNG** is the smallest colour type that holds the picture exactly: a palette
+  kept at the shallowest depth that indexes it, a binary mask as one
+  transparent entry, an unused alpha channel dropped, an all-grey picture
+  written as grey.
+- **JPEG** is baseline JFIF at a quality of 1 to 100 (`JpegOptions`),
+  composited over a background, one component for a grey picture and 4:4:4
+  chroma from quality 90.
+- **A sprite area** writes each sprite in its own mode — indexed at the mode's
+  depth with the palette form asked for, `Implied` only where the colours are
+  the desktop's, or direct colour in any packing the mode names (1:5:5:5,
+  5:6:5, 4:4:4:4, 8:8:8 or 8:8:8:8) — with its mask in the form the mode names.
+  A kept sprite goes back exactly but for its length word, and one that is not
+  a whole number of words is refused, since every sprite after it would start
+  off a word boundary. `SpriteMode::with_eig` restates a mode for pixels of
+  another shape — a numbered mode as the numbered mode or mode word of its
+  depth and that shape, a mode word with its resolution fields rewritten — so
+  an editor that reshapes a sprite's pixels writes a mode that agrees.
+
+`over(below, above)` is the one straight-alpha source-over, rounded to the
+nearest: a WEBP animation's frames are composited by it, and an editor lays
+paint with it, so the two can never disagree about a pixel.
 
 ## Security
 

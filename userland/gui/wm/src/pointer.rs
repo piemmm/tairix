@@ -463,7 +463,7 @@ fn erase(art: &mut Surface, drawn: &Halo) {
     let mut bands = ArrayVec::new();
     halo_cover(Point::new(half, half), drawn.rings(), &mut bands);
     for band in bands {
-        let (Ok(x), Ok(top)) = (u32::try_from(band.left()), u32::try_from(band.top())) else {
+        let Some((x, top)) = band.surface_origin() else {
             continue;
         };
         for y in top..top.saturating_add(band.height) {

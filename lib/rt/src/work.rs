@@ -320,6 +320,20 @@ impl<S, Req, Ans> Worker<S, Req, Ans, JobQueue<Req, Ans>> {
         self.held.lock().desk.collect()
     }
 
+    /// Hand `adopt` every answer landed by now, oldest first, and none that
+    /// lands while they are adopted: a job `adopt` asks for that runs here for
+    /// want of a worker waits for the next pass, so a chain of them cannot
+    /// keep the loop from its input and its frame.
+    pub fn collect_landed(&self, mut adopt: impl FnMut(Ans)) {
+        let landed = self.held.lock().desk.landed();
+        for _ in 0..landed {
+            let Some(answer) = self.collect() else {
+                return;
+            };
+            adopt(answer);
+        }
+    }
+
     /// Withdraw every waiting job `keep` turns down; nobody answers them.
     pub fn retain_waiting(&self, keep: impl FnMut(&Req) -> bool) {
         self.held.lock().desk.retain_waiting(keep);
@@ -586,6 +600,23 @@ mod tests {
         });
         assert!(nudged, "the loop is owed a wake");
         assert_eq!(worker.collect(), Some(done));
+    }
+
+    /// A pass takes only what had landed when it began: a job asked for while
+    /// adopting, carried out here for want of a worker, waits for the next.
+    #[test]
+    fn a_pass_leaves_what_lands_while_it_adopts() {
+        let (job, _) = job();
+        let worker = queued(2);
+        worker.stop();
+        let _ = worker.submit(job);
+        let mut adopted = alloc::vec::Vec::new();
+        worker.collect_landed(|done| {
+            adopted.push(done.run_number);
+            assert_eq!(worker.submit(job).map_err(|_| ()), Ok(true));
+        });
+        assert_eq!(adopted, [1], "the job asked for meanwhile was not adopted");
+        assert_eq!(worker.collect().map(|done| done.run_number), Some(2));
     }
 
     /// Waiting takes what has already landed, oldest first, without blocking.

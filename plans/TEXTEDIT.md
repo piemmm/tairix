@@ -18,7 +18,7 @@ address space and I/O off its loop.
 | TE8 | The session clipboard | done |
 | TE9 | The app-set pointer shape | done |
 | TE10 | The editor engine: document, history, layout, highlighting cache, find, the view | done |
-| TE11 | The `Run` binary: windows, the two workers, documents, menus, the icon bar | done |
+| TE11 | The `Run` binary: the editor's own work and its syntax worker, over the shared document host | done |
 | TE12 | The bundle: manifest, icon, Help in every required locale, docs, registration | done |
 | TE13 | A save that a crash cannot tear | blocked: no VFS primitive replaces a file's content atomically through a held descriptor |
 
@@ -30,8 +30,8 @@ graphical editor for any file, text or not. The curses `edit` command is a
 separate program and stays one; neither links the other.
 
 Single instance, a window per document, resident on the icon bar. The manifest
-requests `CAP_CONSOLE_WRITE`, `CAP_SHM`, `CAP_PROC_SPAWN` (the sandbox
-worker) and `CAP_LOG_EMIT` (the record of a worker replaced after a crash), and
+requests `CAP_CONSOLE_WRITE`, `CAP_SHM`, `CAP_SANDBOX_SPAWN` (the sandbox
+worker, and no other process) and `CAP_LOG_EMIT` (the record of a worker replaced after a crash), and
 **no filesystem capability**: every document reaches it through a
 user-mediated grant (Files, the desktop, the picker, a drop), and every write
 goes through the grant the user's act conferred.
@@ -162,9 +162,11 @@ answers, never a parser.
 
 ## The picker's Save mode
 
-`PickFile` carries a purpose: Open, or Save with a suggested leaf name. Save
-shows a name field and a Save button in the session's own window, confirms a
-replacement, and concludes by opening the chosen path write-only under the
+`PickFile` carries a purpose: Open, or Save with a suggested leaf name and the
+name endings the requester can write. Save shows a name field and a Save button
+in the session's own window, refuses an ending the requester cannot write and
+gives a name with none the first, confirms a replacement, and concludes by
+opening the chosen path write-only under the
 session's authority: created exclusively and never through a link when new,
 and never truncated — the requester writes from the start and cuts the file to
 what it wrote, so a save abandoned first loses nothing. A replacement is asked
@@ -205,29 +207,35 @@ the arrow elsewhere, asking only when the shape changes.
 
 ## The loop
 
-Two workers, each its own desk and wake. The document worker is
-`tairix_rt::work`'s queued form, answering each job in turn: it loads (read
-to wherever the file now ends, not to the length it measured at open), saves,
-searches and converts line endings. A load, a search and a conversion each
-run one `STEP_BYTES` stretch per job, so a save queued meanwhile runs between
-steps and a closed window's work is put down between them; a newer search or
+The editor runs in the shared document host (`tairix_window::docapp`), which
+owns the windows, the events that reach them, the picker, the icon bar, and
+the queue saves are written on — `tairix_rt::work`'s queued form, answering
+each job in turn. The editor's own work on that queue loads (read to wherever
+the file now ends, not to the length it measured at open), searches and
+converts line endings. A load, a search and a conversion each run one
+`STEP_BYTES` stretch per job, so a save queued meanwhile runs between steps
+and a closed window's work is put down between them; a newer search or
 conversion withdraws the waiting one it replaces, so the queue's room is a
-fixed share per window (`JOBS_PER_WINDOW`) grown as windows open. A save is
+fixed share per window (`JOBS_PER_WINDOW`) grown as windows open, and the host
+refuses a window's own work past its share. Every job carries the window's
+`Stamp` (its id and document epoch), so an answer lands only on the document
+it was asked of. A save is
 never refused while its memory can be had. The syntax worker holds the
 sandbox (lex, detect, validate), one job at a time.
 
-A window's file (`tairix_textedit::file`) decides its saves and pickers,
+A window's file (`tairix_window::document`) decides its saves and pickers,
 host-tested: one save outstanding; a save asked meanwhile freezes the document
 then and is written in turn once those ahead of it land, so a Save as is
 adopted before the next save picks a file. Plain saves asked in a row become
 one of the latest document; every Save as keeps its own, its file already
-made. Closing writes them all at once, each where it would have gone. A document opened into a window replaces only one with nothing
-under way. The loop takes in every answer and queued event, then paints each
-window once; a keystroke repaints the rows it changed and the status band,
-never the window, and a present the desktop refuses is that window's alone.
-The process does not end under a save still being written, even when the
-desktop's channel is lost. A window's title fits the document's name to the
-title field.
+made. Closing writes them all at once, each where it would have gone. A
+document opened into a window replaces only one with nothing under way. The
+loop takes in every answer and queued event, then paints each window once; a
+keystroke repaints the rows it changed and the status band, never the window,
+and a present the desktop refuses is that window's alone. The process does not
+end under a save still being written, even when the desktop's channel is lost.
+A window's title fits the document's name to the title field
+(`tairix_browse::vfs::write_document_title`).
 
 ## Invariants
 

@@ -55,7 +55,7 @@ mod program {
             write_stderr_line(USAGE);
             return 2;
         };
-        let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
+        let locale = tairix_help::user_locale();
         // The wall clock is read here, at the edge, and passed in: the
         // request/render library takes no clock of its own, exactly as it
         // opens no transport of its own. An untrusted or unset clock falls

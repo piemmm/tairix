@@ -8,35 +8,23 @@ use super::{
     encode_reply, evaluate_datagram, TimeSyncFailure, TimeSyncService, MAX_STRATUM_EXCLUSIVE,
     ORIGIN_TS_AT, REPLY_SAMPLE,
 };
-use crate::host::{Launcher, ParserSandbox};
+use crate::host::ParserSandbox;
 use crate::loopback::LoopbackLauncher;
-use crate::proto::Channel;
+use crate::testing::{loopback, scripted, NullSink};
 use crate::wire::Writer;
 use crate::worker::Service;
 use alloc::vec;
 use alloc::vec::Vec;
 use tairix_abi::time::{Duration64, Time64};
-use tairix_abi::{Errno, RELEASE_EPOCH_SECS};
-use tairix_log::{Event, Sink};
+use tairix_abi::RELEASE_EPOCH_SECS;
 use tairix_net::ntp::{
     KissCode, NtpTimestamp, RejectReason, Reply, Sample, Transaction, MAX_ROUND_TRIP, PACKET_LEN,
 };
 
-/// Discards every event: these cases exercise healthy workers unless they
-/// script a failure themselves.
-struct SilentSink;
-
-impl Sink for SilentSink {
-    fn write_event(&self, _event: &Event<'_>) {}
-}
-
-type TestSandbox = ParserSandbox<LoopbackLauncher<fn() -> TimeSyncService>, SilentSink>;
+type TestSandbox = ParserSandbox<LoopbackLauncher<fn() -> TimeSyncService>, NullSink>;
 
 fn sandbox() -> TestSandbox {
-    ParserSandbox::new(
-        LoopbackLauncher::new(TimeSyncService::default as fn() -> TimeSyncService),
-        SilentSink,
-    )
+    loopback()
 }
 
 const NONCE: u64 = 0x0123_4567_89AB_CDEF;
@@ -188,65 +176,6 @@ fn a_malformed_request_is_a_typed_error_reply_not_a_dead_worker() {
     }
 }
 
-/// A launcher whose workers reply with `payload` to every request, so a
-/// hostile or broken worker can be scripted exactly.
-struct ScriptedLauncher {
-    payload: Vec<u8>,
-}
-
-/// A channel that answers every framed request with the scripted payload.
-struct ScriptedChannel {
-    payload: Vec<u8>,
-    pending: Vec<u8>,
-    at: usize,
-    armed: bool,
-}
-
-impl Channel for ScriptedChannel {
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
-        if self.at == self.pending.len() {
-            if !self.armed {
-                return Ok(0);
-            }
-            self.armed = false;
-            let len = u32::try_from(self.payload.len()).unwrap_or(0);
-            self.pending = len.to_le_bytes().to_vec();
-            self.pending.extend_from_slice(&self.payload);
-            self.at = 0;
-        }
-        let take = buf.len().min(self.pending.len() - self.at);
-        buf[..take].copy_from_slice(&self.pending[self.at..self.at + take]);
-        self.at += take;
-        Ok(take)
-    }
-
-    fn write(&mut self, buf: &[u8]) -> Result<usize, Errno> {
-        self.armed = true;
-        Ok(buf.len())
-    }
-}
-
-impl Launcher for ScriptedLauncher {
-    type Channel = ScriptedChannel;
-
-    fn launch(&mut self) -> Result<ScriptedChannel, Errno> {
-        Ok(ScriptedChannel {
-            payload: self.payload.clone(),
-            pending: Vec::new(),
-            at: 0,
-            armed: false,
-        })
-    }
-
-    fn dispose(&mut self, _channel: ScriptedChannel) -> Option<i32> {
-        None
-    }
-}
-
-fn hostile(payload: Vec<u8>) -> ParserSandbox<ScriptedLauncher, SilentSink> {
-    ParserSandbox::new(ScriptedLauncher { payload }, SilentSink)
-}
-
 /// The reply a compromised worker would send to claim `sample`.
 fn forged_sample(sample: &Sample) -> Vec<u8> {
     let mut w = Writer::new();
@@ -265,7 +194,7 @@ fn a_worker_sample_outside_the_engines_own_rules_is_refused() {
         stratum: 2,
     };
     // The honest sample still passes, so the gate is not simply closed.
-    let mut sb = hostile(forged_sample(&good));
+    let mut sb = scripted(forged_sample(&good));
     assert_eq!(
         evaluate_datagram(&mut sb, &txn(NONCE), received(), &server_reply(NONCE, 0)),
         Ok(Reply::Sample(good))
@@ -290,7 +219,7 @@ fn a_worker_sample_outside_the_engines_own_rules_is_refused() {
         },
     ];
     for forgery in forgeries {
-        let mut sb = hostile(forged_sample(&forgery));
+        let mut sb = scripted(forged_sample(&forgery));
         assert_eq!(
             evaluate_datagram(&mut sb, &txn(NONCE), received(), &server_reply(NONCE, 0)),
             Err(TimeSyncFailure::ReplyRefused),
@@ -332,7 +261,7 @@ fn a_reply_violating_the_grammar_yields_nothing() {
         truncated,
         trailing,
     ] {
-        let mut sb = hostile(payload.clone());
+        let mut sb = scripted(payload.clone());
         assert_eq!(
             evaluate_datagram(&mut sb, &txn(NONCE), received(), &server_reply(NONCE, 0)),
             Err(TimeSyncFailure::ReplyMalformed),

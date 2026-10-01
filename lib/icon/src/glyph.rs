@@ -232,6 +232,28 @@ pub enum IconKind {
     TcpIp,
     /// A painter's palette, for the desktop-theme category.
     Theme,
+    /// A dashed rectangle, for choosing an area of a picture.
+    ToolSelect,
+    /// A pencil, for setting single pixels.
+    ToolPencil,
+    /// A paintbrush, for painting soft strokes.
+    ToolBrush,
+    /// A spray can and its spray, for scattering paint.
+    ToolSpray,
+    /// An eraser over the line it rubs out, for clearing paint.
+    ToolEraser,
+    /// A tipped paint bucket, for filling an area.
+    ToolFill,
+    /// An eyedropper, for taking a colour from a picture.
+    ToolPicker,
+    /// A line between two handles, for drawing straight lines.
+    ToolLine,
+    /// A rectangle's outline, for drawing rectangles.
+    ToolRectangle,
+    /// An ellipse's outline, for drawing ellipses.
+    ToolEllipse,
+    /// A ruled grid, for showing the boundaries between pixels.
+    PixelGrid,
 }
 
 impl IconKind {
@@ -320,6 +342,17 @@ impl IconKind {
             "dns" => Self::Dns,
             "tcp-ip" => Self::TcpIp,
             "theme" => Self::Theme,
+            "tool-select" => Self::ToolSelect,
+            "tool-pencil" => Self::ToolPencil,
+            "tool-brush" => Self::ToolBrush,
+            "tool-spray" => Self::ToolSpray,
+            "tool-eraser" => Self::ToolEraser,
+            "tool-fill" => Self::ToolFill,
+            "tool-picker" => Self::ToolPicker,
+            "tool-line" => Self::ToolLine,
+            "tool-rectangle" => Self::ToolRectangle,
+            "tool-ellipse" => Self::ToolEllipse,
+            "pixel-grid" => Self::PixelGrid,
             _ => Self::Generic,
         }
     }
@@ -414,6 +447,17 @@ impl IconKind {
             Self::Dns => 77,
             Self::TcpIp => 78,
             Self::Theme => 79,
+            Self::ToolSelect => 80,
+            Self::ToolPencil => 81,
+            Self::ToolBrush => 82,
+            Self::ToolSpray => 83,
+            Self::ToolEraser => 84,
+            Self::ToolFill => 85,
+            Self::ToolPicker => 86,
+            Self::ToolLine => 87,
+            Self::ToolRectangle => 88,
+            Self::ToolEllipse => 89,
+            Self::PixelGrid => 90,
         }
     }
 
@@ -507,6 +551,17 @@ impl IconKind {
             Self::Dns => "dns",
             Self::TcpIp => "tcp-ip",
             Self::Theme => "theme",
+            Self::ToolSelect => "tool-select",
+            Self::ToolPencil => "tool-pencil",
+            Self::ToolBrush => "tool-brush",
+            Self::ToolSpray => "tool-spray",
+            Self::ToolEraser => "tool-eraser",
+            Self::ToolFill => "tool-fill",
+            Self::ToolPicker => "tool-picker",
+            Self::ToolLine => "tool-line",
+            Self::ToolRectangle => "tool-rectangle",
+            Self::ToolEllipse => "tool-ellipse",
+            Self::PixelGrid => "pixel-grid",
         }
     }
 }
@@ -583,6 +638,17 @@ pub fn builtin_icon(kind: IconKind, color: Color) -> VectorIcon {
         IconKind::RotateLeft => rotate(color, false),
         IconKind::Mirror => mirror(color),
         IconKind::Info => info(color),
+        IconKind::ToolSelect => tool_select(color),
+        IconKind::ToolPencil => tool_pencil(color),
+        IconKind::ToolBrush => tool_brush(color),
+        IconKind::ToolSpray => tool_spray(color),
+        IconKind::ToolEraser => tool_eraser(color),
+        IconKind::ToolFill => tool_fill(color),
+        IconKind::ToolPicker => tool_picker(color),
+        IconKind::ToolLine => tool_line(color),
+        IconKind::ToolRectangle => tool_rectangle(color),
+        IconKind::ToolEllipse => tool_ellipse(color),
+        IconKind::PixelGrid => pixel_grid(color),
         // A settings category or pane is drawn with its symbol, the same one
         // its badge carries; one that could not be built is a defect in the
         // compiled-in table, and draws the placeholder rather than nothing.
@@ -1158,4 +1224,209 @@ fn info(color: Color) -> alloc::vec::Vec<IconLayer> {
         IconLayer::from_points(color, DOT),
         IconLayer::from_points(color, STEM),
     ]
+}
+
+/// A dashed rectangle: four corners and a dash midway along each side, so it
+/// reads as a boundary still being drawn rather than as [`zoom_fit`]'s
+/// brackets.
+fn tool_select(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const TOP_LEFT: &[(i32, i32)] = &[(3, 4), (8, 4), (8, 6), (5, 6), (5, 9), (3, 9)];
+    const TOP_RIGHT: &[(i32, i32)] = &[(16, 4), (21, 4), (21, 9), (19, 9), (19, 6), (16, 6)];
+    const BOTTOM_LEFT: &[(i32, i32)] = &[(3, 15), (5, 15), (5, 18), (8, 18), (8, 20), (3, 20)];
+    const BOTTOM_RIGHT: &[(i32, i32)] =
+        &[(19, 15), (21, 15), (21, 20), (16, 20), (16, 18), (19, 18)];
+    const TOP: &[(i32, i32)] = &[(10, 4), (14, 4), (14, 6), (10, 6)];
+    const BOTTOM: &[(i32, i32)] = &[(10, 18), (14, 18), (14, 20), (10, 20)];
+    const LEFT: &[(i32, i32)] = &[(3, 11), (5, 11), (5, 13), (3, 13)];
+    const RIGHT: &[(i32, i32)] = &[(19, 11), (21, 11), (21, 13), (19, 13)];
+    [
+        TOP_LEFT,
+        TOP_RIGHT,
+        BOTTOM_LEFT,
+        BOTTOM_RIGHT,
+        TOP,
+        BOTTOM,
+        LEFT,
+        RIGHT,
+    ]
+    .into_iter()
+    .map(|part| IconLayer::from_points(color, part))
+    .collect()
+}
+
+/// A pencil laid on the diagonal: its sharpened point, its shaft, and the
+/// cap at its far end.
+fn tool_pencil(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const POINT: &[(i32, i32)] = &[(6, 15), (9, 18), (3, 21)];
+    const SHAFT: &[(i32, i32)] = &[(7, 14), (15, 6), (18, 9), (10, 17)];
+    const CAP: &[(i32, i32)] = &[(17, 4), (19, 2), (22, 5), (20, 7)];
+    vec![
+        IconLayer::from_points(color, POINT),
+        IconLayer::from_points(color, SHAFT),
+        IconLayer::from_points(color, CAP),
+    ]
+}
+
+/// A paintbrush on the diagonal: a tapered tuft, the ferrule gripping it,
+/// and a slim handle.
+fn tool_brush(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const TUFT: &[(i32, i32)] = &[(6, 12), (11, 17), (8, 20), (3, 21), (4, 16)];
+    const FERRULE: &[(i32, i32)] = &[(8, 12), (11, 9), (15, 13), (12, 16)];
+    const HANDLE: &[(i32, i32)] = &[(13, 9), (20, 2), (22, 4), (15, 11)];
+    vec![
+        IconLayer::from_points(color, TUFT),
+        IconLayer::from_points(color, FERRULE),
+        IconLayer::from_points(color, HANDLE),
+    ]
+}
+
+/// A spray can, its nozzle, and the scatter of paint it throws.
+fn tool_spray(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const CAN: &[(i32, i32)] = &[(4, 10), (12, 10), (12, 22), (4, 22)];
+    const SHOULDER: &[(i32, i32)] = &[(5, 7), (11, 7), (11, 9), (5, 9)];
+    const NOZZLE: &[(i32, i32)] = &[(7, 4), (10, 4), (10, 6), (7, 6)];
+    const SPRAY: [&[(i32, i32)]; 5] = [
+        &[(14, 4), (16, 4), (16, 6), (14, 6)],
+        &[(18, 2), (20, 2), (20, 4), (18, 4)],
+        &[(19, 7), (21, 7), (21, 9), (19, 9)],
+        &[(15, 9), (17, 9), (17, 11), (15, 11)],
+        &[(20, 12), (22, 12), (22, 14), (20, 14)],
+    ];
+    [CAN, SHOULDER, NOZZLE]
+        .into_iter()
+        .chain(SPRAY)
+        .map(|part| IconLayer::from_points(color, part))
+        .collect()
+}
+
+/// A block eraser on the diagonal — its rubber tip apart from its sleeve —
+/// over the line it has rubbed out.
+fn tool_eraser(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const TIP: &[(i32, i32)] = &[(4, 15), (8, 11), (13, 16), (9, 20)];
+    const SLEEVE: &[(i32, i32)] = &[(9, 10), (12, 7), (17, 12), (14, 15)];
+    const LINE: &[(i32, i32)] = &[(12, 20), (21, 20), (21, 22), (12, 22)];
+    vec![
+        IconLayer::from_points(color, TIP),
+        IconLayer::from_points(color, SLEEVE),
+        IconLayer::from_points(color, LINE),
+    ]
+}
+
+/// A paint bucket tipped towards the lower right, and the paint falling
+/// from its mouth.
+fn tool_fill(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const BUCKET: &[(i32, i32)] = &[(4, 9), (10, 3), (18, 11), (12, 17)];
+    const HANDLE: &[(i32, i32)] = &[(3, 7), (8, 2), (9, 3), (4, 8)];
+    const PAINT: &[(i32, i32)] = &[(16, 16), (19, 13), (21, 18), (20, 21), (18, 22), (16, 20)];
+    vec![
+        IconLayer::from_points(color, BUCKET),
+        IconLayer::from_points(color, HANDLE),
+        IconLayer::from_points(color, PAINT),
+    ]
+}
+
+/// An eyedropper on the diagonal: its bulb, the collar below it, and the
+/// glass tube narrowing to the tip that takes the colour.
+fn tool_picker(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const BULB: &[(i32, i32)] = &[(14, 6), (18, 2), (22, 6), (18, 10)];
+    const COLLAR: &[(i32, i32)] = &[(12, 7), (13, 6), (18, 11), (17, 12)];
+    const TUBE: &[(i32, i32)] = &[(13, 9), (15, 11), (7, 19), (4, 20), (5, 17)];
+    vec![
+        IconLayer::from_points(color, BULB),
+        IconLayer::from_points(color, COLLAR),
+        IconLayer::from_points(color, TUBE),
+    ]
+}
+
+/// A straight line between two square handles.
+fn tool_line(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const LINE: &[(i32, i32)] = &[(5, 17), (17, 5), (19, 7), (7, 19)];
+    const START: &[(i32, i32)] = &[(3, 18), (6, 18), (6, 21), (3, 21)];
+    const END: &[(i32, i32)] = &[(18, 3), (21, 3), (21, 6), (18, 6)];
+    vec![
+        IconLayer::from_points(color, LINE),
+        IconLayer::from_points(color, START),
+        IconLayer::from_points(color, END),
+    ]
+}
+
+/// A rectangle's outline: outer then inner in one even-odd ring.
+fn tool_rectangle(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const FRAME: &[(i32, i32)] = &[
+        (4, 6),
+        (20, 6),
+        (20, 18),
+        (4, 18),
+        (4, 6),
+        (6, 8),
+        (6, 16),
+        (18, 16),
+        (18, 8),
+        (6, 8),
+    ];
+    vec![IconLayer::from_points(color, FRAME)]
+}
+
+/// An ellipse's outline, wider than it is tall so it is not read as a ring:
+/// outer then inner in one even-odd ring.
+fn tool_ellipse(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const OUTLINE: &[(i32, i32)] = &[
+        (12, 5),
+        (17, 6),
+        (20, 9),
+        (21, 12),
+        (20, 15),
+        (17, 18),
+        (12, 19),
+        (7, 18),
+        (4, 15),
+        (3, 12),
+        (4, 9),
+        (7, 6),
+        (12, 5),
+        (12, 7),
+        (8, 8),
+        (6, 10),
+        (5, 12),
+        (6, 14),
+        (8, 16),
+        (12, 17),
+        (16, 16),
+        (18, 14),
+        (19, 12),
+        (18, 10),
+        (16, 8),
+        (12, 7),
+    ];
+    vec![IconLayer::from_points(color, OUTLINE)]
+}
+
+/// A frame ruled into three by three cells: the lines between pixels, drawn
+/// as lines so it is not read as [`library`]'s tiles.
+fn pixel_grid(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const FRAME: &[(i32, i32)] = &[
+        (2, 2),
+        (22, 2),
+        (22, 22),
+        (2, 22),
+        (2, 2),
+        (4, 4),
+        (4, 20),
+        (20, 20),
+        (20, 4),
+        (4, 4),
+    ];
+    const COLUMNS: [&[(i32, i32)]; 2] = [
+        &[(8, 4), (10, 4), (10, 20), (8, 20)],
+        &[(14, 4), (16, 4), (16, 20), (14, 20)],
+    ];
+    const ROWS: [&[(i32, i32)]; 2] = [
+        &[(4, 8), (20, 8), (20, 10), (4, 10)],
+        &[(4, 14), (20, 14), (20, 16), (4, 16)],
+    ];
+    core::iter::once(FRAME)
+        .chain(COLUMNS)
+        .chain(ROWS)
+        .map(|part| IconLayer::from_points(color, part))
+        .collect()
 }

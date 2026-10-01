@@ -254,7 +254,7 @@ mod program {
                 return 2;
             }
         };
-        let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
+        let locale = tairix_help::user_locale();
         // The inherited HOME is the `rescan --user` walk's, and nothing
         // else's: the overlay itself is resolved by the app-data service from
         // the identity the kernel attests for this task, so no path here

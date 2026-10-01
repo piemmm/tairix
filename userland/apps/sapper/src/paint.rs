@@ -16,8 +16,9 @@
 //! and fading off. That is why a suppressed animation needs no second code
 //! path — with no motion the lid is simply already gone.
 
+use tairix_controls::{blend_area, fill_area};
 use tairix_font::BitmapFont;
-use tairix_geometry::{Rect, Scale};
+use tairix_geometry::{to_i32, Rect, Scale};
 use tairix_raster::{Color, Surface, SUBPIXEL};
 use tairix_theme::{Appearance, Rgba, Theme};
 
@@ -253,7 +254,7 @@ fn header(
     focus: Focus,
     elapsed_secs: u32,
 ) {
-    fill(surface, layout.header, skin.header);
+    fill_area(surface, layout.header, skin.header);
     readout(surface, layout.counter, board.remaining(), skin);
     readout(surface, layout.clock, i64::from(elapsed_secs), skin);
     face(surface, layout.face, board.phase(), focus, skin);
@@ -359,7 +360,7 @@ fn seven_segment(surface: &mut Surface, slot: Rect, glyph: Glyph, skin: &Skin) {
             w,
             h,
         );
-        fill(surface, bar, if on { skin.lit } else { skin.unlit });
+        fill_area(surface, bar, if on { skin.lit } else { skin.unlit });
     }
 }
 
@@ -551,7 +552,7 @@ fn tile(surface: &mut Surface, rect: Rect, skin: &Skin, pressed: bool, hovered: 
     // The gradient is laid inside the rounded plate, so the corners keep the
     // rounding the plate already established.
     let inner = shrink(rect, 1);
-    if let Some((x, y)) = origin(inner) {
+    if let Some((x, y)) = inner.surface_origin() {
         surface.fill_vertical_gradient(x, y, inner.width, inner.height, top, skin.tile_bottom);
     }
 }
@@ -637,7 +638,7 @@ fn shockwave(surface: &mut Surface, layout: &Layout, rect: Rect, motion: CellMot
     let colour = Color::rgba(skin.struck.r, skin.struck.g, skin.struck.b, fade / 2);
     // The wave reaches past its own cell, so it is bounded by the grid rather
     // than by the tile: it must not wash over the header.
-    let Some((x, y)) = origin(layout.grid) else {
+    let Some((x, y)) = layout.grid.surface_origin() else {
         return;
     };
     surface.with_clip(x, y, layout.grid.width, layout.grid.height, |surface| {
@@ -694,7 +695,7 @@ fn flag(surface: &mut Surface, rect: Rect, skin: &Skin, motion: Option<CellMotio
         area.width * 2 / 3,
         (area.height / 6).max(1),
     );
-    fill(surface, base, skin.pole);
+    fill_area(surface, base, skin.pole);
     let pole_weight = weight(area.width / 9);
     surface.stroke_polyline(
         &[sub(pole_x, top), sub(pole_x, top + height * 5 / 6)],
@@ -818,23 +819,8 @@ fn shrink(rect: Rect, by: u32) -> Rect {
     )
 }
 
-/// A rectangle's origin as surface coordinates, or `None` when it starts off
-/// the surface — in which case the shape is clipped away anyway.
-fn origin(rect: Rect) -> Option<(u32, u32)> {
-    Some((
-        u32::try_from(rect.left()).ok()?,
-        u32::try_from(rect.top()).ok()?,
-    ))
-}
-
-fn fill(surface: &mut Surface, rect: Rect, colour: Color) {
-    if let Some((x, y)) = origin(rect) {
-        surface.fill_rect(x, y, rect.width, rect.height, colour);
-    }
-}
-
 fn round_fill(surface: &mut Surface, rect: Rect, radius: u32, colour: Color) {
-    if let Some((x, y)) = origin(rect) {
+    if let Some((x, y)) = rect.surface_origin() {
         surface.fill_round_rect(x, y, rect.width, rect.height, radius, colour);
     }
 }
@@ -860,27 +846,17 @@ fn ring(surface: &mut Surface, rect: Rect, colour: Color, thickness: u32) {
         Rect::new(rect.left(), inner_y, thickness, side),
         Rect::new(inner_x, inner_y, thickness, side),
     ] {
-        fill(surface, bar, colour);
+        fill_area(surface, bar, colour);
     }
-}
-
-/// A pixel length as a signed coordinate, saturating rather than wrapping.
-fn to_i32(value: u32) -> i32 {
-    i32::try_from(value).unwrap_or(i32::MAX)
 }
 
 /// Composite `colour` over `rect` at `strength`/255.
 fn wash(surface: &mut Surface, rect: Rect, colour: Color, strength: u8) {
-    if strength == 0 {
-        return;
-    }
-    if let Some((x, y)) = origin(rect) {
-        surface.fill_rect(
-            x,
-            y,
-            rect.width,
-            rect.height,
-            Color::rgba(colour.r, colour.g, colour.b, strength),
+    if strength > 0 {
+        blend_area(
+            surface,
+            rect,
+            Rgba::new(colour.r, colour.g, colour.b, strength),
         );
     }
 }

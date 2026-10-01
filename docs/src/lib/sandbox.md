@@ -26,9 +26,12 @@ Stability tier: **experimental**.
   "that request is malformed" as a typed error reply; the loop itself
   cannot be derailed by request content.
 - **`host`** — the calling program's side. `ParserSandbox::request` sends
-  one payload and blocks for the reply. Every worker failure — crash,
-  protocol violation, oversize reply, exit without answering — runs one
-  containment path: the caller receives a typed `SandboxError`, the dead
+  one payload and blocks for the reply, for no longer than the production
+  launcher's reply deadline (`rt::REPLY_DEADLINE_NS`, two minutes: far past
+  any parse the bounds admit). Every worker failure — crash, protocol
+  violation, oversize reply, exit without answering, an answer not given in
+  time — runs one containment path, a worker still running being killed
+  before it is reaped: the caller receives a typed `SandboxError`, the dead
   worker is disposed of (reaped) and **replaced**, and the event is
   logged with a stable id (`EventId(6000)` crashed, `EventId(6001)`
   unavailable; the crate owns the `6000..7000` range). Dropping the seam
@@ -105,13 +108,25 @@ Stability tier: **experimental**.
   frame: `MAX_VALIDATE_LEN` is one byte past the longest store, so the
   store's own parser refuses an over-long one, and a validation answers at
   most `tairix_syntax::MAX_DIAGNOSTICS`. `TextEdit.app` is the consumer.
+- **`imagerender`** — the desktop's image decodes: an icon, sent whole in one
+  request; the wallpaper, sent with `send_document`; and a document session,
+  whose file is streamed in through `upload_document` rather than held whole,
+  read straight into one push frame of at most `MAX_DOCUMENT_CHUNK` bytes and
+  no more than the document, and never copied.
+- **`imageedit`** — an editor's document over the same upload: each entry at
+  its own depth, a sprite the decoder cannot read kept as its bytes, every
+  answer held by the caller to `MAX_EDIT_SIDE`, `MAX_EDIT_PIXELS` and
+  `MAX_EDIT_ENTRIES`. `Paint.app` is the consumer, and reads each document
+  through a fresh worker (`ParserSandbox::release`).
 - **`rt`** (feature `program`, freestanding targets only) — the
   production transport. `RtLauncher` spawns the program's **own binary**
   in a worker role: two fresh pipes wired to the child's fd 0/1 through
   `SpawnAttach::sandbox`, the shared `--parser-sandbox-worker` argv
   marker, and a blocking reap on disposal. The worker side
   (`worker_role` + `serve_stdio`) serves over fd 0/1 — exactly the
-  surface the kernel sandbox allow-list admits. `RtSessionChannel` is the
+  surface the kernel sandbox allow-list admits — and ends with
+  `ServeEnd::exit_code`, the one mapping of how its conversation ended to
+  the status it exits with. `RtSessionChannel` is the
   duplex transport over that same spawn (one shared pipe-pair-and-attach
   path, `--sandbox-session-worker`), reporting its two descriptor numbers
   so the owner can register them, and `session_worker_role` +

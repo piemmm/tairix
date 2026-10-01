@@ -44,14 +44,13 @@ mod program {
     use tairix_geometry::{Rect, Region, Scale};
     use tairix_input::InputEvent;
     use tairix_rng::{FastRng, RandU64};
-    use tairix_rt::io::{Stderr, Write};
     use tairix_sapper::board::Difficulty;
     use tairix_sapper::game::{Game, Reaction};
     use tairix_sapper::layout::WindowGeometry;
     use tairix_sapper::scores::{BestTimes, SaveError};
     use tairix_theme::{TextRole, Theme, ThemeRegistry};
     use tairix_util::defer::JobDesk;
-    use tairix_window::app::{self, AppWindow, ShellError, Wake, EXIT_CHANNEL_LOST};
+    use tairix_window::app::{self, AppWindow, Wake, EXIT_CHANNEL_LOST};
     use tairix_window::{
         key_input_event, pointer_input_events, pointer_point, present_damage, Desktop, EventDrain,
         EventError, EventMailbox, EventSource, Parked, Repaint, WindowClient, WindowEvents,
@@ -69,24 +68,8 @@ mod program {
     /// The row toggling the question mark in the mark cycle.
     const ROW_QUESTIONS: u16 = ROW_FIRST_PRESET + 3;
 
-    /// State the abnormal-exit reason on `stderr` (fail loud) and hand `code`
-    /// back for `main`.
-    fn fail(code: i32, reason: &str) -> i32 {
-        let _ = writeln!(Stderr, "sapper: {reason}");
-        code
-    }
-
-    /// State a shared-shell bring-up refusal and hand its reserved code back.
-    fn fail_shell(err: ShellError) -> i32 {
-        let _ = writeln!(Stderr, "sapper: {err}");
-        err.code()
-    }
-
-    /// Report a refusal that is not fatal: the game carries on with whatever
-    /// authority it has.
-    fn report(reason: &str) {
-        let _ = writeln!(Stderr, "sapper: {reason}");
-    }
+    /// The name this program states its refusals under.
+    const APP_NAME: &str = "sapper";
 
     // ---- the best-times writer -----------------------------------------
 
@@ -116,7 +99,7 @@ mod program {
         fn submit(&self, times: BestTimes, armed: bool) {
             if !armed {
                 if let Err(err) = Self::write(times) {
-                    report(&alloc::format!("{err}"));
+                    app::report(APP_NAME, format_args!("{err}"));
                 }
                 return;
             }
@@ -260,12 +243,15 @@ mod program {
         game: &Game,
     ) {
         let Some(rows) = menu_rows(game) else {
-            report("this application's icon-bar menu is invalid; carrying on without one");
+            app::report(
+                APP_NAME,
+                "this application's icon-bar menu is invalid; carrying on without one",
+            );
             return;
         };
         let declared = tairix_window::declaration(endpoint, AppBarClick::RaiseOrOpen, &rows);
         if let Err(refused) = tairix_window::declare_app_bar(client, declared) {
-            report(&alloc::format!("{refused}"));
+            app::report(APP_NAME, format_args!("{refused}"));
         }
     }
 
@@ -338,7 +324,7 @@ mod program {
             let server = self
                 .window
                 .open(event_endpoint, &mode, "Sapper", asked.sizing)
-                .map_err(fail_shell)?;
+                .map_err(|err| app::fail(APP_NAME, err.code(), err))?;
             // The first frame is the whole window, so the rectangles the
             // relayout reports are already covered by it.
             self.adopt(game, desktop.scale(), &mut tairix_controls::damage::sink());
@@ -347,7 +333,7 @@ mod program {
                 .is_err()
             {
                 self.close();
-                return Err(fail(EXIT_CHANNEL_LOST, "present refused"));
+                return Err(app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused"));
             }
             Ok(server)
         }
@@ -404,7 +390,10 @@ mod program {
                 return;
             }
             if !self.window.resize(mode) {
-                report("the desktop refused a resize; the window keeps its size");
+                app::report(
+                    APP_NAME,
+                    "the desktop refused a resize; the window keeps its size",
+                );
             }
             self.adopt(game, scale, damage);
         }
@@ -437,10 +426,13 @@ mod program {
                 self.resized_to(game, wanted, desktop.scale(), damage);
             }
             if let Err(err) = self.window.set_sizing(asked.sizing) {
-                report(&alloc::format!(
-                    "the desktop refused this window's resize range ({err}); \
+                app::report(
+                    APP_NAME,
+                    format_args!(
+                        "the desktop refused this window's resize range ({err}); \
                      it keeps the range it had"
-                ));
+                    ),
+                );
             }
         }
 
@@ -675,7 +667,7 @@ mod program {
             // A landed write is reported and otherwise costs the game nothing:
             // a best time that could not be kept is still a best time played.
             if let Some(Err(err)) = round.writer.collect() {
-                report(&alloc::format!("{err}"));
+                app::report(APP_NAME, format_args!("{err}"));
             }
 
             // Every wake advances the clock and the animation, whether it was
@@ -701,7 +693,7 @@ mod program {
                 // at. Either way the tick above still stands.
                 Ok(None) | Err(EventError::Undecodable(_)) => {}
                 Err(EventError::Mailbox(_)) => {
-                    return fail(EXIT_CHANNEL_LOST, "event channel lost")
+                    return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "event channel lost")
                 }
             }
 
@@ -767,7 +759,7 @@ mod program {
                 )
                 .is_err()
             {
-                return fail(EXIT_CHANNEL_LOST, "present refused");
+                return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused");
             }
         }
     }
@@ -796,7 +788,7 @@ mod program {
             }
             Ok(false) => Acted::Idle,
             Err(err) => {
-                report(&alloc::format!("desktop change refused: {err}"));
+                app::report(APP_NAME, format_args!("desktop change refused: {err}"));
                 Acted::Idle
             }
         }
@@ -808,11 +800,13 @@ mod program {
         let settings = Settings::open_without_defaults(&mut host);
         let (times, refused) = BestTimes::load(&settings);
         for entry in refused {
-            report(&alloc::format!(
-                "the stored best time `{}` is unreadable ({:?}); starting that board with none",
-                entry.key,
-                entry.reason
-            ));
+            app::report(
+                APP_NAME,
+                format_args!(
+                    "the stored best time `{}` is unreadable ({:?}); starting that board with none",
+                    entry.key, entry.reason
+                ),
+            );
         }
         times
     }
@@ -828,7 +822,10 @@ mod program {
             // monotonic clock is a worse game, not a broken one — and the
             // alternative is refusing to start over an unpredictability
             // requirement a puzzle does not have.
-            report("the system generator is unavailable; seeding this session from the clock");
+            app::report(
+                APP_NAME,
+                "the system generator is unavailable; seeding this session from the clock",
+            );
             FastRng::seed_from_u64(tairix_rt::clock_get())
         })
     }
@@ -847,11 +844,11 @@ mod program {
         };
         let (mut desktop, mut themes) = match app::bring_up_desktop(surface.window.client()) {
             Ok(pair) => pair,
-            Err(err) => return fail_shell(err),
+            Err(err) => return app::fail(APP_NAME, err.code(), err),
         };
         let binding = match app::bind_event_mailbox() {
             Ok(binding) => binding,
-            Err(err) => return fail_shell(err),
+            Err(err) => return app::fail(APP_NAME, err.code(), err),
         };
         let event_endpoint = binding.endpoint();
 
@@ -923,7 +920,10 @@ mod program {
     /// never loses a record.
     fn start_writer(writer: &Arc<Writer>, set: u64) -> bool {
         let Some(read) = writer.wake.read_end() else {
-            report("no writer wake pipe; best times are written on the event loop");
+            app::report(
+                APP_NAME,
+                "no writer wake pipe; best times are written on the event loop",
+            );
             return false;
         };
         if tairix_rt::waitset_ctl(
@@ -934,16 +934,22 @@ mod program {
             WRITER_TOKEN,
         ) != 0
         {
-            report("writer wake refused; best times are written on the event loop");
+            app::report(
+                APP_NAME,
+                "writer wake refused; best times are written on the event loop",
+            );
             return false;
         }
         let served = Arc::clone(writer);
         match tairix_rt::thread::Thread::spawn(move || served.serve()) {
             Ok(_) => true,
             Err(err) => {
-                report(&alloc::format!(
-                    "no writer thread ({err:?}); best times are written on the event loop"
-                ));
+                app::report(
+                    APP_NAME,
+                    format_args!(
+                        "no writer thread ({err:?}); best times are written on the event loop"
+                    ),
+                );
                 false
             }
         }

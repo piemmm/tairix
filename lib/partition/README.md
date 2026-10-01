@@ -24,8 +24,8 @@ validated fail-closed against an untrusted, possibly-hostile disk
   (boot reader), sharing one extent validator.
 - `gpt` — the GUID Partition Table read path: a fail-closed,
   CRC32-validated header + entry-array parser (the write path lands with
-  the UEFI image builder). Includes the first-party IEEE `crc32`
-  (`AGENTS.md` §2.12).
+  the UEFI image builder), checked through the shared IEEE CRC-32
+  (`lib/crc32`).
 - `PartitionBlock` — presents one partition's extent of an underlying
   `Block` device as a standalone, bounds-checked `Block`, so a
   filesystem driver mounts a partition without being able to address a

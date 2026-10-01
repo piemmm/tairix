@@ -47,6 +47,9 @@ tairix-vt = { path = "../../../lib/vt", version = "=0.0.0" }
 tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # The memory-pressure band the undo history is sized for.
 tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
+# A window's document file: the saves and the file chooser it sequences, and
+# the access a document is held with. The engine needs none of the runtime.
+tairix-window = { path = "../../../lib/window", version = "=0.0.0", default-features = false }
 
 # The package is both the host-tested editor engine and the `Run` entry-point
 # binary of the on-disk `TextEdit.app` bundle: a freestanding pure-Rust
@@ -57,8 +60,8 @@ path = "src/run.rs"
 
 # Everything only the freestanding `Run` binary links.
 [target.'cfg(target_os = "none")'.dependencies]
-# The app half of the window channel, the shared windowed-app shell and the
-# clipboard client.
+# The app half of the window channel: the document host the editor runs in
+# and the clipboard client.
 tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
 # The pure-Rust userland runtime: `_start`, the allocator, the file calls
 # and the worker desks the document and the sandbox run on.

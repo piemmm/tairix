@@ -19,10 +19,11 @@
 //!
 //! # Handing over an untrusted file
 //!
-//! A file arrives through one path, whatever it is for: [`begin_document`]
-//! declares its length and [`push_document`] carries it in pieces no larger
-//! than [`MAX_DOCUMENT_CHUNK`], with [`send_document`] doing both for a
-//! caller that already holds the whole of it. There is deliberately no
+//! A file arrives through one path, whatever it is for: its length is
+//! declared, then it is carried in pieces no larger than
+//! [`MAX_DOCUMENT_CHUNK`] — streamed from a reader by [`upload_document`], or
+//! sent by [`send_document`] for a caller that already holds the whole of
+//! it. There is deliberately no
 //! second way — a request carrying a whole file inline is bounded by what
 //! one protocol frame holds, and a source ceiling set anywhere else can
 //! quietly exceed that and be refused by the transport rather than served.
@@ -171,7 +172,7 @@ const OP_FONTS_SUPPLY: u8 = 12;
 
 /// Reply tag shared by every refusal this service returns, whatever the
 /// request opcode: an error code byte follows.
-const REPLY_ERROR: u8 = 0;
+pub(crate) const REPLY_ERROR: u8 = 0;
 /// Icon-rasterisation success reply tag.
 const REPLY_PIXELS: u8 = 1;
 /// Reply tag shared by every op that decodes a document which turned out to
@@ -265,7 +266,7 @@ impl Unbelieved for IconRasterFailure {
 impl core::fmt::Display for IconRasterFailure {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Sandbox(inner) => write!(f, "parser sandbox failed: {inner:?}"),
+            Self::Sandbox(inner) => write!(f, "parser sandbox failed: {inner}"),
             Self::Refused(refusal) => write!(f, "worker refused: {refusal}"),
             Self::ReplyMalformed => f.write_str("worker reply violated the reply grammar"),
             Self::FontsUnavailable => f.write_str("no installed font can draw this lettering"),
@@ -292,6 +293,8 @@ pub struct ImageRenderService {
     document: Option<Document>,
     wallpaper: Option<PreparedWallpaper>,
     view: Option<ViewSession>,
+    /// A document opened for editing, and the entry of it decoded last.
+    edit: Option<crate::imageedit::EditSession>,
     /// The glyph geometry the host last supplied, which a decode of a
     /// document carrying `<text>` is served from. Empty until the host
     /// sends one, which is what makes the first round report what it wants.
@@ -325,6 +328,9 @@ impl Service for ImageRenderService {
                     Err(refusal) => encode_error(refusal.to_wire()),
                 }
             }
+            Some(op) if crate::imageedit::is_edit_op(op) => {
+                crate::imageedit::dispatch(request, &mut self.document, &mut self.edit)
+            }
             _ => encode_error(REFUSAL_MALFORMED_REQUEST),
         }
     }
@@ -332,7 +338,7 @@ impl Service for ImageRenderService {
 
 /// Encode a [`REPLY_ERROR`] reply carrying `code`, whichever refusal
 /// enum's wire mapping produced it.
-fn encode_error(code: u8) -> Vec<u8> {
+pub(crate) fn encode_error(code: u8) -> Vec<u8> {
     let mut w = Writer::new();
     w.u8(REPLY_ERROR);
     w.u8(code);
@@ -953,7 +959,7 @@ impl Unbelieved for WallpaperRenderFailure {
 impl core::fmt::Display for WallpaperRenderFailure {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Sandbox(inner) => write!(f, "parser sandbox failed: {inner:?}"),
+            Self::Sandbox(inner) => write!(f, "parser sandbox failed: {inner}"),
             Self::Document(inner) => write!(f, "source upload failed: {inner}"),
             Self::Refused(refusal) => write!(f, "worker refused: {refusal}"),
             Self::ReplyMalformed => f.write_str("worker reply violated the reply grammar"),
@@ -1172,12 +1178,18 @@ fn rows_per_band(dest_w: u32) -> u32 {
     // Tag (1) + echoed `first_row` (4) + echoed `rows` (4) + the pixel
     // field's own length prefix (4): the fixed overhead of a band reply
     // besides its pixel payload.
-    const BAND_REPLY_HEADER: u64 = 1 + 4 + 4 + 4;
-    let row_bytes = u64::from(dest_w) * 4;
+    const BAND_REPLY_HEADER: usize = 1 + 4 + 4 + 4;
+    rows_fitting(u64::from(dest_w) * 4, BAND_REPLY_HEADER)
+}
+
+/// How many rows of `row_bytes` each one reply with `header` bytes of fixed
+/// overhead can carry inside [`MAX_FRAME`]: at least one, and zero only for
+/// a zero-width row.
+pub(crate) fn rows_fitting(row_bytes: u64, header: usize) -> u32 {
     if row_bytes == 0 {
         return 0;
     }
-    let budget = (MAX_FRAME as u64).saturating_sub(BAND_REPLY_HEADER);
+    let budget = MAX_FRAME.saturating_sub(header) as u64;
     u32::try_from((budget / row_bytes).max(1)).unwrap_or(u32::MAX)
 }
 
@@ -1725,8 +1737,8 @@ fn decode_wallpaper_error(r: &mut Reader<'_>) -> WallpaperRenderFailure {
 /// A fixed containment bound, not a growable capacity: it bounds what one
 /// worker holds *resident*, which is what an untrusted file costs before a
 /// single pixel of it is decoded. Sixty-four mebibytes admits an
-/// uncompressed 4K RGBA TIFF page (33 MiB) and a large multi-page scan,
-/// and is exactly eight [`MAX_FRAME`] chunks, so the number of pushes a
+/// uncompressed 4K RGBA TIFF page (33 MiB) and a large multi-page scan, and
+/// takes nine [`MAX_DOCUMENT_CHUNK`] pushes, so the number of pushes a
 /// document takes is bounded as well as its size.
 ///
 /// Every decoder in `tairix_image` reads a whole file rather than a
@@ -1736,7 +1748,7 @@ pub const MAX_DOCUMENT_BYTES: usize = 64 << 20;
 
 /// Fixed bytes an `OP_DOC_PUSH` request spends besides its chunk: the
 /// opcode and the chunk field's own length prefix.
-const DOC_PUSH_OVERHEAD: usize = 1 + 4;
+const DOC_PUSH_OVERHEAD: usize = 1 + crate::wire::BYTES_PREFIX;
 
 /// Largest chunk one `OP_DOC_PUSH` may carry.
 ///
@@ -1824,6 +1836,8 @@ pub enum DocumentFailure {
     /// how much it had received: it cannot be believed, so the caller gets
     /// nothing (fail closed).
     ReplyMalformed,
+    /// There was no memory for the request a chunk is sent in.
+    NoMemory,
 }
 
 impl Unbelieved for DocumentFailure {
@@ -1835,16 +1849,17 @@ impl Unbelieved for DocumentFailure {
 impl core::fmt::Display for DocumentFailure {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Sandbox(inner) => write!(f, "parser sandbox failed: {inner:?}"),
+            Self::Sandbox(inner) => write!(f, "parser sandbox failed: {inner}"),
             Self::Refused(refusal) => write!(f, "worker refused: {refusal}"),
             Self::ReplyMalformed => f.write_str("worker reply violated the reply grammar"),
+            Self::NoMemory => f.write_str("there is not enough memory to send it"),
         }
     }
 }
 
 /// The untrusted file a worker holds, and how much of it has arrived.
 #[derive(Debug)]
-struct Document {
+pub(crate) struct Document {
     /// The length `OP_DOC_BEGIN` declared, reserved in full up front so a
     /// large document is not repeatedly grown and copied.
     declared: usize,
@@ -1853,8 +1868,13 @@ struct Document {
 
 impl Document {
     /// Whether every byte the upload declared has arrived.
-    fn is_complete(&self) -> bool {
+    pub(crate) fn is_complete(&self) -> bool {
         self.bytes.len() == self.declared
+    }
+
+    /// The file's bytes, for a session that takes ownership of them.
+    pub(crate) fn into_bytes(self) -> Vec<u8> {
+        self.bytes
     }
 }
 
@@ -1887,6 +1907,7 @@ impl ImageRenderService {
         }
         self.wallpaper = None;
         self.view = None;
+        self.edit = None;
         self.document = None;
         let mut bytes = Vec::new();
         if !fallible::reserve(&mut bytes, declared) {
@@ -1935,7 +1956,7 @@ impl ImageRenderService {
 ///
 /// [`DocumentFailure`]: the sandbox failed, the worker refused the length,
 /// or the reply could not be believed.
-pub fn begin_document<L: Launcher, S: tairix_log::Sink>(
+fn begin_document<L: Launcher, S: tairix_log::Sink>(
     sandbox: &mut ParserSandbox<L, S>,
     len: usize,
 ) -> Result<(), DocumentFailure> {
@@ -1957,52 +1978,75 @@ pub fn begin_document<L: Launcher, S: tairix_log::Sink>(
         let mut r = Reader::new(&reply);
         match r.u8() {
             Ok(REPLY_DOC_BEGUN) if r.is_exhausted() => Ok(()),
-            Ok(REPLY_ERROR) => Err(decode_document_error(&mut r)),
+            Ok(REPLY_ERROR) => Err(DocumentFailure::refusal(&mut r)),
             _ => Err(DocumentFailure::ReplyMalformed),
         }
     })
 }
 
-/// Push one chunk of the declared document, answering how many bytes the
-/// worker now holds.
-///
-/// `chunk` may be no larger than [`MAX_DOCUMENT_CHUNK`], which is what one
-/// protocol frame can carry; a caller reading a file streams it in pieces
-/// of at most that size rather than holding the whole of it.
-///
-/// # Errors
-///
-/// [`DocumentFailure`]: the sandbox failed, the worker refused the chunk
-/// (no upload begun, or it runs past the declared length), or the reply
-/// could not be believed.
-pub fn push_document<L: Launcher, S: tairix_log::Sink>(
-    sandbox: &mut ParserSandbox<L, S>,
-    chunk: &[u8],
-) -> Result<u64, DocumentFailure> {
-    if chunk.len() > MAX_DOCUMENT_CHUNK {
-        return Err(DocumentFailure::Refused(DocumentRefusal::MalformedRequest));
+/// The room a document is pushed through: [`DOC_PUSH_OVERHEAD`] bytes for
+/// the opcode and the chunk's length, then the chunk its caller puts there.
+/// A chunk is sent as it lies, so a document costs one allocation however
+/// many pushes it takes, and a chunk read off a file is never copied.
+struct PushFrame(Vec<u8>);
+
+impl PushFrame {
+    /// Room for chunks of up to `chunk` bytes, at most
+    /// [`MAX_DOCUMENT_CHUNK`]; `None` where the memory is refused.
+    fn new(chunk: usize) -> Option<Self> {
+        let chunk = chunk.clamp(1, MAX_DOCUMENT_CHUNK);
+        tairix_util::fallible::filled(DOC_PUSH_OVERHEAD + chunk, 0u8).map(Self)
     }
-    let mut w = Writer::with_capacity(5 + chunk.len());
-    w.u8(OP_DOC_PUSH);
-    w.bytes(chunk);
-    let request = w.finish();
-    sandbox.ask(|sandbox| {
-        let reply = sandbox
-            .request(&request)
-            .map_err(DocumentFailure::Sandbox)?;
-        let mut r = Reader::new(&reply);
-        match r.u8() {
-            Ok(REPLY_DOC_PUSHED) => {
-                let total = r.u64().map_err(|_| DocumentFailure::ReplyMalformed)?;
-                if !r.is_exhausted() {
-                    return Err(DocumentFailure::ReplyMalformed);
+
+    /// Where the next chunk is put.
+    fn chunk(&mut self) -> &mut [u8] {
+        &mut self.0[DOC_PUSH_OVERHEAD..]
+    }
+
+    /// The request carrying the first `len` bytes put in
+    /// [`chunk`](Self::chunk), its header laid over the front; `None` past
+    /// the room.
+    fn request(&mut self, len: usize) -> Option<&[u8]> {
+        let request = self.0.get_mut(..DOC_PUSH_OVERHEAD.checked_add(len)?)?;
+        request[0] = OP_DOC_PUSH;
+        request[1..DOC_PUSH_OVERHEAD].copy_from_slice(&crate::wire::bytes_prefix(len));
+        Some(request)
+    }
+
+    /// Push the first `len` bytes put in [`chunk`](Self::chunk), and check
+    /// the worker now holds exactly `sent` plus them, advancing `sent`: a
+    /// worker that drops or duplicates a chunk is caught here rather than by
+    /// whatever decodes the document next.
+    fn push<L: Launcher, S: tairix_log::Sink>(
+        &mut self,
+        sandbox: &mut ParserSandbox<L, S>,
+        len: usize,
+        sent: &mut u64,
+    ) -> Result<(), DocumentFailure> {
+        let request = self
+            .request(len)
+            .ok_or(DocumentFailure::Refused(DocumentRefusal::MalformedRequest))?;
+        let held = sandbox.ask(|sandbox| {
+            let reply = sandbox.request(request).map_err(DocumentFailure::Sandbox)?;
+            let mut r = Reader::new(&reply);
+            match r.u8() {
+                Ok(REPLY_DOC_PUSHED) => {
+                    let total = r.u64().map_err(|_| DocumentFailure::ReplyMalformed)?;
+                    if !r.is_exhausted() {
+                        return Err(DocumentFailure::ReplyMalformed);
+                    }
+                    Ok(total)
                 }
-                Ok(total)
+                Ok(REPLY_ERROR) => Err(DocumentFailure::refusal(&mut r)),
+                _ => Err(DocumentFailure::ReplyMalformed),
             }
-            Ok(REPLY_ERROR) => Err(decode_document_error(&mut r)),
-            _ => Err(DocumentFailure::ReplyMalformed),
+        })?;
+        *sent = sent.saturating_add(len as u64);
+        if held != *sent {
+            return Err(DocumentFailure::ReplyMalformed);
         }
-    })
+        Ok(())
+    }
 }
 
 /// Send a whole document a caller already holds, in as many chunks as the
@@ -2015,31 +2059,139 @@ pub fn push_document<L: Launcher, S: tairix_log::Sink>(
 ///
 /// # Errors
 ///
-/// [`DocumentFailure`], as [`begin_document`] and [`push_document`].
+/// [`DocumentFailure`]: the sandbox failed, the worker refused the length,
+/// a reply could not be believed, or the request a chunk is sent in could
+/// not be had.
 pub fn send_document<L: Launcher, S: tairix_log::Sink>(
     sandbox: &mut ParserSandbox<L, S>,
     bytes: &[u8],
 ) -> Result<(), DocumentFailure> {
+    let mut frame = PushFrame::new(bytes.len()).ok_or(DocumentFailure::NoMemory)?;
     sandbox.ask(|sandbox| {
         begin_document(sandbox, bytes.len())?;
-        let mut sent = 0usize;
+        let mut sent = 0u64;
         for chunk in bytes.chunks(MAX_DOCUMENT_CHUNK) {
-            let held = push_document(sandbox, chunk)?;
-            sent += chunk.len();
-            if held != sent as u64 {
-                return Err(DocumentFailure::ReplyMalformed);
-            }
+            frame.chunk()[..chunk.len()].copy_from_slice(chunk);
+            frame.push(sandbox, chunk.len(), &mut sent)?;
         }
         Ok(())
     })
 }
 
-/// Decode a `REPLY_ERROR` reply's refusal code fail-closed, `r` positioned
-/// just after the shared tag byte.
-fn decode_document_error(r: &mut Reader<'_>) -> DocumentFailure {
-    match r.u8().ok().and_then(DocumentRefusal::from_wire) {
-        Some(refusal) if r.is_exhausted() => DocumentFailure::Refused(refusal),
-        _ => DocumentFailure::ReplyMalformed,
+/// Why streaming a file to the worker stopped.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum UploadFailure<E> {
+    /// Reading the file failed with the reader's own error.
+    Read(E),
+    /// The file ended before the length it was declared at.
+    Shrank,
+    /// There was no memory for the run it is read through.
+    NoMemory,
+    /// The worker refused or failed the upload.
+    Document(DocumentFailure),
+}
+
+impl<E> Unbelieved for UploadFailure<E> {
+    fn unbelieved(&self) -> bool {
+        matches!(self, Self::Document(failure) if failure.unbelieved())
+    }
+}
+
+impl<E> From<DocumentFailure> for UploadFailure<E> {
+    fn from(failure: DocumentFailure) -> Self {
+        Self::Document(failure)
+    }
+}
+
+/// Stream a file of `length` bytes to the worker without holding it whole:
+/// `read_at(offset, into)` fills a run of at most [`MAX_DOCUMENT_CHUNK`]
+/// bytes from the file, and each run is pushed and counted as it arrives.
+///
+/// # Errors
+///
+/// [`UploadFailure`]: the reader failed, the file shrank beneath the
+/// upload, the run could not be held, or the worker refused or failed it.
+pub fn upload_document<L, S, E>(
+    sandbox: &mut ParserSandbox<L, S>,
+    length: usize,
+    mut read_at: impl FnMut(u64, &mut [u8]) -> Result<usize, E>,
+) -> Result<(), UploadFailure<E>>
+where
+    L: Launcher,
+    S: tairix_log::Sink,
+{
+    let mut frame = PushFrame::new(length).ok_or(UploadFailure::NoMemory)?;
+    sandbox.ask(|sandbox| {
+        begin_document(sandbox, length)?;
+        let mut sent = 0u64;
+        while sent < length as u64 {
+            let left = usize::try_from(length as u64 - sent).unwrap_or(usize::MAX);
+            let run = frame.chunk();
+            let want = left.min(run.len());
+            let got = read_at(sent, &mut run[..want]).map_err(UploadFailure::Read)?;
+            if got == 0 {
+                return Err(UploadFailure::Shrank);
+            }
+            frame.push(sandbox, got.min(want), &mut sent)?;
+        }
+        Ok(())
+    })
+}
+
+/// A client's failure to have a request of this worker answered: the
+/// worker's own typed refusal, or a reply that cannot be believed. Each
+/// protocol says which failure a refusal code is; reading a reply is written
+/// once, here.
+pub(crate) trait ReplyFailure: Sized {
+    /// A reply that breaks its grammar.
+    const MALFORMED: Self;
+
+    /// The failure refusal `code` is, or `None` for a code the protocol has
+    /// no refusal for.
+    fn refused(code: u8) -> Option<Self>;
+
+    /// The refusal an error reply carries, `r` just past its tag: one known
+    /// code and nothing after it, or the reply cannot be believed.
+    fn refusal(r: &mut Reader<'_>) -> Self {
+        match r.u8().ok().and_then(Self::refused) {
+            Some(failure) if r.is_exhausted() => failure,
+            _ => Self::MALFORMED,
+        }
+    }
+
+    /// Read the tag a reply opens with: `expected` continues, an error reply
+    /// is its refusal, and anything else cannot be believed.
+    fn expect_tag(r: &mut Reader<'_>, expected: u8) -> Result<(), Self> {
+        match r.u8() {
+            Ok(tag) if tag == expected => Ok(()),
+            Ok(REPLY_ERROR) => Err(Self::refusal(r)),
+            _ => Err(Self::MALFORMED),
+        }
+    }
+
+    /// Read a reply's boolean field, refusing any byte that is not one.
+    fn flag(r: &mut Reader<'_>) -> Result<bool, Self> {
+        match r.u8() {
+            Ok(0) => Ok(false),
+            Ok(1) => Ok(true),
+            _ => Err(Self::MALFORMED),
+        }
+    }
+}
+
+impl ReplyFailure for DocumentFailure {
+    const MALFORMED: Self = Self::ReplyMalformed;
+
+    fn refused(code: u8) -> Option<Self> {
+        DocumentRefusal::from_wire(code).map(Self::Refused)
+    }
+}
+
+impl ReplyFailure for ViewFailure {
+    const MALFORMED: Self = Self::ReplyMalformed;
+
+    fn refused(code: u8) -> Option<Self> {
+        ViewRefusal::from_wire(code).map(Self::Refused)
     }
 }
 
@@ -2076,7 +2228,8 @@ const MAX_VIEW_DECODE_SIDE: u32 = 1 << 24;
 /// [`MAX_WALLPAPER_PROGRESSIVE_COEFFICIENT_BYTES`] sets out: a progressive
 /// scan must buffer every coefficient before it can produce a pixel, and
 /// that store does not shrink with the output.
-const MAX_VIEW_PROGRESSIVE_COEFFICIENT_BYTES: u64 = MAX_VIEW_DECODE_PIXELS.saturating_mul(3);
+pub(crate) const MAX_VIEW_PROGRESSIVE_COEFFICIENT_BYTES: u64 =
+    MAX_VIEW_DECODE_PIXELS.saturating_mul(3);
 
 /// View opcodes.
 const OP_VIEW_OPEN: u8 = 7;
@@ -2231,7 +2384,7 @@ impl Unbelieved for ViewFailure {
 impl core::fmt::Display for ViewFailure {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Sandbox(inner) => write!(f, "parser sandbox failed: {inner:?}"),
+            Self::Sandbox(inner) => write!(f, "parser sandbox failed: {inner}"),
             Self::Document(inner) => write!(f, "document upload failed: {inner}"),
             Self::Refused(refusal) => write!(f, "worker refused: {refusal}"),
             Self::ReplyMalformed => f.write_str("worker reply violated the reply grammar"),
@@ -2345,7 +2498,7 @@ impl ViewFormat {
 
     /// This format's wire byte, which is never zero — that byte is what
     /// asks the service to read the document's own signature instead.
-    const fn to_wire(self) -> u8 {
+    pub(crate) const fn to_wire(self) -> u8 {
         match self {
             Self::Png => 1,
             Self::Jpeg => 2,
@@ -2361,7 +2514,7 @@ impl ViewFormat {
 
     /// The format `raw` names, `None` for the zero byte and for any byte
     /// this protocol does not define.
-    const fn from_wire(raw: u8) -> Option<Self> {
+    pub(crate) const fn from_wire(raw: u8) -> Option<Self> {
         match raw {
             1 => Some(Self::Png),
             2 => Some(Self::Jpeg),
@@ -2842,23 +2995,44 @@ fn view_limits() -> DecodeLimits {
     )
 }
 
-/// Which refusal a decoder's error is, told apart so a viewer states the
-/// reason the user is actually looking at.
+/// What a decoder's error amounts to for whoever asked, told apart so each
+/// states the reason the user is actually looking at.
 ///
-/// The three are genuinely different answers: an unreadable file, a real
-/// picture too big for the bound, and a machine that could not hold one it
-/// would otherwise have decoded. Folding the middle one into "failed to
-/// decode" would tell a user their photograph is broken when it is only
-/// large.
-fn view_decode_refusal(err: &DecodeError) -> ViewRefusal {
-    match err {
-        DecodeError::UnknownFormat => ViewRefusal::UnsupportedFormat,
-        DecodeError::OutOfMemory => ViewRefusal::Unrenderable,
-        DecodeError::WidthExceedsLimit
-        | DecodeError::HeightExceedsLimit
-        | DecodeError::PixelCountExceedsLimit
-        | DecodeError::DimensionsOverflow => ViewRefusal::TooLarge,
-        _ => ViewRefusal::MalformedDocument,
+/// These are genuinely different answers: a file of no format here, an
+/// unreadable one, a real picture too big for the bound, and a machine that
+/// could not hold one it would otherwise have decoded. Folding a picture that
+/// is too large into "damaged" would tell a user their photograph is broken
+/// when it is only large.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum DecodeVerdict {
+    Unsupported,
+    Damaged,
+    TooLarge,
+    OutOfMemory,
+}
+
+impl DecodeVerdict {
+    pub(crate) const fn of(err: &DecodeError) -> Self {
+        match err {
+            DecodeError::UnknownFormat => Self::Unsupported,
+            DecodeError::OutOfMemory => Self::OutOfMemory,
+            DecodeError::WidthExceedsLimit
+            | DecodeError::HeightExceedsLimit
+            | DecodeError::PixelCountExceedsLimit
+            | DecodeError::DimensionsOverflow
+            | DecodeError::JpegProgressiveCoefficientStoreExceedsLimit => Self::TooLarge,
+            _ => Self::Damaged,
+        }
+    }
+}
+
+/// The view refusal a decoder's error is.
+const fn view_decode_refusal(err: &DecodeError) -> ViewRefusal {
+    match DecodeVerdict::of(err) {
+        DecodeVerdict::Unsupported => ViewRefusal::UnsupportedFormat,
+        DecodeVerdict::Damaged => ViewRefusal::MalformedDocument,
+        DecodeVerdict::TooLarge => ViewRefusal::TooLarge,
+        DecodeVerdict::OutOfMemory => ViewRefusal::Unrenderable,
     }
 }
 
@@ -2872,9 +3046,8 @@ fn view_decode_refusal(err: &DecodeError) -> ViewRefusal {
 /// format's own parser still validates the bytes, so naming the wrong one
 /// is refused rather than misread.
 ///
-/// The document is sent first with [`send_document`], or with
-/// [`begin_document`] and [`push_document`] by a caller streaming a file it
-/// does not hold whole. Opening takes the bytes from the worker's upload
+/// The document is sent first with [`send_document`], or streamed with
+/// [`upload_document`] by a caller that does not hold it whole. Opening takes the bytes from the worker's upload
 /// slot, so a further document must be uploaded before another open.
 ///
 /// # Errors
@@ -2902,11 +3075,11 @@ pub fn open_view<L: Launcher, S: tairix_log::Sink>(
             })?;
         let reply = view_refusal(reply)?;
         let mut r = Reader::new(&reply);
-        expect_tag(&mut r, REPLY_VIEW_OPENED)?;
+        ViewFailure::expect_tag(&mut r, REPLY_VIEW_OPENED)?;
         let named = r.u8().map_err(|_| ViewFailure::ReplyMalformed)?;
         let format = ViewFormat::from_wire(named).ok_or(ViewFailure::ReplyMalformed)?;
-        let animated = read_flag(&mut r)?;
-        let counted = read_flag(&mut r)?;
+        let animated = ViewFailure::flag(&mut r)?;
+        let counted = ViewFailure::flag(&mut r)?;
         let declared = r.u32().map_err(|_| ViewFailure::ReplyMalformed)?;
         let count = r.u32().map_err(|_| ViewFailure::ReplyMalformed)?;
         let width = r.u32().map_err(|_| ViewFailure::ReplyMalformed)?;
@@ -2953,7 +3126,7 @@ pub fn select_page<L: Launcher, S: tairix_log::Sink>(
     sandbox.ask(|sandbox| {
         let reply = view_reply(sandbox, w)?;
         let mut r = Reader::new(&reply);
-        expect_tag(&mut r, REPLY_VIEW_PAGE)?;
+        ViewFailure::expect_tag(&mut r, REPLY_VIEW_PAGE)?;
         let echoed = r.u32().map_err(|_| ViewFailure::ReplyMalformed)?;
         let width = r.u32().map_err(|_| ViewFailure::ReplyMalformed)?;
         let height = r.u32().map_err(|_| ViewFailure::ReplyMalformed)?;
@@ -3010,7 +3183,7 @@ pub fn render_page<L: Launcher, S: tairix_log::Sink>(
     sandbox.ask(|sandbox| {
         let reply = view_reply(sandbox, w)?;
         let mut r = Reader::new(&reply);
-        expect_tag(&mut r, REPLY_VIEW_RENDERED)?;
+        ViewFailure::expect_tag(&mut r, REPLY_VIEW_RENDERED)?;
         let rows_per_band = r.u32().map_err(|_| ViewFailure::ReplyMalformed)?;
         if !r.is_exhausted() || rows_per_band == 0 {
             return Err(ViewFailure::ReplyMalformed);
@@ -3043,21 +3216,12 @@ pub fn close_view<L: Launcher, S: tairix_log::Sink>(
     sandbox.ask(|sandbox| {
         let reply = view_reply(sandbox, w)?;
         let mut r = Reader::new(&reply);
-        expect_tag(&mut r, REPLY_VIEW_RELEASED)?;
+        ViewFailure::expect_tag(&mut r, REPLY_VIEW_RELEASED)?;
         if !r.is_exhausted() {
             return Err(ViewFailure::ReplyMalformed);
         }
         Ok(())
     })
-}
-
-/// Read a reply's boolean field, refusing any byte that is not one.
-fn read_flag(r: &mut Reader<'_>) -> Result<bool, ViewFailure> {
-    match r.u8() {
-        Ok(0) => Ok(false),
-        Ok(1) => Ok(true),
-        _ => Err(ViewFailure::ReplyMalformed),
-    }
 }
 
 /// Send one `OP_VIEW_BAND` request and return its validated pixels
@@ -3074,7 +3238,7 @@ fn view_band<L: Launcher, S: tairix_log::Sink>(
     w.u32(rows);
     let reply = view_reply(sandbox, w)?;
     let mut r = Reader::new(&reply);
-    expect_tag(&mut r, REPLY_VIEW_BAND)?;
+    ViewFailure::expect_tag(&mut r, REPLY_VIEW_BAND)?;
     let echoed_first = r.u32().map_err(|_| ViewFailure::ReplyMalformed)?;
     let echoed_rows = r.u32().map_err(|_| ViewFailure::ReplyMalformed)?;
     if echoed_first != first_row || echoed_rows != rows {
@@ -3105,18 +3269,7 @@ fn view_reply<L: Launcher, S: tairix_log::Sink>(
 fn view_refusal(reply: Vec<u8>) -> Result<Vec<u8>, ViewFailure> {
     let mut probe = Reader::new(&reply);
     if probe.u8() == Ok(REPLY_ERROR) {
-        return Err(match probe.u8().ok().and_then(ViewRefusal::from_wire) {
-            Some(refusal) if probe.is_exhausted() => ViewFailure::Refused(refusal),
-            _ => ViewFailure::ReplyMalformed,
-        });
+        return Err(ViewFailure::refusal(&mut probe));
     }
     Ok(reply)
-}
-
-/// Read the tag byte a reply must open with, refusing any other.
-fn expect_tag(r: &mut Reader<'_>, tag: u8) -> Result<(), ViewFailure> {
-    match r.u8() {
-        Ok(found) if found == tag => Ok(()),
-        _ => Err(ViewFailure::ReplyMalformed),
-    }
 }

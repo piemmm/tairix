@@ -1,0 +1,12 @@
+[package]
+name = "tairix-crc32"
+description = "TAIRiX CRC-32 (IEEE, reflected 0xEDB8_8320): the one first-party definition of the framing checksum foreign formats carry — PNG chunks, GPT headers and entries, zip and gzip — table-driven, one-shot or streaming, no_std and allocation-free."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

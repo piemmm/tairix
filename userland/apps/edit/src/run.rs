@@ -49,8 +49,7 @@ mod program {
     use tairix_abi::{Errno, InputMode, OpenFlags, STDOUT};
     use tairix_curses::{Screen, Size, StreamTty};
     use tairix_edit::{parse, run, Command, Fs, Model, MAX_FILE_BYTES, USAGE};
-    use tairix_help::{own_short_help, BundleHelp};
-    use tairix_rt::io::{write_stderr_line, Stdout, Write};
+    use tairix_rt::io::write_stderr_line;
     use tairix_rt::File;
     use tairix_termcap::from_term;
 
@@ -100,21 +99,6 @@ mod program {
         }
     }
 
-    /// Render `edit`'s own short help (`NAME` + `SYNOPSIS` + compact
-    /// `OPTIONS`) from its own bundle's `Help/` tree through the one shared
-    /// engine; when no document can be served (a build without the bundle's
-    /// documents) the usage banner stands in — the tool's own text, not
-    /// fabricated help content — so `-h` never fails.
-    fn short_help() -> i32 {
-        let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
-        let bytes = own_short_help(&BundleHelp::new("edit"), locale, "edit")
-            .unwrap_or_else(|| alloc::format!("{USAGE}\n").into_bytes());
-        match Stdout.write_all(&bytes) {
-            Ok(()) => 0,
-            Err(_) => 1,
-        }
-    }
-
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
     ///
@@ -131,7 +115,7 @@ mod program {
         };
         let path = match parse(&arguments) {
             Ok(Command::Run { path }) => path,
-            Ok(Command::Help) => return short_help(),
+            Ok(Command::Help) => return tairix_help::print_own_short_help("edit", Some(USAGE)),
             Err(_) => {
                 write_stderr_line(USAGE);
                 return 2;

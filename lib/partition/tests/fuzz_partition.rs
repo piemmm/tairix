@@ -11,8 +11,7 @@
 //! arbitrary disks, with a single invariant:
 //!
 //! * feeding any byte image to [`tairix_partition::parse_partition_table`]
-//!   (and the lower [`tairix_partition::mbr::parse`] /
-//!   [`tairix_partition::gpt::crc32`]) never panics and never reads out of
+//!   (and the lower [`tairix_partition::mbr::parse`]) never panics and never reads out of
 //!   bounds — the parser returns a validated [`tairix_partition::PartitionTable`]
 //!   or a [`tairix_partition::PartitionError`]. The run
 //!   aborting *is* the failure.
@@ -128,7 +127,7 @@ fn gpt_image() -> Vec<u8> {
     region[16] = 1;
     region[32..40].copy_from_slice(&12u64.to_le_bytes());
     region[40..48].copy_from_slice(&14u64.to_le_bytes());
-    let entries_crc = gpt::crc32(&region);
+    let entries_crc = tairix_crc32::checksum(&region);
     img[2 * bs..2 * bs + region_len].copy_from_slice(&region);
 
     // Primary header at LBA 1.
@@ -141,7 +140,7 @@ fn gpt_image() -> Vec<u8> {
     img[hdr_off + 84..hdr_off + 88]
         .copy_from_slice(&u32::try_from(gpt::ENTRY_LEN).expect("fits").to_le_bytes());
     img[hdr_off + 88..hdr_off + 92].copy_from_slice(&entries_crc.to_le_bytes());
-    let header_crc = gpt::crc32(&img[hdr_off..hdr_off + 92]);
+    let header_crc = tairix_crc32::checksum(&img[hdr_off..hdr_off + 92]);
     img[hdr_off + 16..hdr_off + 20].copy_from_slice(&header_crc.to_le_bytes());
 
     img
@@ -170,8 +169,6 @@ fn exercise_never_panics(bytes: &[u8]) {
     if bytes.len() >= mbr::MBR_SECTOR_LEN {
         let _ = mbr::parse(&bytes[..mbr::MBR_SECTOR_LEN]);
     }
-    // The CRC must accept any slice without panicking.
-    let _ = gpt::crc32(bytes);
 }
 
 #[test]

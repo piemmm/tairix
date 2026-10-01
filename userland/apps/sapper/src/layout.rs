@@ -18,7 +18,7 @@
 //! to at least one pixel.
 
 use tairix_abi::window_ipc::WindowSizing;
-use tairix_geometry::{Point, Rect, Scale};
+use tairix_geometry::{to_i32, Point, Rect, Scale};
 
 use crate::board::{Coord, Dimensions};
 
@@ -313,11 +313,6 @@ fn centred_in(outer: Rect, inner: Rect) -> Rect {
 /// The pixel offset of the `n`th cell along an axis.
 fn offset(n: u16, step: u32) -> i32 {
     to_i32(u32::from(n).saturating_mul(step))
-}
-
-/// A pixel length as a signed coordinate, saturating rather than wrapping.
-fn to_i32(value: u32) -> i32 {
-    i32::try_from(value).unwrap_or(i32::MAX)
 }
 
 /// Which cell a distance along an axis falls in, clamped to the last one so a

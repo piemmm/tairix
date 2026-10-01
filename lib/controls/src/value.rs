@@ -28,10 +28,9 @@ use tairix_theme::{Rgba, TextRole, Theme};
 
 use crate::damage;
 use crate::paint::{
-    centred_text_y, clamp_permille, inset, measured_thickness, paint_bead, paint_filled_circle,
-    paint_plate, paint_run, plate_border, progress_thickness, resolve_bead, resolve_frame,
-    resolve_mark, resolve_rail, role_font, run_width, surface_rect, to_i32, withheld, PlateStyle,
-    FULL,
+    clamp_permille, inset, measured_thickness, paint_bead, paint_filled_circle, paint_plate,
+    paint_run, plate_border, progress_thickness, resolve_bead, resolve_frame, resolve_mark,
+    resolve_rail, role_font, run_width, surface_rect, to_i32, withheld, PlateStyle, FULL,
 };
 use crate::state::{
     ActivityState, ControlDisposition, ControlRole, ControlState, PointerState, RecoveryState,
@@ -576,7 +575,7 @@ impl Slider {
             return;
         };
         let font = role_font(theme, scale, TextRole::Caption);
-        let y = centred_text_y(font, layout.y, layout.h);
+        let y = font.centred_top(to_i32(layout.y), layout.h);
         let ink = Color::from(theme.palette().on_surface_muted);
         font.draw_text(surface, to_i32(start_x), y, start, ink);
         font.draw_text(surface, to_i32(end_x), y, end, ink);

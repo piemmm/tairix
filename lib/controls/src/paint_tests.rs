@@ -31,8 +31,8 @@ use crate::menu::{Menu, MenuItem};
 use crate::metric::{CompositionBar, CompositionSegment, MetricTile, StatusPill};
 use crate::nav::{Breadcrumb, Crumb};
 use crate::paint::{
-    grab_after, ground_fill, paint_icon_slot, paint_surface_plate, plate_corner, resolve_frame,
-    route_pointer, ChromeLayer, FrameColors, FULL_COLOUR,
+    blend_area, fill_area, grab_after, ground_fill, paint_icon_slot, paint_surface_plate,
+    plate_corner, resolve_frame, route_pointer, ChromeLayer, FrameColors, FULL_COLOUR,
 };
 use crate::rail::ActionRail;
 use crate::record::{Fact, FactList, Timeline, TimelineEvent};
@@ -1300,4 +1300,33 @@ fn a_plates_corner_scales_and_never_exceeds_half_its_shorter_side() {
     assert_eq!(plate_corner(100, 10, 8, Scale::ONE), 5, "a short plate");
     assert_eq!(plate_corner(9, 100, 8, Scale::ONE), 4, "a narrow plate");
     assert_eq!(plate_corner(0, 100, 8, Scale::ONE), 0);
+}
+
+#[test]
+fn an_area_fill_replaces_and_a_blend_composites() {
+    let mut surface = Surface::new(8, 8).expect("surface");
+    surface.fill(Color::rgb(0, 0, 200));
+    fill_area(&mut surface, Rect::new(2, 2, 3, 3), Color::rgb(200, 0, 0));
+    assert_eq!(surface.get(3, 3), Some(Color::rgb(200, 0, 0).premultiply()));
+    assert_eq!(surface.get(5, 5), Some(Color::rgb(0, 0, 200).premultiply()));
+    blend_area(
+        &mut surface,
+        Rect::new(0, 0, 2, 2),
+        Rgba::new(200, 0, 0, 128),
+    );
+    let blended = surface.get(0, 0).expect("in bounds");
+    assert!(blended.r > 0 && blended.b > 0, "both show: {blended:?}");
+}
+
+#[test]
+fn an_area_starting_off_the_surface_paints_nothing() {
+    let mut surface = Surface::new(8, 8).expect("surface");
+    let before = surface.pixels().to_vec();
+    fill_area(&mut surface, Rect::new(-1, 2, 4, 4), Color::rgb(200, 0, 0));
+    blend_area(
+        &mut surface,
+        Rect::new(2, -1, 4, 4),
+        Rgba::new(200, 0, 0, 255),
+    );
+    assert_eq!(surface.pixels(), before.as_slice());
 }

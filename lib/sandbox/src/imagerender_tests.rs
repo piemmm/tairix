@@ -15,7 +15,6 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_icon::MAX_ARTWORK_BYTES;
-use tairix_log::{Event, Sink};
 use tairix_raster::Region;
 use tairix_svg::font::NoFonts;
 use tairix_wallpaper::WallpaperFit;
@@ -26,25 +25,16 @@ use super::{
 };
 use crate::host::ParserSandbox;
 use crate::loopback::LoopbackLauncher;
+use crate::testing::{loopback, scripted, tampering, NullSink, Tampering};
 use crate::wire::Writer;
 use crate::worker::Service;
 
 use super::rasterise_icon;
 
-/// Discards every event (the happy paths log nothing).
-struct NullSink;
-
-impl Sink for NullSink {
-    fn write_event(&self, _event: &Event<'_>) {}
-}
-
 type TestSandbox = ParserSandbox<LoopbackLauncher<fn() -> ImageRenderService>, NullSink>;
 
 fn sandbox() -> TestSandbox {
-    ParserSandbox::new(
-        LoopbackLauncher::new(ImageRenderService::default as fn() -> ImageRenderService),
-        NullSink,
-    )
+    loopback()
 }
 
 /// A minimal SVG icon: one opaque-coloured square covering the whole
@@ -63,33 +53,16 @@ const IHDR: [u8; 4] = *b"IHDR";
 const IDAT: [u8; 4] = *b"IDAT";
 const IEND: [u8; 4] = *b"IEND";
 
-/// Standard CRC-32 (the polynomial PNG chunks use), computed over the
-/// concatenation of `parts`.
-fn crc32_of(parts: &[&[u8]]) -> u32 {
-    fn update(mut crc: u32, byte: u8) -> u32 {
-        crc ^= u32::from(byte);
-        for _ in 0..8 {
-            let mask = 0u32.wrapping_sub(crc & 1);
-            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
-        }
-        crc
-    }
-    let mut crc = 0xFFFF_FFFFu32;
-    for part in parts {
-        for &byte in *part {
-            crc = update(crc, byte);
-        }
-    }
-    crc ^ 0xFFFF_FFFF
-}
-
 fn chunk(chunk_type: [u8; 4], payload: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     let len = u32::try_from(payload.len()).expect("test payload fits a u32 length");
     out.extend_from_slice(&len.to_be_bytes());
     out.extend_from_slice(&chunk_type);
     out.extend_from_slice(payload);
-    let crc = crc32_of(&[&chunk_type, payload]);
+    let mut crc = tairix_crc32::Crc32::new();
+    crc.update(&chunk_type);
+    crc.update(payload);
+    let crc = crc.finish();
     out.extend_from_slice(&crc.to_be_bytes());
     out
 }
@@ -422,28 +395,9 @@ fn the_worker_itself_refuses_every_malformed_request_shape() {
 
 // ---- hostile replies ------------------------------------------------------
 
-/// A hostile worker: replies with exactly the given bytes, exactly as a
-/// compromised parser process could.
-struct EvilWorker(Vec<u8>);
-
-impl Service for EvilWorker {
-    fn handle(&mut self, _request: &[u8]) -> Vec<u8> {
-        self.0.clone()
-    }
-}
-
-fn evil_sandbox(
-    reply: Vec<u8>,
-) -> ParserSandbox<LoopbackLauncher<impl FnMut() -> EvilWorker>, NullSink> {
-    ParserSandbox::new(
-        LoopbackLauncher::new(move || EvilWorker(reply.clone())),
-        NullSink,
-    )
-}
-
 #[test]
 fn a_reply_with_an_unknown_tag_is_refused() {
-    let mut sandbox = evil_sandbox(vec![0xEE]);
+    let mut sandbox = scripted(vec![0xEE]);
     assert_eq!(
         rasterise_icon(&mut sandbox, 2, &svg_square("#000000"), &mut NoFonts),
         Err(IconRasterFailure::ReplyMalformed)
@@ -456,7 +410,7 @@ fn a_reply_with_the_wrong_echoed_side_is_refused() {
     w.u8(super::REPLY_PIXELS);
     w.u32(3); // the request below asks for side 2
     w.bytes(&[0u8; 2 * 2 * 4]);
-    let mut sandbox = evil_sandbox(w.finish());
+    let mut sandbox = scripted(w.finish());
     assert_eq!(
         rasterise_icon(&mut sandbox, 2, &svg_square("#000000"), &mut NoFonts),
         Err(IconRasterFailure::ReplyMalformed)
@@ -469,7 +423,7 @@ fn a_reply_with_the_wrong_pixel_length_is_refused() {
     w.u8(super::REPLY_PIXELS);
     w.u32(2);
     w.bytes(&[0u8; 3]); // not 2*2*4
-    let mut sandbox = evil_sandbox(w.finish());
+    let mut sandbox = scripted(w.finish());
     assert_eq!(
         rasterise_icon(&mut sandbox, 2, &svg_square("#000000"), &mut NoFonts),
         Err(IconRasterFailure::ReplyMalformed)
@@ -484,7 +438,7 @@ fn trailing_bytes_after_an_otherwise_well_formed_reply_are_refused() {
     w.bytes(&[0u8; 2 * 2 * 4]);
     let mut reply = w.finish();
     reply.push(0xAB);
-    let mut sandbox = evil_sandbox(reply);
+    let mut sandbox = scripted(reply);
     assert_eq!(
         rasterise_icon(&mut sandbox, 2, &svg_square("#000000"), &mut NoFonts),
         Err(IconRasterFailure::ReplyMalformed)
@@ -496,7 +450,7 @@ fn an_unknown_refusal_code_in_an_error_reply_is_refused() {
     let mut w = Writer::new();
     w.u8(super::REPLY_ERROR);
     w.u8(0xFF);
-    let mut sandbox = evil_sandbox(w.finish());
+    let mut sandbox = scripted(w.finish());
     assert_eq!(
         rasterise_icon(&mut sandbox, 2, &svg_square("#000000"), &mut NoFonts),
         Err(IconRasterFailure::ReplyMalformed)
@@ -2045,48 +1999,13 @@ fn every_view_refusal_states_a_reason() {
     }
 }
 
-// ---- a worker that turns hostile part-way through a session --------------
-
-/// Serves honestly until the request naming `op`, whose reply it corrupts.
-///
-/// The view is a session, so a reply cannot be judged in isolation the way
-/// the icon path's can: the parent has to be walked all the way to the
-/// band before there is a band to lie about.
-struct TamperingWorker {
-    inner: ImageRenderService,
-    op: u8,
-    tamper: fn(Vec<u8>) -> Vec<u8>,
-}
-
-impl Service for TamperingWorker {
-    fn handle(&mut self, request: &[u8]) -> Vec<u8> {
-        let reply = self.inner.handle(request);
-        if request.first().copied() == Some(self.op) {
-            (self.tamper)(reply)
-        } else {
-            reply
-        }
-    }
-}
-
-fn tampering(
-    op: u8,
-    tamper: fn(Vec<u8>) -> Vec<u8>,
-) -> ParserSandbox<LoopbackLauncher<impl FnMut() -> TamperingWorker>, NullSink> {
-    ParserSandbox::new(
-        LoopbackLauncher::new(move || TamperingWorker {
-            inner: ImageRenderService::default(),
-            op,
-            tamper,
-        }),
-        NullSink,
-    )
-}
-
 /// Walk a tampering sandbox through a whole render of a 2×2 picture,
 /// answering whatever the first step to fail reports.
 fn drive_tampered(
-    sandbox: &mut ParserSandbox<LoopbackLauncher<impl FnMut() -> TamperingWorker>, NullSink>,
+    sandbox: &mut ParserSandbox<
+        LoopbackLauncher<impl FnMut() -> Tampering<ImageRenderService>>,
+        NullSink,
+    >,
 ) -> Result<(), super::ViewFailure> {
     let png = png_with(2, 2, |_, _| [1, 2, 3, 255]);
     super::send_document(sandbox, &png).map_err(super::ViewFailure::Document)?;
@@ -2098,7 +2017,7 @@ fn drive_tampered(
 
 #[test]
 fn a_band_echoing_a_row_range_that_was_not_asked_for_is_refused() {
-    let mut sandbox = tampering(super::OP_VIEW_BAND, |mut reply| {
+    let mut sandbox = tampering::<ImageRenderService>(super::OP_VIEW_BAND, |mut reply| {
         // Bytes 1..5 are the echoed first row.
         reply[1] = reply[1].wrapping_add(1);
         reply
@@ -2111,7 +2030,7 @@ fn a_band_echoing_a_row_range_that_was_not_asked_for_is_refused() {
 
 #[test]
 fn a_band_carrying_the_wrong_number_of_pixels_is_refused() {
-    let mut sandbox = tampering(super::OP_VIEW_BAND, |mut reply| {
+    let mut sandbox = tampering::<ImageRenderService>(super::OP_VIEW_BAND, |mut reply| {
         reply.push(0);
         reply
     });
@@ -2123,7 +2042,7 @@ fn a_band_carrying_the_wrong_number_of_pixels_is_refused() {
 
 #[test]
 fn a_band_reply_cut_short_of_its_pixels_is_refused() {
-    let mut sandbox = tampering(super::OP_VIEW_BAND, |mut reply| {
+    let mut sandbox = tampering::<ImageRenderService>(super::OP_VIEW_BAND, |mut reply| {
         reply.truncate(reply.len() - 1);
         reply
     });
@@ -2135,7 +2054,7 @@ fn a_band_reply_cut_short_of_its_pixels_is_refused() {
 
 #[test]
 fn a_render_claiming_it_can_carry_no_rows_is_refused_rather_than_looped_on() {
-    let mut sandbox = tampering(super::OP_VIEW_RENDER, |mut reply| {
+    let mut sandbox = tampering::<ImageRenderService>(super::OP_VIEW_RENDER, |mut reply| {
         for byte in reply.iter_mut().skip(1) {
             *byte = 0;
         }
@@ -2150,7 +2069,7 @@ fn a_render_claiming_it_can_carry_no_rows_is_refused_rather_than_looped_on() {
 
 #[test]
 fn a_page_reply_about_some_other_page_is_refused() {
-    let mut sandbox = tampering(super::OP_VIEW_PAGE, |mut reply| {
+    let mut sandbox = tampering::<ImageRenderService>(super::OP_VIEW_PAGE, |mut reply| {
         reply[1] = reply[1].wrapping_add(1);
         reply
     });
@@ -2162,7 +2081,7 @@ fn a_page_reply_about_some_other_page_is_refused() {
 
 #[test]
 fn a_page_reply_claiming_no_pixels_is_refused() {
-    let mut sandbox = tampering(super::OP_VIEW_PAGE, |mut reply| {
+    let mut sandbox = tampering::<ImageRenderService>(super::OP_VIEW_PAGE, |mut reply| {
         // Bytes 5..9 are the page's width.
         for byte in reply.iter_mut().skip(5).take(4) {
             *byte = 0;
@@ -2177,7 +2096,7 @@ fn a_page_reply_claiming_no_pixels_is_refused() {
 
 #[test]
 fn an_open_reply_naming_a_format_the_protocol_does_not_carry_is_refused() {
-    let mut sandbox = tampering(super::OP_VIEW_OPEN, |mut reply| {
+    let mut sandbox = tampering::<ImageRenderService>(super::OP_VIEW_OPEN, |mut reply| {
         reply[1] = 0xEE;
         reply
     });
@@ -2189,7 +2108,7 @@ fn an_open_reply_naming_a_format_the_protocol_does_not_carry_is_refused() {
 
 #[test]
 fn an_open_reply_giving_a_page_container_a_loop_count_is_refused() {
-    let mut sandbox = tampering(super::OP_VIEW_OPEN, |mut reply| {
+    let mut sandbox = tampering::<ImageRenderService>(super::OP_VIEW_OPEN, |mut reply| {
         // Byte 2 is `animated`, byte 3 whether a loop count follows.
         reply[3] = 1;
         reply
@@ -2203,7 +2122,7 @@ fn an_open_reply_giving_a_page_container_a_loop_count_is_refused() {
 
 #[test]
 fn an_open_reply_with_a_flag_byte_that_is_not_a_flag_is_refused() {
-    let mut sandbox = tampering(super::OP_VIEW_OPEN, |mut reply| {
+    let mut sandbox = tampering::<ImageRenderService>(super::OP_VIEW_OPEN, |mut reply| {
         reply[2] = 2;
         reply
     });
@@ -2215,7 +2134,7 @@ fn an_open_reply_with_a_flag_byte_that_is_not_a_flag_is_refused() {
 
 #[test]
 fn an_open_reply_declaring_an_empty_document_is_refused() {
-    let mut sandbox = tampering(super::OP_VIEW_OPEN, |mut reply| {
+    let mut sandbox = tampering::<ImageRenderService>(super::OP_VIEW_OPEN, |mut reply| {
         // Bytes 8..12 are the entry count.
         for byte in reply.iter_mut().skip(8).take(4) {
             *byte = 0;
@@ -2230,7 +2149,7 @@ fn an_open_reply_declaring_an_empty_document_is_refused() {
 
 #[test]
 fn a_push_reply_disagreeing_about_how_much_arrived_is_refused() {
-    let mut sandbox = tampering(super::OP_DOC_PUSH, |mut reply| {
+    let mut sandbox = tampering::<ImageRenderService>(super::OP_DOC_PUSH, |mut reply| {
         reply[1] = reply[1].wrapping_add(1);
         reply
     });
@@ -2244,7 +2163,7 @@ fn a_push_reply_disagreeing_about_how_much_arrived_is_refused() {
 
 #[test]
 fn a_view_reply_with_an_unknown_tag_is_refused() {
-    let mut sandbox = tampering(super::OP_VIEW_OPEN, |_| vec![0xEE]);
+    let mut sandbox = tampering::<ImageRenderService>(super::OP_VIEW_OPEN, |_| vec![0xEE]);
     assert_eq!(
         drive_tampered(&mut sandbox),
         Err(super::ViewFailure::ReplyMalformed)
@@ -2253,7 +2172,8 @@ fn a_view_reply_with_an_unknown_tag_is_refused() {
 
 #[test]
 fn a_refusal_code_no_refusal_uses_is_not_read_as_one() {
-    let mut sandbox = tampering(super::OP_VIEW_OPEN, |_| vec![super::REPLY_ERROR, 0xEE]);
+    let mut sandbox =
+        tampering::<ImageRenderService>(super::OP_VIEW_OPEN, |_| vec![super::REPLY_ERROR, 0xEE]);
     assert_eq!(
         drive_tampered(&mut sandbox),
         Err(super::ViewFailure::ReplyMalformed)
@@ -2380,4 +2300,16 @@ fn a_wallpaper_band_wider_than_a_reply_frame_carries_is_refused_too() {
             super::REFUSAL_WALLPAPER_BAND_OUT_OF_RANGE
         ]
     );
+}
+
+/// A chunk put in the push frame is sent framed exactly as the wire writer
+/// frames one, with no copy or allocation of its own, and a push past the
+/// frame's room is refused rather than sent.
+#[test]
+fn a_chunk_is_pushed_framed_as_the_wire_writer_frames_one() {
+    let mut frame = super::PushFrame::new(8).expect("room");
+    frame.chunk()[..3].copy_from_slice(b"abc");
+    assert_eq!(frame.request(3), Some(push(b"abc").as_slice()));
+    assert_eq!(frame.request(0), Some(push(b"").as_slice()));
+    assert_eq!(frame.request(9), None, "past the room");
 }

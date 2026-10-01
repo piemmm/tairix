@@ -641,9 +641,11 @@ clients, and their exit-code sets are their own.
   `PageSource` trait plus the cursor, remembered refusal, and one retained
   decode a page container's walk is, from `ico`). Three readings the format's
   own text does not settle are stated in the module rustdoc and the crate
-  docs: a sprite with no palette is resolved against the palette the OS
-  assigns on entering a mode of that depth (at eight bits the screen-memory
-  byte's own tint arrangement, so it is exact); a palette shorter than the
+  docs: a sprite with no palette shows the desktop's own colours
+  (`tairix_image::desktop_palette`), never a PC palette — at sixteen colours
+  colour *n* is Wimp colour *n*, at two Wimp colours 0 and 7, at four 0, 2, 4
+  and 7, and at 256 the screen-memory byte's own tint arrangement, so that one
+  is exact; a palette shorter than the
   depth needs is the VIDC1 arrangement, its last sixteen entries being the
   hardware registers with a pixel's top four bits overriding supremacy bits;
   and a mask supersedes a pixel's own alpha. Indexed pixels run least
@@ -1081,19 +1083,20 @@ read this paragraph first; the rustdoc on both types points here.
 
 ## Noticed and not yet fixed
 
-- **`lib/sandbox` allocates its bounded buffers infallibly.** Every band,
-  destination, and frame buffer in the crate is `vec![0u8; n]`
-  (`proto.rs`, `decode.rs`, `imagerender.rs`), which aborts rather than
-  answering when the memory is not there. Inside a worker that is
-  contained — the sandbox reports a typed failure and replaces it — but
-  `render_wallpaper`'s parent-side assembly allocates the whole
-  destination, up to 33 MiB, *in the calling desktop session*, so a
-  session under memory pressure dies rather than falling back to its
-  backdrop colour. The view's own parent side already avoids this by
-  taking the caller's buffer (`render_page`), and the document upload
-  reserves fallibly; the rest is a crate-wide allocation-discipline
-  change spanning four modules and is not smuggled into this one. It
-  carries its regression test when it lands.
+- **`lib/sandbox` allocates its bounded buffers infallibly.** A frame the
+  parent reads is reserved fallibly (`plans/OPEN-DEFECTS.md` D160), and the
+  document upload reserves fallibly, but `imagerender.rs`'s bands,
+  destinations and scaled icons are still `vec![0u8; n]` or `to_vec()`,
+  which abort rather than answer when the memory is not there. Inside a
+  worker that is contained — the sandbox reports a typed failure and
+  replaces it — but two copies run *in the calling process*:
+  `render_wallpaper`'s assembly allocates the whole destination, up to
+  33 MiB, in the desktop session, so a session under memory pressure dies
+  rather than falling back to its backdrop colour; and `view_band` copies
+  each band out of its reply before `render_page` copies it again into the
+  caller's buffer, where one copy straight into that buffer would do. It is
+  a crate-wide allocation-discipline change and is not smuggled into
+  another; it carries its regression test when it lands.
 
 - **A vector band's cost is edges × rows, because the scan converter has
   no active-edge table.** `ScanFill::coverage_row` walks every edge whose

@@ -38,8 +38,8 @@ use tairix_theme::{Rgba, SurfaceGround, TextRole, Theme};
 use crate::button::{Button, ButtonAction};
 use crate::damage;
 use crate::paint::{
-    bead_band, centred_text_y, dominant_color, draw_outline, foreground, grab_after,
-    heavy_contrast, icon_slot_side, inset, key_activation, line_budget, paint_bead, paint_chevron,
+    bead_band, dominant_color, draw_outline, foreground, grab_after, heavy_contrast,
+    icon_slot_side, inset, key_activation, line_budget, paint_bead, paint_chevron,
     paint_count_badge, paint_icon_slot, paint_row, paint_run, paint_surface_plate, plate_border,
     plate_corner, pointer_activation, press_latch, rail_thickness, resolve_bead, role_font,
     route_pointer, row_content_span, run_width, seam_thickness, seam_width, surface_rect, to_i32,
@@ -285,7 +285,7 @@ impl ListRow {
         let fg = foreground(theme, disposition);
         let muted = Color::from(theme.palette().on_surface_muted);
         let pad = scale.scale_length(theme.metrics().control_inset).max(1);
-        let text_y = centred_text_y(font, cy, ch);
+        let text_y = font.centred_top(to_i32(cy), ch);
 
         let mut left = cx;
         // The leading icon on a reserved column, so labels line up whether or
@@ -498,7 +498,7 @@ impl TableCell {
             .state
             .map_or(row_disposition, ControlState::disposition);
         let fg = foreground(theme, disposition);
-        let text_y = centred_text_y(font, y, h);
+        let text_y = font.centred_top(to_i32(y), h);
         let layout = self.layout(rect, row);
 
         // A cell-specific Signal Bead at the trailing edge (only for a cell
@@ -837,12 +837,8 @@ impl TableRow {
             font: role_font(theme, scale, TextRole::Body),
             row_disposition: self.state.disposition(),
         };
-        let rect = (
-            u32::try_from(column.left()).ok()?,
-            u32::try_from(column.top()).ok()?,
-            column.width,
-            column.height,
-        );
+        let (x, y) = column.surface_origin()?;
+        let rect = (x, y, column.width, column.height);
         let (left, right) = cell.layout(rect, &context).text?;
         Some(Rect::new(
             to_i32(left),
@@ -1429,7 +1425,7 @@ impl TableHeader {
             let budget = right - left;
             let run = font.elide_to_width(&column.title, budget);
             let tw = run_width(font, run);
-            let text_y = centred_text_y(font, y, h);
+            let text_y = font.centred_top(to_i32(y), h);
             let tx = match column.align {
                 CellAlign::Leading => to_i32(left),
                 CellAlign::Center => to_i32(left) + (to_i32(budget) - to_i32(tw)).max(0) / 2,
@@ -2911,7 +2907,7 @@ impl Panel {
         // The title, left-aligned in the header.
         let fg = foreground(theme, self.header_state.disposition());
         if header_right > header_left {
-            let text_y = centred_text_y(font, iy, hh);
+            let text_y = font.centred_top(to_i32(iy), hh);
             let run = font.elide_to_width(&self.title, header_right - header_left);
             paint_run(surface, font, run, (to_i32(header_left), text_y), fg, None);
         }

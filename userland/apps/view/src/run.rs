@@ -54,29 +54,27 @@ mod program {
     use alloc::vec::Vec;
     use core::cell::Cell;
 
-    use tairix_abi::fs::{FileKind, FileStat};
     use tairix_abi::input::KeyInput;
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
     use tairix_abi::window_ipc::{
         AppBarClick, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuRow,
-        AppMenuShortcut, MenuOutcome, PickPurpose, TooltipText, WindowEvent, WindowRegion,
+        AppMenuShortcut, MenuOutcome, PickPurpose, WindowEvent, WindowRegion,
     };
     use tairix_abi::{Errno, ProcId, DOCUMENT_ROLE_ARG, STDIN};
     use tairix_controls::damage;
     use tairix_font::BitmapFont;
     use tairix_geometry::{Point, Rect, Region, Scale};
-    use tairix_help::{own_short_help, BundleHelp};
     use tairix_icon::NoArtwork;
     use tairix_input::InputEvent;
     use tairix_raster::Surface;
-    use tairix_rt::io::{Stderr, Stdout, Write};
+
+    use tairix_browse::media::{media_for_name, MediaType};
     use tairix_sandbox::imagerender::{
-        begin_document, close_view, open_view, push_document, render_page, select_page,
-        ImageRenderService, ViewDocument, ViewFailure, ViewFormat, ViewPage, ViewRefusal,
-        MAX_DOCUMENT_CHUNK,
+        close_view, open_view, render_page, select_page, upload_document, ImageRenderService,
+        UploadFailure, ViewDocument, ViewFailure, ViewFormat, ViewPage, ViewRefusal,
     };
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
-    use tairix_sandbox::{ParserSandbox, ServeEnd};
+    use tairix_sandbox::ParserSandbox;
     use tairix_theme::{TextRole, Theme};
     use tairix_view::view::{Command, Outcome, View};
     use tairix_view::{
@@ -84,9 +82,9 @@ mod program {
     };
     use tairix_window::app::{self, Wake, WindowPane};
     use tairix_window::{
-        key_input_event, pointer_input_events, pointer_point, present_damage, Desktop, EventDrain,
-        EventError, EventMailbox, EventSource, Parked, Repaint, Target, WindowClient, WindowEvents,
-        WindowSizing,
+        key_input_event, pointer_input_events, pointer_point, present_damage, DeclaredTip, Desktop,
+        EventDrain, EventError, EventMailbox, EventSource, Parked, Repaint, Target, WindowClient,
+        WindowEvents, WindowSizing,
     };
 
     /// The name this program states its own refusals under.
@@ -94,23 +92,6 @@ mod program {
 
     /// The wait-set token of the sandbox worker's answer wake.
     const WORKER_TOKEN: u64 = app::FIRST_APP_TOKEN;
-
-    /// State the abnormal-exit reason on `stderr` and hand `code` back for
-    /// `main`: an exit code alone is not a diagnosis.
-    fn fail(code: i32, reason: &str) -> i32 {
-        let _ = writeln!(Stderr, "{APP_NAME}: {reason}");
-        code
-    }
-
-    /// State a bring-up refusal the shared shell reported.
-    fn fail_shell(err: app::ShellError) -> i32 {
-        fail(err.code(), &alloc::format!("{err}"))
-    }
-
-    /// Report something the user should know that is not fatal.
-    fn report(reason: &str) {
-        let _ = writeln!(Stderr, "{APP_NAME}: {reason}");
-    }
 
     // ---- the sandbox session -------------------------------------------
 
@@ -126,23 +107,14 @@ mod program {
     /// document twice — once to size it and once to send it — for a figure
     /// the kernel already knows.
     fn document_length(handle: &tairix_rt::File) -> Result<usize, Refusal> {
-        let mut record = [0u8; FileStat::WIRE_LEN];
-        let read = tairix_rt::fs_stat_raw(handle.fd(), &mut record)
-            .map_err(|raw| Refusal::Unreadable(Errno::from_syscall(raw)))?;
-        if read < FileStat::WIRE_LEN {
-            return Err(Refusal::Unreadable(Errno::BufferTooSmall));
-        }
-        let stat = FileStat::decode(&record).map_err(Refusal::Unreadable)?;
-        if stat.kind != FileKind::Regular {
-            // A directory or a device is not a document, and its declared
-            // length says nothing about what a read would give.
-            return Err(Refusal::Unreadable(Errno::OutOfRange));
-        }
-        let length = usize::try_from(stat.size).map_err(|_| Refusal::TooLong)?;
-        if length > MAX_DOCUMENT_BYTES {
-            return Err(Refusal::TooLong);
-        }
-        Ok(length)
+        let length = handle
+            .regular_len()
+            .map_err(Refusal::Unreadable)?
+            .ok_or(Refusal::Unreadable(Errno::OutOfRange))?;
+        usize::try_from(length)
+            .ok()
+            .filter(|&length| length <= MAX_DOCUMENT_BYTES)
+            .ok_or(Refusal::TooLong)
     }
 
     /// What only this binary knows about a document: the descriptor it is
@@ -308,48 +280,31 @@ mod program {
         Ok((declared, source.name.clone(), length))
     }
 
-    /// Read the descriptor and push it to the worker in protocol-bounded
-    /// chunks, answering how many bytes it holds.
+    /// Measure the descriptor and stream it to the worker, answering how
+    /// many bytes it holds.
     ///
-    /// The document's length is declared before any of it is sent, so the
-    /// descriptor is measured first and then streamed: at no point does this
-    /// process hold more than one chunk of an untrusted file, and the fixed
-    /// ceiling bounds what is *resident* rather than what is addressable,
-    /// because the reads are positional.
+    /// At no point does this process hold more than one chunk of an
+    /// untrusted file, and the fixed ceiling bounds what is *resident*
+    /// rather than what is addressable, because the reads are positional.
     fn upload(
         sandbox: &mut ParserSandbox<RtLauncher, tairix_rt::LogSink>,
         handle: &tairix_rt::File,
     ) -> Result<u64, Refusal> {
         let fd = handle.fd();
         let length = document_length(handle)?;
-        begin_document(sandbox, length)
-            .map_err(|err| Refusal::Failed(ViewFailure::Document(err)))?;
-        let length = length as u64;
-        let mut chunk =
-            tairix_util::fallible::filled(MAX_DOCUMENT_CHUNK, 0u8).ok_or(Refusal::Unholdable)?;
-        let mut sent = 0u64;
-        while sent < length {
-            let want = usize::try_from(length - sent)
-                .unwrap_or(MAX_DOCUMENT_CHUNK)
-                .min(MAX_DOCUMENT_CHUNK);
-            let got = read_at(fd, sent, &mut chunk[..want])?;
-            if got == 0 {
-                // The file is shorter than it measured, so the declaration
-                // the worker holds can no longer be satisfied: fail closed
-                // rather than pad the document with anything.
-                return Err(Refusal::Unreadable(Errno::OutOfRange));
-            }
-            push_document(sandbox, &chunk[..got])
-                .map_err(|err| Refusal::Failed(ViewFailure::Document(err)))?;
-            sent = sent.saturating_add(got as u64);
-        }
-        Ok(length)
-    }
-
-    /// Read from `fd` at `offset`, reporting the kernel's own refusal.
-    fn read_at(fd: u32, offset: u64, into: &mut [u8]) -> Result<usize, Refusal> {
-        tairix_rt::fs_read(fd, offset, into)
-            .map_err(|raw| Refusal::Unreadable(Errno::from_syscall(raw)))
+        upload_document(sandbox, length, |offset, into| {
+            tairix_rt::fs_read(fd, offset, into).map_err(Errno::from_syscall)
+        })
+        .map_err(|failure| match failure {
+            UploadFailure::Read(err) => Refusal::Unreadable(err),
+            // The file is shorter than it measured, so the declaration the
+            // worker holds can no longer be satisfied: fail closed rather
+            // than pad the document with anything.
+            UploadFailure::Shrank => Refusal::Unreadable(Errno::OutOfRange),
+            UploadFailure::NoMemory => Refusal::Unholdable,
+            UploadFailure::Document(err) => Refusal::Failed(ViewFailure::Document(err)),
+        })?;
+        Ok(length as u64)
     }
 
     /// Bring the session to `page` and draw `window` of it scaled to
@@ -365,7 +320,7 @@ mod program {
             Ok(decoded) => decoded,
             Err(err) => return (None, Err(Refusal::Failed(err))),
         };
-        let Some(wanted) = pixel_len(window) else {
+        let (Some(wanted), Some((x, y))) = (pixel_len(window), window.surface_origin()) else {
             return (
                 Some(decoded),
                 Err(Refusal::Failed(ViewFailure::Refused(
@@ -381,8 +336,8 @@ mod program {
             sandbox,
             extent,
             tairix_raster::Region {
-                x: u32::try_from(window.left()).unwrap_or(0),
-                y: u32::try_from(window.top()).unwrap_or(0),
+                x,
+                y,
                 width: window.width,
                 height: window.height,
             },
@@ -448,10 +403,7 @@ mod program {
     /// recognised from its bytes, which is stronger than trusting a file
     /// name — a document named `.png` that is a JPEG opens as the JPEG it is.
     fn format_for(name: &str) -> Option<ViewFormat> {
-        let extension = name.rsplit_once('.')?.1;
-        extension
-            .eq_ignore_ascii_case("spr")
-            .then_some(ViewFormat::Sprite)
+        (media_for_name(name) == Some(MediaType::ImageSprite)).then_some(ViewFormat::Sprite)
     }
 
     // ---- the app-declared menu -----------------------------------------
@@ -529,9 +481,7 @@ mod program {
         /// The menu open over the window, so an outcome is matched to the
         /// gesture that asked for it rather than to whichever was last.
         menu: Option<u64>,
-        /// The tooltip region last declared, so it is only sent again when it
-        /// moves.
-        tip: Option<Rect>,
+        tip: DeclaredTip,
         /// The title the session was last told, so it is only set again when
         /// the document changes.
         title: String,
@@ -639,7 +589,7 @@ mod program {
         let (width, height) = desktop.window_size(WIN_WIDTH, WIN_HEIGHT);
         let mode = app::mode_for(width, height);
         let Some(surface) = Surface::new(mode.width_px, mode.height_px) else {
-            report("no drawing surface; no window opened");
+            app::report(APP_NAME, "no drawing surface; no window opened");
             return None;
         };
         // Declared in *physical* pixels, derived from the theme's metrics at
@@ -659,7 +609,7 @@ mod program {
             match WindowPane::open(client, event_endpoint, &mode, APP_TITLE, sizing) {
                 Ok(opened) => opened,
                 Err(err) => {
-                    report(&alloc::format!("{err}; no window opened"));
+                    app::report(APP_NAME, format_args!("{err}; no window opened"));
                     return None;
                 }
             };
@@ -668,7 +618,10 @@ mod program {
         // into, exactly as a popup's reply is checked.
         if replied != server {
             let _ = pane.close(client);
-            report("a window reply came from another sender; no window opened");
+            app::report(
+                APP_NAME,
+                "a window reply came from another sender; no window opened",
+            );
             return None;
         }
         Some(Window {
@@ -679,7 +632,7 @@ mod program {
             view: View::new(source.is_some()),
             pending: source,
             menu: None,
-            tip: None,
+            tip: DeclaredTip::new(),
             title: String::from(APP_TITLE),
             presented: false,
         })
@@ -756,10 +709,6 @@ mod program {
     const APP_TITLE: &str = "View";
 
     /// Declare, or withdraw, the tooltip for whatever the pointer is over.
-    ///
-    /// A session that shows no tooltips refuses this; the tip is incidental
-    /// to the viewer's purpose, so the refusal ends the asking and the viewer
-    /// carries on rather than asking again on every pointer sample.
     fn set_tip(
         window: &mut Window,
         client: &mut WindowClient<app::RtWindowTransport>,
@@ -767,21 +716,7 @@ mod program {
         (scale, theme): (Scale, &Theme),
     ) {
         let wanted = window.view.tool_tip(layout, scale, theme);
-        let region = wanted.map(|(rect, _)| rect);
-        if region == window.tip {
-            return;
-        }
-        window.tip = region;
-        let (rect, text) = wanted.unwrap_or((Rect::EMPTY, ""));
-        let (Ok(anchor), Ok(text)) = (
-            WindowRegion::new(rect.left(), rect.top(), rect.width, rect.height),
-            TooltipText::new(text),
-        ) else {
-            return;
-        };
-        if client.set_tooltip(window.pane.id(), anchor, text).is_err() {
-            window.tip = None;
-        }
+        window.tip.declare(client, window.pane.id(), wanted);
     }
 
     /// Tell the session what the window is showing, once, when it changes.
@@ -800,18 +735,6 @@ mod program {
         }
     }
 
-    /// Print the bundle's own short help and answer the exit code.
-    fn print_help() -> i32 {
-        let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
-        let Some(bytes) = own_short_help(&BundleHelp::new(APP_NAME), locale, APP_NAME) else {
-            return fail(1, "this bundle's help documents could not be read");
-        };
-        match Stdout.write_all(&bytes) {
-            Ok(()) => 0,
-            Err(_) => 1,
-        }
-    }
-
     /// Ask the picker for a document for `window`, reporting a session that
     /// has none.
     fn ask_for_document(window: &mut Window, client: &mut WindowClient<app::RtWindowTransport>) {
@@ -820,10 +743,13 @@ mod program {
         // no document: the window then appears stating it, where the stderr
         // line alone would leave a graphical launch silent.
         if let Err(err) = client.pick_file(window.pane.id(), PickPurpose::Open) {
-            report(&alloc::format!(
-                "the desktop offered no file chooser ({err}); \
+            app::report(
+                APP_NAME,
+                format_args!(
+                    "the desktop offered no file chooser ({err}); \
                  open a document from the files app"
-            ));
+                ),
+            );
             window.view.no_document(Refusal::PickRefused(err));
         }
     }
@@ -839,14 +765,10 @@ mod program {
         // same binary is re-entered as, serving over its wired standard
         // streams and nothing else. It never becomes the viewer.
         if worker_role() {
-            let mut service = ImageRenderService::default();
-            return match serve_stdio(&mut service) {
-                ServeEnd::Finished | ServeEnd::Ended => 0,
-                ServeEnd::Failed(_) => 1,
-            };
+            return serve_stdio(&mut ImageRenderService::default()).exit_code();
         }
         if tairix_rt::arg(1).is_some_and(|arg| matches!(arg, b"-h" | b"--help" | b"-?")) {
-            return print_help();
+            return tairix_help::print_own_short_help(APP_NAME, None);
         }
 
         // A user-facing loop, so declare the frame it owes. A debug image
@@ -863,7 +785,7 @@ mod program {
         let mut client = WindowClient::new(app::RtWindowTransport);
         let (mut desktop, mut themes) = match app::bring_up_desktop(&mut client) {
             Ok(pair) => pair,
-            Err(err) => return fail_shell(err),
+            Err(err) => return app::fail(APP_NAME, err.code(), err),
         };
         let theme = themes.active();
         let scale = desktop.scale();
@@ -872,12 +794,16 @@ mod program {
         // what authenticates the icon-bar events it still receives, and
         // without it there is nothing to accept them against (fail closed).
         let Some(server) = client.session() else {
-            return fail(app::EXIT_NO_WINDOW, "the desktop did not identify itself");
+            return app::fail(
+                APP_NAME,
+                app::EXIT_NO_WINDOW,
+                "the desktop did not identify itself",
+            );
         };
 
         let binding = match app::bind_event_mailbox() {
             Ok(binding) => binding,
-            Err(err) => return fail_shell(err),
+            Err(err) => return app::fail(APP_NAME, err.code(), err),
         };
         let event_endpoint = binding.endpoint();
         let set = binding.set();
@@ -890,15 +816,17 @@ mod program {
             tairix_rt::sync::WorkerWake::create(),
         ));
         if let Err(reason) = Worker::start(&worker) {
-            report(&alloc::format!(
-                "no decode worker ({reason:?}); documents are read on the event loop"
-            ));
+            app::report(
+                APP_NAME,
+                format_args!("no decode worker ({reason:?}); documents are read on the event loop"),
+            );
         }
         let _worker_guard = tairix_rt::work::WorkerGuard::new(&worker);
         if let Err(err) = app::watch_wake(set, worker.wake(), WORKER_TOKEN) {
-            return fail(
+            return app::fail(
+                APP_NAME,
                 app::EXIT_NO_EVENTS,
-                &alloc::format!("decode answer wake refused ({err})"),
+                format_args!("decode answer wake refused ({err})"),
             );
         }
 
@@ -906,7 +834,7 @@ mod program {
         // windows are still reachable, though nothing reaches it with none open.
         let declared = tairix_window::info_and_quit(event_endpoint, AppBarClick::RaiseOrOpen);
         if let Err(refused) = tairix_window::declare_app_bar(&mut client, declared) {
-            report(&alloc::format!("{refused}"));
+            app::report(APP_NAME, format_args!("{refused}"));
         }
 
         // The windows open, in the order they were opened. A viewer launched
@@ -934,7 +862,7 @@ mod program {
                 .present(&mut client, Repaint::Whole, &damage::sink(), theme, scale)
                 .is_err()
             {
-                return fail(app::EXIT_CHANNEL_LOST, "first present refused");
+                return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "first present refused");
             }
         }
 
@@ -964,12 +892,18 @@ mod program {
                                 .present(&mut client, Repaint::Whole, &reported, theme, scale)
                                 .is_err()
                             {
-                                return fail(app::EXIT_CHANNEL_LOST, "present refused");
+                                return app::fail(
+                                    APP_NAME,
+                                    app::EXIT_CHANNEL_LOST,
+                                    "present refused",
+                                );
                             }
                         }
                     }
                     Ok(false) => {}
-                    Err(err) => report(&alloc::format!("desktop change refused: {err}")),
+                    Err(err) => {
+                        app::report(APP_NAME, format_args!("desktop change refused: {err}"));
+                    }
                 }
             }
             let (theme, scale) = (themes.active(), desktop.scale());
@@ -1011,7 +945,7 @@ mod program {
                                 .present(&mut client, repaint, &reported, theme, scale)
                                 .is_err()
                         {
-                            return fail(app::EXIT_CHANNEL_LOST, "present refused");
+                            return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "present refused");
                         }
                     }
                 }
@@ -1069,10 +1003,10 @@ mod program {
                 // woke for.
                 Ok(None) => continue,
                 Err(EventError::Mailbox(_)) => {
-                    return fail(app::EXIT_CHANNEL_LOST, "the event channel died")
+                    return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "the event channel died")
                 }
                 Err(EventError::Undecodable(_)) => {
-                    report("a malformed window event was refused");
+                    app::report(APP_NAME, "a malformed window event was refused");
                     continue;
                 }
             };
@@ -1091,7 +1025,9 @@ mod program {
                 &mut reported,
             ) {
                 Routed::Quit => return 0,
-                Routed::Lost => return fail(app::EXIT_CHANNEL_LOST, "present refused"),
+                Routed::Lost => {
+                    return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "present refused")
+                }
                 Routed::Served => {}
             }
         }
@@ -1325,7 +1261,10 @@ mod program {
                 {
                     // A refused resize leaves the old geometry standing, so
                     // the window is still drawable at the size it had.
-                    report("the desktop refused a resize; the window keeps its size");
+                    app::report(
+                        APP_NAME,
+                        "the desktop refused a resize; the window keeps its size",
+                    );
                 }
                 // The reported client size is what the layout follows either
                 // way, so the whole window is redrawn regardless.
@@ -1343,7 +1282,7 @@ mod program {
                 // unnamed rather than refusing it.
                 let name = app.client.take_picked_name(*window_id).unwrap_or_default();
                 let Some(source) = delegated(*handle, name) else {
-                    report("the delegated document could not be redeemed");
+                    app::report(APP_NAME, "the delegated document could not be redeemed");
                     return Acted::Idle;
                 };
                 app.windows[index].pending = Some(source);
@@ -1525,7 +1464,7 @@ mod program {
                 Ok(Some(target)) => target,
                 Ok(None) => return,
                 Err(err) => {
-                    report(&alloc::format!("cannot take an open target ({err})"));
+                    app::report(APP_NAME, format_args!("cannot take an open target ({err})"));
                     return;
                 }
             };
@@ -1534,7 +1473,7 @@ mod program {
                     if let Some(source) = delegated(grant, name) {
                         source
                     } else {
-                        report("a handed-over document could not be redeemed");
+                        app::report(APP_NAME, "a handed-over document could not be redeemed");
                         continue;
                     }
                 }
@@ -1542,19 +1481,25 @@ mod program {
                 // viewer a descriptor precisely because it holds no
                 // filesystem authority to open a name with.
                 Target::Path(path) => {
-                    report(&alloc::format!(
-                        "{path} was handed over as a path; this viewer holds no filesystem \
+                    app::report(
+                        APP_NAME,
+                        format_args!(
+                            "{path} was handed over as a path; this viewer holds no filesystem \
                          authority and can only be given an open document"
-                    ));
+                        ),
+                    );
                     continue;
                 }
                 // This viewer is one place: it shows a document, and has no
                 // pane a launch could name.
                 Target::Pane(pane) => {
-                    report(&alloc::format!(
-                        "{pane} was handed over, but this viewer shows a document and has no \
+                    app::report(
+                        APP_NAME,
+                        format_args!(
+                            "{pane} was handed over, but this viewer shows a document and has no \
                          places to go to"
-                    ));
+                        ),
+                    );
                     continue;
                 }
             };
@@ -1585,16 +1530,17 @@ mod program {
     ) {
         let (menu, skipped) = build_menu(&window.view);
         if skipped > 0 {
-            report(&alloc::format!(
-                "{skipped} menu row(s) do not fit and are not shown"
-            ));
+            app::report(
+                APP_NAME,
+                format_args!("{skipped} menu row(s) do not fit and are not shown"),
+            );
         }
         let Ok(anchor) = WindowRegion::new(at.x, at.y, 0, 0) else {
             return;
         };
         match client.open_menu(window.pane.id(), anchor, &menu) {
             Ok(open) => window.menu = Some(open),
-            Err(_) => report("the desktop composes no menu service"),
+            Err(_) => app::report(APP_NAME, "the desktop composes no menu service"),
         }
     }
 

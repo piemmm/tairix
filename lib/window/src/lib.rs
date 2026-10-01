@@ -19,6 +19,20 @@
 //!   vocabulary the shared controls consume, so no app carries a private
 //!   copy of it.
 //!
+//! * [`document`] — a window's document file: the save in flight, the saves
+//!   chained behind it, and the file chooser open for it, sequenced apart
+//!   from the syscalls that carry them out, for every application that saves
+//!   what it edits.
+//!
+//! * [`menu`] — an application's own menu built a row at a time, a row the
+//!   bounded menu cannot hold left out rather than the whole menu.
+//!
+//! * [`docapp`] — a document application: a window per document in one
+//!   process on the icon bar. The contract its engine is driven through is
+//!   host-tested here; the host that drives it — the windows, their saves and
+//!   choosers, the save queue, the exit that sees every save out — builds on
+//!   the `app` shell, so it too compiles only on the bare-metal targets.
+//!
 //! * `app` — the app-side *shell* the windowed `Run` binaries share: the
 //!   `ipc_call` transport, the bound event mailbox and its wait-set (with the
 //!   machine's memory-pressure band on it), the desktop query, one window's
@@ -50,10 +64,13 @@ pub mod client;
 #[cfg(feature = "rt")]
 pub mod clipboard;
 pub mod desktop;
+pub mod docapp;
+pub mod document;
 #[cfg(feature = "rt")]
 pub mod frames;
 #[cfg(feature = "rt")]
 pub mod mailbox;
+pub mod menu;
 pub mod park;
 pub mod server;
 
@@ -62,9 +79,9 @@ pub use appbar::{
     QUIT_ROW,
 };
 pub use client::{
-    damage_in, key_input_event, pointer_input_events, pointer_point, present_damage, EventDrain,
-    EventError, EventSource, Parked, Repaint, Target, WindowClient, WindowEvents, WindowTransport,
-    EVENT_MAILBOX_CAPACITY,
+    damage_in, key_input_event, pointer_input_events, pointer_point, present_damage, DeclaredTip,
+    EventDrain, EventError, EventSource, Parked, Repaint, Target, WindowClient, WindowEvents,
+    WindowTransport, EVENT_MAILBOX_CAPACITY,
 };
 pub use desktop::Desktop;
 #[cfg(feature = "rt")]

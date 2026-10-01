@@ -17,7 +17,7 @@ pub(crate) fn chunk(chunk_type: [u8; 4], payload: &[u8]) -> Vec<u8> {
     out.extend_from_slice(&len.to_be_bytes());
     out.extend_from_slice(&chunk_type);
     out.extend_from_slice(payload);
-    let crc = crate::crc32::crc32_of(&[&chunk_type, payload]);
+    let crc = crate::png::chunk_crc(chunk_type, payload);
     out.extend_from_slice(&crc.to_be_bytes());
     out
 }

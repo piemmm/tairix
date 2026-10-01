@@ -13,7 +13,8 @@ use tairix_abi::SYSTEM_SERVICE_STORE;
 use tairix_icon::IconKind;
 
 use super::{
-    ancestry, extension, media_for_entry, media_for_name, MediaType, ALL, EXTENSION_TABLE,
+    ancestry, media_for_entry, media_for_name, name_endings, Ending, MediaType, ALL,
+    EXTENSION_TABLE,
 };
 use crate::entry::{Entry, EntryKind};
 
@@ -107,7 +108,7 @@ fn every_recognised_extension_has_a_row() {
             listed += 1;
             let row = ROWS
                 .iter()
-                .find(|(name, _, _)| extension(name) == Some(*ext));
+                .find(|(name, _, _)| Ending::of(name).extension == Some(*ext));
             let (_, row_media, _) = row.unwrap_or_else(|| panic!("no row covers .{ext}"));
             assert_eq!(row_media, media, ".{ext}");
         }
@@ -145,6 +146,62 @@ fn every_type_the_registry_can_produce_is_in_the_round_trip_table() {
     ] {
         assert!(ALL.contains(&media), "{media:?}");
     }
+}
+
+#[test]
+fn a_risc_os_file_type_after_a_comma_names_the_media() {
+    assert_eq!(media_for_name("Sprites,ff9"), Some(MediaType::ImageSprite));
+    assert_eq!(media_for_name("Logo,B60"), Some(MediaType::ImagePng));
+    assert_eq!(media_for_name("photo,c85"), Some(MediaType::ImageJpeg));
+    assert_eq!(media_for_name("ReadMe,fff"), Some(MediaType::TextPlain));
+    // A type the registry does not know leaves the extension to say.
+    assert_eq!(media_for_name("notes.txt,ffb"), Some(MediaType::TextPlain));
+    assert_eq!(media_for_name("Sprites,ff9.png"), Some(MediaType::ImagePng));
+    assert_eq!(media_for_name("a,b,ff9"), Some(MediaType::ImageSprite));
+    assert_eq!(media_for_name("Obey,feb"), None);
+    assert_eq!(media_for_name(",b60"), None, "a file type needs a stem");
+}
+
+/// A name ends in a file type only after a stem and only as three hex
+/// digits, and in an extension only after a stem: anything else ends it in
+/// nothing.
+#[test]
+fn a_name_ends_only_in_a_file_type_or_an_extension_after_a_stem() {
+    let both = Ending::of("notes.txt,ffb");
+    assert_eq!(
+        (both.stem, both.filetype, both.extension),
+        ("notes", Some("ffb"), Some("txt"))
+    );
+    for bare in [
+        "Smith, J",
+        ",b60",
+        ".png",
+        "plain",
+        "trailing.",
+        "a,b6",
+        "a,b600",
+    ] {
+        let ending = Ending::of(bare);
+        assert!(ending.is_none(), "{bare}");
+        assert_eq!(ending.stem, bare, "{bare}");
+    }
+    assert_eq!(Ending::of("a.tar.gz").stem, "a.tar");
+    assert_eq!(Ending::of("my.photos").extension, Some("photos"));
+    assert_eq!(Ending::of("Logo,B60").filetype, Some("B60"));
+}
+
+/// Every ending a type is known by names that type back, extensions first.
+#[test]
+fn a_types_name_endings_read_back_as_the_type() {
+    for media in ALL {
+        for (separator, code) in name_endings(*media) {
+            let name = alloc::format!("picture{separator}{code}");
+            assert_eq!(media_for_name(&name), Some(*media), "{name}");
+        }
+    }
+    let png: Vec<(char, &str)> = name_endings(MediaType::ImagePng).collect();
+    assert_eq!(png, [('.', "png"), (',', "b60")]);
+    assert_eq!(name_endings(MediaType::InodeDirectory).count(), 0);
 }
 
 #[test]

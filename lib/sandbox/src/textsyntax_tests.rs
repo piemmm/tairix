@@ -5,7 +5,6 @@ use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::cell::Cell;
 
-use tairix_log::{Event, Sink};
 use tairix_syntax::{lex_line, Format, LineState, Severity, Span, MAX_DIAGNOSTICS};
 use tairix_theme::SyntaxRole;
 
@@ -15,36 +14,12 @@ use super::{
 };
 use crate::host::ParserSandbox;
 use crate::loopback::LoopbackLauncher;
+use crate::testing::{loopback, scripted, NullSink, Scripted};
 use crate::wire::Writer;
 use crate::worker::Service;
 
-struct NullSink;
-
-impl Sink for NullSink {
-    fn write_event(&self, _event: &Event<'_>) {}
-}
-
 fn sandbox() -> ParserSandbox<LoopbackLauncher<fn() -> TextSyntaxService>, NullSink> {
-    ParserSandbox::new(
-        LoopbackLauncher::new(TextSyntaxService::default as _),
-        NullSink,
-    )
-}
-
-/// A worker that answers every request with `reply`.
-struct Hostile(Vec<u8>);
-
-impl Service for Hostile {
-    fn handle(&mut self, _request: &[u8]) -> Vec<u8> {
-        self.0.clone()
-    }
-}
-
-fn hostile(reply: Vec<u8>) -> ParserSandbox<LoopbackLauncher<impl FnMut() -> Hostile>, NullSink> {
-    ParserSandbox::new(
-        LoopbackLauncher::new(move || Hostile(reply.clone())),
-        NullSink,
-    )
+    loopback()
 }
 
 /// A lex reply for one line carrying `spans` as raw `(start, end, role)`.
@@ -116,14 +91,14 @@ fn a_span_that_breaks_the_contract_fails_the_whole_reply() {
     ] {
         let reply = lex_reply(&spans);
         assert_eq!(
-            lex_lines(&mut hostile(reply), Format::C, LineState::START, &line),
+            lex_lines(&mut scripted(reply), Format::C, LineState::START, &line),
             Err(SyntaxFailure::ReplyMalformed),
             "{spans:?}"
         );
     }
     let fine = lex_reply(&[(0, 2, comment), (2, 6, SyntaxRole::Keyword.index())]);
     let batch =
-        lex_lines(&mut hostile(fine), Format::C, LineState::START, &line).expect("believed");
+        lex_lines(&mut scripted(fine), Format::C, LineState::START, &line).expect("believed");
     assert_eq!(
         batch.line(0),
         [
@@ -148,7 +123,7 @@ fn a_reply_that_cannot_be_believed_retires_its_worker() {
     let mut sandbox = ParserSandbox::new(
         LoopbackLauncher::new(move || {
             counted.set(counted.get() + 1);
-            Hostile(alloc::vec![super::REPLY_DETECTED, 99])
+            Scripted(alloc::vec![super::REPLY_DETECTED, 99])
         }),
         NullSink,
     );
@@ -158,7 +133,7 @@ fn a_reply_that_cannot_be_believed_retires_its_worker() {
     );
     assert_eq!(launched.get(), 2, "the liar was replaced at once");
     let refused = alloc::vec![super::REPLY_REFUSED];
-    let mut refusing = hostile(refused);
+    let mut refusing = scripted(refused);
     assert_eq!(detect(&mut refusing, b"x"), Err(SyntaxFailure::Refused));
     assert_eq!(detect(&mut refusing, b"x"), Err(SyntaxFailure::Refused));
 }
@@ -171,7 +146,7 @@ fn a_reply_for_the_wrong_number_of_lines_or_with_trailing_bytes_fails() {
     two.u32(2);
     assert_eq!(
         lex_lines(
-            &mut hostile(two.finish()),
+            &mut scripted(two.finish()),
             Format::C,
             LineState::START,
             &line
@@ -181,12 +156,12 @@ fn a_reply_for_the_wrong_number_of_lines_or_with_trailing_bytes_fails() {
     let mut trailing = lex_reply(&[]);
     trailing.push(0);
     assert_eq!(
-        lex_lines(&mut hostile(trailing), Format::C, LineState::START, &line),
+        lex_lines(&mut scripted(trailing), Format::C, LineState::START, &line),
         Err(SyntaxFailure::ReplyMalformed)
     );
     assert_eq!(
         lex_lines(
-            &mut hostile(alloc::vec![super::REPLY_REFUSED]),
+            &mut scripted(alloc::vec![super::REPLY_REFUSED]),
             Format::C,
             LineState::START,
             &line
@@ -238,12 +213,12 @@ fn a_diagnostic_off_the_document_or_saying_nothing_fails_the_reply() {
         reply(1, 0, "a\x1b[2J"),
     ] {
         assert_eq!(
-            validate_document(&mut hostile(bad), Format::SystemConfig, text),
+            validate_document(&mut scripted(bad), Format::SystemConfig, text),
             Err(SyntaxFailure::ReplyMalformed)
         );
     }
     let good = validate_document(
-        &mut hostile(reply(3, 1, "ignored")),
+        &mut scripted(reply(3, 1, "ignored")),
         Format::SystemConfig,
         text,
     )
@@ -254,7 +229,7 @@ fn a_diagnostic_off_the_document_or_saying_nothing_fails_the_reply() {
     many.u8(super::REPLY_VALIDATED);
     many.u32(u32::try_from(MAX_DIAGNOSTICS + 1).expect("fits"));
     assert_eq!(
-        validate_document(&mut hostile(many.finish()), Format::SystemConfig, text),
+        validate_document(&mut scripted(many.finish()), Format::SystemConfig, text),
         Err(SyntaxFailure::ReplyMalformed)
     );
 }
@@ -272,7 +247,7 @@ fn detection_names_a_format_or_none_and_refuses_what_it_cannot_believe() {
     );
     let unknown = alloc::vec![super::REPLY_DETECTED, 99];
     assert_eq!(
-        detect(&mut hostile(unknown), b"x"),
+        detect(&mut scripted(unknown), b"x"),
         Err(SyntaxFailure::ReplyMalformed)
     );
 }
@@ -293,4 +268,17 @@ fn the_service_refuses_malformed_requests_without_failing() {
             "{request:?}"
         );
     }
+}
+
+/// A failure reads as a reason, for the diagnostics that state it.
+#[test]
+fn a_syntax_failure_says_why() {
+    assert_eq!(
+        alloc::format!("{}", SyntaxFailure::TooLarge),
+        "the request is larger than a parser takes"
+    );
+    assert_eq!(
+        alloc::format!("{}", SyntaxFailure::ReplyMalformed),
+        "the parser's answer could not be believed"
+    );
 }

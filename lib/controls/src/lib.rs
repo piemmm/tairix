@@ -297,6 +297,7 @@ extern crate alloc;
 
 pub mod button;
 pub mod chart;
+pub mod checker;
 pub mod collection;
 pub mod combo;
 pub mod credential;
@@ -317,6 +318,7 @@ pub mod selector;
 pub mod shell;
 pub mod stack;
 pub mod state;
+pub mod swatch_grid;
 pub mod tabs;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testkit;
@@ -327,6 +329,7 @@ pub mod window;
 
 pub use button::{Button, ButtonAction, ButtonContent, IconButton, SplitAction, SplitButton};
 pub use chart::{Chart, MAX_CHART_SAMPLES};
+pub use checker::Checker;
 pub use collection::{
     Card, CardAction, CellAlign, HeaderAction, HeaderColumn, IconTile, ListRow, Panel, PanelAction,
     PanelEdge, RowAction, SortOrder, TableCell, TableHeader, TableRow,
@@ -336,7 +339,7 @@ pub use credential::{
     CredentialAction, CredentialSheet, CREDENTIAL_HEIGHT, CREDENTIAL_NOT_STARTED_REASON,
     CREDENTIAL_REFUSED_REASON, CREDENTIAL_WIDTH,
 };
-pub use decision::{Dialog, DialogAction, HelpTip, HelpTipAction, Tooltip};
+pub use decision::{Dialog, DialogAction, HelpTip, HelpTipAction, SaveChanges, Tooltip};
 pub use disclosure::{tree_step, DisclosureSet, TreeKey, TreeRow, TreeStep};
 pub use form::{
     FieldAction, FieldControl, FieldGroup, FieldGroupAction, FieldLayout, FieldRow, FlagSet,
@@ -351,9 +354,9 @@ pub use metric::{
 };
 pub use nav::{Breadcrumb, BreadcrumbAction, Crumb};
 pub use paint::{
-    ground_fill, inset, paint_framed_surface_plate, paint_icon_slot, paint_run,
-    paint_surface_plate, paint_titled_surface_plate, plate_border, run_width, ChromeLayer,
-    FULL as FULL_PERMILLE, FULL_COLOUR,
+    blend_area, fill_area, ground_fill, inset, paint_framed_surface_plate, paint_icon_slot,
+    paint_run, paint_surface_plate, paint_titled_surface_plate, plate_border, run_width, withheld,
+    ChromeLayer, FULL as FULL_PERMILLE, FULL_COLOUR,
 };
 pub use picture::{Aspect, PictureAction, PictureChoice, PictureItem, PictureSection, Swatch};
 pub use rail::{ActionRail, RailAction};
@@ -374,6 +377,7 @@ pub use state::{
     RecoveryState, RenderInvariant, SelectionState, SizeAction, ValidationState,
     WindowActivationState, WindowControlKind, WindowFurnitureState, WindowSizeState,
 };
+pub use swatch_grid::{SwatchAction, SwatchGrid, SwatchMark};
 pub use tabs::{Tab, TabGroupAbsence, Tabs, TabsAction, TabsOrientation};
 pub use text::{Keystroke, SearchField, SecretField, TextAction, TextArea, TextField};
 pub use toolbar::{ToolActivation, Toolbar, ToolbarAction, ToolbarOutcome};
@@ -424,6 +428,8 @@ mod shell_tests;
 mod stack_tests;
 #[cfg(test)]
 mod state_tests;
+#[cfg(test)]
+mod swatch_grid_tests;
 #[cfg(test)]
 mod tabs_tests;
 #[cfg(test)]

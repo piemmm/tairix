@@ -227,15 +227,8 @@ fn cell_count(cols: u16, rows: u16) -> usize {
 /// The pixel extent of `rect` as the unsigned quadruple the surface fills
 /// take, or `None` when the rectangle is empty or lies off the top-left.
 fn extent(rect: Rect) -> Option<(u32, u32, u32, u32)> {
-    if rect.is_empty() {
-        return None;
-    }
-    Some((
-        u32::try_from(rect.left()).ok()?,
-        u32::try_from(rect.top()).ok()?,
-        rect.width,
-        rect.height,
-    ))
+    let (x, y) = rect.surface_origin()?;
+    Some((x, y, rect.width, rect.height))
 }
 
 /// The face's cell extent, read once per paint rather than once per cell:

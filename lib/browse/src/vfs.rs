@@ -22,6 +22,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::fs::{DirEntries, FileKind, FS_PATH_MAX};
+use tairix_abi::window_ipc::WINDOW_TITLE_MAX;
 use tairix_abi::Errno;
 use tairix_font::ELLIPSIS;
 
@@ -124,8 +125,6 @@ pub fn spell_absolute_path(components: &[String]) -> String {
 /// cannot leave a window permanently unable to state where it is. Only the title
 /// is spelled this way: [`spell_absolute_path`] stays byte-exact, because it
 /// names a real path to open.
-///
-/// [`WINDOW_TITLE_MAX`]: tairix_abi::window_ipc::WINDOW_TITLE_MAX
 #[must_use]
 pub fn spell_title_location(components: &[String], budget: usize) -> String {
     let shown: Option<Vec<String>> = components
@@ -155,6 +154,38 @@ pub fn spell_title_location(components: &[String], budget: usize) -> String {
     fitted
 }
 
+/// What leads a document window's title while the document holds changes.
+const MODIFIED_MARK: &str = "*";
+
+/// What follows the name of a document its window may not save over.
+const READ_ONLY_MARK: &str = " (read-only)";
+
+/// What parts the document's name from the application's in a title.
+const APP_SEPARATOR: &str = " \u{2014} ";
+
+/// Write the title a document window shows over `title`, reusing its room:
+/// `name`, marked while it holds unsaved changes and when it may only be
+/// read, then `app` — the name cut to what the bounded title field leaves.
+pub fn write_document_title(
+    title: &mut String,
+    name: &str,
+    modified: bool,
+    read_only: bool,
+    app: &str,
+) {
+    title.clear();
+    let modified = if modified { MODIFIED_MARK } else { "" };
+    let read_only = if read_only { READ_ONLY_MARK } else { "" };
+    let budget = WINDOW_TITLE_MAX
+        .saturating_sub(modified.len() + read_only.len())
+        .saturating_sub(APP_SEPARATOR.len() + app.len());
+    title.push_str(modified);
+    push_title_name(title, name, budget);
+    title.push_str(read_only);
+    title.push_str(APP_SEPARATOR);
+    title.push_str(app);
+}
+
 /// Append the document name `name` to `title` as a window title carries it,
 /// in at most `budget` bytes: every control character shown as
 /// [`char::REPLACEMENT_CHARACTER`], and a name too long cut on a `char`
@@ -163,7 +194,7 @@ pub fn spell_title_location(components: &[String], budget: usize) -> String {
 /// A window title is a bounded field and a name is not, so a long one is
 /// shortened rather than left to make the whole title unacceptable; and a
 /// control character in it would make any title refused.
-pub fn push_title_name(title: &mut String, name: &str, budget: usize) {
+pub(crate) fn push_title_name(title: &mut String, name: &str, budget: usize) {
     let whole: usize = name.chars().map(|ch| shown(ch).len_utf8()).sum();
     let room = if whole <= budget {
         budget

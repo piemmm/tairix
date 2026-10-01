@@ -26,9 +26,11 @@ untrusted work imports this seam; a second per-app copy is forbidden.
   stream ends the worker cleanly. A `Service` is total: a malformed request
   is a typed error *reply*, never a panic.
 - **The host side** (`host`): `ParserSandbox` sends a request and receives
-  the reply over a worker its `Launcher` started. Any worker failure —
-  crash, protocol violation, oversize reply — is contained: the caller
-  receives a typed `SandboxError`, the worker is disposed of and replaced,
+  the reply over a worker its `Launcher` started, waiting no longer than the
+  production launcher's reply deadline. Any worker failure — crash,
+  protocol violation, oversize reply, no answer in time — is contained: the
+  caller receives a typed `SandboxError`, the worker is killed if it still
+  runs, then disposed of and replaced,
   and the event is logged with a stable `EventId` (this crate owns the
   `6000..7000` range). A parser crash never takes down the calling program.
 - **The duplex session seam** (`session`): the long-lived counterpart to
@@ -151,7 +153,19 @@ untrusted work imports this seam; a second per-app copy is forbidden.
   caller-side `open_view`/`select_page`/`render_page`/`close_view`
   validates every reply fail-closed as the wallpaper path does, and
   `render_page` draws into a buffer the caller already holds, so an
-  interactive re-render allocates nothing.
+  interactive re-render allocates nothing. `upload_document` is the one way a
+  caller streams a file into that upload without holding it whole, through a
+  chunk buffer it lends and a read that is refused if the file shrinks.
+- **The edit-decode service** (`imageedit`, the same worker and the same
+  upload): an editor's document, read as its file stores it rather than
+  flattened. `open_edit` answers the format and how many entries it holds;
+  `select_entry` decodes one — a picture at its own depth, indexed with its
+  palette or RGBA, with its sprite's name, mode, mask and palette form, or a
+  sprite the decoder cannot read as a kept entry naming why (`KeptReason`) —
+  and `read_rows` and `read_kept` fetch its rows or its bytes. The caller side
+  holds every answer to the edit bounds (`MAX_EDIT_SIDE`, `MAX_EDIT_PIXELS`,
+  `MAX_EDIT_ENTRIES`), checks each index against its palette and each mode
+  word against its pixels, and believes nothing it cannot check.
 - **The NTP-evaluation service** (`timesync`): a network time server's reply
   is evaluated in the worker (`tairix-net`'s RFC 5905 rules), because the
   `timed` service that acts on the verdict holds `CAP_TIME_SET` and must

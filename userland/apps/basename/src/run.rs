@@ -31,23 +31,7 @@ mod program {
     use alloc::format;
 
     use tairix_basename::{output, parse, Command, USAGE};
-    use tairix_help::{own_short_help, BundleHelp};
     use tairix_rt::io::{write_stderr_line, Stdout, Write};
-
-    /// Render `basename`'s own short help (`NAME` + `SYNOPSIS` + compact
-    /// `OPTIONS`) from its own bundle's `Help/` tree through the one shared
-    /// engine; when no document can be served (a build without the bundle's
-    /// documents) the usage banner stands in — the tool's own text, not
-    /// fabricated help content — so `-h` never fails.
-    fn short_help() -> i32 {
-        let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
-        let bytes = own_short_help(&BundleHelp::new("basename"), locale, "basename")
-            .unwrap_or_else(|| format!("{USAGE}\n").into_bytes());
-        match Stdout.write_all(&bytes) {
-            Ok(()) => 0,
-            Err(_) => 1,
-        }
-    }
 
     /// Program entry point. `tairix-rt`'s `_start` calls it once the runtime
     /// is set up and routes its return value through the `exit` syscall.
@@ -67,7 +51,7 @@ mod program {
                 suffix,
                 zero,
             }) => (names, suffix, zero),
-            Ok(Command::Help) => return short_help(),
+            Ok(Command::Help) => return tairix_help::print_own_short_help("basename", Some(USAGE)),
             Err(err) => {
                 write_stderr_line(&format!("basename: {err}"));
                 write_stderr_line(USAGE);

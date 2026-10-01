@@ -20,8 +20,8 @@ use tairix_abi::window_ipc::{
     AppBar, AppBarClick, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow,
     AppMenuRowView, BundleRunPath, ClipboardHeld, ClipboardKind, CursorShape, DocumentName,
     DropTarget, HandOverDocument, HandOverOutcome, LayerDepth, MenuOutcome, MenuRefusal,
-    PickPurpose, PointerAction, PreviewSubject, TerrainPlate, TooltipText, WindowEvent,
-    WindowRegion, WindowRequest, APP_MENU_ENTRY_MAX, DESKTOP_LAYER_MAX_PER_CLIENT,
+    PickPurpose, PointerAction, PreviewSubject, SaveEndings, TerrainPlate, TooltipText,
+    WindowEvent, WindowRegion, WindowRequest, APP_MENU_ENTRY_MAX, DESKTOP_LAYER_MAX_PER_CLIENT,
     HAND_OVER_RUN_PATH_MAX, WINDOW_MAX_OPEN_TARGETS, WINDOW_TITLE_MAX,
 };
 use tairix_abi::{BundleId, CapabilityId, Errno, PublisherId};
@@ -29,8 +29,8 @@ use tairix_display::{FrameRegion, ShmMapper};
 use tairix_geometry::{Point, Rect, Region, Scale};
 
 use crate::client::{
-    damage_in, pointer_point, present_damage, retained_damage, EventDrain, EventError, EventSource,
-    Parked, Repaint, Target, WindowClient, WindowEvents, WindowTransport,
+    damage_in, pointer_point, present_damage, retained_damage, DeclaredTip, EventDrain, EventError,
+    EventSource, Parked, Repaint, Target, WindowClient, WindowEvents, WindowTransport,
 };
 use crate::desktop::Desktop;
 use crate::server::{
@@ -2652,6 +2652,7 @@ fn pick_file_is_owner_bound_single_pending_and_concluded_by_delivery() {
     );
     let save = PickPurpose::Save {
         suggested: DocumentName::new("Untitled.txt").expect("a valid name"),
+        endings: SaveEndings::ANY,
     };
     client
         .pick_file(window, save)
@@ -4480,6 +4481,38 @@ fn a_host_that_shows_no_tooltip_refuses_and_the_app_carries_on() {
         "a refused tip is an answer the app reports and carries on from"
     );
     assert!(loopback.borrow().host.tooltips.is_empty());
+}
+
+#[test]
+fn a_declared_tip_asks_once_per_tool_and_once_more_to_withdraw() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let (copy, paste) = (Rect::new(0, 0, 20, 20), Rect::new(20, 0, 20, 20));
+    let mut tip = DeclaredTip::new();
+    for _ in 0..3 {
+        tip.declare(&mut client, window, Some((copy, "Copy")));
+    }
+    tip.declare(&mut client, window, Some((paste, "Paste")));
+    tip.declare(&mut client, window, None);
+    tip.declare(&mut client, window, None);
+    let host = &loopback.borrow().host;
+    assert_eq!(host.tooltips.len(), 3, "{:?}", host.tooltips);
+    assert_eq!(host.tooltips[2].2, String::new(), "the withdrawal");
+}
+
+#[test]
+fn a_refused_tip_is_not_asked_again_on_every_pointer_sample() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    loopback.borrow_mut().host.refuse_tooltip = Some(Errno::NotSupported);
+    let asked = loopback.borrow().sent.len();
+    let mut tip = DeclaredTip::new();
+    for _ in 0..5 {
+        tip.declare(&mut client, window, Some((Rect::new(0, 0, 20, 20), "Copy")));
+    }
+    assert_eq!(loopback.borrow().sent.len(), asked + 1);
 }
 
 #[test]

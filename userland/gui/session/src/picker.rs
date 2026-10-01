@@ -35,7 +35,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::fs::OpenFlags;
 use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode};
-use tairix_abi::window_ipc::{PickPurpose, WINDOW_TITLE_MAX};
+use tairix_abi::window_ipc::{PickPurpose, SaveEndings, WINDOW_TITLE_MAX};
 use tairix_abi::{Errno, FS_NAME_MAX};
 use tairix_browse::render::{
     entry_index_at, render_into, reveal_selection, scroll_pointer, scroll_wheel, toolbar_command_at,
@@ -43,7 +43,7 @@ use tairix_browse::render::{
 use tairix_browse::ManagerChrome;
 use tairix_browse::ToolbarBand;
 use tairix_browse::{
-    apply_command, vfs, Browser, DirectorySource, EntryKind, WIN_HEIGHT, WIN_WIDTH,
+    apply_command, vfs, Browser, DirectorySource, Ending, EntryKind, WIN_HEIGHT, WIN_WIDTH,
 };
 use tairix_controls::{damage, Button, ButtonContent, ControlRole, TextAction, TextField};
 use tairix_font::BitmapFont;
@@ -250,12 +250,14 @@ struct SaveBand {
     /// The name offered when the pick began, put back after the field named a
     /// folder the picker then went into.
     suggested: String,
+    /// The endings the requester can write a name under.
+    endings: SaveEndings,
     /// The file the user is being asked whether to replace.
     replacing: Option<Replacing>,
 }
 
 impl SaveBand {
-    fn new(suggested: &str) -> Self {
+    fn new(suggested: &str, endings: SaveEndings) -> Self {
         let mut name = TextField::new()
             .with_text(suggested)
             .with_max_len(FS_NAME_MAX);
@@ -265,7 +267,33 @@ impl SaveBand {
             cancel: Button::labelled(CANCEL_LABEL),
             save: save_button(false),
             suggested: String::from(suggested),
+            endings,
             replacing: None,
+        }
+    }
+
+    /// `name` as the requester can write it: as typed where it ends as the
+    /// requester asks, given the first ending where it has none, and refused,
+    /// with the endings it may take, where it has another.
+    fn held(&self, name: String) -> Result<String, String> {
+        if self.endings.accepts(&name) {
+            return Ok(name);
+        }
+        match self.endings.iter().next() {
+            Some(first) if Ending::of(&name).is_none() => {
+                let mut named = name;
+                named.push_str(first);
+                tairix_path::validate_file_name(&named).map_err(|err| err.to_string())?;
+                Ok(named)
+            }
+            _ => {
+                let mut refusal = String::from("Name it to end in one of:");
+                for ending in self.endings.iter() {
+                    refusal.push(' ');
+                    refusal.push_str(ending);
+                }
+                Err(refusal)
+            }
         }
     }
 
@@ -812,17 +840,34 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         if let Some(Replacing { name, path }) = band.replacing.take() {
             return self.request_at(name, path, PickAccess::Replace, shell, compositor);
         }
-        let name = band.name.text().to_string();
-        if let Err(err) = tairix_path::validate_file_name(&name) {
-            band.edit(Some(err.to_string()));
-            redraw_band(active, shell, compositor);
-            return None;
-        }
-        let taken = active
+        let typed = band.name.text().to_string();
+        // A name naming a folder goes into it, whatever a file must end in.
+        let folder = active
             .browser
             .entries()
             .iter()
-            .position(|entry| entry.name() == name);
+            .position(|entry| entry.name() == typed && entry.kind().is_directory());
+        let held = tairix_path::validate_file_name(&typed)
+            .map_err(|err| err.to_string())
+            .and_then(|()| match folder {
+                Some(_) => Ok(typed),
+                None => band.held(typed),
+            });
+        let name = match held {
+            Ok(name) => name,
+            Err(refusal) => {
+                band.edit(Some(refusal));
+                redraw_band(active, shell, compositor);
+                return None;
+            }
+        };
+        let taken = folder.or_else(|| {
+            active
+                .browser
+                .entries()
+                .iter()
+                .position(|entry| entry.name() == name)
+        });
         let Some(index) = taken else {
             // A name the listing does not show is created exclusively, so one
             // that appeared since is asked about rather than overwritten.
@@ -996,7 +1041,9 @@ impl<S: DirectorySource, F: FnMut() -> S> PickerSlot for SessionPicker<S, F> {
         };
         let save = match purpose {
             PickPurpose::Open => None,
-            PickPurpose::Save { suggested } => Some(SaveBand::new(suggested.as_str())),
+            PickPurpose::Save { suggested, endings } => {
+                Some(SaveBand::new(suggested.as_str(), *endings))
+            }
         };
         let scale = compositor.scale();
         let surface = {
@@ -1221,7 +1268,7 @@ fn repaint<S: DirectorySource>(
     let size = window_size(active.save.is_some(), scale, theme);
     compositor.repaint_window(active.wm, size, area, |surface, rects| {
         for rect in rects {
-            let (Ok(x), Ok(y)) = (u32::try_from(rect.left()), u32::try_from(rect.top())) else {
+            let Some((x, y)) = rect.surface_origin() else {
                 continue;
             };
             surface.with_clip(x, y, rect.width, rect.height, |surface| {

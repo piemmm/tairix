@@ -1262,7 +1262,7 @@ impl DesktopShell {
                 // clipped to it, so its corner is a surface coordinate; a
                 // rectangle that somehow is not addressable is left alone
                 // rather than painted somewhere else.
-                let (Ok(x), Ok(y)) = (u32::try_from(rect.left()), u32::try_from(rect.top())) else {
+                let Some((x, y)) = rect.surface_origin() else {
                     continue;
                 };
                 surface.with_clip(x, y, rect.width, rect.height, |surface| {

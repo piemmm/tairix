@@ -10,35 +10,36 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::{
-    decode, decode_as, probe_as, sniff, DecodeError, DecodeLimits, ImageFormat, RasterImage,
-    Sequence, SequenceKind,
+    decode, decode_as, desktop_palette, open_native, probe_as, sniff, DecodeError, DecodeLimits,
+    ImageFormat, IndexDepth, NativeDocument, Pixels, RasterImage, Sequence, SequenceKind,
+    SpriteAreaReader, SpriteEntry, SpriteLayout, SpriteMode, SpriteName, SpritePalette,
 };
 
 /// Limits generous enough for every fixture here.
-fn limits() -> DecodeLimits {
+pub(crate) fn limits() -> DecodeLimits {
     DecodeLimits::new(256, 256, 256 * 256, 0)
 }
 
 /// A numbered mode at each depth the table holds.
-const MODE_2: u32 = 0;
-const MODE_4: u32 = 1;
-const MODE_16: u32 = 12;
-const MODE_256: u32 = 15;
+pub(crate) const MODE_2: u32 = 0;
+pub(crate) const MODE_4: u32 = 1;
+pub(crate) const MODE_16: u32 = 12;
+pub(crate) const MODE_256: u32 = 15;
 
 /// A RISC OS 3.5 sprite mode word: a type over two 90 DPI fields.
-fn ro35(sprite_type: u32, wide_mask: bool) -> u32 {
+pub(crate) fn ro35(sprite_type: u32, wide_mask: bool) -> u32 {
     (u32::from(wide_mask) << 31) | (sprite_type << 27) | (90 << 14) | (90 << 1) | 1
 }
 
 /// A RISC OS 5 sprite mode word: the fixed pattern, a seven-bit type, and
 /// mode-flags bits 8 to 15.
-fn ro5(sprite_type: u32, flags: u32, wide_mask: bool) -> u32 {
+pub(crate) fn ro5(sprite_type: u32, flags: u32, wide_mask: bool) -> u32 {
     (u32::from(wide_mask) << 31) | (0xF << 27) | (sprite_type << 20) | (flags << 8) | 1
 }
 
 /// Mode-flags bits, as the RISC OS 5 word's own eight-bit field spells them.
-const FLAG_RGB_ORDER: u32 = 1 << 6;
-const FLAG_ALPHA: u32 = 1 << 7;
+pub(crate) const FLAG_RGB_ORDER: u32 = 1 << 6;
+pub(crate) const FLAG_ALPHA: u32 = 1 << 7;
 const FLAG_FAMILY_MISC: u32 = 1 << 4;
 
 /// Words one row of `width` pixels occupies at `bits`, after `left` wasted
@@ -76,7 +77,7 @@ fn pack_rows(bits: u32, width: u32, height: u32, left: u32, values: &[u32]) -> V
 }
 
 /// One sprite: its control block's fields, and the payload after them.
-struct Sprite {
+pub(crate) struct Sprite {
     mode: u32,
     bits: u32,
     width: u32,
@@ -93,7 +94,7 @@ struct Sprite {
 
 impl Sprite {
     /// A sprite of flat zero pixels at `bits` deep.
-    fn new(mode: u32, bits: u32, width: u32, height: u32) -> Self {
+    pub(crate) fn new(mode: u32, bits: u32, width: u32, height: u32) -> Self {
         Self {
             mode,
             bits,
@@ -116,7 +117,7 @@ impl Sprite {
     }
 
     /// Attach a palette in the format's own `&BBGGRR00` entry pairs.
-    fn palette(mut self, entries: &[[u8; 3]]) -> Self {
+    pub(crate) fn palette(mut self, entries: &[[u8; 3]]) -> Self {
         self.palette = entries
             .iter()
             .flat_map(|&[r, g, b]| [0, r, g, b, 0, r, g, b])
@@ -130,20 +131,20 @@ impl Sprite {
         self
     }
 
-    fn pixels(mut self, values: &[u32]) -> Self {
+    pub(crate) fn pixels(mut self, values: &[u32]) -> Self {
         self.image = pack_rows(self.bits, self.width, self.height, self.left, values);
         self
     }
 
     /// A new-format mask: one bit per pixel, from bit zero of its own rows.
-    fn mask_bits(mut self, opaque: &[bool]) -> Self {
+    pub(crate) fn mask_bits(mut self, opaque: &[bool]) -> Self {
         let values: Vec<u32> = opaque.iter().map(|&on| u32::from(on)).collect();
         self.mask = Some(pack_rows(1, self.width, self.height, 0, &values));
         self
     }
 
     /// A wide mask: eight bits of alpha per pixel.
-    fn mask_alpha(mut self, alpha: &[u8]) -> Self {
+    pub(crate) fn mask_alpha(mut self, alpha: &[u8]) -> Self {
         let values: Vec<u32> = alpha.iter().map(|&a| u32::from(a)).collect();
         self.mask = Some(pack_rows(8, self.width, self.height, 0, &values));
         self
@@ -151,7 +152,7 @@ impl Sprite {
 
     /// An old-format mask: the image's own depth and row layout, every bit
     /// of a pixel set or clear together.
-    fn mask_image(mut self, opaque: &[bool]) -> Self {
+    pub(crate) fn mask_image(mut self, opaque: &[bool]) -> Self {
         let solid = u32::MAX >> (32 - self.bits);
         let values: Vec<u32> = opaque
             .iter()
@@ -187,13 +188,13 @@ impl Sprite {
         self
     }
 
-    fn length(mut self, length: u32) -> Self {
+    pub(crate) fn length(mut self, length: u32) -> Self {
         self.length = Some(length);
         self
     }
 
     /// This sprite's control block and payload.
-    fn bytes(&self) -> Vec<u8> {
+    pub(crate) fn bytes(&self) -> Vec<u8> {
         let len = |bytes: &[u8]| u32::try_from(bytes.len()).expect("a small fixture");
         let image_at = 44 + len(&self.palette);
         let mask_at = image_at + len(&self.image);
@@ -233,7 +234,7 @@ impl Sprite {
 }
 
 /// Lay a set of sprites out as a sprite area file.
-fn area(sprites: &[Sprite]) -> Vec<u8> {
+pub(crate) fn area(sprites: &[Sprite]) -> Vec<u8> {
     let bodies: Vec<Vec<u8>> = sprites.iter().map(Sprite::bytes).collect();
     let total: usize = 12 + bodies.iter().map(Vec::len).sum::<usize>();
     let mut out = Vec::new();
@@ -250,7 +251,7 @@ fn area(sprites: &[Sprite]) -> Vec<u8> {
     out
 }
 
-fn one(sprite: Sprite) -> Vec<u8> {
+pub(crate) fn one(sprite: Sprite) -> Vec<u8> {
     area(&[sprite])
 }
 
@@ -271,7 +272,28 @@ const BLACK: [u8; 4] = [0, 0, 0, 255];
 const WHITE: [u8; 4] = [255, 255, 255, 255];
 const RED: [u8; 4] = [255, 0, 0, 255];
 const GREEN: [u8; 4] = [0, 255, 0, 255];
-const YELLOW: [u8; 4] = [255, 255, 0, 255];
+
+/// The desktop's sixteen standard colours in Wimp colour order: what a
+/// palette-less sprite's pixels mean, written out here rather than read back
+/// from the decoder.
+const WIMP: [[u8; 4]; 16] = [
+    [0xFF, 0xFF, 0xFF, 255],
+    [0xDD, 0xDD, 0xDD, 255],
+    [0xBB, 0xBB, 0xBB, 255],
+    [0x99, 0x99, 0x99, 255],
+    [0x77, 0x77, 0x77, 255],
+    [0x55, 0x55, 0x55, 255],
+    [0x33, 0x33, 0x33, 255],
+    [0x00, 0x00, 0x00, 255],
+    [0x00, 0x44, 0x99, 255],
+    [0xEE, 0xEE, 0x00, 255],
+    [0x00, 0xCC, 0x00, 255],
+    [0xDD, 0x00, 0x00, 255],
+    [0xEE, 0xEE, 0xBB, 255],
+    [0x55, 0x88, 0x00, 255],
+    [0xFF, 0xBB, 0x00, 255],
+    [0x00, 0xBB, 0xFF, 255],
+];
 
 // ---------------------------------------------------------------- the area
 
@@ -338,7 +360,7 @@ fn sprites_starting_after_the_area_ends_are_refused() {
 fn bytes_after_the_area_end_are_ignored() {
     let mut bytes = one(Sprite::new(MODE_2, 1, 8, 1).pixels(&[1, 0, 1, 0, 1, 0, 1, 0]));
     bytes.extend_from_slice(b"trailing junk the area does not claim");
-    assert_eq!(rgba(&bytes)[0], WHITE);
+    assert_eq!(rgba(&bytes)[0], WIMP[7]);
 }
 
 #[test]
@@ -375,26 +397,43 @@ fn a_declared_count_the_chain_cannot_satisfy_is_refused() {
 // ----------------------------------------------------------- numbered modes
 
 #[test]
-fn every_numbered_depth_decodes_against_its_default_palette() {
+fn a_two_and_a_four_colour_sprite_are_shown_as_the_wimp_plots_them() {
+    // Two colours are Wimp colours 0 and 7; four are 0, 2, 4 and 7.
     assert_eq!(
         rgba(&one(Sprite::new(MODE_2, 1, 2, 1).pixels(&[0, 1]))),
-        [BLACK, WHITE]
+        [WIMP[0], WIMP[7]]
     );
     assert_eq!(
         rgba(&one(Sprite::new(MODE_4, 2, 4, 1).pixels(&[0, 1, 2, 3]))),
-        [BLACK, RED, YELLOW, WHITE]
-    );
-    assert_eq!(
-        rgba(&one(Sprite::new(MODE_16, 4, 4, 1).pixels(&[0, 2, 3, 15]))),
-        [BLACK, GREEN, YELLOW, WHITE]
+        [WIMP[0], WIMP[2], WIMP[4], WIMP[7]]
     );
 }
 
 #[test]
-fn the_sixteen_colour_default_repeats_its_eight() {
+fn a_sixteen_colour_sprite_is_the_wimp_palette_not_a_pc_one() {
     let indices: Vec<u32> = (0..16).collect();
     let decoded = rgba(&one(Sprite::new(MODE_16, 4, 16, 1).pixels(&indices)));
-    assert_eq!(&decoded[0..8], &decoded[8..16]);
+    assert_eq!(decoded, WIMP);
+    // Neither the EGA order nor the BBC mode-entry colours.
+    assert_ne!(decoded[1], [0x00, 0x00, 0xAA, 255]);
+    assert_ne!(decoded[1], RED);
+}
+
+#[test]
+fn the_desktop_palette_is_the_one_every_depth_decodes_against() {
+    for depth in IndexDepth::ALL {
+        let colours = desktop_palette(depth);
+        assert_eq!(colours.len(), depth.colours());
+        let mode = [MODE_2, MODE_4, MODE_16, MODE_256][depth.bits().trailing_zeros() as usize];
+        let count = u32::try_from(depth.colours()).expect("at most 256");
+        let indices: Vec<u32> = (0..count).collect();
+        let decoded = rgba(&one(
+            Sprite::new(mode, depth.bits(), count, 1).pixels(&indices)
+        ));
+        for (pixel, &[r, g, b]) in decoded.iter().zip(colours) {
+            assert_eq!(*pixel, [r, g, b, 255]);
+        }
+    }
 }
 
 #[test]
@@ -458,7 +497,10 @@ fn the_indexed_sprite_types_carry_their_depths() {
             2,
             "type {sprite_type} decoded the wrong width"
         );
-        assert_eq!(decoded[0], BLACK, "type {sprite_type} index 0");
+        // Index 0 is the desktop's white below eight bits, and the screen
+        // byte's own black at eight.
+        let expected = if bits == 8 { BLACK } else { WIMP[0] };
+        assert_eq!(decoded[0], expected, "type {sprite_type} index 0");
     }
 }
 
@@ -624,7 +666,7 @@ fn indexed_pixels_run_least_significant_first() {
     // is the opposite of every other format here.
     let bytes = one(Sprite::new(MODE_16, 4, 2, 1).pixels(&[15, 0]));
     let decoded = decode_as(ImageFormat::Sprite, &bytes, &limits()).expect("decodes");
-    assert_eq!(quads(&decoded), [WHITE, BLACK]);
+    assert_eq!(quads(&decoded), [WIMP[15], WIMP[0]]);
 }
 
 // ------------------------------------------------------------------ palettes
@@ -707,7 +749,7 @@ fn a_palette_that_is_not_whole_entries_is_ignored() {
     let sprite = Sprite::new(MODE_4, 2, 2, 1)
         .raw_palette(vec![9; 12])
         .pixels(&[0, 1]);
-    assert_eq!(rgba(&one(sprite)), [BLACK, RED]);
+    assert_eq!(rgba(&one(sprite)), [WIMP[0], WIMP[2]]);
 }
 
 #[test]
@@ -725,7 +767,7 @@ fn left_wastage_skips_the_bits_before_the_first_pixel() {
     // Four wasted bits at 4bpp is one pixel's worth, so the row's own first
     // pixel is the second field in the word.
     let sprite = Sprite::new(MODE_16, 4, 2, 1).left(4).pixels(&[15, 2]);
-    assert_eq!(rgba(&one(sprite)), [WHITE, GREEN]);
+    assert_eq!(rgba(&one(sprite)), [WIMP[15], WIMP[2]]);
 }
 
 #[test]
@@ -911,7 +953,7 @@ fn a_page_is_addressed_directly_and_the_walk_restarts() {
         .page(0)
         .expect("the page decodes")
         .expect("present");
-    assert_eq!(first.pixels().as_chunks::<4>().0, [BLACK, WHITE]);
+    assert_eq!(first.pixels().as_chunks::<4>().0, [WIMP[0], WIMP[7]]);
     assert!(sequence.page(2).expect("no such page").is_none());
 
     sequence.rewind();
@@ -1014,4 +1056,354 @@ fn naming_the_wrong_format_is_refused_rather_than_misread() {
         probe_as(ImageFormat::Gif, &bytes).err(),
         Some(DecodeError::GifBadSignature)
     );
+}
+
+// ------------------------------------------------------------ the sprite model
+
+/// The one sprite of `bytes`, read natively.
+fn native(bytes: &[u8]) -> SpriteEntry {
+    let mut reader = SpriteAreaReader::open(bytes, &limits()).expect("the area opens");
+    reader
+        .sprite(0)
+        .expect("no machine refusal")
+        .expect("one sprite")
+}
+
+fn picture(entry: SpriteEntry) -> crate::Sprite {
+    match entry {
+        SpriteEntry::Picture(sprite) => sprite,
+        SpriteEntry::Opaque(kept) => panic!("kept as bytes: {:?}", kept.reason),
+    }
+}
+
+#[test]
+fn a_name_ends_at_its_first_control_character() {
+    let sprite = picture(native(&one(Sprite::new(MODE_2, 1, 8, 1))));
+    assert_eq!(sprite.name.as_bytes(), b"fixture");
+    assert_eq!(alloc::format!("{}", sprite.name), "fixture");
+}
+
+#[test]
+fn a_new_name_is_lower_cased_and_held_to_the_control_blocks_field() {
+    assert_eq!(
+        SpriteName::new("MyIcon").expect("valid").as_bytes(),
+        b"myicon"
+    );
+    assert!(SpriteName::new("").is_none());
+    assert!(SpriteName::new("thirteenchars").is_none());
+    assert!(SpriteName::new("has space").is_none());
+    assert!(SpriteName::new("caf\u{e9}").is_none());
+    assert!(SpriteName::new("twelve_chars").is_some());
+}
+
+#[test]
+fn names_match_as_risc_os_matches_them_regardless_of_case() {
+    let lower = SpriteName::new("icon").expect("valid");
+    let read = picture(native(&one(Sprite::new(MODE_2, 1, 8, 1)))).name;
+    assert!(!lower.matches(&read));
+    assert!(lower.matches(&SpriteName::new("ICON").expect("valid")));
+}
+
+#[test]
+fn a_numbered_modes_pixel_shape_comes_from_its_eigen_factors() {
+    let shape = |mode| SpriteMode::from_value(mode).expect("a mode").pixel_aspect();
+    assert_eq!(shape(12), (1, 2), "mode 12 pixels are twice as tall");
+    assert_eq!(shape(27), (1, 1));
+    assert_eq!(shape(49), (2, 1), "mode 49 pixels are twice as wide");
+    assert_eq!(shape(2), (2, 1), "mode 2's eight-unit pixels over four");
+    assert_eq!(SpriteMode::from_value(12).expect("a mode").eig(), (1, 2));
+    // Mode 22's 768 by 288 pixels cover 768 by 576 OS units.
+    let large = SpriteMode::from_value(22).expect("a mode");
+    assert_eq!(large.eig(), (0, 1));
+    assert_eq!(
+        large.with_alpha_mask(true).eig(),
+        (0, 1),
+        "a mask keeps the shape"
+    );
+}
+
+/// A mode made for a new sprite is exactly the mode its word reads back as,
+/// so what is written is what a reader sees.
+#[test]
+fn a_new_sprites_mode_reads_back_as_itself() {
+    let depths = [
+        IndexDepth::One,
+        IndexDepth::Two,
+        IndexDepth::Four,
+        IndexDepth::Eight,
+    ];
+    for eig in [
+        (0, 0),
+        (0, 1),
+        (1, 1),
+        (1, 2),
+        (2, 1),
+        (3, 2),
+        (4, 4),
+        (9, 9),
+    ] {
+        for alpha in [false, true] {
+            for depth in depths {
+                let mode = SpriteMode::indexed(depth, eig, alpha);
+                let read = SpriteMode::from_value(mode.value());
+                assert_eq!(read, Some(mode), "{depth:?} {eig:?} {alpha}");
+            }
+            let mode = SpriteMode::truecolour(eig, alpha);
+            let read = SpriteMode::from_value(mode.value());
+            assert_eq!(read, Some(mode), "truecolour {eig:?} {alpha}");
+        }
+    }
+}
+
+#[test]
+fn a_thirty_five_words_pixel_shape_comes_from_its_resolutions() {
+    let word = (3 << 27) | (45 << 14) | (90 << 1) | 1;
+    let mode = SpriteMode::from_value(word).expect("a mode word");
+    assert_eq!(mode.eig(), (1, 2));
+    assert_eq!(mode.pixel_aspect(), (1, 2));
+    assert!(!mode.is_numbered());
+}
+
+#[test]
+fn a_five_words_eigen_factors_are_its_own_fields() {
+    let word = ro5(6, 0, false) | (2 << 4) | (1 << 6);
+    let mode = SpriteMode::from_value(word).expect("a mode word");
+    assert_eq!(mode.eig(), (2, 1));
+    assert_eq!(
+        mode.layout(),
+        SpriteLayout::Direct {
+            bits_per_pixel: 32,
+            alpha_channel: false
+        }
+    );
+}
+
+#[test]
+fn a_new_paletted_sprite_takes_a_numbered_mode_every_risc_os_reads() {
+    let mode = SpriteMode::indexed(IndexDepth::Four, (1, 2), false);
+    assert_eq!(mode.value(), 12);
+    let square = SpriteMode::indexed(IndexDepth::Eight, (1, 1), false);
+    assert!(square.is_numbered());
+    assert_eq!(square.eig(), (1, 1));
+    assert_eq!(square.layout(), SpriteLayout::Indexed(IndexDepth::Eight));
+    // An alpha mask needs a mode word: a numbered mode's mask is binary.
+    let alpha = SpriteMode::indexed(IndexDepth::Four, (1, 1), true);
+    assert!(!alpha.is_numbered());
+    assert!(alpha.alpha_mask());
+    assert_eq!(alpha.layout(), SpriteLayout::Indexed(IndexDepth::Four));
+}
+
+#[test]
+fn the_least_a_sprite_stores_is_its_control_block_and_its_word_aligned_rows() {
+    let one_bit = SpriteLayout::Indexed(IndexDepth::One);
+    // Thirty-three one-bit pixels need two words a row.
+    assert_eq!(one_bit.least_stored_bytes(33, 3), Some(44 + 3 * 8));
+    assert_eq!(one_bit.least_stored_bytes(32, 1), Some(44 + 4));
+    let direct = SpriteLayout::Direct {
+        bits_per_pixel: 24,
+        alpha_channel: false,
+    };
+    assert_eq!(direct.bits_per_pixel(), 24);
+    // Three twenty-four-bit pixels are seventy-two bits: three words.
+    assert_eq!(direct.least_stored_bytes(3, 2), Some(44 + 2 * 12));
+    assert_eq!(
+        SpriteLayout::Indexed(IndexDepth::Eight).least_stored_bytes(u32::MAX, u32::MAX),
+        Some(44 + u64::from(u32::MAX).div_ceil(4) * 4 * u64::from(u32::MAX)),
+    );
+    let widest = SpriteLayout::Direct {
+        bits_per_pixel: 32,
+        alpha_channel: true,
+    };
+    assert_eq!(
+        widest.least_stored_bytes(u32::MAX, u32::MAX),
+        None,
+        "overflows"
+    );
+}
+
+#[test]
+fn a_new_truecolour_sprite_is_a_thirty_two_bit_mode_word() {
+    let mode = SpriteMode::truecolour((1, 1), false);
+    assert_eq!(mode.value(), ro35(6, false));
+    assert!(SpriteMode::truecolour((1, 1), true).alpha_mask());
+}
+
+#[test]
+fn a_value_naming_no_readable_layout_is_not_a_mode() {
+    assert!(SpriteMode::from_value(7).is_none());
+    assert!(SpriteMode::from_value(ro35(9, false)).is_none());
+    assert!(SpriteMode::from_value(0x100).is_none());
+}
+
+#[test]
+fn a_paletted_sprite_reads_as_its_indices_palette_and_mask() {
+    let sprite = picture(native(&one(Sprite::new(MODE_16, 4, 4, 1)
+        .pixels(&[0, 7, 11, 15])
+        .mask_image(&[true, false, true, true]))));
+    assert_eq!(sprite.mode.value(), MODE_16);
+    assert_eq!(sprite.palette, SpritePalette::Implied);
+    assert!(sprite.masked);
+    let Pixels::Indexed {
+        depth,
+        palette,
+        indices,
+        mask,
+    } = sprite.picture.pixels()
+    else {
+        panic!("a paletted sprite reads as indices");
+    };
+    assert_eq!(*depth, IndexDepth::Four);
+    assert_eq!(palette.as_slice(), &WIMP);
+    assert_eq!(indices.as_slice(), &[0, 7, 11, 15]);
+    assert_eq!(mask.as_deref(), Some(&[255, 0, 255, 255][..]));
+}
+
+#[test]
+fn a_stored_palette_is_kept_exactly_as_the_file_held_it() {
+    let entries = [[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12]];
+    let fixture = Sprite::new(MODE_4, 2, 4, 1)
+        .palette(&entries)
+        .pixels(&[3, 2, 1, 0]);
+    let raw = fixture.palette.clone();
+    let sprite = picture(native(&one(fixture)));
+    assert_eq!(sprite.palette, SpritePalette::Stored(raw));
+    let Pixels::Indexed { palette, .. } = sprite.picture.pixels() else {
+        panic!("indices");
+    };
+    assert_eq!(palette[3], [10, 11, 12, 255]);
+}
+
+#[test]
+fn a_direct_sprites_mask_is_folded_into_its_alpha() {
+    let sprite = picture(native(&one(Sprite::new(ro35(6, false), 32, 2, 1)
+        .pixels(&[0x0000_00FF, 0x0000_FF00])
+        .mask_bits(&[true, false]))));
+    assert!(sprite.masked);
+    let Pixels::Rgba(rgba) = sprite.picture.pixels() else {
+        panic!("a direct sprite reads as RGBA");
+    };
+    assert_eq!(rgba.as_slice(), &[255, 0, 0, 255, 0, 255, 0, 0]);
+}
+
+#[test]
+fn a_sprite_that_cannot_be_read_is_kept_as_its_exact_bytes() {
+    let jpeg = Sprite::new(ro35(9, false), 32, 2, 1);
+    let bytes = area(&[Sprite::new(MODE_2, 1, 8, 1), jpeg]);
+    let mut reader = SpriteAreaReader::open(&bytes[..], &limits()).expect("the chain is sound");
+    assert_eq!(reader.count(), 2);
+    assert!(matches!(
+        reader.sprite(0).expect("no machine refusal"),
+        Some(SpriteEntry::Picture(_))
+    ));
+    let Some(SpriteEntry::Opaque(kept)) = reader.sprite(1).expect("no machine refusal") else {
+        panic!("the JPEG sprite is kept");
+    };
+    assert_eq!(kept.reason, DecodeError::SpriteUnsupportedType);
+    let second = &bytes[16 - 4 + Sprite::new(MODE_2, 1, 8, 1).bytes().len()..];
+    assert_eq!(kept.bytes.as_slice(), second);
+    assert_eq!(kept.name.as_bytes(), b"fixture");
+    assert!(reader.sprite(2).expect("past the end").is_none());
+}
+
+#[test]
+fn a_sprite_too_large_to_open_is_kept_rather_than_refusing_the_area() {
+    let bytes = one(Sprite::new(MODE_16, 4, 64, 4).pixels(&[0; 256]));
+    let tight = DecodeLimits::new(8, 8, 64, 0);
+    let mut reader = SpriteAreaReader::open(&bytes[..], &tight).expect("the chain is sound");
+    let Some(SpriteEntry::Opaque(kept)) = reader.sprite(0).expect("no machine refusal") else {
+        panic!("kept");
+    };
+    assert_eq!(kept.reason, DecodeError::WidthExceedsLimit);
+}
+
+#[test]
+fn an_area_none_of_whose_sprites_can_be_read_still_opens_natively() {
+    let bytes = area(&[
+        Sprite::new(7, 4, 2, 1),
+        Sprite::new(ro35(7, false), 32, 2, 1),
+    ]);
+    let mut reader = SpriteAreaReader::open(&bytes[..], &limits()).expect("the chain is sound");
+    for index in 0..2 {
+        assert!(matches!(
+            reader.sprite(index).expect("no machine refusal"),
+            Some(SpriteEntry::Opaque(_))
+        ));
+    }
+}
+
+#[test]
+fn a_broken_chain_refuses_the_native_walk_too() {
+    let bytes = one(Sprite::new(MODE_2, 1, 8, 1).length(4096));
+    assert_eq!(
+        SpriteAreaReader::open(&bytes[..], &limits()).err(),
+        Some(DecodeError::SpriteBadArea)
+    );
+}
+
+#[test]
+fn opening_an_area_natively_answers_its_reader() {
+    let bytes = one(Sprite::new(MODE_2, 1, 8, 1));
+    let Ok(NativeDocument::Sprites(reader)) =
+        open_native(ImageFormat::Sprite, &bytes[..], &limits())
+    else {
+        panic!("a sprite area opens as its sprites");
+    };
+    assert_eq!(reader.count(), 1);
+}
+
+#[test]
+fn a_native_sprite_flattens_to_exactly_what_a_decode_answers() {
+    let bytes = one(Sprite::new(MODE_256, 8, 3, 2)
+        .pixels(&[0x00, 0x11, 0xFF, 0x80, 0x03, 0x60])
+        .mask_image(&[true, true, false, true, false, true]));
+    let flat = picture(native(&bytes)).picture.to_rgba().expect("memory");
+    let decoded = decode_as(ImageFormat::Sprite, &bytes, &limits()).expect("decodes");
+    assert_eq!(flat, decoded.pixels());
+}
+
+#[test]
+fn a_mode_takes_an_alpha_mask_keeping_its_layout_and_shape() {
+    let numbered = SpriteMode::from_value(MODE_16).expect("mode 12");
+    let widened = numbered.with_alpha_mask(true);
+    assert!(widened.alpha_mask() && !widened.is_numbered());
+    assert_eq!(widened.layout(), numbered.layout());
+    assert_eq!(widened.eig(), numbered.eig());
+    assert_eq!(numbered.with_alpha_mask(false), numbered);
+    let word = SpriteMode::from_value(ro35(6, false)).expect("a word");
+    let alpha = word.with_alpha_mask(true);
+    assert_eq!(alpha.value(), ro35(6, true));
+    assert_eq!(alpha.with_alpha_mask(false), word);
+}
+
+#[test]
+fn a_name_read_back_keeps_its_case_but_never_a_control_character() {
+    assert_eq!(
+        SpriteName::from_bytes(b"MixedCase")
+            .expect("valid")
+            .as_bytes(),
+        b"MixedCase"
+    );
+    assert!(SpriteName::from_bytes(b"").is_some());
+    assert!(SpriteName::from_bytes(b"has space").is_none());
+    assert!(SpriteName::from_bytes(b"thirteen_long").is_none());
+    assert!(SpriteName::from_bytes(b"tab\there").is_none());
+}
+
+/// A mode restated at another pixel shape keeps its layout and mask, and its
+/// word reads back as that shape, whichever form the word takes.
+#[test]
+fn a_mode_restated_at_another_shape_keeps_its_layout() {
+    let sixteen = SpriteMode::from_value((5 << 27) | (45 << 14) | (90 << 1) | 1).expect("a word");
+    let five = SpriteMode::from_value(ro5(6, 0, false) | (1 << 4) | (2 << 6)).expect("a word");
+    for mode in [sixteen, five, SpriteMode::from_value(12).expect("a mode")] {
+        let turned = mode.with_eig((mode.eig().1, mode.eig().0));
+        assert_eq!(turned.eig(), (mode.eig().1, mode.eig().0), "{mode:?}");
+        assert_eq!(turned.layout(), mode.layout());
+        assert_eq!(turned.alpha_mask(), mode.alpha_mask());
+        assert_eq!(
+            SpriteMode::from_value(turned.value()),
+            Some(turned),
+            "{mode:?}"
+        );
+    }
 }

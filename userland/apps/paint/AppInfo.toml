@@ -1,0 +1,28 @@
+# Signed-AppInfo manifest source for Paint, the desktop image editor
+# (plans/PAINT.md). The build's app-bundle composer cross-compiles Run, signs
+# this manifest, and plants the bundle on /System/Applications.
+#
+# No filesystem capability: every document is one the user handed over — a
+# descriptor Files or the desktop opened for it, or a grant from the session's
+# trusted picker — and every save writes through that descriptor.
+# CAP_CONSOLE_WRITE carries its stderr diagnostics; CAP_SHM the window frame
+# region and the clipboard's payload region; CAP_SANDBOX_SPAWN re-enters this
+# binary as the capability-empty worker that decodes documents and pasted
+# pictures, which are untrusted input — it starts no child but one holding
+# nothing beyond its two pipes; CAP_LOG_EMIT records that worker being
+# replaced after a crash, which would otherwise be refused and lost.
+id = "os.tairix.paint"
+name = "Paint"
+title = "Paint"
+version = "0.1.0"
+kind = "application"
+purpose = "Paint and edit pictures and RISC OS sprites"
+author = "The TAIRiX Project"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_SHM", "CAP_SANDBOX_SPAWN", "CAP_LOG_EMIT"]
+# The formats Paint writes back as well as reads: offered for these, a file
+# opens writable and Save writes it. The others it reads open through its own
+# Open…, and save as a new file.
+associations = ["image/png", "image/jpeg", "image/x-riscos-sprite"]
+document-access = "read-write"
+library = "Graphics"
+library-icon = "Paint.png"

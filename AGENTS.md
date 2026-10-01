@@ -608,6 +608,7 @@ tairix/
 │   ├── conout/          # Shared kernel console-output engine (framed queue).
 │   ├── controls/        # Shared Reactive Alloy GUI control behaviour.
 │   ├── cpuops/          # Self-optimising CPU-dispatch framework.
+│   ├── crc32/           # CRC-32 (IEEE): the PNG and GPT framing checksum.
 │   ├── crc32c/          # CRC-32C (Castagnoli) block-integrity checksum.
 │   ├── crt0/            # C-callable abi-v1 program startup object (non-Rust progs).
 │   ├── crypto/          # Audited crypto. No hand-rolled primitives.
@@ -1636,6 +1637,7 @@ You are not exempt from any rule above. In addition:
     | Durable structured storage: the `lib/recdb` B+tree record store, its write-ahead log and commit barrier, recovery, snapshot transactions, secondary indexes, and per-page encryption at rest | `plans/RECDB.md` |
     | The `vim` app | `plans/VIM.md` |
     | The desktop editor (`TextEdit.app`): the byte document and its displays, syntax colouring and settings validation in the sandbox, writable documents, the picker's Save mode, drag-and-drop onto the icon bar, the clipboard and the app-set pointer shape | `plans/TEXTEDIT.md` |
+    | The image editor (`Paint.app`): the formats it writes, RISC OS sprite semantics (the Wimp palette for a sprite with none, kept sprites, masks, pixel aspect), the sandboxed edit decode, the tiled canvas and its history, and the shared document host both editors run in (`tairix_window::docapp`) | `plans/PAINT.md` |
     | Shared containers and hashing: the heap-backed tiers in `lib/collections`, the allocation-free tier in `lib/inline`, the keyed `lib/hash` seed, and any hand-rolled LRU, ring, range map, bitmap, slot map, or id counter being replaced | `plans/COLLECTIONS.md` |
     | Randomness: the non-cryptographic vs fast-secure vs DRBG tier split, the buffered ChaCha12 fast-key-erasure generator, the kernel output reserve's backing, task-id and scheduler draws, and the statistical test battery | `plans/FIX-RANDOMNESS.md` |
     | Code-quality / comment-discipline sweeps | `plans/CODEVERIFY.md`; `plans/WAFFLE.md` |

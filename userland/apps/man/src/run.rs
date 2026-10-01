@@ -54,7 +54,6 @@ mod program {
     use tairix_sandbox::helpdoc::HelpService;
     use tairix_sandbox::host::ParserSandbox;
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
-    use tairix_sandbox::worker::ServeEnd;
 
     /// Initial byte size of the directory-listing buffer. A `Help/` tree
     /// lists a handful of locale directories and a store directory a
@@ -219,11 +218,7 @@ mod program {
         // before argument parsing — the role marker is the whole argument
         // vector's meaning.
         if worker_role() {
-            let mut service = HelpService;
-            return match serve_stdio(&mut service) {
-                ServeEnd::Finished | ServeEnd::Ended => 0,
-                ServeEnd::Failed(_) => 1,
-            };
+            return serve_stdio(&mut HelpService).exit_code();
         }
 
         // A malformed (non-UTF-8) argument vector is a usage error, reported
@@ -236,7 +231,7 @@ mod program {
             write_stderr_line(USAGE);
             return 2;
         };
-        let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
+        let locale = tairix_help::user_locale();
         let path = tairix_rt::env_var(b"PATH").and_then(|raw| core::str::from_utf8(raw).ok());
         let home = tairix_rt::env_var(b"HOME").and_then(|raw| core::str::from_utf8(raw).ok());
         // `TERM` decides how much colour the rendered page uses (only on an

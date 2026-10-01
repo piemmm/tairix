@@ -1,6 +1,6 @@
 [package]
 name = "tairix-controls"
-description = "TAIRiX shared Reactive Alloy GUI control behaviour: the one orientation-independent scroll geometry engine shared by the window manager's root viewport and application content (plans/GUI-CONTROLS-DESIGN.md §11.28)."
+description = "TAIRiX shared Reactive Alloy GUI control behaviour: every drawn control family the desktop's surfaces compose, over the one scroll geometry engine the window manager's root viewport and application content share (plans/GUI-CONTROLS-DESIGN.md)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

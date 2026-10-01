@@ -130,6 +130,49 @@ impl Canonical {
     }
 }
 
+/// Every symbol's code under a canonical assignment, for an encoder writing
+/// the code a table describes: `len[symbol]` bits of `code[symbol]`, a
+/// length of zero for a symbol the table leaves out.
+pub(crate) struct Assigned {
+    pub(crate) code: [u16; 256],
+    pub(crate) len: [u8; 256],
+}
+
+/// Assign the canonical code of `counts` — as [`Canonical::build`] takes
+/// them — to `symbols`, listed in code order.
+///
+/// A `const fn` for the tables an encoder ships, so a table whose counts
+/// and symbols disagree fails the build rather than a run: evaluated at
+/// compile time, an index past `symbols` is a compile error.
+pub(crate) const fn assign(counts: &[u8; MAX_CODE_BITS], symbols: &[u8]) -> Assigned {
+    let mut assigned = Assigned {
+        code: [0; 256],
+        len: [0; 256],
+    };
+    let (mut code, mut next) = (0u32, 0usize);
+    let mut len = 0usize;
+    while len < MAX_CODE_BITS {
+        let mut left = counts[len];
+        while left > 0 {
+            let symbol = symbols[next] as usize;
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "a code of at most sixteen bits, and a length of at most sixteen"
+            )]
+            {
+                assigned.code[symbol] = code as u16;
+                assigned.len[symbol] = (len + 1) as u8;
+            }
+            code += 1;
+            next += 1;
+            left -= 1;
+        }
+        code <<= 1;
+        len += 1;
+    }
+    assigned
+}
+
 /// One code being decoded, bit by bit.
 ///
 /// The first bit taken is the code's most significant, which is how both

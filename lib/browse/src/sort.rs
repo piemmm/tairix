@@ -16,7 +16,7 @@
 use core::cmp::Ordering;
 
 use crate::entry::{Entry, EntryKind};
-use crate::media::extension;
+use crate::media::Ending;
 
 /// Which field a listing is ordered by.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]
@@ -164,8 +164,8 @@ const fn kind_rank(entry: &Entry) -> u8 {
 /// together within the file group.
 fn kind_cmp(a: &Entry, b: &Entry) -> Ordering {
     kind_rank(a).cmp(&kind_rank(b)).then_with(|| {
-        let ext_a = extension(a.name()).unwrap_or_default();
-        let ext_b = extension(b.name()).unwrap_or_default();
+        let ext_a = Ending::of(a.name()).extension.unwrap_or_default();
+        let ext_b = Ending::of(b.name()).extension.unwrap_or_default();
         ext_a
             .bytes()
             .map(|byte| byte.to_ascii_lowercase())

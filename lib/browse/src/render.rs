@@ -212,9 +212,7 @@ fn draw_listing_cue(surface: &mut Surface, scale: Scale, theme: &Theme, content:
     let x = content
         .left()
         .saturating_add_unsigned(content.width.saturating_sub(width) / 2);
-    let y = content
-        .top()
-        .saturating_add_unsigned(content.height.saturating_sub(font.glyph_height()) / 2);
+    let y = font.centred_top(content.top(), content.height);
     font.draw_text(
         surface,
         x,

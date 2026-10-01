@@ -104,7 +104,7 @@ use tairix_abi::window_ipc::{
     AppMenuEntryText, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuReason,
     AppMenuRole, AppMenuRow, AppMenuShortcut, BundleRunPath, ClipboardKind, CursorShape,
     DocumentName, HandOverDocument, MenuOutcome, MenuRefusal, PickPurpose, PreviewSubject,
-    TooltipText, WindowEvent, WindowRegion, WindowRequest, WindowSizing, WindowTitle,
+    SaveEndings, TooltipText, WindowEvent, WindowRegion, WindowRequest, WindowSizing, WindowTitle,
 };
 use tairix_abi::BUNDLE_ID_MAX;
 use tairix_abi::{
@@ -1901,6 +1901,14 @@ fn window_request_text_seeds() -> std::vec::Vec<WindowRequest> {
             window_id: 3,
             purpose: PickPurpose::Save {
                 suggested: DocumentName::new("notes.txt").expect("a valid name"),
+                endings: SaveEndings::ANY,
+            },
+        },
+        WindowRequest::PickFile {
+            window_id: 3,
+            purpose: PickPurpose::Save {
+                suggested: DocumentName::new("Sprites,ff9").expect("a valid name"),
+                endings: fuzz_endings(),
             },
         },
         WindowRequest::TakePickedName { window_id: 3 },
@@ -1951,6 +1959,15 @@ fn window_request_text_seeds() -> std::vec::Vec<WindowRequest> {
         },
         WindowRequest::QueryDesktop,
     ]
+}
+
+/// Endings of both separators, so a flip lands on each count, length and
+/// ending byte.
+fn fuzz_endings() -> SaveEndings {
+    let mut endings = SaveEndings::ANY;
+    endings.push('.', "spr").expect("an extension");
+    endings.push(',', "ff9").expect("a RISC OS file type");
+    endings
 }
 
 /// The rich menu both structured menu seeds carry, appended to `menu`: every

@@ -10,7 +10,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt::Write;
 
-use tairix_controls::{Fact, FactList};
+use tairix_controls::{fill_area, Checker, Fact, FactList};
 use tairix_font::BitmapFont;
 use tairix_geometry::{to_i32, Rect, Scale};
 use tairix_icon::IconArtwork;
@@ -20,14 +20,6 @@ use tairix_theme::Theme;
 
 use crate::view::View;
 use crate::{Document, Layout};
-
-/// One square of the transparency checkerboard, in logical pixels.
-const CHECKER_SIDE: u32 = 8;
-
-/// How far the lighter checkerboard square is lifted from the darker one, in
-/// eighths of the way to white — the same visible step in a dark theme and a
-/// light one.
-const CHECKER_LIFT: u32 = 1;
 
 /// Paint the whole viewer into the caller's retained window `surface`.
 ///
@@ -52,8 +44,8 @@ pub fn render_into(
     // The two chrome strips stand off the body, so the canvas reads as the
     // content it is rather than as more window.
     let chrome = Color::from(theme.palette().surface_raised);
-    plate(surface, layout.toolbar(), chrome);
-    plate(surface, layout.status(), chrome);
+    fill_area(surface, layout.toolbar(), chrome);
+    fill_area(surface, layout.status(), chrome);
     canvas(surface, view, layout, theme, scale, font);
     view.toolbar_control()
         .render(surface, layout.tools(), scale, theme, artwork);
@@ -71,15 +63,6 @@ pub fn render_into(
         );
     }
     status(surface, view, layout, theme, scale, font);
-}
-
-/// Lay `color` down over `bounds`, which the active clip narrows to whatever
-/// of it this round is repainting.
-fn plate(surface: &mut Surface, bounds: Rect, color: Color) {
-    let (Ok(x), Ok(y)) = (u32::try_from(bounds.left()), u32::try_from(bounds.top())) else {
-        return;
-    };
-    surface.fill_rect(x, y, bounds.width, bounds.height, color);
 }
 
 /// Paint the canvas: the checkerboard, then the picture over it, or the reason
@@ -110,37 +93,10 @@ fn canvas(
 
 /// Paint the transparency checkerboard under `bounds`.
 fn checkerboard(surface: &mut Surface, bounds: Rect, theme: &Theme, scale: Scale) {
-    let (Ok(x0), Ok(y0)) = (u32::try_from(bounds.left()), u32::try_from(bounds.top())) else {
+    let Some((x0, y0)) = bounds.surface_origin() else {
         return;
     };
-    if bounds.is_empty() {
-        return;
-    }
-    let side = scale.scale_length(CHECKER_SIDE).max(1);
-    let dark = Color::from(theme.palette().surface);
-    let light = Color::rgba(lift(dark.r), lift(dark.g), lift(dark.b), dark.a);
-    surface.fill_rect(x0, y0, bounds.width, bounds.height, dark);
-    let mut row = 0;
-    while row * side < bounds.height {
-        let mut column = u32::from(row % 2 == 0);
-        while column * side < bounds.width {
-            surface.fill_rect(
-                x0 + column * side,
-                y0 + row * side,
-                side.min(bounds.width - column * side),
-                side.min(bounds.height - row * side),
-                light,
-            );
-            column += 2;
-        }
-        row += 1;
-    }
-}
-
-/// One channel lifted toward white.
-fn lift(channel: u8) -> u8 {
-    let lifted = u32::from(channel) + (255 - u32::from(channel)) * CHECKER_LIFT / 8;
-    u8::try_from(lifted).unwrap_or(u8::MAX)
+    Checker::new(theme, scale).paint(surface, x0, y0, bounds.width, bounds.height);
 }
 
 /// Draw the reason the canvas is showing no picture, centred.
@@ -215,7 +171,7 @@ fn status(
     }
     let gap = scale.scale_length(theme.metrics().control_gap).max(1);
     let ink = Color::from(theme.palette().on_surface_muted);
-    let baseline = centred_baseline(bounds, font);
+    let baseline = font.centred_top(bounds.top(), bounds.height);
     let zoom = percent(view.viewport().zoom());
     let zoom_width = font.text_width(&zoom);
     let room = bounds.width.saturating_sub(gap * 3 + zoom_width);
@@ -332,13 +288,13 @@ fn centre_text(surface: &mut Surface, rect: Rect, text: &str, font: BitmapFont, 
     let x = rect
         .left()
         .saturating_add(to_i32(rect.width.saturating_sub(width) / 2));
-    font.draw_text(surface, x, centred_baseline(rect, font), fitted, ink);
-}
-
-/// The `y` a line of `font` is drawn at to sit centred in `rect`.
-fn centred_baseline(rect: Rect, font: BitmapFont) -> i32 {
-    rect.top()
-        .saturating_add(to_i32(rect.height.saturating_sub(font.glyph_height()) / 2))
+    font.draw_text(
+        surface,
+        x,
+        font.centred_top(rect.top(), rect.height),
+        fitted,
+        ink,
+    );
 }
 
 #[cfg(test)]

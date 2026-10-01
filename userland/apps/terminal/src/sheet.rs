@@ -99,7 +99,7 @@ impl SheetScreen {
         if rect.is_empty() {
             return Rect::EMPTY;
         }
-        let (Ok(x), Ok(y)) = (u32::try_from(rect.left()), u32::try_from(rect.top())) else {
+        let Some((x, y)) = rect.surface_origin() else {
             return Rect::EMPTY;
         };
         self.surface.with_clip(x, y, rect.width, rect.height, |s| {

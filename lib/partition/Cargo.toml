@@ -16,6 +16,8 @@ path = "src/lib.rs"
 
 [dependencies]
 tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The IEEE CRC-32 GPT checks its header and entry array with, shared with PNG.
+tairix-crc32 = { path = "../crc32", version = "=0.0.0" }
 
 [dev-dependencies]
 tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

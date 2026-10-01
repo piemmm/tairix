@@ -42,7 +42,7 @@ use tairix_util::fallible;
 use crate::chrome::{ChromeEpoch, WindowChrome};
 use crate::color::{Color, DitherRow, Pixel};
 use crate::corner::Corners;
-use crate::frost::{frost_bytes, inset, FrostEpoch, FrostPlan, FrostedBackdrop};
+use crate::frost::{frost_bytes, FrostEpoch, FrostPlan, FrostedBackdrop};
 use crate::geometry::{Point, Rect, Region, Scale};
 use crate::pointer::{Ghost, Halo, PointerOverlay, Sprite, SpriteRun, MAX_OWED, MAX_SPRITES};
 use crate::shadow::ShadowKit;
@@ -3669,7 +3669,7 @@ impl Compositor {
             FrostPlan::Whole if self.frost_retained(window.id()) => {
                 window.bounds().intersection(&self.screen_rect())
             }
-            FrostPlan::Core(core) => inset(core, self.blur_radius_px(window)),
+            FrostPlan::Core(core) => core.inset(self.blur_radius_px(window)),
             FrostPlan::Whole | FrostPlan::Blur => Rect::EMPTY,
         }
     }

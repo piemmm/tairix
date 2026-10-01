@@ -45,7 +45,9 @@ with a hotspot and an optional outline, so the same definition is
   built by kind (`from_cursors`) so a set can neither omit a cursor nor
   mis-order two, plus the built-in default set: a light body inside a
   one-pixel dark outline for every kind, a busy ring carrying a coloured arc,
-  and one double arrow at four angles for the window resize edges.
+  a crosshair whose arms stop short of its clear centre so the pixel under
+  the hotspot shows, and one double arrow at four angles for the window resize
+  edges.
 - `registry` — `CursorRegistry`: the available cursor sets and the active one,
   with fail-closed `register` / `set_active` (`AGENTS.md` §5.4 / §2.9).
 - `svg` — `VectorCursor::from_svg` and `decode_svg(bytes)`: build a cursor

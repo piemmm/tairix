@@ -62,11 +62,11 @@ use crate::{DecodeError, DecodeLimits, FitBox, RasterImage, RGBA_BYTES};
 // Marker codes (ITU-T T.81 Table B.1)
 // ---------------------------------------------------------------------
 
-const SOF0: u8 = 0xC0;
+pub(crate) const SOF0: u8 = 0xC0;
 const SOF1: u8 = 0xC1;
 const SOF2: u8 = 0xC2;
 const SOF3: u8 = 0xC3;
-const DHT: u8 = 0xC4;
+pub(crate) const DHT: u8 = 0xC4;
 const SOF5: u8 = 0xC5;
 const SOF6: u8 = 0xC6;
 const SOF7: u8 = 0xC7;
@@ -79,19 +79,32 @@ const SOF14: u8 = 0xCE;
 const SOF15: u8 = 0xCF;
 const RST0: u8 = 0xD0;
 const RST7: u8 = 0xD7;
-const SOI: u8 = 0xD8;
-const EOI: u8 = 0xD9;
-const SOS: u8 = 0xDA;
-const DQT: u8 = 0xDB;
+pub(crate) const SOI: u8 = 0xD8;
+pub(crate) const EOI: u8 = 0xD9;
+pub(crate) const SOS: u8 = 0xDA;
+pub(crate) const DQT: u8 = 0xDB;
 const DNL: u8 = 0xDC;
 const DRI: u8 = 0xDD;
 const DHP: u8 = 0xDE;
 const EXP: u8 = 0xDF;
-const APP0: u8 = 0xE0;
+pub(crate) const APP0: u8 = 0xE0;
 const APP1: u8 = 0xE1;
 const APP14: u8 = 0xEE;
 const APP15: u8 = 0xEF;
 const COM: u8 = 0xFE;
+
+/// The `APP0` payload the encoder opens with: JFIF 1.01, a density of one by
+/// one with no unit, so square pixels, and no thumbnail.
+pub(crate) const JFIF_PAYLOAD: [u8; 14] = *b"JFIF\0\x01\x01\x00\x00\x01\x00\x01\x00\x00";
+
+/// Whether an `APP0` payload says no more than the encoder's own: a JFIF
+/// header of any version, square pixels and no thumbnail.
+fn plain_jfif(payload: &[u8]) -> bool {
+    fn all_but_version(bytes: &[u8]) -> (Option<&[u8]>, Option<&[u8]>) {
+        (bytes.get(..5), bytes.get(7..))
+    }
+    all_but_version(payload) == all_but_version(&JFIF_PAYLOAD)
+}
 
 /// Whether `marker` is a `RSTn` restart marker, and if so its cyclic
 /// sequence number (`0..=7`).
@@ -110,18 +123,18 @@ const fn restart_index(marker: u8) -> Option<u8> {
 /// The natural (row-major) index of each zig-zag position (ITU-T T.81
 /// Figure A.6), used both to expand a `DQT`'s element order into natural
 /// order and to place a decoded coefficient at its natural position.
-const ZIGZAG: [usize; 64] = [
+pub(crate) const ZIGZAG: [usize; 64] = [
     0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20,
     13, 6, 7, 14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59,
     52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
 ];
 
-/// Fixed-point precision of every inverse-DCT basis constant in this
-/// module: a value `alpha(u) * cos((2x+1) * u * pi / (2m))` scaled by
-/// `1 << IDCT_SCALE_BITS` and rounded to the nearest integer, with
+/// Fixed-point precision of every DCT constant in this crate, inverse and
+/// forward: a value `alpha(u) * cos((2x+1) * u * pi / (2m))` scaled by
+/// `1 << DCT_SCALE_BITS` and rounded to the nearest integer, with
 /// `alpha(0) = 1/sqrt(2)` and `alpha(u) = 1` otherwise (ITU-T T.81 Annex
-/// A.3.3, the inverse DCT definition).
-const IDCT_SCALE_BITS: u32 = 13;
+/// A.3.3).
+pub(crate) const DCT_SCALE_BITS: u32 = 13;
 
 // ---------------------------------------------------------------------
 // Reduced-scale decoding
@@ -1024,6 +1037,15 @@ pub(crate) fn probe(bytes: &[u8]) -> Result<(u32, u32), DecodeError> {
 
 /// Decode `bytes` at natural size.
 pub(crate) fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage, DecodeError> {
+    decode_inner(bytes, limits, None).map(|(image, _)| image)
+}
+
+/// Decode `bytes` at natural size, saying whether the file held more than
+/// the picture in its application and comment segments.
+pub(crate) fn decode_native(
+    bytes: &[u8],
+    limits: &DecodeLimits,
+) -> Result<(RasterImage, bool), DecodeError> {
     decode_inner(bytes, limits, None)
 }
 
@@ -1035,7 +1057,7 @@ pub(crate) fn decode_fitted(
     limits: &DecodeLimits,
     fit: FitBox,
 ) -> Result<RasterImage, DecodeError> {
-    decode_inner(bytes, limits, Some(fit))
+    decode_inner(bytes, limits, Some(fit)).map(|(image, _)| image)
 }
 
 /// Decoder state accumulated while scanning markers.
@@ -1047,6 +1069,9 @@ struct Decoder<'a> {
     ac_tables: [Option<HuffmanTable>; 4],
     restart_interval: u32,
     adobe_transform: Option<u8>,
+    /// Whether an application or comment segment held what the picture does
+    /// not: metadata, a colour profile, a pixel density, text.
+    extras: bool,
     /// The orientation the first EXIF `APP1` block states, if one does.
     /// Read before the frame header a well-formed file puts after it, so
     /// the decode scale and the output buffer are both sized to the
@@ -1087,7 +1112,7 @@ fn decode_inner(
     bytes: &[u8],
     limits: &DecodeLimits,
     fit: Option<FitBox>,
-) -> Result<RasterImage, DecodeError> {
+) -> Result<(RasterImage, bool), DecodeError> {
     if !bytes.starts_with(&crate::JPEG_SIGNATURE[..2]) {
         return Err(DecodeError::JpegBadSignature);
     }
@@ -1099,6 +1124,7 @@ fn decode_inner(
         ac_tables: [None, None, None, None],
         restart_interval: 0,
         adobe_transform: None,
+        extras: false,
         orientation: None,
         frame: None,
         scale: Scale::Full,
@@ -1106,7 +1132,8 @@ fn decode_inner(
         coefficients: Vec::new(),
         eobrun: 0,
     };
-    decoder.run(bytes)
+    let image = decoder.run(bytes)?;
+    Ok((image, decoder.extras))
 }
 
 impl Decoder<'_> {
@@ -1177,6 +1204,8 @@ impl Decoder<'_> {
                 APP1 => {
                     let (payload, after) = read_segment(bytes, pos)?;
                     pos = after;
+                    // The orientation is applied, but the block holds more.
+                    self.extras = true;
                     if self.orientation.is_none() {
                         self.orientation = orientation::from_exif(payload);
                     }
@@ -1197,8 +1226,9 @@ impl Decoder<'_> {
                     pos = self.decode_scan(bytes, after, &header)?;
                 }
                 marker if (APP0..=APP15).contains(&marker) || marker == COM => {
-                    let (_, after) = read_segment(bytes, pos)?;
+                    let (payload, after) = read_segment(bytes, pos)?;
                     pos = after;
+                    self.extras |= marker != APP0 || !plain_jfif(payload);
                 }
                 _ => return Err(DecodeError::JpegUnknownMarker),
             }
@@ -2406,43 +2436,42 @@ fn store_block(
     }
 }
 
-/// The two guard bits the column pass keeps before the row pass descales
-/// them away — libjpeg's `PASS1_BITS`.
-const IDCT_PASS1_BITS: u32 = 2;
+/// The two guard bits an 8-point transform's first pass keeps for its
+/// second to descale away — libjpeg's `PASS1_BITS`, in both directions.
+pub(crate) const DCT_PASS1_BITS: u32 = 2;
+
+/// The integer 8-point transform's cosine products at [`DCT_SCALE_BITS`]
+/// precision, shared by the inverse and the forward DCT.
+pub(crate) const FIX_0_298631336: i32 = 2446;
+pub(crate) const FIX_0_390180644: i32 = 3196;
+pub(crate) const FIX_0_541196100: i32 = 4433;
+pub(crate) const FIX_0_765366865: i32 = 6270;
+pub(crate) const FIX_0_899976223: i32 = 7373;
+pub(crate) const FIX_1_175875602: i32 = 9633;
+pub(crate) const FIX_1_501321110: i32 = 12299;
+pub(crate) const FIX_1_847759065: i32 = 15137;
+pub(crate) const FIX_1_961570560: i32 = 16069;
+pub(crate) const FIX_2_053119869: i32 = 16819;
+pub(crate) const FIX_2_562915447: i32 = 20995;
+pub(crate) const FIX_3_072711026: i32 = 25172;
 
 /// One 8-point 1-D inverse DCT: the standard integer AAN /
 /// Loeffler-Ligtenberg-Moerlein butterfly, the same formulation libjpeg
 /// names `jpeg_idct_islow` (implemented here directly from the published
 /// algorithm, not translated from any source). `s` is 8 (dequantised, or
 /// column-pass) inputs; the return is the 8 spatial samples in natural
-/// order, still scaled by `2^IDCT_SCALE_BITS` for the caller to descale.
+/// order, still scaled by `2^DCT_SCALE_BITS` for the caller to descale.
 ///
 /// Every step is `wrapping_*` (the two left shifts are by the constant
-/// `IDCT_SCALE_BITS < 32`, which never panics on value overflow). The
+/// `DCT_SCALE_BITS < 32`, which never panics on value overflow). The
 /// overflow argument lives on [`idct8_islow`], the two-pass caller.
 fn idct_1d(s: &[i32; 8]) -> [i32; 8] {
-    // Fixed-point cosine products, `round(c * 2^13)`, matching [`IDCT_BASIS`]'s
-    // own 13-bit precision so the two routines agree to within the rounding
-    // the JPEG standard's accuracy requirement allows.
-    const FIX_0_298631336: i32 = 2446;
-    const FIX_0_390180644: i32 = 3196;
-    const FIX_0_541196100: i32 = 4433;
-    const FIX_0_765366865: i32 = 6270;
-    const FIX_0_899976223: i32 = 7373;
-    const FIX_1_175875602: i32 = 9633;
-    const FIX_1_501321110: i32 = 12299;
-    const FIX_1_847759065: i32 = 15137;
-    const FIX_1_961570560: i32 = 16069;
-    const FIX_2_053119869: i32 = 16819;
-    const FIX_2_562915447: i32 = 20995;
-    const FIX_3_072711026: i32 = 25172;
-
     // Even part -> the four symmetric "sum" terms.
     let rot = s[2].wrapping_add(s[6]).wrapping_mul(FIX_0_541196100);
     let rot_hi = rot.wrapping_add(s[6].wrapping_mul(-FIX_1_847759065));
     let rot_lo = rot.wrapping_add(s[2].wrapping_mul(FIX_0_765366865));
-    let sum04 = s[0].wrapping_add(s[4]) << IDCT_SCALE_BITS;
-    let dif04 = s[0].wrapping_sub(s[4]) << IDCT_SCALE_BITS;
+    let sum04 = s[0].wrapping_add(s[4]) << DCT_SCALE_BITS;
+    let dif04 = s[0].wrapping_sub(s[4]) << DCT_SCALE_BITS;
     let even = [
         sum04.wrapping_add(rot_lo),
         dif04.wrapping_add(rot_hi),
@@ -2495,7 +2524,7 @@ fn idct_1d(s: &[i32; 8]) -> [i32; 8] {
 /// with `O(8^2)` multiply-adds, in `i32` fixed point rather than `i64`,
 /// and takes a per-column shortcut for the flat (all-AC-zero) block a
 /// smoothly shaded image produces in abundance — the constant-DC case
-/// whose every column reconstructs to `dc << IDCT_PASS1_BITS`.
+/// whose every column reconstructs to `dc << DCT_PASS1_BITS`.
 ///
 /// Overflow: [`idct_1d`]'s arithmetic is `wrapping_*`. For a valid 8-bit
 /// frame `|deq| <= ~2^11`, so the largest intermediate the butterfly forms
@@ -2508,7 +2537,7 @@ fn idct_1d(s: &[i32; 8]) -> [i32; 8] {
 /// pixel outside `0..=255`.
 fn idct8_islow(deq: &[i32; 64]) -> [u8; 64] {
     // Two passes' 13 basis bits, the 2 guard bits, and a 3-bit `1/8`.
-    const ROW_SHIFT: u32 = IDCT_SCALE_BITS + IDCT_PASS1_BITS + 3;
+    const ROW_SHIFT: u32 = DCT_SCALE_BITS + DCT_PASS1_BITS + 3;
 
     let mut ws = [0i32; 64];
     for c in 0..8 {
@@ -2526,7 +2555,7 @@ fn idct8_islow(deq: &[i32; 64]) -> [u8; 64] {
         // the constant DC term, so skip the butterfly.
         if (column[1] | column[2] | column[3] | column[4] | column[5] | column[6] | column[7]) == 0
         {
-            let dcval = column[0] << IDCT_PASS1_BITS;
+            let dcval = column[0] << DCT_PASS1_BITS;
             for k in 0..8 {
                 ws[k * 8 + c] = dcval;
             }
@@ -2534,7 +2563,7 @@ fn idct8_islow(deq: &[i32; 64]) -> [u8; 64] {
         }
         let spatial = idct_1d(&column);
         for (k, &value) in spatial.iter().enumerate() {
-            ws[k * 8 + c] = descale(value, IDCT_SCALE_BITS - IDCT_PASS1_BITS);
+            ws[k * 8 + c] = descale(value, DCT_SCALE_BITS - DCT_PASS1_BITS);
         }
     }
 
@@ -2550,14 +2579,11 @@ fn idct8_islow(deq: &[i32; 64]) -> [u8; 64] {
     out
 }
 
-/// Round `x / 2^n` to the nearest integer via a fixed-point descale
-/// (`(x + 2^(n-1)) >> n`, an arithmetic shift). Both call sites pass a small
-/// compile-time constant, so the round bias folds away; the add wraps
-/// (harmless for the hostile-input case [`idct8_islow`] documents) and the
-/// shift is exact for the in-range case. The bias shift is saturating so the
-/// routine is total for every `n` including `0`, rather than leaving an
-/// underflow trap for a later caller to fall into.
-const fn descale(x: i32, n: u32) -> i32 {
+/// Round `x / 2^n` to the nearest integer (`(x + 2^(n-1)) >> n`, an
+/// arithmetic shift), as both transforms descale. The add wraps, harmless for
+/// the hostile-input case [`idct8_islow`] documents, and the bias shift
+/// saturates, so the routine is total for every `n` including `0`.
+pub(crate) const fn descale(x: i32, n: u32) -> i32 {
     x.wrapping_add(1i32.wrapping_shl(n.saturating_sub(1))) >> n
 }
 
@@ -2577,29 +2603,29 @@ fn dequantize_corner<const M: usize>(coeffs: &[i32; 64], quant: &[u16; 64]) -> [
 }
 
 /// Fixed-point `alpha(0)` — equivalently `cos(pi/4)`, the two being the
-/// same number — at [`IDCT_SCALE_BITS`] precision.
+/// same number — at [`DCT_SCALE_BITS`] precision.
 const FIX_ALPHA0: i32 = 5793;
 
-/// Fixed-point `cos(pi/8)` at [`IDCT_SCALE_BITS`] precision.
+/// Fixed-point `cos(pi/8)` at [`DCT_SCALE_BITS`] precision.
 const FIX_COS_PI_8: i32 = 7568;
 
-/// Fixed-point `cos(3*pi/8)` at [`IDCT_SCALE_BITS`] precision.
+/// Fixed-point `cos(3*pi/8)` at [`DCT_SCALE_BITS`] precision.
 const FIX_COS_3PI_8: i32 = 3135;
 
 /// The row-pass descale a reduced-scale inverse DCT finishes with.
 ///
-/// Two passes of the `2^IDCT_SCALE_BITS` basis and the transform's own
-/// `1/4` leave `2 * IDCT_SCALE_BITS + 2` bits to shed, of which the column
-/// pass has already shed `IDCT_SCALE_BITS - IDCT_PASS1_BITS`. (The
+/// Two passes of the `2^DCT_SCALE_BITS` basis and the transform's own
+/// `1/4` leave `2 * DCT_SCALE_BITS + 2` bits to shed, of which the column
+/// pass has already shed `DCT_SCALE_BITS - DCT_PASS1_BITS`. (The
 /// full-scale pass sheds one bit more, because [`idct_1d`]'s AAN
 /// formulation folds `alpha(0)` away and so carries an extra factor of two
 /// per axis.)
-const IDCT_REDUCED_ROW_SHIFT: u32 = IDCT_SCALE_BITS + IDCT_PASS1_BITS + 2;
+const IDCT_REDUCED_ROW_SHIFT: u32 = DCT_SCALE_BITS + DCT_PASS1_BITS + 2;
 
 /// One 4-point 1-D inverse DCT — the sum over `u` of `alpha(u) *
 /// cos((2x+1) * u * pi / 8) * s[u]` — evaluated as the usual even/odd
 /// butterfly. The return is the 4 spatial samples, still scaled by
-/// `1 << IDCT_SCALE_BITS`.
+/// `1 << DCT_SCALE_BITS`.
 ///
 /// Every step is `wrapping_*`; the overflow argument is [`idct4_islow`]'s.
 fn idct4_1d(s: &[i32; 4]) -> [i32; 4] {
@@ -2636,7 +2662,7 @@ fn idct4_islow(deq: &[[i32; 4]; 4]) -> [u8; 16] {
         let column = [deq[0][c], deq[1][c], deq[2][c], deq[3][c]];
         let spatial = idct4_1d(&column);
         for (k, &value) in spatial.iter().enumerate() {
-            ws[k * 4 + c] = descale(value, IDCT_SCALE_BITS - IDCT_PASS1_BITS);
+            ws[k * 4 + c] = descale(value, DCT_SCALE_BITS - DCT_PASS1_BITS);
         }
     }
 
@@ -2661,11 +2687,11 @@ fn idct2_islow(deq: &[[i32; 2]; 2]) -> [u8; 4] {
         [
             descale(
                 a.wrapping_add(b).wrapping_mul(FIX_ALPHA0),
-                IDCT_SCALE_BITS - IDCT_PASS1_BITS,
+                DCT_SCALE_BITS - DCT_PASS1_BITS,
             ),
             descale(
                 a.wrapping_sub(b).wrapping_mul(FIX_ALPHA0),
-                IDCT_SCALE_BITS - IDCT_PASS1_BITS,
+                DCT_SCALE_BITS - DCT_PASS1_BITS,
             ),
         ]
     };

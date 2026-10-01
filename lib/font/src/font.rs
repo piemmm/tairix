@@ -227,6 +227,13 @@ impl BitmapFont {
         self.pixel_height
     }
 
+    /// The top a line box is drawn from to sit centred in a band `height`
+    /// pixels tall starting at `top`, rounding towards the band's top.
+    #[must_use]
+    pub fn centred_top(self, top: i32, height: u32) -> i32 {
+        top.saturating_add_unsigned(height.saturating_sub(self.pixel_height) / 2)
+    }
+
     /// The advance every glyph of this font shares, or `None` when the
     /// family is proportional.
     #[must_use]

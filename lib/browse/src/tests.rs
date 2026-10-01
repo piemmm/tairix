@@ -1821,6 +1821,24 @@ fn sort_by_modified_orders_within_the_file_group() {
 }
 
 #[test]
+fn sort_by_kind_clusters_a_typed_name_by_its_extension() {
+    let mut entries = vec![
+        Entry::new("b.zip", EntryKind::File, 0, Time64::from_secs(0)),
+        Entry::new("c.txt", EntryKind::File, 0, Time64::from_secs(0)),
+        Entry::new("a.zip,a91", EntryKind::File, 0, Time64::from_secs(0)),
+    ];
+    sort_entries(
+        &mut entries,
+        SortMode {
+            key: SortKey::Kind,
+            direction: SortDirection::Ascending,
+        },
+    );
+    let ordered: Vec<&str> = entries.iter().map(Entry::name).collect();
+    assert_eq!(ordered, ["c.txt", "a.zip,a91", "b.zip"]);
+}
+
+#[test]
 fn sort_by_kind_clusters_bundles_ahead_of_files_within_the_non_directory_group() {
     let mut entries = mixed_listing();
     sort_entries(
@@ -9201,6 +9219,19 @@ mod trash {
     }
 
     #[test]
+    fn a_clashing_typed_name_disambiguates_before_its_file_type() {
+        let trash = owned(&["Trash"]);
+        for (leaf, expected) in [
+            ("Logo,b60", "Logo (2),b60"),
+            ("notes.txt,fff", "notes (2).txt,fff"),
+        ] {
+            let taken = owned(&[leaf]);
+            let dest = trash_dest_path(&trash, leaf, &taken).expect("disambiguated");
+            assert_eq!(dest.last().map(String::as_str), Some(expected), "{leaf}");
+        }
+    }
+
+    #[test]
     fn disambiguation_skips_every_taken_suffix_in_order() {
         let trash = owned(&["Trash"]);
         let taken = owned(&["notes.txt", "notes (2).txt", "notes (3).txt"]);
@@ -9320,7 +9351,9 @@ mod trash {
 
 mod title_location {
     use super::comps;
-    use crate::vfs::{push_title_name, spell_absolute_path, spell_title_location};
+    use crate::vfs::{
+        push_title_name, spell_absolute_path, spell_title_location, write_document_title,
+    };
     use alloc::string::String;
     use tairix_abi::window_ipc::{WindowTitle, WINDOW_TITLE_MAX};
     use tairix_font::ELLIPSIS;
@@ -9456,6 +9489,24 @@ mod title_location {
             );
         }
         assert_eq!(spell_title_location(&leaf, 0), "");
+    }
+
+    /// A document window's title leads with the changed mark, follows the
+    /// name with the read-only one, ends with the application, and — for any
+    /// name at all — is one the channel accepts, the name giving way first.
+    #[test]
+    fn a_document_title_carries_its_marks_and_always_fits() {
+        let mut title = String::from("stale");
+        write_document_title(&mut title, "notes.txt", false, false, "TextEdit");
+        assert_eq!(title, "notes.txt \u{2014} TextEdit");
+        write_document_title(&mut title, "notes.txt", true, true, "TextEdit");
+        assert_eq!(title, "*notes.txt (read-only) \u{2014} TextEdit");
+
+        let long = "n".repeat(4 * WINDOW_TITLE_MAX);
+        write_document_title(&mut title, &long, true, true, "Paint");
+        assert!(WindowTitle::new(&title).is_ok(), "{title:?} is refused");
+        assert!(title.starts_with("*nnn"));
+        assert!(title.ends_with(&alloc::format!("{ELLIPSIS} (read-only) \u{2014} Paint")));
     }
 }
 

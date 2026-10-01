@@ -16,7 +16,8 @@ use super::render_into;
 use crate::document::Document;
 use crate::editor::{Editor, Mode};
 use crate::layout::{Faces, Layout};
-use crate::view::{Access, View};
+use crate::view::View;
+use tairix_window::document::Access;
 
 const WINDOW: (u32, u32) = (800, 480);
 

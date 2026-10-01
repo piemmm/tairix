@@ -182,7 +182,7 @@ mod program {
             write_stderr_line(USAGE);
             return 2;
         };
-        let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
+        let locale = tairix_help::user_locale();
         // The `TERM` preference decides the colour depth of `--color` output.
         // An unset or non-UTF-8 value reads as `None`, so `auto` renders plain
         // — colour is never guessed at.

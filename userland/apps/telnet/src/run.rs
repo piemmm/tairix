@@ -476,7 +476,7 @@ mod program {
                 return 2;
             }
         };
-        let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
+        let locale = tairix_help::user_locale();
         // The terminal type the session exports, reported over TERMINAL-TYPE;
         // a session that exported none is told so rather than claiming to be a
         // terminal this console may not implement.

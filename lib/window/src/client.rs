@@ -169,15 +169,53 @@ pub fn present_damage(mode: &DisplayMode, repaint: Repaint, damage: &Region) -> 
 #[must_use]
 pub fn damage_in(mode: &DisplayMode, rect: Rect) -> Option<DamageRect> {
     let clipped = rect.intersection(&Rect::new(0, 0, mode.width_px, mode.height_px));
-    if clipped.is_empty() {
-        return None;
-    }
+    let (x, y) = clipped.surface_origin()?;
     Some(DamageRect {
-        x: u32::try_from(clipped.left()).ok()?,
-        y: u32::try_from(clipped.top()).ok()?,
+        x,
+        y,
         width_px: clipped.width,
         height_px: clipped.height,
     })
+}
+
+/// The tooltip a window last asked the session for, so that pointer samples
+/// over one tool ask once rather than once each.
+///
+/// A tip is incidental: a session that shows none refuses, and a refused tip
+/// is not asked for again until the one wanted changes.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DeclaredTip {
+    region: Option<Rect>,
+}
+
+impl DeclaredTip {
+    /// No tip asked for yet.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { region: None }
+    }
+
+    /// Ask for `wanted` — the region a tip covers and its line — over window
+    /// `window_id`, or for no tip at all, unless it is what was last asked.
+    pub fn declare<T: WindowTransport>(
+        &mut self,
+        client: &mut WindowClient<T>,
+        window_id: u64,
+        wanted: Option<(Rect, &str)>,
+    ) {
+        let region = wanted.map(|(rect, _)| rect);
+        if region == self.region {
+            return;
+        }
+        self.region = region;
+        let (rect, text) = wanted.unwrap_or((Rect::EMPTY, ""));
+        if let (Ok(anchor), Ok(text)) = (
+            WindowRegion::new(rect.left(), rect.top(), rect.width, rect.height),
+            TooltipText::new(text),
+        ) {
+            let _ = client.set_tooltip(window_id, anchor, text);
+        }
+    }
 }
 
 /// The rectangle a retained window's present must repaint and send, or `None`

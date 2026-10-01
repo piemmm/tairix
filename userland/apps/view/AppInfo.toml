@@ -14,10 +14,11 @@
 # reached over. The launched process receives this set intersected with the
 # launching user's grants, never more.
 #
-# CAP_PROC_SPAWN is what lets the viewer re-enter its own binary as the
-# capability-empty decoder: a document is untrusted input and is never decoded
-# in this address space. The child inherits nothing but its two wired pipes,
-# so the decoder holds strictly less authority than the viewer does.
+# CAP_SANDBOX_SPAWN is what lets the viewer re-enter its own binary as the
+# capability-empty decoder, the only kind of child it starts: a document is
+# untrusted input and is never decoded in this address space. The child
+# inherits nothing but its two wired pipes, so the decoder holds strictly less
+# authority than the viewer does.
 # CAP_LOG_EMIT records a decoder replaced after a crash, which would otherwise
 # be refused and lost.
 id = "os.tairix.view"
@@ -30,7 +31,7 @@ kind = "application"
 # about itself (plans/NEW-TASKBAR.md).
 purpose = "Look at a picture or a document"
 author = "The TAIRiX Project"
-capabilities = ["CAP_CONSOLE_WRITE", "CAP_SHM", "CAP_PROC_SPAWN", "CAP_LOG_EMIT"]
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_SHM", "CAP_SANDBOX_SPAWN", "CAP_LOG_EMIT"]
 # Single instance, and deliberately: the viewer is resident on the icon bar
 # with a window per document, so opening a second picture opens a second
 # window in the one process rather than starting another. Containment is not

@@ -156,8 +156,8 @@ reordering cannot re-map a row. Every advertised shortcut is really honoured by
 restating it. The plate, its placement, the grab and the dismissal are the
 session's (`plans/NEW-MENUS.md`); this app draws no menu pixel and a refused
 menu is reported and carried on from. `Settings` is a modal sheet on its own
-popup surface, composed from the shared Reactive Alloy controls plus the
-app-local `SwatchGrid` colour wells; every edit clamps through
+popup surface, composed from the shared Reactive Alloy controls, its colour
+wells the shared `SwatchGrid`; every edit clamps through
 `Profile::clamp`, so the sheet can never produce an invalid profile. Its body
 scrolls in pixels through the shared `ScrollView` — a row its edge crosses is
 drawn cut, and only the part that shows takes the pointer — and the wheel the

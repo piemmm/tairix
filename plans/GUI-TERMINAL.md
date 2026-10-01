@@ -272,8 +272,8 @@ accept no typeface from the app.
 **Status: done.**
 
 `userland/apps/terminal/src/settings.rs` — a modal sheet composed from the
-shared Reactive Alloy controls (`Panel`, `Tabs`, `Slider`, `Radio`, `Button`)
-plus the app-local colour-well grid, on its own popup surface.
+shared Reactive Alloy controls (`Panel`, `Tabs`, `Slider`, `Radio`, `Button`,
+`SwatchGrid`), on its own popup surface.
 
 - **Appearance**: the scheme chooser, the text-size slider, and the custom
   scheme's editor — a `SwatchGrid` of the twenty editable colours with
@@ -302,10 +302,6 @@ follows the live profile (`Settings::adopt`), reporting the rows that moved and
 leaving a drag, the selected well and the focus where they are. A change
 re-derives the colours and the face, re-applies the backdrop blur, reshapes the
 grid (the pty follows), and writes the document once it settles.
-
-The colour-well grid lives in the app rather than `lib/controls` because the
-control library takes a control only once two independent consumers need it
-(`plans/GUI-CONTROLS-DESIGN.md` §4). A second consumer moves it.
 
 ---
 

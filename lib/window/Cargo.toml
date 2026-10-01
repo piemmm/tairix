@@ -28,22 +28,26 @@ tairix-rt = { path = "../rt", version = "=0.0.0", optional = true }
 tairix-procinfo = { path = "../procinfo", version = "=0.0.0", optional = true, features = [
     "program",
 ] }
-# The retained window surface the shell draws each frame into, and the theme
-# registry it primes from the session's reported appearance. Optional with the
-# rest of the app-side half.
+# The retained window surface the shell draws each frame into. Optional with
+# the rest of the app-side half.
 tairix-raster = { path = "../raster", version = "=0.0.0", optional = true }
-tairix-theme = { path = "../theme", version = "=0.0.0", optional = true }
+# The theme a document window's engine is laid out and drawn under, and the
+# registry the shell primes from the session's reported appearance.
+tairix-theme = { path = "../theme", version = "=0.0.0" }
+# The queue a document application's saves are written on.
+tairix-util = { path = "../util", version = "=0.0.0", optional = true }
 
 [features]
 default = ["rt"]
-# The application's own half: the frame region (`WindowFrames`) and the shared
-# app shell (`app`), which call the runtime's syscalls. Disable for the
-# engine-only, syscall-free view a host test or the server side takes.
+# The application's own half: the frame region (`WindowFrames`), the shared
+# app shell (`app`) and the document host (`docapp`), which call the runtime's
+# syscalls. Disable for the engine-only, syscall-free view a host test or the
+# server side takes.
 rt = [
     "dep:tairix-rt",
     "dep:tairix-procinfo",
     "dep:tairix-raster",
-    "dep:tairix-theme",
+    "dep:tairix-util",
 ]
 
 [lints]

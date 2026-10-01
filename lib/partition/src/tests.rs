@@ -262,8 +262,8 @@ fn mbr_parse_rejects_overlapping_on_disk_entries() {
 // ----------------------------------------------------------------------
 
 /// Build a GPT disk image (protective MBR + primary header + entry array)
-/// with the given partitions, computing both CRCs with the crate's own
-/// [`gpt::crc32`] so the parser is exercised against a self-consistent
+/// with the given partitions, computing both CRCs with the shared
+/// `tairix_crc32` so the parser is exercised against a self-consistent
 /// image (the standard way to test a parser absent an in-tree encoder).
 fn build_gpt(
     block_size: u32,
@@ -293,7 +293,7 @@ fn build_gpt(
         region[base + 32..base + 40].copy_from_slice(&first.to_le_bytes());
         region[base + 40..base + 48].copy_from_slice(&last.to_le_bytes());
     }
-    let entries_crc = gpt::crc32(&region);
+    let entries_crc = tairix_crc32::checksum(&region);
     // Write the region across consecutive blocks from LBA 2.
     let entries_lba = 2u64;
     for (i, chunk) in region.chunks(bs).enumerate() {
@@ -309,7 +309,7 @@ fn build_gpt(
     hdr[80..84].copy_from_slice(&num_entries.to_le_bytes());
     hdr[84..88].copy_from_slice(&u32::try_from(ENTRY_LEN).expect("fits").to_le_bytes());
     hdr[88..92].copy_from_slice(&entries_crc.to_le_bytes());
-    let header_crc = gpt::crc32(&hdr[..92]);
+    let header_crc = tairix_crc32::checksum(&hdr[..92]);
     hdr[16..20].copy_from_slice(&header_crc.to_le_bytes());
     dev.put(1, &hdr);
 
@@ -676,11 +676,4 @@ fn table_push_fails_closed_past_the_cap() {
         table.push(root(1, 1)),
         Err(PartitionError::TooManyPartitions)
     );
-}
-
-/// A known-answer vector for the IEEE CRC-32 the GPT path uses: the
-/// check value of `"123456789"` is `0xCBF43926`.
-#[test]
-fn crc32_matches_the_standard_check_value() {
-    assert_eq!(gpt::crc32(b"123456789"), 0xcbf4_3926);
 }

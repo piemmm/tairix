@@ -40,21 +40,8 @@ mod controller_main;
 mod program {
     extern crate alloc;
 
-    use tairix_help::{own_short_help, BundleHelp};
     use tairix_rt::io::{write_stderr_line, Stdout, Write};
     use tairix_stress::{parse, Command, USAGE};
-
-    /// Render `stress`'s own short help through the one shared engine;
-    /// the usage banner stands in when no document can be served.
-    fn short_help() -> i32 {
-        let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
-        let bytes = own_short_help(&BundleHelp::new("stress"), locale, "stress")
-            .unwrap_or_else(|| alloc::format!("{USAGE}\n").into_bytes());
-        match Stdout.write_all(&bytes) {
-            Ok(()) => 0,
-            Err(_) => 1,
-        }
-    }
 
     /// Program entry point.
     ///
@@ -68,7 +55,7 @@ mod program {
             return 2;
         };
         match parse(&arguments) {
-            Ok(Command::Help) => short_help(),
+            Ok(Command::Help) => tairix_help::print_own_short_help("stress", Some(USAGE)),
             Ok(Command::Version) => {
                 let line = alloc::format!("stress (TAIRiX) {}\n", env!("CARGO_PKG_VERSION"));
                 match Stdout.write_all(line.as_bytes()) {

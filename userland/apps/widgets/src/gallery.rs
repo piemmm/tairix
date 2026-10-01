@@ -445,7 +445,6 @@ impl Gallery {
 
         let body = frame.view.viewport();
         let panel = &self.panels[self.current.index()];
-        let glyph_h = font.glyph_height();
         frame.view.paint(surface, |column| {
             for (item, rect) in panel.iter().zip(&frame.items) {
                 let row = Rect::new(body.left(), rect.top(), body.width, rect.height);
@@ -454,7 +453,7 @@ impl Gallery {
                 }
                 let caption = Self::caption_rect(*rect, body, scale, theme);
                 let text = font.truncate_to_width(&item.caption, caption.width);
-                let ty = caption.top() + (to_i32(caption.height) - to_i32(glyph_h)).max(0) / 2;
+                let ty = font.centred_top(caption.top(), caption.height);
                 font.draw_text(
                     column,
                     caption.left(),

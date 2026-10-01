@@ -215,6 +215,9 @@ pub enum PickPurpose {
         /// The name the picker offers, which the user may keep or change.
         /// Empty offers none.
         suggested: DocumentName,
+        /// The endings the chosen name is held to: what the requester can
+        /// write, refused in the picker before any file is made.
+        endings: SaveEndings,
     },
 }
 
@@ -223,8 +226,160 @@ impl PickPurpose {
     const fn suggested_len_byte(&self) -> u8 {
         match self {
             Self::Open => 0,
-            Self::Save { suggested } => suggested.len_byte(),
+            Self::Save { suggested, .. } => suggested.len_byte(),
         }
+    }
+
+    /// The endings it holds a name to: none for an open.
+    const fn endings(&self) -> SaveEndings {
+        match self {
+            Self::Open => SaveEndings::ANY,
+            Self::Save { endings, .. } => *endings,
+        }
+    }
+}
+
+/// Most endings a [`SaveEndings`] holds.
+pub const SAVE_ENDINGS_MAX: usize = 8;
+
+/// Longest ending a [`SaveEndings`] holds, its separator included: room for
+/// `.markdown`, the longest the type registry knows, which it checks.
+pub const SAVE_ENDING_MAX: usize = 9;
+
+/// The name endings a [`PickPurpose::Save`] holds the chosen name to — an
+/// extension such as `.png`, or a RISC OS file type such as `,b60` —
+/// matched without regard to ASCII case. None holds it to none.
+///
+/// Each is a `.` or a `,` and then ASCII letters or digits, so an ending can
+/// name nothing but a format.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SaveEndings {
+    count: u8,
+    lens: [u8; SAVE_ENDINGS_MAX],
+    bytes: [[u8; SAVE_ENDING_MAX]; SAVE_ENDINGS_MAX],
+}
+
+impl SaveEndings {
+    /// Any name: the requester writes whatever the document is called.
+    pub const ANY: Self = Self {
+        count: 0,
+        lens: [0; SAVE_ENDINGS_MAX],
+        bytes: [[0; SAVE_ENDING_MAX]; SAVE_ENDINGS_MAX],
+    };
+
+    /// Bytes the endings take on the wire: a count, then each length-prefixed.
+    const MAX_WIRE_LEN: usize = 1 + SAVE_ENDINGS_MAX * (1 + SAVE_ENDING_MAX);
+
+    /// Hold the name to `separator` and `code` too — `('.', "png")`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] past [`SAVE_ENDINGS_MAX`] endings or an
+    /// ending past [`SAVE_ENDING_MAX`] bytes; [`Errno::OutOfRange`] for a
+    /// separator other than `.` or `,`, or a code not wholly ASCII letters
+    /// and digits.
+    pub fn push(&mut self, separator: char, code: &str) -> Result<(), Errno> {
+        if code.len() >= SAVE_ENDING_MAX {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut ending = [0u8; SAVE_ENDING_MAX];
+        ending[0] = match separator {
+            '.' => b'.',
+            ',' => b',',
+            _ => return Err(Errno::OutOfRange),
+        };
+        ending[1..=code.len()].copy_from_slice(code.as_bytes());
+        self.adopt(&ending[..=code.len()])
+    }
+
+    /// Take `ending` as the next, refusing one of another shape.
+    fn adopt(&mut self, ending: &[u8]) -> Result<(), Errno> {
+        let slot = usize::from(self.count);
+        if slot == SAVE_ENDINGS_MAX || ending.len() > SAVE_ENDING_MAX {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let shaped = match ending {
+            [b'.' | b',', code @ ..] => {
+                !code.is_empty() && code.iter().all(u8::is_ascii_alphanumeric)
+            }
+            _ => false,
+        };
+        if !shaped {
+            return Err(Errno::OutOfRange);
+        }
+        let len = u8::try_from(ending.len()).map_err(|_| Errno::LengthOutOfRange)?;
+        self.bytes[slot][..ending.len()].copy_from_slice(ending);
+        self.lens[slot] = len;
+        self.count += 1;
+        Ok(())
+    }
+
+    /// Whether it holds a name to nothing.
+    #[must_use]
+    pub const fn is_any(&self) -> bool {
+        self.count == 0
+    }
+
+    /// The endings, first the one a name with none is given.
+    pub fn iter(&self) -> impl Iterator<Item = &str> {
+        self.lens[..usize::from(self.count)]
+            .iter()
+            .zip(&self.bytes)
+            // Every ending was checked to be ASCII on the way in.
+            .map(|(&len, bytes)| core::str::from_utf8(&bytes[..usize::from(len)]).unwrap_or(""))
+    }
+
+    /// Whether `name` is one it holds: any name when it holds none, else one
+    /// that ends in one of its endings after a stem of its own.
+    #[must_use]
+    pub fn accepts(&self, name: &str) -> bool {
+        self.is_any()
+            || self.iter().any(|ending| {
+                name.len() > ending.len()
+                    && name.as_bytes()[name.len() - ending.len()..]
+                        .eq_ignore_ascii_case(ending.as_bytes())
+            })
+    }
+
+    /// Bytes it takes on the wire.
+    const fn wire_len(&self) -> usize {
+        let mut len = 1;
+        let mut slot = 0;
+        while slot < self.count as usize {
+            len += 1 + self.lens[slot] as usize;
+            slot += 1;
+        }
+        len
+    }
+
+    /// Write it at the head of `out`, which [`wire_len`](Self::wire_len)
+    /// bytes fit.
+    fn write(&self, out: &mut [u8]) {
+        out[0] = self.count;
+        let mut at = 1;
+        for (&len, bytes) in self.lens[..usize::from(self.count)].iter().zip(&self.bytes) {
+            let end = at + 1 + usize::from(len);
+            out[at] = len;
+            out[at + 1..end].copy_from_slice(&bytes[..usize::from(len)]);
+            at = end;
+        }
+    }
+
+    /// The endings at the head of `bytes`; the frame's own length check
+    /// refuses anything past them.
+    fn read(bytes: &[u8]) -> Result<Self, Errno> {
+        let (&count, mut rest) = bytes.split_first().ok_or(Errno::BufferTooSmall)?;
+        if usize::from(count) > SAVE_ENDINGS_MAX {
+            return Err(Errno::LengthOutOfRange);
+        }
+        let mut endings = Self::ANY;
+        for _ in 0..count {
+            let (&len, tail) = rest.split_first().ok_or(Errno::BufferTooSmall)?;
+            let ending = tail.get(..usize::from(len)).ok_or(Errno::BufferTooSmall)?;
+            endings.adopt(ending)?;
+            rest = &tail[usize::from(len)..];
+        }
+        Ok(endings)
     }
 }
 
@@ -1756,6 +1911,8 @@ pub enum CursorShape {
     Pointer,
     /// The busy shape, while the content cannot answer.
     Busy,
+    /// The open cross, over content where the pointer picks out one pixel.
+    Crosshair,
 }
 
 impl CursorShape {
@@ -1766,6 +1923,7 @@ impl CursorShape {
             Self::Text => 1,
             Self::Pointer => 2,
             Self::Busy => 3,
+            Self::Crosshair => 4,
         }
     }
 
@@ -1777,6 +1935,7 @@ impl CursorShape {
             1 => Ok(Self::Text),
             2 => Ok(Self::Pointer),
             3 => Ok(Self::Busy),
+            4 => Ok(Self::Crosshair),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -2677,9 +2836,13 @@ const PICK_PURPOSE_SAVE: u8 = 1;
 
 /// Encoded size of a [`WindowRequest::PickFile`] suggesting a `name`-byte
 /// name.
-const fn pick_file_wire_len(name: usize) -> usize {
-    PICK_NAME_OFFSET + name
+const fn pick_file_wire_len(name: usize, endings: usize) -> usize {
+    PICK_NAME_OFFSET + name + endings
 }
+const _: () = assert!(
+    pick_file_wire_len(crate::FS_NAME_MAX, SaveEndings::MAX_WIRE_LEN)
+        <= WindowRequest::MAX_WIRE_LEN
+);
 /// Byte offset of a [`WindowRequest::BeginDrag`]'s name length.
 const DRAG_NAME_LEN_OFFSET: usize = WINDOW_ID_WIRE_LEN;
 /// Byte offset of its name.
@@ -3068,9 +3231,10 @@ impl WindowRequest {
             | Self::TakeDropTarget { .. }
             | Self::TakeTerrain { .. } => WINDOW_ID_WIRE_LEN,
             Self::BeginDrag { ref name, .. } => begin_drag_wire_len(name.len_byte() as usize),
-            Self::PickFile { purpose, .. } => {
-                pick_file_wire_len(purpose.suggested_len_byte() as usize)
-            }
+            Self::PickFile { purpose, .. } => pick_file_wire_len(
+                purpose.suggested_len_byte() as usize,
+                purpose.endings().wire_len(),
+            ),
             Self::OpenLayer { .. } => OPEN_LAYER_WIRE_LEN,
             Self::PlaceLayer { .. } => PLACE_LAYER_WIRE_LEN,
             Self::TakeOpenTarget => TAKE_OPEN_TARGET_WIRE_LEN,
@@ -3711,11 +3875,13 @@ fn write_transfer_operands(request: &WindowRequest, out: &mut [u8]) {
             put_u64(out, 8, window_id);
             let (wire, name) = match purpose {
                 PickPurpose::Open => (PICK_PURPOSE_OPEN, ""),
-                PickPurpose::Save { suggested } => (PICK_PURPOSE_SAVE, suggested.as_str()),
+                PickPurpose::Save { suggested, .. } => (PICK_PURPOSE_SAVE, suggested.as_str()),
             };
             out[PICK_PURPOSE_OFFSET] = wire;
             out[PICK_NAME_LEN_OFFSET] = purpose.suggested_len_byte();
-            out[PICK_NAME_OFFSET..PICK_NAME_OFFSET + name.len()].copy_from_slice(name.as_bytes());
+            let endings = PICK_NAME_OFFSET + name.len();
+            out[PICK_NAME_OFFSET..endings].copy_from_slice(name.as_bytes());
+            purpose.endings().write(&mut out[endings..]);
         }
         WindowRequest::BeginDrag {
             window_id,
@@ -3776,20 +3942,22 @@ fn read_pick_file(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     }
     let window_id = nonzero_id(read_u64(bytes, 8))?;
     let name_len = bytes[PICK_NAME_LEN_OFFSET];
-    exact_len(bytes, pick_file_wire_len(usize::from(name_len)))?;
+    let len = usize::from(name_len);
+    let text = bytes
+        .get(PICK_NAME_OFFSET..PICK_NAME_OFFSET + len)
+        .ok_or(Errno::BufferTooSmall)?;
+    let endings = SaveEndings::read(&bytes[PICK_NAME_OFFSET + len..])?;
+    exact_len(bytes, pick_file_wire_len(len, endings.wire_len()))?;
     let purpose = match bytes[PICK_PURPOSE_OFFSET] {
-        PICK_PURPOSE_OPEN if name_len == 0 => PickPurpose::Open,
+        PICK_PURPOSE_OPEN if name_len == 0 && endings.is_any() => PickPurpose::Open,
         PICK_PURPOSE_SAVE => {
             let mut name = [0u8; crate::FS_NAME_MAX];
-            let len = usize::from(name_len);
-            let text = bytes
-                .get(PICK_NAME_OFFSET..PICK_NAME_OFFSET + len)
-                .ok_or(Errno::BufferTooSmall)?;
             name.get_mut(..len)
                 .ok_or(Errno::LengthOutOfRange)?
                 .copy_from_slice(text);
             PickPurpose::Save {
                 suggested: DocumentName::from_wire(name_len, &name)?,
+                endings,
             }
         }
         _ => return Err(Errno::OutOfRange),
@@ -6583,9 +6751,9 @@ mod tests {
         AppMenuReason, AppMenuRole, AppMenuRow, AppMenuRowView, AppMenuShortcut, BundleRunPath,
         ClipboardHeld, ClipboardKind, CursorShape, DocumentName, DropTarget, HandOverDocument,
         HandOverOutcome, LayerDepth, MenuOutcome, MenuRefusal, OpenTarget, PickPurpose,
-        PointerAction, TerrainPlate, TooltipText, WallpaperEntry, WindowEvent, WindowRegion,
-        WindowRequest, WindowSizeState, WindowSizing, WindowTitle, APP_BAR_CLICK_OFFSET,
-        APP_BAR_MAX_WIRE_LEN, APP_BAR_ROWS_OFFSET, APP_BAR_ROW_COUNT_OFFSET,
+        PointerAction, SaveEndings, TerrainPlate, TooltipText, WallpaperEntry, WindowEvent,
+        WindowRegion, WindowRequest, WindowSizeState, WindowSizing, WindowTitle,
+        APP_BAR_CLICK_OFFSET, APP_BAR_MAX_WIRE_LEN, APP_BAR_ROWS_OFFSET, APP_BAR_ROW_COUNT_OFFSET,
         APP_BAR_TEXT_LEN_OFFSET, APP_MENU_ENTRY_MAX, APP_MENU_KIND_SEPARATOR,
         APP_MENU_KIND_SUBMENU, APP_MENU_LABEL_MAX, APP_MENU_MAX_DEPTH, APP_MENU_MAX_ROWS,
         APP_MENU_MAX_TOTAL_ROWS, APP_MENU_REASON_MAX, APP_MENU_ROW_ENTRY_LEN_OFFSET,
@@ -6603,12 +6771,13 @@ mod tests {
         MENU_TEXT_REPLY_TEXT_OFFSET, NAME_LIST_COUNT_OFFSET, NAME_LIST_NAMES_OFFSET,
         OPEN_LAYER_WIRE_LEN, OPEN_MENU_ANCHOR_OFFSET, OPEN_MENU_MAX_WIRE_LEN,
         OPEN_MENU_ROWS_OFFSET, OPEN_MENU_ROW_COUNT_OFFSET, OPEN_MENU_TEXT_LEN_OFFSET,
-        OPEN_MENU_TITLE_LEN_OFFSET, PICKED_NAME_REPLY_TEXT_OFFSET, PICK_NAME_OFFSET,
-        PICK_PURPOSE_OFFSET, PICK_PURPOSE_OPEN, PLACE_LAYER_WIRE_LEN, PRESENT_WIRE_LEN,
-        PREVIEW_EVENT_RENDERED_OFFSET, PREVIEW_EVENT_SIZE_OFFSET, PREVIEW_EVENT_SUBJECT_OFFSET,
-        PREVIEW_SCREENSAVER_LEN_OFFSET, QUERY_CURSOR_SETS_WIRE_LEN, QUERY_WALLPAPERS_WIRE_LEN,
-        RENDER_PREVIEW_SIZE_OFFSET, RENDER_PREVIEW_SUBJECT_OFFSET, RENDER_PREVIEW_WIRE_LEN,
-        REQUEST_HEADER_LEN, SET_CLIPBOARD_KIND_OFFSET, SET_CLIPBOARD_LEN_OFFSET, SET_CURSOR_OFFSET,
+        OPEN_MENU_TITLE_LEN_OFFSET, PICKED_NAME_REPLY_TEXT_OFFSET, PICK_NAME_LEN_OFFSET,
+        PICK_NAME_OFFSET, PICK_PURPOSE_OFFSET, PICK_PURPOSE_OPEN, PLACE_LAYER_WIRE_LEN,
+        PRESENT_WIRE_LEN, PREVIEW_EVENT_RENDERED_OFFSET, PREVIEW_EVENT_SIZE_OFFSET,
+        PREVIEW_EVENT_SUBJECT_OFFSET, PREVIEW_SCREENSAVER_LEN_OFFSET, QUERY_CURSOR_SETS_WIRE_LEN,
+        QUERY_WALLPAPERS_WIRE_LEN, RENDER_PREVIEW_SIZE_OFFSET, RENDER_PREVIEW_SUBJECT_OFFSET,
+        RENDER_PREVIEW_WIRE_LEN, REQUEST_HEADER_LEN, SAVE_ENDINGS_MAX, SAVE_ENDING_MAX,
+        SET_CLIPBOARD_KIND_OFFSET, SET_CLIPBOARD_LEN_OFFSET, SET_CURSOR_OFFSET,
         SET_SIZE_STATE_OFFSET, SET_SIZING_OFFSET, SET_SIZING_WIRE_LEN, SET_TITLE_LEN_OFFSET,
         SET_TITLE_TEXT_OFFSET, SET_TITLE_WIRE_LEN, SET_TOOLTIP_LEN_OFFSET,
         SET_TOOLTIP_REGION_OFFSET, SET_TOOLTIP_TEXT_OFFSET, SET_TOOLTIP_WIRE_LEN,
@@ -7000,6 +7169,19 @@ mod tests {
         BundleRunPath::new("/System/Applications/view.app/Run").expect("a valid bundle path")
     }
 
+    /// As many endings as a save pick holds, each as long as one may be.
+    fn widest_endings() -> SaveEndings {
+        let mut endings = SaveEndings::ANY;
+        for slot in 0..SAVE_ENDINGS_MAX {
+            let mut code = [b'a'; SAVE_ENDING_MAX - 1];
+            code[0] = b'0' + u8::try_from(slot).expect("a digit");
+            endings
+                .push('.', core::str::from_utf8(&code).expect("ASCII"))
+                .expect("an ending");
+        }
+        endings
+    }
+
     /// The pick and drag requests [`each_request`] visits: each purpose, with
     /// the narrowest and widest name.
     fn each_pick_request(visit: &mut impl FnMut(WindowRequest)) {
@@ -7007,11 +7189,17 @@ mod tests {
             window_id: 9,
             purpose: PickPurpose::Open,
         });
-        for len in [0, crate::FS_NAME_MAX] {
+        for (len, endings) in [
+            (0, SaveEndings::ANY),
+            (crate::FS_NAME_MAX, widest_endings()),
+        ] {
             let name = DocumentName::new(&"n".repeat(len)).expect("a valid name");
             visit(WindowRequest::PickFile {
                 window_id: 9,
-                purpose: PickPurpose::Save { suggested: name },
+                purpose: PickPurpose::Save {
+                    suggested: name,
+                    endings,
+                },
             });
             visit(WindowRequest::BeginDrag { window_id: 9, name });
         }
@@ -8475,6 +8663,7 @@ mod tests {
             CursorShape::Text,
             CursorShape::Pointer,
             CursorShape::Busy,
+            CursorShape::Crosshair,
         ] {
             let request = WindowRequest::SetCursor {
                 window_id: 9,
@@ -8490,7 +8679,7 @@ mod tests {
         zero_id[8..16].copy_from_slice(&0u64.to_le_bytes());
         assert_eq!(WindowRequest::from_bytes(&zero_id), Err(Errno::OutOfRange));
         let mut unknown = base.frame();
-        unknown[SET_CURSOR_OFFSET] = 4;
+        unknown[SET_CURSOR_OFFSET] = 5;
         assert_eq!(WindowRequest::from_bytes(&unknown), Err(Errno::OutOfRange));
         assert_eq!(
             WindowRequest::from_bytes(&base.frame().over_long(1)),
@@ -8602,6 +8791,7 @@ mod tests {
             window_id: 9,
             purpose: PickPurpose::Save {
                 suggested: DocumentName::new("notes.txt").expect("a valid name"),
+                endings: SaveEndings::ANY,
             },
         };
         let frame = save.frame();
@@ -8630,7 +8820,86 @@ mod tests {
         assert_eq!(
             WindowRequest::from_bytes(&frame[..len - 1]),
             Err(Errno::BufferTooSmall),
-            "a name shorter than its length byte states is truncation"
+            "a frame that stops before its endings is truncation"
+        );
+    }
+
+    #[test]
+    fn save_endings_hold_only_a_separator_and_a_short_code() {
+        let mut endings = SaveEndings::ANY;
+        assert!(endings.accepts("anything at all"));
+        assert_eq!(endings.push('/', "png"), Err(Errno::OutOfRange));
+        assert_eq!(endings.push('.', ""), Err(Errno::OutOfRange));
+        assert_eq!(endings.push('.', "p/g"), Err(Errno::OutOfRange));
+        let long = [b'm'; SAVE_ENDING_MAX];
+        let code = core::str::from_utf8(&long).expect("ASCII");
+        let mut longest = SaveEndings::ANY;
+        assert_eq!(longest.push('.', &code[1..]), Ok(()), "the bound fits");
+        assert_eq!(endings.push('.', code), Err(Errno::LengthOutOfRange));
+        endings.push('.', "png").expect("an extension");
+        endings.push(',', "b60").expect("a RISC OS file type");
+        let mut listed = endings.iter();
+        assert_eq!(
+            (listed.next(), listed.next(), listed.next()),
+            (Some(".png"), Some(",b60"), None)
+        );
+        assert!(
+            endings.accepts("Picture.PNG"),
+            "matched without regard to case"
+        );
+        assert!(endings.accepts("picture,B60"));
+        assert!(!endings.accepts(".png"), "an ending is not a name");
+        assert!(!endings.accepts("picture.jpg"));
+        assert!(!endings.accepts("picture"));
+        let mut full = widest_endings();
+        assert_eq!(full.push('.', "png"), Err(Errno::LengthOutOfRange));
+    }
+
+    #[test]
+    fn a_save_pick_carries_its_endings_and_refuses_ones_misstated() {
+        let mut endings = SaveEndings::ANY;
+        endings.push('.', "spr").expect("an extension");
+        endings.push(',', "ff9").expect("a RISC OS file type");
+        let save = WindowRequest::PickFile {
+            window_id: 9,
+            purpose: PickPurpose::Save {
+                suggested: DocumentName::new("Sprites.spr").expect("a valid name"),
+                endings,
+            },
+        };
+        let frame = save.frame();
+        let len = save.wire_len();
+        assert_eq!(WindowRequest::from_bytes(&frame[..len]), Ok(save));
+        let at = PICK_NAME_OFFSET + "Sprites.spr".len();
+
+        let mut too_many = frame;
+        too_many[at] = u8::try_from(SAVE_ENDINGS_MAX + 1).expect("a count byte");
+        assert_eq!(
+            WindowRequest::from_bytes(&too_many[..len]),
+            Err(Errno::LengthOutOfRange)
+        );
+        let mut path = frame;
+        path[at + 2] = b'/';
+        assert_eq!(
+            WindowRequest::from_bytes(&path[..len]),
+            Err(Errno::OutOfRange),
+            "an ending names a format, never a path"
+        );
+        let mut fewer = frame;
+        fewer[at] = 1;
+        assert_eq!(
+            WindowRequest::from_bytes(&fewer[..len]),
+            Err(Errno::BadMagic),
+            "bytes past the endings it states are smuggled"
+        );
+        let mut held_open = frame;
+        held_open[PICK_PURPOSE_OFFSET] = PICK_PURPOSE_OPEN;
+        held_open[PICK_NAME_LEN_OFFSET] = 0;
+        held_open.copy_within(at..len, PICK_NAME_OFFSET);
+        assert_eq!(
+            WindowRequest::from_bytes(&held_open[..len - "Sprites.spr".len()]),
+            Err(Errno::OutOfRange),
+            "an open holds a name to nothing"
         );
     }
 

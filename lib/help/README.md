@@ -60,6 +60,11 @@ the one shared resolution policy (`lib/cmdres`), so a program's `-h` and
   `tairix-rt` file wrappers, spelled from the shared `lib/abi` store/suffix
   constants. Enabled only by a freestanding `Run` binary; the engine itself
   stays seam-injected and performs no ambient I/O.
+  `print_own_short_help(word, usage)` is the whole `-h` of a `Run` binary:
+  its short help in the user's locale on standard output, else its own
+  `usage` banner, else (a program with none) the refusal on standard error,
+  answering the exit status. `user_locale()` is that locale — `LANG`, when
+  it is UTF-8 — for every `Run` binary that renders help.
 - `lint_help_trees` (the `lint` cargo feature, host-only tooling) — the one
   help-tree lint (`plans/APPS.md` §8.1) shared by `cargo xtask help-lint` and
   the `tools/syshelp` aggregator tests: spellings and parse bounds on every

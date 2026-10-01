@@ -5814,6 +5814,20 @@ impl File {
         stat_fd(self.fd)
     }
 
+    /// How long the regular file this handle holds is — or `None` for a
+    /// handle on anything else, whose declared length says nothing about
+    /// what a read gives. One `fs_stat`, which the descriptor's own backing
+    /// authorises, so a holder with no filesystem capability can measure
+    /// what it was handed.
+    ///
+    /// # Errors
+    ///
+    /// The kernel's refusal of the stat.
+    pub fn regular_len(&self) -> Result<Option<u64>, tairix_abi::Errno> {
+        let stat = self.stat().map_err(tairix_abi::Errno::from_syscall)?;
+        Ok((stat.kind == tairix_abi::FileKind::Regular).then_some(stat.size))
+    }
+
     /// Set this file's length to `size` bytes.
     ///
     /// # Errors

@@ -22,8 +22,11 @@ can never diverge in navigation semantics, listing policy, or look.
   file-type icon and the "Open With…" association vocabulary read, so the two
   can never drift apart. `MediaType` names a type by its IANA (or TAIRiX
   vendor) media-type spelling (`as_str` / `from_media_str`, round-tripping
-  case-insensitively); `media_for_name(name)` maps a filename extension
-  (ASCII-case-insensitive, allocating nothing) and `media_for_entry(entry,
+  case-insensitively); `Ending::of(name)` is what ends a name — a RISC OS
+  file type after a comma (`,ff9`) and an extension after a dot, each only
+  after a stem, which it also answers — `media_for_name(name)` maps that ending to its type
+  (ASCII-case-insensitive, allocating nothing), `name_endings(media)` lists
+  the endings a type is known by, and `media_for_entry(entry,
   parent)` classifies a listed entry — `inode/directory` for a directory
   whatever its name, `application/x-tairix-service` for a `<Name>.app` listed
   from the system service store (`tairix_abi::SYSTEM_SERVICE_STORE`) and
@@ -719,7 +722,12 @@ can never diverge in navigation semantics, listing policy, or look.
   `tairix_path::validate_file_name` rule, the same rule the rename editor
   spells a new name through, before any syscall) and `VfsDirectorySource`,
   the composition over an injected `fetch(path) -> stream` primitive so
-  the engine is host-proven end to end without a kernel.
+  the engine is host-proven end to end without a kernel. A window title is a
+  bounded field and a name is not: `spell_title_location` fits a folder's path
+  to it by dropping leading components, and `write_document_title` writes a
+  document window's whole title — the name, marked while it holds changes and
+  when it may only be read, then the application's — cutting the name first,
+  so any name makes a title the channel accepts.
 
 `no_std` (with `alloc`); depends only on `lib/abi`, `lib/path`,
 `lib/geometry`, `lib/theme`, `lib/raster`, `lib/font`, `lib/controls`, and

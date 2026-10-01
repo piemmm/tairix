@@ -707,3 +707,22 @@ fn a_registry_switched_to_light_hands_the_painter_the_light_theme() {
         "the switch the app adopts is the one the painter draws with"
     );
 }
+
+/// The victory wash is laid over a tile, not in its place: what was beneath
+/// still shows through, and the tile stays opaque.
+#[test]
+fn a_wash_is_composited_over_what_is_beneath() {
+    let mut surface = Surface::new(8, 8).expect("a surface");
+    let beneath = Color::rgb(0, 0, 200);
+    surface.fill_rect(0, 0, 8, 8, beneath);
+    super::wash(
+        &mut surface,
+        Rect::new(0, 0, 8, 8),
+        Color::rgb(255, 255, 255),
+        128,
+    );
+    let pixel = surface.get(4, 4).expect("on the surface");
+    assert_eq!(pixel.a, 255, "an opaque tile stays opaque");
+    assert!(pixel.b > pixel.r, "the blue beneath still shows: {pixel:?}");
+    assert!(pixel.r > 100, "and the wash lies over it: {pixel:?}");
+}

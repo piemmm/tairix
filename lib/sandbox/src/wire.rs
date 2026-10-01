@@ -26,6 +26,18 @@ pub enum WireError {
     Malformed,
 }
 
+/// Bytes a length-prefixed byte string's length takes ahead of it.
+pub const BYTES_PREFIX: usize = 4;
+
+/// The length a byte string of `len` bytes is prefixed with.
+#[must_use]
+pub fn bytes_prefix(len: usize) -> [u8; BYTES_PREFIX] {
+    // Payload fields are bounded well below `u32::MAX` by the frame cap; a
+    // longer one cannot reach here through the public encoders, so
+    // saturating keeps the encoder total without an unchecked cast.
+    u32::try_from(len).unwrap_or(u32::MAX).to_le_bytes()
+}
+
 /// Append-only payload encoder over a growable byte vector.
 #[derive(Debug, Default)]
 pub struct Writer {
@@ -45,6 +57,15 @@ impl Writer {
         Self {
             out: Vec::with_capacity(bytes),
         }
+    }
+
+    /// [`with_capacity`](Self::with_capacity), or `None` where the allocator
+    /// refuses the room — for a payload sized by what it answers.
+    #[must_use]
+    pub fn try_with_capacity(bytes: usize) -> Option<Self> {
+        let mut out = Vec::new();
+        out.try_reserve_exact(bytes).ok()?;
+        Some(Self { out })
     }
 
     /// Finish, yielding the encoded payload.
@@ -73,14 +94,10 @@ impl Writer {
         self.out.extend_from_slice(&value.to_le_bytes());
     }
 
-    /// Append a length-prefixed byte string (`u32` length, then the bytes).
+    /// Append a length-prefixed byte string ([`bytes_prefix`], then the
+    /// bytes).
     pub fn bytes(&mut self, value: &[u8]) {
-        // Payload fields are bounded well below `u32::MAX` by the frame
-        // cap; a longer slice cannot reach here through the public
-        // encoders, so saturating keeps the encoder total without an
-        // unchecked cast.
-        let len = u32::try_from(value.len()).unwrap_or(u32::MAX);
-        self.u32(len);
+        self.out.extend_from_slice(&bytes_prefix(value.len()));
         self.out.extend_from_slice(value);
     }
 

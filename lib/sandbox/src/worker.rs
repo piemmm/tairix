@@ -46,6 +46,18 @@ pub enum ServeEnd {
     Failed(ProtoError),
 }
 
+impl ServeEnd {
+    /// The exit status the worker process ends with: `0` once the
+    /// conversation is over, `1` when its transport failed.
+    #[must_use]
+    pub const fn exit_code(&self) -> i32 {
+        match self {
+            Self::Finished | Self::Ended => 0,
+            Self::Failed(_) => 1,
+        }
+    }
+}
+
 /// Serve requests until the request stream closes.
 ///
 /// Every iteration is strictly request → reply, so the parent's
@@ -190,5 +202,12 @@ mod tests {
             output: Vec::new(),
         };
         assert_eq!(recv_frame(&mut replies), Ok(Some(vec![])));
+    }
+
+    #[test]
+    fn a_worker_exits_cleanly_only_when_its_conversation_closed() {
+        assert_eq!(ServeEnd::Finished.exit_code(), 0);
+        assert_eq!(ServeEnd::Ended.exit_code(), 0);
+        assert_eq!(ServeEnd::Failed(ProtoError::PeerClosed).exit_code(), 1);
     }
 }

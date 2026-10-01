@@ -138,24 +138,6 @@ mod program {
     /// a terminal with no animated effect never wakes at all.
     const FRAME_INTERVAL_NS: u64 = 50_000_000;
 
-    /// State the abnormal-exit reason on `stderr` (fail loud: an exit
-    /// code alone is not a diagnosis) and hand back `code` for `main`.
-    fn fail(code: i32, reason: &str) -> i32 {
-        let _ = writeln!(Stderr, "terminal: {reason}");
-        code
-    }
-
-    /// State a shared-shell bring-up refusal and hand its reserved code back.
-    fn fail_shell(err: app::ShellError) -> i32 {
-        let _ = writeln!(Stderr, "terminal: {err}");
-        err.code()
-    }
-
-    /// Report a non-fatal refusal on `stderr` and carry on.
-    fn report(reason: &str) {
-        let _ = writeln!(Stderr, "terminal: {reason}");
-    }
-
     /// Reap a hosted shell if it has exited.
     ///
     /// The shell's exit becomes visible on both the output-stream member
@@ -170,7 +152,7 @@ mod program {
     /// State why a reaped shell never got off the ground, if it did not.
     fn report_launch_failure(reason: Option<&'static str>) {
         if let Some(reason) = reason {
-            let _ = writeln!(Stderr, "terminal: shell failed to launch: {reason}");
+            app::report(OWN_WORD, format_args!("shell failed to launch: {reason}"));
         }
     }
 
@@ -205,21 +187,26 @@ mod program {
     /// is named.
     fn load_profile(settings: &SettingsStore<'_>) -> Profile {
         if let Some(err) = settings.store_refusal() {
-            report(&alloc::format!(
-                "settings unavailable ({err:?}); running on this build's defaults"
-            ));
+            app::report(
+                OWN_WORD,
+                format_args!("settings unavailable ({err:?}); running on this build's defaults"),
+            );
         }
         if let Some(err) = settings.defaults_refusal() {
-            report(&alloc::format!(
-                "this bundle's shipped defaults could not be read ({err:?})"
-            ));
+            app::report(
+                OWN_WORD,
+                format_args!("this bundle's shipped defaults could not be read ({err:?})"),
+            );
         }
         let (profile, refused) = Profile::load(settings);
         for key in refused {
-            report(&alloc::format!(
-                "{}: not a value this setting accepts; using its default",
-                key.name()
-            ));
+            app::report(
+                OWN_WORD,
+                format_args!(
+                    "{}: not a value this setting accepts; using its default",
+                    key.name()
+                ),
+            );
         }
         profile
     }
@@ -293,20 +280,26 @@ mod program {
         let model = match menu::model() {
             Ok(model) => model,
             Err(err) => {
-                report(&alloc::format!("menu model refused ({err}); not shown"));
+                app::report(
+                    OWN_WORD,
+                    format_args!("menu model refused ({err}); not shown"),
+                );
                 return;
             }
         };
         let anchor = match WindowRegion::new(at.x, at.y, 0, 0) {
             Ok(anchor) => anchor,
             Err(err) => {
-                report(&alloc::format!("menu anchor refused ({err}); not shown"));
+                app::report(
+                    OWN_WORD,
+                    format_args!("menu anchor refused ({err}); not shown"),
+                );
                 return;
             }
         };
         match client.open_menu(open.pane.id(), anchor, &model) {
             Ok(open_id) => open.menu = Some(open_id),
-            Err(err) => report(&alloc::format!("menu refused ({err}); not shown")),
+            Err(err) => app::report(OWN_WORD, format_args!("menu refused ({err}); not shown")),
         }
     }
 
@@ -352,19 +345,22 @@ mod program {
             centre_offset(parent_mode.height_px, extent.1),
         );
         if extent.0 == 0 || extent.1 == 0 {
-            report("settings sheet has no drawable extent; not shown");
+            app::report(OWN_WORD, "settings sheet has no drawable extent; not shown");
             return None;
         }
         let mode = app::mode_for(extent.0, extent.1);
         let Some(picture) = SheetScreen::new(extent.0, extent.1) else {
-            report("settings sheet picture could not be allocated; not shown");
+            app::report(
+                OWN_WORD,
+                "settings sheet picture could not be allocated; not shown",
+            );
             return None;
         };
         let pane =
             match WindowPane::open_popup(client, parent, server, event_endpoint, &mode, offset) {
                 Ok(pane) => pane,
                 Err(err) => {
-                    report(&alloc::format!("{err}; settings sheet not shown"));
+                    app::report(OWN_WORD, format_args!("{err}; settings sheet not shown"));
                     return None;
                 }
             };
@@ -375,7 +371,7 @@ mod program {
             dismissed: false,
         };
         if present_overlay(&mut overlay, theme, scale, client).is_err() {
-            report("settings sheet present refused; not shown");
+            app::report(OWN_WORD, "settings sheet present refused; not shown");
             overlay.close(client);
             return None;
         }
@@ -760,13 +756,13 @@ mod program {
     /// its window to take back down.
     fn open_shell(cols: u16, rows: u16, env: &[Vec<u8>]) -> Option<HostedShell> {
         let Ok((pty_master, pty_slave)) = tairix_rt::pty_create(rows, cols) else {
-            report("pty refused; no window opened");
+            app::report(OWN_WORD, "pty refused; no window opened");
             return None;
         };
         let Some(terminal) = Terminal::new(cols, rows, PtyShell { master: pty_master }) else {
             let _ = tairix_rt::fs_close(pty_master);
             let _ = tairix_rt::fs_close(pty_slave);
-            report("screen grid refused; no window opened");
+            app::report(OWN_WORD, "screen grid refused; no window opened");
             return None;
         };
         let attach = shell_wires(pty_slave);
@@ -777,7 +773,7 @@ mod program {
         let _ = tairix_rt::fs_close(pty_slave);
         if pid < 0 {
             let _ = tairix_rt::fs_close(pty_master);
-            report("shell spawn refused; no window opened");
+            app::report(OWN_WORD, "shell spawn refused; no window opened");
             return None;
         }
         Some(HostedShell {
@@ -811,7 +807,7 @@ mod program {
         let (cols, rows) = grid_dims(w, h, look.font);
 
         let Some(screen) = Screen::new(w, h) else {
-            report("screen surface refused; no window opened");
+            app::report(OWN_WORD, "screen surface refused; no window opened");
             return None;
         };
 
@@ -837,7 +833,7 @@ mod program {
         ) {
             Ok(opened) => opened,
             Err(err) => {
-                report(&alloc::format!("{err}; no window opened"));
+                app::report(OWN_WORD, format_args!("{err}; no window opened"));
                 return None;
             }
         };
@@ -877,14 +873,14 @@ mod program {
         ];
         for (watched, (kind, id, token)) in members.into_iter().enumerate() {
             if tairix_rt::waitset_ctl(ctx.set, WaitSetOp::Add, kind, id, token) != 0 {
-                report("wait-set member refused; no window opened");
+                app::report(OWN_WORD, "wait-set member refused; no window opened");
                 opened.abandon(ctx.client, ctx.set, ctx.ending, watched > 0);
                 return None;
             }
         }
         apply_blur(ctx.client, opened.pane.id(), ctx.profile);
         if opened.present(ctx.client).is_err() {
-            report("first present refused; no window opened");
+            app::report(OWN_WORD, "first present refused; no window opened");
             opened.abandon(ctx.client, ctx.set, ctx.ending, true);
             return None;
         }
@@ -982,7 +978,7 @@ mod program {
         profile: &Profile,
     ) {
         if let Err(err) = client.set_backdrop_blur(window, profile.effects.blur_radius_px()) {
-            report(&alloc::format!("backdrop blur refused: {err}"));
+            app::report(OWN_WORD, format_args!("backdrop blur refused: {err}"));
         }
     }
 
@@ -1017,9 +1013,12 @@ mod program {
             tairix_rt::sync::WorkerWake::create(),
         ));
         if let Err(reason) = Publisher::start(&publisher) {
-            report(&alloc::format!(
-                "no settings worker ({reason:?}); the profile is saved on the event loop"
-            ));
+            app::report(
+                OWN_WORD,
+                format_args!(
+                    "no settings worker ({reason:?}); the profile is saved on the event loop"
+                ),
+            );
         }
         let _publisher_guard = tairix_rt::work::WorkerGuard::new(&publisher);
 
@@ -1028,14 +1027,14 @@ mod program {
         let mut client = WindowClient::new(app::RtWindowTransport);
         let (mut desktop, mut themes) = match app::bring_up_desktop(&mut client) {
             Ok(brought_up) => brought_up,
-            Err(err) => return fail_shell(err),
+            Err(err) => return app::fail(OWN_WORD, err.code(), err),
         };
 
         // --- The one event mailbox and the wait-set the process parks on. One
         // mailbox serves every window and the icon bar.
         let binding = match app::bind_event_mailbox() {
             Ok(binding) => binding,
-            Err(err) => return fail_shell(err),
+            Err(err) => return app::fail(OWN_WORD, err.code(), err),
         };
         let event_endpoint = binding.endpoint();
         let set = binding.set();
@@ -1051,7 +1050,7 @@ mod program {
                 PUBLISH_TOKEN,
             ) != 0
             {
-                return fail(app::EXIT_NO_EVENTS, "settings wake refused");
+                return app::fail(OWN_WORD, app::EXIT_NO_EVENTS, "settings wake refused");
             }
         }
 
@@ -1079,7 +1078,7 @@ mod program {
         if let Err(refused) =
             tairix_window::declare_app_bar(&mut client, appbar::declaration(event_endpoint))
         {
-            report(&alloc::format!("{refused}"));
+            app::report(OWN_WORD, format_args!("{refused}"));
         }
 
         // Shells whose windows have closed, each reaped once it has exited.
@@ -1098,7 +1097,11 @@ mod program {
             env: &env,
             ending: &mut ending,
         }) else {
-            return fail(app::EXIT_NO_WINDOW, "no terminal window could be opened");
+            return app::fail(
+                OWN_WORD,
+                app::EXIT_NO_WINDOW,
+                "no terminal window could be opened",
+            );
         };
         next_slot += 1;
         let mut windows: Vec<TerminalWindow> = alloc::vec![first];
@@ -1132,12 +1135,12 @@ mod program {
                     for open in &mut windows {
                         open.look.phase = open.look.phase.advance();
                         if open.present(&mut client).is_err() {
-                            return fail(app::EXIT_CHANNEL_LOST, "present refused");
+                            return app::fail(OWN_WORD, app::EXIT_CHANNEL_LOST, "present refused");
                         }
                     }
                     continue;
                 }
-                Err(_) => return fail(app::EXIT_CHANNEL_LOST, "wait-set lost"),
+                Err(_) => return app::fail(OWN_WORD, app::EXIT_CHANNEL_LOST, "wait-set lost"),
             };
             // A shell the wait-set could not watch is reaped on any wake.
             ending.reap(None, reap_shell, |shell, reason| {
@@ -1184,7 +1187,9 @@ mod program {
                     ) {
                         Applied::Running => {}
                         Applied::Ended => return 0,
-                        Applied::Lost(reason) => return fail(app::EXIT_CHANNEL_LOST, reason),
+                        Applied::Lost(reason) => {
+                            return app::fail(OWN_WORD, app::EXIT_CHANNEL_LOST, reason)
+                        }
                     }
                 }
                 Wake::App(PUBLISH_TOKEN) => {
@@ -1212,7 +1217,9 @@ mod program {
                     ) {
                         Applied::Running => {}
                         Applied::Ended => return 0,
-                        Applied::Lost(reason) => return fail(app::EXIT_CHANNEL_LOST, reason),
+                        Applied::Lost(reason) => {
+                            return app::fail(OWN_WORD, app::EXIT_CHANNEL_LOST, reason)
+                        }
                     }
                 }
                 Wake::DesktopChanged => {
@@ -1222,7 +1229,7 @@ mod program {
                     let changed = match app::adopt_desktop(&mut desktop, &mut themes) {
                         Ok(changed) => changed,
                         Err(err) => {
-                            let _ = writeln!(Stderr, "terminal: desktop change refused: {err}");
+                            app::report(OWN_WORD, format_args!("desktop change refused: {err}"));
                             false
                         }
                     };
@@ -1246,7 +1253,9 @@ mod program {
                         ) {
                             Applied::Running => {}
                             Applied::Ended => return 0,
-                            Applied::Lost(reason) => return fail(app::EXIT_CHANNEL_LOST, reason),
+                            Applied::Lost(reason) => {
+                                return app::fail(OWN_WORD, app::EXIT_CHANNEL_LOST, reason)
+                            }
                         }
                     }
                 }
@@ -1287,7 +1296,9 @@ mod program {
                     // Its siblings keep running.
                     match ended {
                         ShellEnd::Running => {}
-                        ShellEnd::Lost(reason) => return fail(app::EXIT_CHANNEL_LOST, reason),
+                        ShellEnd::Lost(reason) => {
+                            return app::fail(OWN_WORD, app::EXIT_CHANNEL_LOST, reason)
+                        }
                         ShellEnd::Exited(reason) => {
                             windows.remove(index).close(&mut client, set);
                             report_launch_failure(reason);
@@ -2166,7 +2177,8 @@ mod program {
                         // is dropped rather than guessed at.
                         MenuOutcome::Entered(_) | MenuOutcome::Dismissed => {}
                         MenuOutcome::Refused(reason) => {
-                            report(&alloc::format!("no menu was shown: {}", reason.describe()));
+                            let why = reason.describe();
+                            app::report(OWN_WORD, format_args!("no menu was shown: {why}"));
                         }
                     }
                 }

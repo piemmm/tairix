@@ -1246,8 +1246,7 @@ impl Tabs {
             let run = font.elide_to_width(tab.label(), avail);
             let tw = run_width(font, run);
             let cx = to_i32(x) + to_i32(w.saturating_sub(bead_w)) / 2;
-            let glyph_h = font.glyph_height();
-            let text_y = to_i32(y) + (to_i32(h) - to_i32(glyph_h)).max(0) / 2;
+            let text_y = font.centred_top(to_i32(y), h);
             paint_run(
                 surface,
                 font,
@@ -1295,7 +1294,7 @@ impl Tabs {
             return;
         };
         let label_row = paint.line;
-        let text_y = y.saturating_add(label_row.saturating_sub(font.glyph_height()) / 2);
+        let text_y = font.centred_top(to_i32(y), label_row);
 
         let bead_w = Self::bead_gutter(scale, theme, rect, tab);
         // The label line's running edges: what the glyph has claimed from the
@@ -1320,7 +1319,7 @@ impl Tabs {
                 surface,
                 font,
                 run,
-                (to_i32(line.trail.saturating_sub(reading_w)), to_i32(text_y)),
+                (to_i32(line.trail.saturating_sub(reading_w)), text_y),
                 Color::from(theme.palette().on_surface_muted),
                 None,
             );
@@ -1331,7 +1330,7 @@ impl Tabs {
                 surface,
                 font,
                 font.elide_to_width(tab.label(), line.avail),
-                (to_i32(line.lead), to_i32(text_y)),
+                (to_i32(line.lead), text_y),
                 Self::label_color(theme, tab, theme.palette().on_surface),
                 None,
             );

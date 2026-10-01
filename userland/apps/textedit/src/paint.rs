@@ -8,6 +8,7 @@ use alloc::string::String;
 use core::fmt::Write as _;
 use core::ops::ControlFlow;
 
+use tairix_controls::{blend_area, fill_area, withheld};
 use tairix_font::BitmapFont;
 use tairix_geometry::{to_i32, Rect, Scale};
 use tairix_raster::{Color, Surface};
@@ -42,8 +43,8 @@ pub fn render_into(
     let palette = theme.palette();
     surface.fill(Color::from(palette.surface));
     let chrome = Color::from(palette.surface_raised);
-    if view.find_open() && shows(surface, layout.find()) {
-        fill(surface, layout.find(), chrome);
+    if view.find_open() && !withheld(surface, layout.find()) {
+        fill_area(surface, layout.find(), chrome);
         let (find, replace, buttons) = view.find_controls();
         find.render(surface, layout.find_field(), scale, theme);
         replace.render(surface, layout.replace_field(), scale, theme);
@@ -51,67 +52,33 @@ pub fn render_into(
             button.render(surface, *bounds, scale, theme);
         }
     }
-    if shows(surface, layout.grid()) {
-        fill(surface, layout.grid(), Color::from(palette.document));
+    if !withheld(surface, layout.grid()) {
+        fill_area(surface, layout.grid(), Color::from(palette.document));
         match view.editor().mode() {
             Mode::Text => text_grid(surface, view, layout, theme, faces.grid, focused, scale),
             Mode::Hex => hex_grid(surface, view, layout, theme, faces.grid, focused),
         }
     }
     let (vertical, horizontal) = view.scrollbars();
-    if shows(surface, layout.vertical_bar()) {
+    if !withheld(surface, layout.vertical_bar()) {
         vertical.render(surface, layout.vertical_bar(), scale, theme);
     }
-    if shows(surface, layout.horizontal_bar()) {
+    if !withheld(surface, layout.horizontal_bar()) {
         horizontal.render(surface, layout.horizontal_bar(), scale, theme);
     }
-    fill(surface, layout.corner(), Color::from(palette.scroll_track));
-    if shows(surface, layout.status()) {
+    fill_area(surface, layout.corner(), Color::from(palette.scroll_track));
+    if !withheld(surface, layout.status()) {
         status(surface, view, layout, theme, faces.status);
     }
     if let Some((dialog, field)) = view.modal() {
         let window = layout.window();
-        blend(surface, window, palette.drop_shadow.with_alpha(VEIL_ALPHA));
+        blend_area(surface, window, palette.drop_shadow.with_alpha(VEIL_ALPHA));
         let bounds = View::modal_rect(dialog, window, field.is_some(), scale, theme);
         dialog.render(surface, bounds, scale, theme);
         if let (Some(field), Some(content)) = (field, dialog.content_rect(bounds, scale, theme)) {
             field.render(surface, content, scale, theme);
         }
     }
-}
-
-/// Whether any of `rect` lies inside the surface's clip: a part the clip
-/// leaves wholly outside is not worth composing.
-fn shows(surface: &Surface, rect: Rect) -> bool {
-    origin(rect).is_some_and(|(x, y)| surface.admits(x, y, rect.width, rect.height))
-}
-
-fn fill(surface: &mut Surface, rect: Rect, color: Color) {
-    if let Some((x, y)) = origin(rect) {
-        surface.fill_rect(x, y, rect.width, rect.height, color);
-    }
-}
-
-/// Composite `color`, which may be translucent, over `rect`.
-fn blend(surface: &mut Surface, rect: Rect, color: Rgba) {
-    if let Some((x, y)) = origin(rect) {
-        surface.fill_round_rect(x, y, rect.width, rect.height, 0, Color::from(color));
-    }
-}
-
-fn origin(rect: Rect) -> Option<(u32, u32)> {
-    if rect.is_empty() {
-        return None;
-    }
-    Some((
-        u32::try_from(rect.left()).ok()?,
-        u32::try_from(rect.top()).ok()?,
-    ))
-}
-
-/// The top a glyph box is drawn at to sit centred in a row starting at `top`.
-fn text_top(top: i32, height: u32, font: BitmapFont) -> i32 {
-    top.saturating_add(to_i32(height.saturating_sub(font.glyph_height()) / 2))
 }
 
 /// The colour a unit is drawn in: its token's role, else the span over it.
@@ -225,14 +192,14 @@ fn text_grid(
         columns: layout.columns(),
         caret_width: scale.scale_length(2).max(1),
     };
-    fill(surface, painter.gutter, Color::from(palette.surface));
+    fill_area(surface, painter.gutter, Color::from(palette.surface));
     let caret_row = text::row_of(document, editor.selection().head);
     let rows = layout.rows().max(1);
     let problems = problems_by_line(view, rows);
     let mut run = String::new();
     for (index, row) in view.visible_rows(rows).enumerate() {
         let rect = layout.row_rect(index);
-        if !shows(surface, rect) {
+        if withheld(surface, rect) {
             continue;
         }
         let problem = row
@@ -247,7 +214,7 @@ fn text_grid(
                 painter.area.width,
                 painter.cell.1,
             );
-            blend(surface, band, palette.accent.with_alpha(CURRENT_ROW_ALPHA));
+            blend_area(surface, band, palette.accent.with_alpha(CURRENT_ROW_ALPHA));
         }
         gutter_cell(
             surface,
@@ -269,7 +236,7 @@ fn text_grid(
         );
         if let Some(severity) = problem {
             let y = rect.bottom().saturating_sub(1);
-            fill(
+            fill_area(
                 surface,
                 Rect::new(painter.area.left(), y, painter.area.width, 1),
                 Color::from(severity_colour(theme, severity)),
@@ -326,7 +293,7 @@ fn text_row(
     let bounds = text::row_bounds(document, row);
     let spans = editor.highlight().spans(row.line).unwrap_or(&[]);
     let (cell_w, cell_h) = painter.cell;
-    let y = text_top(top, cell_h, painter.font);
+    let y = painter.font.centred_top(top, cell_h);
     let mut span_at = 0usize;
     let mut end_column = 0usize;
     let mut caret_column = None;
@@ -346,7 +313,7 @@ fn text_row(
             }
             if selected.contains(&unit.offset) {
                 let wide = u32::try_from(unit.width).unwrap_or(0) * cell_w;
-                blend(
+                blend_area(
                     surface,
                     Rect::new(painter.x_of(unit.column), top, wide, cell_h),
                     palette.selection_fill,
@@ -383,7 +350,7 @@ fn text_row(
             && bounds.end < bounds.next
             && painter.visible(end_column, 1)
         {
-            blend(
+            blend_area(
                 surface,
                 Rect::new(painter.x_of(end_column), top, cell_w, cell_h),
                 palette.selection_fill,
@@ -400,7 +367,7 @@ fn text_row(
             } else {
                 (painter.caret_width, top, cell_h)
             };
-            fill(
+            fill_area(
                 surface,
                 Rect::new(x, y, width, height).intersection(&painter.area),
                 Color::from(palette.accent),
@@ -442,7 +409,7 @@ fn gutter_cell(
     painter.font.draw_text(
         surface,
         right.saturating_sub(to_i32(wide)),
-        text_top(top, cell_h, painter.font),
+        painter.font.centred_top(top, cell_h),
         run,
         ink,
     );
@@ -494,11 +461,11 @@ fn hex_grid(
             break;
         }
         let rect = layout.row_rect(index);
-        if !shows(surface, rect) {
+        if withheld(surface, rect) {
             continue;
         }
         let top = rect.top();
-        let y = text_top(top, cell_h, font);
+        let y = font.centred_top(top, cell_h);
         let (bytes, count) = row_bytes(document, base);
         let (x, clip_top, width, height) = row_clip(grid, top, cell_h);
         surface.with_clip(x, clip_top, width, height, |surface| {
@@ -515,7 +482,7 @@ fn hex_grid(
                         [(hex_column, 2, 2 * cell_w), (ascii_column, 1, cell_w)]
                     {
                         if shown(column, cells) {
-                            blend(
+                            blend_area(
                                 surface,
                                 Rect::new(x_of(column), top, wide, cell_h),
                                 palette.selection_fill,
@@ -618,12 +585,12 @@ fn hex_caret(
 /// Outline `rect` `weight` pixels thick.
 fn frame(surface: &mut Surface, rect: Rect, color: Color, weight: u32) {
     let weight = weight.min(rect.width).min(rect.height);
-    fill(
+    fill_area(
         surface,
         Rect::new(rect.left(), rect.top(), rect.width, weight),
         color,
     );
-    fill(
+    fill_area(
         surface,
         Rect::new(
             rect.left(),
@@ -633,12 +600,12 @@ fn frame(surface: &mut Surface, rect: Rect, color: Color, weight: u32) {
         ),
         color,
     );
-    fill(
+    fill_area(
         surface,
         Rect::new(rect.left(), rect.top(), weight, rect.height),
         color,
     );
-    fill(
+    fill_area(
         surface,
         Rect::new(
             rect.right().saturating_sub(to_i32(weight)),
@@ -654,7 +621,7 @@ fn frame(surface: &mut Surface, rect: Rect, color: Color, weight: u32) {
 /// parser reports, and the fields that open the view's settings.
 fn status(surface: &mut Surface, view: &View, layout: &Layout, theme: &Theme, font: BitmapFont) {
     let palette = theme.palette();
-    fill(
+    fill_area(
         surface,
         layout.status(),
         Color::from(palette.surface_raised),
@@ -680,7 +647,7 @@ fn status(surface: &mut Surface, view: &View, layout: &Layout, theme: &Theme, fo
     let muted = Color::from(palette.on_surface_muted);
     let ink = Color::from(palette.on_surface);
     let status = layout.status();
-    let y = text_top(status.top(), status.height, font);
+    let y = font.centred_top(status.top(), status.height);
     let draw = |surface: &mut Surface, rect: Rect, words: &str, colour: Color| {
         let fitted = font.truncate_to_width(words, rect.width);
         font.draw_text(surface, rect.left(), y, fitted, colour);

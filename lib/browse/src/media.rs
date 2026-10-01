@@ -421,15 +421,83 @@ const EXTENSION_TABLE: &[(MediaType, &[&str])] = &[
     (MediaType::ArchiveRar, &["rar"]),
 ];
 
-/// The media type a file name's extension implies, if any.
+/// RISC OS file types a name may carry after a comma — how a RISC OS file
+/// keeps its type on a filesystem with no field for one (`Sprites,ff9`) —
+/// for the types this registry knows.
+const FILETYPE_TABLE: &[(MediaType, &str)] = &[
+    (MediaType::ImageSprite, "ff9"),
+    (MediaType::ImagePng, "b60"),
+    (MediaType::ImageJpeg, "c85"),
+    (MediaType::TextPlain, "fff"),
+];
+
+/// What ends a file name: the RISC OS file type after its last comma, when
+/// that is three hex digits, and the extension after the last dot of what
+/// comes before it. Each needs a stem of its own, so a name whose only dot or
+/// comma starts it ends in neither.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Ending<'a> {
+    /// What the ending follows: the whole name when it ends in neither.
+    pub stem: &'a str,
+    /// The file type's three hex digits.
+    pub filetype: Option<&'a str>,
+    /// The extension, without its dot.
+    pub extension: Option<&'a str>,
+}
+
+impl<'a> Ending<'a> {
+    /// What ends `name`.
+    #[must_use]
+    pub fn of(name: &'a str) -> Self {
+        let (rest, filetype) = match name.rsplit_once(',') {
+            Some((stem, filetype))
+                if !stem.is_empty()
+                    && tairix_fsmeta::preset::acorn::filetype_from_value(filetype.as_bytes())
+                        .is_ok() =>
+            {
+                (stem, Some(filetype))
+            }
+            _ => (name, None),
+        };
+        let (stem, extension) = match rest.rsplit_once('.') {
+            Some((stem, extension)) if !stem.is_empty() && !extension.is_empty() => {
+                (stem, Some(extension))
+            }
+            _ => (rest, None),
+        };
+        Self {
+            stem,
+            filetype,
+            extension,
+        }
+    }
+
+    /// Whether the name ends in neither.
+    #[must_use]
+    pub const fn is_none(&self) -> bool {
+        self.filetype.is_none() && self.extension.is_none()
+    }
+}
+
+/// The media type a file name implies, if any: its [`Ending`]'s file type
+/// when that is one the registry knows, else its extension.
 ///
 /// The lookup is ASCII-case-insensitive and allocates no `String`: it splits
-/// the extension off in place and compares it against the static table.
-/// `None` for a name with no extension, a leading-dot dotfile whose only dot
-/// starts the name, or an extension the registry does not recognise.
+/// the suffix off in place and compares it against the static tables.
+/// `None` for a name with neither, or a suffix the registry does not
+/// recognise.
 #[must_use]
 pub fn media_for_name(name: &str) -> Option<MediaType> {
-    let ext = extension(name)?;
+    let ending = Ending::of(name);
+    let known = ending.filetype.and_then(|filetype| {
+        FILETYPE_TABLE
+            .iter()
+            .find(|(_, code)| code.eq_ignore_ascii_case(filetype))
+    });
+    if let Some((media, _)) = known {
+        return Some(*media);
+    }
+    let ext = ending.extension?;
     EXTENSION_TABLE
         .iter()
         .find(|(_, exts)| {
@@ -437,6 +505,40 @@ pub fn media_for_name(name: &str) -> Option<MediaType> {
                 .any(|candidate| candidate.eq_ignore_ascii_case(ext))
         })
         .map(|(media, _)| *media)
+}
+
+/// Every ending the registry knows fits a save pick's bound with its dot in
+/// front, so a requester can offer any of them.
+const _: () = {
+    let mut longest = 0;
+    let mut row = 0;
+    while row < EXTENSION_TABLE.len() {
+        let extensions = EXTENSION_TABLE[row].1;
+        let mut at = 0;
+        while at < extensions.len() {
+            if extensions[at].len() > longest {
+                longest = extensions[at].len();
+            }
+            at += 1;
+        }
+        row += 1;
+    }
+    assert!(longest < tairix_abi::window_ipc::SAVE_ENDING_MAX);
+};
+
+/// The endings a name of `media` is known by — each extension after a `.`,
+/// then its RISC OS file type after a `,` — as [`media_for_name`] reads
+/// them back, most usual first.
+pub fn name_endings(media: MediaType) -> impl Iterator<Item = (char, &'static str)> {
+    let extensions = EXTENSION_TABLE
+        .iter()
+        .filter(move |(held, _)| *held == media)
+        .flat_map(|(_, extensions)| extensions.iter().map(|extension| ('.', *extension)));
+    let filetype = FILETYPE_TABLE
+        .iter()
+        .filter(move |(held, _)| *held == media)
+        .map(|(_, code)| (',', *code));
+    extensions.chain(filetype)
 }
 
 /// The media type of a listed entry, given the components of the directory it
@@ -561,25 +663,6 @@ pub(crate) fn ancestry(media: MediaType) -> impl Iterator<Item = MediaType> {
         Some(current)
     })
     .take(ALL.len())
-}
-
-/// The filename extension of `name`: the text after the final `.`, or `None`
-/// when there is no such dot, the dot is the first byte (a dotfile with no
-/// further extension, e.g. `.profile`), or nothing follows it (`archive.`).
-///
-/// Shared by [`media_for_name`] and the "Open With…" association model so the
-/// two split a name's extension off identically, never each its own copy.
-pub(crate) fn extension(name: &str) -> Option<&str> {
-    let dot = name.rfind('.')?;
-    if dot == 0 {
-        return None;
-    }
-    let ext = name.get(dot + 1..)?;
-    if ext.is_empty() {
-        None
-    } else {
-        Some(ext)
-    }
 }
 
 #[cfg(test)]

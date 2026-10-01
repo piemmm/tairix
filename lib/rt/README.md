@@ -220,7 +220,9 @@ offset, leave that shared cursor untouched, and split a transfer larger than
 `tairix_abi::FS_IO_MAX` across successive syscalls through the same
 `read_fill`/`write_drain` loop rather than a second copy of it;
 `fs_read_full` / `fs_write_all` are the same pair for a descriptor held as a
-number, answering an `Errno`. A program names
+number, answering an `Errno`. `File::regular_len` measures a handed-over
+document with one `fs_stat` — `None` for anything but a regular file, whose
+declared length says nothing about a read. A program names
 a descriptor, never a device (`AGENTS.md` §20). Every capability, identity, and
 per-inode check stays kernel-side behind the secured VFS (`AGENTS.md` §5.4); a
 refusal surfaces as the raw `-errno`. The `open` / `create` / `open_dir` free

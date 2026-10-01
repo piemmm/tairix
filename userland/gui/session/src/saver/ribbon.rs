@@ -333,12 +333,9 @@ fn letter(surface: &mut Surface, block: Option<&Surface>, at: Point, area: Rect)
         return;
     };
     let reach = area.intersection(&Rect::new(at.x, at.y, block.width(), block.height()));
-    let (Ok(x), Ok(y)) = (u32::try_from(reach.left()), u32::try_from(reach.top())) else {
+    let Some((x, y)) = reach.surface_origin() else {
         return;
     };
-    if reach.is_empty() {
-        return;
-    }
     surface.with_clip(x, y, reach.width, reach.height, |surface| {
         surface.blit(at.x, at.y, block);
     });

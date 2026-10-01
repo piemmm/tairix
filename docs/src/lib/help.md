@@ -134,6 +134,14 @@ that sequence lives here once rather than per tool:
   where the image builder plants the documents. Only a freestanding `Run`
   binary enables the feature; the engine itself stays seam-injected and
   performs no ambient I/O.
+- `print_own_short_help(word, usage)` (the `rt` cargo feature) — the whole
+  `-h` of a `Run` binary: `word`'s short help in the user's locale on
+  standard output, else its own `usage` banner, else — for a program with
+  none, as View, Paint and TextEdit have none — the refusal on standard
+  error. A write that fails is stated too, answering `1`.
+- `user_locale()` (the `rt` cargo feature) — the locale the user reads help
+  in, `LANG` when it is UTF-8: the one place every `Run` binary takes it
+  from.
 
 ## The help-tree lint (the `lint` cargo feature)
 

@@ -214,14 +214,44 @@ server and every app's client can never drift apart.
   refuses. Its `resize` is the pane's `resize_with`, so a window the app could
   not draw into is never left on screen.
 
-  A **multi-window** app (the terminal emulator, the file manager, the viewer,
-  the editor) holds its own `WindowPane` per window — and per popup — beside
-  whatever retained picture it actually paints from, and takes the shell's
-  free functions for the rest. `watch_wake` puts a `tairix_rt::work` worker's
+  A **multi-window** app (the terminal emulator, the file manager, the viewer)
+  holds its own `WindowPane` per window — and per popup — beside whatever
+  retained picture it actually paints from, and takes the shell's free
+  functions for the rest. `watch_wake` puts a `tairix_rt::work` worker's
   answer wake on the app's wait-set (nothing to watch for a worker that never
-  started), and `declare_app_bar` declares an icon-bar presence, answering an
-  `AppBarRefused` whose words the app states and carries on — so no app spells
-  either itself.
+  started), `declare_app_bar` declares an icon-bar presence, answering an
+  `AppBarRefused` whose words the app states and carries on, and `report` /
+  `fail` state a reason on `stderr` under the app's name — so no app spells
+  any of them itself.
+
+- **A window's document file** (`document`): where a document came from and
+  is saved to, the save in flight and the saves asked for behind it, and a
+  file chooser open for it — the sequencing apart from the syscalls, so every
+  order is a host test. One save is in flight at a time; plain saves asked in a
+  row become one of the latest document, every Save As is its own, and closing
+  writes every chained save at once. A save that lands renames the document
+  after the file a Save As made, makes it writable and says so, through the
+  `SavedDocument` the application's engine implements.
+- **An application's own menu** (`menu`): `MenuBuilder` builds the bounded
+  `AppMenu` a row at a time, onto the root plate or a submenu, leaving out a
+  row the menu cannot hold rather than the whole menu.
+- **The document host** (`docapp`): a window per document in one resident
+  process. The contract the engine is driven through — `DocumentView`, the
+  `Outcome` an input comes to, the `Request`s every document window makes
+  alike — is host-tested with the engines. On the bare-metal targets `run`
+  is the whole program of an application that edits what the user handed it
+  (TextEdit, Paint): opening, closing and quitting with changes asked about
+  first, the trusted picker, documents handed over on the icon bar, painting
+  only what changed, and the one queue saves are written on in the order
+  asked. A save beyond a window's share of that queue grows it by a room for
+  as long as the save is outstanding, a closing window keeps a room for each
+  save it leaves behind, and the process ends only once every save has landed.
+  What differs per application is `DocumentApp`: reading a document in, its
+  own requests and workers, and its pixels.
+- **A tooltip is asked for once per tool** (`DeclaredTip`): the region a
+  window last asked a tip for, so pointer samples over one tool cost no
+  further request, and a session that refuses tips is not asked again until
+  the tip wanted changes.
 
 The wire format itself lives in `tairix_abi::window_ipc`; this crate adds
 the behaviour. Both halves are host-proven in `src/tests.rs` against an

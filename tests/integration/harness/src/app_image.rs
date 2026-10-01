@@ -1189,6 +1189,7 @@ mod tests {
         assert_eq!(
             names,
             [
+                "Paint",
                 "TextEdit",
                 "applib",
                 "audiod",

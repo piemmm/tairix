@@ -290,3 +290,18 @@ fn the_bound_grows_and_shrinks_without_losing_what_is_held() {
     assert_eq!((queue.collect(), queue.collect()), (Some(10), Some(20)));
     assert_eq!(queue.submit(3), Err(3), "the room given up is gone");
 }
+
+/// What has landed is counted until it is collected, and nothing else is.
+#[test]
+fn landed_counts_answers_until_they_are_collected() {
+    let mut queue = JobQueue::<u32, u32>::with_capacity(2).expect("room for two");
+    queue.submit(1).expect("room");
+    queue.submit(2).expect("room");
+    assert_eq!(queue.landed(), 0, "waiting is not landed");
+    assert_eq!(queue.next_job(), Some(1));
+    assert_eq!(queue.landed(), 0, "in flight is not landed");
+    assert!(queue.deliver(10));
+    assert_eq!(queue.landed(), 1);
+    assert_eq!(queue.collect(), Some(10));
+    assert_eq!(queue.landed(), 0);
+}

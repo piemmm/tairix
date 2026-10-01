@@ -73,9 +73,9 @@ mod program {
     use tairix_greeter_service::screen::LoginScreen;
     use tairix_log::{Event, EventId, Field, FieldValue, Level};
     use tairix_procinfo::{call, IpcTransport};
-    use tairix_rt::io::{Stderr, Write};
     use tairix_rt::LogSink;
     use tairix_theme::{Appearance, ThemeRegistry};
+    use tairix_window::app;
 
     /// Frames in the presented ring: one being scanned out, one being written.
     const FRAME_COUNT: u32 = 2;
@@ -96,12 +96,15 @@ mod program {
     /// The wait set could not be built, so the loop could only busy-poll.
     const EXIT_NO_WAITSET: i32 = 6;
 
-    /// State one reason on `stderr` and answer `code`, so no abnormal exit is
-    /// a bare number. The reason never names an account or a secret.
+    /// The name this program states its refusals under.
+    const APP_NAME: &str = "greeter";
+
+    /// State one reason on `stderr` and in the audit trail and answer `code`,
+    /// so no abnormal exit is a bare number. The reason never names an
+    /// account or a secret.
     fn fail(code: i32, reason: &str) -> i32 {
-        let _ = writeln!(Stderr, "greeter: {reason}");
         record(SCREEN_UNAVAILABLE, Level::Error, reason);
-        code
+        app::fail(APP_NAME, code, reason)
     }
 
     /// The audit sink every record goes through.
@@ -117,7 +120,7 @@ mod program {
                 message,
                 fields: &[Field {
                     key: "service",
-                    value: FieldValue::Str("greeter"),
+                    value: FieldValue::Str(APP_NAME),
                 }],
             },
         );
@@ -188,7 +191,7 @@ mod program {
                 fields: &[
                     Field {
                         key: "service",
-                        value: FieldValue::Str("greeter"),
+                        value: FieldValue::Str(APP_NAME),
                     },
                     Field {
                         key: "reason",
@@ -232,7 +235,7 @@ mod program {
                 fields: &[
                     Field {
                         key: "service",
-                        value: FieldValue::Str("greeter"),
+                        value: FieldValue::Str(APP_NAME),
                     },
                     Field {
                         key: "error",

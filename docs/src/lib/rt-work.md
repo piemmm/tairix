@@ -35,7 +35,10 @@ The desk is the worker's last type parameter, one of a sealed pair (`Desk`):
   the saves of a file. `submit` hands a job back when the bound is full,
   `retain_waiting` withdraws what the owner no longer awaits, and `wait` blocks
   for the next answer, or answers `None` once nothing is outstanding, for an
-  owner seeing its work out before it ends.
+  owner seeing its work out before it ends. `collect_landed` adopts exactly the
+  answers that had landed when it began (`JobQueue::landed`), so a loop's pass
+  is bounded: what lands while it adopts waits for the next wake rather than
+  holding the loop from the input behind it.
 
 ## A machine that grants no worker is slower, never wrong
 
@@ -73,7 +76,10 @@ again on a source that is still ready.
 ## Consumers
 
 * The terminal's settings publisher — a settled slider edit's store write.
-* TextEdit's document worker (a queue) — each window's reads, saves, searches
-  and conversions, answered in turn.
+* The document host's queue (`tairix_window::docapp`) — each window's saves,
+  answered in turn with the editor's own work beside them: TextEdit's reads,
+  searches and conversions, Paint's clipboard encodes, fills and transforms.
+* Paint's decode worker (a queue) — each window's document and paste, read
+  through the sandbox.
 * The Settings application's applier — the desktop session's *Apply* round
   trip, which the session answers only once it has written the store.

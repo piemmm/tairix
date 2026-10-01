@@ -196,6 +196,76 @@ impl Rect {
         let y = clamp_axis(self.origin.y, self.height, screen.top(), screen.bottom());
         Self::new(x, y, self.width, self.height)
     }
+
+    /// This rectangle with `by` pixels taken off every side, or
+    /// [`Rect::EMPTY`] where that leaves nothing.
+    #[must_use]
+    pub fn inset(&self, by: u32) -> Self {
+        let shrink = by.saturating_mul(2);
+        if self.width <= shrink || self.height <= shrink {
+            return Self::EMPTY;
+        }
+        Self::new(
+            self.origin.x.saturating_add_unsigned(by),
+            self.origin.y.saturating_add_unsigned(by),
+            self.width - shrink,
+            self.height - shrink,
+        )
+    }
+
+    /// Cut a band `height` pixels tall — all of it, where there is less — off
+    /// the top, answering the band and leaving the rest.
+    #[must_use]
+    pub fn take_top(&mut self, height: u32) -> Self {
+        let height = height.min(self.height);
+        let band = Self::new(self.left(), self.top(), self.width, height);
+        self.origin.y = self.origin.y.saturating_add_unsigned(height);
+        self.height -= height;
+        band
+    }
+
+    /// Cut a band `height` pixels tall off the bottom, as
+    /// [`take_top`](Self::take_top) does off the top.
+    #[must_use]
+    pub fn take_bottom(&mut self, height: u32) -> Self {
+        let height = height.min(self.height);
+        self.height -= height;
+        Self::new(self.left(), self.bottom(), self.width, height)
+    }
+
+    /// Cut a band `width` pixels wide off the left, as
+    /// [`take_top`](Self::take_top) does off the top.
+    #[must_use]
+    pub fn take_left(&mut self, width: u32) -> Self {
+        let width = width.min(self.width);
+        let band = Self::new(self.left(), self.top(), width, self.height);
+        self.origin.x = self.origin.x.saturating_add_unsigned(width);
+        self.width -= width;
+        band
+    }
+
+    /// Cut a band `width` pixels wide off the right, as
+    /// [`take_top`](Self::take_top) does off the top.
+    #[must_use]
+    pub fn take_right(&mut self, width: u32) -> Self {
+        let width = width.min(self.width);
+        self.width -= width;
+        Self::new(self.right(), self.top(), width, self.height)
+    }
+
+    /// The top-left corner as the unsigned coordinates of a surface pixel, or
+    /// `None` for a rectangle that covers nothing or starts above or left of
+    /// the surface.
+    #[must_use]
+    pub fn surface_origin(&self) -> Option<(u32, u32)> {
+        if self.is_empty() {
+            return None;
+        }
+        Some((
+            u32::try_from(self.origin.x).ok()?,
+            u32::try_from(self.origin.y).ok()?,
+        ))
+    }
 }
 
 /// Shift `origin` so `[origin, origin + extent)` stays within `[low, high)`,

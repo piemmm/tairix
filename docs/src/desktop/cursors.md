@@ -83,7 +83,9 @@ Degenerate cursors and scales fail closed with `None` rather than panicking
 ## Cursor sets
 
 A `CursorTheme` binds one `VectorCursor` to each `tairix_theme::CursorKind`
-(`Arrow`, `Text`, `Pointer`, `Move`, `Busy`, and the four resize double arrows
+(`Arrow`, `Text`, `Pointer`, `Move`, `Busy`, `Crosshair` — four arms that stop
+short of a clear centre, the hotspot, so the pixel under it is never hidden —
+and the four resize double arrows
 `ResizeHorizontal`, `ResizeVertical`, `ResizeDiagonalRising`,
 `ResizeDiagonalFalling`). `tairix_theme::CURSOR_KINDS` is that closed
 vocabulary as a table, so a loader, a cache, or a test iterates every kind
@@ -341,8 +343,8 @@ coded per window action. The window manager's `select` module
 - Each window carries a `cursor_hint` (default `Arrow`). An application sets
   its own window's with the `SetCursor { window_id, shape }` window-channel
   request (`WindowClient::set_cursor`), naming one of the content shapes
-  `CursorShape` allows — `Arrow`, `Text`, `Pointer`, `Busy`; the resize and
-  move shapes are the frame's and cannot be asked for. The session checks the
+  `CursorShape` allows — `Arrow`, `Text`, `Pointer`, `Busy`, `Crosshair`;
+  the resize and move shapes are the frame's and cannot be asked for. The session checks the
   window is the caller's, sets the hint through
   `Compositor::set_window_cursor`, and refreshes the pointer at once. One
   shape per window: content with regions of different kinds restates it as the

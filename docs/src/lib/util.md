@@ -126,15 +126,18 @@ and panic-free throughout.
   a capacity reserved when the queue is made, so a burst is refused rather
   than grown and no later step allocates. An owner whose bound follows what
   it serves grows and shrinks the capacity (`grow`, `shrink`), withdraws
-  requests it no longer awaits (`retain_waiting`), and lands the answer of a
-  job it carried out itself (`land`). The desk is only the
+  requests it no longer awaits (`retain_waiting`), lands the answer of a
+  job it carried out itself (`land`), and reads how many answers wait to be
+  collected (`landed`). The desk is only the
   bookkeeping; the exclusion, the parked worker thread, and the wake that
   reaches a loop's wait-set are `tairix_rt::work`, which every app-side
   consumer drives it through. Consumed by the terminal's settings publisher
   and the Settings application's applier (both via `tairix_rt::work`), the
   desktop
-  session's settings publisher, the session's program-catalogue scan, and the
-  file manager's bundle scan.
+  session's settings publisher, the session's program-catalogue scan, the
+  file manager's bundle scan, the document host's queue
+  (`tairix_window::docapp`, which TextEdit and Paint run in), and Paint's
+  decode queue.
 * `argv` — resolving a value-taking option's value from a command line,
   attached (`-u0`, `--uid=0`) or as the following argument (`-u 0`), so
   every GNU-shaped command app agrees on what a trailing `--uid` is. The

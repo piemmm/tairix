@@ -12,7 +12,7 @@ Stability tier: **experimental**.
 
 ## Capabilities
 
-`CAP_CONSOLE_WRITE`, `CAP_SHM`, `CAP_PROC_SPAWN` — and **no filesystem
+`CAP_CONSOLE_WRITE`, `CAP_SHM`, `CAP_SANDBOX_SPAWN`, `CAP_LOG_EMIT` — and **no filesystem
 capability**. A document reaches the editor only as the user's own act: a
 descriptor Files or the desktop opened for it at launch or on a drop onto its
 icon-bar slot, or a grant the session's trusted picker delegated. The manifest
@@ -20,7 +20,8 @@ declares `document-access = "read-write"`, so a document the user may write
 is handed over writable and Save writes back through it; any other is
 read-only, and Save asks where.
 
-`CAP_PROC_SPAWN` re-enters the binary as a capability-empty worker: colouring,
+`CAP_SANDBOX_SPAWN` re-enters the binary as a capability-empty worker, the one
+process it may start: colouring,
 format detection and settings validation parse untrusted bytes, so none of it
 runs in the editor's address space.
 

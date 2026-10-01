@@ -374,6 +374,17 @@ mod render {
     }
 
     #[test]
+    fn a_line_centres_in_a_band_rounding_up() {
+        let font = BitmapFont::monospace(10);
+        assert_eq!(font.centred_top(20, 30), 30);
+        assert_eq!(font.centred_top(20, 31), 30);
+        assert_eq!(font.centred_top(-5, 12), -4);
+        // A band shorter than the line starts the line at the band.
+        assert_eq!(font.centred_top(7, 4), 7);
+        assert_eq!(font.centred_top(i32::MAX, 100), i32::MAX);
+    }
+
+    #[test]
     fn a_large_font_rasterises_bigger_crisp_glyphs_from_the_outline() {
         install();
         // A size well above native asks the service to rasterise a large

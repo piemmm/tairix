@@ -185,6 +185,31 @@ fn alike(a: u8, b: u8) -> bool {
 }
 
 #[test]
+fn the_crosshair_leaves_the_pixel_it_picks_out_in_view() {
+    for side in SIDES {
+        let image = builtin_image(CursorKind::Crosshair, side);
+        let (hx, hy) = (i64::from(image.hotspot().x), i64::from(image.hotspot().y));
+        assert_eq!(
+            alpha_at(&image, hx, hy),
+            0,
+            "side {side}: the centre is open"
+        );
+        let reach = i64::from(side) * 7 / 32;
+        for (dx, dy) in [(0, -reach), (0, reach), (-reach, 0), (reach, 0)] {
+            assert!(
+                alpha_at(&image, hx + dx, hy + dy) > 0,
+                "side {side}: an arm at ({dx}, {dy})"
+            );
+        }
+        assert_eq!(
+            alpha_at(&image, hx + reach, hy + reach),
+            0,
+            "side {side}: nothing between the arms"
+        );
+    }
+}
+
+#[test]
 fn every_resize_cursor_points_both_ways() {
     // A resize cursor states that an edge can be dragged either way, so its
     // artwork must be unchanged by a half turn about its hotspot. An arrow

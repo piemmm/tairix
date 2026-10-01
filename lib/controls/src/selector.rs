@@ -24,7 +24,7 @@ use tairix_raster::{Color, Surface};
 use tairix_theme::{TextRole, Theme};
 
 use crate::paint::{
-    key_activation, paint_bead, paint_plate, paint_run, plate_border, pointer_activation,
+    inset, key_activation, paint_bead, paint_plate, paint_run, plate_border, pointer_activation,
     resolve_bead, resolve_frame, resolve_mark, resolve_rail, role_font, surface_rect, to_i32,
     withheld, PlateStyle,
 };
@@ -241,19 +241,8 @@ fn paint_box(
         },
     );
 
-    inner_rect(box_rect, border)
-}
-
-/// The content rectangle inside a plate's rim border, or `None` when the plate
-/// collapses under its own border.
-fn inner_rect(box_rect: (u32, u32, u32, u32), border: u32) -> Option<(u32, u32, u32, u32)> {
     let (x, y, w, h) = box_rect;
-    let iw = w.checked_sub(border.saturating_mul(2))?;
-    let ih = h.checked_sub(border.saturating_mul(2))?;
-    if iw == 0 || ih == 0 {
-        return None;
-    }
-    Some((x + border, y + border, iw, ih))
+    inset(x, y, w, h, border)
 }
 
 /// The rectangle a square selector's value mark fills for `bounds` under the
@@ -266,8 +255,8 @@ pub(crate) fn selector_mark_rect(
     scale: Scale,
     theme: &Theme,
 ) -> Option<(u32, u32, u32, u32)> {
-    let glyph = square_glyph_rect(bounds, scale, theme)?;
-    mark_rect(inner_rect(glyph, plate_border(theme, scale))?)
+    let (x, y, w, h) = square_glyph_rect(bounds, scale, theme)?;
+    mark_rect(inset(x, y, w, h, plate_border(theme, scale))?)
 }
 
 /// Inset a plate rectangle by a small proportional margin so a glyph mark
@@ -276,13 +265,7 @@ pub(crate) fn selector_mark_rect(
 /// scales with density. Returns `None` if the mark would collapse.
 fn mark_rect(inner: (u32, u32, u32, u32)) -> Option<(u32, u32, u32, u32)> {
     let (ix, iy, iw, ih) = inner;
-    let margin = (iw.min(ih) / 5).max(1);
-    let mw = iw.checked_sub(margin.saturating_mul(2))?;
-    let mh = ih.checked_sub(margin.saturating_mul(2))?;
-    if mw == 0 || mh == 0 {
-        return None;
-    }
-    Some((ix + margin, iy + margin, mw, mh))
+    inset(ix, iy, iw, ih, (iw.min(ih) / 5).max(1))
 }
 
 /// The label, role, composed state, and pointer/press latch shared by every

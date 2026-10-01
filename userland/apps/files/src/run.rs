@@ -158,7 +158,6 @@ mod program {
     use tairix_controls::decision::Dialog;
     use tairix_controls::text::{Keystroke, TextAction, TextField};
     use tairix_geometry::{Point, Rect, Region, Scale};
-    use tairix_help::{own_short_help, BundleHelp};
     use tairix_icon::{
         artwork_cache, render_artwork, ArtworkDesk, ArtworkJob, ArtworkKey, ArtworkRasteriser,
         ArtworkReader, ArtworkResolver, IconRequest, InlineArtwork, Resolved, MAX_ARTWORK_BYTES,
@@ -166,10 +165,10 @@ mod program {
     use tairix_input::{ClickKind, DoubleClickTracker, Key, Modifiers, NamedKey, PointerButton};
     use tairix_procinfo::{IpcTransport, WalkStep};
     use tairix_raster::Surface;
-    use tairix_rt::io::{self, Stderr, Stdout, Write};
+    use tairix_rt::io::{Stderr, Write};
     use tairix_sandbox::imagerender::{rasterise_icon, ImageRenderService};
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
-    use tairix_sandbox::{ParserSandbox, ServeEnd};
+    use tairix_sandbox::ParserSandbox;
     use tairix_theme::{Grounds, Theme, ThemeRegistry};
     use tairix_window::app::{self, Wake, WindowPane};
     use tairix_window::{
@@ -238,18 +237,8 @@ mod program {
         }
     }
 
-    /// State the abnormal-exit reason on `stderr` (fail loud: an exit
-    /// code alone is not a diagnosis) and hand back `code` for `main`.
-    fn fail(code: i32, reason: &str) -> i32 {
-        let _ = writeln!(Stderr, "files: {reason}");
-        code
-    }
-
-    /// State a shared-shell bring-up refusal and hand its reserved code back.
-    fn fail_shell(err: app::ShellError) -> i32 {
-        let _ = writeln!(Stderr, "files: {err}");
-        err.code()
-    }
+    /// The name this program states its refusals under.
+    const APP_NAME: &str = "files";
 
     /// Declare (or re-declare) this process's presence on the desktop's icon
     /// bar, as its `role` decides.
@@ -1327,7 +1316,11 @@ mod program {
         )
         .is_err()
         {
-            return Some(fail(app::EXIT_CHANNEL_LOST, "present refused"));
+            return Some(app::fail(
+                APP_NAME,
+                app::EXIT_CHANNEL_LOST,
+                "present refused",
+            ));
         }
         // The window this round asked for, opened once its own window's borrow
         // has ended.
@@ -1375,7 +1368,11 @@ mod program {
             return None;
         }
         if present_whole(win, client, grounds, icons, scale).is_err() {
-            return Some(fail(app::EXIT_CHANNEL_LOST, "present refused"));
+            return Some(app::fail(
+                APP_NAME,
+                app::EXIT_CHANNEL_LOST,
+                "present refused",
+            ));
         }
         None
     }
@@ -1418,7 +1415,11 @@ mod program {
             return None;
         }
         if present_window(win, client, grounds, icons, scale, repaint, &damage).is_err() {
-            return Some(fail(app::EXIT_CHANNEL_LOST, "present refused"));
+            return Some(app::fail(
+                APP_NAME,
+                app::EXIT_CHANNEL_LOST,
+                "present refused",
+            ));
         }
         None
     }
@@ -1527,26 +1528,30 @@ mod program {
             let path = match client.take_open_target() {
                 Ok(Some(Target::Path(path))) => path,
                 Ok(Some(Target::Document { name, .. })) => {
-                    let _ = writeln!(
-                        Stderr,
-                        "files: {name} was handed over as a document; this is a file manager, \
+                    app::report(
+                        APP_NAME,
+                        format_args!(
+                            "{name} was handed over as a document; this is a file manager, \
                          which opens what it is given by name"
+                        ),
                     );
                     continue;
                 }
                 // A window on a folder is what this opens; it has no panes
                 // for a launch to name.
                 Ok(Some(Target::Pane(pane))) => {
-                    let _ = writeln!(
-                        Stderr,
-                        "files: {pane} was handed over, but this is a file manager and has no \
+                    app::report(
+                        APP_NAME,
+                        format_args!(
+                            "{pane} was handed over, but this is a file manager and has no \
                          places of that name"
+                        ),
                     );
                     continue;
                 }
                 Ok(None) => return,
                 Err(err) => {
-                    let _ = writeln!(Stderr, "files: cannot take an open target: {err}");
+                    app::report(APP_NAME, format_args!("cannot take an open target: {err}"));
                     return;
                 }
             };
@@ -1565,7 +1570,7 @@ mod program {
                 // Stated and skipped: the *next* target may well be fine, so
                 // one bad spelling must not abandon the drain.
                 Err(reason) => {
-                    let _ = writeln!(Stderr, "files: {reason}");
+                    app::report(APP_NAME, reason);
                 }
             }
         }
@@ -2650,7 +2655,10 @@ mod program {
         match app::adopt_desktop(desktop, themes) {
             Ok(changed) => changed,
             Err(err) => {
-                let _ = writeln!(Stderr, "files: could not adopt the desktop change: {err}");
+                app::report(
+                    APP_NAME,
+                    format_args!("could not adopt the desktop change: {err}"),
+                );
                 false
             }
         }
@@ -4297,7 +4305,10 @@ mod program {
     /// the leaf name the user already sees.
     fn report_trash_item_error(source: &[String], reason: &str) {
         let name = source.last().map_or("", String::as_str);
-        let _ = writeln!(Stderr, "files: could not move {name} to Trash: {reason}");
+        app::report(
+            APP_NAME,
+            format_args!("could not move {name} to Trash: {reason}"),
+        );
     }
 
     /// Read the children of the directory at `path`: each child's leaf name
@@ -4355,7 +4366,7 @@ mod program {
     /// the user already sees.
     fn report_delete_refused(path: &[String]) {
         let name = path.last().map_or("", String::as_str);
-        let _ = writeln!(Stderr, "files: could not delete {name}");
+        app::report(APP_NAME, format_args!("could not delete {name}"));
     }
 
     /// State a `files:`-prefixed diagnosis on `stderr` — the one fail-loud
@@ -4363,7 +4374,7 @@ mod program {
     /// unspellable path, a rejected paste plan, an internal step error) states
     /// its reason through, shared by the delete and paste drives.
     fn report_error(reason: &str) {
-        let _ = writeln!(Stderr, "files: {reason}");
+        app::report(APP_NAME, reason);
     }
 
     /// One clipboard verb the keyboard invokes in navigation mode.
@@ -5015,7 +5026,7 @@ mod program {
     /// the leaf name the user already sees.
     fn report_paste_item_error(source: &[String], reason: &str) {
         let name = source.last().map_or("", String::as_str);
-        let _ = writeln!(Stderr, "files: could not paste {name}: {reason}");
+        app::report(APP_NAME, format_args!("could not paste {name}: {reason}"));
     }
 
     /// Route one primary-button press at window-local `point` in navigation
@@ -5391,7 +5402,7 @@ mod program {
             }
             Err(err) => {
                 let msg = err.message();
-                let _ = writeln!(Stderr, "files: {msg}");
+                app::report(APP_NAME, msg);
                 (false, false)
             }
         }
@@ -5941,16 +5952,16 @@ mod program {
         toolbar: ToolbarBand,
     ) -> (bool, bool) {
         let Some(home) = home_components() else {
-            io::write_stderr_line("files: no home directory, so no Trash");
+            app::report(APP_NAME, "no home directory, so no Trash");
             return (false, false);
         };
         if home.is_empty() {
-            io::write_stderr_line("files: no home directory, so no Trash");
+            app::report(APP_NAME, "no home directory, so no Trash");
             return (false, false);
         }
         let trash = trash_dir(&home);
         if !ensure_trash_dir(&trash) {
-            io::write_stderr_line("files: the Trash folder is unavailable");
+            app::report(APP_NAME, "the Trash folder is unavailable");
             return (false, false);
         }
         match browser.navigate_to(trash) {
@@ -5961,7 +5972,7 @@ mod program {
             // Already in the Trash, or (fail closed) it could not be listed.
             Ok(false) => (false, false),
             Err(_) => {
-                io::write_stderr_line("files: the Trash folder could not be opened");
+                app::report(APP_NAME, "the Trash folder could not be opened");
                 (false, false)
             }
         }
@@ -5996,7 +6007,7 @@ mod program {
             return (false, false);
         }
         let Ok(children) = removal_children(&trash) else {
-            io::write_stderr_line("files: could not read the Trash folder");
+            app::report(APP_NAME, "could not read the Trash folder");
             return (false, false);
         };
         match empty_trash_plan(&trash, &children) {
@@ -6016,7 +6027,7 @@ mod program {
             Ok(None) => (false, false),
             Err(err) => {
                 let msg = err.message();
-                let _ = writeln!(Stderr, "files: {msg}");
+                app::report(APP_NAME, msg);
                 (false, false)
             }
         }
@@ -6053,7 +6064,7 @@ mod program {
             Ok(()) => begin_rename(browser, rename, scale, theme, viewport, toolbar),
             Err(err) => {
                 let msg = err.message();
-                let _ = writeln!(Stderr, "files: {msg}");
+                app::report(APP_NAME, msg);
                 (false, false)
             }
         }
@@ -6567,20 +6578,24 @@ mod program {
         // offered back as nothing at all: the volume, not the kernel, decided
         // those bytes.
         let Some(key) = attr.key_text() else {
-            let _ = writeln!(
-                Stderr,
-                "files: {} has a key that cannot be edited as text",
-                attr.key_display()
+            app::report(
+                APP_NAME,
+                format_args!(
+                    "{} has a key that cannot be edited as text",
+                    attr.key_display()
+                ),
             );
             return true;
         };
         let line = if let Some(text) = attr.text() {
             alloc::format!("{key} = {text}")
         } else {
-            let _ = writeln!(
-                Stderr,
-                "files: {key} holds bytes that cannot be edited as text; \
+            app::report(
+                APP_NAME,
+                format_args!(
+                    "{key} holds bytes that cannot be edited as text; \
                  its key is offered without them"
+                ),
             );
             alloc::format!("{key} = ")
         };
@@ -6619,7 +6634,7 @@ mod program {
             }
             Err(err) => {
                 let msg = err.message();
-                let _ = writeln!(Stderr, "files: {msg}");
+                app::report(APP_NAME, msg);
                 (Repaint::Nothing, false)
             }
         }
@@ -6719,7 +6734,10 @@ mod program {
             let errno = Errno::from_syscall(ret);
             win.editor
                 .set_message(Some(alloc::format!("refused: {errno}")));
-            let _ = writeln!(Stderr, "files: {} could not be set: {errno}", key.as_str());
+            app::report(
+                APP_NAME,
+                format_args!("{} could not be set: {errno}", key.as_str()),
+            );
             return (Repaint::Whole, false);
         }
         win.editor = attribute_editor();
@@ -6750,7 +6768,10 @@ mod program {
             let errno = Errno::from_syscall(ret);
             win.editor
                 .set_message(Some(alloc::format!("refused: {errno}")));
-            let _ = writeln!(Stderr, "files: {shown} could not be removed: {errno}");
+            app::report(
+                APP_NAME,
+                format_args!("{shown} could not be removed: {errno}"),
+            );
             return (Repaint::Whole, false);
         }
         reads.want_properties(win.job(window_id));
@@ -6904,7 +6925,8 @@ mod program {
     /// capability — a process may always wait on its own children — so a
     /// refusal here is a genuine bring-up failure.
     fn bind_event_mailbox() -> Result<(u64, u64), i32> {
-        let binding = app::bind_event_mailbox().map_err(fail_shell)?;
+        let binding =
+            app::bind_event_mailbox().map_err(|err| app::fail(APP_NAME, err.code(), err))?;
         if tairix_rt::waitset_ctl(
             binding.set(),
             WaitSetOp::Add,
@@ -6913,7 +6935,11 @@ mod program {
             CHILD_TOKEN,
         ) != 0
         {
-            return Err(fail(app::EXIT_NO_EVENTS, "child wait refused"));
+            return Err(app::fail(
+                APP_NAME,
+                app::EXIT_NO_EVENTS,
+                "child wait refused",
+            ));
         }
         Ok((binding.endpoint(), binding.set()))
     }
@@ -6942,21 +6968,6 @@ mod program {
     fn holds_chown() -> bool {
         tairix_rt::self_origin()
             .is_ok_and(|origin| origin.capabilities().holds_cap(CapabilityId::FS_CHOWN))
-    }
-
-    /// Render `files`'s own short help (`NAME` + `SYNOPSIS` + compact
-    /// `OPTIONS`) from its own bundle's `Help/` tree through the one shared
-    /// engine; when no document can be served (a build without the bundle's
-    /// documents) the usage banner stands in — the program's own text, not
-    /// fabricated help content — so `-h` never fails.
-    fn short_help() -> i32 {
-        let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
-        let bytes = own_short_help(&BundleHelp::new("files"), locale, "files")
-            .unwrap_or_else(|| alloc::format!("{USAGE}\n").into_bytes());
-        match Stdout.write_all(&bytes) {
-            Ok(()) => 0,
-            Err(_) => 1,
-        }
     }
 
     /// State a command line the program cannot act on — the reason, then the
@@ -7072,11 +7083,7 @@ mod program {
         // its wired standard streams and nothing else — it never becomes the
         // file manager.
         if worker_role() {
-            let mut service = ImageRenderService::default();
-            return match serve_stdio(&mut service) {
-                ServeEnd::Finished | ServeEnd::Ended => 0,
-                ServeEnd::Failed(_) => 1,
-            };
+            return serve_stdio(&mut ImageRenderService::default()).exit_code();
         }
 
         // From here this task drives a user-facing loop, so declare the
@@ -7094,7 +7101,7 @@ mod program {
             .and_then(|arguments| command::parse(&arguments));
         let start = match parsed {
             Ok(Command::Open(start)) => start,
-            Ok(Command::Help) => return short_help(),
+            Ok(Command::Help) => return tairix_help::print_own_short_help(APP_NAME, Some(USAGE)),
             Err(err) => return usage_error(&alloc::format!("{err}")),
         };
 
@@ -7111,10 +7118,11 @@ mod program {
         let mut client = WindowClient::new(app::RtWindowTransport);
         let (mut desktop, mut themes) = match app::bring_up_desktop(&mut client) {
             Ok(pair) => pair,
-            Err(err) => return fail_shell(err),
+            Err(err) => return app::fail(APP_NAME, err.code(), err),
         };
         let Some(server) = client.session() else {
-            return fail(
+            return app::fail(
+                APP_NAME,
                 app::EXIT_NO_WINDOW,
                 "the desktop session did not identify itself",
             );
@@ -7178,9 +7186,10 @@ mod program {
         // handle detaches.
         let _reads_guard = ReadsGuard(alloc::sync::Arc::clone(&reads));
         if let Err(err) = app::watch_wake(set, &reads.wake, READS_TOKEN) {
-            return fail(
+            return app::fail(
+                APP_NAME,
                 app::EXIT_NO_EVENTS,
-                &alloc::format!("reader wake wait refused ({err})"),
+                format_args!("reader wake wait refused ({err})"),
             );
         }
         // The places rail is what is mounted, so it converges on the mount
@@ -7195,7 +7204,7 @@ mod program {
             MOUNTS_TOKEN,
         ) != 0
         {
-            return fail(app::EXIT_NO_EVENTS, "mount-change wake refused");
+            return app::fail(APP_NAME, app::EXIT_NO_EVENTS, "mount-change wake refused");
         }
 
         let icons = {
@@ -7239,7 +7248,7 @@ mod program {
             )
             .is_err()
             {
-                return fail(app::EXIT_CHANNEL_LOST, "first present refused");
+                return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "first present refused");
             }
             windows.push(win);
         }
@@ -7306,7 +7315,7 @@ mod program {
                 )
                 .is_err()
                 {
-                    return fail(app::EXIT_CHANNEL_LOST, "present refused");
+                    return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "present refused");
                 }
                 if finished {
                     // Re-list so the view reflects what actually remains — a
@@ -7329,7 +7338,7 @@ mod program {
                     )
                     .is_err()
                     {
-                        return fail(app::EXIT_CHANNEL_LOST, "present refused");
+                        return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "present refused");
                     }
                     continue;
                 }
@@ -7403,7 +7412,7 @@ mod program {
                     // carries on (never guessed at).
                     Ok(None) | Err(EventError::Undecodable(_)) => {}
                     Err(EventError::Mailbox(_)) => {
-                        return fail(app::EXIT_CHANNEL_LOST, "event channel lost")
+                        return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "event channel lost")
                     }
                 }
                 continue;
@@ -7423,7 +7432,7 @@ mod program {
                         if redraw_for_desktop(&mut windows, &mut client, &desktop, grounds, &icons)
                             .is_err()
                         {
-                            return fail(app::EXIT_CHANNEL_LOST, "present refused");
+                            return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "present refused");
                         }
                         continue;
                     }
@@ -7459,7 +7468,11 @@ mod program {
                             )
                             .is_err()
                             {
-                                return fail(app::EXIT_CHANNEL_LOST, "present refused");
+                                return app::fail(
+                                    APP_NAME,
+                                    app::EXIT_CHANNEL_LOST,
+                                    "present refused",
+                                );
                             }
                         }
                         continue;
@@ -7509,7 +7522,11 @@ mod program {
                             )
                             .is_err()
                             {
-                                return fail(app::EXIT_CHANNEL_LOST, "present refused");
+                                return app::fail(
+                                    APP_NAME,
+                                    app::EXIT_CHANNEL_LOST,
+                                    "present refused",
+                                );
                             }
                         }
                         continue;
@@ -7539,7 +7556,11 @@ mod program {
                             )
                             .is_err()
                             {
-                                return fail(app::EXIT_CHANNEL_LOST, "present refused");
+                                return app::fail(
+                                    APP_NAME,
+                                    app::EXIT_CHANNEL_LOST,
+                                    "present refused",
+                                );
                             }
                         }
                         if shown {
@@ -7579,7 +7600,11 @@ mod program {
                             )
                             .is_err()
                             {
-                                return fail(app::EXIT_CHANNEL_LOST, "present refused");
+                                return app::fail(
+                                    APP_NAME,
+                                    app::EXIT_CHANNEL_LOST,
+                                    "present refused",
+                                );
                             }
                         }
                         // A batch that answered nothing this window is showing
@@ -7603,7 +7628,11 @@ mod program {
                             )
                             .is_err()
                             {
-                                return fail(app::EXIT_CHANNEL_LOST, "present refused");
+                                return app::fail(
+                                    APP_NAME,
+                                    app::EXIT_CHANNEL_LOST,
+                                    "present refused",
+                                );
                             }
                         }
                         continue;
@@ -7625,7 +7654,7 @@ mod program {
                 // refused and the app keeps waiting (never guessed at).
                 Err(EventError::Undecodable(_)) => continue,
                 Err(EventError::Mailbox(_)) => {
-                    return fail(app::EXIT_CHANNEL_LOST, "event channel lost")
+                    return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "event channel lost")
                 }
             };
 
@@ -7635,7 +7664,7 @@ mod program {
                 let grounds = themes.grounds(MANAGER_WINDOW_GROUND);
                 if redraw_for_desktop(&mut windows, &mut client, &desktop, grounds, &icons).is_err()
                 {
-                    return fail(app::EXIT_CHANNEL_LOST, "present refused");
+                    return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "present refused");
                 }
             }
 

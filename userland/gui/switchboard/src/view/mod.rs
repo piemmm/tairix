@@ -1551,7 +1551,7 @@ impl Switchboard {
     /// Lay the window's ground over the whole client area: the theme's base
     /// surface, at the ground's own weight when the window is glass.
     fn fill_client(surface: &mut Surface, bounds: Rect, theme: &Theme) {
-        let (Ok(x), Ok(y)) = (u32::try_from(bounds.left()), u32::try_from(bounds.top())) else {
+        let Some((x, y)) = bounds.surface_origin() else {
             return;
         };
         let ground = ground_fill(theme, theme.palette().surface, ChromeLayer::Ground);

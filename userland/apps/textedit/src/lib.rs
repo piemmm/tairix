@@ -11,7 +11,6 @@ extern crate alloc;
 pub mod detect;
 pub mod document;
 pub mod editor;
-pub mod file;
 pub mod find;
 pub mod hex;
 pub mod highlight;

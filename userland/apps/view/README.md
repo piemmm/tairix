@@ -26,17 +26,18 @@ for a file it must always refuse (`plans/VIEW.md`).
 
 ## Capabilities
 
-`CAP_CONSOLE_WRITE`, `CAP_SHM`, `CAP_PROC_SPAWN` — and **no filesystem
+`CAP_CONSOLE_WRITE`, `CAP_SHM`, `CAP_SANDBOX_SPAWN`, `CAP_LOG_EMIT` — and **no filesystem
 capability at all**. A document reaches the viewer only as the user's own act:
 
 * a read-only descriptor the file manager had the kernel clone in at spawn, or
 * a one-shot `fd_grant` the session's trusted picker delegated, which
   `fd_redeem` installs.
 
-`CAP_PROC_SPAWN` is what lets the viewer re-enter its own binary as a
-capability-empty decoder. A document is untrusted input and is never decoded
-in the viewer's address space: the worker holds nothing but its two wired
-pipes, so it has strictly less authority than the viewer, and a malformed or
+`CAP_SANDBOX_SPAWN` is what lets the viewer re-enter its own binary as a
+capability-empty decoder, the only kind of child it starts. A document is
+untrusted input and is never decoded in the viewer's address space: the
+worker holds nothing but its two wired pipes, so it has strictly less
+authority than the viewer, and a malformed or
 hostile file crashes it and nothing else.
 
 ## Where the work lives

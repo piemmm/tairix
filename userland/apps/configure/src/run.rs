@@ -233,7 +233,7 @@ mod program {
             write_stderr_line(USAGE);
             return 2;
         };
-        let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
+        let locale = tairix_help::user_locale();
         // The tool's own bundle's `Help/` tree, read through the shared
         // syscall-backed source for the short-help switches.
         match run(

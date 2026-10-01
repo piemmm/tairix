@@ -1,0 +1,80 @@
+[package]
+name = "tairix-paint"
+description = "TAIRiX Paint: the desktop image editor — pixel editing and painting in truecolour or a palette, reading every picture format TAIRiX decodes and writing PNG, JPEG and RISC OS sprite areas at every depth, holding no filesystem capability and decoding nothing of its documents itself (plans/PAINT.md)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The `abi-v1` `Errno`, the window-channel menu vocabulary, and the desktop's
+# scroll units the engine speaks.
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The shared Reactive Alloy controls the window composes: the toolbar, the
+# scrollbars, the sliders and toggles, the palette's swatch grid, and the
+# dialogs.
+tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
+# Shared text rasterisation: the status band and the tool panel.
+tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
+# The shared integer screen geometry the layout and every hit-test use.
+tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
+# The built-in glyphs the toolbar's tools draw.
+tairix-icon = { path = "../../../lib/icon", version = "=0.0.0" }
+# The picture model, the RISC OS sprite model and desktop palettes, and the
+# PNG, JPEG and sprite-area encoders a save runs.
+tairix-image = { path = "../../../lib/image", version = "=0.0.0" }
+# The shared desktop input vocabulary and the one click-pairing rule.
+tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
+# Shared software rasterisation: the window picture, and the one resampler a
+# smooth resize goes through.
+tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
+# The memory-pressure band the undo history is sized for.
+tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
+# The shared non-cryptographic generator the spray scatters paint by.
+tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
+# The edit decode's vocabulary, so the document a load assembles is built
+# from the seam's own checked answers.
+tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0" }
+# The one extension registry a document's name is typed by, and the title
+# fitting every document window shares.
+tairix-browse = { path = "../../../lib/browse", version = "=0.0.0" }
+# The shared desktop theme.
+tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
+# Fallible buffers for everything sized by a picture.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
+# A window's document file: its saves and file choosers. The engine needs
+# none of the runtime.
+tairix-window = { path = "../../../lib/window", version = "=0.0.0", default-features = false }
+
+# The package is both the host-tested editor engine and the `Run` entry-point
+# binary of the on-disk `Paint.app` bundle: a freestanding pure-Rust program
+# on the native Tier-1 targets and an inert host stub elsewhere.
+[[bin]]
+name = "tairix-paint-run"
+path = "src/run.rs"
+
+# Everything only the freestanding `Run` binary links.
+[target.'cfg(target_os = "none")'.dependencies]
+# The app half of the window channel: the document host the editor runs in
+# and the clipboard client.
+tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
+# The pure-Rust userland runtime: `_start`, the allocator, the file calls and
+# the worker desks the decoder and the writer run on.
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+# The glyph service the status band and panels are set through.
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt"] }
+# The bundle's own `Help/` tree, read for the short `-h` surface.
+tairix-help = { path = "../../../lib/help", version = "=0.0.0", features = ["rt"] }
+# The sandbox's worker-role side: `serve_stdio`, `worker_role` and the
+# launcher that re-enters this binary as its capability-empty decoder.
+tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0", features = ["program"] }
+
+[dev-dependencies]
+# The engine's host tests measure and draw text, so they use the shared solid
+# test transport rather than reaching a running `fontd`.
+tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["test-util"] }

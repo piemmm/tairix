@@ -87,3 +87,5 @@ workspace = true
 # the start of the test, and bounds the smoke/soak loop. Test scaffolding only;
 # never in a TAIRiX build.
 tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }
+# The CRC-32 the PNG fixtures frame their chunks with.
+tairix-crc32 = { path = "../crc32", version = "=0.0.0" }

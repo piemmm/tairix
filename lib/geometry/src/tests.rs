@@ -168,3 +168,51 @@ fn center_saturates_rather_than_wrapping() {
 fn center_of_the_empty_rect_is_its_origin() {
     assert_eq!(Rect::new(7, 9, 0, 0).center(), Point::new(7, 9));
 }
+
+#[test]
+fn inset_takes_the_margin_off_every_side() {
+    assert_eq!(
+        Rect::new(10, 20, 30, 40).inset(4),
+        Rect::new(14, 24, 22, 32)
+    );
+    assert_eq!(
+        Rect::new(-10, -20, 30, 40).inset(0),
+        Rect::new(-10, -20, 30, 40)
+    );
+}
+
+#[test]
+fn inset_past_the_middle_leaves_nothing() {
+    assert_eq!(Rect::new(10, 20, 8, 40).inset(4), Rect::EMPTY);
+    assert_eq!(Rect::new(10, 20, 40, 7).inset(4), Rect::EMPTY);
+    assert_eq!(Rect::new(0, 0, 40, 40).inset(u32::MAX), Rect::EMPTY);
+}
+
+#[test]
+fn taking_bands_partitions_the_rectangle() {
+    let mut rest = Rect::new(5, 7, 100, 60);
+    assert_eq!(rest.take_top(10), Rect::new(5, 7, 100, 10));
+    assert_eq!(rest.take_bottom(12), Rect::new(5, 55, 100, 12));
+    assert_eq!(rest.take_left(20), Rect::new(5, 17, 20, 38));
+    assert_eq!(rest.take_right(30), Rect::new(75, 17, 30, 38));
+    assert_eq!(rest, Rect::new(25, 17, 50, 38));
+}
+
+#[test]
+fn a_band_wider_than_the_rest_takes_all_of_it() {
+    let mut rest = Rect::new(0, 0, 10, 8);
+    assert_eq!(rest.take_top(20), Rect::new(0, 0, 10, 8));
+    assert!(rest.is_empty());
+    assert_eq!(rest.take_left(5), Rect::new(0, 8, 5, 0));
+    let mut rest = Rect::new(0, 0, 10, 8);
+    assert_eq!(rest.take_right(u32::MAX), Rect::new(0, 0, 10, 8));
+    assert_eq!(rest.width, 0);
+}
+
+#[test]
+fn surface_origin_refuses_what_a_surface_cannot_address() {
+    assert_eq!(Rect::new(3, 4, 5, 6).surface_origin(), Some((3, 4)));
+    assert_eq!(Rect::new(-1, 4, 5, 6).surface_origin(), None);
+    assert_eq!(Rect::new(3, -4, 5, 6).surface_origin(), None);
+    assert_eq!(Rect::new(3, 4, 0, 6).surface_origin(), None);
+}

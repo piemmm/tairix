@@ -54,6 +54,10 @@ pub trait Channel {
     /// The transport's typed failure (e.g. [`Errno::BrokenPipe`] once no
     /// reader remains).
     fn write(&mut self, buf: &[u8]) -> Result<usize, Errno>;
+
+    /// A request is about to be sent and its answer awaited: a transport
+    /// that bounds how long an answer may take starts that clock here.
+    fn begin_exchange(&mut self) {}
 }
 
 /// Typed framing failure.

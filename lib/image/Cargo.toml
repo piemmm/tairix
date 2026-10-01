@@ -1,6 +1,6 @@
 [package]
 name = "tairix-image"
-description = "First-party TAIRiX raster-image decoding: complete, fail-closed PNG, JPEG, GIF, BMP, ICO/CUR, RISC OS sprite and TIFF decoders for untrusted artwork, with reduced-scale JPEG decode for wallpapers and one sequence shape for multi-frame and multi-page containers (`lib/`)."
+description = "First-party TAIRiX raster images: complete, fail-closed PNG, JPEG, GIF, BMP, ICO/CUR, RISC OS sprite, TIFF and WEBP decoders for untrusted artwork, with reduced-scale JPEG decode for wallpapers and one sequence shape for multi-frame and multi-page containers, and the PNG, JPEG and sprite-area encoders an editor saves with (`lib/`)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,10 +13,11 @@ workspace = true
 
 [dependencies]
 # PNG's `IDAT` chunk stream is zlib-wrapped DEFLATE (RFC 1950/1951); the
-# decode-only `inflate`/`zlib` modules there are the crate's one definition
-# of that foreign-format interoperability, so PNG decoding never carries a
-# second copy of it.
+# `inflate`/`zlib` modules there are the one definition of that foreign
+# format, so PNG reading and writing never carry a second copy of it.
 tairix-compress = { path = "../compress", version = "=0.0.0" }
+# The CRC-32 every PNG chunk is framed with, shared with GPT.
+tairix-crc32 = { path = "../crc32", version = "=0.0.0" }
 # The one shared fallible-allocation reservation: a decoded image's row and
 # output buffers are sized by the file's own declared geometry, bounded by the
 # decode limits but still megabytes at master resolution, so a machine short of

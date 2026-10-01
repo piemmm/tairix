@@ -30,15 +30,15 @@
 //! while a previously-trashed `notes.txt` is still there. [`trash_dest_path`]
 //! resolves a destination *inside* the Trash directory that no existing entry
 //! carries: the original leaf when it is free, otherwise the smallest ` (n)`
-//! disambiguation inserted before the extension (`notes (2).txt`,
-//! `notes (3).txt`, …). It never overwrites an existing trashed item (no silent
+//! disambiguation inserted before its ending (`notes (2).txt`,
+//! `Logo (2),b60`, …). It never overwrites an existing trashed item (no silent
 //! clobber) and is fail closed: it refuses a Trash directory that names the
 //! root, an invalid original name, a disambiguation that would exceed the
 //! per-name length limit, and a search that cannot find a free name within
 //! [`MAX_TRASH_NAME_ATTEMPTS`].
 //!
-//! The extension split reuses the one shared [`crate::media`] extension rule, so
-//! the disambiguation lands before the same extension the content-type registry
+//! The ending is the one shared [`crate::media::Ending`], so the disambiguation
+//! lands before the same extension and file type the content-type registry
 //! classifies icons and "Open With…" associations by.
 //!
 //! # Emptying the Trash
@@ -62,7 +62,7 @@ use tairix_path::validate_file_name;
 
 use crate::delete::DeletePlan;
 use crate::execute::VolumeId;
-use crate::media::extension;
+use crate::media::Ending;
 
 /// How a single delete target must be removed: a cheap recoverable move into
 /// Trash, or the irreversible unlink.
@@ -263,7 +263,7 @@ impl TrashError {
 /// Returns the full root-first component path the item should be renamed to:
 /// `trash_dir` with the resolved leaf appended. When `leaf` is free the leaf is
 /// used unchanged; otherwise the smallest ` (n)` disambiguation (n ≥ 2) that no
-/// entry in `taken` carries is inserted before the extension.
+/// entry in `taken` carries is inserted before the leaf's ending.
 ///
 /// Pure and fail closed: it performs no I/O, makes no permission decision (that
 /// is the VFS's at rename time), and never returns a path that would overwrite
@@ -305,18 +305,11 @@ fn resolve_trash_name(leaf: &str, taken: &[String]) -> Result<String, TrashError
     if !is_taken(taken, leaf) {
         return Ok(String::from(leaf));
     }
-    // Split the extension off with the one shared rule so a disambiguation lands
-    // before the same extension the icon/"Open With…" classifiers recognise.
-    let (stem, ext) = match extension(leaf) {
-        // `leaf` ends in `.<ext>`; the stem is everything before the final dot.
-        Some(ext) => (&leaf[..leaf.len() - ext.len() - 1], Some(ext)),
-        None => (leaf, None),
-    };
+    let (stem, ending) = leaf
+        .split_at_checked(Ending::of(leaf).stem.len())
+        .unwrap_or((leaf, ""));
     for suffix in 2..=(MAX_TRASH_NAME_ATTEMPTS + 1) {
-        let candidate = match ext {
-            Some(ext) => format!("{stem} ({suffix}).{ext}"),
-            None => format!("{stem} ({suffix})"),
-        };
+        let candidate = format!("{stem} ({suffix}){ending}");
         // A very long original name can push a disambiguation past the per-name
         // limit; refuse rather than truncate to a name that could collide.
         if validate_file_name(&candidate).is_err() {

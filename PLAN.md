@@ -171,6 +171,7 @@ plan's ledger. A `blocked` row names its blocker.
 | STRESSTEST | `sysmon`, `stress` and the observability they need (`plans/STRESSTEST.md`) | in progress |
 | VIEW | The picture and document viewer (`plans/VIEW.md`) | in progress |
 | TEXTEDIT | `TextEdit.app`, the desktop editor, and the desktop facilities it needed (`plans/TEXTEDIT.md`) | blocked: TE13 needs a VFS primitive that replaces a file's content atomically through a held descriptor |
+| PAINT | `Paint.app`, the desktop image editor, and the shared document host (`plans/PAINT.md`) | done |
 
 ### Desktop
 
@@ -236,7 +237,8 @@ HMAC-SHA256 DRBG, the ChaCha12 fast-key-erasure generator, the xoshiro256++
 non-cryptographic generator, and the entropy and hardware-RNG seams), the
 allocation-free `lib/inline` beside the heap-backed `lib/collections`,
 `lib/memguard` (the one guard-region sentinel and canary window, shared by the
-slab guard, the kthread stack guard and every port's boot-stack guard), and
+slab guard, the kthread stack guard and every port's boot-stack guard),
+`lib/crc32` (the one IEEE CRC-32, which PNG and GPT framing carry), and
 `lib/util`.
 
 `lib/util` admits only an item with two or more independent callers, and its
@@ -248,8 +250,8 @@ README requires this file to name them:
 | `cfloat`, `cnum` | `seq`, `printf` |
 | `conf` | `lib/sysconfig`, `lib/netconfig`, `lib/enrolment`, `lib/users`, `lib/fontface`, `lib/proglib`, `lib/syntax`, `userland/system/init` |
 | `count`, `tailwindow` | `head`, `tail` |
-| `defer` | the terminal's and the desktop session's settings publishers, the session's catalogue scan and file desk, the file manager's bundle scan, occupancy probes and document opens, TextEdit's document queue (through `lib/rt`) |
-| `fallible` | `lib/audio`, `lib/cursor`, `lib/discovery`, `lib/image`, `lib/raster`, `lib/raytrace`, `lib/resolver`, `lib/ribbon`, `lib/rt`, `lib/sandbox`, `lib/terrain`, `userland/gui/wm`, the desktop session, the greeter, `audiod`, `discoveryd`, TextEdit, `view` |
+| `defer` | the terminal's and the desktop session's settings publishers, the session's catalogue scan and file desk, the file manager's bundle scan, occupancy probes and document opens, the document host's queue (`lib/window::docapp`) and Paint's decode queue (through `lib/rt`) |
+| `fallible` | `lib/audio`, `lib/cursor`, `lib/discovery`, `lib/image`, `lib/raster`, `lib/raytrace`, `lib/resolver`, `lib/ribbon`, `lib/rt`, `lib/sandbox`, `lib/terrain`, `userland/gui/wm`, the desktop session, the greeter, `audiod`, `discoveryd`, TextEdit, `view`, Paint |
 | `fmt` | `kernel/sec`, `kernel/ipc` |
 | `hexdump` | `fstree`, TextEdit |
 | `lanes` | `lib/collections`, TextEdit |

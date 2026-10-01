@@ -94,10 +94,9 @@ mod program {
     };
     use tairix_procinfo::IpcTransport;
     use tairix_raster::Surface;
-    use tairix_rt::io::{self, Stderr, Write};
     use tairix_sandbox::imagerender::{rasterise_icon, ImageRenderService};
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
-    use tairix_sandbox::{ParserSandbox, ServeEnd};
+    use tairix_sandbox::ParserSandbox;
     use tairix_switchboard::{
         authenticate_command, probe_scopes, refusal_notice, win_sizing, CycleOutcome,
         DegradedField, PanelLayout, Service, ServiceHost, Switchboard, SwitchboardAction,
@@ -146,18 +145,14 @@ mod program {
     /// is the only channel a user can still read the reason on.
     static LOG_SINK: tairix_rt::LogSink = tairix_rt::LogSink;
 
-    /// State the abnormal-exit reason on `stderr` (fail loud: an exit code
-    /// alone is not a diagnosis) and hand back `code` for `main`.
-    fn fail(code: i32, reason: &str) -> i32 {
-        let _ = writeln!(Stderr, "switchboard: {reason}");
-        code
-    }
+    /// The name this program states its refusals under.
+    const APP_NAME: &str = "switchboard";
 
     /// State a clean-exit reason on `stderr` and return `0`: the service
     /// has no purpose without a session to report to, so this is not a
     /// failure, merely a stated reason for stopping.
-    fn clean_exit(reason: &str) -> i32 {
-        let _ = writeln!(Stderr, "switchboard: {reason}");
+    fn clean_exit(reason: impl core::fmt::Display) -> i32 {
+        app::report(APP_NAME, reason);
         0
     }
 
@@ -191,9 +186,10 @@ mod program {
                         }],
                     },
                 );
-                Some(fail(EXIT_SESSION_REFUSED, reason))
+                Some(app::fail(APP_NAME, EXIT_SESSION_REFUSED, reason))
             }
-            CycleOutcome::PublishFailed => Some(fail(
+            CycleOutcome::PublishFailed => Some(app::fail(
+                APP_NAME,
                 EXIT_PUBLISH_FAILURES,
                 "too many consecutive publish failures",
             )),
@@ -358,7 +354,7 @@ mod program {
         fn apply_backdrop(&mut self) {
             let blur = self.themes.active_on(WINDOW_GROUND).backdrop_blur();
             if let Err(err) = self.window.set_backdrop_blur(blur) {
-                let _ = writeln!(Stderr, "switchboard: backdrop blur refused: {err}");
+                app::report(APP_NAME, format_args!("backdrop blur refused: {err}"));
             }
         }
 
@@ -560,7 +556,7 @@ mod program {
         }
 
         fn report_refusal(&mut self, action: &str, refusal: Errno) {
-            io::write_stderr_line(&refusal_notice(action, refusal));
+            app::report(APP_NAME, refusal_notice(action, refusal));
         }
 
         fn note_degradation(&mut self, field: DegradedField) {
@@ -657,7 +653,7 @@ mod program {
                     "notice: crash records are unavailable; recent faults are not shown"
                 }
             };
-            let _ = writeln!(Stderr, "switchboard: {reason}");
+            app::report(APP_NAME, reason);
         }
     }
 
@@ -895,13 +891,16 @@ mod program {
                 Ok(Some(event)) => event,
                 Ok(None) => return,
                 Err(EventError::Undecodable(_)) => {
-                    io::write_stderr_line("switchboard: dropped a malformed window event");
+                    app::report(APP_NAME, "dropped a malformed window event");
                     continue;
                 }
                 // The mailbox will refuse the same way again, so reading on
                 // would spin; the notice states it once and the drain ends.
                 Err(EventError::Mailbox(err)) => {
-                    io::write_stderr_line(&refusal_notice("read the window event mailbox", err));
+                    app::report(
+                        APP_NAME,
+                        refusal_notice("read the window event mailbox", err),
+                    );
                     return;
                 }
             };
@@ -936,19 +935,21 @@ mod program {
                 return;
             };
             let Some(session) = host.session() else {
-                io::write_stderr_line(
-                    "switchboard: dropped a command received before any session was attested",
+                app::report(
+                    APP_NAME,
+                    "dropped a command received before any session was attested",
                 );
                 continue;
             };
             match authenticate_command(&frame[..len], &sender, session) {
                 Ok(command) => service.command(host, command, authority),
                 Err(Errno::PermissionDenied) => {
-                    io::write_stderr_line(
-                        "switchboard: dropped a command from a sender that is not the session",
+                    app::report(
+                        APP_NAME,
+                        "dropped a command from a sender that is not the session",
                     );
                 }
-                Err(_) => io::write_stderr_line("switchboard: dropped a malformed command"),
+                Err(_) => app::report(APP_NAME, "dropped a malformed command"),
             }
         }
     }
@@ -969,7 +970,7 @@ mod program {
             Ok(len) => Some(len),
             Err(ret) if Errno::from_syscall(ret) == Errno::WouldBlock => None,
             Err(ret) => {
-                io::write_stderr_line(&refusal_notice(action, Errno::from_syscall(ret)));
+                app::report(APP_NAME, refusal_notice(action, Errno::from_syscall(ret)));
                 None
             }
         }
@@ -1000,7 +1001,11 @@ mod program {
     fn arm_wait_set(command_endpoint: u64) -> Result<u64, i32> {
         let set = tairix_rt::waitset_create();
         if set < 0 {
-            return Err(fail(EXIT_NO_WAIT_SOURCE, "cannot create the wait-set"));
+            return Err(app::fail(
+                APP_NAME,
+                EXIT_NO_WAIT_SOURCE,
+                "cannot create the wait-set",
+            ));
         }
         #[allow(clippy::cast_sign_loss)] // `set >= 0` checked above; it is a kernel-minted handle.
         let set = set as u64;
@@ -1012,7 +1017,8 @@ mod program {
             WaitToken::Signal.as_u64(),
         ) != 0
         {
-            return Err(fail(
+            return Err(app::fail(
+                APP_NAME,
                 EXIT_NO_WAIT_SOURCE,
                 "cannot arm the termination signal wait-set member",
             ));
@@ -1025,7 +1031,8 @@ mod program {
             WaitToken::Command.as_u64(),
         ) != 0
         {
-            return Err(fail(
+            return Err(app::fail(
+                APP_NAME,
                 EXIT_NO_COMMANDS,
                 "cannot arm the command mailbox wait-set member",
             ));
@@ -1034,7 +1041,8 @@ mod program {
         // cache starts from what the machine actually reports rather than the
         // fail-closed unknown that admits nothing.
         if !tairix_procinfo::pressure::watch(set, WaitToken::MemoryPressure.as_u64()) {
-            return Err(fail(
+            return Err(app::fail(
+                APP_NAME,
                 EXIT_NO_WAIT_SOURCE,
                 "cannot arm the memory-pressure wait-set member",
             ));
@@ -1050,7 +1058,8 @@ mod program {
             WaitToken::Desktop.as_u64(),
         ) != 0
         {
-            return Err(fail(
+            return Err(app::fail(
+                APP_NAME,
                 EXIT_NO_WAIT_SOURCE,
                 "cannot arm the desktop-change wait-set member",
             ));
@@ -1276,9 +1285,11 @@ mod program {
         match tairix_rt::thread::Thread::spawn(move || served.serve()) {
             Ok(handle) => Some(handle),
             Err(err) => {
-                let _ = writeln!(
-                    Stderr,
-                    "switchboard: no icon-reader thread ({err:?}); every row draws its built-in glyph"
+                app::report(
+                    APP_NAME,
+                    format_args!(
+                        "no icon-reader thread ({err:?}); every row draws its built-in glyph"
+                    ),
                 );
                 None
             }
@@ -1296,7 +1307,11 @@ mod program {
         if tairix_abi::ipc::is_reserved_endpoint(commands)
             || tairix_rt::port_bind(commands, SwitchboardCommand::WIRE_LEN, COMMAND_CAPACITY) != 0
         {
-            return Err(fail(EXIT_NO_COMMANDS, "command mailbox bind refused"));
+            return Err(app::fail(
+                APP_NAME,
+                EXIT_NO_COMMANDS,
+                "command mailbox bind refused",
+            ));
         }
         let events = tairix_abi::window_ipc::event_endpoint_for(pid);
         if tairix_abi::ipc::is_reserved_endpoint(events)
@@ -1306,7 +1321,8 @@ mod program {
                 tairix_window::EVENT_MAILBOX_CAPACITY,
             ) != 0
         {
-            return Err(fail(
+            return Err(app::fail(
+                APP_NAME,
                 EXIT_NO_WAIT_SOURCE,
                 "window event mailbox bind refused",
             ));
@@ -1331,7 +1347,7 @@ mod program {
                 changed
             }
             Err(err) => {
-                let _ = writeln!(Stderr, "switchboard: desktop change refused: {err}");
+                app::report(APP_NAME, format_args!("desktop change refused: {err}"));
                 false
             }
         }
@@ -1361,7 +1377,11 @@ mod program {
                 WaitToken::Artwork.as_u64(),
             ) != 0
             {
-                return Err(fail(EXIT_NO_WAIT_SOURCE, "icon-reader wake wait refused"));
+                return Err(app::fail(
+                    APP_NAME,
+                    EXIT_NO_WAIT_SOURCE,
+                    "icon-reader wake wait refused",
+                ));
             }
         }
         Ok(reads)
@@ -1377,11 +1397,7 @@ mod program {
         // over its wired standard streams and nothing else — it never becomes
         // the monitor.
         if worker_role() {
-            let mut service = ImageRenderService::default();
-            return match serve_stdio(&mut service) {
-                ServeEnd::Finished | ServeEnd::Ended => 0,
-                ServeEnd::Failed(_) => 1,
-            };
+            return serve_stdio(&mut ImageRenderService::default()).exit_code();
         }
         monitor()
     }
@@ -1398,10 +1414,14 @@ mod program {
         // answers zero, which is why the result is not examined.
         let _ = tairix_rt::latency_watch(DEFAULT_FRAME_BUDGET_NS);
         if tairix_rt::signal_intake(SignalIntakeOp::Enable) != 0 {
-            return fail(EXIT_NO_WAIT_SOURCE, "cannot enable signal observation");
+            return app::fail(
+                APP_NAME,
+                EXIT_NO_WAIT_SOURCE,
+                "cannot enable signal observation",
+            );
         }
         let Ok(origin) = tairix_rt::self_origin() else {
-            return fail(EXIT_NO_WAIT_SOURCE, "own identity unavailable");
+            return app::fail(APP_NAME, EXIT_NO_WAIT_SOURCE, "own identity unavailable");
         };
         let pid = origin.pid();
 
@@ -1428,10 +1448,7 @@ mod program {
         let mut shell = AppWindow::new();
         let (desktop, themes) = match app::bring_up_desktop(shell.client()) {
             Ok(brought_up) => brought_up,
-            Err(err) => {
-                let _ = writeln!(Stderr, "switchboard: {err}");
-                return EXIT_NO_WAIT_SOURCE;
-            }
+            Err(err) => return app::fail(APP_NAME, EXIT_NO_WAIT_SOURCE, err),
         };
 
         let transport = IpcTransport;
@@ -1446,11 +1463,11 @@ mod program {
         let Some(output_bytes) =
             app::region_bytes(&app::mode_for(frame_w, frame_h), app::FRAME_COUNT)
         else {
-            let _ = writeln!(
-                Stderr,
-                "switchboard: window frame larger than the address width"
+            return app::fail(
+                APP_NAME,
+                app::EXIT_NO_FRAMES,
+                "window frame larger than the address width",
             );
-            return app::EXIT_NO_FRAMES;
         };
         let mut host = RtHost::new(
             set,
@@ -1492,51 +1509,65 @@ mod program {
                 // Any other wait failure means the loop is no longer
                 // actually parking: continuing would spin rather than wait,
                 // so exit fail-loud instead.
-                return fail(EXIT_WAIT_FAILED, "the wait-set failed unexpectedly");
+                return app::fail(
+                    APP_NAME,
+                    EXIT_WAIT_FAILED,
+                    "the wait-set failed unexpectedly",
+                );
             }
-            match WaitToken::from_u64(token) {
-                Some(WaitToken::Signal) => {
-                    let drained = tairix_rt::signal_intake(SignalIntakeOp::Take);
-                    let name = signal_name(drained);
-                    let _ = writeln!(Stderr, "switchboard: received a {name} signal; exiting");
-                    return 0;
-                }
-                Some(WaitToken::Command) => drain_commands(&mut service, &mut host, &authority),
-                Some(WaitToken::WindowEvent) => {
-                    drain_window_events(&mut service, &mut host, &authority);
-                }
-                Some(WaitToken::Artwork) => {
-                    // The readiness is a level peek, so leaving it undrained
-                    // would report ready for ever and turn the park into a
-                    // spin.
-                    reads.wake.drain();
-                    if reads.take_landed() {
-                        service.panel_mut().repaint_whole();
-                    }
-                }
-                Some(WaitToken::MemoryPressure) if tairix_procinfo::pressure::refresh() => {
-                    // The machine's band moved: give back whatever the new
-                    // band says the retained artwork and glyphs may no longer
-                    // keep, here at the wake rather than at whatever later
-                    // frame happens to touch a cache. A band that did not
-                    // really move costs one read and no eviction work.
-                    host.trim_artwork();
-                    tairix_font::trim_glyph_cache();
-                    // The band that refused a decode has moved, so the keys
-                    // held back for it are offered again.
-                    reads.retry_declined();
-                }
-                Some(WaitToken::Desktop) => {
-                    if adopt_desktop(&mut host) {
-                        service.panel_mut().repaint_whole();
-                    }
-                }
-                // A band that did not move needs no trim, and a token the
-                // loop never arms is a spurious wake: either way, re-sample
-                // on the next iteration rather than acting on a guess.
-                Some(WaitToken::MemoryPressure) | None => {}
+            if let Some(code) = on_wake(token, &mut service, &mut host, &reads, &authority) {
+                return code;
             }
         }
+    }
+
+    /// Act on the wake `token` names, answering the exit status when it ends
+    /// the monitor.
+    fn on_wake(
+        token: u64,
+        service: &mut Service,
+        host: &mut RtHost,
+        reads: &Reads,
+        authority: &dyn CapabilityQuery,
+    ) -> Option<i32> {
+        match WaitToken::from_u64(token) {
+            Some(WaitToken::Signal) => {
+                let drained = tairix_rt::signal_intake(SignalIntakeOp::Take);
+                let name = signal_name(drained);
+                return Some(clean_exit(format_args!(
+                    "received a {name} signal; exiting"
+                )));
+            }
+            Some(WaitToken::Command) => drain_commands(service, host, authority),
+            Some(WaitToken::WindowEvent) => drain_window_events(service, host, authority),
+            Some(WaitToken::Artwork) => {
+                // The readiness is a level peek, so leaving it undrained would
+                // report ready for ever and turn the park into a spin.
+                reads.wake.drain();
+                if reads.take_landed() {
+                    service.panel_mut().repaint_whole();
+                }
+            }
+            Some(WaitToken::MemoryPressure) if tairix_procinfo::pressure::refresh() => {
+                // The band moved: give back what it says the retained artwork
+                // and glyphs may no longer keep, here at the wake rather than
+                // at whatever later frame touches a cache.
+                host.trim_artwork();
+                tairix_font::trim_glyph_cache();
+                // The band that refused a decode has moved, so the keys held
+                // back for it are offered again.
+                reads.retry_declined();
+            }
+            Some(WaitToken::Desktop) => {
+                if adopt_desktop(host) {
+                    service.panel_mut().repaint_whole();
+                }
+            }
+            // A band that did not move needs no trim, and a token the loop
+            // never arms is a spurious wake: re-sample on the next pass.
+            Some(WaitToken::MemoryPressure) | None => {}
+        }
+        None
     }
 
     tairix_rt::entry!(main);

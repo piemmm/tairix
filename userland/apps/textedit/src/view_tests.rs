@@ -13,8 +13,11 @@ use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_syntax::Format;
 use tairix_theme::{TextRole, Theme, ThemeRegistry};
 
+use tairix_window::docapp::{DocumentView, Relayout};
+use tairix_window::document::{Access, SavedDocument};
+
 use super::{
-    Access, Action, MenuKind, Request, View, APP_TITLE, CHECK_SETTLE_NS, ENDINGS, INDENTS, MODES,
+    Action, MenuKind, Own, Request, View, APP_TITLE, CHECK_SETTLE_NS, ENDINGS, INDENTS, MODES,
     PLAIN_ACTIONS, TAB_WIDTHS,
 };
 use crate::detect::LineEnding;
@@ -83,7 +86,7 @@ impl Harness {
             self.registry.active(),
             &mut damage,
         );
-        if outcome.relayout {
+        if outcome.relayout != Relayout::None {
             self.relayout();
         }
         (outcome, damage)
@@ -122,7 +125,7 @@ impl Harness {
             theme.active(),
             &mut damage,
         );
-        if outcome.relayout {
+        if outcome.relayout != Relayout::None {
             self.relayout();
         }
         outcome
@@ -212,7 +215,11 @@ fn the_gutter_widening_lays_the_window_out_again() {
     harness.ctrl('a', false);
     harness.press(Key::Named(NamedKey::End));
     let outcome = harness.press(Key::Named(NamedKey::Enter));
-    assert!(outcome.relayout, "1000 lines need a fourth digit");
+    assert_eq!(
+        outcome.relayout,
+        Relayout::Whole,
+        "1000 lines need a fourth digit"
+    );
 }
 
 #[test]
@@ -264,15 +271,15 @@ fn the_find_bar_opens_seeded_searches_and_closes() {
     harness.click(0, 0);
     harness.view.editor_mut().click(5, true);
     let outcome = harness.ctrl('f', false);
-    assert!(outcome.relayout);
+    assert_eq!(outcome.relayout, Relayout::Whole);
     assert!(harness.view.find_open());
     assert_eq!(harness.view.find_controls().0.text(), "alpha");
     let outcome = harness.press(Key::Named(NamedKey::Enter));
-    let Some(Request::Search {
+    let Some(Request::Own(Own::Search {
         id,
         search,
         replacement: None,
-    }) = outcome.request
+    })) = outcome.request
     else {
         panic!("Enter asks for a search");
     };
@@ -286,7 +293,7 @@ fn the_find_bar_opens_seeded_searches_and_closes() {
         .found(id, generation, found, None, &harness.layout, &mut damage);
     assert_eq!(harness.view.editor().selection().range(), 11..16);
     let outcome = harness.press(Key::Named(NamedKey::Escape));
-    assert!(outcome.relayout);
+    assert_eq!(outcome.relayout, Relayout::Whole);
     assert!(!harness.view.find_open());
 }
 
@@ -295,7 +302,8 @@ fn an_answer_for_an_older_document_is_not_believed() {
     let mut harness = Harness::new(b"find me", Format::PlainText);
     harness.ctrl('f', false);
     harness.type_str("me");
-    let Some(Request::Search { id, .. }) = harness.press(Key::Named(NamedKey::Enter)).request
+    let Some(Request::Own(Own::Search { id, .. })) =
+        harness.press(Key::Named(NamedKey::Enter)).request
     else {
         panic!("a search");
     };
@@ -331,11 +339,11 @@ fn replace_all_replaces_every_match_as_one_step_and_counts_them() {
     let outcome = harness.pointer(InputEvent::PointerReleased {
         button: PointerButton::Primary,
     });
-    let Some(Request::Search {
+    let Some(Request::Own(Own::Search {
         id,
         replacement: Some(bytes),
         ..
-    }) = outcome.request
+    })) = outcome.request
     else {
         panic!("All asks for every match");
     };
@@ -408,6 +416,21 @@ fn closing_a_changed_document_asks_first() {
     assert!(matches!(outcome.request, Some(Request::Close)));
 }
 
+/// A quit is never left waiting on a question it did not ask.
+#[test]
+fn closing_puts_the_save_question_in_place_of_another() {
+    let mut harness = Harness::new(b"text", Format::PlainText);
+    harness.type_str("x");
+    harness.ctrl('l', false);
+    assert!(harness.view.modal().is_some());
+    assert!(!harness.view.asking_to_close());
+    let outcome = harness
+        .view
+        .close_requested(&harness.layout, &mut Region::new());
+    assert!(outcome.request.is_none());
+    assert!(harness.view.asking_to_close());
+}
+
 #[test]
 fn go_to_line_asks_for_a_number_and_goes_there() {
     let mut harness = Harness::new(b"a\nb\nc\nd\n", Format::PlainText);
@@ -475,13 +498,13 @@ fn moving_the_caret_in_the_hex_view_repaints_the_rows_it_left_and_reached() {
 fn copy_cut_and_paste_go_through_the_clipboard_requests() {
     let mut harness = Harness::new(b"hello world", Format::PlainText);
     harness.ctrl('a', false);
-    let Some(Request::Copy(bytes)) = harness.ctrl('c', false).request else {
+    let Some(Request::Own(Own::Copy(bytes))) = harness.ctrl('c', false).request else {
         panic!("copy asks to put the selection on the clipboard");
     };
     assert_eq!(bytes, b"hello world");
     assert!(matches!(
         harness.ctrl('v', false).request,
-        Some(Request::Paste)
+        Some(Request::Own(Own::Paste))
     ));
     let mut damage = Region::new();
     harness.view.paste(b"bye", &harness.layout, &mut damage);
@@ -489,7 +512,7 @@ fn copy_cut_and_paste_go_through_the_clipboard_requests() {
     harness.ctrl('a', false);
     assert!(matches!(
         harness.ctrl('x', false).request,
-        Some(Request::Copy(_))
+        Some(Request::Own(Own::Copy(_)))
     ));
     assert_eq!(harness.text(), b"");
 }
@@ -684,10 +707,11 @@ fn a_chosen_row_runs_its_action() {
     let id = AppMenuItemId::new(Action::Mode(Mode::Hex).id()).expect("an id");
     let mut damage = Region::new();
     let outcome = harness.view.chosen(id, &harness.layout, &mut damage);
-    assert!(outcome.relayout);
+    assert_eq!(outcome.relayout, Relayout::Whole);
     assert_eq!(harness.view.editor().mode(), Mode::Hex);
-    assert!(
+    assert_eq!(
         harness.ctrl('h', true).relayout,
+        Relayout::Whole,
         "Ctrl+Shift+H toggles back"
     );
     assert_eq!(harness.view.editor().mode(), Mode::Text);
@@ -751,9 +775,8 @@ fn the_title_says_what_the_document_is_and_whether_it_changed() {
     harness.type_str("a");
     assert_eq!(title_of(&harness.view), "*notes.txt \u{2014} TextEdit");
     let generation = harness.view.editor().generation();
-    harness
-        .view
-        .saved(generation, Some(String::from("renamed.txt")));
+    harness.view.saved(generation);
+    harness.view.rename(String::from("renamed.txt"));
     assert_eq!(title_of(&harness.view), "renamed.txt \u{2014} TextEdit");
 }
 
@@ -837,6 +860,21 @@ fn a_lexed_batch_repaints_only_the_rows_it_coloured() {
     );
 }
 
+impl Harness {
+    /// Ask for the line breaks to be converted to `to`, answering the id the
+    /// conversion is known by.
+    fn ask_conversion(&mut self, to: LineEnding) -> u64 {
+        let outcome = self
+            .view
+            .act(Action::LineEnding(to), &self.layout, &mut Region::new());
+        let Some(Request::Own(Own::Convert { id, to: asked })) = outcome.request else {
+            panic!("a conversion is asked for");
+        };
+        assert_eq!(asked, to);
+        id
+    }
+}
+
 /// A conversion lands as one edit when the document is unchanged since its
 /// snapshot, and is refused with its reason when it has moved on.
 #[test]
@@ -844,8 +882,10 @@ fn a_conversion_is_adopted_only_for_the_document_it_was_taken_from() {
     let mut harness = Harness::new(b"one\ntwo\n", Format::PlainText);
     let (generation, _) = harness.view.editor_mut().snapshot().expect("room");
     let mut damage = Region::new();
+    let id = harness.ask_conversion(LineEnding::CrLf);
     let chunks = Some(alloc::vec![b"one\r\ntwo\r\n".to_vec()]);
     let _ = harness.view.converted(
+        id,
         generation,
         chunks,
         LineEnding::CrLf,
@@ -854,8 +894,10 @@ fn a_conversion_is_adopted_only_for_the_document_it_was_taken_from() {
     );
     assert_eq!(harness.view.editor().line_ending(), LineEnding::CrLf);
     assert!(harness.view.editor().is_modified());
+    let id = harness.ask_conversion(LineEnding::Lf);
     let stale = Some(alloc::vec![b"x".to_vec()]);
     let _ = harness.view.converted(
+        id,
         generation,
         stale,
         LineEnding::Lf,
@@ -869,6 +911,58 @@ fn a_conversion_is_adopted_only_for_the_document_it_was_taken_from() {
     assert!(harness.view.message().is_some(), "the refusal is said");
 }
 
+/// The newest conversion asked for wins: an older one answering before or
+/// after it is not adopted, and goes no further.
+#[test]
+fn an_overtaken_conversion_is_not_adopted() {
+    let mut harness = Harness::new(b"one\ntwo\n", Format::PlainText);
+    let (generation, _) = harness.view.editor_mut().snapshot().expect("room");
+    let crlf = || Some(alloc::vec![b"one\r\ntwo\r\n".to_vec()]);
+    let mut damage = Region::new();
+
+    let older = harness.ask_conversion(LineEnding::CrLf);
+    let newer = harness.ask_conversion(LineEnding::Lf);
+    assert!(!harness.view.wants_conversion(older));
+    assert!(harness.view.wants_conversion(newer));
+    let layout = &harness.layout;
+    let _ = harness.view.converted(
+        older,
+        generation,
+        crlf(),
+        LineEnding::CrLf,
+        layout,
+        &mut damage,
+    );
+    assert!(
+        !harness.view.editor().is_modified(),
+        "the older one is let go"
+    );
+    let _ = harness
+        .view
+        .converted(newer, generation, None, LineEnding::Lf, layout, &mut damage);
+    assert!(!harness.view.wants_conversion(newer), "answered once");
+
+    let older = harness.ask_conversion(LineEnding::Lf);
+    let newer = harness.ask_conversion(LineEnding::CrLf);
+    let layout = &harness.layout;
+    let _ = harness.view.converted(
+        newer,
+        generation,
+        crlf(),
+        LineEnding::CrLf,
+        layout,
+        &mut damage,
+    );
+    let _ = harness
+        .view
+        .converted(older, generation, None, LineEnding::Lf, layout, &mut damage);
+    assert_eq!(harness.view.editor().line_ending(), LineEnding::CrLf);
+    assert_eq!(
+        harness.view.editor().document().to_vec().expect("room"),
+        b"one\r\ntwo\r\n"
+    );
+}
+
 #[test]
 fn a_detected_format_applies_until_the_user_chooses_one() {
     let mut harness = Harness::new(b"<!doctype html>\n<p>hi</p>\n", Format::PlainText);
@@ -876,20 +970,24 @@ fn a_detected_format_applies_until_the_user_chooses_one() {
     let outcome = harness
         .view
         .detected(Format::Html, &harness.layout, &mut damage);
-    assert!(outcome.relayout, "a new format redraws the window");
+    assert_eq!(
+        outcome.relayout,
+        Relayout::Whole,
+        "a new format redraws the window"
+    );
     assert_eq!(harness.view.editor().format(), Format::Html);
 
     harness.relayout();
     let chosen = harness
         .view
         .act(Action::Format(Format::Xml), &harness.layout, &mut damage);
-    assert!(chosen.relayout);
+    assert_eq!(chosen.relayout, Relayout::Whole);
     harness.relayout();
     let late = harness
         .view
         .detected(Format::Html, &harness.layout, &mut damage);
     assert!(
-        !late.relayout && late.request.is_none(),
+        late.relayout == Relayout::None && late.request.is_none(),
         "a late detection changes nothing"
     );
     assert_eq!(
@@ -951,12 +1049,12 @@ fn the_clipboard_keys_act_on_the_find_field_that_has_the_keyboard() {
     );
     let document = |harness: &Harness| harness.view.editor().document().to_vec().expect("room");
     harness.ctrl('a', false);
-    let Some(Request::Copy(bytes)) = harness.ctrl('c', false).request else {
+    let Some(Request::Own(Own::Copy(bytes))) = harness.ctrl('c', false).request else {
         panic!("the field's selection is copied");
     };
     assert_eq!(bytes, b"beta");
     let outcome = harness.ctrl('v', false);
-    assert!(matches!(outcome.request, Some(Request::Paste)));
+    assert!(matches!(outcome.request, Some(Request::Own(Own::Paste))));
     let mut damage = Region::new();
     let _ = harness.view.paste(b"alpha", &harness.layout, &mut damage);
     assert_eq!(
@@ -976,7 +1074,7 @@ fn the_clipboard_keys_act_on_the_find_field_that_has_the_keyboard() {
         "undo belongs to the document's focus"
     );
     harness.ctrl('a', false);
-    let Some(Request::Copy(cut)) = harness.ctrl('x', false).request else {
+    let Some(Request::Own(Own::Copy(cut))) = harness.ctrl('x', false).request else {
         panic!("a cut copies");
     };
     assert_eq!(
@@ -1024,14 +1122,14 @@ fn the_window_menu_acts_on_what_the_secondary_press_landed_on() {
     assert!(!enabled(&menu, "Undo"), "the field keeps no history");
     choose(&mut harness, Action::SelectAll);
     assert!(enabled(&harness.view.menu(MenuKind::Window), "Copy"));
-    let Some(Request::Copy(bytes)) = choose(&mut harness, Action::Copy).request else {
+    let Some(Request::Own(Own::Copy(bytes))) = choose(&mut harness, Action::Copy).request else {
         panic!("the field's selection is copied");
     };
     assert_eq!(bytes, b"beta");
 
     secondary(&mut harness, layout.grid().center());
     choose(&mut harness, Action::SelectAll);
-    let Some(Request::Copy(bytes)) = choose(&mut harness, Action::Copy).request else {
+    let Some(Request::Own(Own::Copy(bytes))) = choose(&mut harness, Action::Copy).request else {
         panic!("the document's selection is copied");
     };
     assert_eq!(bytes, b"alpha beta");
@@ -1051,7 +1149,7 @@ fn find_next_moves_on_past_a_match_inside_a_character() {
         harness.view.editor_mut().click(0, false);
         for _ in 0..rounds {
             let outcome = harness.press(Key::Named(NamedKey::Function { number: 3 }));
-            let Some(Request::Search { id, mut search, .. }) = outcome.request else {
+            let Some(Request::Own(Own::Search { id, mut search, .. })) = outcome.request else {
                 panic!("find next asks for a search");
             };
             let generation = harness.view.editor().generation();
@@ -1081,7 +1179,7 @@ fn find_next_moves_on_past_a_match_inside_a_character() {
     for _ in 0..3 {
         let mut damage = Region::new();
         let outcome = harness.press(Key::Named(NamedKey::Function { number: 3 }));
-        let Some(Request::Search { id, mut search, .. }) = outcome.request else {
+        let Some(Request::Own(Own::Search { id, mut search, .. })) = outcome.request else {
             panic!("find next asks for a search");
         };
         let generation = harness.view.editor().generation();
@@ -1116,7 +1214,11 @@ fn replacing_one_match_lays_the_window_out_again_when_the_gutter_widens() {
     harness.view.editor_mut().click(at + 4, true);
     let (outcome, _) = harness.key(Key::Named(NamedKey::Enter), Modifiers::default());
     assert_eq!(harness.view.editor().document().line_count(), 1000);
-    assert!(outcome.relayout, "a thousandth line widens the gutter");
+    assert_eq!(
+        outcome.relayout,
+        Relayout::Whole,
+        "a thousandth line widens the gutter"
+    );
 }
 
 #[test]

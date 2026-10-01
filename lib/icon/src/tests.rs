@@ -162,6 +162,45 @@ fn each_playback_command_glyph_is_its_own_mark() {
 }
 
 #[test]
+fn each_image_editing_glyph_is_its_own_mark() {
+    // A toolbar of drawing tools is read by shape alone, so no tool may share
+    // artwork with another, with the viewer's zoom glyphs beside them, or
+    // with the tiles and brackets it was drawn to be told apart from.
+    let tools = [
+        IconKind::ToolSelect,
+        IconKind::ToolPencil,
+        IconKind::ToolBrush,
+        IconKind::ToolSpray,
+        IconKind::ToolEraser,
+        IconKind::ToolFill,
+        IconKind::ToolPicker,
+        IconKind::ToolLine,
+        IconKind::ToolRectangle,
+        IconKind::ToolEllipse,
+        IconKind::PixelGrid,
+    ];
+    let neighbours = [
+        IconKind::Generic,
+        IconKind::ZoomIn,
+        IconKind::ZoomOut,
+        IconKind::ZoomFit,
+        IconKind::ZoomActual,
+        IconKind::Library,
+        IconKind::ViewToggle,
+        IconKind::Info,
+    ];
+    for (position, kind) in tools.iter().enumerate() {
+        for other in tools[position + 1..].iter().chain(&neighbours) {
+            assert_ne!(
+                builtin_icon(*kind, FG),
+                builtin_icon(*other, FG),
+                "{kind:?} and {other:?} draw the same mark"
+            );
+        }
+    }
+}
+
+#[test]
 fn each_settings_category_glyph_is_its_own_mark() {
     // A sidebar row's glyph is how a reader finds a category or pane without
     // reading, so no two kinds drawn with a symbol may share their artwork.

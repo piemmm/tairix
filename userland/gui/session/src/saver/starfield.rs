@@ -384,7 +384,7 @@ fn span(extent: f64) -> u32 {
 
 /// Black over `rect`, which the frame repaints.
 fn erase(surface: &mut Surface, rect: Rect) {
-    let (Ok(x), Ok(y)) = (u32::try_from(rect.left()), u32::try_from(rect.top())) else {
+    let Some((x, y)) = rect.surface_origin() else {
         return;
     };
     surface.fill_rect(x, y, rect.width, rect.height, Color::rgb(0, 0, 0));

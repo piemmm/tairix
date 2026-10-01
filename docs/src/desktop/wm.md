@@ -2125,10 +2125,15 @@ a path or any browsing authority of its own.
 A pick has a purpose. `PickPurpose::Open` chooses an existing file,
 delegated as the requester is handed any document: read-write where its
 signed manifest edits documents and the user may write the file, read-only
-otherwise, and `FilePicked` says which. `PickPurpose::Save { suggested }`
-chooses where a
+otherwise, and `FilePicked` says which. `PickPurpose::Save { suggested,
+endings }` chooses where a
 document goes: the picker adds a name field, offering `suggested`, and
-Save/Cancel beneath its listing; a name no entry shows is created
+Save/Cancel beneath its listing. `endings` (`SaveEndings`: at most eight,
+each a `.` or `,` and up to seven ASCII letters or digits, matched without
+regard to case) are what the requester can write: a name ending otherwise is
+refused in the field, and one with no ending at all takes the first, so a name
+the save would refuse never becomes an empty file; none holds the name to
+nothing. A name no entry shows is created
 exclusively, a name that already names a file is replaced only after the
 user answers the question put in the field, a name naming a folder goes
 into it, and the chosen file is delegated write-only with the session's own

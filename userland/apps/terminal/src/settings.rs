@@ -51,7 +51,8 @@ use tairix_controls::{
 use crate::effects::{EffectKey, FULL};
 use crate::profile::{Profile, MAX_FONT_SIZE_PX, MIN_FONT_SIZE_PX};
 use crate::scheme::Scheme;
-use crate::swatch::{SwatchAction, SwatchGrid};
+use crate::swatch;
+use tairix_controls::{SwatchAction, SwatchGrid, SwatchMark};
 
 /// The tab that edits the colour scheme and text size.
 const APPEARANCE_TAB: usize = 0;
@@ -280,7 +281,7 @@ impl Settings {
         ))
         .with_steps(font_size_step_permille(), font_size_step_permille() * 4);
 
-        let swatches = SwatchGrid::from_scheme(&profile.custom);
+        let swatches = swatch::grid_for(&profile.custom);
 
         let effect_sliders = EffectKey::ALL.map(|key| effect_slider(key, key.of(profile.effects)));
 
@@ -674,17 +675,6 @@ fn effect_slider(key: EffectKey, value: u16) -> Slider {
     Slider::new(effect_permille(key, value)).with_steps(10, 100)
 }
 
-/// The surface rectangle of a logical `Rect`, or `None` if it lies off the
-/// top-left or collapses.
-fn surface_rect(rect: Rect) -> Option<(u32, u32, u32, u32)> {
-    let x = u32::try_from(rect.left()).ok()?;
-    let y = u32::try_from(rect.top()).ok()?;
-    if rect.width == 0 || rect.height == 0 {
-        return None;
-    }
-    Some((x, y, rect.width, rect.height))
-}
-
 impl Settings {
     /// Every content row the active tab owns, in display order.
     fn content_rows(&self) -> Vec<Focus> {
@@ -805,10 +795,7 @@ impl Settings {
     /// Copy the currently selected swatch well's channels into the three
     /// channel sliders, so they always show the well they edit.
     fn sync_channel_sliders(&mut self) {
-        let color = self
-            .swatches
-            .color(self.swatches.selected())
-            .unwrap_or_default();
+        let color = swatch::colour(&self.swatches, self.swatches.selected()).unwrap_or_default();
         let channels = [color.r, color.g, color.b];
         for (slider, channel) in self.channel_sliders.iter_mut().zip(channels) {
             slider.set_value(permille_from_channel(channel));
@@ -1015,7 +1002,10 @@ impl Settings {
     ) {
         // A row the paint's clip leaves nothing of is not composed: its label
         // would be formatted for pixels nothing keeps.
-        if !surface_rect(rect).is_some_and(|(x, y, w, h)| surface.admits(x, y, w, h)) {
+        if !rect
+            .surface_origin()
+            .is_some_and(|(x, y)| surface.admits(x, y, rect.width, rect.height))
+        {
             return;
         }
         match row {
@@ -1195,7 +1185,8 @@ impl Settings {
     ) -> SheetOutcome {
         let (_, grid_rect) = swatch_caption_split(rect, style.scale, style.font);
         match layout.in_body(damage, |drew| {
-            self.swatches.on_pointer(event, grid_rect, drew)
+            self.swatches
+                .on_pointer(event, grid_rect, SwatchMark::Primary, drew)
         }) {
             Some(SwatchAction::Selected { .. }) => {
                 self.focus_on(Focus::Swatches, layout, style, damage);
@@ -1380,7 +1371,7 @@ impl Settings {
         damage: &mut Region,
     ) {
         let selected = self.swatches.selected();
-        let mut color = self.swatches.color(selected).unwrap_or_default();
+        let mut color = swatch::colour(&self.swatches, selected).unwrap_or_default();
         let value = channel_from_permille(permille);
         match channel {
             0 => color.r = value,
@@ -1388,8 +1379,8 @@ impl Settings {
             2 => color.b = value,
             _ => return,
         }
-        self.swatches.set_color(selected, color);
-        self.swatches.apply_to(&mut self.profile.custom);
+        self.swatches.set_colour(selected, color.opaque());
+        swatch::apply(&self.swatches, &mut self.profile.custom);
         self.profile.clamp();
         if let Some(slider) = self.channel_sliders.get_mut(channel) {
             slider.set_value(permille_from_channel(value));
@@ -1400,10 +1391,7 @@ impl Settings {
 
     /// The current channel value (`0..=255`) of the selected well.
     fn channel_value(&self, channel: usize) -> u8 {
-        let color = self
-            .swatches
-            .color(self.swatches.selected())
-            .unwrap_or_default();
+        let color = swatch::colour(&self.swatches, self.swatches.selected()).unwrap_or_default();
         match channel {
             0 => color.r,
             1 => color.g,
@@ -1470,10 +1458,10 @@ impl Settings {
         // force, so a scheme change alone reaches that row too.
         if was.custom != now.custom || was.scheme != now.scheme {
             let well = self.swatches.selected();
-            let edited = self.swatches.color(well);
-            self.swatches.adopt_scheme(&now.custom);
+            let edited = self.swatches.colour(well);
+            swatch::adopt(&mut self.swatches, &now.custom);
             damage.add(layout.rect_of(Focus::Swatches));
-            if self.swatches.color(well) != edited {
+            if self.swatches.colour(well) != edited {
                 self.adopt_selected_well(&layout, damage);
             }
         }
@@ -1521,7 +1509,7 @@ fn panel_bounds(viewport: Rect, scale: Scale) -> Rect {
 /// The *Restore defaults* and *Done* button rectangles within the footer
 /// band, shared by rendering and pointer routing.
 fn footer_split(rect: Rect, scale: Scale) -> (Option<Rect>, Option<Rect>) {
-    let Some((x, y, w, h)) = surface_rect(rect) else {
+    let (Some((x, y)), w, h) = (rect.surface_origin(), rect.width, rect.height) else {
         return (None, None);
     };
     let gap = scale.scale_length(LABEL_GAP_PX).max(1);
@@ -1566,12 +1554,11 @@ fn swatch_caption_split(rect: Rect, scale: Scale, font: BitmapFont) -> (Rect, Re
 
 /// Draw one line of `text` vertically centred in `rect`.
 fn draw_row_label(surface: &mut Surface, rect: Rect, theme: &Theme, font: BitmapFont, text: &str) {
-    let Some((x, y, w, h)) = surface_rect(rect) else {
+    let (Some((x, y)), w, h) = (rect.surface_origin(), rect.width, rect.height) else {
         return;
     };
     let fitted = font.truncate_to_width(text, w);
-    let glyph_h = font.glyph_height();
-    let text_y = to_i32(y) + (to_i32(h) - to_i32(glyph_h)).max(0) / 2;
+    let text_y = font.centred_top(to_i32(y), h);
     font.draw_text(
         surface,
         to_i32(x),

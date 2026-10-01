@@ -57,11 +57,10 @@ mod program {
     use tairix_input::InputEvent;
     use tairix_raster::Surface;
     use tairix_rng::FastRng;
-    use tairix_rt::io::{Stderr, Write};
     use tairix_theme::{Theme, ThemeRegistry, Timeline};
     use tairix_util::defer::JobDesk;
     use tairix_util::mathf;
-    use tairix_window::app::{self, AppWindow, ShellError, Wake, WindowPane, EXIT_CHANNEL_LOST};
+    use tairix_window::app::{self, AppWindow, Wake, WindowPane, EXIT_CHANNEL_LOST};
     use tairix_window::{
         pointer_input_events, pointer_point, Desktop, EventDrain, EventMailbox, WindowClient,
     };
@@ -86,24 +85,8 @@ mod program {
     #[allow(clippy::cast_precision_loss)] // A frame budget is far below 2^53 ns.
     const FRAME_SECONDS: f64 = FRAME_NS as f64 / 1_000_000_000.0;
 
-    /// State the abnormal-exit reason on `stderr` (fail loud) and hand `code`
-    /// back for `main`.
-    fn fail(code: i32, reason: &str) -> i32 {
-        let _ = writeln!(Stderr, "cinder: {reason}");
-        code
-    }
-
-    /// State a shared-shell bring-up refusal and hand its reserved code back.
-    fn fail_shell(err: ShellError) -> i32 {
-        let _ = writeln!(Stderr, "cinder: {err}");
-        err.code()
-    }
-
-    /// Report a refusal that is not fatal: the companion carries on with
-    /// whatever authority it has.
-    fn report(reason: &str) {
-        let _ = writeln!(Stderr, "cinder: {reason}");
-    }
+    /// The name this program states its refusals under.
+    const APP_NAME: &str = "cinder";
 
     // ---- the saved-mood writer -----------------------------------------
 
@@ -133,7 +116,10 @@ mod program {
         fn submit(&self, saved: Saved, armed: bool) {
             if !armed {
                 if let Err(err) = Self::write(saved) {
-                    report(&alloc::format!("could not save Cinder's mood ({err:?})"));
+                    app::report(
+                        APP_NAME,
+                        format_args!("could not save Cinder's mood ({err:?})"),
+                    );
                 }
                 return;
             }
@@ -201,7 +187,10 @@ mod program {
     /// Start the worker, answering whether one is actually running.
     fn start_writer(writer: &Arc<Writer>, set: u64) -> bool {
         let Some(read) = writer.wake.read_end() else {
-            report("no writer wake pipe; Cinder's mood is saved on the frame loop");
+            app::report(
+                APP_NAME,
+                "no writer wake pipe; Cinder's mood is saved on the frame loop",
+            );
             return false;
         };
         if tairix_rt::waitset_ctl(
@@ -212,16 +201,22 @@ mod program {
             WRITER_TOKEN,
         ) != 0
         {
-            report("writer wake refused; Cinder's mood is saved on the frame loop");
+            app::report(
+                APP_NAME,
+                "writer wake refused; Cinder's mood is saved on the frame loop",
+            );
             return false;
         }
         let served = Arc::clone(writer);
         match tairix_rt::thread::Thread::spawn(move || served.serve()) {
             Ok(_) => true,
             Err(err) => {
-                report(&alloc::format!(
-                    "no writer thread ({err:?}); Cinder's mood is saved on the frame loop"
-                ));
+                app::report(
+                    APP_NAME,
+                    format_args!(
+                        "no writer thread ({err:?}); Cinder's mood is saved on the frame loop"
+                    ),
+                );
                 false
             }
         }
@@ -246,7 +241,10 @@ mod program {
             // A companion seeded from the clock is a less varied companion,
             // not a broken one, and refusing to start over it would be dying
             // of an unpredictability requirement a pet does not have.
-            report("the system generator is unavailable; seeding this session from the clock");
+            app::report(
+                APP_NAME,
+                "the system generator is unavailable; seeding this session from the clock",
+            );
             FastRng::seed_from_u64(tairix_rt::clock_get())
         })
     }
@@ -471,13 +469,16 @@ mod program {
             .zip(AppMenuLabel::new(text).ok())
             .map(|(id, label)| AppMenuRow::Item(AppMenuItem::new(id, label)))
         else {
-            report("this application's icon-bar menu is invalid; carrying on without one");
+            app::report(
+                APP_NAME,
+                "this application's icon-bar menu is invalid; carrying on without one",
+            );
             return;
         };
         let rows = alloc::vec![row];
         let declared = tairix_window::declaration(event_endpoint, AppBarClick::RaiseOrOpen, &rows);
         if let Err(refused) = tairix_window::declare_app_bar(client, declared) {
-            report(&alloc::format!("{refused}"));
+            app::report(APP_NAME, format_args!("{refused}"));
         }
     }
 
@@ -493,11 +494,11 @@ mod program {
         let mut window = AppWindow::new();
         let (mut desktop, mut themes) = match app::bring_up_desktop(window.client()) {
             Ok(pair) => pair,
-            Err(err) => return fail_shell(err),
+            Err(err) => return app::fail(APP_NAME, err.code(), err),
         };
         let binding = match app::bind_event_mailbox() {
             Ok(binding) => binding,
-            Err(err) => return fail_shell(err),
+            Err(err) => return app::fail(APP_NAME, err.code(), err),
         };
         let event_endpoint = binding.endpoint();
 
@@ -524,7 +525,7 @@ mod program {
         let server = match window.open(event_endpoint, &mode, "Cinder", pen_sizing(desktop.scale()))
         {
             Ok(server) => server,
-            Err(err) => return fail_shell(err),
+            Err(err) => return app::fail(APP_NAME, err.code(), err),
         };
         let mut pen_layout = layout::pen(
             Rect::new(0, 0, pen_w, pen_h),
@@ -583,7 +584,7 @@ mod program {
             }
             Err(refusal) => {
                 companion.pen.let_out(Some(refusal));
-                report(refusal.reason());
+                app::report(APP_NAME, refusal.reason());
             }
         }
     }
@@ -673,12 +674,16 @@ mod program {
                 let deadline = tairix_rt::clock_get().saturating_add(FRAME_NS);
                 match app::park_until(set, deadline) {
                     Ok(wake) => wake,
-                    Err(_) => return fail(EXIT_CHANNEL_LOST, "the wait set was torn down"),
+                    Err(_) => {
+                        return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "the wait set was torn down")
+                    }
                 }
             } else {
                 match app::park(set) {
                     Ok(wake) => Some(wake),
-                    Err(_) => return fail(EXIT_CHANNEL_LOST, "the wait set was torn down"),
+                    Err(_) => {
+                        return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "the wait set was torn down")
+                    }
                 }
             };
 
@@ -693,7 +698,10 @@ mod program {
                 }
                 Some(Wake::App(WRITER_TOKEN)) => {
                     if let Some(Err(err)) = writer.collect() {
-                        report(&alloc::format!("could not save Cinder's mood ({err:?})"));
+                        app::report(
+                            APP_NAME,
+                            format_args!("could not save Cinder's mood ({err:?})"),
+                        );
                     }
                     continue;
                 }
@@ -720,7 +728,9 @@ mod program {
                 match mailbox.try_next(&mut frame) {
                     Ok(true) => {}
                     Ok(false) => break,
-                    Err(_) => return fail(EXIT_CHANNEL_LOST, "the event channel was lost"),
+                    Err(_) => {
+                        return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "the event channel was lost")
+                    }
                 }
                 let Ok(event) = WindowEvent::from_bytes(&frame) else {
                     // A frame this build will not decode is already consumed
@@ -952,7 +962,7 @@ mod program {
             Err(err) => {
                 // A refused re-open is reported and the application stays on
                 // the bar: it is a click that did not work, not a fault.
-                report(&alloc::format!("{err}"));
+                app::report(APP_NAME, format_args!("{err}"));
                 false
             }
         }

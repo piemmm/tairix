@@ -61,19 +61,24 @@ editor keeps no access to a document it has closed.
 
 ## The loop
 
-The window's loop reads nothing and waits on nothing. Two workers carry what
-does wait:
+TextEdit runs in the shared document host (`tairix_window::docapp`), which
+owns its windows, their saves and choosers, and the queue saves are written on.
+The loop reads nothing and waits on nothing. Two workers carry what does wait:
 
-- the **document worker** answers each job in turn from a queue that grows
-  by a fixed share (`JOBS_PER_WINDOW`) as each window opens, where a newer
-  search or conversion withdraws the one it replaces. It reads a document
-  into its piece table, on to wherever the file now ends; saves a snapshot
-  (write it at offset 0, cut the file to its length, sync); searches; and
-  converts line endings. A read, a search and a conversion each go one
-  `STEP_BYTES` stretch at a time, so a save queued meanwhile runs between
-  steps and a window's work is put down when it closes; all but a read run
-  over a snapshot, handed out again while the document is unchanged, so
-  editing goes on meanwhile;
+- the host's **queue** answers each job in turn and grows by a fixed share
+  (`JOBS_PER_WINDOW`) as each window opens, where a newer search or conversion
+  withdraws the one it replaces, and refuses a window more than its share, so
+  no window's work crowds out another's. Each search and conversion carries an
+  id, so a step of one a newer ask has overtaken goes no further and can never
+  withdraw the newer one, and every job carries the window's stamp — its id,
+  and an epoch bumped each time it shows another document — so nothing asked of
+  the document a window has left lands on the one it shows now. Beside saves (write the snapshot at offset 0,
+  cut the file to its length, sync) it reads a document into its piece table,
+  on to wherever the file now ends; searches; and converts line endings. A
+  read, a search and a conversion each go one `STEP_BYTES` stretch at a time,
+  so a save queued meanwhile runs between steps and a window's work is put
+  down when it closes; all but a read run over a snapshot, handed out again
+  while the document is unchanged, so editing goes on meanwhile;
 - the **syntax worker** holds the sandbox that lexes batches of visible
   lines, detects a format from a head, and validates a store.
 
@@ -85,14 +90,18 @@ keeps its own. A plain save asked for behind a Save as that fails was for the
 file it would have made, so it goes with it and never onto the original.
 Closing the window writes them all at once, so no file the chooser already
 made is left empty.
-These decisions are the engine's (`tairix_textedit::file`) and host-tested.
-The loop takes in every answer and every queued event, then paints each
-window once, a keystroke repainting the rows it changed and the status band;
+These decisions are `tairix_window::document`'s, shared with every document
+application, and host-tested.
+The loop takes in every answer and every queued event, then shows the
+pointer's shape and declares its tip once a window, then paints each window
+once, a keystroke repainting the rows it changed and the status band;
 a present the desktop refuses is that window's alone, said once and repainted
 whole at its next chance. The process does not end under a save still being
 written, even when the desktop's channel is lost — every window is closed
 first, so the saves chained behind one in flight are written too — and a save
-that fails after its window has closed is still said on `stderr`.
+that fails after its window has closed is still said on `stderr`. A quit puts
+the save question in place of any other a window is asking, so a quit is never
+left waiting on a question it did not ask.
 
 A window's title is the document's name shortened to fit the title field
 beside its marks, so a long or oddly spelt name never keeps a window from

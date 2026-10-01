@@ -101,11 +101,16 @@ impl<S: PageSource> Pages<S> {
     }
 
     /// Decode the page at `index`, answering `false` when there is none.
+    ///
+    /// The page already held is lent again rather than decoded a second
+    /// time: a viewer asks for the page it shows before every redraw.
     pub(crate) fn page(&mut self, bytes: &[u8], index: u32) -> Result<bool, DecodeError> {
         if index >= self.source.count() {
             return Ok(false);
         }
-        self.decode_at(bytes, index)?;
+        if self.current.as_ref().is_none_or(|(held, _)| *held != index) {
+            self.decode_at(bytes, index)?;
+        }
         Ok(true)
     }
 
@@ -122,5 +127,68 @@ impl<S: PageSource> Pages<S> {
         self.current = None;
         self.current = Some((index, self.source.decode(bytes, index, &self.limits)?));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::vec;
+
+    use super::{PageSource, Pages};
+    use crate::{DecodeError, DecodeLimits, RasterImage};
+
+    /// A container of one-pixel pages that counts its decodes.
+    struct Counting {
+        decodes: u32,
+    }
+
+    impl PageSource for Counting {
+        fn count(&self) -> u32 {
+            3
+        }
+
+        fn decode(
+            &mut self,
+            _: &[u8],
+            index: u32,
+            _: &DecodeLimits,
+        ) -> Result<RasterImage, DecodeError> {
+            self.decodes += 1;
+            let shade = u8::try_from(index).unwrap_or(0);
+            Ok(RasterImage::from_parts(
+                1,
+                1,
+                vec![shade, shade, shade, 255],
+            ))
+        }
+    }
+
+    fn pages() -> Pages<Counting> {
+        Pages::new(
+            Counting { decodes: 0 },
+            &DecodeLimits::new(8, 8, 64, 0),
+            1,
+            1,
+        )
+    }
+
+    #[test]
+    fn the_page_already_held_is_lent_again_rather_than_decoded_again() {
+        let mut pages = pages();
+        for _ in 0..4 {
+            assert!(pages.page(&[], 1).expect("decodes"));
+        }
+        assert_eq!(pages.source.decodes, 1);
+        assert_eq!(pages.current().map(|(index, _)| index), Some(1));
+    }
+
+    #[test]
+    fn a_different_page_is_decoded_and_replaces_the_one_held() {
+        let mut pages = pages();
+        assert!(pages.page(&[], 1).expect("decodes"));
+        assert!(pages.page(&[], 2).expect("decodes"));
+        assert!(pages.page(&[], 1).expect("decodes"));
+        assert_eq!(pages.source.decodes, 3);
+        assert!(!pages.page(&[], 3).expect("no such page"));
     }
 }

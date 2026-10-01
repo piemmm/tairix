@@ -48,8 +48,7 @@ mod program {
     use tairix_abi::fs::OpenFlags;
     use tairix_abi::{Errno, InputMode, STDOUT};
     use tairix_curses::{InputMode as CursesInputMode, Screen, Size, StreamTty};
-    use tairix_help::{own_short_help, BundleHelp};
-    use tairix_rt::io::{write_stderr_line, Stdout, Write};
+    use tairix_rt::io::write_stderr_line;
     use tairix_rt::File;
     use tairix_termcap::from_term;
     use tairix_vim::{parse, run, Command, Editor, FileIo, USAGE};
@@ -111,21 +110,6 @@ mod program {
         }
     }
 
-    /// Render `vim`'s own short help (`NAME` + `SYNOPSIS` + compact
-    /// `OPTIONS`) from its own bundle's `Help/` tree through the one
-    /// shared engine; when no document can be served (a build without the
-    /// bundle's documents) the usage banner stands in — the tool's own
-    /// text, not fabricated help content — so `-h` never fails.
-    fn short_help() -> i32 {
-        let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
-        let bytes = own_short_help(&BundleHelp::new("vim"), locale, "vim")
-            .unwrap_or_else(|| alloc::format!("{USAGE}\n").into_bytes());
-        match Stdout.write_all(&bytes) {
-            Ok(()) => 0,
-            Err(_) => 1,
-        }
-    }
-
     /// Program entry point. `tairix-rt`'s `_start` calls it once the
     /// runtime is set up and routes its return value through the `exit`
     /// syscall.
@@ -146,7 +130,7 @@ mod program {
                 start,
                 files,
             }) => (readonly, start, files),
-            Ok(Command::Help) => return short_help(),
+            Ok(Command::Help) => return tairix_help::print_own_short_help("vim", Some(USAGE)),
             Err(err) => {
                 write_stderr_line(&alloc::format!("vim: unknown argument: {}", err.argument));
                 write_stderr_line(USAGE);

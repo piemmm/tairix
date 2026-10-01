@@ -44,10 +44,9 @@ mod program {
     use tairix_font::BitmapFont;
     use tairix_geometry::{Point, Rect, Region, Scale};
     use tairix_input::InputEvent;
-    use tairix_rt::io::{Stderr, Write};
     use tairix_theme::{TextRole, Theme, ThemeRegistry};
     use tairix_widgets::Gallery;
-    use tairix_window::app::{self, AppWindow, ShellError, Wake, EXIT_CHANNEL_LOST};
+    use tairix_window::app::{self, AppWindow, Wake, EXIT_CHANNEL_LOST};
     use tairix_window::{
         key_input_event, pointer_input_events, pointer_point, present_damage, Desktop, EventDrain,
         EventError, EventMailbox, EventSource, Parked, Repaint, WindowClient, WindowEvents,
@@ -71,35 +70,29 @@ mod program {
         match tairix_window::info_and_quit(endpoint, AppBarClick::RaiseOrOpen) {
             Ok(bar) => {
                 if let Err(err) = client.set_app_bar(&bar) {
-                    let _ = writeln!(
-                        Stderr,
-                        "widgets: the desktop refused this application's icon-bar presence \
+                    app::report(
+                        APP_NAME,
+                        format_args!(
+                            "the desktop refused this application's icon-bar presence \
                          ({err}); carrying on without one"
+                        ),
                     );
                 }
             }
             Err(err) => {
-                let _ = writeln!(
-                    Stderr,
-                    "widgets: this application's icon-bar menu is invalid ({err:?}); carrying \
+                app::report(
+                    APP_NAME,
+                    format_args!(
+                        "this application's icon-bar menu is invalid ({err:?}); carrying \
                      on without one"
+                    ),
                 );
             }
         }
     }
 
-    /// State the abnormal-exit reason on `stderr` (fail loud) and hand back
-    /// `code` for `main`.
-    fn fail(code: i32, reason: &str) -> i32 {
-        let _ = writeln!(Stderr, "widgets: {reason}");
-        code
-    }
-
-    /// State a shared-shell bring-up refusal and hand its reserved code back.
-    fn fail_shell(err: ShellError) -> i32 {
-        let _ = writeln!(Stderr, "widgets: {err}");
-        err.code()
-    }
+    /// The name this program states its refusals under.
+    const APP_NAME: &str = "widgets";
 
     /// The production [`EventSource`]: drain the app's own event mailbox,
     /// parking on the wait-set whenever it is empty, and accept only events
@@ -173,13 +166,13 @@ mod program {
             let server = self
                 .window
                 .open(event_endpoint, mode, "widgets", WindowSizing::default())
-                .map_err(fail_shell)?;
+                .map_err(|err| app::fail(APP_NAME, err.code(), err))?;
             if self
                 .present(gallery, theme, scale, mode, DamageRect::full(mode))
                 .is_err()
             {
                 self.close();
-                return Err(fail(EXIT_CHANNEL_LOST, "present refused"));
+                return Err(app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused"));
             }
             Ok(server)
         }
@@ -344,7 +337,7 @@ mod program {
         match app::adopt_desktop(desktop, themes) {
             Ok(changed) => changed,
             Err(err) => {
-                let _ = writeln!(Stderr, "widgets: desktop change refused: {err}");
+                app::report(APP_NAME, format_args!("desktop change refused: {err}"));
                 false
             }
         }
@@ -383,12 +376,12 @@ mod program {
                             )
                             .is_err()
                     {
-                        return fail(EXIT_CHANNEL_LOST, "present refused");
+                        return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused");
                     }
                     continue;
                 }
                 Err(EventError::Mailbox(_)) => {
-                    return fail(EXIT_CHANNEL_LOST, "event channel lost")
+                    return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "event channel lost")
                 }
             };
 
@@ -453,7 +446,7 @@ mod program {
                 .present(gallery, themes.active(), desktop.scale(), mode, damage)
                 .is_err()
             {
-                return fail(EXIT_CHANNEL_LOST, "present refused");
+                return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused");
             }
         }
     }
@@ -475,7 +468,7 @@ mod program {
         // than a guess corrected once the user has seen it.
         let (mut desktop, mut themes) = match app::bring_up_desktop(surface.window.client()) {
             Ok(pair) => pair,
-            Err(err) => return fail_shell(err),
+            Err(err) => return app::fail(APP_NAME, err.code(), err),
         };
 
         let (initial_w, initial_h) = desktop.window_size(WIN_WIDTH, WIN_HEIGHT);
@@ -483,7 +476,7 @@ mod program {
 
         let binding = match app::bind_event_mailbox() {
             Ok(binding) => binding,
-            Err(err) => return fail_shell(err),
+            Err(err) => return app::fail(APP_NAME, err.code(), err),
         };
         let event_endpoint = binding.endpoint();
 

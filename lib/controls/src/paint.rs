@@ -167,27 +167,40 @@ pub(crate) fn surface_rect(bounds: Rect) -> Option<(u32, u32, u32, u32)> {
 /// three fifths of a whole render and survived any clip.
 ///
 /// A rectangle that lies off the top-left cannot be stated in surface
-/// coordinates ([`surface_rect`]), so it is drawn rather than skipped: a
-/// control partly above or left of the surface still owes the part that is on
-/// it, and over-drawing costs pixels where skipping would lose them.
+/// coordinates, so it is drawn rather than skipped: a control partly above or
+/// left of the surface still owes the part that is on it, and over-drawing
+/// costs pixels where skipping would lose them.
 #[must_use]
-pub(crate) fn withheld(surface: &Surface, bounds: Rect) -> bool {
+pub fn withheld(surface: &Surface, bounds: Rect) -> bool {
     surface_rect(bounds).is_some_and(|(x, y, w, h)| !surface.admits(x, y, w, h))
 }
 
-/// Inset a surface rectangle by `by` on every side, or `None` if it collapses.
-///
-/// The one plate-geometry inset the desktop shares, so a surface painted
-/// outside this crate ([`paint_surface_plate`]) shrinks past its own rim and
-/// padding by exactly the arithmetic the controls seated on it use.
+/// Fill `area` with `color`, replacing what is there. An area that starts
+/// above or left of the surface paints nothing.
+pub fn fill_area(surface: &mut Surface, area: Rect, color: Color) {
+    if let Some((x, y)) = area.surface_origin() {
+        surface.fill_rect(x, y, area.width, area.height, color);
+    }
+}
+
+/// Composite `color`, which may be translucent, over `area`.
+pub fn blend_area(surface: &mut Surface, area: Rect, color: Rgba) {
+    if let Some((x, y)) = area.surface_origin() {
+        surface.fill_round_rect(x, y, area.width, area.height, 0, Color::from(color));
+    }
+}
+
+/// Inset a surface rectangle by `by` on every side, or `None` if it collapses:
+/// [`Rect::inset`] in surface coordinates, so a surface painted outside this
+/// crate ([`paint_surface_plate`]) shrinks past its own rim and padding by
+/// exactly the arithmetic the controls seated on it use.
 #[must_use]
 pub fn inset(x: u32, y: u32, w: u32, h: u32, by: u32) -> Option<(u32, u32, u32, u32)> {
-    let iw = w.checked_sub(by.saturating_mul(2))?;
-    let ih = h.checked_sub(by.saturating_mul(2))?;
-    if iw == 0 || ih == 0 {
+    let rect = Rect::new(i32::try_from(x).ok()?, i32::try_from(y).ok()?, w, h).inset(by);
+    if rect.is_empty() {
         return None;
     }
-    Some((x + by, y + by, iw, ih))
+    surface_rect(rect)
 }
 
 /// The scaled plate border/rim thickness, doubled under heavy contrast so a
@@ -1928,7 +1941,7 @@ pub(crate) fn paint_count_badge(
     surface.fill_round_rect(x, y, w, h, h / 2, fill);
     let tw = font.text_width(text);
     let tx = to_i32(x) + (to_i32(w) - to_i32(tw)).max(0) / 2;
-    let ty = to_i32(y) + (to_i32(h) - to_i32(font.glyph_height())).max(0) / 2;
+    let ty = font.centred_top(to_i32(y), h);
     font.draw_text(surface, tx, ty, text, text_color);
 }
 
@@ -2144,12 +2157,6 @@ pub(crate) fn paint_row(
     }
 
     row_content_span(scale, theme, x, w, h).map(|(cx, cw)| (cx, y, cw, h))
-}
-
-/// The baseline `y` that vertically centres one line of `font` in a
-/// `(y, h)` band.
-pub(crate) fn centred_text_y(font: BitmapFont, y: u32, h: u32) -> i32 {
-    to_i32(y) + (to_i32(h) - to_i32(font.glyph_height())).max(0) / 2
 }
 
 /// The drawn width of a fitted run — the pair a fitter hands back, text and

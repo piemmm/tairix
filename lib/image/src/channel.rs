@@ -45,6 +45,23 @@ impl Channel {
         self.width != 0
     }
 
+    /// `value`, eight bits wide, narrowed to this channel's width with
+    /// rounding and moved into place: the inverse of what a [`Sampler`]
+    /// reads, so a narrowed value widens back to exactly itself whenever it
+    /// was a widened one to begin with.
+    pub(crate) fn place(self, value: u8) -> u32 {
+        if self.width == 0 {
+            return 0;
+        }
+        let narrowed = if self.width >= 8 {
+            u32::from(value) << (self.width - 8)
+        } else {
+            let max = (1u32 << self.width) - 1;
+            (u32::from(value) * max + 127) / 255
+        };
+        narrowed << self.shift & self.mask
+    }
+
     /// A channel from a mask a file declared, or `None` where its set bits
     /// are not contiguous: a scattered field names no single sample value.
     ///

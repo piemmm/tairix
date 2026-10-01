@@ -31,7 +31,7 @@ code.
   `lib/discovery`, `lib/image`, `lib/raster`, `lib/raytrace`,
   `lib/resolver`, `lib/ribbon`, `lib/rt`, `lib/sandbox`, `lib/terrain`,
   `userland/gui/wm`, the desktop session, the greeter, `audiod`,
-  `discoveryd`, TextEdit and `view`.
+  `discoveryd`, TextEdit, `view` and Paint.
 * `fmt` — no-allocation numeric formatters for structured-log field
   values. Consumers: `kernel/sec`, `kernel/ipc`.
 * `size` — the GNU coreutils size vocabulary: `-B`/`--block-size`
@@ -47,7 +47,9 @@ code.
   will produce. `JobQueue`: every request answered, in turn). Consumers:
   the terminal's and the desktop session's settings publishers, the
   session's program-catalogue scan and file calls, the file manager's
-  bundle scan and occupancy probes, and TextEdit's document queue.
+  bundle scan and occupancy probes, the document host's queue
+  (`lib/window::docapp`, which TextEdit and Paint run in), and Paint's
+  decode queue.
 * `hexdump` — the canonical offset/hex/ASCII dump row. Consumers:
   `fstree` and TextEdit's hex view.
 * `lanes` — finding a byte eight lanes of a word at a time. Consumers:

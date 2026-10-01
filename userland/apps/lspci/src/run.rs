@@ -117,7 +117,7 @@ mod program {
                 return 2;
             }
         };
-        let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
+        let locale = tairix_help::user_locale();
         // The bundle's own lookup table. A load or validation failure is a
         // lost naming aid, not a lost inventory: the reason goes to standard
         // error and the listing renders numeric ids.

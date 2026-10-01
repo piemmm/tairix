@@ -55,11 +55,13 @@ under the floor and are unchanged.
 | `collection` | `ListRow`, `TableRow`, `TableCell`, `TableHeader`, `Card`, `Panel` |
 | `form`, `stack` | `FieldRow`, `FieldGroup`, `FlagSet`, and the plate column groups stack down |
 | `picture` | `PictureChoice`, `PictureSection`, `PictureItem`, `Swatch`, `Aspect` |
+| `swatch_grid` | `SwatchGrid`: a grid of colour wells, one primary and an optional secondary mark, chosen by pointer or arrows, a translucent well shown over a checker; each mark is black or white by the well's colour as it shows over the surface |
+| `checker` | `Checker`: the one checkerboard transparency is shown over, in the theme's surface and that colour lifted, square side scaled |
 | `credential` | `CredentialSheet` |
 | `scroll`, `scrollbar` | the geometry engine and the one `ScrollBar` over it |
 | `window` | `WindowFrame`, `TitleBar`, `WindowControl`, `ResizeGrabber` |
 | `shell` | `Notification`, `TaskbarItem`, `WindowPreview`, `TraySignal` |
-| `decision` | `Dialog`, `Tooltip`, `HelpTip` |
+| `decision` | `Dialog`, `Tooltip`, `HelpTip`, and the save-changes question (`Dialog::save_changes`, answered as a `SaveChanges`) every document window asks before closing over changes |
 
 A continuous control reports where its interaction *settled*, distinctly from
 the values it took along the way: `Slider` answers `SliderAction::SetValue`

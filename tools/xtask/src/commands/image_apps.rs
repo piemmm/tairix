@@ -1232,81 +1232,22 @@ mod tests {
         encode_png(side, side, true, &samples)
     }
 
-    /// Wrap row-major 8-bit `samples` — one a pixel, or grey+alpha pairs when
-    /// `with_alpha` — as a PNG.
+    /// Row-major 8-bit `samples` — one a pixel, or grey+alpha pairs when
+    /// `with_alpha` — as a PNG, written by the desktop's own encoder.
     ///
     /// Built here rather than committed as a fixture so a test can ask for
     /// exactly the geometry — or the transparency — it wants to be refused.
-    /// The `IDAT` zlib stream is a run of stored (uncompressed) DEFLATE
-    /// blocks, which is legal and keeps this to arithmetic the reader can
-    /// check by eye; greyscale keeps a master-sized image comfortably inside
-    /// the artwork byte bound without needing a compressor here.
     fn encode_png(width: u32, height: u32, with_alpha: bool, samples: &[u8]) -> Vec<u8> {
-        fn crc32(bytes: &[u8]) -> u32 {
-            let mut crc = 0xFFFF_FFFFu32;
-            for byte in bytes {
-                crc ^= u32::from(*byte);
-                for _ in 0..8 {
-                    let mask = 0u32.wrapping_sub(crc & 1);
-                    crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
-                }
-            }
-            !crc
-        }
-        fn chunk(out: &mut Vec<u8>, tag: [u8; 4], body: &[u8]) {
-            out.extend_from_slice(&u32::try_from(body.len()).expect("chunk fits").to_be_bytes());
-            let mut crc_over = tag.to_vec();
-            crc_over.extend_from_slice(body);
-            out.extend_from_slice(&tag);
-            out.extend_from_slice(body);
-            out.extend_from_slice(&crc32(&crc_over).to_be_bytes());
-        }
-
-        // Each scanline is the filter byte (none) followed by its samples.
-        let stride = width as usize * if with_alpha { 2 } else { 1 };
-        let mut raw = Vec::with_capacity((stride + 1) * height as usize);
-        for row in samples.chunks_exact(stride) {
-            raw.push(0);
-            raw.extend_from_slice(row);
-        }
-
-        // RFC 1950 envelope over RFC 1951 stored blocks (each at most the
-        // 16-bit block length the format allows).
-        let mut zlib = vec![0x78, 0x01];
-        let mut rest = raw.as_slice();
-        loop {
-            let take = rest.len().min(usize::from(u16::MAX));
-            let (block, tail) = rest.split_at(take);
-            let len = u16::try_from(block.len()).expect("bounded by u16::MAX");
-            zlib.push(u8::from(tail.is_empty()));
-            zlib.extend_from_slice(&len.to_le_bytes());
-            zlib.extend_from_slice(&(!len).to_le_bytes());
-            zlib.extend_from_slice(block);
-            rest = tail;
-            if rest.is_empty() {
-                break;
-            }
-        }
-        let (mut a, mut b) = (1u32, 0u32);
-        for byte in &raw {
-            a = (a + u32::from(*byte)) % 65521;
-            b = (b + a) % 65521;
-        }
-        zlib.extend_from_slice(&((b << 16) | a).to_be_bytes());
-
-        // Colour type 4 (grey+alpha) when an alpha channel was asked for,
-        // else 0 (grey).
-        let colour_type = if with_alpha { 4 } else { 0 };
-        let mut ihdr = Vec::new();
-        ihdr.extend_from_slice(&width.to_be_bytes());
-        ihdr.extend_from_slice(&height.to_be_bytes());
-        ihdr.extend_from_slice(&[8, colour_type, 0, 0, 0]);
-
-        let mut out = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
-        chunk(&mut out, *b"IHDR", &ihdr);
-        chunk(&mut out, *b"IDAT", &zlib);
-        chunk(&mut out, *b"IEND", &[]);
-        out
+        let step = if with_alpha { 2 } else { 1 };
+        let rgba = samples
+            .chunks_exact(step)
+            .flat_map(|pixel| {
+                let alpha = if with_alpha { pixel[1] } else { u8::MAX };
+                [pixel[0], pixel[0], pixel[0], alpha]
+            })
+            .collect();
+        let picture = tairix_image::Picture::rgba(width, height, rgba).expect("a picture");
+        tairix_image::encode_png(&picture).expect("it encodes")
     }
 
     /// A bundle that declares no library icon has nothing to verify.

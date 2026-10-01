@@ -244,6 +244,12 @@ impl<Req, Ans> JobQueue<Req, Ans> {
         self.answered.pop_front()
     }
 
+    /// How many answers have landed and wait to be collected.
+    #[must_use]
+    pub fn landed(&self) -> usize {
+        self.answered.len()
+    }
+
     /// Whether a request is waiting for a worker to take it.
     #[must_use]
     pub fn has_work(&self) -> bool {

@@ -1493,6 +1493,7 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
             CursorShape::Text => CursorKind::Text,
             CursorShape::Pointer => CursorKind::Pointer,
             CursorShape::Busy => CursorKind::Busy,
+            CursorShape::Crosshair => CursorKind::Crosshair,
         };
         if !self.compositor.set_window_cursor(wm, kind) {
             return Err(Errno::NotFound);

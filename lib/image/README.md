@@ -2,10 +2,11 @@
 
 Stability tier: **experimental**.
 
-First-party TAIRiX raster-image decoding: complete, fail-closed PNG, JPEG,
-GIF, BMP, ICO/CUR, RISC OS sprite, TIFF and WEBP decoders that turn untrusted
-artwork into a validated, straight-alpha RGBA8 pixel buffer, or a typed
-refusal — never a panic, and never more memory than the caller allows.
+First-party TAIRiX raster images: complete, fail-closed PNG, JPEG, GIF, BMP,
+ICO/CUR, RISC OS sprite, TIFF and WEBP decoders that turn untrusted artwork
+into a validated, straight-alpha RGBA8 pixel buffer, or a typed refusal —
+never a panic, and never more memory than the caller allows — and the PNG,
+JPEG and sprite-area encoders an editor saves with.
 
 ## Consumers
 
@@ -21,11 +22,12 @@ authored no larger than the wallpaper renderer's own maximum destination
 that, which is what `decode_fitted` and the progressive-store bound below
 exist for.
 
-The picture viewer (`plans/VIEW.md`) is the other consumer, through the same
-sandbox. Every format it claims lands here rather than beside it, so a
-format's decoder exists once. *Admitting* a format is still each consumer's
-own decision: the icon pipeline deliberately takes only PNG and SVG
-(`plans/ICONS.md`), and the wallpaper catalog only its own extensions.
+The picture viewer (`plans/VIEW.md`) and the image editor (`plans/PAINT.md`)
+are the other consumers, through the same sandbox. Every format they claim
+lands here rather than beside them, so a format's decoder exists once.
+*Admitting* a format is still each consumer's own decision: the icon pipeline
+deliberately takes only PNG and SVG (`plans/ICONS.md`), and the wallpaper
+catalog only its own extensions.
 
 ## Formats
 
@@ -108,15 +110,46 @@ the name a file was picked by reaches the decoder by naming the format
 parser still validates the bytes, so naming the wrong one is refused rather
 than misread. The sprite decoder also takes three readings the format's own
 text does not settle, all stated in its module rustdoc: a sprite with no
-palette is resolved against the palette the OS assigns on entering a mode of
-that depth (at eight bits that is the screen-memory byte's own tint
-arrangement, so it is exact); a palette shorter than the depth needs is the
-VIDC1 arrangement, its last sixteen entries being the hardware registers and
-a pixel's top four bits overriding supremacy bits; and where a file carries
-both a mask and per-pixel alpha the mask wins, since it is what the format
-calls a sprite's transparency. Sprite names are read over rather than
-reported, and the CMYK, JPEG-data, and YCbCr sprite types are refused by
-name rather than half-read.
+palette shows the desktop's colours (`desktop_palette`), never a PC palette —
+two colours are Wimp colours 0 and 7, four are 0, 2, 4 and 7, sixteen are the
+sixteen Wimp colours, and 256 are the screen-memory byte's own tint
+arrangement; a palette shorter than the depth needs is the VIDC1 arrangement,
+its last sixteen entries being the hardware registers and a pixel's top four
+bits overriding supremacy bits; and where a file carries both a mask and
+per-pixel alpha the mask wins, since it is what the format calls a sprite's
+transparency. The CMYK, JPEG-data, and YCbCr sprite types are refused by name
+rather than half-read.
+
+`open_native` reads a picture as its file stores it, for an editor:
+a paletted PNG as its indices and palette, a sprite area through
+`SpriteAreaReader` — each sprite's `SpriteName`, `SpriteMode` (its eigen
+factors, `pixel_aspect` and alpha-mask form) and `SpritePalette` (`Implied`,
+`Stored` exactly as read, or `Full`), with a sprite it cannot read handed
+back as its bytes (`OpaqueSprite`) rather than refused — and any other format
+as RGBA. For a PNG or JPEG, `Unkept` says what the file held that the picture
+does not: samples narrowed from 16 bits (`precision`), or data beside the
+picture no encoder here writes (`extras`), such as a colour profile, text,
+EXIF metadata or an animation's further frames.
+
+## Writing
+
+`encode_png`, `encode_jpeg` and `encode_sprite_area` read a `PictureSource`
+a row at a time — `Picture` is the one this crate owns — and refuse anything
+their format cannot state (`EncodeError`) rather than approximate it. PNG is
+the smallest colour type that holds the picture exactly: a palette is kept at
+the shallowest depth that indexes it, a binary mask becomes one transparent
+entry, and an unused alpha channel or an all-grey picture is dropped to what
+it needs. JPEG is baseline JFIF at a quality of 1 to 100 (`JpegOptions`),
+composited over a background, one component for a grey picture and 4:4:4
+chroma from quality 90. A sprite area writes each sprite in its own mode —
+indexed at the mode's depth with the palette form asked for, or direct colour
+in the packing the mode names — with its mask in the form the mode names, and a
+kept sprite back exactly but for its length word, refusing one that is not a
+whole number of words, which would misplace every sprite after it.
+`SpriteMode::with_eig` restates a mode for pixels of another shape, so a
+reshaped sprite is written with a mode that agrees. `over` is the one
+straight-alpha source-over, which WEBP's animation and an editor's paint both
+composite by.
 
 TIFF takes three readings its own text does not settle, all stated in the
 module rustdoc. A plain `decode` answers the first page the file does not

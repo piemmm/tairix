@@ -49,13 +49,16 @@ pub enum CursorKind {
     /// The double arrow along the falling diagonal, shown on a top-left or
     /// bottom-right resize corner.
     ResizeDiagonalFalling,
+    /// The open cross shown where a pointer picks out one pixel, as over an
+    /// image editor's canvas.
+    Crosshair,
 }
 
 /// Every cursor kind the desktop defines.
 ///
 /// The closed [`CursorKind`] vocabulary as a table, so a loader, a cache, or a
 /// test iterates every kind without restating the list.
-pub const CURSOR_KINDS: [CursorKind; 9] = [
+pub const CURSOR_KINDS: [CursorKind; 10] = [
     CursorKind::Arrow,
     CursorKind::Text,
     CursorKind::Pointer,
@@ -65,6 +68,7 @@ pub const CURSOR_KINDS: [CursorKind; 9] = [
     CursorKind::ResizeVertical,
     CursorKind::ResizeDiagonalRising,
     CursorKind::ResizeDiagonalFalling,
+    CursorKind::Crosshair,
 ];
 
 impl CursorKind {
@@ -85,6 +89,7 @@ impl CursorKind {
             Self::ResizeVertical => "cursor.resize-vertical",
             Self::ResizeDiagonalRising => "cursor.resize-diagonal-rising",
             Self::ResizeDiagonalFalling => "cursor.resize-diagonal-falling",
+            Self::Crosshair => "cursor.crosshair",
         }
     }
 }
@@ -176,6 +181,8 @@ pub struct CursorSet {
     pub resize_diagonal_rising: String,
     /// Asset for [`CursorKind::ResizeDiagonalFalling`].
     pub resize_diagonal_falling: String,
+    /// Asset for [`CursorKind::Crosshair`].
+    pub crosshair: String,
 }
 
 impl CursorSet {
@@ -196,6 +203,7 @@ impl CursorSet {
             resize_vertical: String::from(CursorKind::ResizeVertical.asset_id()),
             resize_diagonal_rising: String::from(CursorKind::ResizeDiagonalRising.asset_id()),
             resize_diagonal_falling: String::from(CursorKind::ResizeDiagonalFalling.asset_id()),
+            crosshair: String::from(CursorKind::Crosshair.asset_id()),
         }
     }
 
@@ -212,6 +220,7 @@ impl CursorSet {
             CursorKind::ResizeVertical => &self.resize_vertical,
             CursorKind::ResizeDiagonalRising => &self.resize_diagonal_rising,
             CursorKind::ResizeDiagonalFalling => &self.resize_diagonal_falling,
+            CursorKind::Crosshair => &self.crosshair,
         }
     }
 }

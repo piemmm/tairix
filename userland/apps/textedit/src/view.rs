@@ -9,21 +9,24 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_abi::time::Duration64;
-use tairix_abi::window_ipc::{
-    AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuRow, AppMenuShortcut,
-    WINDOW_TITLE_MAX,
-};
+use tairix_abi::window_ipc::{AppMenu, AppMenuItemId, CursorShape};
+use tairix_browse::vfs::write_document_title;
 use tairix_controls::{
-    Button, ButtonContent, ControlRole, Dialog, DialogAction, ScrollAction, ScrollBar, ScrollModel,
-    ScrollOrientation, ScrollRange, SearchField, SelectionState, TextAction, TextField,
+    Button, ButtonContent, ControlRole, Dialog, DialogAction, SaveChanges, ScrollAction, ScrollBar,
+    ScrollModel, ScrollOrientation, ScrollRange, SearchField, SelectionState, TextAction,
+    TextField,
 };
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{ClickRun, InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_sandbox::textsyntax::LexedBatch;
 use tairix_syntax::{Diagnostic, Format};
 use tairix_theme::Theme;
+use tairix_window::docapp::DocumentView;
+use tairix_window::document::{Access, SavedDocument};
+use tairix_window::menu::{MenuBuilder, Plate};
 
 use crate::detect::{Indent, LineEnding};
+use crate::document::Snapshot;
 use crate::editor::{Command, Editor, Effect, Mode, Motion};
 use crate::find::{Options, Pattern, PatternError, Search, Step};
 use crate::hex::{self, HexLayout};
@@ -31,19 +34,8 @@ use crate::highlight::LexJob;
 use crate::layout::{Faces, Layout, FIND_BUTTONS};
 use crate::text::{self, Row};
 
-/// The name a window's document goes by until it is saved.
-pub const UNTITLED: &str = "Untitled";
-
 /// The application's name, as window titles end.
 pub const APP_TITLE: &str = "TextEdit";
-
-/// What stands between a document's name and [`APP_TITLE`] in its title.
-const TITLE_SEPARATOR: &str = " \u{2014} ";
-
-/// How a window's title marks a document changed since its file, and one
-/// that may not be saved over.
-const MODIFIED_MARK: &str = "*";
-const READ_ONLY_MARK: &str = " (read-only)";
 
 /// Longest selection the find field is filled from.
 const FIND_SEED_BYTES: usize = 256;
@@ -51,17 +43,6 @@ const FIND_SEED_BYTES: usize = 256;
 /// How long a settings store goes unedited before its parser is asked about
 /// it: long enough that typing does not ask once a keystroke.
 pub const CHECK_SETTLE_NS: u64 = 400_000_000;
-
-/// How the window's document may be written.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum Access {
-    /// A new document with no file yet.
-    Untitled,
-    /// A file this window was handed read-only.
-    ReadOnly,
-    /// A file this window may save over.
-    Writable,
-}
 
 /// A menu the window asks the desktop to open.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -89,33 +70,15 @@ const STATUS_MENUS: [Option<MenuKind>; crate::layout::STATUS_FIELDS] = [
     Some(MenuKind::Format),
 ];
 
-/// What the window asks of `Run`.
+/// What the window asks of `Run` that only this editor carries out.
 #[derive(Debug)]
-pub enum Request {
-    /// Save the document where it came from, or ask where when it came from
-    /// nowhere writable.
-    Save,
-    /// Ask where to save the document.
-    SaveAs,
-    /// Ask the desktop's picker for a document to open.
-    Open,
+pub enum Own {
     /// Open a new, empty window.
     NewWindow,
-    /// Close this window: its document is saved or its changes were given up.
-    Close,
-    /// Save, then close once the save has landed.
-    SaveThenClose,
     /// Put these bytes on the clipboard.
     Copy(Vec<u8>),
     /// Paste what the clipboard holds.
     Paste,
-    /// Open a menu, anchored on `anchor` in the window.
-    Menu {
-        /// Which.
-        kind: MenuKind,
-        /// Where, in window pixels.
-        anchor: Rect,
-    },
     /// Run a search over a snapshot of the document.
     Search {
         /// Which search this is, echoed with its answer.
@@ -126,40 +89,19 @@ pub enum Request {
         replacement: Option<Vec<u8>>,
     },
     /// Convert every line break to a convention, over a snapshot.
-    Convert(LineEnding),
+    Convert {
+        /// Which conversion this is, echoed with its answer.
+        id: u64,
+        /// The convention.
+        to: LineEnding,
+    },
 }
+
+/// What the window asks of `Run`.
+pub type Request = tairix_window::docapp::Request<MenuKind, Own>;
 
 /// What an input event led to beyond the damage it recorded.
-#[derive(Debug, Default)]
-pub struct Outcome {
-    /// What `Run` is asked to do.
-    pub request: Option<Request>,
-    /// The bands moved: lay the window out again and repaint it whole.
-    pub relayout: bool,
-}
-
-impl Outcome {
-    const fn none() -> Self {
-        Self {
-            request: None,
-            relayout: false,
-        }
-    }
-
-    const fn asking(request: Request) -> Self {
-        Self {
-            request: Some(request),
-            relayout: false,
-        }
-    }
-
-    const fn relaid() -> Self {
-        Self {
-            request: None,
-            relayout: true,
-        }
-    }
-}
+pub type Outcome = tairix_window::docapp::Outcome<Request>;
 
 /// What a menu row or a key asks for.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -389,7 +331,9 @@ pub struct View {
     modifiers: Modifiers,
     message: Option<String>,
     search: Option<u64>,
-    next_search: u64,
+    conversion: Option<u64>,
+    /// The id the next search or conversion asked for is known by.
+    next_ask: u64,
     modal: Option<Modal>,
     double_click: Duration64,
     /// The widest row measured in this view, in columns: what the
@@ -401,6 +345,126 @@ pub struct View {
     /// The document generation [`View::check_due`] last saw, and when it
     /// first saw it.
     seen: (u64, u64),
+}
+
+impl SavedDocument for View {
+    type Snapshot = Snapshot;
+
+    fn access(&self) -> Access {
+        self.access
+    }
+
+    fn is_modified(&self) -> bool {
+        self.editor.is_modified()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.editor.document().is_empty()
+    }
+
+    fn snapshot(&mut self) -> Option<(u64, alloc::sync::Arc<Snapshot>)> {
+        self.editor.snapshot().ok()
+    }
+
+    fn saved(&mut self, generation: u64) {
+        self.editor.saved(generation);
+    }
+
+    fn rename(&mut self, name: String) {
+        self.name = name;
+    }
+
+    fn set_access(&mut self, access: Access) {
+        self.access = access;
+    }
+
+    fn say(&mut self, message: String) {
+        View::say(self, message);
+    }
+}
+
+impl DocumentView for View {
+    type Layout = Layout;
+    type Faces = Faces;
+    type MenuKind = MenuKind;
+    type Own = Own;
+
+    fn name(&self) -> &str {
+        View::name(self)
+    }
+
+    fn write_title(&self, title: &mut String) {
+        View::write_title(self, title);
+    }
+
+    fn layout(&self, width: u32, height: u32, theme: &Theme, scale: Scale, faces: Faces) -> Layout {
+        View::layout(self, width, height, theme, scale, faces)
+    }
+
+    fn min_size(&self, theme: &Theme, scale: Scale, faces: Faces) -> (u32, u32) {
+        Layout::min_size(theme, scale, faces)
+    }
+
+    fn settle(&mut self, layout: &Layout, damage: &mut Region) {
+        View::settle(self, layout, damage);
+    }
+
+    fn message_area(layout: &Layout) -> Rect {
+        layout.status()
+    }
+
+    fn asking_to_close(&self) -> bool {
+        matches!(self.modal, Some(Modal::Close(_)))
+    }
+
+    /// The I-beam over text that takes a caret, the arrow over everything
+    /// else.
+    fn cursor(&self, layout: &Layout, at: Point) -> CursorShape {
+        let text = [layout.grid(), layout.find_field(), layout.replace_field()];
+        if self.modal.is_none() && text.iter().any(|rect| rect.contains(at)) {
+            CursorShape::Text
+        } else {
+            CursorShape::Arrow
+        }
+    }
+
+    fn menu(&self, kind: MenuKind) -> AppMenu {
+        View::menu(self, kind)
+    }
+
+    fn close_requested(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
+        View::close_requested(self, layout, damage)
+    }
+
+    fn chosen(&mut self, item: AppMenuItemId, layout: &Layout, damage: &mut Region) -> Outcome {
+        View::chosen(self, item, layout, damage)
+    }
+
+    fn focus_changed(&mut self, focused: bool, layout: &Layout, damage: &mut Region) {
+        View::focus_changed(self, focused, layout, damage);
+    }
+
+    fn input(
+        &mut self,
+        input: &InputEvent,
+        now_ns: u64,
+        layout: &Layout,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> Outcome {
+        match *input {
+            InputEvent::KeyPressed { key, modifiers } => {
+                self.on_key(key, modifiers, layout, scale, theme, damage)
+            }
+            InputEvent::KeyReleased { .. } => Outcome::none(),
+            _ => self.on_pointer(input, now_ns, layout, scale, theme, damage),
+        }
+    }
+
+    fn offered_extension(&self) -> &'static str {
+        "txt"
+    }
 }
 
 impl View {
@@ -433,7 +497,8 @@ impl View {
             modifiers: Modifiers::default(),
             message: None,
             search: None,
-            next_search: 1,
+            conversion: None,
+            next_ask: 1,
             modal: None,
             double_click,
             widest: None,
@@ -459,49 +524,15 @@ impl View {
         &self.name
     }
 
-    /// How the document may be written.
-    #[must_use]
-    pub const fn access(&self) -> Access {
-        self.access
-    }
-
-    /// The document became `name`, writable, saved as `generation`.
-    pub fn saved(&mut self, generation: u64, name: Option<String>) {
-        self.editor.saved(generation);
-        if let Some(name) = name {
-            self.name = name;
-        }
-        self.access = Access::Writable;
-        self.message = Some(String::from("Saved"));
-    }
-
     /// Say `message` in the status band.
     pub fn say(&mut self, message: impl Into<String>) {
         self.message = Some(message.into());
     }
 
-    /// Write what the window's title reads over `title`, reusing its room:
-    /// the name shortened to what the title field holds beside the marks.
+    /// Write what the window's title reads over `title`, reusing its room.
     pub fn write_title(&self, title: &mut String) {
-        title.clear();
-        let modified = if self.editor.is_modified() {
-            MODIFIED_MARK
-        } else {
-            ""
-        };
-        let read_only = if self.access == Access::ReadOnly {
-            READ_ONLY_MARK
-        } else {
-            ""
-        };
-        let budget = WINDOW_TITLE_MAX
-            .saturating_sub(modified.len() + read_only.len())
-            .saturating_sub(TITLE_SEPARATOR.len() + APP_TITLE.len());
-        title.push_str(modified);
-        tairix_browse::vfs::push_title_name(title, &self.name, budget);
-        title.push_str(read_only);
-        title.push_str(TITLE_SEPARATOR);
-        title.push_str(APP_TITLE);
+        let (modified, read_only) = (self.editor.is_modified(), self.access == Access::ReadOnly);
+        write_document_title(title, &self.name, modified, read_only, APP_TITLE);
     }
 
     /// The status band's message: the last thing said, else what the
@@ -626,15 +657,21 @@ impl View {
         }
     }
 
-    /// Adopt the document converted to `to` as of `generation`.
+    /// Adopt the document conversion `id` made to `to` as of `generation`,
+    /// unless a newer one has been asked for since.
     pub fn converted(
         &mut self,
+        id: u64,
         generation: u64,
         chunks: Option<Vec<Vec<u8>>>,
         to: LineEnding,
         layout: &Layout,
         damage: &mut Region,
     ) -> Outcome {
+        if !self.wants_conversion(id) {
+            return Outcome::none();
+        }
+        self.conversion = None;
         let before = self.editor.selection();
         let effect = self.editor.converted(generation, chunks, to);
         self.message = None;
@@ -687,6 +724,19 @@ impl View {
     #[must_use]
     pub fn wants_search(&self, id: u64) -> bool {
         self.search == Some(id)
+    }
+
+    /// Whether conversion `id` is still the one this window wants answered.
+    #[must_use]
+    pub fn wants_conversion(&self, id: u64) -> bool {
+        self.conversion == Some(id)
+    }
+
+    /// The id the next search or conversion is known by.
+    fn ask(&mut self) -> u64 {
+        let id = self.next_ask;
+        self.next_ask += 1;
+        id
     }
 
     /// Bring the scroll and the bars into line with the caret and report
@@ -918,23 +968,25 @@ impl View {
     /// Carry out `action`.
     pub fn act(&mut self, action: Action, layout: &Layout, damage: &mut Region) -> Outcome {
         let command = match action {
-            Action::NewWindow => return Outcome::asking(Request::NewWindow),
+            Action::NewWindow => return Outcome::asking(Request::Own(Own::NewWindow)),
             Action::Open => return Outcome::asking(Request::Open),
             Action::Save => return Outcome::asking(Request::Save),
             Action::SaveAs => return Outcome::asking(Request::SaveAs),
             Action::Close => return self.close_requested(layout, damage),
             Action::Copy => return self.copy(),
             Action::Cut => return self.cut(layout, damage),
-            Action::Paste => return Outcome::asking(Request::Paste),
+            Action::Paste => return Outcome::asking(Request::Own(Own::Paste)),
             Action::Find => return self.open_find(Focus::Find, layout, damage),
             Action::Replace => return self.open_find(Focus::Replace, layout, damage),
             Action::FindNext => return self.search(false, None, layout, damage),
             Action::FindPrevious => return self.search(true, None, layout, damage),
             Action::GoToLine => return self.ask_go_to(layout, damage),
-            Action::LineEnding(ending) => {
+            Action::LineEnding(to) => {
+                let id = self.ask();
+                self.conversion = Some(id);
                 self.message = Some(String::from("Converting line endings\u{2026}"));
                 damage.add(layout.status());
-                return Outcome::asking(Request::Convert(ending));
+                return Outcome::asking(Request::Own(Own::Convert { id, to }));
             }
             Action::Undo => Command::Undo,
             Action::Redo => Command::Redo,
@@ -957,7 +1009,7 @@ impl View {
 
     fn copy(&mut self) -> Outcome {
         match self.editor.copy() {
-            Ok(bytes) if !bytes.is_empty() => Outcome::asking(Request::Copy(bytes)),
+            Ok(bytes) if !bytes.is_empty() => Outcome::asking(Request::Own(Own::Copy(bytes))),
             Ok(_) => Outcome::none(),
             Err(why) => {
                 self.message = Some(why.to_string());
@@ -971,7 +1023,7 @@ impl View {
         let (effect, bytes) = self.editor.cut();
         let mut outcome = self.report(effect, before, layout, damage);
         if let Some(bytes) = bytes {
-            outcome.request = Some(Request::Copy(bytes));
+            outcome.request = Some(Request::Own(Own::Copy(bytes)));
         }
         outcome
     }
@@ -1003,21 +1055,7 @@ impl View {
         if !self.editor.is_modified() {
             return Outcome::asking(Request::Close);
         }
-        let title = alloc::format!("Save the changes to \u{201c}{}\u{201d}?", self.name);
-        let dialog = Dialog::new(title)
-            .with_message("Your changes will be lost if you do not save them.")
-            .with_actions(alloc::vec![
-                Button::labelled("Cancel"),
-                Button::new(
-                    ButtonContent::Label(String::from("Don\u{2019}t Save")),
-                    ControlRole::Destructive
-                ),
-                Button::new(
-                    ButtonContent::Label(String::from("Save")),
-                    ControlRole::Recommended
-                ),
-            ]);
-        self.modal = Some(Modal::Close(dialog));
+        self.modal = Some(Modal::Close(Dialog::save_changes(&self.name)));
         damage.add(layout.window());
         Outcome::none()
     }
@@ -1048,22 +1086,13 @@ impl View {
         scale: Scale,
         theme: &Theme,
     ) -> Rect {
-        let width = scale.scale_length(420).min(window.width);
         let content = if field {
             TextField::height(scale, theme)
         } else {
             0
         };
-        let height = dialog
-            .height_for_content(content, width, scale, theme)
-            .min(window.height);
-        let x = window
-            .left()
-            .saturating_add_unsigned((window.width - width) / 2);
-        let y = window
-            .top()
-            .saturating_add_unsigned((window.height - height) / 3);
-        Rect::new(x, y, width, height)
+        let width = scale.scale_length(Dialog::QUESTION_WIDTH);
+        dialog.placed_over(window, width, content, scale, theme)
     }
 
     fn modal_pointer(
@@ -1136,10 +1165,10 @@ impl View {
     fn answer_modal(&mut self, index: usize, layout: &Layout, damage: &mut Region) -> Outcome {
         damage.add(layout.window());
         match self.modal.take() {
-            Some(Modal::Close(_)) => match index {
-                1 => Outcome::asking(Request::Close),
-                2 => Outcome::asking(Request::SaveThenClose),
-                _ => Outcome::none(),
+            Some(Modal::Close(_)) => match SaveChanges::of(index) {
+                SaveChanges::Discard => Outcome::asking(Request::Close),
+                SaveChanges::Save => Outcome::asking(Request::SaveThenClose),
+                SaveChanges::Cancel => Outcome::none(),
             },
             Some(Modal::GoTo(_, field)) if index == 1 => {
                 if let Ok(line) = field.text().trim().parse::<usize>() {
@@ -1256,15 +1285,14 @@ impl View {
             (None, true) => Search::previous(pattern, range.start),
             (None, false) => Search::next(pattern, range.end),
         };
-        let id = self.next_search;
-        self.next_search += 1;
+        let id = self.ask();
         self.search = Some(id);
         self.message = Some(String::from("Searching\u{2026}"));
-        Outcome::asking(Request::Search {
+        Outcome::asking(Request::Own(Own::Search {
             id,
             search,
             replacement,
-        })
+        }))
     }
 
     fn replace_one(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
@@ -1280,7 +1308,7 @@ impl View {
             replaced = self.report(effect, before, layout, damage);
         }
         let mut outcome = self.search(false, None, layout, damage);
-        outcome.relayout |= replaced.relayout;
+        outcome.relayout = outcome.relayout.max(replaced.relayout);
         outcome
     }
 
@@ -1864,7 +1892,7 @@ impl View {
     /// A copy of the focused find field's selection.
     fn field_copy(&self) -> Option<Request> {
         self.field_selection()
-            .map(|text| Request::Copy(text.as_bytes().to_vec()))
+            .map(|text| Request::Own(Own::Copy(text.as_bytes().to_vec())))
     }
 
     fn find_key(
@@ -1976,8 +2004,8 @@ impl View {
     #[must_use]
     pub fn menu(&self, kind: MenuKind) -> AppMenu {
         let mut menu = match kind {
-            MenuKind::Window => Menu::titled(APP_TITLE),
-            _ => Menu::default(),
+            MenuKind::Window => MenuBuilder::titled(APP_TITLE),
+            _ => MenuBuilder::new(),
         };
         match kind {
             MenuKind::Window => self.window_rows(&mut menu),
@@ -1990,13 +2018,13 @@ impl View {
                 self.tab_widths(&mut menu, Plate::Root);
             }
         }
-        menu.menu
+        menu.finish()
     }
 
     /// The window's menu: the clipboard, which a secondary press most often
     /// wants, on the plate it opens with, then each of the window's menus as
     /// a submenu.
-    fn window_rows(&self, menu: &mut Menu) {
+    fn window_rows(&self, menu: &mut MenuBuilder) {
         self.clipboard_rows(menu, Plate::Root);
         menu.separator(Plate::Root);
         if let Some(file) = menu.submenu("File", Plate::Root) {
@@ -2019,7 +2047,7 @@ impl View {
         self.editor.mode() == Mode::Text && self.editor.format().line_comment().is_some()
     }
 
-    fn clipboard_rows(&self, menu: &mut Menu, plate: Plate) {
+    fn clipboard_rows(&self, menu: &mut MenuBuilder, plate: Plate) {
         let selected = match self.focus {
             Focus::Grid => !self.editor.selection().is_empty(),
             Focus::Find | Focus::Replace => self.field_selection().is_some(),
@@ -2030,7 +2058,7 @@ impl View {
         menu.item(Action::SelectAll, "Select all", "Ctrl+A", true, plate);
     }
 
-    fn edit_rows(&self, menu: &mut Menu, plate: Plate) {
+    fn edit_rows(&self, menu: &mut MenuBuilder, plate: Plate) {
         let text = self.editor.mode() == Mode::Text;
         let history = self.focus == Focus::Grid;
         let (undo, redo) = self.editor.can_undo_redo();
@@ -2058,7 +2086,7 @@ impl View {
         );
     }
 
-    fn find_rows(&self, menu: &mut Menu, plate: Plate) {
+    fn find_rows(&self, menu: &mut MenuBuilder, plate: Plate) {
         let text = self.editor.mode() == Mode::Text;
         let problems = !self.editor.diagnostics().0.is_empty();
         menu.item(Action::Find, "Find\u{2026}", "Ctrl+F", true, plate);
@@ -2082,7 +2110,7 @@ impl View {
         menu.item(Action::NextProblem, "Next problem", "F8", problems, plate);
     }
 
-    fn view_rows(&self, menu: &mut Menu, plate: Plate) {
+    fn view_rows(&self, menu: &mut MenuBuilder, plate: Plate) {
         self.modes(menu, plate);
         menu.separator(plate);
         if let Some(formats) = menu.submenu("Format", plate) {
@@ -2099,7 +2127,7 @@ impl View {
         }
     }
 
-    fn modes(&self, menu: &mut Menu, plate: Plate) {
+    fn modes(&self, menu: &mut MenuBuilder, plate: Plate) {
         menu.radio(
             Action::Mode(Mode::Text),
             "Text",
@@ -2116,7 +2144,7 @@ impl View {
         );
     }
 
-    fn formats(&self, menu: &mut Menu, plate: Plate) {
+    fn formats(&self, menu: &mut MenuBuilder, plate: Plate) {
         for format in Format::ALL {
             menu.radio(
                 Action::Format(format),
@@ -2128,7 +2156,7 @@ impl View {
         }
     }
 
-    fn tab_widths(&self, menu: &mut Menu, plate: Plate) {
+    fn tab_widths(&self, menu: &mut MenuBuilder, plate: Plate) {
         for (width, label) in TAB_WIDTHS.into_iter().zip(TAB_LABELS) {
             menu.radio(
                 Action::TabWidth(width),
@@ -2140,7 +2168,7 @@ impl View {
         }
     }
 
-    fn indents(&self, menu: &mut Menu, plate: Plate) {
+    fn indents(&self, menu: &mut MenuBuilder, plate: Plate) {
         for (indent, label) in INDENTS.into_iter().zip(INDENT_LABELS) {
             menu.radio(
                 Action::Indentation(indent),
@@ -2152,7 +2180,7 @@ impl View {
         }
     }
 
-    fn endings(&self, menu: &mut Menu, plate: Plate) {
+    fn endings(&self, menu: &mut MenuBuilder, plate: Plate) {
         for ending in ENDINGS {
             menu.radio(
                 Action::LineEnding(ending),
@@ -2178,7 +2206,7 @@ const INDENT_LABELS: [&str; 4] = [
 ];
 
 /// The File menu's rows, the same whatever the document.
-fn file_rows(menu: &mut Menu, plate: Plate) {
+fn file_rows(menu: &mut MenuBuilder, plate: Plate) {
     menu.item(Action::NewWindow, "New window", "Ctrl+N", true, plate);
     menu.item(Action::Open, "Open\u{2026}", "Ctrl+O", true, plate);
     menu.separator(plate);
@@ -2194,114 +2222,9 @@ fn file_rows(menu: &mut Menu, plate: Plate) {
     menu.item(Action::Close, "Close", "Ctrl+W", true, plate);
 }
 
-/// Which plate of a menu a row is laid on.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum Plate {
-    /// The plate the menu opens with.
-    Root,
-    /// The submenu the row at this index opens.
-    Under(usize),
-}
-
-/// A menu being built; a row the menu cannot hold is left out rather than
-/// the whole menu, since a menu is incidental to editing.
-struct Menu {
-    menu: AppMenu,
-}
-
-impl Default for Menu {
-    fn default() -> Self {
-        Self {
-            menu: AppMenu::EMPTY,
-        }
-    }
-}
-
-impl Menu {
-    /// An empty menu whose plate is titled `title`, or an untitled one where
-    /// the title cannot be carried.
-    fn titled(title: &str) -> Self {
-        AppMenuLabel::new(title).map_or_else(
-            |_| Self::default(),
-            |title| Self {
-                menu: AppMenu::titled(title),
-            },
-        )
-    }
-
-    fn push(&mut self, row: &AppMenuRow, plate: Plate) -> Result<(), tairix_abi::Errno> {
-        match plate {
-            Plate::Root => self.menu.push(*row),
-            Plate::Under(parent) => self.menu.push_under(*row, parent),
-        }
-    }
-
-    fn build(
-        &mut self,
-        action: Action,
-        label: &str,
-        shortcut: &str,
-        enabled: bool,
-        mark: AppMenuMark,
-        plate: Plate,
-    ) {
-        let (Ok(id), Ok(label)) = (AppMenuItemId::new(action.id()), AppMenuLabel::new(label))
-        else {
-            return;
-        };
-        let mut item = AppMenuItem::new(id, label).with_mark(mark);
-        if !shortcut.is_empty() {
-            if let Ok(caption) = AppMenuShortcut::new(shortcut) {
-                item = item.with_shortcut(caption);
-            }
-        }
-        if !enabled {
-            item = item.disabled();
-        }
-        let _ = self.push(&AppMenuRow::Item(item), plate);
-    }
-
-    fn item(&mut self, action: Action, label: &str, shortcut: &str, enabled: bool, plate: Plate) {
-        self.build(action, label, shortcut, enabled, AppMenuMark::None, plate);
-    }
-
-    fn mark(&mut self, action: Action, label: &str, shortcut: &str, on: bool, plate: Plate) {
-        let mark = if on {
-            AppMenuMark::Check
-        } else {
-            AppMenuMark::None
-        };
-        self.build(action, label, shortcut, true, mark, plate);
-    }
-
-    fn radio(&mut self, action: Action, label: &str, shortcut: &str, on: bool, plate: Plate) {
-        let mark = if on {
-            AppMenuMark::Radio
-        } else {
-            AppMenuMark::None
-        };
-        self.build(action, label, shortcut, true, mark, plate);
-    }
-
-    fn separator(&mut self, plate: Plate) {
-        let _ = self.push(&AppMenuRow::Separator, plate);
-    }
-
-    /// Open a submenu labelled `label` on `plate`, answering the plate its
-    /// rows go on, or `None` when it could not be added — so its rows are
-    /// left out with it rather than landing on another plate.
-    fn submenu(&mut self, label: &str, plate: Plate) -> Option<Plate> {
-        let index = self.menu.len();
-        let label = AppMenuLabel::new(label).ok()?;
-        self.push(
-            &AppMenuRow::Submenu {
-                label,
-                enabled: true,
-            },
-            plate,
-        )
-        .ok()?;
-        Some(Plate::Under(index))
+impl From<Action> for u16 {
+    fn from(action: Action) -> Self {
+        action.id()
     }
 }
 

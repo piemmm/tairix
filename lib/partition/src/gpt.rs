@@ -75,24 +75,6 @@ pub enum GptError {
     TooManyPartitions,
 }
 
-/// IEEE CRC-32 (reflected, polynomial `0xEDB8_8320`), as GPT specifies.
-///
-/// First-party; GPT uses the IEEE polynomial, distinct
-/// from the CRC-32C used elsewhere, so it is defined here beside its only
-/// consumer rather than shared.
-#[must_use]
-pub fn crc32(data: &[u8]) -> u32 {
-    let mut crc: u32 = 0xffff_ffff;
-    for &byte in data {
-        crc ^= u32::from(byte);
-        for _ in 0..8 {
-            let mask = (crc & 1).wrapping_neg();
-            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
-        }
-    }
-    !crc
-}
-
 /// Classify a GPT type GUID into the scheme-neutral [`PartitionType`].
 #[must_use]
 pub fn classify(type_guid: &[u8; 16]) -> PartitionType {
@@ -130,7 +112,7 @@ fn parse_header(block: &[u8]) -> Result<Header, GptError> {
     let mut hdr = [0u8; 92];
     hdr.copy_from_slice(&block[..92]);
     hdr[16..20].copy_from_slice(&[0, 0, 0, 0]);
-    if crc32(&hdr) != stored_crc {
+    if tairix_crc32::checksum(&hdr) != stored_crc {
         return Err(GptError::HeaderCrc);
     }
 
@@ -192,7 +174,7 @@ pub fn parse<B: Block>(dev: &mut B, geo: &BlockGeometry) -> Result<PartitionTabl
     let entry_size = header.entry_size as usize;
 
     let mut table = PartitionTable::empty();
-    let mut crc: u32 = 0xffff_ffff;
+    let mut crc = tairix_crc32::Crc32::new();
     let mut parsed = 0u32;
     let mut lba = header.entries_lba;
     while parsed < header.num_entries {
@@ -201,7 +183,7 @@ pub fn parse<B: Block>(dev: &mut B, geo: &BlockGeometry) -> Result<PartitionTabl
         let mut off = 0;
         while parsed < header.num_entries && off + ENTRY_LEN <= bs {
             let entry = &buf[off..off + ENTRY_LEN];
-            crc = crc32_update(crc, entry);
+            crc.update(entry);
             collect_entry(entry, geo, &mut table)?;
             off += entry_size;
             parsed += 1;
@@ -211,25 +193,10 @@ pub fn parse<B: Block>(dev: &mut B, geo: &BlockGeometry) -> Result<PartitionTabl
             .ok_or(PartitionError::Gpt(GptError::BadExtent))?;
     }
 
-    // Finalise the running CRC (one's complement) and compare against the
-    // value the header committed to.
-    if !crc != header.entries_crc {
+    if crc.finish() != header.entries_crc {
         return Err(PartitionError::Gpt(GptError::EntriesCrc));
     }
     Ok(table)
-}
-
-/// Fold one chunk into a running CRC-32 (reflected `0xEDB8_8320`); finalise
-/// by complementing the result.
-fn crc32_update(mut crc: u32, data: &[u8]) -> u32 {
-    for &byte in data {
-        crc ^= u32::from(byte);
-        for _ in 0..8 {
-            let mask = (crc & 1).wrapping_neg();
-            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
-        }
-    }
-    crc
 }
 
 /// Validate one GPT entry and, if present, append it to `table`.

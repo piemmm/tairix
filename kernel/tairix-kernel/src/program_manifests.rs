@@ -1321,11 +1321,12 @@ mod tests {
     ];
 
     // A windowed application that parses what it shows — the viewer `view`
-    // (plans/VIEW.md), the editor `TextEdit` (plans/TEXTEDIT.md): console
-    // write for its fail-loud diagnostics, `CAP_SHM` for the zero-copy window
-    // frame region and the pipe pair its parser is reached over, and
-    // `CAP_PROC_SPAWN` to re-enter its own binary as that capability-empty
-    // parser — a document is untrusted input and is never parsed in the
+    // (plans/VIEW.md), the editor `TextEdit` (plans/TEXTEDIT.md), the painter
+    // `Paint` (plans/PAINT.md): console write for its fail-loud diagnostics,
+    // `CAP_SHM` for the zero-copy window frame region and the pipe pair its
+    // parser is reached over, and `CAP_SANDBOX_SPAWN` to re-enter its own
+    // binary as that capability-empty parser, the only kind of child it
+    // admits — a document is untrusted input and is never parsed in the
     // application's own address space — and `CAP_LOG_EMIT` to record that
     // parser being replaced after a crash. Deliberately NO filesystem
     // capability: every document arrives as a descriptor handed over at spawn
@@ -1334,7 +1335,7 @@ mod tests {
     const SANDBOXED_DOCUMENT_APP_REQUEST: &[CapabilityId] = &[
         CapabilityId::CONSOLE_WRITE,
         CapabilityId::LOG_EMIT,
-        CapabilityId::PROC_SPAWN,
+        CapabilityId::SANDBOX_SPAWN,
         CapabilityId::SHM,
     ];
 
@@ -1536,6 +1537,11 @@ mod tests {
     /// order discovery sorts them. PID 1 `init` is deliberately absent: it is
     /// the boot floor the boot path enters directly, never a store bundle.
     const STORE_INVENTORY: &[(&str, ProgramKind, &[CapabilityId])] = &[
+        (
+            "Paint",
+            ProgramKind::Application,
+            SANDBOXED_DOCUMENT_APP_REQUEST,
+        ),
         (
             "TextEdit",
             ProgramKind::Application,

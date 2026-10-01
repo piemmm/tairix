@@ -64,7 +64,6 @@ mod program {
     use tairix_input::InputEvent;
     use tairix_procinfo::{for_each_mount, IpcTransport, WalkStep};
     use tairix_reclaim::PressureBand;
-    use tairix_rt::io::{Stderr, Write};
     use tairix_settings::{
         win_sizing, AccountFacts, ElevateRefusal, Elevated, Elevation, MachineFacts, OwnAccount,
         Pane, Renders, Roster, RunMode, Shell, ShellOutcome, VolumeReading, WINDOW_GROUND,
@@ -74,7 +73,7 @@ mod program {
     use tairix_theme::{CursorSetId, Theme, ThemeRegistry};
     use tairix_users::{Salt, SALT_LEN};
     use tairix_wallpaper::{ApplyOutcome, CatalogItem, DesktopSettings, PINBOARD_PUBLISHER};
-    use tairix_window::app::{self, AppWindow, ShellError, Wake, EXIT_CHANNEL_LOST};
+    use tairix_window::app::{self, AppWindow, Wake, EXIT_CHANNEL_LOST};
     use tairix_window::{
         key_input_event, pointer_input_events, pointer_point, present_damage, Desktop, EventDrain,
         EventError, EventMailbox, EventSource, Parked, Repaint, Target, WindowEvents,
@@ -143,20 +142,24 @@ mod program {
         let document = match tairix_appdata::read_published(&mut RtHost, PINBOARD_PUBLISHER) {
             Ok(document) => document,
             Err(err) => {
-                let _ = writeln!(
-                    Stderr,
-                    "settings: the desktop's settings could not be read ({err:?}); showing the \
+                app::report(
+                    APP_NAME,
+                    format_args!(
+                        "the desktop's settings could not be read ({err:?}); showing the \
                      defaults"
+                    ),
                 );
                 return DesktopSettings::default();
             }
         };
         let (settings, refused) = DesktopSettings::load(&document);
         for key in refused {
-            let _ = writeln!(
-                Stderr,
-                "settings: the desktop publishes a `{key}` this build does not accept; showing \
+            app::report(
+                APP_NAME,
+                format_args!(
+                    "the desktop publishes a `{key}` this build does not accept; showing \
                  its default"
+                ),
             );
         }
         settings
@@ -202,10 +205,12 @@ mod program {
         let config = match tairix_procinfo::system_config(&IpcTransport) {
             Ok(config) => config.or_else(|| Some(SystemConfig::default())),
             Err(err) => {
-                let _ = writeln!(
-                    Stderr,
-                    "settings: the machine's configuration could not be read ({err:?}); its rows \
+                app::report(
+                    APP_NAME,
+                    format_args!(
+                        "the machine's configuration could not be read ({err:?}); its rows \
                      show no value"
+                    ),
                 );
                 None
             }
@@ -239,9 +244,9 @@ mod program {
         }) {
             Ok(()) => Some(resolvers),
             Err(err) => {
-                let _ = writeln!(
-                    Stderr,
-                    "settings: the name servers could not be read ({err:?}); the pane says so"
+                app::report(
+                    APP_NAME,
+                    format_args!("the name servers could not be read ({err:?}); the pane says so"),
                 );
                 None
             }
@@ -301,10 +306,7 @@ mod program {
             Ok(Some(record)) => OwnAccount::Known(alloc::boxed::Box::new(record)),
             Ok(None) => OwnAccount::Unknown,
             Err(err) => {
-                let _ = writeln!(
-                    Stderr,
-                    "settings: this session's own account could not be read ({err:?}); the pane                      says so"
-                );
+                app::report(APP_NAME, format_args!("this session's own account could not be read ({err:?}); the pane                      says so"));
                 OwnAccount::Unmeasured
             }
         }
@@ -319,9 +321,9 @@ mod program {
         match outcome {
             Ok(()) => Some(listed),
             Err(err) => {
-                let _ = writeln!(
-                    Stderr,
-                    "settings: a directory could not be read ({err:?}); the pane says so"
+                app::report(
+                    APP_NAME,
+                    format_args!("a directory could not be read ({err:?}); the pane says so"),
                 );
                 None
             }
@@ -346,9 +348,9 @@ mod program {
         match outcome {
             Ok(read) if read == SALT_LEN => Some(salt),
             _ => {
-                let _ = writeln!(
-                    Stderr,
-                    "settings: no randomness was available; a new password cannot be hashed here"
+                app::report(
+                    APP_NAME,
+                    "no randomness was available; a new password cannot be hashed here",
                 );
                 None
             }
@@ -466,10 +468,12 @@ mod program {
             volumes.push(VolumeReading::of(record));
             Ok(WalkStep::Continue)
         }) {
-            let _ = writeln!(
-                Stderr,
-                "settings: the mount table could not be read ({err:?}); the storage pane shows \
+            app::report(
+                APP_NAME,
+                format_args!(
+                    "the mount table could not be read ({err:?}); the storage pane shows \
                  what arrived"
+                ),
             );
         }
         volumes
@@ -659,13 +663,13 @@ mod program {
         match outcome {
             ApplyOutcome::Applied | ApplyOutcome::Applying => {}
             ApplyOutcome::Refused(reason) => {
-                let _ = writeln!(Stderr, "settings: the desktop refused the change: {reason}");
+                app::report(
+                    APP_NAME,
+                    format_args!("the desktop refused the change: {reason}"),
+                );
             }
             ApplyOutcome::NoDesktop => {
-                let _ = writeln!(
-                    Stderr,
-                    "settings: no desktop session answered; nothing was changed"
-                );
+                app::report(APP_NAME, "no desktop session answered; nothing was changed");
             }
         }
         shell.adopt_settings(settings_in_effect());
@@ -691,10 +695,12 @@ mod program {
             let answered = match client.wallpapers(from, &mut page) {
                 Ok(answered) => answered,
                 Err(err) => {
-                    let _ = writeln!(
-                        Stderr,
-                        "settings: the desktop's picture catalog could not be read ({err}); the \
+                    app::report(
+                        APP_NAME,
+                        format_args!(
+                            "the desktop's picture catalog could not be read ({err}); the \
                          gallery shows what arrived"
+                        ),
                     );
                     return catalog;
                 }
@@ -739,10 +745,12 @@ mod program {
         let answered = match client.cursor_sets(&mut frame) {
             Ok(answered) => answered,
             Err(err) => {
-                let _ = writeln!(
-                    Stderr,
-                    "settings: the desktop's cursor sets could not be read ({err}); the \
+                app::report(
+                    APP_NAME,
+                    format_args!(
+                        "the desktop's cursor sets could not be read ({err}); the \
                      pointer row offers the built-in set alone"
+                    ),
                 );
                 return Vec::new();
             }
@@ -797,9 +805,9 @@ mod program {
                     .renders
                     .region(wanted.bytes(), tairix_rt::shm::SharedRegion::create)
                 else {
-                    let _ = writeln!(
-                        Stderr,
-                        "settings: no shared region for a picture; it keeps its placeholder"
+                    app::report(
+                        APP_NAME,
+                        "no shared region for a picture; it keeps its placeholder",
                     );
                     shell.mark_picture_refused(wanted.subject);
                     return;
@@ -807,10 +815,10 @@ mod program {
                 let grant =
                     tairix_rt::shm_grant(region.id(), tairix_abi::window_ipc::WINDOW_ENDPOINT);
                 let Some(grant) = u64::try_from(grant).ok().filter(|grant| *grant >= 1) else {
-                    let _ = writeln!(
-                        Stderr,
-                        "settings: a picture's region could not be granted; it keeps its \
-                         placeholder"
+                    app::report(
+                        APP_NAME,
+                        "a picture's region could not be granted; it keeps its \
+                         placeholder",
                     );
                     self.renders.unused(region);
                     shell.mark_picture_refused(wanted.subject);
@@ -824,10 +832,12 @@ mod program {
                     Ok(()) => self.renders.accepted(wanted, region),
                     Err(err) => {
                         if self.renders.declined(err, region) {
-                            let _ = writeln!(
-                                Stderr,
-                                "settings: the desktop refused a picture ({err}); it keeps its \
+                            app::report(
+                                APP_NAME,
+                                format_args!(
+                                    "the desktop refused a picture ({err}); it keeps its \
                                  placeholder"
+                                ),
                             );
                             shell.mark_picture_refused(wanted.subject);
                         }
@@ -884,18 +894,8 @@ mod program {
         }
     }
 
-    /// State the abnormal-exit reason on `stderr` (fail loud) and hand back
-    /// `code` for `main`.
-    fn fail(code: i32, reason: &str) -> i32 {
-        let _ = writeln!(Stderr, "settings: {reason}");
-        code
-    }
-
-    /// State a shared-shell bring-up refusal and hand its reserved code back.
-    fn fail_shell(err: ShellError) -> i32 {
-        let _ = writeln!(Stderr, "settings: {err}");
-        err.code()
-    }
+    /// The name this program states its refusals under.
+    const APP_NAME: &str = "settings";
 
     /// The production [`EventSource`]: drain the app's own event mailbox,
     /// parking on the wait-set whenever it is empty.
@@ -1019,7 +1019,7 @@ mod program {
             let server = self
                 .window
                 .open(event_endpoint, &self.mode, self.title, win_sizing(scale))
-                .map_err(fail_shell)?;
+                .map_err(|err| app::fail(APP_NAME, err.code(), err))?;
             // Before the first present, so no frame is shown unfrosted.
             self.apply_backdrop(themes);
             if self
@@ -1027,7 +1027,7 @@ mod program {
                 .is_err()
             {
                 self.close();
-                return Err(fail(EXIT_CHANNEL_LOST, "present refused"));
+                return Err(app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused"));
             }
             Ok(server)
         }
@@ -1042,7 +1042,7 @@ mod program {
         fn apply_backdrop(&mut self, themes: &ThemeRegistry) {
             let blur = themes.active_on(WINDOW_GROUND).backdrop_blur();
             if let Err(err) = self.window.set_backdrop_blur(blur) {
-                let _ = writeln!(Stderr, "settings: backdrop blur refused: {err}");
+                app::report(APP_NAME, format_args!("backdrop blur refused: {err}"));
             }
         }
 
@@ -1162,9 +1162,9 @@ mod program {
                 } else {
                     // A refused resize leaves the old geometry standing and
                     // still drawable, so the window keeps the size it had.
-                    let _ = writeln!(
-                        Stderr,
-                        "settings: the desktop refused a resize; the window keeps its size"
+                    app::report(
+                        APP_NAME,
+                        "the desktop refused a resize; the window keeps its size",
                     );
                 }
                 // The reported client extent is what the shell lays out to
@@ -1261,29 +1261,33 @@ mod program {
                     if shell.go_to_pane(&pane, viewport, scale, theme, &mut sink) {
                         moved = true;
                     } else {
-                        let _ = writeln!(
-                            Stderr,
-                            "settings: there is no `{pane}` here; the window stays where it is"
+                        app::report(
+                            APP_NAME,
+                            format_args!("there is no `{pane}` here; the window stays where it is"),
                         );
                     }
                 }
                 Ok(Some(Target::Path(path))) => {
-                    let _ = writeln!(
-                        Stderr,
-                        "settings: {path} was handed over, but this window shows settings, not \
+                    app::report(
+                        APP_NAME,
+                        format_args!(
+                            "{path} was handed over, but this window shows settings, not \
                          files"
+                        ),
                     );
                 }
                 Ok(Some(Target::Document { name, .. })) => {
-                    let _ = writeln!(
-                        Stderr,
-                        "settings: {name} was handed over as a document, which this window has \
+                    app::report(
+                        APP_NAME,
+                        format_args!(
+                            "{name} was handed over as a document, which this window has \
                          nowhere to show"
+                        ),
                     );
                 }
                 Ok(None) => return moved,
                 Err(err) => {
-                    let _ = writeln!(Stderr, "settings: cannot take an open target: {err}");
+                    app::report(APP_NAME, format_args!("cannot take an open target: {err}"));
                     return moved;
                 }
             }
@@ -1340,7 +1344,7 @@ mod program {
         match app::adopt_desktop(desktop, themes) {
             Ok(changed) => changed,
             Err(err) => {
-                let _ = writeln!(Stderr, "settings: desktop change refused: {err}");
+                app::report(APP_NAME, format_args!("desktop change refused: {err}"));
                 false
             }
         }
@@ -1535,9 +1539,9 @@ mod program {
                 // once it has, so the round trip costs no I/O either side.
                 let answer = surface.window.client().lock_screen();
                 if let Err(err) = answer {
-                    let _ = writeln!(
-                        Stderr,
-                        "settings: the desktop would not lock the screen ({err})"
+                    app::report(
+                        APP_NAME,
+                        format_args!("the desktop would not lock the screen ({err})"),
                     );
                 }
                 shell.adopt_lock_answer(answer);
@@ -1554,9 +1558,9 @@ mod program {
                 // I/O either side.
                 let answer = surface.window.client().preview_screensaver(document);
                 if let Err(err) = answer {
-                    let _ = writeln!(
-                        Stderr,
-                        "settings: the desktop would not show the screensaver ({err})"
+                    app::report(
+                        APP_NAME,
+                        format_args!("the desktop would not show the screensaver ({err})"),
                     );
                 }
                 shell.adopt_preview_answer(answer);
@@ -1626,10 +1630,10 @@ mod program {
             // An answer the park drained is the loop's to adopt, whether or
             // not an event came with it.
             if !adopt_answers(surface, shell, themes, desktop, &mut desks) {
-                return fail(EXIT_CHANNEL_LOST, "present refused");
+                return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused");
             }
             if !advance_secrets(surface, shell, themes, desktop) {
-                return fail(EXIT_CHANNEL_LOST, "present refused");
+                return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused");
             }
             secret_due.set(shell.secret_deadline_ns());
             let event = match events.wait(surface.window.client()) {
@@ -1647,12 +1651,12 @@ mod program {
                         desktop_moved,
                         pictures,
                     ) {
-                        return fail(EXIT_CHANNEL_LOST, "present refused");
+                        return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused");
                     }
                     continue;
                 }
                 Err(EventError::Mailbox(_)) => {
-                    return fail(EXIT_CHANNEL_LOST, "event channel lost")
+                    return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "event channel lost")
                 }
             };
 
@@ -1718,7 +1722,7 @@ mod program {
                 .present(shell, themes, desktop.scale(), area)
                 .is_err()
             {
-                return fail(EXIT_CHANNEL_LOST, "present refused");
+                return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused");
             }
         }
     }
@@ -1750,9 +1754,9 @@ mod program {
                 shell.go_to(pane, viewport, desktop.scale(), themes.active(), &mut sink)
             });
             if !named {
-                let _ = writeln!(
-                    Stderr,
-                    "settings: that is not a pane here; the window opens where it always does"
+                app::report(
+                    APP_NAME,
+                    "that is not a pane here; the window opens where it always does",
                 );
             }
         }
@@ -1796,9 +1800,9 @@ mod program {
                     .collect(),
             ),
             Err(err) => {
-                let _ = writeln!(
-                    Stderr,
-                    "settings: the desktop would not say which programs have notified ({err})"
+                app::report(
+                    APP_NAME,
+                    format_args!("the desktop would not say which programs have notified ({err})"),
                 );
                 None
             }
@@ -1920,9 +1924,9 @@ mod program {
         what: &str,
     ) {
         if let Err(reason) = tairix_rt::work::Worker::start(worker) {
-            let _ = writeln!(
-                Stderr,
-                "settings: no {what} worker ({reason:?}); it is done on the event loop"
+            app::report(
+                APP_NAME,
+                format_args!("no {what} worker ({reason:?}); it is done on the event loop"),
             );
         }
     }
@@ -1939,9 +1943,10 @@ mod program {
     ) -> Result<(), i32> {
         for (wake, token, refusal) in wakes {
             if let Err(err) = app::watch_wake(set, wake, *token) {
-                return Err(fail(
+                return Err(app::fail(
+                    APP_NAME,
                     app::EXIT_NO_EVENTS,
-                    &alloc::format!("{refusal} ({err})"),
+                    format_args!("{refusal} ({err})"),
                 ));
             }
         }
@@ -1974,14 +1979,15 @@ mod program {
         let mut window = AppWindow::new();
         let (mut desktop, mut themes) = match app::bring_up_desktop(window.client()) {
             Ok(pair) => pair,
-            Err(err) => return fail_shell(err),
+            Err(err) => return app::fail(APP_NAME, err.code(), err),
         };
         let (initial_w, initial_h) = desktop.window_size(WIN_WIDTH, WIN_HEIGHT);
         let mode = app::mode_for(initial_w, initial_h);
         // A frame region that cannot be sized is a window that can never open,
         // so it is stated here rather than as a refused create later.
         let Some(frame_bytes) = app::region_bytes(&mode, app::FRAME_COUNT) else {
-            return fail(
+            return app::fail(
+                APP_NAME,
                 app::EXIT_NO_FRAMES,
                 "window frame larger than the address width",
             );
@@ -1995,14 +2001,15 @@ mod program {
 
         let binding = match app::bind_event_mailbox() {
             Ok(binding) => binding,
-            Err(err) => return fail_shell(err),
+            Err(err) => return app::fail(APP_NAME, err.code(), err),
         };
         let event_endpoint = binding.endpoint();
 
         // An empty registry would leave the window nothing to show at all, so
         // it ends fail-loud rather than opening a blank frame.
         let Some(mut shell) = Shell::new(settings_in_effect()) else {
-            return fail(
+            return app::fail(
+                APP_NAME,
                 EXIT_CHANNEL_LOST,
                 "the settings registry holds no categories",
             );

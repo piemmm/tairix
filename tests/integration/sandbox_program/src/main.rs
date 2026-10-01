@@ -1,7 +1,7 @@
 //! EL0 fixture program for the `lib/sandbox` parser-sandbox seam (the
 //! fstree S8b increment — `plans/APPS.md`).
 //!
-//! One binary, six roles, selected by the **registry path** it is spawned
+//! One binary, seven roles, selected by the **registry path** it is spawned
 //! under (`arg(0)`) plus the seam's role marker (`arg(1)`), because the
 //! production launchers (`tairix_sandbox::rt::RtLauncher`,
 //! `tairix_sandbox::rt::RtSessionChannel`) always pass `[path, marker]`:
@@ -22,7 +22,10 @@
 //!   only the final report, then closing the session itself;
 //! * **stream worker** (`/bin/sbx-stream` + session marker) — echoes every
 //!   frame, and dies through its panic path on the crash frame: the
-//!   real-process stand-in for a streaming decoder a crafted input kills.
+//!   real-process stand-in for a streaming decoder a crafted input kills;
+//! * **hung worker** (`/bin/sbx-hang` + one-shot marker) — never answers
+//!   and never exits, even at the end of its input: the stand-in for a
+//!   decoder a crafted input drives round a loop.
 //!
 //! The parent proves, end to end over the production spawn/pipe/wait path:
 //! decode of valid and malformed inputs through a genuinely sandboxed
@@ -33,8 +36,10 @@
 //! which can only complete if the write-room wake fires; and the supervised
 //! session replacing a crashed stream worker only once its paced delay has
 //! elapsed on a real one-shot wait, the replacement serving on fresh
-//! descriptors. Each failure site exits with a distinct diagnostic code the
-//! chassis folds into its failure finisher.
+//! descriptors; and a worker that never answers failing its request at the
+//! deadline, killed and reaped though it ignores its input's end. Each
+//! failure site exits with a distinct diagnostic code the chassis folds into
+//! its failure finisher.
 //!
 //! It is a **pure-Rust** program: it links `tairix-rt` (which supplies
 //! `_start` and the global allocator), never the C ABI. It is built
@@ -52,12 +57,14 @@ extern crate alloc;
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
+    use alloc::rc::Rc;
     use alloc::vec;
     use alloc::vec::Vec;
-    use core::sync::atomic::{AtomicUsize, Ordering};
+    use core::cell::Cell;
 
     use tairix_abi::{Errno, OpenFlags};
     use tairix_log::{Event, Sink};
+    use tairix_rt::io::Read;
     use tairix_sandbox::decode::{
         container_summary, disassemble, ContainerFormat, DecodeFailure, DecodeRefusal,
         DecodeService, Isa,
@@ -88,6 +95,11 @@ mod program {
     /// Registry path whose worker echoes a stream and dies on the crash
     /// frame.
     const STREAM_PATH: &[u8] = b"/bin/sbx-stream";
+    /// Registry path whose worker never answers and never exits: the
+    /// stand-in for a decoder a hostile file drives round a loop.
+    const HANG_PATH: &[u8] = b"/bin/sbx-hang";
+    /// How long the hung worker is given before it is ended.
+    const HANG_DEADLINE_NS: u64 = 2_000_000_000;
     /// The frame the stream worker dies on.
     const STREAM_CRASH: &[u8] = b"crash";
 
@@ -129,18 +141,22 @@ mod program {
     /// A worker's serve loop failed on its transport.
     const FAIL_SERVE: i32 = 7;
 
-    /// Crash-containment events the parent's sink observed.
-    static CRASH_EVENTS: AtomicUsize = AtomicUsize::new(0);
+    /// Counts [`EVENT_WORKER_CRASHED`] emissions into the tally its clones
+    /// share; everything else is irrelevant to this fixture.
+    #[derive(Clone, Default)]
+    struct CountingSink(Rc<Cell<usize>>);
 
-    /// Counts [`EVENT_WORKER_CRASHED`] emissions; everything else is
-    /// irrelevant to this fixture.
-    #[derive(Clone, Copy)]
-    struct CountingSink;
+    impl CountingSink {
+        /// Crash-containment events observed so far.
+        fn crashes(&self) -> usize {
+            self.0.get()
+        }
+    }
 
     impl Sink for CountingSink {
         fn write_event(&self, event: &Event<'_>) {
             if event.id == EVENT_WORKER_CRASHED {
-                CRASH_EVENTS.fetch_add(1, Ordering::Relaxed);
+                self.0.set(self.0.get().saturating_add(1));
             }
         }
     }
@@ -191,6 +207,22 @@ mod program {
         }
     }
 
+    /// The hung worker: take whatever arrives, or the end of the input, and
+    /// then never answer and never exit — the parse that will not end, which
+    /// only the parent's deadline and its kill can stop. It parks on a
+    /// condition nothing signals rather than spinning, so the chassis's
+    /// cooperative drive still steps the parent.
+    fn run_hang_worker() -> i32 {
+        let mut buf = [0u8; 64];
+        let _ = tairix_rt::io::Stdin.read(&mut buf);
+        let never = tairix_rt::sync::Mutex::new(());
+        let unsignalled = tairix_rt::sync::Condvar::new();
+        let mut guard = never.lock();
+        loop {
+            guard = unsignalled.wait(guard);
+        }
+    }
+
     /// Serve the session over the wired standard streams.
     fn run_session_worker() -> i32 {
         match serve_session_stdio(&mut CountingService { seen: 0 }) {
@@ -228,14 +260,15 @@ mod program {
         let transport = match RtSessionChannel::launch(SESSION_PATH) {
             Ok(transport) => transport,
             Err(errno) => {
-                log_unavailable(&CountingSink, errno);
+                log_unavailable(&CountingSink::default(), errno);
                 return 40;
             }
         };
         let Ok(bounds) = SessionBounds::new(SESSION_QUEUE, SESSION_QUEUE) else {
             return 41;
         };
-        let Ok(mut session) = SandboxSession::new(transport, bounds, CountingSink) else {
+        let Ok(mut session) = SandboxSession::new(transport, bounds, CountingSink::default())
+        else {
             return 42;
         };
         if session.descriptors().is_none() {
@@ -387,7 +420,8 @@ mod program {
         let Ok(bounds) = SessionBounds::new(SESSION_QUEUE, SESSION_QUEUE) else {
             return 60;
         };
-        let mut session = Stream::new(RtSessionLauncher::new(STREAM_PATH), bounds, CountingSink);
+        let sink = CountingSink::default();
+        let mut session = Stream::new(RtSessionLauncher::new(STREAM_PATH), bounds, sink.clone());
         let Ok(set) = u64::try_from(tairix_rt::waitset_create()) else {
             return 61;
         };
@@ -399,7 +433,7 @@ mod program {
             return code;
         }
 
-        let crashes = CRASH_EVENTS.load(Ordering::Relaxed);
+        let crashes = sink.crashes();
         if session.send(STREAM_CRASH).is_err() {
             return 63;
         }
@@ -413,7 +447,7 @@ mod program {
         if !observed || session.is_live() {
             return 64;
         }
-        if CRASH_EVENTS.load(Ordering::Relaxed) != crashes + 1 {
+        if sink.crashes() != crashes + 1 {
             return 65;
         }
 
@@ -448,7 +482,7 @@ mod program {
     /// The parent role: every check distinct, fail-closed, in seam order.
     fn parent() -> i32 {
         // A healthy sandboxed decode worker spawned from this binary.
-        let mut good = ParserSandbox::new(RtLauncher::new(SBX_PATH), CountingSink);
+        let mut good = ParserSandbox::new(RtLauncher::new(SBX_PATH), CountingSink::default());
 
         // 1. A valid container decodes through the real sandbox path.
         match container_summary(&mut good, WASM_FIXTURE) {
@@ -489,13 +523,14 @@ mod program {
         // 4. Real crash containment: the dying worker is a genuine spawned
         //    process that exits without serving. The request must fail
         //    typed, the crash must be logged, and this caller must survive.
-        let mut dying = ParserSandbox::new(RtLauncher::new(DIE_PATH), CountingSink);
+        let sink = CountingSink::default();
+        let mut dying = ParserSandbox::new(RtLauncher::new(DIE_PATH), sink.clone());
         match dying.request(b"anything") {
             Err(SandboxError::WorkerFailed) => {}
             Ok(_) => return 20,
             Err(_) => return 21,
         }
-        if CRASH_EVENTS.load(Ordering::Relaxed) == 0 {
+        if sink.crashes() == 0 {
             return 22;
         }
         // Reap the dying seam's replacement worker eagerly.
@@ -506,7 +541,7 @@ mod program {
         }
 
         // 5. The syscall wall, probed from inside a live sandbox.
-        let mut probe = ParserSandbox::new(RtLauncher::new(PROBE_PATH), CountingSink);
+        let mut probe = ParserSandbox::new(RtLauncher::new(PROBE_PATH), CountingSink::default());
         match probe.request(b"go") {
             Ok(reply) => {
                 if reply.as_slice() != [1u8, 1] {
@@ -525,7 +560,37 @@ mod program {
 
         // 7. The supervised session: a crashed stream worker replaced after
         //    its paced delay, the caller surviving throughout.
-        supervised_leg()
+        let supervised = supervised_leg();
+        if supervised != 0 {
+            return supervised;
+        }
+
+        // 8. A worker that never answers: the request fails typed once its
+        //    deadline passes, rather than never, and the worker — which
+        //    ignores the end of its input — is killed and reaped, as is its
+        //    replacement when the seam is let go.
+        hang_leg()
+    }
+
+    /// Leg 8 of [`parent`].
+    fn hang_leg() -> i32 {
+        let sink = CountingSink::default();
+        let launcher = RtLauncher::new(HANG_PATH).answering_within(HANG_DEADLINE_NS);
+        let mut hung = ParserSandbox::new(launcher, sink.clone());
+        let asked = tairix_rt::clock_get();
+        match hung.request(b"anything") {
+            Err(SandboxError::WorkerFailed) => {}
+            Ok(_) => return 80,
+            Err(_) => return 81,
+        }
+        if tairix_rt::clock_get().saturating_sub(asked) < HANG_DEADLINE_NS {
+            return 82;
+        }
+        if sink.crashes() == 0 {
+            return 83;
+        }
+        drop(hung);
+        0
     }
 
     /// Program entry point: the role marker (`arg(1)`) selects a worker
@@ -542,6 +607,7 @@ mod program {
         if worker_role() {
             return match tairix_rt::arg(0) {
                 Some(path) if path == DIE_PATH => DIE_EXIT,
+                Some(path) if path == HANG_PATH => run_hang_worker(),
                 Some(path) if path == PROBE_PATH => run_worker(&mut ProbeService),
                 _ => run_worker(&mut DecodeService),
             };

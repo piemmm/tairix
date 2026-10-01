@@ -303,8 +303,8 @@ fn reverse_swaps_the_pair_and_forces_both_opaque() {
 fn every_builtin_scheme_has_visibly_distinct_foreground_and_background() {
     for scheme in Scheme::BUILTINS.into_iter().chain([Scheme::Paper]) {
         let palette = scheme.palette().expect("builtin has a palette");
-        let fg_luma = i32::from(palette.foreground.luminance());
-        let bg_luma = i32::from(palette.background.luminance());
+        let fg_luma = i32::from(palette.foreground.opaque().luma());
+        let bg_luma = i32::from(palette.background.opaque().luma());
         assert!(
             (fg_luma - bg_luma).abs() > 60,
             "{scheme:?} text is too close in luminance to its background"

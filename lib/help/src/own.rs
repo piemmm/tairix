@@ -30,7 +30,7 @@ use crate::render::{render_short, RenderCtx, Styling};
 /// Returns `None` when no document can be served (an invalid `word`
 /// spelling, an absent or unreadable `Help/` tree, a document that does
 /// not parse). The caller then prints its own usage banner — its own
-/// text, never fabricated help content — so `-h` never fails.
+/// text, never fabricated help content — or, holding none, says why.
 pub fn own_short_help(
     source: &dyn HelpSource,
     locale: Option<&str>,
@@ -93,7 +93,7 @@ mod rt_source {
     ///
     /// A build without the bundle's documents simply has no locales: the
     /// engine then reports "not found" and the caller falls back to its
-    /// usage banner, so `-h` never fails.
+    /// usage banner.
     pub struct BundleHelp {
         /// The program's own word (e.g. `ls`), naming its bundle directory
         /// `<word>.app` in whichever system store it was planted in.
@@ -209,7 +209,48 @@ mod rt_source {
             Ok(Some(bytes))
         }
     }
+
+    /// The locale the user reads help in: `LANG`, when it is UTF-8.
+    #[must_use]
+    pub fn user_locale() -> Option<&'static str> {
+        tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok())
+    }
+
+    /// Print `word`'s own short help, read from its bundle in the user's
+    /// [`user_locale`], to standard output — or, when the bundle's documents cannot
+    /// be read, its own `usage` banner — answering the exit status: `0` once
+    /// printed, else `1` with the refusal stated on standard error.
+    #[must_use]
+    pub fn print_own_short_help(word: &'static str, usage: Option<&str>) -> i32 {
+        use tairix_rt::io::{Stderr, Stdout, Write};
+
+        let written = match (
+            super::own_short_help(&BundleHelp::new(word), user_locale(), word),
+            usage,
+        ) {
+            (Some(bytes), _) => Stdout.write_all(&bytes),
+            (None, Some(usage)) => writeln!(Stdout, "{usage}"),
+            (None, None) => {
+                let _ = writeln!(
+                    Stderr,
+                    "{word}: this bundle's help documents could not be read"
+                );
+                return 1;
+            }
+        };
+        match written {
+            Ok(()) => 0,
+            Err(err) => {
+                let _ = writeln!(
+                    Stderr,
+                    "{word}: the help could not be written ({})",
+                    err.as_errno()
+                );
+                1
+            }
+        }
+    }
 }
 
 #[cfg(feature = "rt")]
-pub use rt_source::BundleHelp;
+pub use rt_source::{print_own_short_help, user_locale, BundleHelp};

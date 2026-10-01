@@ -785,7 +785,7 @@ impl Light {
     pub fn paint(&mut self, surface: &mut Surface, area: Rect) {
         let (width, height) = self.size;
         let area = on_screen(area, self.size);
-        let (Ok(left), Ok(top)) = (u32::try_from(area.left()), u32::try_from(area.top())) else {
+        let Some((left, top)) = area.surface_origin() else {
             return;
         };
         let pixels = (

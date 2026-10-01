@@ -320,7 +320,8 @@ Done (code + host coverage). What now holds:
   header carry the surface.
 - **Protocol**: `WindowRequest::PickFile { window_id, purpose }` (op 4,
   status reply = acceptance only; the purpose is `Open` or
-  `Save { suggested }`) and the conclusions
+  `Save { suggested, endings }`, the endings what the requester can write)
+  and the conclusions
   `WindowEvent::FilePicked { window_id, handle, writable }` (kind 5,
   non-zero handle, `writable` a 0/1 byte) / `WindowEvent::PickCancelled`
   (kind 6), with the chosen name

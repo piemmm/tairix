@@ -43,7 +43,7 @@ use crate::combo::{ComboAction, ComboBox};
 use crate::damage;
 use crate::metric::StatusPill;
 use crate::paint::{
-    bead_band, centred_text_y, foreground, grab_after, inset, line_budget, paint_row, paint_run,
+    bead_band, foreground, grab_after, inset, line_budget, paint_row, paint_run,
     paint_surface_plate, plate_border, plate_corner, role_font, route_pointer, row_content_span,
     row_width_for_content, surface_rect, text_plate_height, to_i32, withheld, ChromeLayer,
     Measured, TextBlock,
@@ -385,7 +385,7 @@ impl FieldControl {
             surface,
             font,
             run,
-            (to_i32(x), centred_text_y(font, y, h)),
+            (to_i32(x), font.centred_top(to_i32(y), h)),
             color,
             None,
         );
@@ -962,7 +962,7 @@ impl FieldRow {
                 surface,
                 label_font,
                 (label, elided),
-                (to_i32(tx), centred_text_y(label_font, cy, band)),
+                (to_i32(tx), label_font.centred_top(to_i32(cy), band)),
                 fg,
                 None,
             );

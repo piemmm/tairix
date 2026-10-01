@@ -70,6 +70,7 @@ pub struct CursorTheme {
     resize_vertical: VectorCursor,
     resize_diagonal_rising: VectorCursor,
     resize_diagonal_falling: VectorCursor,
+    crosshair: VectorCursor,
 }
 
 impl CursorTheme {
@@ -94,6 +95,7 @@ impl CursorTheme {
             resize_vertical: cursor(CursorKind::ResizeVertical),
             resize_diagonal_rising: cursor(CursorKind::ResizeDiagonalRising),
             resize_diagonal_falling: cursor(CursorKind::ResizeDiagonalFalling),
+            crosshair: cursor(CursorKind::Crosshair),
         }
     }
 
@@ -110,6 +112,7 @@ impl CursorTheme {
             CursorKind::ResizeVertical => &self.resize_vertical,
             CursorKind::ResizeDiagonalRising => &self.resize_diagonal_rising,
             CursorKind::ResizeDiagonalFalling => &self.resize_diagonal_falling,
+            CursorKind::Crosshair => &self.crosshair,
         }
     }
 
@@ -133,6 +136,7 @@ fn builtin_cursor(kind: CursorKind) -> VectorCursor {
         CursorKind::ResizeVertical => outlined(CENTRE, RESIZE_VERTICAL),
         CursorKind::ResizeDiagonalRising => outlined(CENTRE, RESIZE_DIAGONAL_RISING),
         CursorKind::ResizeDiagonalFalling => outlined(CENTRE, RESIZE_DIAGONAL_FALLING),
+        CursorKind::Crosshair => builtin_crosshair(),
     }
 }
 
@@ -294,6 +298,18 @@ const BUSY_RING: &str = "M25 16 A9 9 0 1 1 7 16 A9 9 0 1 1 25 16 Z \
 /// The coloured arc on the busy ring, from twelve o'clock round a third of
 /// the ring and a little more.
 const BUSY_SWEEP: &str = "M16 7 A9 9 0 0 1 23.281 21.290 L20.045 18.939 A5 5 0 0 0 16 11 Z";
+
+/// The crosshair's four arms, two pixels across, stopping three pixels short
+/// of the centre so the pixel being picked out stays in view.
+const CROSSHAIR: &str = "M15 5 H17 V13 H15 Z M15 19 H17 V27 H15 Z \
+                         M5 15 H13 V17 H5 Z M19 15 H27 V17 H19 Z";
+
+/// The crosshair, pivoting on the open centre between its arms.
+fn builtin_crosshair() -> VectorCursor {
+    let arms = Layer::filled(Paint::Solid(BODY), FillRule::NonZero, contours(CROSSHAIR));
+    VectorCursor::new(DESIGN, units(CENTRE.0), units(CENTRE.1), alloc::vec![arms])
+        .with_outline(OUTLINE)
+}
 
 /// The pointing hand, one layer per part of [`HAND`].
 fn builtin_pointer() -> VectorCursor {

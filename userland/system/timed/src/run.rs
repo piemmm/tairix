@@ -456,9 +456,7 @@ mod program {
         // The worker role first, before any other argument handling: a worker
         // never behaves as the service.
         if worker_role() {
-            let mut service = TimeSyncService;
-            let _ = tairix_sandbox::rt::serve_stdio(&mut service);
-            return 0;
+            return tairix_sandbox::rt::serve_stdio(&mut TimeSyncService).exit_code();
         }
 
         // Every nonce and jitter draw comes from this generator, keyed from

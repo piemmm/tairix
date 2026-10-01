@@ -236,12 +236,12 @@ fn parent_caps() -> CapabilitySet {
 }
 
 /// The program registry the production `spawn` syscall resolves the
-/// seam's worker paths against: one `rxe` image, five rows. The roles
+/// seam's worker paths against: one `rxe` image, six rows. The roles
 /// ride on the *path* (`arg(0)`) and the marker (`arg(1)`) — the seam's
 /// launchers always pass `[path, role-marker]` as the startup vector,
 /// which replaces the registry defaults — so every row requests no
 /// capability and pins no arguments.
-static CHILD_PROGRAMS: [EmbeddedProgram; 5] = [
+static CHILD_PROGRAMS: [EmbeddedProgram; 6] = [
     EmbeddedProgram {
         path: b"/bin/sbx",
         rxe: PROGRAM_RXE,
@@ -268,6 +268,12 @@ static CHILD_PROGRAMS: [EmbeddedProgram; 5] = [
     },
     EmbeddedProgram {
         path: b"/bin/sbx-stream",
+        rxe: PROGRAM_RXE,
+        caps: &[],
+        args: &[],
+    },
+    EmbeddedProgram {
+        path: b"/bin/sbx-hang",
         rxe: PROGRAM_RXE,
         caps: &[],
         args: &[],
@@ -451,10 +457,19 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     // `tairix-rt` heap (the parent's and each worker's) draws on.
     let live: &'static LiveMemMap<Aarch64BinArch> = Box::leak(Box::new(LiveMemMap::new(sys.arch)));
 
+    // The scheduler-side process-signal producer: the seam ends a worker that
+    // will not end itself — one still parsing past its deadline — with a
+    // `signal` kill before it reaps it, exactly as on a production boot.
+    let signal_producer = Box::leak(Box::new(tairix_kernel_core::KernelProcessSignal::new(
+        wait_producer,
+        sys.sched,
+        sys.caps,
+    )));
+
     // Publish the production dispatch hook: every syscall the programs
     // issue — `pipe_create`, `spawn` (with the sandbox attach block),
     // `stream_read`/`stream_write`, `fs_read`/`fs_write`/`fs_close`,
-    // `mem_map`/`mem_unmap`, `wait`, `exit` — and every user-fault
+    // `mem_map`/`mem_unmap`, `signal`, `wait`, `exit` — and every user-fault
     // resolution runs the production caller-context resolution and
     // handler path.
     let hook: &'static KernelDispatchHook<'static, Aarch64BinArch> = Box::leak(Box::new(
@@ -480,9 +495,18 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
             &NULL_MMIO_MAP_FACILITY,
             &NULL_DMA_ALLOC_FACILITY,
         )
-        .with_peer_watch(sys.peer_watch),
+        .with_peer_watch(sys.peer_watch)
+        .with_process_signal(signal_producer),
     ));
     if DISPATCH_SLOT.install_dispatcher(hook).is_err() {
+        qemu_exit::exit_failure(FAIL_HOOK_INSTALL);
+    }
+    // The hook is the producer's landing seam, so a signalled kill tears the
+    // worker down through the one shared process teardown.
+    if signal_producer.install_task_reclaim(hook).is_err() {
+        qemu_exit::exit_failure(FAIL_HOOK_INSTALL);
+    }
+    if tairix_kernel_core::install_deferred_kill_lander(signal_producer).is_err() {
         qemu_exit::exit_failure(FAIL_HOOK_INSTALL);
     }
 

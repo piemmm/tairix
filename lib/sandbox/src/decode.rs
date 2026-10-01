@@ -1015,6 +1015,7 @@ mod tests {
     };
     use crate::host::ParserSandbox;
     use crate::loopback::LoopbackLauncher;
+    use crate::testing::{loopback, NullSink};
     use crate::wire::Writer;
     use crate::worker::Service;
     use alloc::vec;
@@ -1023,22 +1024,11 @@ mod tests {
         CapabilityId, LoadHeader, ManifestHeader, RxePermission, Segment, LOAD_FLAG_PIE,
         LOAD_MAGIC, MANIFEST_MAGIC, RXE_PAGE_SIZE,
     };
-    use tairix_log::{Event, Sink};
 
-    /// Discards every event: these tests exercise healthy workers.
-    struct SilentSink;
-
-    impl Sink for SilentSink {
-        fn write_event(&self, _event: &Event<'_>) {}
-    }
-
-    type TestSandbox = ParserSandbox<LoopbackLauncher<fn() -> DecodeService>, SilentSink>;
+    type TestSandbox = ParserSandbox<LoopbackLauncher<fn() -> DecodeService>, NullSink>;
 
     fn sandbox() -> TestSandbox {
-        ParserSandbox::new(
-            LoopbackLauncher::new(DecodeService::default as fn() -> DecodeService),
-            SilentSink,
-        )
+        loopback()
     }
 
     /// A minimal valid rxe image: one RX code segment holding the entry,

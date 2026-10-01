@@ -25,9 +25,6 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(all(freestanding, feature = "program"))]
 mod program {
-    extern crate alloc;
-
-    use tairix_help::{own_short_help, BundleHelp};
     use tairix_rt::io::{write_stderr_line, Stdout, Write};
     use tairix_yes::{block, parse, pump, Command, Output, YesError, USAGE};
 
@@ -39,21 +36,6 @@ mod program {
             // The shared short-write loop; a stream that stops accepting
             // bytes fails closed rather than spinning.
             Stdout.write_all(bytes).map_err(|_| YesError::Output)
-        }
-    }
-
-    /// Render `yes`'s own short help (`NAME` + `SYNOPSIS` + compact
-    /// `OPTIONS`) from its own bundle's `Help/` tree through the one shared
-    /// engine; when no document can be served (a build without the bundle's
-    /// documents) the usage banner stands in — the tool's own text, not
-    /// fabricated help content — so `-h` never fails.
-    fn short_help() -> i32 {
-        let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
-        let bytes = own_short_help(&BundleHelp::new("yes"), locale, "yes")
-            .unwrap_or_else(|| alloc::format!("{USAGE}\n").into_bytes());
-        match Stdout.write_all(&bytes) {
-            Ok(()) => 0,
-            Err(_) => 1,
         }
     }
 
@@ -73,7 +55,7 @@ mod program {
         };
         let operands = match parse(&arguments) {
             Ok(Command::Repeat(operands)) => operands,
-            Ok(Command::Help) => return short_help(),
+            Ok(Command::Help) => return tairix_help::print_own_short_help("yes", Some(USAGE)),
             Err(_) => {
                 write_stderr_line(USAGE);
                 return 2;

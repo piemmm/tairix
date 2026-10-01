@@ -1400,6 +1400,7 @@ fn sample_theme(id: ThemeId) -> Theme {
             resize_vertical: String::from("c.resize-v"),
             resize_diagonal_rising: String::from("c.resize-rising"),
             resize_diagonal_falling: String::from("c.resize-falling"),
+            crosshair: String::from("c.crosshair"),
         },
         MotionTheme::new([
             90, 80, 60, 90, 180, 120, 120, 180, 90, 160, 70, 90, 200, 380, 900, 500, 140, 320,

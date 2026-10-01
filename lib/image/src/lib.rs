@@ -115,6 +115,22 @@
 //! offset arithmetic over untrusted values uses checked or widened integer
 //! operations, so a crafted input cannot provoke an overflow panic even in
 //! a debug build.
+//!
+//! # Pictures as their files store them
+//!
+//! An editor needs more than what a picture looks like: a paletted PNG's
+//! indices and palette, a sprite area's every sprite with its name, mode,
+//! palette and mask. [`open_native`] answers that [`Picture`] form — for a
+//! sprite area through [`SpriteAreaReader`], which keeps a sprite it cannot
+//! read as its exact bytes — and every other format as the RGBA picture
+//! [`decode_as`] answers.
+//!
+//! # Writing
+//!
+//! [`encode_png`], [`encode_jpeg`] and [`encode_sprite_area`] write the
+//! three formats an editor saves, each reading its picture a row at a time
+//! through [`PictureSource`] and refusing, with an [`EncodeError`], a
+//! picture its format cannot state rather than writing something else.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -127,23 +143,38 @@ use alloc::vec::Vec;
 mod bmp;
 mod ccitt;
 mod channel;
-mod crc32;
+mod encode;
 mod frames;
 mod gif;
 mod huffman;
 mod ico;
 mod jpeg;
+mod jpeg_encode;
 mod lzw;
 mod orientation;
 mod pages;
+mod picture;
 mod png;
+mod png_encode;
 #[cfg(test)]
 mod png_fixture;
 mod sprite;
+mod sprite_encode;
 mod tiff;
 mod vp8;
 mod vp8l;
 mod webp;
+
+pub use encode::{encode_jpeg, encode_png, encode_sprite_area, EncodeError, JpegOptions};
+pub use picture::{
+    flatten_row, masked_colour, over, IndexDepth, Picture, PictureError, PictureKind,
+    PictureSource, Pixels, Rgba8,
+};
+pub use sprite::{
+    desktop_palette, opaque_sprite_writes_back, OpaqueSprite, Sprite, SpriteAreaReader,
+    SpriteEntry, SpriteLayout, SpriteMode, SpriteName, SpritePalette, SPRITE_HEADER_LEN,
+};
+pub use sprite_encode::SpriteInput;
 
 /// Bytes one decoded pixel occupies: straight-alpha RGBA8, the one output
 /// shape [`RasterImage`] and every format decoder here produce.
@@ -1407,6 +1438,81 @@ pub fn decode_fitted(
     }
 }
 
+/// What a file held that the picture opened from it does not, so writing
+/// the picture back as that format would not reproduce the file.
+///
+/// Reported for the formats this crate writes, PNG and JPEG, so a writer
+/// can tell whether a write-back keeps everything; every other format opens
+/// through [`decode_as`], which reports neither.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct Unkept {
+    /// Its samples were narrowed from sixteen bits to eight.
+    pub precision: bool,
+    /// It held data beside the picture: a colour profile, a pixel density,
+    /// text, metadata, an animation's further frames.
+    pub extras: bool,
+}
+
+/// A document opened in the representation its file stores: what an
+/// editor holds.
+pub enum NativeDocument<B> {
+    /// One picture.
+    Picture {
+        /// The format it was read as.
+        format: ImageFormat,
+        /// The picture.
+        picture: Picture,
+        /// What the file held that the picture does not.
+        unkept: Unkept,
+    },
+    /// A RISC OS sprite area, read one sprite at a time.
+    Sprites(SpriteAreaReader<B>),
+}
+
+/// Open `bytes` as `format` in the representation its file stores.
+///
+/// A PNG with a palette opens as its indices and palette and a sprite area
+/// as its sprites; every other format opens as the picture [`decode_as`]
+/// answers, in RGBA.
+///
+/// # Errors
+///
+/// See [`DecodeError`] for every fail-closed refusal reason.
+pub fn open_native<B: AsRef<[u8]>>(
+    format: ImageFormat,
+    bytes: B,
+    limits: &DecodeLimits,
+) -> Result<NativeDocument<B>, DecodeError> {
+    let rgba = |image: RasterImage| {
+        let (width, height) = (image.width(), image.height());
+        Picture::rgba(width, height, image.into_pixels())
+            .map_err(|_| DecodeError::DimensionsOverflow)
+    };
+    let (picture, unkept) = match format {
+        ImageFormat::Sprite => {
+            return SpriteAreaReader::open(bytes, limits).map(NativeDocument::Sprites);
+        }
+        ImageFormat::Png => png::decode_native(bytes.as_ref(), limits)?,
+        ImageFormat::Jpeg => {
+            let (image, extras) = jpeg::decode_native(bytes.as_ref(), limits)?;
+            let unkept = Unkept {
+                precision: false,
+                extras,
+            };
+            (rgba(image)?, unkept)
+        }
+        other => (
+            rgba(decode_as(other, bytes.as_ref(), limits)?)?,
+            Unkept::default(),
+        ),
+    };
+    Ok(NativeDocument::Picture {
+        format,
+        picture,
+        unkept,
+    })
+}
+
 /// What a container's entries are, which is what decides whether they are
 /// *played* or *chosen between*.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -1949,7 +2055,6 @@ mod tests {
     use alloc::vec::Vec;
 
     use super::{decode, decode_fitted, sniff, DecodeError, DecodeLimits, FitBox, ImageFormat};
-    use crate::crc32;
 
     #[test]
     fn sniff_recognises_the_png_signature() {
@@ -2026,7 +2131,7 @@ mod tests {
             out.extend_from_slice(&len.to_be_bytes());
             out.extend_from_slice(&chunk_type);
             out.extend_from_slice(payload);
-            let crc = crc32::crc32_of(&[&chunk_type, payload]);
+            let crc = crate::png::chunk_crc(chunk_type, payload);
             out.extend_from_slice(&crc.to_be_bytes());
             out
         }

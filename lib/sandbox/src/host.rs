@@ -21,7 +21,7 @@ use tairix_log::{Event, EventId, Field, Level, Sink};
 
 use alloc::vec::Vec;
 
-use crate::proto::{recv_frame, send_frame, Channel, MAX_FRAME};
+use crate::proto::{recv_frame, send_frame, Channel, ProtoError, MAX_FRAME};
 
 /// Stable event id: a sandboxed worker crashed or violated the protocol
 /// mid-request and was disposed of and replaced.
@@ -68,12 +68,23 @@ pub enum SandboxError {
     /// No worker could be started; the carried errno names the launch
     /// failure.
     WorkerUnavailable(Errno),
-    /// The worker crashed or violated the protocol mid-request. It has
-    /// been disposed of and a replacement was started (or its failure to
-    /// start was itself logged). The request was not answered.
+    /// The worker crashed, violated the protocol, or did not answer within
+    /// its transport's deadline. It has been disposed of and a replacement
+    /// was started (or its failure to start was itself logged). The request
+    /// was not answered.
     WorkerFailed,
     /// The request payload exceeds [`MAX_FRAME`]; nothing was sent.
     RequestTooLarge,
+}
+
+impl core::fmt::Display for SandboxError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::WorkerUnavailable(errno) => write!(f, "no parser could be started ({errno})"),
+            Self::WorkerFailed => f.write_str("the parser stopped without answering"),
+            Self::RequestTooLarge => f.write_str("the request is larger than a parser takes"),
+        }
+    }
 }
 
 /// The parent-side seam: one sandboxed worker, one outstanding request.
@@ -145,16 +156,18 @@ impl<L: Launcher, S: Sink> ParserSandbox<L, S> {
             })?;
             self.live.insert(launched)
         };
+        channel.begin_exchange();
         let outcome = send_frame(channel, payload).and_then(|()| recv_frame(channel));
-        if let Ok(Some(reply)) = outcome {
+        let reason = match outcome {
             // A reply arrived; the worker stays live for the next request.
-            return Ok(reply);
-        }
-        // The worker exited without answering, died mid-frame, declared an
-        // oversize reply, or the transport failed: all are the same
-        // containment path — the worker is gone or can no longer be
-        // believed.
-        self.contain_failure("worker failed mid-request");
+            Ok(Some(reply)) => return Ok(reply),
+            Err(ProtoError::Channel(Errno::TimedOut)) => "worker did not answer in time",
+            // Exited without answering, died mid-frame, declared an oversize
+            // reply, or the transport failed: the worker is gone or can no
+            // longer be believed.
+            Ok(None) | Err(_) => "worker failed mid-request",
+        };
+        self.contain_failure(reason);
         Err(SandboxError::WorkerFailed)
     }
 

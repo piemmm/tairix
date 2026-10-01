@@ -57,6 +57,12 @@
 //!   [`imagerender::render_wallpaper`] drives the sequence and validates
 //!   every band's echoed geometry and exact pixel length before trusting
 //!   the assembled RGBA8 buffer.
+//! * [`imageedit`] — a picture an image editor opens is decoded inside the
+//!   same worker into the representation its file stores — a palette's
+//!   indices, a sprite area's every sprite, a sprite it cannot read as its
+//!   bytes — and the caller-side [`imageedit::select_entry`] and
+//!   [`imageedit::read_rows`] hold every description, mode word, palette and
+//!   index to its bounds before handing on a row.
 //! * [`textsyntax`] — a document an editor holds is coloured, detected and
 //!   validated inside the worker (`tairix-syntax`), and the caller-side
 //!   [`textsyntax::lex_lines`] and [`textsyntax::validate_document`] check
@@ -80,6 +86,7 @@ extern crate alloc;
 pub mod decode;
 pub mod helpdoc;
 pub mod host;
+pub mod imageedit;
 pub mod imagerender;
 pub mod loopback;
 pub mod proto;
@@ -88,6 +95,8 @@ pub mod rt;
 pub mod session;
 pub mod supervise;
 pub mod svgfonts;
+#[cfg(test)]
+mod testing;
 pub mod textsyntax;
 pub mod timesync;
 pub mod wire;

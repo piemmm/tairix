@@ -26,9 +26,9 @@
 use alloc::vec::Vec;
 
 use tairix_abi::{
-    Errno, FdWire, SpawnAttach, WaitSetOp, WaitSourceKind, STDIN, STDOUT, STD_STREAM_COUNT,
+    Errno, FdWire, Signal, SpawnAttach, WaitSetOp, WaitSourceKind, STDIN, STDOUT, STD_STREAM_COUNT,
 };
-use tairix_rt::io::{Error as IoError, Read, Stdin, Stdout, Write};
+use tairix_rt::io::{Error as IoError, Read, Stdin, Stdout, Stream, Write};
 
 use crate::host::Launcher;
 use crate::proto::Channel;
@@ -45,6 +45,16 @@ pub const WORKER_ROLE_ARG: &[u8] = b"--parser-sandbox-worker";
 /// The same marker for a **session** worker ([`crate::session`]), so one
 /// binary can serve both roles and tell them apart.
 pub const SESSION_ROLE_ARG: &[u8] = b"--sandbox-session-worker";
+
+/// How long a one-shot worker may take to answer one request: a
+/// containment bound, so a parse that never ends — a hostile file driving a
+/// decoder round a loop — costs its caller this long and not for ever.
+///
+/// The slowest legitimate answer is a full decode of the largest document
+/// the limits admit: about two seconds on a desktop core, so a deadline of
+/// two minutes leaves room for a core fifteen times slower that is also
+/// heavily loaded.
+pub const REPLY_DEADLINE_NS: u64 = 120_000_000_000;
 
 /// Whether this invocation is a one-shot sandbox-worker role: `argv[1]` is
 /// exactly [`WORKER_ROLE_ARG`].
@@ -113,15 +123,26 @@ impl Channel for StdioChannel {
 /// a sandboxed worker over a fresh pipe pair per launch.
 pub struct RtLauncher {
     path: Vec<u8>,
+    reply_deadline_ns: u64,
 }
 
 impl RtLauncher {
-    /// Build a launcher over the program path to spawn as the worker.
+    /// Build a launcher over the program path to spawn as the worker, whose
+    /// workers answer within [`REPLY_DEADLINE_NS`].
     #[must_use]
     pub fn new(path: &[u8]) -> Self {
         Self {
             path: path.to_vec(),
+            reply_deadline_ns: REPLY_DEADLINE_NS,
         }
+    }
+
+    /// The same launcher, its workers given `deadline_ns` to answer each
+    /// request instead.
+    #[must_use]
+    pub const fn answering_within(mut self, deadline_ns: u64) -> Self {
+        self.reply_deadline_ns = deadline_ns;
+        self
     }
 
     /// Build a launcher over this program's own binary, via the kernel's
@@ -182,19 +203,29 @@ impl Launcher for RtLauncher {
             pid,
             write_fd,
             read_fd,
+            reply_deadline_ns: self.reply_deadline_ns,
+            deadline_ns: 0,
         })
     }
 
     fn dispose(&mut self, channel: RtChannel) -> Option<i32> {
         let pid = channel.pid;
-        // Dropping the channel closes the parent's pipe ends; a still-
-        // running worker then sees end-of-stream on fd 0 and exits, so the
-        // blocking reap below always completes.
         drop(channel);
-        let mut code = 0i32;
-        let reaped = tairix_rt::wait_exit(pid, &mut code);
-        (reaped >= 0).then_some(code)
+        end_worker(pid)
     }
+}
+
+/// End worker `pid`, whose pipes its owner has closed, and reap it,
+/// answering its exit code.
+///
+/// It is killed first: a worker still parsing, or one that ignores the end
+/// of its input, would never exit by itself, and the reap would wait on it
+/// for ever.
+fn end_worker(pid: i64) -> Option<i32> {
+    let _ = tairix_rt::signal(pid, Signal::Kill);
+    let mut code = 0i32;
+    let reaped = tairix_rt::wait_exit(pid, &mut code);
+    (reaped >= 0).then_some(code)
 }
 
 /// The parent's channel to one spawned worker: the request pipe's write
@@ -203,16 +234,33 @@ pub struct RtChannel {
     pid: i64,
     write_fd: u32,
     read_fd: u32,
+    /// How long the worker has to answer each request.
+    reply_deadline_ns: u64,
+    /// When the answer to the request in flight is due, on the monotonic
+    /// clock.
+    deadline_ns: u64,
 }
 
 impl Channel for RtChannel {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
+        // A timeout of zero would wait for ever, so a deadline already
+        // reached is answered here.
+        let left = self.deadline_ns.saturating_sub(tairix_rt::clock_get());
+        if left == 0 {
+            return Err(Errno::TimedOut);
+        }
         // A pipe ignores the file offset; end-of-stream reads 0.
-        tairix_rt::fs_read(self.read_fd, 0, buf).map_err(Errno::from_syscall)
+        Stream::new(self.read_fd)
+            .read_timeout(buf, left)
+            .map_err(IoError::as_errno)
     }
 
     fn write(&mut self, buf: &[u8]) -> Result<usize, Errno> {
         tairix_rt::fs_write(self.write_fd, 0, buf).map_err(Errno::from_syscall)
+    }
+
+    fn begin_exchange(&mut self) {
+        self.deadline_ns = tairix_rt::clock_get().saturating_add(self.reply_deadline_ns);
     }
 }
 
@@ -280,13 +328,8 @@ impl SessionTransport for RtSessionChannel {
 
     fn dispose(self) -> Option<i32> {
         let pid = self.pid;
-        // Dropping closes the parent's pipe ends; a still-running worker
-        // then sees end-of-stream on fd 0 and exits, so the blocking reap
-        // below always completes.
         drop(self);
-        let mut code = 0i32;
-        let reaped = tairix_rt::wait_exit(pid, &mut code);
-        (reaped >= 0).then_some(code)
+        end_worker(pid)
     }
 }
 

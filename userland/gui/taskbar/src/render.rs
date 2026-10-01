@@ -698,15 +698,11 @@ fn draw_label(
 
     let text_width = font.text_width(fitted);
     let x_offset = rect.width.saturating_sub(text_width) / 2;
-    let y_offset = rect.height.saturating_sub(font.glyph_height()) / 2;
     let x = rect
         .left()
         .saturating_sub(origin.x)
         .saturating_add(to_i32(x_offset));
-    let y = rect
-        .top()
-        .saturating_sub(origin.y)
-        .saturating_add(to_i32(y_offset));
+    let y = font.centred_top(rect.top().saturating_sub(origin.y), rect.height);
     font.draw_text(surface, x, y, fitted, color);
 }
 

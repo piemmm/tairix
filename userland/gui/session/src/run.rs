@@ -158,7 +158,6 @@ mod program {
         DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper, SwitchedOff,
     };
     use tairix_greeter::{Verdict, Verifier};
-    use tairix_help::{own_short_help, BundleHelp};
     use tairix_icon::{ArtworkDesk, ArtworkKey, ArtworkResolver, InlineArtwork, Resolved};
     use tairix_keymap::modifiers_to_abi;
     use tairix_log::{
@@ -171,14 +170,14 @@ mod program {
     use tairix_rt::ServedCall;
     use tairix_sandbox::imagerender::{rasterise_icon, render_wallpaper, ImageRenderService};
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
-    use tairix_sandbox::{ParserSandbox, ServeEnd};
+    use tairix_sandbox::ParserSandbox;
     use tairix_taskbar::{MenuRequest, MenuSubject, TaskId, TaskbarConfig, TaskbarResponse};
     use tairix_theme::Accessibility;
     use tairix_wallpaper::{
         CpuUse, DesktopSettings, ScreensaverKind, MAX_WALLPAPER_BYTES, WALLPAPER_STORE,
     };
     use tairix_window::{
-        CallerIdentity, ClientRegion, EventSink, PickedFile, WallpaperName, WindowServer,
+        app, CallerIdentity, ClientRegion, EventSink, PickedFile, WallpaperName, WindowServer,
         WINDOW_REPLY_MAX,
     };
     use tairix_wm::{
@@ -361,12 +360,8 @@ mod program {
     /// owns nothing.
     static LOG_SINK: tairix_rt::LogSink = tairix_rt::LogSink;
 
-    /// State the abnormal-exit reason on `stderr` (fail loud: an exit code
-    /// alone is not a diagnosis) and hand back `code` for `main` to return.
-    fn fail(code: i32, reason: &str) -> i32 {
-        let _ = writeln!(Stderr, "desktop: {reason}");
-        code
-    }
+    /// The name this program states its refusals under.
+    const APP_NAME: &str = "desktop";
 
     /// The production [`DisplayTransport`]: one synchronous `ipc_call` to
     /// the reserved display endpoint per request. The display service
@@ -844,10 +839,12 @@ mod program {
     fn drain_fault(shell: &mut DesktopShell, compositor: &mut Compositor, err: Errno) -> i32 {
         shell.teardown(compositor);
         match err {
-            Errno::SeatRevoked | Errno::SeatNotOwner => {
-                fail(EXIT_SEAT_LOST, "seat lease lost; tearing the session down")
-            }
-            _ => fail(EXIT_INPUT_FAULT, "seat input drain faulted"),
+            Errno::SeatRevoked | Errno::SeatNotOwner => app::fail(
+                APP_NAME,
+                EXIT_SEAT_LOST,
+                "seat lease lost; tearing the session down",
+            ),
+            _ => app::fail(APP_NAME, EXIT_INPUT_FAULT, "seat input drain faulted"),
         }
     }
 
@@ -1002,14 +999,19 @@ mod program {
             }
             Err(DriverError::SeatRevoked | DriverError::PermissionDenied) => {
                 shell.teardown(compositor);
-                Err(fail(
+                Err(app::fail(
+                    APP_NAME,
                     EXIT_SEAT_LOST,
                     "seat lease lost; tearing the session down",
                 ))
             }
             Err(_) => {
                 shell.teardown(compositor);
-                Err(fail(EXIT_PRESENT_FAILED, "display present refused"))
+                Err(app::fail(
+                    APP_NAME,
+                    EXIT_PRESENT_FAILED,
+                    "display present refused",
+                ))
             }
         }
     }
@@ -1154,7 +1156,7 @@ mod program {
         let origin = tairix_rt::peer_origin(SWITCHBOARD_ENDPOINT, ticket)?;
         serve_switchboard_request(serve, origin.pid(), request).map_err(|refusal| {
             let msg = refusal.reason();
-            let _ = writeln!(Stderr, "desktop: {msg}");
+            app::report(APP_NAME, format_args!("{msg}"));
             log(
                 &LOG_SINK,
                 &LogEvent {
@@ -1213,10 +1215,9 @@ mod program {
                 return true;
             }
             if drop_is_noteworthy(command) {
-                let _ = writeln!(
-                    Stderr,
-                    "desktop: switchboard command dropped: {}",
-                    Errno::from_syscall(ret)
+                app::report(
+                    APP_NAME,
+                    format_args!("switchboard command dropped: {}", Errno::from_syscall(ret)),
                 );
             }
             false
@@ -1249,7 +1250,10 @@ mod program {
             match self.totals.post(request) {
                 Ok(()) => Ok(()),
                 Err(err) => {
-                    let _ = writeln!(Stderr, "desktop: frame accounting not handed over: {err}");
+                    app::report(
+                        APP_NAME,
+                        format_args!("frame accounting not handed over: {err}"),
+                    );
                     Err(err)
                 }
             }
@@ -1258,7 +1262,10 @@ mod program {
         fn settle(&mut self) -> Option<Result<(), Errno>> {
             let outcome = self.totals.settle()?;
             if let Err(err) = outcome {
-                let _ = writeln!(Stderr, "desktop: frame accounting not published: {err}");
+                app::report(
+                    APP_NAME,
+                    format_args!("frame accounting not published: {err}"),
+                );
             }
             Some(outcome)
         }
@@ -1432,9 +1439,9 @@ mod program {
         match tairix_rt::thread::Thread::spawn(body) {
             Ok(handle) => Some(handle),
             Err(err) => {
-                let _ = writeln!(
-                    Stderr,
-                    "desktop: no {what} thread ({err:?}); that work runs on the serve loop"
+                app::report(
+                    APP_NAME,
+                    format_args!("no {what} thread ({err:?}); that work runs on the serve loop"),
                 );
                 None
             }
@@ -1456,15 +1463,17 @@ mod program {
             match tairix_rt::thread::Thread::spawn(move || served.serve()) {
                 Ok(handle) => preparers.push(handle),
                 Err(err) => {
-                    let _ = writeln!(
-                        Stderr,
-                        "desktop: {} of {online} wallpaper preparers ({err:?}){}",
-                        preparers.len(),
-                        if preparers.is_empty() {
-                            "; the wallpaper is prepared on the serve loop"
-                        } else {
-                            ""
-                        }
+                    let fallback = if preparers.is_empty() {
+                        "; the wallpaper is prepared on the serve loop"
+                    } else {
+                        ""
+                    };
+                    app::report(
+                        APP_NAME,
+                        format_args!(
+                            "{} of {online} wallpaper preparers ({err:?}){fallback}",
+                            preparers.len()
+                        ),
                     );
                     break;
                 }
@@ -1712,7 +1721,11 @@ mod program {
         // cannot learn who it is must not serve windows apps cannot
         // authenticate (fail closed).
         let Ok(self_origin) = tairix_rt::self_origin() else {
-            return fail(EXIT_NO_WINDOW_ENDPOINT, "session identity unavailable");
+            return app::fail(
+                APP_NAME,
+                EXIT_NO_WINDOW_ENDPOINT,
+                "session identity unavailable",
+            );
         };
         // Bind the fast-user-switching wake mailbox before the first frame,
         // so a session is resumable from the moment it can be switched away
@@ -1733,14 +1746,15 @@ mod program {
 
         // --- Display bring-up: query → shared frames → grant → configure.
         let Ok(mode) = DisplayClient::new(RtDisplayTransport, SEAT_PRIMARY).query() else {
-            return fail(
+            return app::fail(
+                APP_NAME,
                 EXIT_NO_DISPLAY,
                 "display service unreachable or refused the mode query",
             );
         };
         let (display, region) = match establish_frames(&mode) {
             Ok(established) => established,
-            Err((code, reason)) => return fail(code, reason),
+            Err((code, reason)) => return app::fail(APP_NAME, code, reason),
         };
         let frame_len = region.frame_len();
         // Held as options so a resume can drop the ring, give the region
@@ -1808,7 +1822,11 @@ mod program {
             frost,
             tairix_rt::pressure::gauge(),
         ) else {
-            return fail(EXIT_BAD_MODE, "compositor rejected the queried mode");
+            return app::fail(
+                APP_NAME,
+                EXIT_BAD_MODE,
+                "compositor rejected the queried mode",
+            );
         };
         let online = online_cpus();
         compositor.set_job_runner(composite_pool(online));
@@ -1816,7 +1834,11 @@ mod program {
         let screen = Rect::new(0, 0, mode.width_px, mode.height_px);
         let Ok(mut pointer) = DeviceInputSource::new(SeatInputChannel::new(PointerReader), screen)
         else {
-            return fail(EXIT_BAD_MODE, "queried mode has no pointer surface");
+            return app::fail(
+                APP_NAME,
+                EXIT_BAD_MODE,
+                "queried mode has no pointer surface",
+            );
         };
         // Built on the defaults; the loop head reconciles the user's policy
         // into it, and into the pointer, once the settings load.
@@ -2110,7 +2132,11 @@ mod program {
             WINDOW_CAPACITY,
         ) != 0
         {
-            return fail(EXIT_NO_WINDOW_ENDPOINT, "window endpoint bind refused");
+            return app::fail(
+                APP_NAME,
+                EXIT_NO_WINDOW_ENDPOINT,
+                "window endpoint bind refused",
+            );
         }
 
         // Bind the notification rendezvous the same way: the same live seat
@@ -2128,7 +2154,8 @@ mod program {
             NOTIFY_CAPACITY,
         ) != 0
         {
-            return fail(
+            return app::fail(
+                APP_NAME,
                 EXIT_NO_NOTIFY_ENDPOINT,
                 "notification endpoint bind refused",
             );
@@ -2149,7 +2176,8 @@ mod program {
             SWITCHBOARD_CAPACITY,
         ) != 0
         {
-            return fail(
+            return app::fail(
+                APP_NAME,
                 EXIT_NO_SWITCHBOARD_ENDPOINT,
                 "switchboard endpoint bind refused",
             );
@@ -2170,7 +2198,11 @@ mod program {
             PINBOARD_CAPACITY,
         ) != 0
         {
-            return fail(EXIT_NO_PINBOARD_ENDPOINT, "pinboard endpoint bind refused");
+            return app::fail(
+                APP_NAME,
+                EXIT_NO_PINBOARD_ENDPOINT,
+                "pinboard endpoint bind refused",
+            );
         }
 
         // Park on the wait-set: the seat member wakes on input delivery
@@ -2182,7 +2214,7 @@ mod program {
         // through its own revocation.
         let set = tairix_rt::waitset_create();
         if set < 0 {
-            return fail(EXIT_WAIT_FAILED, "wait-set refused");
+            return app::fail(APP_NAME, EXIT_WAIT_FAILED, "wait-set refused");
         }
         #[allow(clippy::cast_sign_loss)] // `set >= 0` checked above; it is a kernel handle.
         let set = set as u64;
@@ -2194,7 +2226,7 @@ mod program {
             SEAT_TOKEN,
         ) != 0
         {
-            return fail(EXIT_WAIT_FAILED, "seat wait refused");
+            return app::fail(APP_NAME, EXIT_WAIT_FAILED, "seat wait refused");
         }
         if tairix_rt::waitset_ctl(
             set,
@@ -2204,7 +2236,7 @@ mod program {
             WINDOW_TOKEN,
         ) != 0
         {
-            return fail(EXIT_WAIT_FAILED, "window endpoint wait refused");
+            return app::fail(APP_NAME, EXIT_WAIT_FAILED, "window endpoint wait refused");
         }
         if tairix_rt::waitset_ctl(
             set,
@@ -2214,7 +2246,11 @@ mod program {
             NOTIFY_TOKEN,
         ) != 0
         {
-            return fail(EXIT_WAIT_FAILED, "notification endpoint wait refused");
+            return app::fail(
+                APP_NAME,
+                EXIT_WAIT_FAILED,
+                "notification endpoint wait refused",
+            );
         }
         if tairix_rt::waitset_ctl(
             set,
@@ -2224,7 +2260,11 @@ mod program {
             SWITCHBOARD_TOKEN,
         ) != 0
         {
-            return fail(EXIT_WAIT_FAILED, "switchboard endpoint wait refused");
+            return app::fail(
+                APP_NAME,
+                EXIT_WAIT_FAILED,
+                "switchboard endpoint wait refused",
+            );
         }
         if tairix_rt::waitset_ctl(
             set,
@@ -2234,7 +2274,7 @@ mod program {
             PINBOARD_TOKEN,
         ) != 0
         {
-            return fail(EXIT_WAIT_FAILED, "pinboard endpoint wait refused");
+            return app::fail(APP_NAME, EXIT_WAIT_FAILED, "pinboard endpoint wait refused");
         }
         if tairix_rt::waitset_ctl(
             set,
@@ -2244,7 +2284,7 @@ mod program {
             CHILD_TOKEN,
         ) != 0
         {
-            return fail(EXIT_WAIT_FAILED, "child wait refused");
+            return app::fail(APP_NAME, EXIT_WAIT_FAILED, "child wait refused");
         }
         // The workers' wake: readable exactly when a directory read or a
         // wallpaper preparation has finished. A refused add is fatal rather than
@@ -2260,14 +2300,14 @@ mod program {
                 WORKER_TOKEN,
             ) != 0
             {
-                return fail(EXIT_WAIT_FAILED, "listing wake wait refused");
+                return app::fail(APP_NAME, EXIT_WAIT_FAILED, "listing wake wait refused");
             }
         }
         // `watch` re-reads the band as it registers the member, closing the
         // race between the bring-up read above and this registration — a
         // move in between would otherwise never be seen.
         if !tairix_procinfo::pressure::watch(set, PRESSURE_TOKEN) {
-            return fail(EXIT_WAIT_FAILED, "memory-pressure wait refused");
+            return app::fail(APP_NAME, EXIT_WAIT_FAILED, "memory-pressure wait refused");
         }
         // The wake mailbox joins for the session's whole life, foreground or
         // background: it is the only member a switched-away desktop waits
@@ -2278,7 +2318,11 @@ mod program {
             if tairix_rt::waitset_ctl(set, WaitSetOp::Add, WaitSourceKind::Port, wake, WAKE_TOKEN)
                 != 0
             {
-                return fail(EXIT_WAIT_FAILED, "session wake mailbox wait refused");
+                return app::fail(
+                    APP_NAME,
+                    EXIT_WAIT_FAILED,
+                    "session wake mailbox wait refused",
+                );
             }
         }
 
@@ -2572,7 +2616,7 @@ mod program {
                 if waited != 0 && Errno::from_syscall(waited) != Errno::TimedOut {
                     // A dead wait-set would degrade the loop into a busy poll;
                     // exit fail-loud instead and let the supervisor decide.
-                    return fail(EXIT_WAIT_FAILED, "seat wait failed");
+                    return app::fail(APP_NAME, EXIT_WAIT_FAILED, "seat wait failed");
                 }
                 // No member woke, so `token` still names the *previous*
                 // wake's source and dispatching on it would block in a
@@ -2639,10 +2683,7 @@ mod program {
                                     );
                                 }
                                 Some(SwitchedOff::Refused(refusal)) => {
-                                    let _ = writeln!(
-                                        Stderr,
-                                        "desktop: the display would not switch off ({refusal:?}); the screensaver is kept black instead",
-                                    );
+                                    app::report(APP_NAME, format_args!("the display would not switch off ({refusal:?}); the screensaver is kept black instead"));
                                 }
                                 _ => {}
                             }
@@ -3302,11 +3343,9 @@ mod program {
                         let mode = match switch.resume(&mut screen) {
                             Ok(mode) => mode,
                             Err(failure) => {
-                                let _ = writeln!(
-                                    Stderr,
-                                    "desktop: {} ({:?})",
-                                    failure.reason(),
-                                    failure.errno()
+                                app::report(
+                                    APP_NAME,
+                                    format_args!("{} ({:?})", failure.reason(), failure.errno()),
                                 );
                                 shell.teardown(&mut compositor);
                                 return EXIT_RESUME_FAILED;
@@ -3320,7 +3359,8 @@ mod program {
                             DeviceInputSource::new(pointer.into_channel(), screen_rect)
                         else {
                             shell.teardown(&mut compositor);
-                            return fail(
+                            return app::fail(
+                                APP_NAME,
                                 EXIT_RESUME_FAILED,
                                 "the resumed mode has no pointer surface",
                             );
@@ -3340,7 +3380,7 @@ mod program {
                         });
                     }
                     Err(refusal) => {
-                        let _ = writeln!(Stderr, "desktop: {}", refusal.reason());
+                        app::report(APP_NAME, refusal.reason());
                     }
                 }
             } else if token == SEAT_TOKEN && saver.is_shown() {
@@ -3384,9 +3424,9 @@ mod program {
                     // Still dark: the next input asks again.
                     Some(Err(refusal)) if !told_unwakeable => {
                         told_unwakeable = true;
-                        let _ = writeln!(
-                            Stderr,
-                            "desktop: the display would not switch back on ({refusal:?})",
+                        app::report(
+                            APP_NAME,
+                            format_args!("the display would not switch back on ({refusal:?})"),
                         );
                     }
                     Some(Err(_)) | None => {}
@@ -3931,35 +3971,31 @@ mod program {
     ) -> Result<Surface, alloc::string::String> {
         let Some(path) = source.image_path() else {
             return Err(alloc::string::String::from(
-                "desktop: no wallpaper image to prepare; using the backdrop colour",
+                "no wallpaper image to prepare; using the backdrop colour",
             ));
         };
         let bytes = match read_file(path, MAX_WALLPAPER_BYTES) {
             Ok(bytes) if bytes.len() > MAX_WALLPAPER_BYTES => {
                 return Err(alloc::format!(
-                    "desktop: wallpaper {path} is larger than any wallpaper the desktop renders; \
-                     using the backdrop colour"
+                    "wallpaper {path} is larger than any wallpaper the desktop renders; using \
+                     the backdrop colour"
                 ));
             }
             Ok(bytes) => bytes,
             Err(err) => {
                 return Err(alloc::format!(
-                    "desktop: wallpaper {path} could not be read ({err}); using the backdrop \
-                     colour"
+                    "wallpaper {path} could not be read ({err}); using the backdrop colour"
                 ));
             }
         };
         let placed = render_wallpaper(sandbox, source.width, source.height, source.fit, &bytes)
             .map_err(|err| {
                 alloc::format!(
-                    "desktop: wallpaper {path} could not be rendered ({err}); using the backdrop \
-                     colour"
+                    "wallpaper {path} could not be rendered ({err}); using the backdrop colour"
                 )
             })?;
         Surface::from_rgba8(source.width, source.height, &placed).ok_or_else(|| {
-            alloc::format!(
-                "desktop: wallpaper {path} did not fill the screen; using the backdrop colour"
-            )
+            alloc::format!("wallpaper {path} did not fill the screen; using the backdrop colour")
         })
     }
 
@@ -4862,12 +4898,14 @@ mod program {
         let pool = Pool::for_cpus(online);
         let wanted = online.saturating_sub(1);
         if pool.worker_count() < wanted {
-            let _ = writeln!(
-                Stderr,
-                "desktop: {doing} on {} of {online} cores (the kernel granted \
+            app::report(
+                APP_NAME,
+                format_args!(
+                    "{doing} on {} of {online} cores (the kernel granted \
                  {} of {wanted} threads)",
-                pool.worker_count().saturating_add(1),
-                pool.worker_count(),
+                    pool.worker_count().saturating_add(1),
+                    pool.worker_count()
+                ),
             );
         }
         pool
@@ -4913,10 +4951,12 @@ mod program {
                     Ok(alloc::boxed::Box::new(DeskLink::hand_over(desk, engine)))
                 }
                 Err(err) => {
-                    let _ = writeln!(
-                        Stderr,
-                        "desktop: no ray tracing thread ({err:?}); the screensaver traces on \
+                    app::report(
+                        APP_NAME,
+                        format_args!(
+                            "no ray tracing thread ({err:?}); the screensaver traces on \
                          the serve loop"
+                        ),
                     );
                     Err(engine)
                 }
@@ -5290,7 +5330,7 @@ mod program {
                 // diagnosis cannot interleave with anything else reaching
                 // `stderr`.
                 if let Some(reason) = refusal {
-                    let _ = writeln!(Stderr, "{reason}");
+                    app::report(APP_NAME, reason);
                 }
                 pinboard.prepared = Some(wanted);
                 shell.set_wallpaper(surface, desktop.settings().backdrop, now_ns);
@@ -5366,7 +5406,7 @@ mod program {
                     match server.record_menu_text(window_id, open_id, &text) {
                         Ok(()) => MenuOutcome::Entered(entry),
                         Err(err) => {
-                            let _ = writeln!(Stderr, "desktop: menu text refused ({err:?})");
+                            app::report(APP_NAME, format_args!("menu text refused ({err:?})"));
                             MenuOutcome::Dismissed
                         }
                     }
@@ -5413,7 +5453,7 @@ mod program {
             // one answers a row nothing asked for.
             ChainOutcome::Entered(..) | ChainOutcome::Dismissed => return,
             ChainOutcome::Refused(reason) => {
-                let _ = writeln!(Stderr, "desktop: no bar menu ({reason:?})");
+                app::report(APP_NAME, format_args!("no bar menu ({reason:?})"));
                 return;
             }
         };
@@ -5449,7 +5489,7 @@ mod program {
         ) {
             Ok(()) => present_menu_chain(menu, shell, compositor, windows),
             Err(refused) => {
-                let _ = writeln!(Stderr, "desktop: no bar menu ({refused:?})");
+                app::report(APP_NAME, format_args!("no bar menu ({refused:?})"));
             }
         }
     }
@@ -5475,7 +5515,7 @@ mod program {
             // committed one answers a row nothing asked for.
             ChainOutcome::Entered(..) | ChainOutcome::Dismissed => None,
             ChainOutcome::Refused(reason) => {
-                let _ = writeln!(Stderr, "desktop: no backdrop menu ({reason:?})");
+                app::report(APP_NAME, format_args!("no backdrop menu ({reason:?})"));
                 None
             }
         };
@@ -5601,7 +5641,7 @@ mod program {
         let origin = tairix_rt::peer_origin(PINBOARD_ENDPOINT, ticket)?;
         serve_pinboard_apply(session_uid, origin.uid(), in_effect, request).map_err(|refusal| {
             let msg = refusal.reason();
-            let _ = writeln!(Stderr, "desktop: {msg}");
+            app::report(APP_NAME, format_args!("{msg}"));
             refusal.errno()
         })
     }
@@ -5716,7 +5756,7 @@ mod program {
         match switch.step_aside(&mut RtSessionAuthority, &mut screen) {
             Ok(()) => true,
             Err(refusal) => {
-                let _ = writeln!(Stderr, "desktop: {}", refusal.reason());
+                app::report(APP_NAME, refusal.reason());
                 false
             }
         }
@@ -6473,7 +6513,7 @@ mod program {
     /// state loudly why nothing happened when it could not be relayed.
     fn report_power_relay(answer: Answer, switchboard: Option<u64>) {
         if let Some(reason) = relay_power(answer, switchboard, &mut RtSwitchboardMailbox) {
-            let _ = writeln!(Stderr, "desktop: {reason}");
+            app::report(APP_NAME, format_args!("{reason}"));
         }
     }
 
@@ -6865,7 +6905,7 @@ mod program {
         ) {
             Ok(()) => present_menu_chain(menu, shell, compositor, windows),
             Err(refused) => {
-                let _ = writeln!(Stderr, "desktop: no backdrop menu ({refused:?})");
+                app::report(APP_NAME, format_args!("no backdrop menu ({refused:?})"));
             }
         }
     }
@@ -7011,7 +7051,10 @@ mod program {
         now_ns: u64,
     ) -> bool {
         if let Err(err) = made {
-            let _ = writeln!(Stderr, "desktop: {path} could not be created ({err})");
+            app::report(
+                APP_NAME,
+                format_args!("{path} could not be created ({err})"),
+            );
             return false;
         }
         desktop.relist(now_ns)
@@ -7068,7 +7111,7 @@ mod program {
                             .launch_document(shell, compositor, &run_path, &label, name, &opened);
                     }
                     Err(err) => {
-                        let _ = writeln!(Stderr, "desktop: cannot open '{name}' ({err})");
+                        app::report(APP_NAME, format_args!("cannot open '{name}' ({err})"));
                     }
                 }
                 false
@@ -7157,9 +7200,9 @@ mod program {
         let published = match answer.outcome {
             Ok(published) => published,
             Err(err) => {
-                let _ = writeln!(
-                    Stderr,
-                    "desktop: the desktop settings could not be published ({err:?})"
+                app::report(
+                    APP_NAME,
+                    format_args!("the desktop settings could not be published ({err:?})"),
                 );
                 return false;
             }
@@ -7491,10 +7534,12 @@ mod program {
         let stream = match tairix_rt::read_dir_all(path.as_bytes()) {
             Ok(stream) => stream,
             Err(ret) => {
-                let _ = writeln!(
-                    Stderr,
-                    "desktop: {path}: {}; its wallpapers are not offered",
-                    Errno::from_syscall(ret)
+                app::report(
+                    APP_NAME,
+                    format_args!(
+                        "{path}: {}; its wallpapers are not offered",
+                        Errno::from_syscall(ret)
+                    ),
                 );
                 return None;
             }
@@ -7502,9 +7547,9 @@ mod program {
         let Ok(entries) =
             tairix_browse::vfs::entries_from_dir_stream(path, &stream, &mut RtLinkReader)
         else {
-            let _ = writeln!(
-                Stderr,
-                "desktop: {path}: listing not readable; its wallpapers are not offered"
+            app::report(
+                APP_NAME,
+                format_args!("{path}: listing not readable; its wallpapers are not offered"),
             );
             return None;
         };
@@ -7601,7 +7646,10 @@ mod program {
                 Err(err) => {
                     // Stated, and answered honestly: the engine strands
                     // nothing, so the launch falls back to a fresh process.
-                    let _ = writeln!(Stderr, "desktop: cannot hand over an open target ({err:?})");
+                    app::report(
+                        APP_NAME,
+                        format_args!("cannot hand over an open target ({err:?})"),
+                    );
                     false
                 }
             }
@@ -7831,7 +7879,7 @@ mod program {
         run_path: &str,
     ) -> Option<u64> {
         let Some(pid) = admitted_pid(ret) else {
-            let _ = writeln!(Stderr, "desktop: {label} launch refused");
+            app::report(APP_NAME, format_args!("{label} launch refused"));
             return None;
         };
         launched.record(pid, label, run_path);
@@ -7913,9 +7961,9 @@ mod program {
             None => return,
             Some(PickEnd::Refused { for_window }) => {
                 if let Err(err) = result {
-                    let _ = writeln!(
-                        Stderr,
-                        "desktop: the chosen file could not be opened ({err})"
+                    app::report(
+                        APP_NAME,
+                        format_args!("the chosen file could not be opened ({err})"),
                     );
                 }
                 (for_window, None)
@@ -8186,19 +8234,21 @@ mod program {
         let desktop = match desktop_info(compositor) {
             Ok(desktop) => desktop,
             Err(err) => {
-                let _ = writeln!(
-                    Stderr,
-                    "desktop: cannot describe the desktop to apps: {err}"
+                app::report(
+                    APP_NAME,
+                    format_args!("cannot describe the desktop to apps: {err}"),
                 );
                 return;
             }
         };
         let rc = tairix_rt::notice_publish(&Notice::Desktop(desktop));
         if rc < 0 {
-            let _ = writeln!(
-                Stderr,
-                "desktop: could not publish the desktop to apps: {}",
-                Errno::from_syscall(rc)
+            app::report(
+                APP_NAME,
+                format_args!(
+                    "could not publish the desktop to apps: {}",
+                    Errno::from_syscall(rc)
+                ),
             );
         }
     }
@@ -8280,21 +8330,6 @@ mod program {
         server.client_exited(&mut bridge, owner);
     }
 
-    /// Render the command's own short help (`NAME` + `SYNOPSIS` + compact
-    /// `OPTIONS`) from its own bundle's `Help/` tree through the one shared
-    /// engine; when no document can be served (a build without the
-    /// bundle's documents) the usage banner stands in — the tool's own
-    /// text, not fabricated help content — so `-h` never fails.
-    fn short_help() -> i32 {
-        let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
-        let bytes = own_short_help(&BundleHelp::new("desktop"), locale, "desktop")
-            .unwrap_or_else(|| alloc::format!("{USAGE}\n").into_bytes());
-        match io::Stdout.write_all(&bytes) {
-            Ok(()) => 0,
-            Err(_) => 1,
-        }
-    }
-
     /// Program entry point. `tairix-rt`'s `_start` calls it once the
     /// runtime is set up and routes its return value through the `exit`
     /// syscall.
@@ -8309,11 +8344,7 @@ mod program {
         // this same binary with the reserved role argument, and that
         // capability-empty child must serve parses and nothing else.
         if worker_role() {
-            let mut service = ImageRenderService::default();
-            return match serve_stdio(&mut service) {
-                ServeEnd::Finished | ServeEnd::Ended => 0,
-                ServeEnd::Failed(_) => 1,
-            };
+            return serve_stdio(&mut ImageRenderService::default()).exit_code();
         }
         // The command surface next: a malformed (non-UTF-8) argument
         // vector is a usage error, reported rather than guessed at, and
@@ -8324,7 +8355,7 @@ mod program {
         };
         match parse(&arguments) {
             Ok(Command::Run) => {}
-            Ok(Command::Help) => return short_help(),
+            Ok(Command::Help) => return tairix_help::print_own_short_help(APP_NAME, Some(USAGE)),
             Err(CliError::Usage) => {
                 io::write_stderr_line(USAGE);
                 return 2;
@@ -8342,7 +8373,7 @@ mod program {
         // binds this task as the owner; a seat already held refuses with a
         // typed error rather than displacing its owner.
         if tairix_rt::display_acquire(SEAT_PRIMARY) < 1 {
-            return fail(EXIT_NO_SEAT, "seat acquire refused");
+            return app::fail(APP_NAME, EXIT_NO_SEAT, "seat acquire refused");
         }
         let code = session();
         // Owner-checked release on every exit path: a lease already lost

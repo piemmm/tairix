@@ -38,10 +38,7 @@ pub(super) fn plate(
     theme: &Theme,
 ) -> Option<Rect> {
     let slot = plate_rect(bounds, scale, theme)?;
-    let (x, y) = (
-        u32::try_from(slot.left()).ok()?,
-        u32::try_from(slot.top()).ok()?,
-    );
+    let (x, y) = slot.surface_origin()?;
     let (w, h) = (slot.width, slot.height);
     let radius = scale
         .scale_length(theme.metrics().control_corner_radius)
@@ -71,10 +68,7 @@ pub(super) fn plate_margin(scale: Scale, theme: &Theme) -> u32 {
 /// The rectangle a plate over `bounds` actually occupies: the slot less its
 /// margin.
 fn plate_rect(bounds: Rect, scale: Scale, theme: &Theme) -> Option<Rect> {
-    let (x, y) = (
-        u32::try_from(bounds.left()).ok()?,
-        u32::try_from(bounds.top()).ok()?,
-    );
+    let (x, y) = bounds.surface_origin()?;
     let (ix, iy, iw, ih) = inset(
         x,
         y,
@@ -93,10 +87,7 @@ fn plate_rect(bounds: Rect, scale: Scale, theme: &Theme) -> Option<Rect> {
 /// placing a keyboard ring — reads it here, so the layout and the paint can
 /// never disagree about where a row sits.
 pub(super) fn content_rect(bounds: Rect, scale: Scale, theme: &Theme) -> Option<Rect> {
-    let (x, y) = (
-        u32::try_from(bounds.left()).ok()?,
-        u32::try_from(bounds.top()).ok()?,
-    );
+    let (x, y) = bounds.surface_origin()?;
     let (ix, iy, iw, ih) = inset(
         x,
         y,

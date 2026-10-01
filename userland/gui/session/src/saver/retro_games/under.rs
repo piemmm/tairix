@@ -63,7 +63,7 @@ impl Under {
             return;
         }
         for rect in boxes {
-            let (Ok(x), Ok(y)) = (u32::try_from(rect.left()), u32::try_from(rect.top())) else {
+            let Some((x, y)) = rect.surface_origin() else {
                 continue;
             };
             for row in y..y.saturating_add(rect.height) {
@@ -80,7 +80,7 @@ impl Under {
     pub(super) fn lay_back(&self, surface: &mut Surface) {
         let mut kept = self.pixels.as_slice();
         for rect in &self.boxes {
-            let (Ok(x), Ok(y)) = (u32::try_from(rect.left()), u32::try_from(rect.top())) else {
+            let Some((x, y)) = rect.surface_origin() else {
                 continue;
             };
             for row in y..y.saturating_add(rect.height) {

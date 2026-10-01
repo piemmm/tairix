@@ -311,8 +311,7 @@ fn paint_content(
         return;
     }
     let cx = to_i32(x) + to_i32(w) / 2;
-    let glyph_h = font.glyph_height();
-    let text_y = text_row(y, h, glyph_h);
+    let text_y = text_row(font, y, h);
     // Where a content group `total` wide begins, for the requested seating.
     let group_start = |total: u32| match align {
         ContentAlign::Center => cx - to_i32(total) / 2,
@@ -346,7 +345,7 @@ fn paint_content(
             }
         }
         ButtonContent::IconLabel { icon, label } => {
-            let side = glyph_h.min(avail_h);
+            let side = font.glyph_height().min(avail_h);
             let gap = scale.scale_length(theme.metrics().control_gap);
             let label_budget = avail_w.saturating_sub(side.saturating_add(gap));
             let run = font.elide_to_width(label, label_budget);
@@ -368,7 +367,7 @@ fn paint_content(
     }
 }
 
-/// The row a line of `glyph_h` type seats at within a plate `y..y + h`, or
+/// The row a line of `font` seats at within a plate `y..y + h`, or
 /// `None` when the plate is too short to hold the line box at all.
 ///
 /// A line is seated by centring on the plate's own height: the text inset is
@@ -376,8 +375,8 @@ fn paint_content(
 /// shorter than twice that inset still shows its label rather than silently
 /// dropping it. A plate shorter than the line box has nowhere to put it, and
 /// drawing it anyway would spill type past the plate onto whatever is behind.
-fn text_row(y: u32, h: u32, glyph_h: u32) -> Option<i32> {
-    (h >= glyph_h).then(|| to_i32(y) + (to_i32(h) - to_i32(glyph_h)) / 2)
+fn text_row(font: BitmapFont, y: u32, h: u32) -> Option<i32> {
+    (h >= font.glyph_height()).then(|| font.centred_top(to_i32(y), h))
 }
 
 /// A labelled or icon-labelled action plate (spec §11.1).

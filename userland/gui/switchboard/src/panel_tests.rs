@@ -555,11 +555,13 @@ fn a_scroll_action_changes_nothing_outside_the_panel() {
     assert!(panel.is_open());
 }
 
+/// The notice is the reason alone: the reporter that writes it adds the
+/// program's name and the line's end, so neither is said twice.
 #[test]
 fn a_refusal_notice_names_the_action_and_the_refusal() {
     assert_eq!(
         refusal_notice("restart that task", Errno::PermissionDenied),
-        "switchboard: could not restart that task (permission denied)\n"
+        "could not restart that task (permission denied)"
     );
 }
 

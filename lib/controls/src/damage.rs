@@ -142,7 +142,7 @@ impl Repaint {
 /// and is skipped, rather than painted somewhere else.
 pub fn paint_parts(surface: &mut Surface, rects: &[Rect], mut paint: impl FnMut(&mut Surface)) {
     for rect in rects {
-        let (Ok(x), Ok(y)) = (u32::try_from(rect.left()), u32::try_from(rect.top())) else {
+        let Some((x, y)) = rect.surface_origin() else {
             continue;
         };
         surface.with_clip(x, y, rect.width, rect.height, |surface| {

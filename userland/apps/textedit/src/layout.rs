@@ -114,12 +114,12 @@ impl Layout {
         let mut rest = window;
 
         let button_row = Button::height(scale, theme);
-        let status = take_bottom(&mut rest, status_height(faces, gap));
+        let status = rest.take_bottom(status_height(faces, gap));
         let (position, message, status_fields) = status_slots(status, faces.status, gap);
 
         let (find_band, find_field, replace_field, find_buttons) = if find {
             let row = TextField::height(scale, theme).max(button_row);
-            let band = take_top(&mut rest, row + gap * 2);
+            let band = rest.take_top(row + gap * 2);
             let (find_field, replace_field, buttons) = find_slots(band, row, gap, scale, theme);
             (band, find_field, replace_field, buttons)
         } else {
@@ -131,8 +131,8 @@ impl Layout {
             )
         };
 
-        let under = take_bottom(&mut rest, bar);
-        let vertical_bar = take_right(&mut rest, bar);
+        let under = rest.take_bottom(bar);
+        let vertical_bar = rest.take_right(bar);
         let corner = if under.is_empty() || vertical_bar.is_empty() {
             Rect::EMPTY
         } else {
@@ -146,10 +146,7 @@ impl Layout {
         let gutter = if gutter_digits == 0 {
             Rect::EMPTY
         } else {
-            take_left(
-                &mut rest,
-                (gutter_digits + GUTTER_SPARE_COLUMNS) * cell.0 + gap,
-            )
+            rest.take_left((gutter_digits + GUTTER_SPARE_COLUMNS) * cell.0 + gap)
         };
         let horizontal_bar = Rect::new(rest.left(), under.top(), rest.width, under.height);
         Self {
@@ -348,42 +345,6 @@ fn status_height(faces: Faces, gap: u32) -> u32 {
     faces.status.line_height().max(1) + gap * 2
 }
 
-fn take_top(rest: &mut Rect, height: u32) -> Rect {
-    let height = height.min(rest.height);
-    let band = Rect::new(rest.left(), rest.top(), rest.width, height);
-    *rest = Rect::new(
-        rest.left(),
-        rest.top().saturating_add_unsigned(height),
-        rest.width,
-        rest.height - height,
-    );
-    band
-}
-
-fn take_bottom(rest: &mut Rect, height: u32) -> Rect {
-    let height = height.min(rest.height);
-    *rest = Rect::new(rest.left(), rest.top(), rest.width, rest.height - height);
-    Rect::new(rest.left(), rest.bottom(), rest.width, height)
-}
-
-fn take_right(rest: &mut Rect, width: u32) -> Rect {
-    let width = width.min(rest.width);
-    *rest = Rect::new(rest.left(), rest.top(), rest.width - width, rest.height);
-    Rect::new(rest.right(), rest.top(), width, rest.height)
-}
-
-fn take_left(rest: &mut Rect, width: u32) -> Rect {
-    let width = width.min(rest.width);
-    let band = Rect::new(rest.left(), rest.top(), width, rest.height);
-    *rest = Rect::new(
-        rest.left().saturating_add_unsigned(width),
-        rest.top(),
-        rest.width - width,
-        rest.height,
-    );
-    band
-}
-
 /// The status band's position slot, message slot, and clickable fields.
 fn status_slots(band: Rect, face: BitmapFont, gap: u32) -> (Rect, Rect, [Rect; STATUS_FIELDS]) {
     let inner = Rect::new(
@@ -395,9 +356,9 @@ fn status_slots(band: Rect, face: BitmapFont, gap: u32) -> (Rect, Rect, [Rect; S
     let mut rest = inner;
     let mut fields = [Rect::EMPTY; STATUS_FIELDS];
     for (field, widest) in fields.iter_mut().zip(STATUS_WIDEST) {
-        *field = take_right(&mut rest, face.text_width(widest) + gap * 2);
+        *field = rest.take_right(face.text_width(widest) + gap * 2);
     }
-    let position = take_left(&mut rest, face.text_width(POSITION_WIDEST) + gap * 2);
+    let position = rest.take_left(face.text_width(POSITION_WIDEST) + gap * 2);
     (position, rest, fields)
 }
 

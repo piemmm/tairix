@@ -49,12 +49,11 @@ mod program {
     use tairix_fstree::{run, Fs, FsEntry, Info, Model, RenameOutcome, Settings, VolumeInfo};
     use tairix_help::{own_short_help, BundleHelp};
     use tairix_procinfo::{for_each_mount, IpcTransport, VolumeBytes, WalkStep};
-    use tairix_rt::io::{write_stderr_line, StdInfo, Stdout, Write};
+    use tairix_rt::io::{write_stderr_line, StdInfo, Write};
     use tairix_rt::File;
     use tairix_sandbox::decode::DecodeService;
     use tairix_sandbox::host::ParserSandbox;
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
-    use tairix_sandbox::worker::ServeEnd;
     use tairix_termcap::from_term;
     use tairix_vt::{Op, Parser};
 
@@ -526,18 +525,6 @@ mod program {
         text
     }
 
-    /// Print the tool's own short help (`-h` / `-?`) through the shared
-    /// engine; the usage banner is the fallback when no document serves.
-    fn short_help() -> i32 {
-        let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
-        let Some(bytes) = own_short_help(&BundleHelp::new(OWN_WORD), locale, OWN_WORD) else {
-            write_stderr_line(USAGE);
-            return 2;
-        };
-        let _ = Stdout.write_all(&bytes);
-        0
-    }
-
     fn main() -> i32 {
         // The worker role: this same binary, re-spawned by its own parent
         // inside the kernel sandbox spawn mode, serves the container/
@@ -545,11 +532,7 @@ mod program {
         // exits. Decided before argument parsing — the role marker is the
         // whole argument vector's meaning.
         if worker_role() {
-            let mut service = DecodeService;
-            return match serve_stdio(&mut service) {
-                ServeEnd::Finished | ServeEnd::Ended => 0,
-                ServeEnd::Failed(_) => 1,
-            };
+            return serve_stdio(&mut DecodeService).exit_code();
         }
 
         // A malformed (non-UTF-8) argument vector is a usage error,
@@ -561,7 +544,7 @@ mod program {
         let mut root: Option<String> = None;
         for &argument in arguments.iter().skip(1) {
             match argument {
-                "-h" | "-?" => return short_help(),
+                "-h" | "-?" => return tairix_help::print_own_short_help(OWN_WORD, Some(USAGE)),
                 other if root.is_none() && !other.starts_with('-') => {
                     root = Some(String::from(other));
                 }
@@ -577,7 +560,7 @@ mod program {
         // The `?` overlay's text: the bundle's own Help document rendered
         // by the shared engine, decoded to plain text. A bundle whose help
         // cannot be served shows the key line alone — never embedded text.
-        let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
+        let locale = tairix_help::user_locale();
         let help_text = own_short_help(&BundleHelp::new(OWN_WORD), locale, OWN_WORD)
             .map_or_else(|| String::from(USAGE), |bytes| plain_help_text(&bytes));
 

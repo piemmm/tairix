@@ -28,12 +28,20 @@
 //! extend the loop to a wall-clock budget.
 
 use tairix_fuzzseed::Prng;
+use tairix_image::{
+    encode_png, encode_sprite_area, IndexDepth, Picture, SpriteInput, SpriteMode, SpriteName,
+    SpritePalette,
+};
 use tairix_raster::Region;
 use tairix_sandbox::decode::{
     container_summary, disassemble, manifest_summary, DecodeService, Isa,
 };
 use tairix_sandbox::helpdoc::{render_help, HelpService, RenderMode, Styling};
 use tairix_sandbox::host::{Launcher, ParserSandbox};
+use tairix_sandbox::imageedit::{
+    close_edit, open_edit, read_kept, read_rows, select_entry, EditDocument, EditEntry, EditKept,
+    EditPicture, EditPixels, KeptReason,
+};
 use tairix_sandbox::imagerender::{
     close_view, open_view, rasterise_icon, render_page, render_wallpaper, select_page,
     send_document, ImageRenderService, ViewFormat, MAX_DESTINATION_WIDTH, MAX_ICON_SIDE,
@@ -46,6 +54,7 @@ use tairix_sandbox::session::{
 };
 use tairix_sandbox::textsyntax::{detect, lex_lines, validate_document, TextSyntaxService};
 use tairix_sandbox::timesync::{evaluate_datagram, TimeSyncService};
+use tairix_sandbox::worker::Service;
 use tairix_svg::font::NoFonts;
 use tairix_syntax::{Format, LineState};
 use tairix_wallpaper::WallpaperFit;
@@ -251,33 +260,16 @@ const HELP_TEMPLATE: &[u8] =
 const SVG_TEMPLATE: &[u8] =
     br##"<svg viewBox="0 0 10 10"><polygon points="0,0 10,0 10,10 0,10" fill="#3070f0"/></svg>"##;
 
-/// Standard CRC-32 (the polynomial PNG chunks use), computed over the
-/// concatenation of `parts`.
-fn crc32_of(parts: &[&[u8]]) -> u32 {
-    fn update(mut crc: u32, byte: u8) -> u32 {
-        crc ^= u32::from(byte);
-        for _ in 0..8 {
-            let mask = 0u32.wrapping_sub(crc & 1);
-            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
-        }
-        crc
-    }
-    let mut crc = 0xFFFF_FFFFu32;
-    for part in parts {
-        for &byte in *part {
-            crc = update(crc, byte);
-        }
-    }
-    crc ^ 0xFFFF_FFFF
-}
-
 fn chunk(chunk_type: [u8; 4], payload: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     let len = u32::try_from(payload.len()).expect("test payload fits a u32 length");
     out.extend_from_slice(&len.to_be_bytes());
     out.extend_from_slice(&chunk_type);
     out.extend_from_slice(payload);
-    let crc = crc32_of(&[&chunk_type, payload]);
+    let mut crc = tairix_crc32::Crc32::new();
+    crc.update(&chunk_type);
+    crc.update(payload);
+    let crc = crc.finish();
     out.extend_from_slice(&crc.to_be_bytes());
     out
 }
@@ -488,6 +480,169 @@ fn fuzz_view_iteration(honest: &mut HonestIconSandbox, noise: &[u8], rng: &mut P
             &mut whole_out,
         );
         let _ = close_view(honest);
+    }
+}
+
+/// A small paletted PNG and a sprite area of a masked paletted sprite and a
+/// truecolour one: the documents the edit leg mutates.
+fn edit_templates() -> [Vec<u8>; 2] {
+    let palette: Vec<[u8; 4]> = (0..16u8).map(|i| [i * 16, 255 - i, i, 255]).collect();
+    let indices: Vec<u8> = (0..12).map(|i| i % 16).collect();
+    let paletted = Picture::indexed(
+        4,
+        3,
+        IndexDepth::Four,
+        palette,
+        indices,
+        Some((0..12).map(|i| if i % 3 == 0 { 0 } else { 255 }).collect()),
+    )
+    .unwrap_or_else(|_| unreachable!("a valid fixture"));
+    let unmasked = Picture::indexed(
+        4,
+        3,
+        IndexDepth::Four,
+        (0..16u8).map(|i| [i, i, i, 255]).collect(),
+        (0..12).collect(),
+        None,
+    )
+    .unwrap_or_else(|_| unreachable!("a valid fixture"));
+    let truecolour = Picture::rgba(2, 2, (0..16u8).collect())
+        .unwrap_or_else(|_| unreachable!("a valid fixture"));
+    let png = encode_png(&unmasked).unwrap_or_default();
+    let area = encode_sprite_area(&[
+        SpriteInput::Picture {
+            name: SpriteName::new("icon").unwrap_or_else(|| unreachable!("a valid name")),
+            mode: SpriteMode::indexed(IndexDepth::Four, (1, 1), false),
+            palette: &SpritePalette::Full,
+            masked: true,
+            source: &paletted,
+        },
+        SpriteInput::Picture {
+            name: SpriteName::new("photo").unwrap_or_else(|| unreachable!("a valid name")),
+            mode: SpriteMode::truecolour((1, 1), true),
+            palette: &SpritePalette::Implied,
+            masked: true,
+            source: &truecolour,
+        },
+    ])
+    .unwrap_or_default();
+    [png, area]
+}
+
+/// The formats an edit open may be asked to read a document as.
+const EDIT_FORMATS: [Option<ViewFormat>; 4] = [
+    None,
+    Some(ViewFormat::Png),
+    Some(ViewFormat::Sprite),
+    Some(ViewFormat::Svg),
+];
+
+/// Fuzz one iteration of the edit decode: out-of-order requests first, then
+/// a mutated paletted PNG and sprite area, their truncations and `noise`,
+/// each opened, every entry selected, and every row or kept byte fetched.
+/// A row handed on must be exactly the width its description promised.
+fn fuzz_edit_iteration(honest: &mut HonestIconSandbox, noise: &[u8], rng: &mut Prng) {
+    let _ = select_entry(honest, stray_document(), 0);
+    let _ = read_rows(honest, &stray_picture(), |_, _, _| {});
+    let [png, area] = edit_templates();
+    for template in [png, area] {
+        let mut mutated = template;
+        for _ in 0..rng.at_most(4) {
+            if !mutated.is_empty() {
+                let pos = rng.below(mutated.len());
+                mutated[pos] ^= rng.next_u8();
+            }
+        }
+        let cut = rng.at_most(mutated.len());
+        for document in [mutated.as_slice(), &mutated[..cut], noise] {
+            if send_document(honest, document).is_err() {
+                continue;
+            }
+            let Ok(opened) = open_edit(honest, *rng.pick(&EDIT_FORMATS)) else {
+                continue;
+            };
+            read_every_entry(honest, opened);
+            let _ = close_edit(honest);
+        }
+    }
+}
+
+/// Fetch the rows or bytes of up to four entries of `opened`, holding every
+/// row handed on to the width its description promised and every index to
+/// its palette.
+fn read_every_entry<L: Launcher>(sandbox: &mut ParserSandbox<L, SilentSink>, opened: EditDocument) {
+    for index in 0..opened.count.min(4) {
+        match select_entry(sandbox, opened, index) {
+            Ok(EditEntry::Picture(picture)) => {
+                let width = picture.width() as usize;
+                let sample = picture.pixels().sample_bytes();
+                let plane = picture.pixels().has_plane();
+                let colours = match picture.pixels() {
+                    EditPixels::Indexed { palette, .. } => palette.len(),
+                    EditPixels::Rgba => usize::MAX,
+                };
+                let _ = read_rows(sandbox, &picture, |_, samples, alpha| {
+                    assert_eq!(samples.len(), width * sample);
+                    assert_eq!(alpha.len(), if plane { width } else { 0 });
+                    if colours != usize::MAX {
+                        assert!(samples.iter().all(|&index| usize::from(index) < colours));
+                    }
+                });
+            }
+            Ok(EditEntry::Kept(kept)) => {
+                let mut out = Vec::new();
+                if read_kept(sandbox, &kept, &mut out).is_ok() {
+                    assert_eq!(out.len(), kept.length as usize);
+                }
+            }
+            Err(_) => {}
+        }
+    }
+}
+
+/// Drive every document request — the upload, the view and the edit
+/// decode — against a worker whose every reply is framed noise. Each
+/// request is asked of the worker as it stands, so every reply decoder
+/// meets noise rather than only the first.
+fn hostile_document_iteration<L: Launcher>(hostile: &mut ParserSandbox<L, SilentSink>) {
+    let _ = send_document(hostile, &png_template());
+    let _ = open_view(hostile, None, &mut NoFonts);
+    let _ = select_page(hostile, 0);
+    let _ = render_page(hostile, (1, 1), whole(1, 1), &mut [0u8; 4]);
+    let _ = close_view(hostile);
+    let _ = open_edit(hostile, None);
+    let _ = select_entry(hostile, stray_document(), 0);
+    let _ = read_rows(hostile, &stray_picture(), |_, _, _| {});
+    let kept = EditKept {
+        name: SpriteName::new("stray").unwrap_or_else(|| unreachable!("a valid name")),
+        reason: KeptReason::Damaged,
+        length: 48,
+    };
+    let _ = read_kept(hostile, &kept, &mut Vec::new());
+    let _ = close_edit(hostile);
+}
+
+/// A picture no worker described, for requests out of order and for the
+/// hostile worker to answer about.
+fn stray_picture() -> EditPicture {
+    let pixels = EditPixels::Indexed {
+        depth: IndexDepth::Two,
+        palette: vec![[0; 4]; 4],
+        plane: true,
+    };
+    EditPicture::new(2, 2, pixels, None).unwrap_or_else(|| unreachable!("within the bounds"))
+}
+
+/// A document no worker opened, for the same.
+const fn stray_document() -> EditDocument {
+    EditDocument {
+        format: ViewFormat::Sprite,
+        sprites: true,
+        count: 1,
+        unkept: tairix_image::Unkept {
+            precision: false,
+            extras: false,
+        },
     }
 }
 
@@ -754,6 +909,7 @@ fn decode_surface_never_panics_for_any_input_or_reply() {
         let (wallpaper_w, wallpaper_h, fit) =
             fuzz_wallpaper_iteration(&mut honest_icon, &noise, &mut rng);
         fuzz_view_iteration(&mut honest_icon, &noise, &mut rng);
+        fuzz_edit_iteration(&mut honest_icon, &noise, &mut rng);
 
         // 6b. The duplex session seam: its inbound codec over the same
         //    noise, plus an honest round trip through the in-process fake.
@@ -777,12 +933,7 @@ fn decode_surface_never_panics_for_any_input_or_reply() {
         let _ = render_help(&mut hostile, mode, Styling::Colour, "en-US", HELP_TEMPLATE);
         let _ = rasterise_icon(&mut hostile, side, SVG_TEMPLATE, &mut NoFonts);
         let _ = render_wallpaper(&mut hostile, wallpaper_w, wallpaper_h, fit, &png_template());
-        if send_document(&mut hostile, &png_template()).is_ok() {
-            let _ = open_view(&mut hostile, None, &mut NoFonts);
-            let _ = select_page(&mut hostile, 0);
-            let _ = render_page(&mut hostile, (1, 1), whole(1, 1), &mut [0u8; 4]);
-            let _ = close_view(&mut hostile);
-        }
+        hostile_document_iteration(&mut hostile);
         let hostile_txn = tairix_net::ntp::Transaction {
             server: 0,
             nonce: tairix_net::ntp::NtpTimestamp::from_raw(nonce),
@@ -798,6 +949,76 @@ fn decode_surface_never_panics_for_any_input_or_reply() {
 
         iteration += 1;
         if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
+            break;
+        }
+    }
+}
+
+/// An honest image worker whose replies are now and then corrupted. Framed
+/// noise is turned away at its first tag check; this is what reaches the
+/// validation behind it — descriptions, bands and kept bytes that are
+/// nearly right.
+struct MutatingWorker {
+    honest: ImageRenderService,
+    rng: Prng,
+}
+
+impl Service for MutatingWorker {
+    fn handle(&mut self, request: &[u8]) -> Vec<u8> {
+        let mut reply = self.honest.handle(request);
+        if self.rng.below(3) == 0 && !reply.is_empty() {
+            match self.rng.below(4) {
+                0 => {
+                    let at = self.rng.below(reply.len());
+                    reply[at] ^= 1 << self.rng.below(8);
+                }
+                1 => {
+                    let at = self.rng.below(reply.len());
+                    reply[at] = self.rng.next_u8();
+                }
+                2 => {
+                    let keep = self.rng.at_most(reply.len());
+                    reply.truncate(keep);
+                }
+                _ => {
+                    for _ in 0..=self.rng.below(8) {
+                        reply.push(self.rng.next_u8());
+                    }
+                }
+            }
+        }
+        reply
+    }
+}
+
+#[test]
+fn nearly_right_edit_replies_are_refused_or_hold_their_description() {
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
+    let mut rng = Prng::new(tairix_fuzzseed::start(
+        "nearly_right_edit_replies_are_refused_or_hold_their_description",
+        tairix_fuzzseed::FUZZ_SEED_ENV,
+    ));
+    let mut seeds = Prng::new(rng.next_u64());
+    let mut sandbox = ParserSandbox::new(
+        LoopbackLauncher::new(move || MutatingWorker {
+            honest: ImageRenderService::default(),
+            rng: Prng::new(seeds.next_u64()),
+        }),
+        SilentSink,
+    );
+    let templates = edit_templates();
+    loop {
+        for _ in 0..SMOKE_ITERATIONS {
+            let document = rng.pick(&templates);
+            if send_document(&mut sandbox, document).is_err() {
+                continue;
+            }
+            if let Ok(opened) = open_edit(&mut sandbox, *rng.pick(&EDIT_FORMATS)) {
+                read_every_entry(&mut sandbox, opened);
+            }
+            let _ = close_edit(&mut sandbox);
+        }
+        if !tairix_fuzzseed::within_budget(deadline) {
             break;
         }
     }

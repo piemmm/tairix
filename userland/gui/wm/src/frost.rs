@@ -78,24 +78,6 @@ pub(crate) enum FrostPlan {
     Blur,
 }
 
-/// `rect` with `by` pixels taken off every side, empty where that leaves
-/// nothing.
-pub(crate) fn inset(rect: Rect, by: u32) -> Rect {
-    let shrink = by.saturating_mul(2);
-    let (Some(width), Some(height)) = (
-        rect.width.checked_sub(shrink),
-        rect.height.checked_sub(shrink),
-    ) else {
-        return Rect::EMPTY;
-    };
-    Rect::new(
-        rect.left().saturating_add_unsigned(by),
-        rect.top().saturating_add_unsigned(by),
-        width,
-        height,
-    )
-}
-
 /// How far into its own rectangle a shape's corners weight the mix by less
 /// than full coverage: the corner radius the shape actually rounds by, or `0`
 /// for a square window, whose every pixel is fully covered.
@@ -321,7 +303,7 @@ impl FrostedBackdrop {
         let reach = radius_px
             .max(corner_reach(self.shape))
             .max(corner_reach(shape));
-        let core = inset(shared, reach);
+        let core = shared.inset(reach);
         if core.is_empty() {
             return FrostPlan::Blur;
         }

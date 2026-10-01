@@ -422,21 +422,14 @@ mod tests {
     use super::{render_help, HelpRefusal, HelpRenderFailure, HelpService, RenderMode};
     use crate::host::ParserSandbox;
     use crate::loopback::LoopbackLauncher;
+    use crate::testing::{loopback, NullSink};
     use crate::worker::Service;
-    use tairix_log::{Event, Sink};
-
-    /// Discards every event (the happy paths log nothing).
-    struct NullSink;
-
-    impl Sink for NullSink {
-        fn write_event(&self, _event: &Event<'_>) {}
-    }
 
     /// A minimal valid document.
     const MINIMAL: &str = "## NAME\n\ntop — display tasks\n\n## SYNOPSIS\n\n`top [-d seconds]`\n\n## DESCRIPTION\n\nShows tasks.\n";
 
     fn sandbox() -> ParserSandbox<LoopbackLauncher<fn() -> HelpService>, NullSink> {
-        ParserSandbox::new(LoopbackLauncher::new(HelpService::default as _), NullSink)
+        loopback()
     }
 
     /// The locally-computed expected render for `mode` at `styling` in

@@ -5019,9 +5019,10 @@ static TESTS: &[QemuTest] = &[
     // driven from a wait-set holding `Stream` on the reply descriptor and
     // `StreamRoom` on the request one, pushing twice a pipe's worth of
     // frames at a worker that answers none of them — which completes only
-    // if the room wake fires — and the supervised session replacing a
+    // if the room wake fires — the supervised session replacing a
     // stream worker that crashed mid-conversation only after its paced
-    // delay. PASS once the chassis reaps a
+    // delay, and a worker that never answers failing its request at its
+    // deadline and being killed and reaped. PASS once the chassis reaps a
     // parent exit of 0; every failure site carries a distinct finisher
     // (the parent's diagnostic exit code is folded in). Single CPU and a
     // 60-second budget match the other boot-then-do-fixed-work aarch64

@@ -511,15 +511,12 @@ pub const MIN_WIN_WIDTH: u32 = 640 + crate::view::RAIL_WIDTH;
 /// (see [`MIN_WIN_WIDTH`]).
 pub const MIN_WIN_HEIGHT: u32 = 240;
 
-/// The refusal notice for `action` refused with `refusal`, as one line
-/// ready for the diagnostic stream.
-///
-/// It names the program, the action in plain words, and the refusal the
-/// kernel or the session actually gave, and carries no capability token or
-/// other secret.
+/// What `action` refused with `refusal` says: the action in plain words and
+/// the refusal the kernel or the session actually gave, with no capability
+/// token or other secret. The reporter names the program.
 #[must_use]
 pub fn refusal_notice(action: &str, refusal: Errno) -> String {
-    format!("switchboard: could not {action} ({refusal})\n")
+    format!("could not {action} ({refusal})")
 }
 
 /// The [`Errno`] a desktop's refusal to show a menu is stated as.

@@ -75,9 +75,7 @@ impl Sky {
     /// drawn from `mountains`; `None` when the heap will not give the copy.
     pub(super) fn new(view: View, mountains: &Mountains) -> Option<Self> {
         let zone = bands_zone(&view)?;
-        let (Ok(left), Ok(top)) = (u32::try_from(zone.left()), u32::try_from(zone.top())) else {
-            return None;
-        };
+        let (left, top) = zone.surface_origin()?;
         let mut overlay = Surface::new(zone.width, zone.height)?;
         overlay.with_origin(left, top, |overlay| {
             mountains.draw(overlay, zone, &mut ScanScratch::new());

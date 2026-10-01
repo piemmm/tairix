@@ -300,7 +300,7 @@ fn fade_strength(into: u64, span: u64) -> u8 {
 
 /// Black over `rect`.
 fn erase(surface: &mut Surface, rect: Rect) {
-    let (Ok(x), Ok(y)) = (u32::try_from(rect.left()), u32::try_from(rect.top())) else {
+    let Some((x, y)) = rect.surface_origin() else {
         return;
     };
     surface.fill_rect(x, y, rect.width, rect.height, Color::rgb(0, 0, 0));

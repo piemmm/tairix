@@ -125,6 +125,18 @@ impl fmt::Display for ShellError {
     }
 }
 
+/// State `reason` on `stderr` under the application's `name`.
+pub fn report(name: &str, reason: impl fmt::Display) {
+    use tairix_rt::io::{Stderr, Write};
+    let _ = writeln!(Stderr, "{name}: {reason}");
+}
+
+/// State the abnormal-exit `reason` under `name` and hand `code` back.
+pub fn fail(name: &str, code: i32, reason: impl fmt::Display) -> i32 {
+    report(name, reason);
+    code
+}
+
 /// The production [`WindowTransport`]: one synchronous `ipc_call` to the
 /// reserved window endpoint per request.
 ///

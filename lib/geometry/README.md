@@ -10,7 +10,11 @@ used by the compositing window manager (`userland/gui/wm`), the taskbar
 - `Rect` — an axis-aligned rectangle (a `Point` origin plus unsigned `u32`
   size) with checked `intersection`, `union`, and half-open `contains`. A
   zero-width or zero-height rectangle is *empty*, the canonical "covers
-  nothing" value used by damage tracking and clipping.
+  nothing" value used by damage tracking and clipping. A layout carves bands
+  off a rectangle with `take_top` / `take_bottom` / `take_left` /
+  `take_right` and pulls one in with `inset` (`EMPTY` where that leaves
+  nothing); `surface_origin` is the corner as the unsigned coordinates of a
+  surface pixel, or `None` for a rectangle a surface cannot address.
 - `Scale` — the desktop DPI / UI scale factor (`AGENTS.md` §10): the ratio of
   physical to logical pixels as a percentage of `REFERENCE_DPI` (96).
   `Scale::ONE` is 1:1; `from_percent`/`from_dpi` build a scale and fail closed

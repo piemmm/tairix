@@ -23,18 +23,26 @@
 //! 5. A sprite area has no signature to carry, so every input above is also
 //!    driven through the format-naming door, which is both its only way in
 //!    and free coverage from every other format's corpus.
+//! 6. The doors an editor opens a document through agree with the plain
+//!    decode — a native picture flattens to exactly the pixels
+//!    [`decode_as`] answers, a native sprite to its page — and whatever
+//!    opens writes back: to a PNG showing the same picture, to a JPEG of the
+//!    same size, and a sprite area to one that reopens as the same sprites.
 //!
 //! Every generator, and its chunk/zlib, marker/Huffman, and block/LZW
 //! framing helpers, are deliberately self-contained: this harness only calls
 //! `tairix_image`'s public API (exactly what a real consumer — the desktop
-//! image sandbox — would do), never the crate's own chunk reader, CRC
-//! table, Huffman builder, or code-stream writer, so a bug in any of those is
-//! still caught here.
+//! image sandbox — would do), never the crate's own chunk reader, Huffman
+//! builder, or code-stream writer, so a bug in any of those is still caught
+//! here. Chunks are framed through `tairix_crc32`, the checksum's one
+//! definition, tested against the standard on its own.
 
 use tairix_fuzzseed::Prng;
 use tairix_image::{
-    decode, decode_as, decode_fitted, probe_as, sniff, DecodeLimits, FitBox, ImageFormat, Sequence,
-    SequenceKind,
+    decode, decode_as, decode_fitted, encode_jpeg, encode_png, encode_sprite_area, open_native,
+    probe_as, sniff, DecodeLimits, EncodeError, FitBox, ImageFormat, IndexDepth, JpegOptions,
+    NativeDocument, Picture, PictureKind, PictureSource, Rgba8, Sequence, SequenceKind,
+    SpriteAreaReader, SpriteEntry, SpriteInput, SpriteMode, SpriteName, SpritePalette,
 };
 
 /// Fixed-iteration sweep run when no budget is set.
@@ -44,34 +52,16 @@ const SMOKE_ITERATIONS: u64 = 2_000;
 /// because this harness only ever calls the crate's public API.
 const SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
 
-/// PNG's own chunk-framing CRC-32 (ISO-HDLC), restated here for the same
-/// reason — this harness builds its own chunks rather than reaching into
-/// the crate under test.
-fn crc32(data: &[u8]) -> u32 {
-    const POLY: u32 = 0xEDB8_8320;
-    let mut crc = 0xFFFF_FFFFu32;
-    for &byte in data {
-        crc ^= u32::from(byte);
-        for _ in 0..8 {
-            crc = if crc & 1 != 0 {
-                (crc >> 1) ^ POLY
-            } else {
-                crc >> 1
-            };
-        }
-    }
-    !crc
-}
-
 fn chunk(chunk_type: [u8; 4], payload: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     let len = u32::try_from(payload.len()).unwrap_or(u32::MAX);
     out.extend_from_slice(&len.to_be_bytes());
     out.extend_from_slice(&chunk_type);
     out.extend_from_slice(payload);
-    let mut crc_input = chunk_type.to_vec();
-    crc_input.extend_from_slice(payload);
-    out.extend_from_slice(&crc32(&crc_input).to_be_bytes());
+    let mut crc = tairix_crc32::Crc32::new();
+    crc.update(&chunk_type);
+    crc.update(payload);
+    out.extend_from_slice(&crc.finish().to_be_bytes());
     out
 }
 
@@ -2172,7 +2162,191 @@ fn decode_never_panics_and_respects_limits(bytes: &[u8]) {
     if let Ok(sequence) = Sequence::open_as(ImageFormat::Sprite, bytes, &limits) {
         walk(sequence, &limits);
     }
-    let _ = sniff(bytes);
+    native_doors_agree_and_write_back(bytes);
+}
+
+/// `rgba` as it looks: a fully transparent pixel shows nothing, whatever
+/// colour it was left holding.
+fn shown(rgba: &[u8]) -> Vec<u8> {
+    rgba.as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|&pixel| if pixel[3] == 0 { [0; 4] } else { pixel })
+        .collect()
+}
+
+/// What the JPEG encoder composites transparency over in [`writes_back`].
+const JPEG_BACKGROUND: [u8; 3] = [255, 255, 255];
+
+/// How far a channel of a single-coloured picture may come back from a
+/// quality-75 JPEG: the DC step's half and the colour transform's rounding.
+const FLAT_JPEG_ERROR: u8 = 4;
+
+/// `pixel` composited over [`JPEG_BACKGROUND`], as the JPEG encoder does.
+fn over_background(pixel: [u8; 4]) -> [u8; 3] {
+    let alpha = u32::from(pixel[3]);
+    [0, 1, 2].map(|channel| {
+        let mixed = (u32::from(pixel[channel]) * alpha
+            + u32::from(JPEG_BACKGROUND[channel]) * (255 - alpha)
+            + 127)
+            / 255;
+        u8::try_from(mixed).unwrap_or(u8::MAX)
+    })
+}
+
+/// Check a picture that opened natively writes back to a PNG showing the
+/// same picture, and to a JPEG of the same size that, for a picture of one
+/// colour, shows that colour.
+fn writes_back(picture: &Picture, flat: &[u8]) {
+    let png = encode_png(picture).expect("a picture that opened writes as a PNG");
+    let back = decode_as(ImageFormat::Png, &png, &limits()).expect("the PNG written reads back");
+    assert_eq!(
+        shown(back.pixels()),
+        shown(flat),
+        "the PNG shows another picture"
+    );
+    let options = JpegOptions::new(75, JPEG_BACKGROUND).expect("a valid quality");
+    let jpeg = encode_jpeg(picture, options).expect("a picture that opened writes as a JPEG");
+    let back = decode_as(ImageFormat::Jpeg, &jpeg, &limits()).expect("the JPEG written reads back");
+    assert_eq!(
+        (back.width(), back.height()),
+        (picture.width(), picture.height())
+    );
+    let mut colours = flat
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|&pixel| over_background(pixel));
+    let first = colours.next();
+    if let Some(colour) = first.filter(|&colour| colours.all(|other| other == colour)) {
+        for pixel in back.pixels().as_chunks::<4>().0 {
+            let near = pixel
+                .iter()
+                .zip(colour)
+                .all(|(&got, want)| got.abs_diff(want) <= FLAT_JPEG_ERROR);
+            assert!(near, "a flat {colour:?} came back from JPEG as {pixel:?}");
+        }
+    }
+}
+
+/// What a native sprite read as, for a failure message.
+fn kind_of(entry: &SpriteEntry) -> String {
+    match entry {
+        SpriteEntry::Picture(_) => String::from("pixels"),
+        SpriteEntry::Opaque(kept) => format!("bytes ({}; {} long)", kept.reason, kept.bytes.len()),
+    }
+}
+
+/// Invariant 6, for the format `bytes` sniff as and for the sprite door.
+fn native_doors_agree_and_write_back(bytes: &[u8]) {
+    let limits = limits();
+    if let Some(format) = sniff(bytes) {
+        if let Ok(NativeDocument::Picture { picture, .. }) = open_native(format, bytes, &limits) {
+            assert!(picture.width() <= limits.max_width());
+            assert!(picture.height() <= limits.max_height());
+            let flat = picture
+                .to_rgba()
+                .expect("a picture inside the limits flattens");
+            let plain =
+                decode_as(format, bytes, &limits).expect("the plain decode agrees it opens");
+            assert_eq!(flat, plain.pixels(), "the native picture looks different");
+            writes_back(&picture, &flat);
+        }
+    }
+    let Ok(NativeDocument::Sprites(mut reader)) = open_native(ImageFormat::Sprite, bytes, &limits)
+    else {
+        return;
+    };
+    let count = reader.count().min(SEQUENCE_STEPS);
+    let mut pages = Sequence::open_as(ImageFormat::Sprite, bytes, &limits).ok();
+    let mut entries = Vec::new();
+    for index in 0..count {
+        let Ok(Some(entry)) = reader.sprite(index) else {
+            return;
+        };
+        if let SpriteEntry::Picture(sprite) = &entry {
+            let flat = sprite
+                .picture
+                .to_rgba()
+                .expect("a sprite inside the limits flattens");
+            if let Some(Ok(Some(page))) = pages.as_mut().map(|pages| pages.page(index)) {
+                assert_eq!(
+                    flat,
+                    page.pixels(),
+                    "sprite {index} reads differently natively"
+                );
+            }
+            // A sprite carries what no signed format does — every depth, a
+            // masked palette — so its pictures reach every encoder branch.
+            writes_back(&sprite.picture, &flat);
+        }
+        entries.push(entry);
+    }
+    if count == reader.count() {
+        sprite_area_writes_back(&entries, &limits);
+    }
+}
+
+/// Check every sprite of an area, `entries`, writes back and reads again as
+/// it was: pixels as the same pixels, kept bytes as the same bytes.
+fn sprite_area_writes_back(entries: &[SpriteEntry], limits: &DecodeLimits) {
+    let inputs: Vec<SpriteInput<'_>> = entries
+        .iter()
+        .map(|entry| match entry {
+            SpriteEntry::Picture(sprite) => SpriteInput::Picture {
+                name: sprite.name,
+                mode: sprite.mode,
+                palette: &sprite.palette,
+                masked: sprite.masked,
+                source: &sprite.picture,
+            },
+            SpriteEntry::Opaque(kept) => SpriteInput::Opaque(&kept.bytes),
+        })
+        .collect();
+    let written = encode_sprite_area(&inputs);
+    let off_word = entries.iter().any(
+        |entry| matches!(entry, SpriteEntry::Opaque(kept) if !kept.bytes.len().is_multiple_of(4)),
+    );
+    if off_word {
+        assert_eq!(
+            written,
+            Err(EncodeError::SpriteOpaqueMalformed),
+            "a kept sprite off a word is refused, and nothing else is"
+        );
+        return;
+    }
+    let area = written.expect("an area that opened writes back");
+    let mut again = SpriteAreaReader::open(&area[..], limits).expect("the area written reopens");
+    assert_eq!(again.count() as usize, entries.len());
+    for (index, before) in (0u32..).zip(entries) {
+        let after = again
+            .sprite(index)
+            .expect("no machine refusal")
+            .expect("every sprite written is there");
+        match (before, &after) {
+            (SpriteEntry::Picture(was), SpriteEntry::Picture(now)) => {
+                assert_eq!(
+                    (was.name, was.mode, was.masked),
+                    (now.name, now.mode, now.masked)
+                );
+                assert_eq!(
+                    was.picture, now.picture,
+                    "sprite {index} changed on the way back"
+                );
+                if was.palette != SpritePalette::Full {
+                    assert_eq!(was.palette, now.palette);
+                }
+            }
+            (SpriteEntry::Opaque(was), SpriteEntry::Opaque(now)) => {
+                assert_eq!(now.bytes, was.bytes, "kept sprite {index} changed");
+            }
+            (was, now) => panic!(
+                "sprite {index} changed kind on the way back: {} became {}",
+                kind_of(was),
+                kind_of(now)
+            ),
+        }
+    }
 }
 
 /// Walk a sequence twice, checking every frame against the limits it was
@@ -2618,5 +2792,189 @@ fn the_webp_generator_produces_a_valid_corpus() {
             seen += 1;
         }
         assert_eq!(seen, count, "a fixture decoded a different frame count");
+    }
+}
+
+/// A picture an encoder is handed as arbitrary as its trait allows: any
+/// depth, a palette that may be empty or longer than its depth, indices that
+/// may name colours past its end, and any mask.
+struct ArbitrarySource {
+    width: u32,
+    height: u32,
+    depth: Option<IndexDepth>,
+    palette: Vec<Rgba8>,
+    masked: bool,
+    samples: Vec<u8>,
+    mask: Vec<u8>,
+}
+
+impl ArbitrarySource {
+    fn draw(rng: &mut Prng) -> Self {
+        let side = |rng: &mut Prng| u32::try_from(1 + rng.below(9)).unwrap_or(1);
+        let (width, height) = (side(rng), side(rng));
+        let pixels = (width * height) as usize;
+        let depth = (rng.below(5) != 0).then(|| *rng.pick(&IndexDepth::ALL));
+        // Usually a palette the depth holds, now and then one it cannot.
+        let colours = depth.map_or(0, |depth| {
+            if rng.below(8) == 0 {
+                rng.below(depth.colours() + 3)
+            } else {
+                1 + rng.below(depth.colours())
+            }
+        });
+        let palette = (0..colours)
+            .map(|_| {
+                let alpha = if rng.below(3) == 0 {
+                    rng.next_u8()
+                } else {
+                    255
+                };
+                [rng.next_u8(), rng.next_u8(), rng.next_u8(), alpha]
+            })
+            .collect();
+        let mut samples = vec![0u8; pixels * if depth.is_some() { 1 } else { 4 }];
+        rng.fill(&mut samples);
+        if depth.is_some() {
+            // Mostly indices the palette names, so a write is reached.
+            let reach = if rng.below(6) == 0 {
+                256
+            } else {
+                colours.max(1)
+            };
+            for sample in &mut samples {
+                *sample = u8::try_from(usize::from(*sample) % reach).unwrap_or(0);
+            }
+        }
+        let masked = depth.is_some() && rng.below(2) == 0;
+        let mask = (0..if masked { pixels } else { 0 })
+            .map(|_| *rng.pick(&[0, 255, 255, 255, 128, 7]))
+            .collect();
+        Self {
+            width,
+            height,
+            depth,
+            palette,
+            masked,
+            samples,
+            mask,
+        }
+    }
+
+    /// Whether an encoder may write it: a palette its depth holds, and every
+    /// index naming a colour of it.
+    fn writable(&self) -> bool {
+        self.depth.is_none_or(|depth| {
+            !self.palette.is_empty()
+                && self.palette.len() <= depth.colours()
+                && self
+                    .samples
+                    .iter()
+                    .all(|&index| usize::from(index) < self.palette.len())
+        })
+    }
+}
+
+impl PictureSource for ArbitrarySource {
+    fn width(&self) -> u32 {
+        self.width
+    }
+
+    fn height(&self) -> u32 {
+        self.height
+    }
+
+    fn kind(&self) -> PictureKind<'_> {
+        match self.depth {
+            Some(depth) => PictureKind::Indexed {
+                depth,
+                palette: &self.palette,
+                masked: self.masked,
+            },
+            None => PictureKind::Rgba,
+        }
+    }
+
+    fn read_row(&self, y: u32, samples: &mut [u8], mask: &mut [u8]) {
+        let row = y as usize;
+        for (plane, out) in [(&self.samples, samples), (&self.mask, mask)] {
+            let width = out.len();
+            if let Some(src) = plane.get(row * width..(row + 1) * width) {
+                out.copy_from_slice(src);
+            }
+        }
+    }
+}
+
+/// A mode an arbitrary sprite is written in: any word at all, or one of the
+/// depths a sprite holds.
+fn arbitrary_mode(rng: &mut Prng) -> Option<SpriteMode> {
+    match rng.below(3) {
+        0 => SpriteMode::from_value(rng.next_u32()),
+        1 => SpriteMode::from_value(*rng.pick(&[0, 8, 12, 15, 21, 28])),
+        _ => Some(SpriteMode::truecolour((1, 1), rng.below(2) == 0)),
+    }
+}
+
+#[test]
+fn arbitrary_encoder_inputs_never_panic_and_what_is_written_reads_back() {
+    let mut rng = Prng::new(tairix_fuzzseed::start(
+        "arbitrary_encoder_inputs_never_panic_and_what_is_written_reads_back",
+        tairix_fuzzseed::FUZZ_SEED_ENV,
+    ));
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
+    let limits = limits();
+    let options = JpegOptions::new(75, JPEG_BACKGROUND).expect("a valid quality");
+    let forms = [SpritePalette::Implied, SpritePalette::Full];
+    loop {
+        for _ in 0..SMOKE_ITERATIONS {
+            let source = ArbitrarySource::draw(&mut rng);
+            let writable = source.writable();
+            let png = encode_png(&source);
+            let jpeg = encode_jpeg(&source, options);
+            assert_eq!(
+                png.is_ok(),
+                writable,
+                "PNG writes exactly what may be written"
+            );
+            assert_eq!(
+                jpeg.is_ok(),
+                writable,
+                "JPEG writes exactly what may be written"
+            );
+            for (format, written) in [(ImageFormat::Png, png), (ImageFormat::Jpeg, jpeg)] {
+                if let Ok(bytes) = written {
+                    let back = decode_as(format, &bytes, &limits).expect("what is written reads");
+                    assert_eq!((back.width(), back.height()), (source.width, source.height));
+                }
+            }
+            let Some(mode) = arbitrary_mode(&mut rng) else {
+                continue;
+            };
+            let mut kept = vec![0u8; rng.below(96)];
+            rng.fill(&mut kept);
+            let picture = SpriteInput::Picture {
+                name: SpriteName::new("arbitrary").expect("a name"),
+                mode,
+                palette: rng.pick(&forms),
+                masked: source.masked || (source.depth.is_none() && rng.below(2) == 0),
+                source: &source,
+            };
+            let mut inputs = vec![picture];
+            if rng.below(4) == 0 {
+                inputs.push(SpriteInput::Opaque(&kept));
+            }
+            if let Ok(area) = encode_sprite_area(&inputs) {
+                assert!(
+                    writable,
+                    "a sprite was written from a picture no encoder may write"
+                );
+                let reader =
+                    SpriteAreaReader::open(&area[..], &limits).expect("the area written reopens");
+                assert_eq!(reader.count() as usize, inputs.len());
+            }
+        }
+        if !tairix_fuzzseed::within_budget(deadline) {
+            break;
+        }
     }
 }

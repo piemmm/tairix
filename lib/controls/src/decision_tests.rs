@@ -16,7 +16,7 @@ use tairix_theme::Theme;
 
 use crate::button::{Button, ButtonContent};
 use crate::damage::sink;
-use crate::decision::{Dialog, DialogAction, HelpTip, HelpTipAction, Tooltip};
+use crate::decision::{Dialog, DialogAction, HelpTip, HelpTipAction, SaveChanges, Tooltip};
 use crate::state::{AuthorityState, ControlRole, ControlState};
 use crate::testkit::{has_pixel, high_contrast, premul, region_has, text_ladder};
 
@@ -42,6 +42,25 @@ const RELEASE: InputEvent = InputEvent::PointerReleased {
 };
 
 // --- Dialog (spec §11.24) ----------------------------------------------
+
+/// A question sits centred across the window a third of the way down, and
+/// never past it.
+#[test]
+fn a_question_is_placed_over_the_window_it_asks_of() {
+    let theme = Theme::dark();
+    let dialog = Dialog::save_changes("notes.txt");
+    let window = Rect::new(10, 20, 900, 600);
+    let placed = dialog.placed_over(window, 420, 0, Scale::ONE, &theme);
+    assert_eq!(placed.width, 420);
+    assert_eq!(placed.left() - window.left(), (900 - 420) / 2);
+    assert_eq!(
+        placed.top() - window.top(),
+        i32::try_from((600 - placed.height) / 3).expect("small")
+    );
+    let narrow = Rect::new(0, 0, 200, 40);
+    let squeezed = dialog.placed_over(narrow, 420, 0, Scale::ONE, &theme);
+    assert!(squeezed.width <= narrow.width && squeezed.height <= narrow.height);
+}
 
 const DW: u32 = 320;
 const DH: u32 = 160;
@@ -434,6 +453,28 @@ fn helptip_step_activates_by_keyboard() {
     step.set_focused(true);
     let mut tip = HelpTip::new("Blocked.").with_step(step);
     assert_eq!(tip.on_key(Key::Char(' ')), Some(HelpTipAction::NextStep));
+}
+
+#[test]
+fn the_save_changes_question_names_the_document_and_reads_its_actions() {
+    let dialog = Dialog::save_changes("notes.txt");
+    assert_eq!(
+        dialog.title(),
+        "Save the changes to \u{201c}notes.txt\u{201d}?"
+    );
+    let roles: alloc::vec::Vec<ControlRole> = dialog.actions().iter().map(Button::role).collect();
+    assert_eq!(
+        roles,
+        [
+            ControlRole::Neutral,
+            ControlRole::Destructive,
+            ControlRole::Recommended
+        ]
+    );
+    assert_eq!(SaveChanges::of(0), SaveChanges::Cancel);
+    assert_eq!(SaveChanges::of(1), SaveChanges::Discard);
+    assert_eq!(SaveChanges::of(2), SaveChanges::Save);
+    assert_eq!(SaveChanges::of(3), SaveChanges::Cancel);
 }
 
 #[test]

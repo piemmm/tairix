@@ -131,10 +131,12 @@ sandboxes a parse imports it:
   parent closes the request stream. A malformed request is a typed error
   *reply*, never a panic.
 - **Host side** (`host`): `ParserSandbox` sends one request and blocks
-  for the reply. Every worker failure — crash, protocol violation,
-  oversize reply, exit without answering — is contained identically: the
-  caller receives a typed `SandboxError`, the dead worker is reaped and
-  **replaced**, and the event is logged with a stable id
+  for the reply, never past the reply deadline (`rt::REPLY_DEADLINE_NS`),
+  so a worker a hostile input hangs costs one bounded wait. Every worker
+  failure — crash, protocol violation, oversize reply, exit without
+  answering, no answer in time — is contained identically: the caller
+  receives a typed `SandboxError`, the worker is killed if it still runs,
+  then reaped and **replaced**, and the event is logged with a stable id
   (`EventId(6000)` worker crashed, `EventId(6001)` worker unavailable;
   the crate owns `6000..7000`). A parser crash never takes down the
   calling program.
@@ -334,6 +336,17 @@ sandboxes a parse imports it:
   displayed costs a window, turning what was decoded costs the whole page.
   What the worker does apply is the orientation a file itself declares,
   because reading that is part of reading the file.
+- **Document editing** (`imageedit`, the same worker and the same upload):
+  an editor needs a document as its file stores it — each entry at its own
+  depth, with its palette and its sprite details — rather than flattened for
+  display. The worker opens the upload, answers how many entries it holds,
+  and decodes one entry at a time, freeing the last before the next; a sprite
+  it cannot read comes back as its bytes and the reason, never half-read. The
+  parent (`open_edit`, `select_entry`, `read_rows`, `read_kept`) holds every
+  answer to the edit bounds and checks each index against its palette, each
+  mode word against its pixels, and each row range and length exactly. The
+  editor reads every document through a fresh worker, so a hostile file can
+  reach no other document's decode.
 
 - **NTP response evaluation** (`timesync`): a network time server's reply
   is evaluated inside the worker (`tairix_net::ntp::evaluate`) because the

@@ -93,6 +93,17 @@ pub enum SyntaxFailure {
     ReplyMalformed,
 }
 
+impl core::fmt::Display for SyntaxFailure {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Sandbox(err) => write!(f, "{err}"),
+            Self::Refused => f.write_str("the parser refused the request"),
+            Self::TooLarge => f.write_str("the request is larger than a parser takes"),
+            Self::ReplyMalformed => f.write_str("the parser's answer could not be believed"),
+        }
+    }
+}
+
 impl Unbelieved for SyntaxFailure {
     fn unbelieved(&self) -> bool {
         *self == Self::ReplyMalformed

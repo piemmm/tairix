@@ -286,16 +286,9 @@ impl FrameOut for ReplyFrames<'_> {
 mod tests {
     use super::LoopbackLauncher;
     use crate::host::ParserSandbox;
+    use crate::testing::NullSink;
     use crate::worker::Service;
     use alloc::vec::Vec;
-    use tairix_log::{Event, Sink};
-
-    /// Discards every event (the loopback happy path logs nothing).
-    struct NullSink;
-
-    impl Sink for NullSink {
-        fn write_event(&self, _event: &Event<'_>) {}
-    }
 
     /// Echoes each request with a `>` prefix.
     struct Tagger;

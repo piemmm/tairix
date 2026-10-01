@@ -106,7 +106,7 @@ impl SidebarDemo {
     /// and leaves showing it to its owner, and a slot too short for every
     /// section open at once keeps the rest of the gallery clear.
     pub fn render(&self, surface: &mut Surface, rect: Rect, scale: Scale, theme: &Theme) {
-        let (Ok(x), Ok(y)) = (u32::try_from(rect.left()), u32::try_from(rect.top())) else {
+        let Some((x, y)) = rect.surface_origin() else {
             return;
         };
         surface.with_clip(x, y, rect.width, rect.height, |surface| {

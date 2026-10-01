@@ -5,6 +5,7 @@
 //! wall, and furniture; the companion has nothing at all, because the desktop
 //! shows through everywhere the creature is not.
 
+use tairix_controls::fill_area;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_raster::shape::{self, Scratch, Shape};
 use tairix_raster::{Color, Surface};
@@ -87,8 +88,8 @@ impl Painter {
         let palette_ref = theme.palette();
         // The pen is a lit room: a wall a shade above the window body, a floor
         // a shade below it, so the two read as surfaces rather than as bands.
-        fill(surface, layout.wall, Color::from(palette_ref.surface));
-        fill(
+        fill_area(surface, layout.wall, Color::from(palette_ref.surface));
+        fill_area(
             surface,
             layout.floor,
             Color::from(palette_ref.surface_raised),
@@ -100,7 +101,7 @@ impl Painter {
             Self::draw_empty_bed(surface, layout);
         }
         // The strip is chrome, so it is drawn over the room rather than in it.
-        fill(surface, layout.strip, Color::from(palette_ref.surface));
+        fill_area(surface, layout.strip, Color::from(palette_ref.surface));
         pen.button().render(surface, layout.button, scale, theme);
     }
 
@@ -110,9 +111,9 @@ impl Painter {
         // rounded rectangle: at this size a plain one reads as an unlabelled
         // button, which is the last thing the floor should look like.
         round(surface, layout.bed, palette::FUR_DEEP);
-        round(surface, inset(layout.bed, 3), palette::FUR_MID);
+        round(surface, layout.bed.inset(3), palette::FUR_MID);
         round(surface, layout.bowl, palette::SLATE_SHADE);
-        round(surface, inset(layout.bowl, 3), palette::SLATE_DEEP);
+        round(surface, layout.bowl.inset(3), palette::SLATE_DEEP);
         // The toy is a single bright blob rather than a rectangle: it is the
         // one thing in the pen that moves, and a disc reads as a ball.
         let toy = Rect::new(
@@ -193,36 +194,10 @@ pub fn pen_client(scale: Scale) -> (u32, u32) {
     )
 }
 
-/// Fill `rect` with `color`, clipped to the surface.
-fn fill(surface: &mut Surface, rect: Rect, color: Color) {
-    let (Ok(x), Ok(y)) = (u32::try_from(rect.left()), u32::try_from(rect.top())) else {
-        return;
-    };
-    surface.fill_rect(x, y, rect.width, rect.height, color);
-}
-
-/// `rect` pulled in by `by` pixels on every side, or an empty rectangle when
-/// there is not that much of it.
-fn inset(rect: Rect, by: u32) -> Rect {
-    let shrink = by.saturating_mul(2);
-    if rect.width <= shrink || rect.height <= shrink {
-        return Rect::new(rect.left(), rect.top(), 0, 0);
-    }
-    Rect::new(
-        rect.left().saturating_add(i32::try_from(by).unwrap_or(0)),
-        rect.top().saturating_add(i32::try_from(by).unwrap_or(0)),
-        rect.width - shrink,
-        rect.height - shrink,
-    )
-}
-
 /// Fill `rect` as a fully rounded shape — an oval, near enough, at the sizes
 /// the furniture is drawn at.
 fn round(surface: &mut Surface, rect: Rect, color: Color) {
-    if rect.width == 0 || rect.height == 0 {
-        return;
-    }
-    let (Ok(x), Ok(y)) = (u32::try_from(rect.left()), u32::try_from(rect.top())) else {
+    let Some((x, y)) = rect.surface_origin() else {
         return;
     };
     let radius = rect.width.min(rect.height) / 2;

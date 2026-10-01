@@ -50,8 +50,6 @@ use tairix_wintersun_figure::rigging::Rigging;
 use tairix_wintersun_figure::species::{DYES, TROUSERS};
 use tairix_wintersun_figure::tint::Tint;
 
-mod png;
-
 /// The committed ledger, workspace-relative.
 pub const LEDGER_PATH: &str = "userland/games/wintersun/figure/artsheet.ledger";
 
@@ -623,7 +621,10 @@ fn sheet(figure: &Reference, kind: Kind, side: u32) -> Result<Vec<u8>, String> {
         let straight = pixel.unpremultiply();
         rgba.extend_from_slice(&[straight.r, straight.g, straight.b, straight.a]);
     }
-    png::encode(sheet.width(), sheet.height(), &rgba)
+    let picture = tairix_image::Picture::rgba(sheet.width(), sheet.height(), rgba)
+        .map_err(|err| format!("artsheet: the sheet is not a picture: {err}"))?;
+    tairix_image::encode_png(&picture)
+        .map_err(|err| format!("artsheet: the sheet could not be written: {err}"))
 }
 
 /// A transparent square cell.

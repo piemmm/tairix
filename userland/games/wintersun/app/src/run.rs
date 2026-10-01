@@ -52,15 +52,14 @@ mod program {
     use tairix_controls::damage::{self, Repaint};
     use tairix_controls::Keystroke;
     use tairix_geometry::Region;
-    use tairix_help::{own_short_help, BundleHelp};
     use tairix_log::{Event, Sink};
     use tairix_parallel::{JobRunner, Pool};
     use tairix_raster::surface::Surface;
-    use tairix_rt::io::{StdInfo, Stderr, Stdout, Write};
+    use tairix_rt::io::{StdInfo, Write};
     use tairix_rt::work::{Worker, WorkerGuard};
     use tairix_rt::File;
     use tairix_theme::ThemeRegistry;
-    use tairix_window::app::{self, AppWindow, ShellError, Wake, WindowPane, EXIT_CHANNEL_LOST};
+    use tairix_window::app::{self, AppWindow, Wake, WindowPane, EXIT_CHANNEL_LOST};
     use tairix_window::desktop::Desktop;
     use tairix_window::{
         damage_in, key_input_event, pointer_input_events, pointer_point, EventDrain, EventError,
@@ -129,23 +128,8 @@ mod program {
     /// so it walks around hills rather than through them.
     const PLAYER_KIND: EntityKind = EntityKind(1);
 
-    /// State an abnormal exit's reason on `stderr` and hand `code` back.
-    fn fail(code: i32, reason: &str) -> i32 {
-        let _ = writeln!(Stderr, "wintersun: {reason}");
-        code
-    }
-
-    /// State a shared-shell bring-up refusal and hand its reserved code
-    /// back.
-    fn fail_shell(err: ShellError) -> i32 {
-        let _ = writeln!(Stderr, "wintersun: {err}");
-        err.code()
-    }
-
-    /// Report a refusal the game carries on from.
-    fn report(reason: &str) {
-        let _ = writeln!(Stderr, "wintersun: {reason}");
-    }
+    /// The name this program states its refusals under.
+    const APP_NAME: &str = "wintersun";
 
     /// The client's park: its event mailbox, the chunk worker's answer
     /// wake, and the deadline of the next frame it owes.
@@ -243,7 +227,7 @@ mod program {
 
     impl Sink for Journal {
         fn write_event(&self, event: &Event<'_>) {
-            let _ = writeln!(Stderr, "wintersun: {}", event.message);
+            app::report(APP_NAME, event.message);
         }
     }
 
@@ -256,9 +240,12 @@ mod program {
         match tairix_procinfo::memory_total_bytes(&tairix_procinfo::IpcTransport) {
             Ok(total) => usize::try_from(total).unwrap_or(usize::MAX),
             Err(err) => {
-                report(&alloc::format!(
-                    "memory size unavailable ({err:?}); materials drawn in their flat tones"
-                ));
+                app::report(
+                    APP_NAME,
+                    format_args!(
+                        "memory size unavailable ({err:?}); materials drawn in their flat tones"
+                    ),
+                );
                 0
             }
         }
@@ -418,14 +405,20 @@ mod program {
                 Quarried::Ready(chunk) => {
                     let held = self.ground.adopt(chunk).is_ok();
                     if !held && !self.unheld {
-                        report("no memory to hold solved ground; it is drawn as unmapped");
+                        app::report(
+                            APP_NAME,
+                            "no memory to hold solved ground; it is drawn as unmapped",
+                        );
                     }
                     self.unheld = !held;
                 }
                 Quarried::Refused(coord) => {
                     if !self.refused.contains(&coord) {
                         self.refused.push(coord);
-                        report("ground refused by the generator; drawn as unmapped");
+                        app::report(
+                            APP_NAME,
+                            "ground refused by the generator; drawn as unmapped",
+                        );
                     }
                 }
             }
@@ -674,7 +667,10 @@ mod program {
         let facing = session.facing;
         if let Some(figure) = session.cast.get_mut(player) {
             if let Err(err) = figure.step(nanos, at, facing, depth) {
-                report(&alloc::format!("the player's figure could not move: {err}"));
+                app::report(
+                    APP_NAME,
+                    format_args!("the player's figure could not move: {err}"),
+                );
             }
         }
     }
@@ -731,7 +727,7 @@ mod program {
             // Said once for a run of refused frames rather than once a frame.
             Err(Unpresented::Refused(err)) => {
                 if !core::mem::replace(&mut session.refusing, true) {
-                    report(&alloc::format!("frames refused: {err}"));
+                    app::report(APP_NAME, format_args!("frames refused: {err}"));
                 }
                 Ok(false)
             }
@@ -832,7 +828,7 @@ mod program {
             Err(EventError::Undecodable(_)) => Served::Applied,
             Ok(None) => Served::Empty,
             Err(EventError::Mailbox(_)) => {
-                Served::Stop(fail(EXIT_CHANNEL_LOST, "event channel lost"))
+                Served::Stop(app::fail(APP_NAME, EXIT_CHANNEL_LOST, "event channel lost"))
             }
         }
     }
@@ -973,9 +969,12 @@ mod program {
                     Ok(stored.graphics)
                 }
                 Err(err) => {
-                    report(&alloc::format!(
-                        "the graphics choice could not be kept ({err}); the kept one stands"
-                    ));
+                    app::report(
+                        APP_NAME,
+                        format_args!(
+                            "the graphics choice could not be kept ({err}); the kept one stands"
+                        ),
+                    );
                     Err(err)
                 }
             };
@@ -989,9 +988,12 @@ mod program {
     /// State every stored graphics value that meant nothing here.
     fn report_refused(stored: &Stored) {
         for key in &stored.refused {
-            report(&alloc::format!(
-                "the stored {key} is not one this build understands; it is read as unset"
-            ));
+            app::report(
+                APP_NAME,
+                format_args!(
+                    "the stored {key} is not one this build understands; it is read as unset"
+                ),
+            );
         }
     }
 
@@ -1021,9 +1023,10 @@ mod program {
                 session.settings = Some(pane);
                 declare_app_bar(session.window.client(), session.endpoint, true);
             }
-            Err(reason) => report(&alloc::format!(
-                "the settings window could not open: {reason}"
-            )),
+            Err(reason) => app::report(
+                APP_NAME,
+                format_args!("the settings window could not open: {reason}"),
+            ),
         }
     }
 
@@ -1031,9 +1034,10 @@ mod program {
     fn close_settings(session: &mut Session<'_>) {
         if let Some(pane) = session.settings.take() {
             if let Err(err) = pane.pane.close(session.window.client()) {
-                report(&alloc::format!(
-                    "the settings window's close was refused: {err}"
-                ));
+                app::report(
+                    APP_NAME,
+                    format_args!("the settings window's close was refused: {err}"),
+                );
             }
             declare_app_bar(session.window.client(), session.endpoint, false);
         }
@@ -1057,9 +1061,10 @@ mod program {
             Ok(()) => session.settings_refusing = false,
             Err(err) => {
                 if !core::mem::replace(&mut session.settings_refusing, true) {
-                    report(&alloc::format!(
-                        "the settings window's frames were refused: {err}"
-                    ));
+                    app::report(
+                        APP_NAME,
+                        format_args!("the settings window's frames were refused: {err}"),
+                    );
                 }
             }
         }
@@ -1077,7 +1082,7 @@ mod program {
                 }
             }
             Ok(false) => {}
-            Err(err) => report(&alloc::format!("desktop change refused: {err}")),
+            Err(err) => app::report(APP_NAME, format_args!("desktop change refused: {err}")),
         }
     }
 
@@ -1093,7 +1098,7 @@ mod program {
     ) {
         let declared = appbar::declaration(endpoint, settings_open);
         if let Err(refused) = tairix_window::declare_app_bar(client, declared) {
-            report(&alloc::format!("{refused}"));
+            app::report(APP_NAME, format_args!("{refused}"));
         }
     }
 
@@ -1119,25 +1124,13 @@ mod program {
                 if let Some(ask) = session.shell.request(want) {
                     if let Some(id) = session.window.window_id() {
                         if let Err(err) = session.window.client().set_size_state(id, ask) {
-                            report(&alloc::format!("size state refused: {err}"));
+                            app::report(APP_NAME, format_args!("size state refused: {err}"));
                         }
                     }
                 }
             }
         }
         false
-    }
-
-    /// Print the bundle's own short help, or the usage banner where its Help
-    /// tree cannot be read.
-    fn short_help() -> i32 {
-        let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
-        let bytes = own_short_help(&BundleHelp::new("wintersun"), locale, "wintersun")
-            .unwrap_or_else(|| alloc::format!("{USAGE}\n").into_bytes());
-        match Stdout.write_all(&bytes) {
-            Ok(()) => 0,
-            Err(_) => 1,
-        }
     }
 
     /// A seed for a world nobody named, drawn from the kernel's randomness.
@@ -1149,9 +1142,9 @@ mod program {
         if tairix_rt::random_fill(&mut bytes).is_ok() {
             u64::from_le_bytes(bytes)
         } else {
-            let _ = writeln!(
-                Stderr,
-                "wintersun: no random seed to be had; the clock names this world"
+            app::report(
+                APP_NAME,
+                "no random seed to be had; the clock names this world",
             );
             tairix_rt::clock_get()
         }
@@ -1179,7 +1172,7 @@ mod program {
         let mode = app::mode_for(width, height);
         window
             .open(endpoint, &mode, "WinterSun", shell::SIZING)
-            .map_err(fail_shell)
+            .map_err(|err| app::fail(APP_NAME, err.code(), err))
     }
 
     /// The client's whole life.
@@ -1190,12 +1183,12 @@ mod program {
     fn main() -> i32 {
         let launch = match tairix_rt::args().as_deref().map(cli::parse) {
             Some(Ok(launch)) => launch,
-            Some(Err(CliError::Usage)) | None => return fail(EXIT_USAGE, USAGE),
+            Some(Err(CliError::Usage)) | None => return app::fail(APP_NAME, EXIT_USAGE, USAGE),
         };
         // The world to play and whether its seed was drawn, or none for the
         // reference scene.
         let world = match launch {
-            Launch::Help => return short_help(),
+            Launch::Help => return tairix_help::print_own_short_help(APP_NAME, Some(USAGE)),
             Launch::ReferenceScene => None,
             Launch::Play(named) => {
                 Some(named.map_or_else(|| (drawn_seed(), true), |seed| (seed, false)))
@@ -1204,11 +1197,11 @@ mod program {
         let mut window = AppWindow::new();
         let look = match app::bring_up_desktop(window.client()) {
             Ok((desktop, themes)) => Look { desktop, themes },
-            Err(err) => return fail_shell(err),
+            Err(err) => return app::fail(APP_NAME, err.code(), err),
         };
         let binding = match app::bind_event_mailbox() {
             Ok(binding) => binding,
-            Err(err) => return fail_shell(err),
+            Err(err) => return app::fail(APP_NAME, err.code(), err),
         };
         let Some((seed, drawn)) = world else {
             return reference_scene(window, look, binding.endpoint(), binding.set());
@@ -1216,16 +1209,24 @@ mod program {
 
         let params = RealmParams::default_realm(seed);
         let Ok(field) = RealmField::generate(params) else {
-            return fail(EXIT_NO_REALM, "the realm could not be generated");
+            return app::fail(APP_NAME, EXIT_NO_REALM, "the realm could not be generated");
         };
         if drawn {
             report_drawn_seed(seed);
         }
         let Ok(set) = Set::new() else {
-            return fail(EXIT_NO_FIGURE, "the motion set could not be built");
+            return app::fail(
+                APP_NAME,
+                EXIT_NO_FIGURE,
+                "the motion set could not be built",
+            );
         };
         let Ok(clips) = set.clips() else {
-            return fail(EXIT_NO_FIGURE, "the motion set's clips could not be built");
+            return app::fail(
+                APP_NAME,
+                EXIT_NO_FIGURE,
+                "the motion set's clips could not be built",
+            );
         };
         play(window, look, &binding, field, &clips)
     }
@@ -1243,12 +1244,12 @@ mod program {
         let mut zone = Zone::new(TickRate::default_rate());
         let (player, actor, landing) = match land_player(&field, clips, &mut zone) {
             Ok(landed) => landed,
-            Err((code, reason)) => return fail(code, reason),
+            Err((code, reason)) => return app::fail(APP_NAME, code, reason),
         };
         let start = landing.at;
 
         let Ok(mut world) = World::new(params, &field) else {
-            return fail(EXIT_NO_REALM, "the realm's roads did not fit");
+            return app::fail(APP_NAME, EXIT_NO_REALM, "the realm's roads did not fit");
         };
         world.take(Quarried::Ready(landing.chunk));
         let quarry = Arc::new(Quarry::new(field));
@@ -1256,7 +1257,8 @@ mod program {
 
         let mut cast = Cast::new();
         if cast.join(player, actor, start).is_err() {
-            return fail(
+            return app::fail(
+                APP_NAME,
                 EXIT_NO_FIGURE,
                 "the player's figure could not join the scene",
             );
@@ -1334,9 +1336,12 @@ mod program {
     fn bring_up_graphics(set: u64) -> (Choice, Arc<Publisher>) {
         let (stored, refusal) = graphics::load(&mut RtHost);
         if let Some(err) = refusal {
-            report(&alloc::format!(
-                "graphics settings unavailable ({err}); drawing every detail at its finest"
-            ));
+            app::report(
+                APP_NAME,
+                format_args!(
+                    "graphics settings unavailable ({err}); drawing every detail at its finest"
+                ),
+            );
         }
         report_refused(&stored);
         let publisher = Arc::new(Publisher::new(
@@ -1366,13 +1371,19 @@ mod program {
         });
         if !added {
             publisher.stop();
-            report("no wake for the graphics store worker; the choice is kept on the frame loop");
+            app::report(
+                APP_NAME,
+                "no wake for the graphics store worker; the choice is kept on the frame loop",
+            );
             return;
         }
         if let Err(reason) = Publisher::start(publisher) {
-            report(&alloc::format!(
-                "no graphics store worker ({reason:?}); the choice is kept on the frame loop"
-            ));
+            app::report(
+                APP_NAME,
+                format_args!(
+                    "no graphics store worker ({reason:?}); the choice is kept on the frame loop"
+                ),
+            );
         }
     }
 
@@ -1423,7 +1434,10 @@ mod program {
         match read_preset(&path) {
             Ok(identity) => Some(identity),
             Err(reason) => {
-                report(&alloc::format!("{reason}; walking as the reference figure"));
+                app::report(
+                    APP_NAME,
+                    format_args!("{reason}; walking as the reference figure"),
+                );
                 figures::identity(Species::Human).ok()
             }
         }
@@ -1461,7 +1475,10 @@ mod program {
     /// Start the chunk worker, answering whether one is running.
     fn start_quarry(quarry: &Arc<Quarry>, set: u64) -> bool {
         let Some(read) = quarry.wake.read_end() else {
-            report("no chunk-worker wake pipe; ground is solved on the frame loop");
+            app::report(
+                APP_NAME,
+                "no chunk-worker wake pipe; ground is solved on the frame loop",
+            );
             return false;
         };
         if tairix_rt::waitset_ctl(
@@ -1472,16 +1489,22 @@ mod program {
             QUARRY_TOKEN,
         ) != 0
         {
-            report("chunk-worker wake refused; ground is solved on the frame loop");
+            app::report(
+                APP_NAME,
+                "chunk-worker wake refused; ground is solved on the frame loop",
+            );
             return false;
         }
         let worker = Arc::clone(quarry);
         match tairix_rt::thread::Thread::spawn(move || worker.serve()) {
             Ok(_) => true,
             Err(err) => {
-                report(&alloc::format!(
-                    "no chunk-worker thread ({err:?}); ground is solved on the frame loop"
-                ));
+                app::report(
+                    APP_NAME,
+                    format_args!(
+                        "no chunk-worker thread ({err:?}); ground is solved on the frame loop"
+                    ),
+                );
                 false
             }
         }
@@ -1566,7 +1589,7 @@ mod program {
                 match draw(session, world, player, pool, now) {
                     Ok(true) => governed(session, now),
                     Ok(false) => {}
-                    Err(_) => return fail(EXIT_CHANNEL_LOST, "present refused"),
+                    Err(_) => return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused"),
                 }
             }
             refresh_settings(session);
@@ -1587,7 +1610,8 @@ mod program {
             .governor
             .observe(&session.times, (mode.width_px, mode.height_px), now);
         if session.governor.floored() && !floored {
-            report(
+            app::report(
+                APP_NAME,
                 "frames overrun at the least detail that keeps figures readable; \
                  the frame rate is giving way",
             );
@@ -1598,13 +1622,25 @@ mod program {
     /// leaves.
     fn reference_scene(mut window: AppWindow, look: Look, endpoint: u64, set: u64) -> i32 {
         let Ok(mut world) = reference::World::generate() else {
-            return fail(EXIT_NO_REALM, "the reference realm could not be generated");
+            return app::fail(
+                APP_NAME,
+                EXIT_NO_REALM,
+                "the reference realm could not be generated",
+            );
         };
         let Ok(motion) = Set::new() else {
-            return fail(EXIT_NO_FIGURE, "the motion set could not be built");
+            return app::fail(
+                APP_NAME,
+                EXIT_NO_FIGURE,
+                "the motion set could not be built",
+            );
         };
         let Ok(clips) = motion.clips() else {
-            return fail(EXIT_NO_FIGURE, "the motion set's clips could not be built");
+            return app::fail(
+                APP_NAME,
+                EXIT_NO_FIGURE,
+                "the motion set's clips could not be built",
+            );
         };
         let server = match open_window(&mut window, &look.desktop, endpoint) {
             Ok(server) => server,
@@ -1676,13 +1712,14 @@ mod program {
                         // Holding a picture that is not the scene would
                         // defeat the one thing this mode is for.
                         Err(Unpresented::Refused(err)) => {
-                            return fail(
+                            return app::fail(
+                                APP_NAME,
                                 EXIT_NO_SCENE,
-                                &alloc::format!("the reference scene could not be drawn: {err}"),
+                                format_args!("the reference scene could not be drawn: {err}"),
                             )
                         }
                         Err(Unpresented::Lost(_)) => {
-                            return fail(EXIT_CHANNEL_LOST, "present refused")
+                            return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused")
                         }
                     }
                 }

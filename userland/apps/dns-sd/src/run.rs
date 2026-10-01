@@ -86,7 +86,7 @@ mod program {
                 return 2;
             }
         };
-        let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
+        let locale = tairix_help::user_locale();
         let help = BundleHelp::new("dns-sd");
         let asks = matches!(command, Command::Ask { .. });
         let mut service = RtService(None);

@@ -755,7 +755,7 @@ impl FieldCore {
             return;
         };
         let palette = theme.palette();
-        let baseline = to_i32(row_h.saturating_sub(font.glyph_height())) / 2;
+        let baseline = font.centred_top(0, row_h);
         let caret = match shown {
             Shown::Marker(Some(marker)) => {
                 let run = font.elide_to_width(marker, avail_w);

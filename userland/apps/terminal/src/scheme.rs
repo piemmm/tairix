@@ -72,15 +72,6 @@ impl Rgb {
     pub const fn with_alpha(self, alpha: u8) -> Color {
         Color::rgba(self.r, self.g, self.b, alpha)
     }
-
-    /// The perceived luminance, `0..=255` — the Rec. 601 weighting, in
-    /// integer arithmetic.
-    #[must_use]
-    pub fn luminance(self) -> u8 {
-        // The weights total 1000, so the quotient is already within a byte.
-        let sum = 299 * u32::from(self.r) + 587 * u32::from(self.g) + 114 * u32::from(self.b);
-        u8::try_from(sum / 1000).unwrap_or(u8::MAX)
-    }
 }
 
 impl From<tairix_theme::Rgba> for Rgb {

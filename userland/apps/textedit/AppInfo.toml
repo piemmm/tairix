@@ -6,9 +6,10 @@
 # descriptor Files or the desktop opened for it, or a grant from the session's
 # trusted picker — and every save writes through that descriptor.
 # CAP_CONSOLE_WRITE carries its stderr diagnostics; CAP_SHM the window frame
-# region and the clipboard's payload region; CAP_PROC_SPAWN re-enters this
+# region and the clipboard's payload region; CAP_SANDBOX_SPAWN re-enters this
 # binary as the capability-empty worker that colours, detects and checks a
-# document, which is untrusted input; CAP_LOG_EMIT records that worker being
+# document, which is untrusted input — it starts no child but one holding
+# nothing beyond its two pipes; CAP_LOG_EMIT records that worker being
 # replaced after a crash, which would otherwise be refused and lost.
 id = "os.tairix.textedit"
 name = "TextEdit"
@@ -17,7 +18,7 @@ version = "0.1.0"
 kind = "application"
 purpose = "Edit any file: text, code, settings or raw bytes"
 author = "The TAIRiX Project"
-capabilities = ["CAP_CONSOLE_WRITE", "CAP_SHM", "CAP_PROC_SPAWN", "CAP_LOG_EMIT"]
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_SHM", "CAP_SANDBOX_SPAWN", "CAP_LOG_EMIT"]
 # Every textual type subclasses text/plain, so one claim covers them all and
 # ranks behind an application that claims a type exactly.
 associations = ["text/plain"]

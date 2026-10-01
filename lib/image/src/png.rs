@@ -25,7 +25,17 @@ use alloc::vec::Vec;
 
 use tairix_util::fallible;
 
-use crate::{crc32, DecodeError, DecodeLimits, RasterImage, PROBE_LIMITS, RGBA_BYTES};
+use crate::picture::{IndexDepth, Picture};
+use crate::{DecodeError, DecodeLimits, RasterImage, Unkept, PROBE_LIMITS, RGBA_BYTES};
+
+/// The CRC-32 a chunk carries: over its type and its payload, not its length
+/// (W3C PNG §"Chunk layout").
+pub(crate) fn chunk_crc(kind: [u8; 4], payload: &[u8]) -> u32 {
+    let mut crc = tairix_crc32::Crc32::new();
+    crc.update(&kind);
+    crc.update(payload);
+    crc.finish()
+}
 
 /// The 8-byte PNG file signature.
 const SIGNATURE: [u8; 8] = crate::PNG_SIGNATURE;
@@ -45,7 +55,7 @@ const IHDR_LEN: usize = 13;
 /// refused once, at parse time, rather than needing a fallback arm
 /// everywhere it might otherwise appear.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum ColourType {
+pub(crate) enum ColourType {
     Grey,
     Truecolour,
     Indexed,
@@ -65,8 +75,19 @@ impl ColourType {
         }
     }
 
+    /// The `IHDR` byte that names this colour type.
+    pub(crate) const fn code(self) -> u8 {
+        match self {
+            Self::Grey => 0,
+            Self::Truecolour => 2,
+            Self::Indexed => 3,
+            Self::GreyAlpha => 4,
+            Self::Rgba => 6,
+        }
+    }
+
     /// Samples per pixel this colour type carries.
-    const fn channels(self) -> u32 {
+    pub(crate) const fn channels(self) -> u32 {
         match self {
             Self::Grey | Self::Indexed => 1,
             Self::Truecolour => 3,
@@ -138,7 +159,7 @@ fn read_chunk(data: &[u8], pos: usize) -> Result<([u8; 4], &[u8], usize), Decode
     let payload = &data[payload_start..payload_end];
     let stored_crc_bytes: [u8; 4] = data[payload_end..crc_end].try_into().unwrap_or([0; 4]);
     let stored_crc = u32::from_be_bytes(stored_crc_bytes);
-    if stored_crc != crc32::crc32_of(&[&chunk_type, payload]) {
+    if stored_crc != chunk_crc(chunk_type, payload) {
         return Err(DecodeError::ChunkCrcMismatch);
     }
     Ok((chunk_type, payload, crc_end))
@@ -246,12 +267,19 @@ pub(crate) fn probe(bytes: &[u8]) -> Result<(u32, u32), DecodeError> {
     Ok((ihdr.width, ihdr.height))
 }
 
-/// Decode a complete PNG file into a [`RasterImage`].
-///
-/// # Errors
-///
-/// See [`DecodeError`] for every fail-closed refusal reason.
-pub(crate) fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage, DecodeError> {
+/// A validated chunk stream: the header, the palette and transparency it
+/// declared, the concatenated image data, and whether it held any other
+/// chunk.
+struct Parsed {
+    ihdr: Ihdr,
+    palette: Option<Vec<[u8; 3]>>,
+    trns: Option<Trns>,
+    idat: Vec<u8>,
+    extras: bool,
+}
+
+/// Validate a complete PNG file's chunk stream, decompressing nothing.
+fn parse(bytes: &[u8], limits: &DecodeLimits) -> Result<Parsed, DecodeError> {
     let rest = bytes
         .strip_prefix(&SIGNATURE)
         .ok_or(DecodeError::BadSignature)?;
@@ -265,6 +293,7 @@ pub(crate) fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage,
     let mut idat_finished = false;
     let mut seen_iend = false;
     let mut first_chunk = true;
+    let mut extras = false;
 
     while pos < rest.len() {
         if seen_iend {
@@ -309,6 +338,9 @@ pub(crate) fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage,
                 if idat_finished {
                     return Err(DecodeError::ImageDataNotContiguous);
                 }
+                if !fallible::reserve(&mut idat, payload.len()) {
+                    return Err(DecodeError::OutOfMemory);
+                }
                 idat.extend_from_slice(payload);
                 seen_idat = true;
             }
@@ -324,7 +356,8 @@ pub(crate) fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage,
                 }
                 // A recognised-but-unhandled or wholly unknown ancillary
                 // chunk: its CRC already checked out above, so it is
-                // simply skipped.
+                // skipped, and noted as held beside the picture.
+                extras = true;
             }
         }
 
@@ -346,9 +379,100 @@ pub(crate) fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage,
     if ihdr.colour_type == ColourType::Indexed && palette.is_none() {
         return Err(DecodeError::PaletteRequired);
     }
+    Ok(Parsed {
+        ihdr,
+        palette,
+        trns,
+        idat,
+        extras,
+    })
+}
 
-    let pixels = decode_pixels(&ihdr, palette.as_deref(), trns.as_ref(), &idat)?;
-    Ok(RasterImage::from_parts(ihdr.width, ihdr.height, pixels))
+/// Decode a complete PNG file into a [`RasterImage`].
+///
+/// # Errors
+///
+/// See [`DecodeError`] for every fail-closed refusal reason.
+pub(crate) fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage, DecodeError> {
+    let parsed = parse(bytes, limits)?;
+    let pixels = rgba_pixels(&parsed)?;
+    Ok(RasterImage::from_parts(
+        parsed.ihdr.width,
+        parsed.ihdr.height,
+        pixels,
+    ))
+}
+
+/// Every pixel of `parsed` as straight RGBA8, row-major.
+fn rgba_pixels(parsed: &Parsed) -> Result<Vec<u8>, DecodeError> {
+    let (ihdr, palette, trns) = (
+        &parsed.ihdr,
+        parsed.palette.as_deref(),
+        parsed.trns.as_ref(),
+    );
+    decode_pixels(ihdr, &parsed.idat, RGBA_BYTES, |row, x, out| {
+        out.copy_from_slice(&pixel_rgba(row, x, ihdr, palette, trns)?);
+        Ok(())
+    })
+}
+
+/// Decode a complete PNG file into the representation it stores: an
+/// indexed-colour file as its indices and palette, every other colour type
+/// as RGBA8, with what the file held that the picture does not.
+///
+/// # Errors
+///
+/// See [`DecodeError`] for every fail-closed refusal reason.
+pub(crate) fn decode_native(
+    bytes: &[u8],
+    limits: &DecodeLimits,
+) -> Result<(Picture, Unkept), DecodeError> {
+    let parsed = parse(bytes, limits)?;
+    let ihdr = &parsed.ihdr;
+    let unkept = Unkept {
+        precision: ihdr.bit_depth == 16,
+        extras: parsed.extras,
+    };
+    let geometry = |_| DecodeError::DimensionsOverflow;
+    if ihdr.colour_type != ColourType::Indexed {
+        let pixels = rgba_pixels(&parsed)?;
+        return Picture::rgba(ihdr.width, ihdr.height, pixels)
+            .map(|picture| (picture, unkept))
+            .map_err(geometry);
+    }
+    let depth =
+        IndexDepth::from_bits(u32::from(ihdr.bit_depth)).ok_or(DecodeError::InvalidBitDepth)?;
+    let colours = parsed
+        .palette
+        .as_deref()
+        .ok_or(DecodeError::PaletteRequired)?;
+    let indices = decode_pixels(ihdr, &parsed.idat, 1, |row, x, out| {
+        let index = extract_sample(row, x, ihdr.bit_depth, 0, 1)
+            .ok_or(DecodeError::CompressedSizeMismatch)?;
+        if usize::from(index) >= colours.len() {
+            return Err(DecodeError::PaletteIndexOutOfRange);
+        }
+        out[0] = u8::try_from(index).map_err(|_| DecodeError::PaletteIndexOutOfRange)?;
+        Ok(())
+    })?;
+    // Entries past what the depth indexes can never be selected, so they are
+    // not part of the picture.
+    let alphas = match &parsed.trns {
+        Some(Trns::Indexed(alphas)) => alphas.as_slice(),
+        _ => &[],
+    };
+    let palette = fallible::collected(
+        colours.len().min(depth.colours()),
+        colours
+            .iter()
+            .enumerate()
+            .take(depth.colours())
+            .map(|(index, &[r, g, b])| [r, g, b, alphas.get(index).copied().unwrap_or(u8::MAX)]),
+    )
+    .ok_or(DecodeError::OutOfMemory)?;
+    Picture::indexed(ihdr.width, ihdr.height, depth, palette, indices, None)
+        .map(|picture| (picture, unkept))
+        .map_err(geometry)
 }
 
 /// Widen a `u32` to `usize`, failing closed rather than truncating.
@@ -446,7 +570,7 @@ fn bits_per_pixel(colour_type: ColourType, bit_depth: u8) -> u32 {
 
 /// Bytes per complete pixel used by the filter reconstruction (W3C PNG
 /// §"Filtering"): at least one byte, even for sub-byte bit depths.
-fn filter_bpp(bits_per_pixel: u32) -> usize {
+pub(crate) fn filter_bpp(bits_per_pixel: u32) -> usize {
     core::cmp::max(1, usize::try_from(bits_per_pixel / 8).unwrap_or(usize::MAX))
 }
 
@@ -480,6 +604,20 @@ fn expected_decompressed_len(passes: &[Pass], bits_per_pixel: u32) -> Result<u64
             .ok_or(DecodeError::DimensionsOverflow)?;
     }
     Ok(total)
+}
+
+/// What filter type `filter` predicts a byte to be from `a` (left), `b`
+/// (above) and `c` (above-left), or `None` for no filter type: the decoder
+/// adds it back and the encoder takes it away (W3C PNG §"Filtering").
+pub(crate) fn predict(filter: u8, a: u8, b: u8, c: u8) -> Option<u8> {
+    Some(match filter {
+        0 => 0,
+        1 => a,
+        2 => b,
+        3 => u8::try_from(u16::midpoint(u16::from(a), u16::from(b))).unwrap_or(u8::MAX),
+        4 => paeth_predictor(a, b, c),
+        _ => return None,
+    })
 }
 
 /// The Paeth predictor (W3C PNG §"Filter type 4: Paeth"): whichever of `a`
@@ -542,18 +680,8 @@ fn defilter_pass(
             } else {
                 0
             };
-            let recon = match filter_type {
-                0 => x,
-                1 => x.wrapping_add(a),
-                2 => x.wrapping_add(b),
-                3 => {
-                    let average = u16::midpoint(u16::from(a), u16::from(b));
-                    x.wrapping_add(u8::try_from(average).unwrap_or(u8::MAX))
-                }
-                4 => x.wrapping_add(paeth_predictor(a, b, c)),
-                _ => return Err(DecodeError::InvalidFilterType),
-            };
-            out[out_start + i] = recon;
+            let predicted = predict(filter_type, a, b, c).ok_or(DecodeError::InvalidFilterType)?;
+            out[out_start + i] = x.wrapping_add(predicted);
         }
         previous_row_start = Some(out_start);
     }
@@ -685,14 +813,20 @@ fn pixel_rgba(
     }
 }
 
-/// Decompress `idat` and reconstruct the full straight-alpha RGBA8 pixel
-/// buffer, honouring interlacing.
-fn decode_pixels(
+/// Decompress `idat`, reconstruct every scanline, honouring interlacing, and
+/// have `store` write each pixel's `out_bytes` output bytes.
+///
+/// `store` is handed a defiltered row, the pixel's column within it, and the
+/// slice of the output that pixel owns.
+fn decode_pixels<F>(
     ihdr: &Ihdr,
-    palette: Option<&[[u8; 3]]>,
-    trns: Option<&Trns>,
     idat: &[u8],
-) -> Result<Vec<u8>, DecodeError> {
+    out_bytes: usize,
+    mut store: F,
+) -> Result<Vec<u8>, DecodeError>
+where
+    F: FnMut(&[u8], u32, &mut [u8]) -> Result<(), DecodeError>,
+{
     let bpp_bits = bits_per_pixel(ihdr.colour_type, ihdr.bit_depth);
     let bpp = filter_bpp(bpp_bits);
     let passes = passes_for(ihdr);
@@ -711,7 +845,7 @@ fn decode_pixels(
         .ok_or(DecodeError::DimensionsOverflow)?;
     let output_len = to_usize64(
         pixel_count
-            .checked_mul(RGBA_BYTES as u64)
+            .checked_mul(out_bytes as u64)
             .ok_or(DecodeError::DimensionsOverflow)?,
     )?;
     let mut output = fallible::filled(output_len, 0u8).ok_or(DecodeError::OutOfMemory)?;
@@ -741,15 +875,14 @@ fn decode_pixels(
             let row = defiltered
                 .get(row_start..row_start + row_sample_bytes)
                 .ok_or(DecodeError::CompressedSizeMismatch)?;
+            let out_y = to_usize(placed_coordinate(pass.row_start, y, pass.row_step)?)?;
             for x in 0..pass.width {
-                let rgba = pixel_rgba(row, x, ihdr, palette, trns)?;
                 let out_x = to_usize(placed_coordinate(pass.col_start, x, pass.col_step)?)?;
-                let out_y = to_usize(placed_coordinate(pass.row_start, y, pass.row_step)?)?;
-                let index = (out_y * width + out_x) * RGBA_BYTES;
-                output
-                    .get_mut(index..index + RGBA_BYTES)
-                    .ok_or(DecodeError::CompressedSizeMismatch)?
-                    .copy_from_slice(&rgba);
+                let index = (out_y * width + out_x) * out_bytes;
+                let pixel = output
+                    .get_mut(index..index + out_bytes)
+                    .ok_or(DecodeError::CompressedSizeMismatch)?;
+                store(row, x, pixel)?;
             }
         }
     }

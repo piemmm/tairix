@@ -142,6 +142,8 @@ the program-library popup, and the file browser render at that size. A
 `BitmapFont` is three fields — family, pixel height, weight — and building one
 reads the theme and does arithmetic: no lock, no client call, nothing cached,
 so resolving a role per control paint costs nothing worth hoisting.
+`centred_top` places a line box centred in a band, the one arithmetic for a
+row of text that sits in the middle of its row.
 
 A non-native cell is rasterised **directly from the TrueType outline** at that
 exact size — but by `fontd`, not here: this crate parses no TrueType and holds
