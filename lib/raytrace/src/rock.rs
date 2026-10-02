@@ -14,7 +14,7 @@ use tairix_rng::{NonCryptoRng, RandU64};
 use tairix_util::mathf;
 
 use crate::noise::noise3;
-use crate::prototype::{stored, Facet, Part, Prototype};
+use crate::prototype::{stored, Building, Facet, Part, Prototype};
 use crate::vector::Vec3;
 
 /// How many times the icosahedron is subdivided: 5120 facets.
@@ -33,9 +33,9 @@ pub(crate) struct Habit {
 }
 
 /// A rock of `habit`, about a unit across either way of its middle, in
-/// material `stock`, shaped under `seed`; `None` when the heap will not
-/// hold it.
-pub(crate) fn rock(habit: Habit, stock: u16, seed: u64) -> Option<Prototype> {
+/// material `stock`, shaped under `seed`, its hierarchy still to build;
+/// `None` when the heap will not hold it.
+pub(crate) fn rock(habit: Habit, stock: u16, seed: u64) -> Option<Building> {
     let (mut vertices, mut faces) = icosahedron()?;
     for _ in 0..LEVELS {
         (vertices, faces) = subdivide(&vertices, &faces)?;
@@ -66,7 +66,7 @@ pub(crate) fn rock(habit: Habit, stock: u16, seed: u64) -> Option<Prototype> {
     let mut stored_vertices = Vec::new();
     stored_vertices.try_reserve_exact(vertices.len()).ok()?;
     stored_vertices.extend(vertices.iter().map(|&vertex| stored(vertex)));
-    Prototype::new(parts, stored_vertices, normals)
+    Prototype::building(parts, stored_vertices, normals)
 }
 
 /// The point of the unit sphere along `direction` moved to the rock's

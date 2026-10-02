@@ -27,6 +27,39 @@ pub(crate) fn for_each<T: Send>(
     }
 }
 
+/// Visit each band of `values` as [`for_each`] does, and join what each
+/// answers onto `start` in the order of the bands, whichever core visited
+/// which.
+pub(crate) fn fold<T: Send, R: Copy + Send>(
+    runner: &dyn JobRunner,
+    values: &mut [T],
+    (first, per): (usize, usize),
+    start: R,
+    visit: &(dyn Fn(usize, &mut [T]) -> R + Sync),
+    join: impl Fn(R, R) -> R,
+) -> R {
+    let per = per.max(1);
+    let mut bands: Vec<(usize, &mut [T], R)> = Vec::new();
+    if !fallible::reserve(&mut bands, values.len().div_ceil(per)) {
+        return (first..)
+            .zip(values.chunks_mut(per))
+            .fold(start, |joined, (number, band)| {
+                join(joined, visit(number, band))
+            });
+    }
+    bands.extend(
+        (first..)
+            .zip(values.chunks_mut(per))
+            .map(|(number, band)| (number, band, start)),
+    );
+    tairix_parallel::for_each(runner, &mut bands, &|(number, band, answer)| {
+        *answer = visit(*number, band);
+    });
+    bands
+        .iter()
+        .fold(start, |joined, &(_, _, answer)| join(joined, answer))
+}
+
 #[cfg(test)]
 #[path = "band_tests.rs"]
 mod tests;

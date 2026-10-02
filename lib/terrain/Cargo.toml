@@ -17,3 +17,10 @@ workspace = true
 tairix-util = { path = "../util", version = "=0.0.0" }
 # The predictable stream a run of droplets is drawn from.
 tairix-rng = { path = "../rng", version = "=0.0.0" }
+# The runner a run of droplets shares its tiles across.
+tairix-parallel = { path = "../parallel", version = "=0.0.0", default-features = false }
+
+[dev-dependencies]
+# The host test runners: `Threaded` and `Reversed`, so the tests prove a run
+# of droplets leaves the same ground however its tiles are shared.
+tairix-parallel = { path = "../parallel", version = "=0.0.0", default-features = false, features = ["test-util"] }

@@ -131,7 +131,7 @@ const QUADRATURE: [(f64, f64); 8] = [
 ];
 
 /// A cover over the ground.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct Lawn {
     /// The scene's height grid it lies on.
     pub(crate) field: u32,
@@ -420,6 +420,15 @@ impl Plane {
 }
 
 impl Lawn {
+    /// A copy of this lawn; `None` when the heap will not hold its shade.
+    pub(crate) fn copied(&self) -> Option<Self> {
+        let shade = match &self.shade {
+            Some(shade) => Some(shade.copied()?),
+            None => None,
+        };
+        Some(Self { shade, ..*self })
+    }
+
     pub(crate) fn bounds(&self) -> Aabb {
         Aabb {
             min: Vec3::new(self.from.0, self.floor - 0.01, self.from.1),

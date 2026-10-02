@@ -12,7 +12,8 @@
 //! - [`hillslope`] — linear diffusion, and talus: ground steeper than its
 //!   angle of repose slumps.
 //! - [`droplet`] — particle hydraulic erosion: droplets that carry sediment
-//!   down the slope they read and drop it where they slow.
+//!   down the slope they read and drop it where they slow, tile by tile, the
+//!   tiles of a phase at once across a runner.
 //! - [`route`] — A\* with integer costs: the least-cost path between two
 //!   samples under a caller's pricing of each step.
 //!

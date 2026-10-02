@@ -34,8 +34,8 @@ use crate::vector::{real, share, Frame, Vec3};
 
 /// Rows of elevation a record's hemisphere is cut into, each carrying an
 /// equal share of the cosine, by columns of azimuth: one ray a cell.
-const ROWS: usize = 8;
-const COLUMNS: usize = 32;
+const ROWS: usize = 16;
+pub(crate) const COLUMNS: usize = 64;
 pub(crate) const CELLS: usize = ROWS * COLUMNS;
 
 /// A record holds within this share of the harmonic mean distance of what
@@ -47,12 +47,12 @@ const ACCURACY: f64 = 0.4;
 /// see, and coarser would reach over changes in the light no ray of its own
 /// looked at. Shares, not pixels, so a picture costs the same to gather for
 /// at any size.
-const NEAREST: f64 = 1.0 / 240.0;
+const NEAREST: f64 = 1.0 / 480.0;
 const FARTHEST: f64 = 1.0 / 20.0;
 
 /// The cosine of the widest angle between a record's normal and a point's
 /// that the record still holds for: fifteen degrees.
-const COS_TURN: f64 = 0.866_025_403_784_438_6;
+const COS_TURN: f64 = 0.965_925_826_289_068_3;
 
 /// How far behind a record's surface, as a share of its radius, a point may
 /// lie and still take its light: farther, and something between them may
@@ -65,16 +65,17 @@ const HOLDS: f64 = 0.3;
 
 /// How many rows of sites each grid records are laid over has across the
 /// picture's height, coarsest first; the finest as fine as the least radius.
-const GRIDS: [u32; 5] = [15, 30, 60, 120, 240];
+const GRIDS: [u32; 6] = [15, 30, 60, 120, 240, 480];
 
 /// The most records a square of the picture as wide as it is high holds:
 /// what bounds the gathering where the light changes everywhere at once;
 /// and in a small picture, the pixels there must be for each.
-const RECORDS_A_SQUARE: u64 = 1600;
-const PIXELS_A_RECORD: u64 = 64;
+const RECORDS_A_SQUARE: u64 = 6400;
+const PIXELS_A_RECORD: u64 = 16;
 
-/// Records one core gathers, and sites it looks over, in a unit of work.
-const GATHER_UNIT: usize = 2;
+/// Rows of a record's hemisphere one core gathers, and sites it looks over,
+/// in a unit of work.
+const GATHER_ROWS: usize = 2;
 const FIND_UNIT: usize = 64;
 
 /// A prime above any grid's count of sites, which steps through a grid in an
@@ -149,7 +150,7 @@ fn add(gradient: &mut [Vec3; 3], weights: Vec3, axis: Vec3) {
 
 impl Record {
     /// The record the rays `cells` brought back to `site`.
-    fn new(site: &Site, cells: &[Cell; CELLS]) -> Self {
+    fn new(site: &Site, cells: &[Cell]) -> Self {
         let frame = Frame::around(site.normal);
         let (u, v) = (frame.x, frame.y);
         let cell = |row: usize, column: usize| {
@@ -333,7 +334,8 @@ enum Stage {
     /// Looking over the grid's sites, from the `n`th in its scrambled order,
     /// for those no record holds for.
     Finding(usize),
-    /// Gathering records at the sites found, from the `n`th.
+    /// Gathering records at the sites found, from the `n`th row of their
+    /// hemispheres counted through every site.
     Gathering(usize),
 }
 
@@ -346,6 +348,10 @@ pub(crate) struct Gathering {
     stage: Stage,
     /// The sites of the grid being gathered no record yet holds for.
     sites: Vec<Site>,
+    /// What the rays of the sites a unit gathers for brought back, a site's
+    /// cells after another's, the first holding the rows of a site an
+    /// earlier unit began.
+    cells: Vec<Cell>,
     held: Radiosity,
     most: usize,
 }
@@ -367,6 +373,7 @@ impl Gathering {
             grid: 0,
             stage: Stage::Finding(0),
             sites: Vec::new(),
+            cells: Vec::new(),
             held,
             most,
         })
@@ -425,21 +432,13 @@ impl Gathering {
                 };
             }
             Stage::Gathering(next) => {
-                let end = next
-                    .saturating_add(GATHER_UNIT * width)
-                    .min(self.sites.len());
-                let sites = self.sites.get(next..end).unwrap_or(&[]);
-                let mut gathered: Vec<(Site, Option<Record>)> =
-                    fallible::collected(sites.len(), sites.iter().map(|&site| (site, None)))?;
-                tairix_parallel::for_each(runner, &mut gathered, &|(site, slot)| {
-                    let mut cells = [Cell::DARK; CELLS];
-                    tracer.gather(site, &mut cells);
-                    *slot = Some(Record::new(site, &cells));
-                });
-                self.held
-                    .records
-                    .extend(gathered.into_iter().filter_map(|(_, record)| record));
-                if end < self.sites.len() {
+                let rows = self.sites.len() * ROWS;
+                let end = next.saturating_add(GATHER_ROWS * width).min(rows);
+                if next < end {
+                    let held = (self.sites.as_slice(), &mut self.cells, &mut self.held);
+                    gather_rows(&tracer, held, next..end, runner)?;
+                }
+                if end < rows {
                     self.stage = Stage::Gathering(end);
                 } else {
                     self.held.index()?;
@@ -458,7 +457,7 @@ impl Gathering {
     pub(crate) fn done(&self) -> f64 {
         let within = match self.stage {
             Stage::Finding(_) => 0.0,
-            Stage::Gathering(next) => 0.5 + 0.5 * share(next, self.sites.len()),
+            Stage::Gathering(next) => 0.5 + 0.5 * share(next, self.sites.len() * ROWS),
         };
         let grids = (real(self.grid) + within) / real(GRIDS.len());
         share(self.held.records.len(), self.most).max(grids.min(1.0))
@@ -471,6 +470,53 @@ impl Gathering {
         }
         Some(self.held)
     }
+}
+
+/// Gather rows `rows` of `sites`' hemispheres, counted through every site, a
+/// row a piece across `runner` into `cells`, and lay down in `held` the
+/// record of each site whose last row they reach; `None` when the heap
+/// refused them.
+fn gather_rows(
+    tracer: &Tracer<'_>,
+    (sites, cells, held): (&[Site], &mut Vec<Cell>, &mut Radiosity),
+    rows: core::ops::Range<usize>,
+    runner: &dyn JobRunner,
+) -> Option<()> {
+    let first = rows.start / ROWS;
+    let count = (rows.end - 1) / ROWS - first + 1;
+    if !fallible::grow_to(cells, count * CELLS, Cell::DARK) {
+        return None;
+    }
+    let sites = sites.get(first..first + count)?;
+    let mut pieces: Vec<(&Site, usize, &mut [Cell])> = Vec::new();
+    if !fallible::reserve(&mut pieces, rows.len()) {
+        return None;
+    }
+    for ((site_rows, site), gathered) in (first * ROWS..)
+        .step_by(ROWS)
+        .zip(sites)
+        .zip(cells.chunks_mut(CELLS))
+    {
+        for (row, piece) in gathered.chunks_mut(COLUMNS).enumerate() {
+            if rows.contains(&(site_rows + row)) {
+                pieces.push((site, row, piece));
+            }
+        }
+    }
+    tairix_parallel::for_each(runner, &mut pieces, &|(site, row, piece)| {
+        tracer.gather(site, *row, piece);
+    });
+    let whole = (rows.end / ROWS).saturating_sub(first);
+    for (site, gathered) in sites.iter().zip(cells.chunks(CELLS)).take(whole) {
+        if held.records.len() < held.records.capacity() {
+            held.records.push(Record::new(site, gathered));
+        }
+    }
+    // A site the unit began but did not finish carries into the next.
+    if whole < count {
+        cells.copy_within((count - 1) * CELLS..count * CELLS, 0);
+    }
+    Some(())
 }
 
 /// What the rays of the record gathered for the site at pixel `(x, y)` are

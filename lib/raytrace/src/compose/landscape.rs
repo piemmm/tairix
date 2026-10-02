@@ -715,7 +715,7 @@ pub(super) fn plant(
         closure: (0.6, 1.6),
         stature: (0.65, 0.9),
         gaps: 0.15,
-        most: 20_000,
+        most: 120_000,
         open: (4.0, 0.6),
     };
     stage.sow(Wood {
@@ -1460,7 +1460,7 @@ fn meadow_scene(stage: &mut Stage, dice: &mut Dice, land: &Land, vantage: Vantag
         closure: (0.6, 1.6),
         stature: (0.65, 0.9),
         gaps: 0.1,
-        most: 20_000,
+        most: 120_000,
         open: (4.0, 0.6),
     };
     stage.sow(Wood {
@@ -1574,7 +1574,7 @@ fn forest_kind(dice: &mut Dice) -> Forest {
         closure,
         stature,
         gaps,
-        most: 90_000,
+        most: 270_000,
         open: (1.5, 0.3),
     };
     match dice.count(0, 5) {
@@ -2506,7 +2506,7 @@ fn badlands(stage: &mut Stage, dice: &mut Dice, land: &Land, vantage: &Vantage) 
     let cacti = Grove::new(stage, dice, (&[Kind::Saguaro], Season::Summer), Stand::Open)?;
     stage.sow(Wood {
         grove: cacti,
-        woodland: scattered(0.7, (16.0, 34.0), 600),
+        woodland: scattered(0.7, (16.0, 34.0), 6000),
         rooting: flat,
         vantage: *vantage,
         beneath: None,
@@ -2515,7 +2515,7 @@ fn badlands(stage: &mut Stage, dice: &mut Dice, land: &Land, vantage: &Vantage) 
     let scrub = Grove::new(stage, dice, (&[Kind::Box], Season::Summer), Stand::Open)?;
     stage.sow(Wood {
         grove: scrub,
-        woodland: scattered(0.5, (7.0, 16.0), 900),
+        woodland: scattered(0.5, (7.0, 16.0), 9000),
         rooting: flat,
         vantage: *vantage,
         beneath: None,
@@ -2643,7 +2643,7 @@ fn winter_scene(
         closure: (0.5, 1.1),
         stature: (0.6, 0.9),
         gaps: 0.2,
-        most: 40_000,
+        most: 160_000,
         open: (3.0, 0.5),
     };
     let deadfall = deadfall(
@@ -3071,7 +3071,7 @@ fn canyon_scene(stage: &mut Stage, dice: &mut Dice, land: &Land, vantage: Vantag
         closure: (1.4, 3.5),
         stature: (0.6, 0.9),
         gaps: 0.0,
-        most: 4000,
+        most: 40_000,
         open: (3.0, 0.5),
     };
     stage.sow(Wood {
@@ -3187,7 +3187,7 @@ fn valley_scene(stage: &mut Stage, dice: &mut Dice, land: &Land, vantage: Vantag
         closure: (0.6, 1.6),
         stature: (0.65, 0.9),
         gaps: 0.1,
-        most: 20_000,
+        most: 120_000,
         open: (4.0, 0.6),
     };
     stage.sow(Wood {

@@ -35,7 +35,7 @@ use crate::land::{Build, Land};
 use crate::light::Light;
 use crate::material::{Finish, Foam, Material, Relief};
 use crate::pigment::Pigment;
-use crate::prototype::Prototype;
+use crate::prototype::{Building, Prototype, BUILD_UNIT};
 use crate::rock::{rock, Habit};
 use crate::scene::{Exposure, Fog, Grid, Object, Parts};
 use crate::shade::{Crown, Shades};
@@ -201,14 +201,102 @@ pub(super) enum Recipe {
     },
 }
 
-/// The prototypes a composition's recipes are growing, a bounded step of
-/// several at once each unit.
+/// The prototypes a composition's recipes are growing: as many at once as
+/// the runner runs, each a bounded step a unit on a core of its own.
 #[derive(Debug)]
 struct Grow {
     /// The next recipe not yet begun.
     next: usize,
-    active: Vec<(usize, Growth)>,
+    active: Vec<(usize, Work)>,
     grown: Vec<Option<Prototype>>,
+}
+
+/// A recipe being grown.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "a runner's width of these at once, and a box could not fail gracefully"
+)]
+#[derive(Debug)]
+enum Work {
+    /// Not yet begun.
+    Planned(Recipe),
+    /// A tree, growing its stems and then its hierarchy.
+    Growing(Growth),
+    /// Its parts made, its hierarchy being built.
+    Indexing(Building),
+    Grown(Prototype),
+    /// The heap refused it.
+    Refused,
+}
+
+impl Work {
+    /// The next bounded step of the recipe: a tree's next stems or its
+    /// hierarchy's next slice, or another kind's parts made whole and then
+    /// its hierarchy a slice at a time.
+    fn step(&mut self) {
+        *self = match core::mem::replace(self, Self::Refused) {
+            Self::Planned(recipe) => begun(&recipe).unwrap_or(Self::Refused),
+            Self::Growing(mut growth) => match growth.step() {
+                Some(true) => growth.finish().map_or(Self::Refused, Self::Grown),
+                Some(false) => Self::Growing(growth),
+                None => Self::Refused,
+            },
+            Self::Indexing(mut building) => {
+                if building.step(BUILD_UNIT) {
+                    Self::Grown(building.finish())
+                } else {
+                    Self::Indexing(building)
+                }
+            }
+            done @ (Self::Grown(_) | Self::Refused) => done,
+        };
+    }
+}
+
+/// `recipe` begun: a tree's first stems, or another kind's parts made.
+fn begun(recipe: &Recipe) -> Option<Work> {
+    Some(match *recipe {
+        Recipe::Tree {
+            species,
+            height,
+            season,
+            stock,
+            seed,
+        } => Work::Growing(Growth::new(&species, height, (season, stock), seed)?),
+        Recipe::Palm {
+            height,
+            stock,
+            fronds,
+            seed,
+        } => Work::Indexing(palm(height, stock, fronds, seed)?),
+        Recipe::Saguaro {
+            height,
+            stock,
+            seed,
+        } => Work::Indexing(saguaro(height, stock, seed)?),
+        Recipe::Fern {
+            height,
+            stock,
+            fronds,
+            seed,
+        } => Work::Indexing(fern(height, stock, fronds, seed)?),
+        Recipe::Rock { habit, stock, seed } => Work::Indexing(rock(habit, stock, seed)?),
+        Recipe::Log {
+            length,
+            radius,
+            bark,
+            thrown,
+            seed,
+        } => Work::Indexing(log(length, radius, (bark, thrown), seed)?),
+        Recipe::Stump {
+            height,
+            radius,
+            top,
+            bark,
+            wood,
+            seed,
+        } => Work::Indexing(stump(height, radius, (top, bark, wood), seed)?),
+    })
 }
 
 impl Grow {
@@ -231,100 +319,36 @@ impl Grow {
         )
     }
 
-    /// Grow the next step of as many trees as `runner` runs at once;
+    /// Grow the next step of as many recipes as `runner` runs at once;
     /// whether every recipe is grown, or `None` when the heap refused one.
     fn step(&mut self, recipes: &[Recipe], runner: &dyn JobRunner) -> Option<bool> {
         let width = runner.width().max(1);
         while self.active.len() < width {
-            let Some(recipe) = recipes.get(self.next) else {
+            let Some(&recipe) = recipes.get(self.next) else {
                 break;
             };
-            let index = self.next;
+            self.active.try_reserve(1).ok()?;
+            self.active.push((self.next, Work::Planned(recipe)));
             self.next += 1;
-            match *recipe {
-                Recipe::Tree {
-                    species,
-                    height,
-                    season,
-                    stock,
-                    seed,
-                } => {
-                    self.active.try_reserve(1).ok()?;
-                    self.active
-                        .push((index, Growth::new(&species, height, (season, stock), seed)?));
+        }
+        tairix_parallel::for_each(runner, &mut self.active, &|(_, work)| work.step());
+        let (grown, mut refused) = (&mut self.grown, false);
+        self.active.retain_mut(|(index, work)| match work {
+            Work::Grown(_) => {
+                if let (Work::Grown(prototype), Some(slot)) = (
+                    core::mem::replace(work, Work::Refused),
+                    grown.get_mut(*index),
+                ) {
+                    *slot = Some(prototype);
                 }
-                Recipe::Palm {
-                    height,
-                    stock,
-                    fronds,
-                    seed,
-                } => {
-                    *self.grown.get_mut(index)? = Some(palm(height, stock, fronds, seed)?);
-                }
-                Recipe::Saguaro {
-                    height,
-                    stock,
-                    seed,
-                } => {
-                    *self.grown.get_mut(index)? = Some(saguaro(height, stock, seed)?);
-                }
-                Recipe::Fern {
-                    height,
-                    stock,
-                    fronds,
-                    seed,
-                } => {
-                    *self.grown.get_mut(index)? = Some(fern(height, stock, fronds, seed)?);
-                }
-                Recipe::Rock { habit, stock, seed } => {
-                    *self.grown.get_mut(index)? = Some(rock(habit, stock, seed)?);
-                }
-                Recipe::Log {
-                    length,
-                    radius,
-                    bark,
-                    thrown,
-                    seed,
-                } => {
-                    *self.grown.get_mut(index)? = Some(log(length, radius, (bark, thrown), seed)?);
-                }
-                Recipe::Stump {
-                    height,
-                    radius,
-                    top,
-                    bark,
-                    wood,
-                    seed,
-                } => {
-                    *self.grown.get_mut(index)? =
-                        Some(stump(height, radius, (top, bark, wood), seed)?);
-                }
+                false
             }
-        }
-        let mut refused = false;
-        let mut outcomes: Vec<Option<bool>> = Vec::new();
-        outcomes.try_reserve_exact(self.active.len()).ok()?;
-        outcomes.resize(self.active.len(), Some(false));
-        {
-            let mut pairs: Vec<(&mut (usize, Growth), &mut Option<bool>)> = Vec::new();
-            pairs.try_reserve_exact(self.active.len()).ok()?;
-            pairs.extend(self.active.iter_mut().zip(outcomes.iter_mut()));
-            tairix_parallel::for_each(runner, &mut pairs, &|(active, outcome)| {
-                **outcome = active.1.step();
-            });
-        }
-        let mut still = Vec::new();
-        still.try_reserve_exact(self.active.len()).ok()?;
-        for ((index, growth), outcome) in
-            core::mem::take(&mut self.active).into_iter().zip(outcomes)
-        {
-            match outcome {
-                None => refused = true,
-                Some(true) => *self.grown.get_mut(index)? = Some(growth.finish()?),
-                Some(false) => still.push((index, growth)),
+            Work::Refused => {
+                refused = true;
+                false
             }
-        }
-        self.active = still;
+            Work::Planned(_) | Work::Growing(_) | Work::Indexing(_) => true,
+        });
         if refused {
             return None;
         }
@@ -481,10 +505,14 @@ impl Composition {
     /// and then its planting take most of it, and the grids, growing and sky
     /// its look queued the rest.
     pub(crate) fn done(&self) -> f64 {
-        let (from, span) = if self.landed { (0.8, 0.2) } else { (0.0, 1.0) };
+        let (from, span) = if self.landed {
+            (0.78, 0.22)
+        } else {
+            (0.0, 1.0)
+        };
         match self.jobs.front() {
-            Some(Job::Land(landing)) => 0.66 * landing.build.done(),
-            Some(Job::Plant(planting)) => 0.66 + 0.14 * planting.growing.done(),
+            Some(Job::Land(landing)) => 0.44 * landing.build.done(),
+            Some(Job::Plant(planting)) => 0.44 + 0.34 * planting.growing.done(),
             Some(front) => {
                 let finished = self.settled.saturating_sub(self.jobs.len());
                 let within = (real(finished) + self.job_done(front)) / real(self.settled.max(1));
@@ -497,17 +525,18 @@ impl Composition {
     /// How far one of the look's queued jobs has come.
     fn job_done(&self, job: &Job) -> f64 {
         match job {
-            Job::Fill(fill) => {
-                let rows = match fill.target {
-                    Target::Field(index) => self.stage.fields.get(index).map(Grid::rows),
-                    Target::Clouds => self
-                        .seen
-                        .as_ref()
-                        .and_then(|(look, _)| look.sky.clouds.as_ref())
-                        .map(Grid::rows),
-                };
-                rows.map_or(1.0, |rows| share(fill.row, rows))
-            }
+            Job::Fill(fill) => match fill.target {
+                Target::Field(index) => self
+                    .stage
+                    .fields
+                    .get(index)
+                    .map_or(1.0, |field| fill.done(field.rows(), Some(field))),
+                Target::Clouds => self
+                    .seen
+                    .as_ref()
+                    .and_then(|(look, _)| look.sky.clouds.as_ref())
+                    .map_or(1.0, |clouds| fill.done(clouds.rows(), None)),
+            },
             Job::Grow(grow) => grow.done(),
             Job::Land(_) | Job::Plant(_) | Job::Sky => 0.0,
         }
@@ -812,7 +841,7 @@ const CANOPY_SIDE: usize = 2048;
 
 /// The most of each a stage holds: bounds on what one scene may cost, not
 /// capacities a larger machine would want more of.
-const MAX_OBJECTS: usize = 1 << 17;
+const MAX_OBJECTS: usize = 1 << 19;
 const MAX_FACES: usize = 4096;
 const MAX_FIELDS: usize = 12;
 const MAX_MATERIALS: usize = 256;
@@ -1024,27 +1053,23 @@ impl Stage {
         push(
             &mut self.fills,
             MAX_FIELDS + 1,
-            Fill {
-                target: Target::Field(index as usize),
-                form,
-                row: 0,
-            },
+            Fill::new(Target::Field(index as usize), form),
         )?;
         Some(index)
     }
 
     /// The grid of how high `lawn`'s shoots stand, a vertex at the middle of
-    /// each block of its cells — blocks no more than a canopy grid's side
-    /// across it, and where a block is a cell, how the cell grows — taken
-    /// among the scene's grids to be filled.
+    /// each block of its cells and one more beyond each end — blocks no more
+    /// than a canopy grid's side across it, and where a block is a cell, how
+    /// the cell grows — taken among the scene's grids to be filled.
     fn tops(&mut self, lawn: &Lawn) -> Option<Tops> {
         let cells = |low: f64, high: f64| mathf::ceil((high - low) / lawn.cell).max(1.0);
         let across = cells(lawn.from.0, lawn.to.0).max(cells(lawn.from.1, lawn.to.1));
         let block = mathf::ceil(across / real(CANOPY_SIDE - 2)).max(1.0);
-        let side = usize::try_from(mathf::round_i32(mathf::ceil(across / block))).ok()? + 2;
+        let blocks = usize::try_from(mathf::round_i32(mathf::ceil(across / block))).ok()?;
         let spacing = block * lawn.cell;
         let origin = (lawn.from.0 - 0.5 * spacing, lawn.from.1 - 0.5 * spacing);
-        let mut grid = Heightfield::new(side.next_power_of_two(), origin, spacing, false)?;
+        let mut grid = Heightfield::new(blocks + 1, origin, spacing, false)?;
         if !grid.carry_attributes() {
             return None;
         }
@@ -1052,7 +1077,7 @@ impl Stage {
         let field = self.grid(
             grid,
             Form::Canopy {
-                lawn: lawn.clone(),
+                lawn: lawn.copied()?,
                 block,
             },
         )?;
@@ -1069,11 +1094,7 @@ impl Stage {
         push(
             &mut self.fills,
             MAX_FIELDS + 1,
-            Fill {
-                target: Target::Clouds,
-                form: Form::Clouds(form),
-                row: 0,
-            },
+            Fill::new(Target::Clouds, Form::Clouds(form)),
         )
         .map(|_| ())
     }

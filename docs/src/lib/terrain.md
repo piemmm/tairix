@@ -28,7 +28,13 @@ one value a sample, and refuses one of any other length (`TerrainError::Shape`).
   hollows, and slumps any slope steeper than its angle of repose back to it:
   talus.
 - **Droplets** carry sediment down the slope they read, eroding where they
-  speed and depositing where they slow, a bounded run of them each call.
+  speed and depositing where they slow. They start tile by tile, each tile
+  drawing them from a stream of its own, and the tiles take turns in nine
+  phases: a tile is half as broad as a droplet reaches, and two tiles of one
+  phase lie two tiles apart, so no two of them reach the same sample and a
+  phase's tiles run at once across a runner, each over the rows it can reach.
+  Each call runs one turn — a fixed batch of each of a phase's tiles' droplets
+  — on as many of its tiles as the runner is wide.
 - **Routes** are A\* over integer costs the caller prices step by step, so a
   road can prefer gentle ground, reuse an existing road, and bridge a river
   where it is narrowest; ties break on a sample's index.
@@ -37,7 +43,8 @@ one value a sample, and refuses one of any other length (`TerrainError::Shape`).
 
 A flood, a route and a run of droplets each advance a bounded number of samples
 per call, so a caller answering a frame spreads them over as many calls as it
-needs; run to its end, the pass gives exactly what one call would. A route the
+needs; run to its end, the pass gives exactly what one call would, and a run of
+droplets the same ground however many cores shared its tiles. A route the
 heap refuses room to expand ends with `TerrainError::OutOfMemory`, never left
 half-expanded to answer wrongly later. Arithmetic is
 `f64` or `f32` through `lib/util::mathf` and every queue breaks its ties on a

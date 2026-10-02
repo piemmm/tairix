@@ -11,7 +11,7 @@ const HABIT: Habit = Habit {
 
 #[test]
 fn a_rock_is_met_from_outside_whichever_way_it_is_looked_at() {
-    let stone = rock(HABIT, 3, 17).expect("a rock");
+    let stone = rock(HABIT, 3, 17).expect("a rock").whole();
     let bounds = stone.bounds();
     assert!(
         bounds.max.x - bounds.min.x > 1.0 && bounds.max.x - bounds.min.x < 3.0,
@@ -46,11 +46,11 @@ fn a_rock_is_met_from_outside_whichever_way_it_is_looked_at() {
 fn a_seed_shapes_the_same_rock_and_another_seed_another() {
     let describe = |stone: &Prototype| alloc::format!("{:?}", stone.bounds());
     assert_eq!(
-        describe(&rock(HABIT, 0, 5).expect("a rock")),
-        describe(&rock(HABIT, 0, 5).expect("a rock"))
+        describe(&rock(HABIT, 0, 5).expect("a rock").whole()),
+        describe(&rock(HABIT, 0, 5).expect("a rock").whole())
     );
     assert_ne!(
-        describe(&rock(HABIT, 0, 5).expect("a rock")),
-        describe(&rock(HABIT, 0, 6).expect("a rock"))
+        describe(&rock(HABIT, 0, 5).expect("a rock").whole()),
+        describe(&rock(HABIT, 0, 6).expect("a rock").whole())
     );
 }

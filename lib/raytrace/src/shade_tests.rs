@@ -1,4 +1,6 @@
 use super::*;
+use alloc::vec;
+use tairix_parallel::JobRunner;
 
 const SQUARE: Rect = ((-60.0, -60.0), (60.0, 60.0));
 
@@ -114,4 +116,124 @@ fn smoothing_keeps_a_level_run_level_and_spreads_a_step() {
     let mut grid = [1.0, 7.0, 1.0, 7.0, 4.0, 7.0];
     smooth(&mut grid, 2, 1, &mut sums);
     assert!(close(&grid, &[1.0, 7.0, 2.0, 7.0, 3.0, 7.0]), "{grid:?}");
+}
+
+/// The shade `crowns` cast over `rect`, as it was cast whole before it was
+/// cast in bands: every crown splatted over the grid, then the cover spread
+/// along every row and down every column, twice.
+fn cast_whole(crowns: &[Crown], (from, to): Rect, cell: f64, spread: f64) -> Vec<[u8; 2]> {
+    let (columns, rows) = (
+        samples(to.0 - from.0, cell).expect("columns"),
+        samples(to.1 - from.1, cell).expect("rows"),
+    );
+    let mut under = vec![0u8; columns * rows];
+    for &((x, z), reach) in crowns {
+        let reach = reach.max(1e-3);
+        if x + reach < from.0 || x - reach > to.0 || z + reach < from.1 || z - reach > to.1 {
+            continue;
+        }
+        let (west, east) = (
+            first(x - reach, from.0, cell, columns),
+            first(x + reach, from.0, cell, columns) + 1,
+        );
+        let (south, north) = (
+            first(z - reach, from.1, cell, rows),
+            first(z + reach, from.1, cell, rows) + 1,
+        );
+        for row in south..=north.min(rows - 1) {
+            let dz = from.1 + real(row) * cell - z;
+            for column in west..=east.min(columns - 1) {
+                let dx = from.0 + real(column) * cell - x;
+                let over = 1.0 - smoothstep(EDGE * reach, reach, mathf::hypot(dx, dz));
+                let value = &mut under[row * columns + column];
+                *value = (*value).max(byte(over));
+            }
+        }
+    }
+    let radius = usize::try_from(mathf::round_i32(spread / cell).max(1)).expect("radius");
+    let mut now: Vec<f64> = under.iter().map(|&value| f64::from(value)).collect();
+    let mut line = vec![0.0; columns.max(rows) + 1];
+    for _ in 0..SPREADS {
+        for row in 0..rows {
+            smooth(
+                &mut now[row * columns..(row + 1) * columns],
+                1,
+                radius,
+                &mut line,
+            );
+        }
+        for column in 0..columns {
+            smooth(&mut now[column..], columns, radius, &mut line);
+        }
+    }
+    under
+        .iter()
+        .zip(&now)
+        .map(|(&under, &hidden)| {
+            [
+                under,
+                u8::try_from(mathf::round_i32(hidden).clamp(0, 255)).expect("a byte"),
+            ]
+        })
+        .collect()
+}
+
+/// A wood of a few thousand crowns over and about a rectangle that is not
+/// square, several bands deep: some crowns overhanging its edges from
+/// outside, and their reaches varied.
+fn scattered_wood() -> Vec<Crown> {
+    (0..3000u32)
+        .map(|index| {
+            let draw = |salt: u32| crate::sample::unit(crate::sample::mix32(index ^ salt));
+            (
+                (-90.0 + 260.0 * draw(0x11), -50.0 + 300.0 * draw(0x22)),
+                0.5 + 9.0 * draw(0x33),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_shade_cast_in_bands_is_the_shade_cast_whole_on_any_runner() {
+    let crowns = scattered_wood();
+    let rect = ((-70.0, -30.0), (150.0, 230.0));
+    let whole = cast_whole(&crowns, rect, 0.75, 9.0);
+    let runners: [&dyn JobRunner; 3] = [
+        &tairix_parallel::SERIAL,
+        &tairix_parallel::Reversed::new(5),
+        &tairix_parallel::Threaded::new(4),
+    ];
+    for runner in runners {
+        let mut casting = Casting::new(&crowns, rect, 0.75, 9.0).expect("held");
+        let (mut steps, mut was) = (0, 0.0);
+        while !casting.step(&crowns, runner).expect("held") {
+            let now = casting.done();
+            assert!(now >= was && now < 1.0, "{was} then {now}");
+            was = now;
+            steps += 1;
+        }
+        // Many units, each at most a few bands a core: never the whole cast.
+        assert!(steps > 2 * PASSES, "{steps} steps");
+        let shade = casting.finish();
+        assert_eq!(shade.cover, whole);
+    }
+}
+
+#[test]
+fn a_shade_sampled_in_bands_is_the_shade_sampled_alone() {
+    let crowns = scattered_wood();
+    let shades = Shades::of(&crowns, ((0.0, 0.0), 400.0), (30.0, 60.0)).expect("held");
+    let rect = ((-120.0, -40.0), (300.0, 330.0));
+    let alone = shades.within(rect, 1.5).expect("held");
+    let mut sampling = Sampling::new(rect, 1.5).expect("held");
+    let threaded = tairix_parallel::Threaded::new(4);
+    let mut steps = 0;
+    while !sampling.step(&shades, &threaded) {
+        steps += 1;
+    }
+    // Four cores sample 128 rows a unit, so its 248 rows take two units.
+    assert_eq!(steps, 1);
+    let shared = sampling.finish();
+    assert!(!shared.is_open());
+    assert_eq!(shared.cover, alone.cover);
 }

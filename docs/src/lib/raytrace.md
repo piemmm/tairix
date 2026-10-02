@@ -39,7 +39,8 @@ A land is a landform worn by water through `lib/terrain`
 and hillslope creep over a coarse grid cut its valleys; its rivers, lakes and
 roads are laid where the water and the ground let them run; and a far grid and
 a finer grid about the eye refine it, droplets running over each for the rills
-and fans no coarser pass makes. Each vertex carries what the land is like
+and fans no coarser pass makes, a turn of the land's tiles at a time across the
+runner. Each vertex carries what the land is like
 there — wet, worn or built up, on a road or a path, how much grows — which its
 shading, its sward and its woods read. Grass is laid over it in lawns of
 coarser cells the further they lie, merging leaves finer than a pixel and
@@ -61,8 +62,9 @@ land stands, a bounded step at a time.
   about the eye — all the way round as far as the trees' shadows reach, then
   across the view out to the land's edge, as far as a tree still spans a
   pixel or two, or as far as the wood's most trees would fill — and read
-  across the runner a band at a time. Those that would grow are thinned in
-  order of height: a tree stands only where its trunk keeps from every taller
+  across the runner a band at a time. Those that would grow are ranked by
+  height, sorted in runs a core apiece and merged tallest first as they are
+  taken, and thinned in that order: a tree stands only where its trunk keeps from every taller
   one's by their crowns' reaches together, times the wood's closure there, a
   much shorter tree standing under a taller one's crown more readily than
   beside a peer's, and a stand draws two in five of its trees overtopped or
@@ -85,7 +87,10 @@ land stands, a bounded step at a time.
 Each crown's reach is recorded, and once the woods stand their **shade** is
 cast over the land (`shade`): how far under a crown a place lies, and how much
 of the sky the crowns about it hide — the mean cover of the ground within a
-dozen metres, twice box-filtered. A lone tree hides little of the sky; a
+dozen metres, twice box-filtered. It is cast a band of rows a core: the crowns
+sorted into the bands their trunks stand in, each band covered from the crowns
+that can reach it, then spread along its rows and, turned on its side, along
+its columns. A lone tree hides little of the sky; a
 closed wood nearly all of it. The sward thins with the sky hidden, to none
 under a closed canopy, and weeds all but as soon; the ground under the crowns
 is the leaves or needles they shed, fresh or browned by a year, over humus,
@@ -100,10 +105,13 @@ pyramids, obelisks), capped frusta, tori and their arcs, height grids, lawns,
 and instances of prototypes. A hull's extent is found from its own corners,
 each where three faces meet within the rest.
 
-- **Height grids** hold `f32` heights at the vertices of a square grid and the
-  bilinear patch between them. A ray walks a pyramid of maxima (Tevs, Ihrke
-  and Seidel, *Maximum Mipmaps*, 2008) and meets a cell's patch where a
-  quadratic along it says; a grid that wraps tiles the open sea, a
+- **Height grids** hold `f32` heights at the vertices of a square grid of any
+  number of cells and the bilinear patch between them. A ray walks a pyramid
+  of maxima (Tevs, Ihrke and Seidel, *Maximum Mipmaps*, 2008), each level
+  half the one below with the odd block out kept, and meets a cell's patch
+  where a quadratic along it says. A grid is written as its rows are filled,
+  never zeroed whole beforehand, and its pyramid is sealed a band of rows a
+  core; a lawn's canopy grid is as large as its lawn and no larger; a grid that wraps tiles the open sea, a
   kilometre to a tile in metre cells, and past its 6 km reach lies at its
   mean level out to the horizon. A block's
   four children are crossed at once: the slab test is written once over a
@@ -179,7 +187,10 @@ eye; films interfere by the Airy sum; leaves and blades are lit through from
 behind. The light diffuse surfaces gather from one another and the sky is
 radiosity from an irradiance cache (Ward, Rubinstein and Clear, 1988) with its
 gradients (Ward and Heckbert, 1992), laid over the picture coarse to fine
-before its first pixel is traced; a path that has scattered off a diffuse
+before its first pixel is traced: a record gathers 1024 rays, sixteen rows of
+equal cosine by sixty-four of azimuth, a row of them a core at a time; holds
+down to a 480th of the picture's height and within fifteen degrees of turn;
+and a square of the picture holds at most 6400; a path that has scattered off a diffuse
 surface drops the lamps' images and highlights it would otherwise find.
 
 The air between the eye and what it sees scatters the sun's light and the
@@ -232,21 +243,26 @@ keeps pace with a desert's droplets as with a valley's wear.
 
 ## Budgets
 
-A scene holds at most 131 072 objects (a forest's trees, understory and
+A scene holds at most 524 288 objects (a forest's trees, understory and
 deadwood among them, each 320 bytes), 4096 hull faces, 256 materials, 12
 lights, 12 height grids, 96 prototypes, 16 lawns and 8 woods, and a path at
 most nine bounces.
 
 A scene may take up to 160 s to prepare on a desktop-class machine across 8
-threads and hold up to 500 MB (`plans/RAYTRACE.md`). Measured on a 24-thread
-desktop preparing across 8 threads: a forest stands
-some 75 000 plants over its land and prepares in about 6 s — the land about
-1.4 s, its woods and sward 0.8 s in steps of a few milliseconds, its
-prototypes 0.4 s, and its radiosity most of the rest — and holds about
-260–440 MB while it is traced. Traced on one of its cores, built for the
+threads and hold up to 2 GB at its peak (`plans/RAYTRACE.md`). Measured at 1920×1080 on
+a 24-thread desktop preparing across 8 threads, a landscape prepares in 6–30 s:
+a meadow standing 120 000 trees out to some 3 km in 30 s, a forest some
+160 000 over the whole of its land in 28 s, a desert in 6 s, four-fifths or
+more of each its radiosity records. None holds more than about 360 MB at its peak (a
+snowy wood's, whose places are many) or 310 MB once prepared, and no unit of
+the work takes more than about 6 ms. Traced on one of its cores, built for the
 x86-64 baseline (SSE2), a sample costs from about 2.4 µs (the checkerboard,
 mostly its clouds) to about 19 µs (a meadow, mostly its eye rays over grass)
 at 640×360 and full quality: a forest about 17 µs, a valley 12, a colonnade
-7. Every unit of preparation is bounded — a band of a grid's rows, a
-slice of a hierarchy, a band of a wood's places, a lawn — so `Draft::prepare`
-answers within a frame's slice however large the scene.
+7. Every unit of preparation is a fixed amount of work a core — a band of a
+grid's rows or of a shade's, a turn of a land's droplet tiles, a slice of a
+hierarchy, a band of a wood's places or a run of their ranking, a few rows of
+a radiosity record's hemisphere — so `Draft::prepare` answers within a frame's
+slice however large the scene. Under the screensaver's
+`idle` setting the preparation runs on one core and takes some eight times as
+long.

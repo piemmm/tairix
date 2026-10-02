@@ -839,9 +839,9 @@ fn bent(frame: Frame, angle: f64, around: f64) -> Frame {
 }
 
 /// A saguaro: a ribbed column rounded at its top, with up to three arms
-/// turned up from elbows, grown from `seed` in `stock`'s flesh; `None` when
-/// the heap will not hold it.
-pub(crate) fn saguaro(height: f64, stock: Stock, seed: u64) -> Option<Prototype> {
+/// turned up from elbows, grown from `seed` in `stock`'s flesh, its
+/// hierarchy still to build; `None` when the heap will not hold it.
+pub(crate) fn saguaro(height: f64, stock: Stock, seed: u64) -> Option<Building> {
     let mut dice = NonCryptoRng::seed_from_u64(seed);
     let mut parts: Vec<Part> = Vec::new();
     parts.try_reserve(64).ok()?;
@@ -883,7 +883,7 @@ pub(crate) fn saguaro(height: f64, stock: Stock, seed: u64) -> Option<Prototype>
             mix_key(key),
         );
     }
-    Prototype::new(parts, Vec::new(), Vec::new())
+    Prototype::building(parts, Vec::new(), Vec::new())
 }
 
 fn mix_key(key: u32) -> u32 {
@@ -894,8 +894,9 @@ fn mix_key(key: u32) -> u32 {
 const LEAFLETS: u32 = 5;
 
 /// A palm, `height` tall, its trunk curving away from the vertical, and a
-/// crown of `fronds` fronds; `None` when the heap will not hold it.
-pub(crate) fn palm(height: f64, stock: Stock, fronds: u16, seed: u64) -> Option<Prototype> {
+/// crown of `fronds` fronds, its hierarchy still to build; `None` when the
+/// heap will not hold it.
+pub(crate) fn palm(height: f64, stock: Stock, fronds: u16, seed: u64) -> Option<Building> {
     let mut dice = NonCryptoRng::seed_from_u64(seed);
     let mut parts: Vec<Part> = Vec::new();
     parts.try_reserve(4096).ok()?;
@@ -948,7 +949,7 @@ pub(crate) fn palm(height: f64, stock: Stock, fronds: u16, seed: u64) -> Option<
         key = crate::sample::mix32(key ^ (u32::from(frond) << 8));
         grow_frond(&mut parts, (crown, around), &shape, (stock, key), &mut dice)?;
     }
-    Prototype::new(parts, Vec::new(), Vec::new())
+    Prototype::building(parts, Vec::new(), Vec::new())
 }
 
 /// How a frond grows: how long it is; how far from the vertical it sets out
@@ -1038,8 +1039,9 @@ fn grow_frond(
 
 /// A fern, `height` tall: a shuttlecock of `fronds` fronds rising from the
 /// ground and arching out, bare at their feet, their pinnae each a row of
-/// pinnules; `None` when the heap will not hold it.
-pub(crate) fn fern(height: f64, stock: Stock, fronds: u16, seed: u64) -> Option<Prototype> {
+/// pinnules, its hierarchy still to build; `None` when the heap will not
+/// hold it.
+pub(crate) fn fern(height: f64, stock: Stock, fronds: u16, seed: u64) -> Option<Building> {
     let mut dice = NonCryptoRng::seed_from_u64(seed);
     let mut parts: Vec<Part> = Vec::new();
     parts
@@ -1069,7 +1071,7 @@ pub(crate) fn fern(height: f64, stock: Stock, fronds: u16, seed: u64) -> Option<
             &mut dice,
         )?;
     }
-    Prototype::new(parts, Vec::new(), Vec::new())
+    Prototype::building(parts, Vec::new(), Vec::new())
 }
 
 #[cfg(test)]

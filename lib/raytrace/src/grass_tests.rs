@@ -17,7 +17,7 @@ fn level(attributes: Option<[u8; 4]>) -> Heightfield {
     }
     if let Some(attributes) = attributes {
         assert!(field.carry_attributes());
-        field.attributes_mut().fill(attributes);
+        field.rows_mut(0..side).1.fill(attributes);
     }
     field.seal();
     field

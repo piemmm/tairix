@@ -118,19 +118,19 @@ fn a_seed_grows_the_same_tree_and_another_seed_another() {
 
 #[test]
 fn a_palm_and_a_saguaro_grow_to_their_heights() {
-    let palm = palm(12.0, STOCK, 14, 4).expect("a palm");
+    let palm = palm(12.0, STOCK, 14, 4).expect("a palm").whole();
     // Its crown rises above the trunk no more than a frond is long.
     let top = palm.bounds().max.y;
     assert!(top > 10.0 && top < 12.0 * 1.38, "{top}");
     assert!(counts(&palm).1 > 1000, "fronds of leaflets");
-    let cactus = saguaro(5.0, STOCK, 9).expect("a saguaro");
+    let cactus = saguaro(5.0, STOCK, 9).expect("a saguaro").whole();
     assert!(cactus.bounds().max.y > 4.0 && cactus.bounds().max.y < 6.0);
 }
 
 #[test]
 fn a_fern_arches_its_fronds_out_from_the_ground_as_wide_as_it_is_tall() {
     for seed in 0..4u64 {
-        let fern = fern(0.8, STOCK, 12, seed).expect("a fern");
+        let fern = fern(0.8, STOCK, 12, seed).expect("a fern").whole();
         let bounds = fern.bounds();
         assert!(
             bounds.min.y > -0.05,

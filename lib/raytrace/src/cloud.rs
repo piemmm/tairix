@@ -67,6 +67,8 @@ const WEATHER_SIDE: usize = 384;
 /// The sun's optical-depth grid: columns across, and layers up.
 const LIGHT_SIDE: usize = 96;
 const LIGHT_LAYERS: usize = 20;
+/// Rows of that grid a core fills in a unit: a quarter of a layer.
+const LIGHT_ROWS: usize = LIGHT_SIDE / 4;
 /// Steps taken toward the sun building that grid, and across the bank for
 /// the ground's shadow.
 const LIGHT_STEPS: u32 = 24;
@@ -256,7 +258,7 @@ impl Cloudbank {
         let width = runner.width().max(1);
         match self.stage {
             Stage::Shape(layer) => {
-                let end = (layer + 2 * width).min(SHAPE_SIDE);
+                let end = (layer + width).min(SHAPE_SIDE);
                 let seed = self
                     .decks
                     .iter()
@@ -295,10 +297,11 @@ impl Cloudbank {
                     self.stage = Stage::Weather(end);
                 }
             }
-            Stage::Light(layer) => {
-                let end = (layer + width).min(LIGHT_LAYERS);
-                self.fill_light(layer..end, runner)?;
-                self.stage = if end >= LIGHT_LAYERS {
+            Stage::Light(row) => {
+                let rows = LIGHT_LAYERS * LIGHT_SIDE;
+                let end = (row + LIGHT_ROWS * width).min(rows);
+                self.fill_light(row..end, runner)?;
+                self.stage = if end >= rows {
                     Stage::Shadow(0)
                 } else {
                     Stage::Light(end)
@@ -344,25 +347,26 @@ impl Cloudbank {
         });
     }
 
-    /// The light grid's layers `layers`: at each point, the cloud's optical
-    /// depth toward the sun; `None` when the heap will not hold them.
-    fn fill_light(&mut self, layers: Range<usize>, runner: &dyn JobRunner) -> Option<()> {
-        let per_layer = LIGHT_SIDE * LIGHT_SIDE;
+    /// The light grid's rows `rows`, counted up through its layers: at each
+    /// point, the cloud's optical depth toward the sun; `None` when the heap
+    /// will not hold them.
+    fn fill_light(&mut self, rows: Range<usize>, runner: &dyn JobRunner) -> Option<()> {
         let reader = Reader { bank: self };
-        let mut depths = fallible::filled(layers.len() * per_layer, 0.0f32)?;
+        let mut depths = fallible::filled(rows.len() * LIGHT_SIDE, 0.0f32)?;
         band::for_each(
             runner,
             &mut depths,
-            (layers.start, per_layer),
-            &|layer, band| {
-                for (index, slot) in band.iter_mut().enumerate() {
-                    let point = reader.light_point(index % LIGHT_SIDE, index / LIGHT_SIDE, layer);
+            (rows.start, LIGHT_SIDE),
+            &|row, band| {
+                let (layer, across) = (row / LIGHT_SIDE, row % LIGHT_SIDE);
+                for (column, slot) in band.iter_mut().enumerate() {
+                    let point = reader.light_point(column, across, layer);
                     *slot = narrow(reader.toward_sun(point, LIGHT_STEPS));
                 }
             },
         );
         self.light
-            .get_mut(layers.start * per_layer..layers.end * per_layer)?
+            .get_mut(rows.start * LIGHT_SIDE..rows.end * LIGHT_SIDE)?
             .copy_from_slice(&depths);
         Some(())
     }

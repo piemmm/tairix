@@ -8,10 +8,11 @@ use tairix_parallel::JobRunner;
 use tairix_util::fallible;
 
 use crate::grass::Lawn;
-use crate::heightfield::Heightfield;
+use crate::heightfield::{apart, Heightfield, Sealing};
 use crate::scene::Grid;
 use crate::sky::Clouds;
 use crate::terrain::{Cloudscape, Sea};
+use crate::vector::share;
 
 /// What fills a grid.
 ///
@@ -22,7 +23,7 @@ use crate::terrain::{Cloudscape, Sea};
     clippy::large_enum_variant,
     reason = "a scene holds a handful of fills, and a box could not fail gracefully"
 )]
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) enum Form {
     Sea(Sea),
     Clouds(Cloudscape),
@@ -44,13 +45,19 @@ pub(crate) enum Target {
 }
 
 /// A grid still being filled.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct Fill {
     pub(crate) target: Target,
     pub(crate) form: Form,
     /// The first row not yet filled.
     pub(crate) row: usize,
+    /// A height grid's sealing, once every row is filled.
+    pub(crate) sealing: Sealing,
 }
+
+/// How much of a height grid's fill its sealing is, as a share: a seal's
+/// pass over a cell is a few comparisons where a fill's is noise or waves.
+const SEALING_SHARE: f64 = 0.05;
 
 /// About how many vertices one core fills in a unit of work: well under a
 /// millisecond of noise on a desktop core.
@@ -66,23 +73,57 @@ pub(crate) struct Grids<'a> {
 }
 
 impl Fill {
-    /// Fill the next unit of rows, spread over `runner`, sealing the grid
-    /// once its last row is filled: whether it is, or `None` when the grids
-    /// it names are not there to fill and read.
+    /// A fill of `target` from `form`, from its first row.
+    pub(crate) fn new(target: Target, form: Form) -> Self {
+        Self {
+            target,
+            form,
+            row: 0,
+            sealing: Sealing::BEGUN,
+        }
+    }
+
+    /// How far the fill has come, `rows` the rows of the grid it fills and
+    /// `field` that grid if it is a height grid.
+    pub(crate) fn done(&self, rows: usize, field: Option<&Heightfield>) -> f64 {
+        let filled = share(self.row, rows);
+        match field {
+            Some(field) => {
+                (1.0 - SEALING_SHARE) * filled + SEALING_SHARE * self.sealing.done(field)
+            }
+            None => filled,
+        }
+    }
+
+    /// Fill the next unit of rows, spread over `runner`, then seal a height
+    /// grid a unit at a time once its last row is filled: whether all of it
+    /// is done, or `None` when the grids it names are not there to fill and
+    /// read.
     pub(crate) fn step(&mut self, grids: Grids<'_>, runner: &dyn JobRunner) -> Option<bool> {
-        let Self { target, form, row } = self;
+        let Self {
+            target,
+            form,
+            row,
+            sealing,
+        } = self;
         let Grids { fields, clouds } = grids;
-        let filled = match (*target, &*form) {
+        if let Target::Field(index) = *target {
+            let field = fields.get_mut(index)?;
+            if *row >= field.side() {
+                return Some(sealing.step(field, runner));
+            }
+        }
+        match (*target, &*form) {
             (Target::Field(index), Form::Canopy { lawn, block }) => {
                 let (field, ground) = apart(fields, index, lawn.field as usize)?;
                 canopy(field, row, runner, &|x, z| {
                     lawn.canopy_at(ground, (x, z), *block)
-                })
+                });
             }
             (Target::Field(index), Form::Sea(sea)) => {
                 advance(fields.get_mut(index)?, row, runner, &|x, z| {
                     sea.height(x, z)
-                })
+                });
             }
             // A sky with no cloud layer has none to fill.
             (Target::Clouds, Form::Clouds(cloudscape)) => {
@@ -91,33 +132,9 @@ impl Fill {
                 }));
             }
             _ => return None,
-        };
-        if filled {
-            if let Target::Field(index) = *target {
-                fields.get_mut(index)?.seal();
-            }
         }
-        Some(filled)
+        Some(false)
     }
-}
-
-/// The grid `filled` to fill, and the grid `read` it is filled from; `None`
-/// unless both are there and apart.
-fn apart(
-    fields: &mut [Heightfield],
-    filled: usize,
-    read: usize,
-) -> Option<(&mut Heightfield, &Heightfield)> {
-    if filled == read {
-        return None;
-    }
-    let (low, high) = fields.split_at_mut_checked(filled.max(read))?;
-    let (first, second) = (low.get_mut(filled.min(read))?, high.first_mut()?);
-    Some(if filled < read {
-        (first, &*second)
-    } else {
-        (second, &*first)
-    })
 }
 
 /// Fill the unit of `grid`'s rows from `row`; whether it is full.
@@ -135,31 +152,20 @@ fn advance<G: Grid>(
     *row >= side
 }
 
-/// A row of the canopy grid: its number, its heights, and what its vertices
-/// keep.
-type Row<'a> = (usize, &'a mut [f32], &'a mut [[u8; 4]]);
-
 /// Fill the unit of the canopy grid `tops`'s rows from `row` with `value`
-/// at each vertex, its height and what the vertex keeps; whether it is full.
+/// at each vertex, its height and what the vertex keeps.
 fn canopy(
     tops: &mut Heightfield,
     row: &mut usize,
     runner: &dyn JobRunner,
     value: &(dyn Fn(f64, f64) -> (f64, [u8; 4]) + Sync),
-) -> bool {
+) {
     let side = tops.side().max(1);
     let unit = (UNIT_VERTICES / side).max(1) * runner.width().max(1);
     let rows = *row..(*row + unit).min(side);
     *row = rows.end;
     let ((origin_x, origin_z), step) = tops.placing();
-    let (heights, kept) = tops.surfaces_mut();
-    let heights = heights
-        .get_mut(rows.start * side..rows.end * side)
-        .unwrap_or_default();
-    let kept = kept
-        .get_mut(rows.start * side..rows.end * side)
-        .unwrap_or_default();
-    let fill_row = |(at, heights, kept): &mut Row<'_>| {
+    tops.each_row(rows, runner, &|(at, heights, kept)| {
         let z = origin_z + step * crate::vector::real(*at);
         for (column, height) in heights.iter_mut().enumerate() {
             let (top, packed) = value(origin_x + step * crate::vector::real(column), z);
@@ -173,26 +179,7 @@ fn canopy(
                 *slot = packed;
             }
         }
-    };
-    let mut bands: Vec<Row<'_>> = Vec::new();
-    if fallible::reserve(&mut bands, rows.len()) {
-        bands.extend(
-            (rows.start..)
-                .zip(heights.chunks_mut(side))
-                .zip(kept.chunks_mut(side))
-                .map(|((at, heights), kept)| (at, heights, kept)),
-        );
-        tairix_parallel::for_each(runner, &mut bands, &fill_row);
-    } else {
-        for band in (rows.start..)
-            .zip(heights.chunks_mut(side))
-            .zip(kept.chunks_mut(side))
-        {
-            let ((at, heights), kept) = band;
-            fill_row(&mut (at, heights, kept));
-        }
-    }
-    *row >= side
+    });
 }
 
 /// Fill `rows` of `grid` with `value` at each vertex, the rows spread over

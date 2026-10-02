@@ -186,7 +186,7 @@ plan's ledger. A `blocked` row names its blocker.
 | TOOLTIPS | Seat-owned tooltips (`plans/TOOLTIPS.md`) | in progress |
 | NEW-TASKBAR | The icon bar (`plans/NEW-TASKBAR.md`) | done |
 | NEW-SWITCHBOARD | The Switchboard window (`plans/NEW-SWITCHBOARD.md`) | in progress |
-| NEW-DESKTOP-SETTINGS | The Settings application (`plans/NEW-DESKTOP-SETTINGS.md`) | done |
+| NEW-DESKTOP-SETTINGS | The Settings application (`plans/NEW-DESKTOP-SETTINGS.md`) | in progress |
 | NEW-FILEMANAGER | The graphical file manager (`plans/NEW-FILEMANAGER.md`) | in progress |
 | GUI-TERMINAL | `terminal.app` (`plans/GUI-TERMINAL.md`) | in progress |
 | PINBOARD | The wallpaper, the Desktop folder and the backdrop menu (`plans/PINBOARD.md`) | blocked: P9's picked-directory listing needs an ABI decision on `FilePicked` |

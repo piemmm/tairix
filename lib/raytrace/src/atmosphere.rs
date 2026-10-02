@@ -168,7 +168,7 @@ enum Stage {
 }
 
 /// Rows of a table built in one unit of work by each core.
-const UNIT_ROWS: usize = 2;
+const UNIT_ROWS: usize = 1;
 
 impl Atmosphere {
     /// The atmosphere of `air`, its tables still to build; `None` when the

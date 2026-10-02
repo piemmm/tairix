@@ -695,3 +695,126 @@ fn each_setting_renders_a_picture_worth_looking_at() {
         );
     }
 }
+
+/// A lawn's canopy grid holds a vertex at the middle of each block of its
+/// cells and one beyond each end, and no more: its tier is never rounded up
+/// to a grid as much as twice its size, every padded vertex filled.
+#[test]
+fn a_canopy_grid_is_as_large_as_its_lawn_and_no_larger() {
+    use crate::grass::{Cover, Seen, Weeds};
+    // A side's cells, a cell's breadth, and the cells to a block of the grid.
+    for (cells, cell, block) in [(100.0, 0.5, 1u32), (1344.0, 0.25, 1), (2400.0, 3.0, 2)] {
+        let mut stage = Stage::new().expect("a stage");
+        let span = cells * cell;
+        let lawn = Lawn {
+            field: 0,
+            from: (-40.0, 10.0),
+            to: (span - 40.0, 10.0 + 0.6 * span),
+            hole: None,
+            floor: 0.0,
+            ceiling: 1.0,
+            cell,
+            cover: Cover::Weeds(Weeds {
+                share: 0.5,
+                leaves: (5, 9),
+            }),
+            shade: None,
+            sward: 1,
+            seed: 2,
+            seen: Seen::from((0.0, 0.0), (1.0, 2.0)),
+            tops: None,
+        };
+        let tops = stage.tops(&lawn).expect("a canopy grid");
+        assert_eq!(tops.block, block);
+        let blocks = usize::try_from(mathf::round_i32(mathf::ceil(cells / f64::from(block))))
+            .expect("a count of blocks");
+        let side = stage.fields[tops.field as usize].side();
+        assert_eq!(side, blocks + 2, "{cells} cells of {cell}");
+    }
+}
+
+/// Every kind of prototype grows a bounded step a unit, as many at once as
+/// the runner runs and never more — a rock, a log, a stump, a fern or a palm
+/// made on a core of its own rather than all on the caller's — and each
+/// comes out as it does grown alone.
+#[test]
+fn prototypes_grow_a_core_apiece_a_unit_as_each_grows_alone() {
+    use crate::rock::Habit;
+    use crate::tree::Stock;
+    let stock = Stock { bark: 0, leaves: 0 };
+    let mut recipes: Vec<Recipe> = (0..5)
+        .map(|seed| Recipe::Rock {
+            habit: Habit {
+                squash: 0.6,
+                fractures: 3,
+            },
+            stock: 0,
+            seed,
+        })
+        .collect();
+    recipes.extend([
+        Recipe::Log {
+            length: 9.0,
+            radius: 0.3,
+            bark: 0,
+            thrown: true,
+            seed: 7,
+        },
+        Recipe::Stump {
+            height: 0.6,
+            radius: 0.4,
+            top: Top::Sawn,
+            bark: 0,
+            wood: 0,
+            seed: 8,
+        },
+        Recipe::Fern {
+            height: 0.9,
+            stock,
+            fronds: 12,
+            seed: 9,
+        },
+        Recipe::Palm {
+            height: 11.0,
+            stock,
+            fronds: 14,
+            seed: 10,
+        },
+    ]);
+    let grown = |runner: &dyn tairix_parallel::JobRunner| {
+        let mut grow = Grow::new(recipes.len()).expect("room to grow");
+        let mut was = 0;
+        while !grow.step(&recipes, runner).expect("room to grow") {
+            let now = grow.grown.iter().flatten().count();
+            assert!(now - was <= runner.width(), "{was} then {now}");
+            assert!(grow.active.len() <= runner.width());
+            was = now;
+        }
+        grow.grown
+            .into_iter()
+            .map(|prototype| {
+                let prototype = prototype.expect("grown");
+                (prototype.parts().len(), describe_box(prototype.bounds()))
+            })
+            .collect::<Vec<_>>()
+    };
+    let alone = grown(&tairix_parallel::SERIAL);
+    for runner in [
+        &tairix_parallel::Reversed::new(3) as &dyn tairix_parallel::JobRunner,
+        &Threaded::new(4),
+    ] {
+        assert_eq!(grown(runner), alone);
+    }
+}
+
+/// A box's corners, as bits.
+fn describe_box(bounds: Aabb) -> [u64; 6] {
+    [
+        bounds.min.x.to_bits(),
+        bounds.min.y.to_bits(),
+        bounds.min.z.to_bits(),
+        bounds.max.x.to_bits(),
+        bounds.max.y.to_bits(),
+        bounds.max.z.to_bits(),
+    ]
+}

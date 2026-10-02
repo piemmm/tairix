@@ -46,13 +46,30 @@ fn panel(from: Vec3, dir: Vec3) -> Cell {
     }
 }
 
-/// The cells a record at `site` fills from `light`, each ray through its
-/// cell's centre.
-fn cells_of(site: &Site, light: impl Fn(Vec3, Vec3) -> Cell) -> [Cell; CELLS] {
+/// The cells a record at `site` fills from `light`: each the mean of the
+/// light over its cell, so a record built from them stands or falls by its
+/// own sums rather than by where a sharp edge happens to cut the cells; the
+/// distance its centre's ray met.
+fn cells_of(site: &Site, light: impl Fn(Vec3, Vec3) -> Cell) -> Vec<Cell> {
+    const ACROSS: usize = 4;
     let frame = Frame::around(site.normal);
-    let mut cells = [Cell::DARK; CELLS];
+    let mut cells = alloc::vec![Cell::DARK; CELLS];
     for (index, cell) in cells.iter_mut().enumerate() {
-        *cell = light(site.point, frame.to_world(direction(index, (0.5, 0.5))));
+        let mut sum = Vec3::ZERO;
+        for row in 0..ACROSS {
+            for column in 0..ACROSS {
+                let within = (
+                    (real(row) + 0.5) / real(ACROSS),
+                    (real(column) + 0.5) / real(ACROSS),
+                );
+                sum += light(site.point, frame.to_world(direction(index, within))).light;
+            }
+        }
+        let centre = light(site.point, frame.to_world(direction(index, (0.5, 0.5))));
+        *cell = Cell {
+            light: sum * (1.0 / real(ACROSS * ACROSS)),
+            distance: centre.distance,
+        };
     }
     cells
 }
@@ -194,11 +211,22 @@ fn a_record_holds_near_itself_and_not_behind_askew_or_beyond_its_radius() {
         light(Vec3::new(0.0, 0.0, -0.3), up).is_none(),
         "behind its surface"
     );
-    let askew = Vec3::new(mathf::sin(0.7), 0.0, mathf::cos(0.7));
+    let turned = |degrees: f64| {
+        let angle = degrees.to_radians();
+        Vec3::new(mathf::sin(angle), 0.0, mathf::cos(angle))
+    };
+    // Turned well within its fifteen degrees, a lone record still weighs
+    // enough to hold.
     assert!(
-        light(Vec3::ZERO, askew).is_none(),
-        "turned forty degrees away"
+        light(Vec3::ZERO, turned(10.0)).is_some(),
+        "turned ten degrees"
     );
+    for degrees in [16.0, 25.0, 40.0] {
+        assert!(
+            light(Vec3::ZERO, turned(degrees)).is_none(),
+            "turned {degrees} degrees away"
+        );
+    }
     assert!(radiosity.holds(Vec3::new(0.2, 0.2, 0.0), up));
     assert!(!radiosity.holds(Vec3::new(3.0, 0.0, 0.0), up));
 }
@@ -318,18 +346,24 @@ fn gathered(scene: &Scene, runner: &dyn JobRunner) -> Radiosity {
     gathering.finish().expect("room to gather")
 }
 
+/// However many cores share the work — so however a record's rows fall
+/// across units, one begun in one unit and finished in another — the same
+/// records are laid.
 #[test]
 fn gathering_lays_the_same_records_on_one_thread_as_on_several() {
     let scene = courtyard();
     let alone = gathered(&scene, &SERIAL);
-    let shared = gathered(&scene, &Threaded::new(3));
     assert!(!alone.records.is_empty());
-    assert_eq!(alone.records.len(), shared.records.len());
-    for (a, b) in alone.records.iter().zip(&shared.records) {
-        assert_eq!(a.point, b.point);
-        assert_eq!(a.light, b.light);
-        assert_eq!(a.radius.to_bits(), b.radius.to_bits());
-        assert_eq!((a.turning, a.moving), (b.turning, b.moving));
+    let runners: [&dyn JobRunner; 2] = [&Threaded::new(3), &tairix_parallel::Reversed::new(5)];
+    for runner in runners {
+        let shared = gathered(&scene, runner);
+        assert_eq!(alone.records.len(), shared.records.len());
+        for (a, b) in alone.records.iter().zip(&shared.records) {
+            assert_eq!(a.point, b.point);
+            assert_eq!(a.light, b.light);
+            assert_eq!(a.radius.to_bits(), b.radius.to_bits());
+            assert_eq!((a.turning, a.moving), (b.turning, b.moving));
+        }
     }
 }
 
@@ -348,9 +382,11 @@ fn the_records_stand_for_what_every_sample_would_trace() {
             let Some(recorded) = radiosity.light(site.point, site.normal, site.normal) else {
                 continue;
             };
-            let mut cells = [Cell::DARK; CELLS];
-            let mean = |seed: u32, cells: &mut [Cell; CELLS]| {
-                tracer.gather(&Site { seed, ..site }, cells);
+            let mut cells = alloc::vec![Cell::DARK; CELLS];
+            let mean = |seed: u32, cells: &mut [Cell]| {
+                for (row, piece) in cells.chunks_mut(COLUMNS).enumerate() {
+                    tracer.gather(&Site { seed, ..site }, row, piece);
+                }
                 cells.iter().map(|cell| cell.light.x).sum::<f64>() / real(CELLS)
             };
             let gathered = (0..8u32).map(|seed| mean(seed, &mut cells)).sum::<f64>() / 8.0;

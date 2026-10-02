@@ -6,10 +6,11 @@ nature it sets out, the sampling and reconstruction a pixel is traced with,
 and the screensaver's reveal, progress readout and saved pictures.
 
 Read first: `docs/src/lib/raytrace.md` (the tracer as built),
-`plans/NEW-DESKTOP-SETTINGS.md` DS21 (the screensaver and its pane),
-`plans/WINTERSUN.md` WS29, WS30 and WS35 (the world generator that shares the
-countryside layout), `plans/FIX-DESKTOP.md` (no I/O on the serve loop) and
-`plans/OPEN-DEFECTS.md` D462–D466 and D483–D487 (the tracer's open defects).
+`plans/NEW-DESKTOP-SETTINGS.md` DS21 and DS24 (the screensaver and its pane),
+`plans/WINTERSUN.md` WS25–WS31 and WS35 (the world generator that is to share
+the land generator and the countryside layout), `plans/FIX-DESKTOP.md` (no I/O
+on the serve loop) and `plans/OPEN-DEFECTS.md` D462, D463, D465, D466,
+D483–D487 and D503–D505 (the tracer's open defects).
 
 ## Ledger
 
@@ -19,7 +20,7 @@ countryside layout), `plans/FIX-DESKTOP.md` (no I/O on the serve loop) and
 | RT2 | Progress readout: *Generating scene... N%* while a scene is prepared, then *Rendering... N%*, small and mid-grey in the lower right, gone once the picture is whole | done |
 | RT3 | Saving finished pictures: `screensaver.raytrace.save` keeps each whole picture as a PNG in the user's `Documents/Pictures/Raytracing/`, with no limit on how many | done |
 | RT4 | Highest quality, always: no sample governor; a reconstruction filter and sampling rounds that leave no jagged or noisy edge | done |
-| RT5 | A 160 s preparation budget spent on detail, with every unit of preparation bounded and parallel (closes D464) | planned |
+| RT5 | A 160 s preparation budget, every unit of preparation bounded and parallel (closes D464), spent where it measurably buys realism: radiosity records, and woods reaching twice as far | done |
 | RT6 | Wind on water without repetition: a spectrum of many wave components under gusting patches; the open sea's grid no longer tiles in view; detail finer than a pixel becomes roughness | done |
 | RT7 | The water defects: ripples aliasing far off, reflections lost at grazing angles, the open sea stopping short of the horizon, and the noise seams under every pattern (D490–D494) | done |
 | RT8 | Caustics on and under every body of water, from the light the surface itself focuses | planned |
@@ -51,6 +52,11 @@ countryside layout), `plans/FIX-DESKTOP.md` (no I/O on the serve loop) and
 | RT34 | Planetary scenes: gas giants, ringed planets, earthlike and Mars-like worlds, views from icy moons, nebulae, stars, and the sun with its corona and spots | planned |
 | RT35 | Macro shots: a leaf with a drop hanging from it, focused on the drop over a blurred landscape, in many variations | planned |
 | RT36 | Caves: stalactites, stalagmites, pools, iridescent water, crystal outcrops that glow | planned |
+| RT37 | Woods to the horizon: at *Maximum* a wood reaches as far as its trees still span a pixel, its places sown coarser the further they lie wherever they would not otherwise fit the budget | planned |
+| RT38 | Stones in patches: boulder fields, scree below crags and pebbles in drifts, strewn by noise and slope from eight rocks a scene, and leaf litter as thick as the canopy sheds | planned |
+| RT39 | Scene detail: one generator at two profiles, *Simple* (low memory, every setting, the screensaver's default) and *Maximum* (up to 2 GB, all the realism the budget buys), chosen by `screensaver.raytrace.detail` | planned |
+| RT40 | One land generator, the tracer's and WinterSun's: the land's stages renderer-neutral, keyed by place and seam-free, in crates WinterSun builds its realm's land with at *Maximum* | planned |
+| RT41 | Local adaptation, a gentle photographic HDR: a sky seen from a dark room or over a dark wood keeps its detail and the room its shadows, only the range a display cannot hold compressed, and a scene one exposure holds left exactly as it is | planned |
 
 ## Standing rules
 
@@ -72,11 +78,20 @@ These bind every item, done or planned.
   view, and no scene is uniformly covered by any one thing: cover comes in
   patches, gradients and gaps.
 - **Budgets.** A scene may take up to 160 s to prepare on a desktop-class
-  machine preparing across 8 threads, and hold up to 500 MB (or the free
-  memory, if less). Both are spent on detail. Every unit of preparation stays
+  machine preparing across 8 threads, and hold at its peak up to 2 GB (or the
+  free memory, if less) at *Maximum* detail, far less at *Simple* (RT39). Both
+  are spent on detail and never wasted: a buffer is sized to what it holds, a
+  stage's working set is let go when the stage ends, and where an efficient
+  structure serves as well it is the one used. Every unit of preparation stays
   small enough for a caller answering a frame to stop after it; every
   allocation is fallible, so a smaller machine gets a plainer scene, never an
   abort.
+- **Shared with WinterSun.** The land generator is to build WinterSun's land
+  too, at *Maximum* (RT40), so work on it keeps to WinterSun's world rules
+  (`plans/WINTERSUN.md` WS25–WS31, WS35): a pure function of its inputs, bit
+  for bit the same on every Tier-1 target and however many cores share it,
+  renderer-neutral, and bounded by its working set rather than the land it
+  covers.
 - **Deterministic.** A setting, a seed and a picture size compose one scene,
   and a pixel's samples are hashed from its index and the scene's key.
 
@@ -162,12 +177,40 @@ this is about twice the samples and the time of the old best quality.
 
 ## RT5 — The preparation budget
 
-Up to 160 s of preparation buys density: droplet erosion, tree and plant
-counts, radiosity records, scattered stones and litter, and the countryside's
-pieces. D464's units are made bounded and parallel first: non-tree prototypes
-grow one a unit across the runner, the woods' seedling sort and the far grid's
-border blend are split into bands, and canopy grids are sized to their tiers
-rather than rounded to a power of two.
+Every unit of preparation is a fixed amount of work a core, whatever the
+scene holds, so a caller answering a frame stops within a few milliseconds:
+
+- A height grid of any number of cells reserves its buffers whole and is
+  written as its rows are filled, so no unit zeroes a whole grid; it is
+  sealed a band of rows a core, its mean summed in bands of a fixed size so
+  it comes out the same on any runner. A canopy grid is its tier's size.
+- Prototypes grow as many at once as the runner is wide: a tree's stems a few
+  at a time, any other kind's parts in one core's unit, every hierarchy a
+  slice at a time.
+- A wood's places are ranked in runs of 16 384 a core sorts, merged tallest
+  first as they are thinned, 2048 a unit.
+- The shade crowns cast is cast in bands: the crowns sorted into bands of
+  rows 16 384 a unit, each band covered from the crowns that can reach it,
+  then spread along its rows and, turned, along its columns, a band a core —
+  bit for bit the shade cast whole. A lawn samples its shade the same way.
+- A land's fills and settle passes run four rows a core, its droplets in
+  turns of tiles across the runner (`lib/terrain`), its seal in bands; the
+  sky's tables a row a core, a cloud bank's light a quarter layer a core;
+  a radiosity record's hemisphere is gathered two rows a core a unit.
+
+Measured at 1920×1080 across 8 threads, no unit takes more than about 6 ms,
+where the longest took 49 ms, and bounding them changed no pixel.
+
+The budget is spent where it measurably buys realism. Radiosity records hold
+a hemisphere of 1024 rays, are laid down to half the radius before and four
+times as many to a square, and hold within fifteen degrees of turn, as their
+own rule says: the light a wood's trunks gather from about them, which records
+spread over trunks too thin for them missed. Woods may stand three to ten
+times as many trees, so they carry on to 2–4 km where they stopped at about
+1.3 km and a forest fills its land. Droplet erosion is not made denser:
+measured, more droplets under the present law wear the finer grids' relief
+smooth and silt the river and road beds they run through, so denser erosion
+waits on the law RT30 brings.
 
 ## RT6, RT7 — Water
 
@@ -273,6 +316,23 @@ normal-only relief settles to its mean. Mud cracks are plates of a Voronoi
 desiccation pattern with curled, undercut rims. Snow is accumulated by wind
 over the land's shape, drifting into lee hollows and against walls.
 
+Mountains (RT30) need an erosion law that carves as it gathers: channels
+deepening where droplets converge and branching up every slope, the beds of
+rivers and roads kept, and talus below crags — so that the budget can then be
+spent on droplets, which today only smooth the land.
+
+## RT37, RT38 — Woods and stones by the budget
+
+- Woods to the horizon (RT37): at *Maximum* a wood stands out to as far as
+  its trees still span a pixel. Its places are sown at its own spacing near
+  the eye and coarser beyond only where their candidates — about 80 bytes a
+  place, a dozen places a tree — would not otherwise fit the budget, and never
+  coarser than its trees keep apart.
+- Stones in patches (RT38): eight rocks a scene, strewn where a noise field
+  and the slope say — boulder fields, scree fanning below crags, pebbles in
+  the hollows — never an even sprinkle; leaf litter as thick as the crowns
+  above shed.
+
 ## RT32–RT36 — New scene families
 
 Each is a `Setting` of its own, composed and traced by the same tracer:
@@ -282,3 +342,96 @@ model at their own radius and composition, gas giants as banded flow fields,
 rings as a thin particle disc casting and catching shadow; macro scenes with
 a refracting drop and a shallow depth of field; caves as carved volumes with
 speleothems, pools and emissive crystal.
+
+## RT39 — Scene detail
+
+One generator, two profiles, a parameter of `Draft::new` (`Detail::Simple`,
+`Detail::Maximum`):
+
+- **Simple** composes every setting — a plainer scene, never a missing one —
+  within about 384 MB at its peak and a fraction of Maximum's preparation:
+  the woods' caps and the radiosity records RT5 began from (256 rays a record,
+  down to a 240th of the picture's height, 1600 a square; measured at most
+  some 300 MB), and no RT37 or RT38 spending.
+- **Maximum** spends the whole budget, up to 2 GB and 160 s at 8 threads, on
+  realism: RT5's records and woods, RT37's woods to the horizon, RT38's
+  stones, and what later items buy.
+
+What a profile sets is one table of densities the composition reads, never a
+branch at each call site. A profile changes how much is set out, never what a
+setting is: the land, the eye, the hour and the weather are drawn before and
+apart from whatever the profile scales, so a seed shows the same place at
+both. A setting, a seed, a picture size and a profile compose one scene.
+
+The screensaver's `screensaver.raytrace.detail` is `simple` (the default) or
+`maximum`, a *Detail* dropdown in the ray tracer's group on the pane —
+*Simple* or *Maximum realism* (`plans/NEW-DESKTOP-SETTINGS.md` DS24) —
+carried to the tracing host at launch as `cpu` and `save` are. Where the
+memory band says Maximum's peak is not free, the session prepares the scene
+at Simple instead and says so on `stderr`, rather than letting the heap
+refuse it partway.
+
+## RT40 — One land generator, the tracer's and WinterSun's
+
+WinterSun is to build its realm's land with this generator at Maximum detail
+(`plans/WINTERSUN.md` WS25–WS31, WS35), so the land's stages move out of
+`lib/raytrace` into renderer-neutral crates beside `lib/terrain` and
+`lib/countryside` (RT13), held to WinterSun's world rules: a pure function of
+the seed and the place, bit for bit on every Tier-1 target and across any
+runner, a region laid out in pieces matching one laid out whole, and bounded
+by its working set, its digest folded into WinterSun's.
+
+- Relief, wear and droplets run over tiles whose seams neighbouring pieces
+  agree on; `lib/terrain`'s droplets already leave the same ground on any
+  runner, and seams across pieces are the part still to build.
+- Woods are thinned by a keyed priority rule — a place stands unless a taller
+  place within its room outranks it — rather than in one sequence, so a
+  district's trees need only its neighbours' places, as WinterSun's scatter
+  needs.
+- The grids refined about the eye become the tracer's choice of which pieces
+  to refine, not the generator's.
+- The tracer keeps what is its own: the eye, the picture, shading, light and
+  the reveal.
+
+## RT41 — Local adaptation
+
+One exposure holds about the range a display shows. A dark room with a sunlit
+window, a wood's depths under a bright sky, or snow beside a shaded wall holds
+far more, so one side is lost: the window white, or the room black. A
+photographer keeps both — exposures blended, a graduated filter, dodging and
+burning (Reinhard et al., "Photographic Tone Reproduction for Digital Images",
+2002) — and kept gently it reads as a good photograph; overdone, as the flat,
+haloed "HDR look", which is less real, not more. The tracer's is the gentle
+kind, acting only where one exposure would lose what a photograph would keep,
+and it is what RT24's and RT25's rooms are seen against their windows by.
+
+- **Measured with the meter.** The meter traces the frame more finely — some
+  128 by 72 points of several samples — into a bilateral grid over place and
+  log luminance (Chen, Paris and Durand, "Real-time Edge-aware Image
+  Processing with the Bilateral Grid", 2007), blurred along each axis: for
+  every place and brightness, the mean log luminance of the like-lit ground
+  about it. That is the base layer of Durand and Dorsey's decomposition ("Fast
+  Bilateral Filtering for the Display of High-Dynamic-Range Images", 2002),
+  and a window and the frame about it fall in different layers of the grid,
+  so neither haloes the other.
+- **Applied per sample, in any order.** A sample's exposure is the metered
+  exposure corrected by the grid read at the sample's own place and
+  luminance, before the filmic curve, so a pixel still comes out the same on
+  whichever core and in whatever order it is traced, and every step of the
+  reveal is its pixel's own.
+- **Only where needed.** Where the base layer lies within about a stop and a
+  half of the metered key the correction is nought, so a scene one exposure
+  holds is encoded exactly as before. Beyond that, highlights are drawn down
+  by part of their excess, at most two stops, and the deepest shadows lifted
+  at most one: a sky keeps its clouds, a window its view, a room its dark
+  corners.
+- **Detail kept, never flattened.** The correction follows only the base
+  layer, so texture within a region keeps its contrast; the sun's disc and
+  the glints off water and glass still blow out, as in a photograph.
+- **The camera's, not the scene's.** No light is added or moved: like the
+  filmic curve, it is how the picture is exposed.
+
+Tests: a scene within a display's range encoded bit for bit as before; a dark
+room's window keeping its sky's detail and the room its darkness, with no band
+of halo either side of the window's edge; the sun still blowing out; and the
+same picture on any runner and in any order.

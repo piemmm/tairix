@@ -140,14 +140,14 @@ pub struct Draft {
 /// scene on a land and for one without: measured over the settings on a
 /// desktop-class machine preparing across eight threads.
 const LANDED_ENDS: Ends = Ends {
-    composed: 0.73,
-    built: 0.74,
-    gathered: 0.99,
+    composed: 0.11,
+    built: 0.113,
+    gathered: 0.999,
 };
 const UNLANDED_ENDS: Ends = Ends {
-    composed: 0.15,
-    built: 0.17,
-    gathered: 0.99,
+    composed: 0.03,
+    built: 0.032,
+    gathered: 0.996,
 };
 
 /// Where a draft's composing, building and gathering end, as shares of its

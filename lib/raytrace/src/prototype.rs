@@ -112,6 +112,13 @@ impl Building {
         self.builder.step(budget)
     }
 
+    /// The prototype, its hierarchy built whole at once.
+    #[cfg(test)]
+    pub(crate) fn whole(mut self) -> Prototype {
+        self.step(usize::MAX);
+        self.finish()
+    }
+
     /// The prototype, once its hierarchy is whole.
     pub(crate) fn finish(self) -> Prototype {
         Prototype {
@@ -128,14 +135,13 @@ impl Prototype {
     /// The prototype of `parts`, whose facets index `vertices` and their
     /// `normals`, built at once; `None` when the heap will not hold its
     /// hierarchy, or a facet names a vertex it lacks.
+    #[cfg(test)]
     pub(crate) fn new(
         parts: Vec<Part>,
         vertices: Vec<[f32; 3]>,
         normals: Vec<[f32; 3]>,
     ) -> Option<Self> {
-        let mut building = Self::building(parts, vertices, normals)?;
-        building.step(usize::MAX);
-        Some(building.finish())
+        Some(Self::building(parts, vertices, normals)?.whole())
     }
 
     /// The prototype of `parts`, whose facets index `vertices` and their

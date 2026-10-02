@@ -14,6 +14,7 @@
 //! tree might stand are read in bands across the runner, since a forest's
 //! worth of them is tens of thousands.
 
+use alloc::collections::BinaryHeap;
 use alloc::vec::Vec;
 use core::f64::consts::{PI, TAU};
 
@@ -29,7 +30,7 @@ use crate::land::{Land, Lie};
 use crate::noise::{cells2, fbm2, hash3, smoothstep};
 use crate::prototype::single;
 use crate::sample::{mix32, unit};
-use crate::shade::{Shade, Shades, NEAR_CELL, ROOFED};
+use crate::shade::{Casting, Shade, Shades, Shading, NEAR_CELL, ROOFED};
 use crate::vector::{real, share, Frame, Pose, Vec3};
 
 /// How a wood grows over a land.
@@ -633,10 +634,8 @@ struct Standing {
     band: Vec<Seedling>,
     /// The places read that would grow, in the order they were sown.
     grown: Vec<Seedling>,
-    /// Those places tallest first, as heights and their places among them,
-    /// once every place is read.
-    order: Option<Vec<(f32, u32)>>,
-    next: usize,
+    /// Those places, tallest first.
+    ranking: Ranking,
     crowns: Crowns,
     stood: u32,
     most: u32,
@@ -645,10 +644,11 @@ struct Standing {
     seeds: (u32, u32),
 }
 
-/// How many places a step reads, and how many it thins, at least and at
-/// most.
+/// How many places a step reads at least, across the runner, and how many it
+/// thins at most, one after another since each tree stood shapes where the
+/// next may.
 const READ_UNIT: usize = 1 << 14;
-const THIN_UNIT: usize = 1 << 13;
+const THIN_UNIT: usize = 1 << 11;
 
 impl Standing {
     /// `grove`'s plants to be stood as `woodland` grows them, seen from
@@ -674,8 +674,7 @@ impl Standing {
             rings: rings(&sowing),
             band: Vec::new(),
             grown: Vec::new(),
-            order: None,
-            next: 0,
+            ranking: Ranking::default(),
             crowns: Crowns::new(((vantage.eye.x, vantage.eye.z), sowing.far), most_room)?,
             stood: 0,
             most: woodland
@@ -685,17 +684,16 @@ impl Standing {
         })
     }
 
-    /// How far the standing has come: its rings read, then its places thinned.
+    /// How far the standing has come: its rings read, its places ranked,
+    /// then thinned.
     fn done(&self) -> f64 {
         let read = share(self.ring as usize, self.rings as usize);
-        let thinned = self.order.as_ref().map_or(0.0, |order| {
-            if self.stood >= self.most {
-                1.0
-            } else {
-                share(self.next, order.len())
-            }
-        });
-        0.6 * read + 0.4 * thinned
+        let thinned = if self.stood >= self.most {
+            1.0
+        } else {
+            self.ranking.taken()
+        };
+        0.6 * read + 0.05 * self.ranking.sorted() + 0.35 * thinned
     }
 
     /// The next step of standing `wood`'s plants — its trees, or those of
@@ -731,22 +729,30 @@ impl Standing {
             };
             read_all(runner, &mut self.band, &reading)?;
             let growing = self.band.iter().filter(|seedling| seedling.tree.is_some());
-            if !fallible::reserve(&mut self.grown, growing.clone().count()) {
+            let count = growing.clone().count();
+            if !fallible::reserve(&mut self.grown, count) || !self.ranking.reserve(count) {
                 return None;
             }
-            self.grown.extend(growing.copied());
+            for seedling in growing {
+                let index = u32::try_from(self.grown.len()).ok()?;
+                self.ranking
+                    .add(seedling.tree.map_or(0.0, |tree| tree.height), index);
+                self.grown.push(*seedling);
+            }
             return Some(false);
         }
-        let Some(order) = &self.order else {
+        if !self.ranking.ranked() {
             self.band = Vec::new();
-            self.order = Some(tallest_first(&self.grown)?);
+            self.ranking.rank(runner)?;
             return Some(false);
-        };
-        let end = (self.next + THIN_UNIT).min(order.len());
-        for &(_, index) in order.get(self.next..end)? {
+        }
+        for _ in 0..THIN_UNIT {
             if self.stood >= self.most {
                 break;
             }
+            let Some(index) = self.ranking.next() else {
+                break;
+            };
             let Some(&Seedling {
                 at,
                 draw,
@@ -781,22 +787,145 @@ impl Standing {
             stage.claim(at, trunk(tree.height))?;
             self.stood += 1;
         }
-        self.next = end;
-        Some(self.next >= order.len() || self.stood >= self.most)
+        Some(self.ranking.exhausted() || self.stood >= self.most)
     }
 }
 
-/// The places among `grown` tallest first, as their heights and their places
-/// among them, ties in the order they were sown; `None` when the heap will not
-/// hold them.
-fn tallest_first(grown: &[Seedling]) -> Option<Vec<(f32, u32)>> {
-    let heights = grown.iter().enumerate().filter_map(|(index, seedling)| {
-        let height = seedling.tree?.height;
-        Some((single(height), u32::try_from(index).ok()?))
-    });
-    let mut order = fallible::collected(grown.len(), heights)?;
-    order.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
-    Some(order)
+/// Places in a run of a ranking one core sorts: a unit of the ranking is a
+/// run a core.
+const RUN: usize = 1 << 14;
+
+/// Places ranked tallest first, ties in the order they were added: sorted a
+/// run at a time across a runner once all are added, then merged a place at
+/// a time as they are taken, so neither the sort nor the merge is ever one
+/// long unit.
+#[derive(Debug, Default)]
+pub(super) struct Ranking {
+    /// Each place's height, as the grids hold one, and its index.
+    order: Vec<(f32, u32)>,
+    /// How many of `order` lie in sorted runs, and how many have been taken.
+    sorted: usize,
+    taken: usize,
+    /// The next place of each run not yet taken, and where the run ends.
+    runs: Vec<(usize, usize)>,
+    /// The tallest place each run has left, tallest of all on top.
+    heads: BinaryHeap<Head>,
+}
+
+/// The tallest place a run of a ranking has left.
+#[derive(Copy, Clone, Debug)]
+struct Head {
+    height: f32,
+    index: u32,
+    run: u32,
+}
+
+impl Ord for Head {
+    /// Taller first, and of two as tall, the one added first.
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.height
+            .total_cmp(&other.height)
+            .then(other.index.cmp(&self.index))
+    }
+}
+
+impl PartialOrd for Head {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for Head {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other).is_eq()
+    }
+}
+
+impl Eq for Head {}
+
+impl Ranking {
+    /// Room for `count` more places; `false` when the heap will not hold it.
+    pub(super) fn reserve(&mut self, count: usize) -> bool {
+        fallible::reserve(&mut self.order, count)
+    }
+
+    /// Add place `index` of height `height`, within the room reserved.
+    pub(super) fn add(&mut self, height: f64, index: u32) {
+        if self.order.len() < self.order.capacity() {
+            self.order.push((single(height), index));
+        }
+    }
+
+    /// The share of its places sorted into their runs.
+    fn sorted(&self) -> f64 {
+        share(self.sorted, self.order.len())
+    }
+
+    /// The share of its places taken.
+    fn taken(&self) -> f64 {
+        share(self.taken, self.order.len())
+    }
+
+    /// Whether every place is sorted into its run and the runs are laid out
+    /// to be merged.
+    pub(super) fn ranked(&self) -> bool {
+        self.sorted >= self.order.len() && self.runs.len() == self.order.len().div_ceil(RUN)
+    }
+
+    /// Sort the next runs, one a core across `runner`, and ready them to be
+    /// merged once all are; `None` when the heap will not hold the merge.
+    pub(super) fn rank(&mut self, runner: &dyn JobRunner) -> Option<()> {
+        let end = (self.sorted + RUN * runner.width().max(1)).min(self.order.len());
+        if let Some(runs) = self.order.get_mut(self.sorted..end) {
+            crate::band::for_each(runner, runs, (0, RUN), &|_, run| {
+                run.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+            });
+        }
+        self.sorted = end;
+        if self.sorted < self.order.len() {
+            return Some(());
+        }
+        let count = self.order.len().div_ceil(RUN);
+        if !fallible::reserve(&mut self.runs, count) || self.heads.try_reserve_exact(count).is_err()
+        {
+            return None;
+        }
+        for (run, start) in (0..self.order.len()).step_by(RUN).enumerate() {
+            let end = (start + RUN).min(self.order.len());
+            self.runs.push((start, end));
+            self.push_head(run)?;
+        }
+        Some(())
+    }
+
+    /// The tallest place not yet taken; `None` once all are.
+    pub(super) fn next(&mut self) -> Option<u32> {
+        let head = self.heads.pop()?;
+        self.taken += 1;
+        self.push_head(head.run as usize)?;
+        Some(head.index)
+    }
+
+    /// Whether every place has been taken.
+    pub(super) fn exhausted(&self) -> bool {
+        self.heads.is_empty()
+    }
+
+    /// Move run `run` on to its next place, if it has one left, and offer
+    /// that place to the merge; `None` only for a run that is not there.
+    fn push_head(&mut self, run: usize) -> Option<()> {
+        let (next, end) = self.runs.get_mut(run)?;
+        if *next < *end {
+            let &(height, index) = self.order.get(*next)?;
+            *next += 1;
+            self.heads.push(Head {
+                height,
+                index,
+                run: u32::try_from(run).ok()?,
+            });
+        }
+        Some(())
+    }
 }
 
 /// How a wood's trees are sown: closely enough for its middling trees where
@@ -878,6 +1007,9 @@ enum Phase {
     /// The wood's trees are standing; its patches were laid out under the
     /// seed what grows beneath it keeps to.
     Trees { standing: Standing, patches: u32 },
+    /// The shade the wood's trees cast about the eye is being cast, for what
+    /// grows beneath them.
+    Under { casting: Casting, patches: u32 },
     /// What grows beneath the wood is standing in the shade of its trees.
     Beneath {
         standing: Standing,
@@ -886,6 +1018,9 @@ enum Phase {
     },
     /// The wood's dead are to be laid in it.
     Deadfall { patches: u32 },
+    /// Every wood stands, and the shade they cast over the land is being
+    /// cast.
+    Shading { shading: Shading },
     /// Every wood stands, its shade cast over the land for the sward being
     /// laid in it.
     Laying { shades: Shades, laying: Laying },
@@ -910,10 +1045,12 @@ impl Growing {
     pub(super) fn done(&self) -> f64 {
         let within = match &self.phase {
             Phase::Sowing => 0.0,
-            Phase::Trees { standing, .. } => 0.6 * standing.done(),
+            Phase::Trees { standing, .. } => 0.55 * standing.done(),
+            Phase::Under { casting, .. } => 0.55 + 0.05 * casting.done(),
             Phase::Beneath { standing, .. } => 0.6 + 0.3 * standing.done(),
             Phase::Deadfall { .. } => 0.9,
-            Phase::Laying { laying, .. } => laying.done(),
+            Phase::Shading { shading } => 0.25 * shading.done(),
+            Phase::Laying { laying, .. } => 0.25 + 0.75 * laying.done(),
         };
         let parts = self.woods.len() + 1;
         let (whole, part) = if self.next < self.woods.len() {
@@ -937,7 +1074,7 @@ impl Growing {
     ) -> Option<bool> {
         let phase = core::mem::replace(&mut self.phase, Phase::Sowing);
         let Some(wood) = self.woods.get(self.next) else {
-            return self.lay(stage, dice, land, phase);
+            return self.lay(stage, dice, (land, runner), phase);
         };
         let next = match phase {
             Phase::Sowing => sow(stage, dice, land, wood)?,
@@ -947,9 +1084,19 @@ impl Growing {
             } => {
                 let trees = (&wood.grove, &wood.woodland, &wood.rooting);
                 if standing.step(stage, (land, runner), trees, (&wood.vantage, None))? {
-                    beneath(stage, dice, wood, patches)?
+                    roof(stage, wood, patches)?
                 } else {
                     Phase::Trees { standing, patches }
+                }
+            }
+            Phase::Under {
+                mut casting,
+                patches,
+            } => {
+                if casting.step(&stage.canopies, runner)? {
+                    beneath(stage, dice, wood, (casting.finish(), patches))?
+                } else {
+                    Phase::Under { casting, patches }
                 }
             }
             Phase::Beneath {
@@ -977,32 +1124,47 @@ impl Growing {
                 self.next += 1;
                 Phase::Sowing
             }
-            Phase::Laying { .. } => return None,
+            Phase::Shading { .. } | Phase::Laying { .. } => return None,
         };
         self.phase = next;
         Some(false)
     }
 
     /// The next step once every wood stands, out of `phase`: the woods'
-    /// shade cast over the land, and then the sward laid in it a lawn a step;
-    /// whether all is laid.
+    /// shade cast over the land a unit at a time, and then the sward laid in
+    /// it; whether all is laid.
     fn lay(
         &mut self,
         stage: &mut Stage,
         dice: &mut Dice,
-        land: &Land,
+        (land, runner): (&Land, &dyn JobRunner),
         phase: Phase,
     ) -> Option<bool> {
         let Some(lawning) = self.sward else {
             return Some(true);
         };
-        let Phase::Laying { shades, mut laying } = phase else {
-            let shades = Shades::of(&stage.canopies, (land.centre, land.reach), lawning.eye)?;
-            let laying = landscape::sward(stage, dice, land, &lawning)?;
-            self.phase = Phase::Laying { shades, laying };
-            return Some(false);
+        let (shades, mut laying) = match phase {
+            Phase::Laying { shades, laying } => (shades, laying),
+            Phase::Shading { mut shading } => {
+                self.phase = if shading.step(&stage.canopies, runner)? {
+                    let laying = landscape::sward(stage, dice, land, &lawning)?;
+                    Phase::Laying {
+                        shades: shading.finish(),
+                        laying,
+                    }
+                } else {
+                    Phase::Shading { shading }
+                };
+                return Some(false);
+            }
+            _ => {
+                let shading =
+                    Shading::new(&stage.canopies, (land.centre, land.reach), lawning.eye)?;
+                self.phase = Phase::Shading { shading };
+                return Some(false);
+            }
         };
-        if !laying.step(stage, dice, &shades)? {
+        if !laying.step(stage, dice, (&shades, runner))? {
             self.phase = Phase::Laying { shades, laying };
             return Some(false);
         }
@@ -1044,20 +1206,37 @@ fn sow(stage: &Stage, dice: &mut Dice, land: &Land, wood: &Wood) -> Option<Phase
     })
 }
 
-/// What grows beneath `wood`'s trees, sown in the shade they cast about the
-/// eye, in the wood's own patches laid out under `patches`; the wood's dead
-/// next, if nothing grows beneath it or no crown shades the eye's ground.
-fn beneath(stage: &Stage, dice: &mut Dice, wood: &Wood, patches: u32) -> Option<Phase> {
-    let Some(beneath) = &wood.beneath else {
+/// The shade `wood`'s trees cast about the eye, to be cast for what grows
+/// beneath them; the wood's dead next if nothing does.
+fn roof(stage: &Stage, wood: &Wood, patches: u32) -> Option<Phase> {
+    if wood.beneath.is_none() {
         return Some(Phase::Deadfall { patches });
-    };
+    }
     let eye = (wood.vantage.eye.x, wood.vantage.eye.z);
     let reach = BENEATH + ROOFED;
     let square = (
         (eye.0 - reach, eye.1 - reach),
         (eye.0 + reach, eye.1 + reach),
     );
-    let shade = Shade::of(&stage.canopies, square, NEAR_CELL, ROOFED)?;
+    Some(Phase::Under {
+        casting: Casting::new(&stage.canopies, square, NEAR_CELL, ROOFED)?,
+        patches,
+    })
+}
+
+/// What grows beneath `wood`'s trees, sown in the `shade` they cast about
+/// the eye, in the wood's own patches laid out under `patches`; the wood's
+/// dead next, if nothing grows beneath it or no crown shades the eye's
+/// ground.
+fn beneath(
+    stage: &Stage,
+    dice: &mut Dice,
+    wood: &Wood,
+    (shade, patches): (Shade, u32),
+) -> Option<Phase> {
+    let Some(beneath) = &wood.beneath else {
+        return Some(Phase::Deadfall { patches });
+    };
     if shade.is_open() {
         return Some(Phase::Deadfall { patches });
     }

@@ -2,6 +2,7 @@ use core::f64::consts::TAU;
 
 use super::*;
 use crate::sample::{mix32, unit};
+use tairix_parallel::JobRunner;
 
 /// A grid of `cells` a side, `step` apart from `origin`, filled from
 /// `height` and sealed.
@@ -50,13 +51,147 @@ fn looking_down(index: u32, span: f64, height: f64) -> Ray {
 }
 
 #[test]
-fn a_grid_is_a_power_of_two_a_side_and_steps_forward() {
-    assert!(Heightfield::new(3, (0.0, 0.0), 1.0, false).is_none());
+fn a_grid_has_cells_and_steps_forward() {
     assert!(Heightfield::new(0, (0.0, 0.0), 1.0, false).is_none());
     assert!(Heightfield::new(4, (0.0, 0.0), 0.0, false).is_none());
     assert!(Heightfield::new(4, (0.0, 0.0), -1.0, false).is_none());
     assert!(Heightfield::new(4, (0.0, 0.0), f64::NAN, false).is_none());
-    assert!(Heightfield::new(4, (0.0, 0.0), 1.0, false).is_some());
+    for cells in [1, 3, 4, 37, 1000] {
+        let field = Heightfield::new(cells, (0.0, 0.0), 1.0, false).expect("a grid");
+        assert_eq!(field.side(), cells + 1);
+        // Each level halves the one below, the odd block out kept.
+        let mut blocks = cells;
+        for &(_, at) in &field.levels {
+            assert_eq!(at, blocks);
+            blocks = blocks.div_ceil(2);
+        }
+        assert_eq!(field.levels.last().map(|level| level.1), Some(1));
+    }
+}
+
+/// A grid is written as its rows are filled, not zeroed whole when it is
+/// made, and sealing it reads any row left unwritten as level ground.
+#[test]
+fn a_grid_holds_the_rows_written_and_seals_the_rest_level() {
+    let mut field = Heightfield::new(9, (0.0, 0.0), 1.0, false).expect("a grid");
+    assert!(field.heights().is_empty());
+    assert!(field.carry_attributes());
+    for (_, band) in field.bands(0..4, 2) {
+        band.fill(2.0);
+    }
+    assert_eq!(field.heights().len(), 4 * 10);
+    let (heights, attributes) = field.rows_mut(4..6);
+    assert_eq!((heights.len(), attributes.len()), (20, 20));
+    heights.fill(3.0);
+    attributes.fill([9; 4]);
+    field.seal();
+    assert_eq!(field.heights().len(), 100);
+    assert_eq!((field.low, field.high), (0.0, 3.0));
+    assert!((field.mean - (40.0 * 2.0 + 20.0 * 3.0) / 100.0).abs() < 1e-12);
+    assert_eq!(field.attributes_of(3, 5), [9; 4]);
+    assert_eq!(field.attributes_of(3, 7), [0; 4]);
+}
+
+/// A grid sealed across many cores, in whatever order they take its bands,
+/// holds exactly what one sealed alone does.
+#[test]
+fn a_grid_seals_the_same_however_its_bands_are_shared() {
+    let sealed = |runner: &dyn JobRunner| {
+        let mut field = filled(300, (-20.0, -20.0), 0.13, false, rugged);
+        let mut unsealed = Heightfield::new(300, (-20.0, -20.0), 0.13, false).expect("a grid");
+        let side = unsealed.side();
+        for (start, band) in unsealed.bands(0..side, side) {
+            band.copy_from_slice(
+                &field.heights()[start * side..(start + band.len() / side) * side],
+            );
+        }
+        let mut sealing = Sealing::BEGUN;
+        let mut steps = 0;
+        let mut was = 0.0;
+        while !sealing.step(&mut unsealed, runner) {
+            let now = sealing.done(&unsealed);
+            assert!(now >= was && now < 1.0, "{was} then {now}");
+            was = now;
+            steps += 1;
+        }
+        assert!(sealing.done(&unsealed) >= 1.0);
+        // Each step seals at most a few bands a core, never the whole grid.
+        assert!(
+            steps * SEAL_CELLS * runner.width() >= 300 * 300,
+            "{steps} steps"
+        );
+        field.seal();
+        assert_eq!(field.maxima, unsealed.maxima);
+        unsealed
+    };
+    let alone = sealed(&tairix_parallel::SERIAL);
+    for runner in [
+        &tairix_parallel::Reversed::new(3) as &dyn JobRunner,
+        &tairix_parallel::Threaded::new(4),
+    ] {
+        let shared = sealed(runner);
+        assert_eq!(shared.maxima, alone.maxima);
+        assert_eq!(
+            (
+                shared.low.to_bits(),
+                shared.high.to_bits(),
+                shared.mean.to_bits()
+            ),
+            (
+                alone.low.to_bits(),
+                alone.high.to_bits(),
+                alone.mean.to_bits()
+            )
+        );
+    }
+}
+
+/// Over a grid of any size, a ray meets the nearest patch of any of its
+/// cells it crosses, as testing every cell's patch in turn finds.
+#[test]
+fn a_grid_of_any_size_is_met_at_the_nearest_of_its_cells() {
+    let mut met = 0;
+    for (salt, cells) in (0u32..).zip([1usize, 2, 3, 5, 37, 100]) {
+        let step = 12.0 / real(cells);
+        let field = filled(cells, (0.0, 0.0), step, false, rugged);
+        for index in 0..300 {
+            let ray = looking_down(index + 1000 * salt, 12.0, 7.0);
+            let inverse = reciprocal(ray.dir);
+            let mut nearest: Option<f64> = None;
+            for row in 0..cells {
+                for column in 0..cells {
+                    let corner = (step * real(column), step * real(row));
+                    let cell = Aabb {
+                        min: Vec3::new(corner.0, field.low - 1.0, corner.1),
+                        max: Vec3::new(corner.0 + step, field.high + 1.0, corner.1 + step),
+                    };
+                    let Some((enter, leave)) = cell.span(&ray, inverse, f64::INFINITY) else {
+                        continue;
+                    };
+                    if let Some(hit) =
+                        field.patch(&ray, (column, row), corner, (enter.max(1e-9), leave))
+                    {
+                        nearest = Some(nearest.map_or(hit.t, |t: f64| t.min(hit.t)));
+                    }
+                }
+            }
+            let found = field.intersect(&ray, 1e-9, f64::INFINITY).map(|hit| hit.t);
+            match (found, nearest) {
+                (Some(found), Some(nearest)) => {
+                    assert!(
+                        (found - nearest).abs() < 1e-6 * (1.0 + nearest),
+                        "{cells} cells, ray {index}: {found} against {nearest}"
+                    );
+                    met += 1;
+                }
+                (None, None) => {}
+                (found, nearest) => {
+                    panic!("{cells} cells, ray {index}: {found:?} against {nearest:?}")
+                }
+            }
+        }
+    }
+    assert!(met > 400, "{met} met");
 }
 
 #[test]
@@ -274,6 +409,8 @@ fn crossing_a_blocks_children_together_reaches_what_one_block_at_a_time_does() {
     let fields = [
         filled(16, (-8.0, -8.0), 1.0, false, holed),
         filled(64, (-24.0, -24.0), 0.75, false, rugged),
+        filled(37, (-9.0, -9.0), 0.5, false, holed),
+        filled(50, (-24.0, -24.0), 0.9, false, rugged),
     ];
     let mut compared = 0;
     for field in &fields {
@@ -419,4 +556,20 @@ fn a_wrapping_grid_repeats_across_the_plane_without_end() {
         );
     }
     assert!(met > 400, "{met} of 500 met the sea");
+}
+
+/// Two grids of a scene's are taken apart, one to write and one to read, in
+/// either order; the same grid twice, or one past the last, is none.
+#[test]
+fn grids_are_taken_apart_and_never_past_the_last() {
+    let mut fields: alloc::vec::Vec<Heightfield> = (1..=3)
+        .map(|cells| Heightfield::new(cells, (0.0, 0.0), 1.0, false).expect("a grid"))
+        .collect();
+    for (written, read) in [(0, 2), (2, 0), (1, 2), (2, 1)] {
+        let (write, from) = apart(&mut fields, written, read).expect("two grids apart");
+        assert_eq!((write.side(), from.side()), (written + 2, read + 2));
+    }
+    assert!(apart(&mut fields, 1, 1).is_none());
+    assert!(apart(&mut fields, 0, 3).is_none());
+    assert!(apart(&mut fields, 7, 1).is_none());
 }

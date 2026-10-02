@@ -9,7 +9,8 @@
 use alloc::vec::Vec;
 use core::f64::consts::TAU;
 
-use tairix_util::mathf;
+use tairix_parallel::JobRunner;
+use tairix_util::{fallible, mathf};
 
 use super::{rgb, Dice, Recipe, Stage};
 use crate::bark::{Bark, BarkKind};
@@ -18,10 +19,10 @@ use crate::grass::{Cover, Grass, GrassKind, Habit, Head, Lawn, Litter, Seen, Wee
 use crate::leaf::Outline;
 use crate::material::{Finish, Material, Relief};
 use crate::pigment::{Blades, Crowd, Foliage, Pigment};
-use crate::shade::{Rect, Shades};
+use crate::shade::{Rect, Sampling, Shade, Shades};
 use crate::shape::Shape;
 use crate::tree::{Envelope, Leafing, Level, Season, Species, Stock};
-use crate::vector::{real, share, Frame, Pose, Vec3};
+use crate::vector::{real, Frame, Pose, Vec3};
 
 /// The kinds of tree and shrub a scene can grow.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -1677,20 +1678,32 @@ pub(super) struct Tier {
     pub(super) cell: f64,
 }
 
-/// A sward of a grassland being laid a lawn a step: its grass over each of
-/// its tiers, finest first, drawn under one pattern so the tiers meet unseen
-/// and seen as `seen` has it; then weeds and fallen leaves over the finest
-/// grid's rectangle `ground`, seen as `near` has it.
+/// A sward of a grassland being laid a lawn at a time: its grass over each
+/// of its tiers, finest first, drawn under one pattern so the tiers meet
+/// unseen and seen as `seen` has it; then weeds and fallen leaves over the
+/// finest grid's rectangle `ground`, seen as `near` has it. Each lawn's shade
+/// is sampled a bounded unit at a time before the lawn is laid.
 #[derive(Debug)]
 pub(super) struct Laying {
-    grassland: Grassland,
     material: usize,
     pattern: u32,
-    tiers: Vec<Tier>,
-    seen: Seen,
-    ground: (u32, Rect),
-    near: Seen,
+    lawns: Vec<Planned>,
     next: usize,
+    /// The shade over the next lawn, being sampled.
+    sampling: Option<Sampling>,
+}
+
+/// One lawn of a sward, planned: the grid it lies on, the rectangle it
+/// covers and the finer lawn's within it, what it is of, the side of its
+/// cells, and how it is seen.
+#[derive(Copy, Clone, Debug)]
+struct Planned {
+    field: u32,
+    rect: Rect,
+    hole: Option<Rect>,
+    cover: Cover,
+    cell: f64,
+    seen: Seen,
 }
 
 impl Laying {
@@ -1710,125 +1723,122 @@ impl Laying {
             grassland.crowd(fallen_colours),
             Finish::Leaf { translucency: 0.3 },
         ))?;
+        let grass = Cover::Grass(Grass {
+            kinds: grassland.kinds.map(|kind| kind.map(|(kind, _)| kind)),
+            shoots: grassland.shoots,
+            flowers: grassland.flowers,
+        });
+        let weeds = (grassland.weeds > 0.0).then_some(Cover::Weeds(Weeds {
+            share: grassland.weeds,
+            leaves: (5, 9),
+        }));
+        let litter = grassland.fallen.map(|fallen| {
+            let leafing = species(fallen.kind).leafing;
+            Cover::Litter(Litter {
+                most: fallen.most,
+                length: (0.6 * leafing.length, 1.1 * leafing.length),
+                outline: leafing.outline,
+                age: fallen.age,
+            })
+        });
+        let swards = tiers.iter().map(|tier| Planned {
+            field: tier.field,
+            rect: (tier.from, tier.to),
+            hole: tier.hole,
+            cover: grass,
+            cell: tier.cell,
+            seen,
+        });
+        let (field, rect) = ground;
+        let floor = [weeds, litter].into_iter().flatten().map(|cover| Planned {
+            field,
+            rect,
+            hole: None,
+            cover,
+            cell: LEAF_CELL,
+            seen: near,
+        });
         Some(Self {
-            grassland: *grassland,
             material,
             pattern: dice.seed(),
-            tiers,
-            seen,
-            ground,
-            near,
+            lawns: fallible::collected(tiers.len() + 2, swards.chain(floor))?,
             next: 0,
+            sampling: None,
         })
     }
 
-    /// The share of the lawns laid so far: one a tier, then the weeds' and
-    /// the litter's.
+    /// The share of the lawns laid so far.
     pub(super) fn done(&self) -> f64 {
-        share(self.next, self.tiers.len() + 2)
+        let within = self.sampling.as_ref().map_or(0.0, Sampling::done);
+        (real(self.next) + within) / real(self.lawns.len().max(1))
     }
 
-    /// Lay the next lawn, in the shade `shades` casts: whether every lawn is
-    /// laid, or `None` when the stage will not hold it.
+    /// The next unit of the laying across `runner`, in the shade `shades`
+    /// casts: a unit of the next lawn's shade sampled, or the lawn laid once
+    /// it is; whether every lawn is laid, or `None` when the stage will not
+    /// hold one.
     pub(super) fn step(
         &mut self,
         stage: &mut Stage,
         dice: &mut Dice,
-        shades: &Shades,
+        (shades, runner): (&Shades, &dyn JobRunner),
     ) -> Option<bool> {
-        let (grassland, material, pattern) = (&self.grassland, self.material, self.pattern);
-        let (field, (from, to)) = self.ground;
-        let step = self.next;
+        let Some(&lawn) = self.lawns.get(self.next) else {
+            return Some(true);
+        };
+        let sampling = match self.sampling.as_mut() {
+            Some(sampling) => sampling,
+            None => self.sampling.insert(Sampling::new(
+                lawn.rect,
+                SHADE_STEP.max(SHADE_CELLS * lawn.cell),
+            )?),
+        };
+        if !sampling.step(shades, runner) {
+            return Some(false);
+        }
+        let shade = self.sampling.take()?.finish();
         self.next += 1;
-        if let Some(tier) = self.tiers.get(step) {
-            let grass = Grass {
-                kinds: grassland.kinds.map(|kind| kind.map(|(kind, _)| kind)),
-                shoots: grassland.shoots,
-                flowers: grassland.flowers,
-            };
-            let covered = covering(
-                stage,
-                shades,
-                (tier.field, (tier.from, tier.to)),
-                (Cover::Grass(grass), tier.cell),
-            )?;
-            let lawn = Lawn {
-                hole: tier.hole,
-                sward: pattern,
-                seed: dice.seed(),
-                seen: self.seen,
-                ..covered
-            };
-            // Laid only where grass grows: a lawn over the sea or bare rock would
-            // hold a canopy grid of nothing.
-            if lawn.grows(stage.fields.get(tier.field as usize)?) {
-                let tops = stage.tops(&lawn)?;
+        let covered = Lawn {
+            hole: lawn.hole,
+            sward: self.pattern,
+            seed: dice.seed(),
+            seen: lawn.seen,
+            ..covering(stage, (!shade.is_open()).then_some(shade), &lawn)?
+        };
+        if matches!(lawn.cover, Cover::Grass(_)) {
+            // Laid only where grass grows: a lawn over the sea or bare rock
+            // would hold a canopy grid of nothing.
+            if covered.grows(stage.fields.get(lawn.field as usize)?) {
+                let tops = stage.tops(&covered)?;
                 stage.lawn(
                     Lawn {
                         tops: Some(tops),
-                        ..lawn
+                        ..covered
                     },
-                    material,
+                    self.material,
                 )?;
             }
-            return Some(false);
+        } else {
+            stage.lawn(covered, self.material)?;
         }
-        let cover = match step - self.tiers.len() {
-            0 if grassland.weeds > 0.0 => Cover::Weeds(Weeds {
-                share: grassland.weeds,
-                leaves: (5, 9),
-            }),
-            0 => return Some(false),
-            1 => match grassland.fallen {
-                Some(fallen) => {
-                    let leafing = species(fallen.kind).leafing;
-                    Cover::Litter(Litter {
-                        most: fallen.most,
-                        length: (0.6 * leafing.length, 1.1 * leafing.length),
-                        outline: leafing.outline,
-                        age: fallen.age,
-                    })
-                }
-                None => return Some(true),
-            },
-            _ => return Some(true),
-        };
-        let covered = covering(stage, shades, (field, (from, to)), (cover, LEAF_CELL))?;
-        stage.lawn(
-            Lawn {
-                sward: pattern,
-                seed: dice.seed(),
-                seen: self.near,
-                ..covered
-            },
-            material,
-        )?;
-        Some(matches!(cover, Cover::Litter(_)))
+        Some(self.next >= self.lawns.len())
     }
 }
 
-/// A lawn of `cover` in cells `cell` across over the rectangle `from`–`to`
-/// of grid `field`, bounded by the lowest and highest the ground lies there
-/// and shaded by the trees standing over it; its pattern, seed and sight
-/// still to set.
-fn covering(
-    stage: &Stage,
-    shades: &Shades,
-    (field, (from, to)): (u32, Rect),
-    (cover, cell): (Cover, f64),
-) -> Option<Lawn> {
-    let ground = stage.fields.get(field as usize)?;
-    let shade = shades.within((from, to), SHADE_STEP.max(SHADE_CELLS * cell))?;
-    let shade = (!shade.is_open()).then_some(shade);
+/// A lawn as `lawn` plans it, bounded by the lowest and highest the ground
+/// lies under it and in `shade`; its pattern, seed and sight still to set.
+fn covering(stage: &Stage, shade: Option<Shade>, lawn: &Planned) -> Option<Lawn> {
+    let ground = stage.fields.get(lawn.field as usize)?;
+    let (from, to) = lawn.rect;
     Some(Lawn {
-        field,
+        field: lawn.field,
         from,
         to,
         hole: None,
         floor: ground.lowest_over(from, to) - 0.02,
         ceiling: ground.highest_over(from, to),
-        cell,
-        cover,
+        cell: lawn.cell,
+        cover: lawn.cover,
         shade,
         sward: 0,
         seed: 0,

@@ -9,8 +9,8 @@
 //! the open sea does, the ray walking tile to tile.
 //!
 //! Its heights are filled a band of rows at a time, so a caller spreads the
-//! work over as many frames and cores as it has; then [`Heightfield::seal`]
-//! builds the pyramid. A grid may leave out a rectangle of its cells, which
+//! work over as many frames and cores as it has; then a [`Sealing`] builds
+//! the pyramid the same way. A grid may leave out a rectangle of its cells, which
 //! a finer grid over the same ground covers instead, and any cell with a
 //! corner marked absent: water lies only where there is water. A land's grid
 //! carries what the land is like at each vertex beside its height — how wet,
@@ -20,13 +20,15 @@
 use alloc::vec::Vec;
 use core::ops::Range;
 
+use tairix_parallel::JobRunner;
 use tairix_util::fallible;
 use tairix_util::mathf::{self, fmax, fmin};
 
+use crate::band;
 use crate::lanes::{Corners, Lanes};
 use crate::scene::{Grid, Layout};
 use crate::shape::{quadratic, reciprocal, Aabb, Hit};
-use crate::vector::{real, Ray, Vec3};
+use crate::vector::{real, share, Ray, Vec3};
 
 /// How far a ray is followed over a wrapping grid's tiles: beyond this a swell
 /// is finer than a pixel, and the grid lies at its mean level out to the
@@ -36,7 +38,7 @@ const WRAP_REACH: f64 = 6_000.0;
 /// A square grid of heights.
 #[derive(Debug)]
 pub(crate) struct Heightfield {
-    /// Vertices along each side: a power of two, plus one.
+    /// Vertices along each side: its cells, plus one.
     side: usize,
     /// The world x and z of vertex (0, 0).
     origin: (f64, f64),
@@ -45,9 +47,14 @@ pub(crate) struct Heightfield {
     /// Whether the grid repeats endlessly across the plane; its last row and
     /// column are then its first again.
     wrap: bool,
+    /// The rows written so far. Each buffer is reserved whole when the grid
+    /// is made and extended as its rows are written, so neither the making
+    /// nor any one unit of the filling zeroes the whole grid, and extending
+    /// never allocates.
     heights: Vec<f32>,
-    /// For each level, the highest corner of each block of cells: the first
-    /// level one cell a block, each after it half as many a side.
+    /// For each level sealed so far, the highest corner of each block of
+    /// cells: the first level one cell a block, each after it half as many a
+    /// side, the last of an odd count holding the one cell or block left over.
     maxima: Vec<f32>,
     /// Where each level starts in `maxima`, and how many blocks it has a
     /// side.
@@ -58,9 +65,10 @@ pub(crate) struct Heightfield {
     mean: f64,
     /// The columns and rows of cells a finer grid covers instead.
     absent: Option<(Range<usize>, Range<usize>)>,
-    /// What the land is like at each vertex, four bytes of it; empty for a
-    /// grid that says nothing but its heights.
+    /// What the land is like at each vertex written so far, four bytes of it,
+    /// if the grid carries them.
     attributes: Vec<[u8; 4]>,
+    carries: bool,
 }
 
 /// A block of the pyramid a walk has still to come to, and where the ray
@@ -72,6 +80,29 @@ struct Waiting {
     row: usize,
     enter: f64,
     leave: f64,
+}
+
+/// A row of a grid being written: its number, its heights, and the
+/// attributes there, empty for a grid that carries none.
+pub(crate) type Row<'a> = (usize, &'a mut [f32], &'a mut [[u8; 4]]);
+
+/// The grid `written` of `fields` to write, and the grid `read` it is
+/// written from; `None` unless both are there and apart.
+pub(crate) fn apart(
+    fields: &mut [Heightfield],
+    written: usize,
+    read: usize,
+) -> Option<(&mut Heightfield, &Heightfield)> {
+    if written == read {
+        return None;
+    }
+    let (low, high) = fields.split_at_mut_checked(written.max(read))?;
+    let (first, second) = (low.get_mut(written.min(read))?, high.first_mut()?);
+    Some(if written < read {
+        (first, &*second)
+    } else {
+        (second, &*first)
+    })
 }
 
 /// The height a vertex is given where the grid has no surface.
@@ -98,6 +129,7 @@ impl Grid for Heightfield {
         range: Range<usize>,
         rows: usize,
     ) -> impl Iterator<Item = (usize, &mut [f32])> {
+        self.reach(range.end);
         banded(&mut self.heights, self.side, range, rows)
     }
 }
@@ -135,15 +167,18 @@ fn cells_of(side: usize) -> usize {
 }
 
 impl Heightfield {
-    /// A flat grid of `cells` cells a side (a power of two), `step` apart,
-    /// its first vertex at `origin`; `None` for a size that is not a power
-    /// of two, or when the heap will not hold it.
+    /// A flat grid of `cells` cells a side, `step` apart, its first vertex at
+    /// `origin`; `None` for a grid of no cells, or when the heap will not
+    /// hold it.
     pub(crate) fn new(cells: usize, origin: (f64, f64), step: f64, wrap: bool) -> Option<Self> {
-        if !cells.is_power_of_two() || step.is_nan() || step <= 0.0 {
+        if cells == 0 || step.is_nan() || step <= 0.0 {
             return None;
         }
-        let side = cells + 1;
-        let heights = fallible::filled(side.checked_mul(side)?, 0.0f32)?;
+        let side = cells.checked_add(1)?;
+        let mut heights = Vec::new();
+        if !fallible::reserve(&mut heights, side.checked_mul(side)?) {
+            return None;
+        }
         let mut levels = Vec::new();
         let mut total = 0usize;
         let mut blocks = cells;
@@ -156,7 +191,11 @@ impl Heightfield {
             if blocks == 1 {
                 break;
             }
-            blocks /= 2;
+            blocks = blocks.div_ceil(2);
+        }
+        let mut maxima = Vec::new();
+        if !fallible::reserve(&mut maxima, total) {
+            return None;
         }
         Some(Self {
             side,
@@ -164,13 +203,14 @@ impl Heightfield {
             step,
             wrap,
             heights,
-            maxima: fallible::filled(total, 0.0f32)?,
+            maxima,
             levels,
             low: 0.0,
             high: 0.0,
             mean: 0.0,
             absent: None,
             attributes: Vec::new(),
+            carries: false,
         })
     }
 
@@ -180,36 +220,81 @@ impl Heightfield {
         self.absent = Some((columns, rows));
     }
 
-    /// Carry four bytes of attributes at every vertex; `false` when the heap
-    /// will not hold them.
+    /// Carry four bytes of attributes at every vertex, as the rows already
+    /// written do; `false` when the heap will not hold them.
     pub(crate) fn carry_attributes(&mut self) -> bool {
-        match fallible::filled(self.heights.len(), [0u8; 4]) {
-            Some(attributes) => {
-                self.attributes = attributes;
-                true
-            }
-            None => false,
+        if self.carries {
+            return true;
+        }
+        if !fallible::reserve(&mut self.attributes, self.side * self.side) {
+            return false;
+        }
+        self.carries = true;
+        self.reach(self.heights.len() / self.side);
+        true
+    }
+
+    /// Extend the heights, and the attributes the grid carries, over its
+    /// first `rows` rows, zeroed where nothing was written: within what was
+    /// reserved, so it never allocates.
+    fn reach(&mut self, rows: usize) {
+        let length = rows.min(self.side) * self.side;
+        if self.heights.len() < length {
+            self.heights.resize(length, 0.0);
+        }
+        if self.carries && self.attributes.len() < length {
+            self.attributes.resize(length, [0; 4]);
         }
     }
 
-    /// The heights, row by row, to shape directly.
+    /// The heights, every row, to shape directly.
     pub(crate) fn heights_mut(&mut self) -> &mut [f32] {
+        self.reach(self.side);
         &mut self.heights
     }
 
-    /// The heights, row by row.
+    /// The heights, row by row, of the rows written so far.
     pub(crate) fn heights(&self) -> &[f32] {
         &self.heights
     }
 
-    /// The attributes, row by row, to set; empty for a grid that carries none.
-    pub(crate) fn attributes_mut(&mut self) -> &mut [[u8; 4]] {
-        &mut self.attributes
+    /// The heights and the attributes both of `rows`, to set together; the
+    /// attributes empty for a grid that carries none.
+    pub(crate) fn rows_mut(&mut self, rows: Range<usize>) -> (&mut [f32], &mut [[u8; 4]]) {
+        let end = rows.end.min(self.side);
+        self.reach(end);
+        let span = rows.start.min(end) * self.side..end * self.side;
+        let attributes = if self.carries {
+            self.attributes.get_mut(span.clone()).unwrap_or_default()
+        } else {
+            &mut []
+        };
+        (self.heights.get_mut(span).unwrap_or_default(), attributes)
     }
 
-    /// The heights and the attributes both, row by row, to set together.
-    pub(crate) fn surfaces_mut(&mut self) -> (&mut [f32], &mut [[u8; 4]]) {
-        (&mut self.heights, &mut self.attributes)
+    /// Visit rows `rows` with `visit`, a row a piece across `runner`; on the
+    /// calling thread alone when the heap will not hold the list of rows.
+    pub(crate) fn each_row(
+        &mut self,
+        rows: Range<usize>,
+        runner: &dyn JobRunner,
+        visit: &(dyn Fn(&mut Row<'_>) + Sync),
+    ) {
+        let side = self.side;
+        let first = rows.start;
+        let (heights, attributes) = self.rows_mut(rows);
+        let count = heights.len().div_ceil(side.max(1));
+        let mut kept = attributes.chunks_mut(side);
+        let lines = (first..).zip(heights.chunks_mut(side));
+        let mut list: Vec<Row<'_>> = Vec::new();
+        if fallible::reserve(&mut list, count) {
+            list.extend(lines.map(|(row, line)| (row, line, kept.next().unwrap_or_default())));
+            tairix_parallel::for_each(runner, &mut list, visit);
+        } else {
+            for (row, line) in lines {
+                visit(&mut (row, line, kept.next().unwrap_or_default()));
+            }
+        }
     }
 
     /// The attributes vertex `(column, row)` carries, as set; nought for a
@@ -238,7 +323,7 @@ impl Heightfield {
     /// The attributes at world `(x, z)`, blended from the vertices about it,
     /// each `0.0..=1.0`; [`PLAIN`] for a grid that carries none.
     pub(crate) fn attributes_at(&self, x: f64, z: f64) -> [f64; 4] {
-        if self.attributes.is_empty() {
+        if !self.carries {
             return PLAIN;
         }
         let (column, across) = self.split((x - self.origin.0) / self.step);
@@ -265,72 +350,133 @@ impl Heightfield {
 
     /// Whether cell `(column, row)` has a surface.
     fn present(&self, column: usize, row: usize) -> bool {
-        if let Some((columns, rows)) = &self.absent {
-            if columns.contains(&column) && rows.contains(&row) {
-                return false;
-            }
-        }
-        true
+        present(self.absent.as_ref(), column, row)
     }
 
-    /// Settle the grid once every row is filled: its extremes, and the
-    /// pyramid a ray walks.
+    /// Seal the grid whole on the calling thread.
+    #[cfg(test)]
     pub(crate) fn seal(&mut self) {
-        let side = self.side;
-        let (mut low, mut high, mut sum, mut count) =
-            (f64::INFINITY, f64::NEG_INFINITY, 0.0, 0usize);
-        for &height in self.heights.iter().filter(|height| height.is_finite()) {
-            low = low.min(f64::from(height));
-            high = high.max(f64::from(height));
-            sum += f64::from(height);
-            count += 1;
-        }
-        (self.low, self.high) = if low <= high { (low, high) } else { (0.0, 0.0) };
-        self.mean = if count > 0 { sum / real(count) } else { 0.0 };
-        let cells = cells_of(side);
-        for row in 0..cells {
-            for column in 0..cells {
-                let corner =
-                    |c: usize, r: usize| self.heights.get(r * side + c).copied().unwrap_or(ABSENT);
-                let corners = [
-                    corner(column, row),
-                    corner(column + 1, row),
-                    corner(column, row + 1),
-                    corner(column + 1, row + 1),
-                ];
-                // A cell with a corner absent, or left to a finer grid, has no
-                // surface, and so no height a ray could reach.
-                let whole = corners.iter().all(|height| height.is_finite());
-                let peak = if whole && self.present(column, row) {
-                    corners[0].max(corners[1]).max(corners[2]).max(corners[3])
-                } else {
-                    ABSENT
-                };
-                if let Some(slot) = self.maxima.get_mut(row * cells + column) {
-                    *slot = peak;
+        let mut sealing = Sealing::BEGUN;
+        while !sealing.step(self, &tairix_parallel::SERIAL) {}
+    }
+
+    /// The peaks of cell rows `rows` into the pyramid's first level, in bands
+    /// of `per` rows across `runner`, and the extremes of those rows of
+    /// vertices — and of the last row too, once they reach it.
+    fn seal_cells(&mut self, rows: Range<usize>, per: usize, runner: &dyn JobRunner) -> Extremes {
+        let (side, cells) = (self.side, cells_of(self.side));
+        let Self {
+            heights,
+            maxima,
+            absent,
+            ..
+        } = self;
+        maxima.resize(rows.end * cells, ABSENT);
+        let peaks = maxima
+            .get_mut(rows.start * cells..rows.end * cells)
+            .unwrap_or_default();
+        let heights: &[f32] = heights;
+        let absent = absent.as_ref();
+        let band = |number: usize, peaks: &mut [f32]| {
+            let first = number * per;
+            for (row, out) in (first..).zip(peaks.chunks_mut(cells)) {
+                for (column, slot) in out.iter_mut().enumerate() {
+                    let corner =
+                        |c: usize, r: usize| heights.get(r * side + c).copied().unwrap_or(ABSENT);
+                    let corners = [
+                        corner(column, row),
+                        corner(column + 1, row),
+                        corner(column, row + 1),
+                        corner(column + 1, row + 1),
+                    ];
+                    // A cell with a corner absent, or left to a finer grid, has
+                    // no surface, and so no height a ray could reach.
+                    let whole = corners.iter().all(|height| height.is_finite());
+                    *slot = if whole && present(absent, column, row) {
+                        corners[0].max(corners[1]).max(corners[2]).max(corners[3])
+                    } else {
+                        ABSENT
+                    };
                 }
             }
-        }
-        for level in 1..self.levels.len() {
-            let ((below, below_side), (at, blocks)) = (self.levels[level - 1], self.levels[level]);
-            for row in 0..blocks {
-                for column in 0..blocks {
-                    let child = |c: usize, r: usize| {
-                        self.maxima
-                            .get(below + (2 * row + r) * below_side + 2 * column + c)
-                            .copied()
-                            .unwrap_or(f32::MIN)
-                    };
-                    let peak = child(0, 0)
-                        .max(child(1, 0))
-                        .max(child(0, 1))
-                        .max(child(1, 1));
-                    if let Some(slot) = self.maxima.get_mut(at + row * blocks + column) {
-                        *slot = peak;
+            let end = first + peaks.len() / cells.max(1);
+            let last = if end >= cells { side } else { end };
+            Extremes::of(heights.get(first * side..last * side).unwrap_or_default())
+        };
+        band::fold(
+            runner,
+            peaks,
+            (rows.start / per, per * cells),
+            Extremes::NONE,
+            &band,
+            Extremes::join,
+        )
+    }
+
+    /// The peaks of rows `rows` of pyramid level `level`, each the highest of
+    /// the four blocks beneath it that the level below has, in bands of `per`
+    /// rows across `runner`.
+    fn seal_blocks(
+        &mut self,
+        level: usize,
+        rows: Range<usize>,
+        per: usize,
+        runner: &dyn JobRunner,
+    ) {
+        let (Some(&(below_at, below)), Some(&(at, blocks))) = (
+            level
+                .checked_sub(1)
+                .and_then(|lower| self.levels.get(lower)),
+            self.levels.get(level),
+        ) else {
+            return;
+        };
+        self.maxima.resize(at + rows.end * blocks, ABSENT);
+        let (lower, upper) = self.maxima.split_at_mut(at);
+        let children: &[f32] = lower.get(below_at..).unwrap_or_default();
+        let peaks = upper
+            .get_mut(rows.start * blocks..rows.end * blocks)
+            .unwrap_or_default();
+        band::for_each(
+            runner,
+            peaks,
+            (rows.start / per, per * blocks),
+            &|number, peaks| {
+                for (row, out) in (number * per..).zip(peaks.chunks_mut(blocks)) {
+                    for (column, slot) in out.iter_mut().enumerate() {
+                        let child = |c: usize, r: usize| {
+                            let (column, row) = (2 * column + c, 2 * row + r);
+                            if column < below && row < below {
+                                children
+                                    .get(row * below + column)
+                                    .copied()
+                                    .unwrap_or(ABSENT)
+                            } else {
+                                ABSENT
+                            }
+                        };
+                        *slot = child(0, 0)
+                            .max(child(1, 0))
+                            .max(child(0, 1))
+                            .max(child(1, 1));
                     }
                 }
-            }
-        }
+            },
+        );
+    }
+
+    /// Take `found` as the grid's extremes and mean.
+    fn settle(&mut self, found: Extremes) {
+        (self.low, self.high) = if found.low <= found.high {
+            (found.low, found.high)
+        } else {
+            (0.0, 0.0)
+        };
+        self.mean = if found.count > 0 {
+            found.sum / real(found.count)
+        } else {
+            0.0
+        };
     }
 
     /// The span one tile of the grid covers, each way.
@@ -693,11 +839,14 @@ impl Heightfield {
     /// The highest any cell of block `(column, row)` of `level` stands:
     /// [`ABSENT`] where none has a surface.
     fn peak(&self, level: usize, column: usize, row: usize) -> f32 {
-        self.levels
-            .get(level)
-            .and_then(|&(at, blocks)| self.maxima.get(at + row * blocks + column))
-            .copied()
-            .unwrap_or(ABSENT)
+        match self.levels.get(level) {
+            Some(&(at, blocks)) if column < blocks && row < blocks => self
+                .maxima
+                .get(at + row * blocks + column)
+                .copied()
+                .unwrap_or(ABSENT),
+            _ => ABSENT,
+        }
     }
 
     /// Where the ray meets the patch of cell `(column, row)`, whose first
@@ -773,6 +922,123 @@ impl Heightfield {
         let bottom = blend(gradient(column, row + 1), gradient(column + 1, row + 1), u);
         let (gx, gz) = blend(top, bottom, v);
         Vec3::new(-gx, 1.0, -gz).normalized()
+    }
+}
+
+/// Whether cell `(column, row)` has a surface, `absent` the rectangle of
+/// cells a finer grid covers instead.
+fn present(absent: Option<&(Range<usize>, Range<usize>)>, column: usize, row: usize) -> bool {
+    absent.is_none_or(|(columns, rows)| !(columns.contains(&column) && rows.contains(&row)))
+}
+
+/// About how many cells a band of a grid's sealing holds, in whole rows: a
+/// count of its own rather than the runner's, so the mean sums the same
+/// however many cores share the bands.
+const SEAL_CELLS: usize = 8192;
+
+/// A grid being sealed a band of rows at a time: its extremes and its mean,
+/// then each level of its pyramid from the one below.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct Sealing {
+    /// The pyramid level being built, and its next row.
+    level: usize,
+    row: usize,
+    extremes: Extremes,
+}
+
+impl Sealing {
+    /// A sealing not yet begun.
+    pub(crate) const BEGUN: Self = Self {
+        level: 0,
+        row: 0,
+        extremes: Extremes::NONE,
+    };
+
+    /// Seal the next unit of `field` across `runner`: whether it is sealed.
+    pub(crate) fn step(&mut self, field: &mut Heightfield, runner: &dyn JobRunner) -> bool {
+        field.reach(field.side);
+        let mut budget = SEAL_CELLS.saturating_mul(runner.width().max(1));
+        while let Some(&(_, blocks)) = field.levels.get(self.level) {
+            if budget == 0 {
+                return false;
+            }
+            let per = (SEAL_CELLS / blocks).max(1);
+            let bands = (budget / (per * blocks)).max(1);
+            let rows = self.row..(self.row + bands * per).min(blocks);
+            if self.level == 0 {
+                let found = field.seal_cells(rows.clone(), per, runner);
+                self.extremes = self.extremes.join(found);
+            } else {
+                field.seal_blocks(self.level, rows.clone(), per, runner);
+            }
+            budget = budget.saturating_sub(rows.len() * blocks);
+            self.row = rows.end;
+            if self.row < blocks {
+                return false;
+            }
+            if self.level == 0 {
+                field.settle(self.extremes);
+            }
+            self.level += 1;
+            self.row = 0;
+        }
+        true
+    }
+
+    /// How far the sealing of `field` has come, as a share of its pyramid.
+    pub(crate) fn done(&self, field: &Heightfield) -> f64 {
+        let area = |&(_, blocks): &(usize, usize)| blocks * blocks;
+        let sealed: usize = field.levels.iter().take(self.level).map(area).sum();
+        let within = field
+            .levels
+            .get(self.level)
+            .map_or(0, |&(_, blocks)| self.row * blocks);
+        share(sealed + within, field.levels.iter().map(area).sum())
+    }
+}
+
+/// The least, the greatest and the sum of a run of heights with a surface,
+/// and how many there were.
+#[derive(Copy, Clone, Debug)]
+struct Extremes {
+    low: f64,
+    high: f64,
+    sum: f64,
+    count: usize,
+}
+
+impl Extremes {
+    /// Of no heights at all.
+    const NONE: Self = Self {
+        low: f64::INFINITY,
+        high: f64::NEG_INFINITY,
+        sum: 0.0,
+        count: 0,
+    };
+
+    fn of(heights: &[f32]) -> Self {
+        heights
+            .iter()
+            .filter(|height| height.is_finite())
+            .fold(Self::NONE, |found, &height| {
+                let height = f64::from(height);
+                Self {
+                    low: fmin(found.low, height),
+                    high: fmax(found.high, height),
+                    sum: found.sum + height,
+                    count: found.count + 1,
+                }
+            })
+    }
+
+    /// These and the heights after them.
+    fn join(self, after: Self) -> Self {
+        Self {
+            low: fmin(self.low, after.low),
+            high: fmax(self.high, after.high),
+            sum: self.sum + after.sum,
+            count: self.count + after.count,
+        }
     }
 }
 

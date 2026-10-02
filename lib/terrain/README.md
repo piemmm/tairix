@@ -21,7 +21,9 @@ definition of each algorithm. `no_std` + `alloc`, and
 - `hillslope` — linear diffusion, and talus: ground steeper than its angle of
   repose slumps to it.
 - `droplet` — particle hydraulic erosion: droplets that carry sediment down the
-  slope they read and lay it down where they slow.
+  slope they read and lay it down where they slow, run tile by tile in phases
+  whose tiles reach no sample in common, so a phase's tiles share a
+  `tairix_parallel::JobRunner`.
 - `route` — A\* with integer costs: the least-cost path between two samples
   under a caller's pricing of each step.
 
@@ -29,7 +31,8 @@ definition of each algorithm. `no_std` + `alloc`, and
 
 - **Bounded steps.** A pass whose cost grows with the grid — a flood, a route,
   a run of droplets — advances a bounded amount per call, and run to its end
-  gives exactly what one call would.
+  gives exactly what one call would; a run of droplets leaves the same ground
+  however many cores share it.
 - **Deterministic on every target.** Every answer is a pure function of its
   inputs: arithmetic goes through `lib/util::mathf`, and every queue breaks a
   tie on a sample's index, so a world is bit-identical on every Tier-1 target.
@@ -46,7 +49,9 @@ the same done whole; incision cuts a valley but never below its outlet or the
 floor, and an implicit step lowers a sample toward its receiver and never past
 it; diffusion spreads a spike and talus slumps a column to its repose, losing
 nothing; droplets carry an upper slope down to its foot and leave level ground
-level; a route costs the octile distance over even ground, goes round a wall
-and never through a closed one; and a buffer of the wrong size is refused.
+level, leave the same ground and water tracks on one core as across several,
+and no two tiles of a phase reach a sample in common; a route costs the octile
+distance over even ground, goes round a wall and never through a closed one;
+and a buffer of the wrong size is refused.
 
 The design is in `docs/src/lib/terrain.md`.

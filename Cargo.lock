@@ -3645,6 +3645,7 @@ dependencies = [
 name = "tairix-terrain"
 version = "0.0.0"
 dependencies = [
+ "tairix-parallel",
  "tairix-rng",
  "tairix-util",
 ]

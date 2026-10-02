@@ -42,11 +42,13 @@ random from a seed, and a tracer that answers what one pixel of one shows.
   pixel's samples are hashed from its index and the scene's key.
 - **Fallible allocation.** Every buffer is reserved fallibly: a heap that will
   not hold a scene answers `None`, never an abort.
-- **Bounded cost.** A scene holds at most 131 072 objects, 4096 hull faces,
+- **Bounded cost.** A scene holds at most 524 288 objects, 4096 hull faces,
   256 materials, 12 lights, 12 height grids, 96 prototypes, 16 lawns and 8
   woods; a pixel at most 64 samples, a path at most nine bounces. Every unit of
-  preparation is bounded: a band of a grid's rows, a slice of a prototype's or
-  the scene's hierarchy, a band of a wood's places.
+  preparation is a fixed amount of work a core, whatever the scene holds: a
+  band of a grid's rows or of a shade's, a turn of a land's droplet tiles, a
+  slice of a prototype's or the scene's hierarchy, a band of a wood's places
+  or a run of their ranking, a few rows of a radiosity record's hemisphere.
 
 ## Tests
 
@@ -66,7 +68,14 @@ walling off the view, and a forest standing thousands of trees and its fallen
 among them clear of the eye; the shade crowns cast and the sky they hide, and
 the air beneath them roofed; fallen trunks lying along the ground, thrown or
 snapped, and stumps sawn or splintered; ferns arching from the ground; the
-sampling, lights, materials and pigments; a land lying as its grids hold it,
+sampling, lights, materials and pigments; a grid of any size met at the
+nearest of its cells and sealed the same across any number of cores, written
+only as its rows are filled, and a canopy grid as large as its lawn and no
+larger; a shade cast in bands bit for bit the shade cast whole, and sampled
+in bands as alone; a wood's places ranked tallest first as one sort would;
+prototypes of every kind grown a core apiece a unit; radiosity records laid
+the same however their rows fall across units, holding within fifteen degrees
+of turn; a land lying as its grids hold it,
 its rivers running downhill and its road dry but where it bridges them; the
 composer across every setting under many seeds (lit, sound, framed, the camera
 in the open and above the water, crystals rooted in their rock, an Ionic

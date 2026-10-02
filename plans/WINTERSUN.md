@@ -547,7 +547,9 @@ WS2's pipeline stays; what it produces is too narrow.
 - It has no caves.
 
 These items make the world as varied as a real one without giving up
-anything decision 2 and WS2 stand on. WS32 and WS33, which show the world in
+anything decision 2 and WS2 stand on. The desktop ray tracer's land generator
+is to build this land too, at its *Maximum* detail, moved into renderer-neutral
+crates that keep these rules (`plans/RAYTRACE.md` RT40). WS32 and WS33, which show the world in
 3D from a camera the player positions, and WS27, which draws what they place
 and makes it solid, are in §3. Every new stage is a pure function of the realm,
 seam-free by construction, bounded in memory by the working set, and folded

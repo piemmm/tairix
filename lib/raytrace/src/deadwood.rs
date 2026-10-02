@@ -9,7 +9,7 @@ use core::f64::consts::TAU;
 use tairix_rng::{NonCryptoRng, RandU64};
 use tairix_util::mathf;
 
-use crate::prototype::{single, stored, Facet, Part, Prototype, Tube};
+use crate::prototype::{single, stored, Building, Facet, Part, Prototype, Tube};
 use crate::sample::mix32;
 use crate::vector::{Frame, Vec3};
 
@@ -44,14 +44,14 @@ fn tube(
 /// A fallen trunk `length` long and `radius` thick at its foot, lying along
 /// its frame's `z` on the ground its `y` stands up from, in bark `bark`:
 /// thrown by the wind, its roots torn up with it, if `thrown`, and snapped
-/// off at its foot otherwise; grown from `seed`. `None` when the heap will
-/// not hold it.
+/// off at its foot otherwise; grown from `seed`, its hierarchy still to
+/// build. `None` when the heap will not hold it.
 pub(crate) fn log(
     length: f64,
     radius: f64,
     (bark, thrown): (u16, bool),
     seed: u64,
-) -> Option<Prototype> {
+) -> Option<Building> {
     let mut dice = NonCryptoRng::seed_from_u64(seed);
     let mut key = mix32(u32::try_from(seed & 0xffff_ffff).unwrap_or(0));
     let mut next_key = || {
@@ -152,7 +152,7 @@ pub(crate) fn log(
             ));
         }
     }
-    Prototype::new(parts, Vec::new(), Vec::new())
+    Prototype::building(parts, Vec::new(), Vec::new())
 }
 
 /// How a stump's top was left: snapped off in splinters, or sawn flat.
@@ -167,13 +167,14 @@ const FACE_SIDES: u32 = 14;
 
 /// A stump `height` tall and `radius` across, its roots flaring into the
 /// ground, its bark `bark` and its top as `top` left it, a sawn face in
-/// `wood`; grown from `seed`. `None` when the heap will not hold it.
+/// `wood`; grown from `seed`, its hierarchy still to build. `None` when the
+/// heap will not hold it.
 pub(crate) fn stump(
     height: f64,
     radius: f64,
     (top, bark, wood): (Top, u16, u16),
     seed: u64,
-) -> Option<Prototype> {
+) -> Option<Building> {
     let mut dice = NonCryptoRng::seed_from_u64(seed);
     let mut key = mix32(u32::try_from(seed >> 32).unwrap_or(0));
     let mut next_key = || {
@@ -254,7 +255,7 @@ pub(crate) fn stump(
             }
         }
     }
-    Prototype::new(parts, vertices, normals)
+    Prototype::building(parts, vertices, normals)
 }
 
 #[cfg(test)]

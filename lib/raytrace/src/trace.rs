@@ -40,7 +40,7 @@ use crate::material::{
 };
 use crate::noise::{cells3, noise3, smoothstep};
 use crate::pigment::{Pigment, Spot};
-use crate::radiosity::{self, Cell, Radiosity, Site, CELLS};
+use crate::radiosity::{self, Cell, Radiosity, Site};
 use crate::sample::{cosine_hemisphere, disc, filter_offset, mix32, unit, Sampler};
 use crate::scene::{Glare, Object, Scene, Sight};
 use crate::shape::{Hit, Shape};
@@ -427,9 +427,9 @@ impl<'a> Tracer<'a> {
         })
     }
 
-    /// Fill `cells` with what a radiosity record's rays bring back to `site`,
-    /// each followed as a path of its own.
-    pub(crate) fn gather(&self, site: &Site, cells: &mut [Cell; CELLS]) {
+    /// Fill `cells`, row `row` of a radiosity record's hemisphere, with what
+    /// its rays bring back to `site`, each followed as a path of its own.
+    pub(crate) fn gather(&self, site: &Site, row: usize, cells: &mut [Cell]) {
         let frame = Frame::around(site.normal);
         let origin = lift(site.point, site.facing);
         let path = Path {
@@ -441,7 +441,8 @@ impl<'a> Tracer<'a> {
             channel: None,
             scattered: true,
         };
-        for (index, cell) in (0u32..).zip(cells.iter_mut()) {
+        let first = u32::try_from(row * radiosity::COLUMNS).unwrap_or(u32::MAX);
+        for (index, cell) in (first..).zip(cells.iter_mut().take(radiosity::COLUMNS)) {
             let mut sampler = Sampler::new(site.seed, index);
             let dir = frame.to_world(radiosity::direction(index as usize, sampler.next_2d()));
             *cell = if dir.dot(site.facing) > 0.0 {

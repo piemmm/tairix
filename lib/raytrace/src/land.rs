@@ -33,7 +33,7 @@ use tairix_util::{fallible, mathf};
 
 use crate::band;
 use crate::course::{smoothed, Courses, Mark, Nearest, Reach};
-use crate::heightfield::{Heightfield, ABSENT};
+use crate::heightfield::{apart, Heightfield, Sealing, ABSENT};
 use crate::noise::{fbm2, noise2, ridged2, smoothstep};
 use crate::terrain::Terrain;
 use crate::vector::{real, share, Vec3};
@@ -496,11 +496,9 @@ enum Step {
         network: Network,
         row: usize,
     },
-    /// Running droplets over the far grid, `run` of `total` left.
+    /// Running droplets over the far grid.
     FarDroplets {
         erosion: Erosion,
-        run: u32,
-        total: u32,
         before: Vec<f32>,
         flux: Vec<f32>,
     },
@@ -520,8 +518,6 @@ enum Step {
     NestDroplets {
         level: usize,
         erosion: Erosion,
-        run: u32,
-        total: u32,
     },
     /// Holding finer grid `level`'s border to the grid about it, and its
     /// clearing level, from row `row`.
@@ -530,9 +526,21 @@ enum Step {
         row: usize,
     },
     Water(usize),
-    Seal,
+    /// Sealing the land's grids, the `next` of them on.
+    Seal {
+        next: usize,
+        sealing: Sealing,
+    },
     Done,
     Gone,
+}
+
+impl Step {
+    /// The sealing of the land's grids, from the first.
+    const SEALING: Self = Self::Seal {
+        next: 0,
+        sealing: Sealing::BEGUN,
+    };
 }
 
 /// A land being built.
@@ -563,14 +571,12 @@ pub(crate) struct Build {
 }
 
 /// Rows of a grid one core fills in a unit of work.
-const UNIT_ROWS: usize = 8;
+const UNIT_ROWS: usize = 4;
 /// Samples a flood reaches, a routing or accumulation or incision walks, in
 /// a unit of work.
 const UNIT_SAMPLES: usize = 40_000;
 /// Samples an A\* search settles in a unit of work.
 const UNIT_SETTLED: usize = 20_000;
-/// Droplets run in a unit of work.
-const UNIT_DROPLETS: u32 = 240;
 
 /// What one item of each kind of a build's work costs, in nanoseconds on a
 /// desktop core preparing across eight threads: a vertex filled from the
@@ -581,7 +587,7 @@ const UNIT_DROPLETS: u32 = 240;
 const RELIEF_NS: f64 = 80.0;
 const WEAR_NS: f64 = 180.0;
 const FILL_NS: f64 = 60.0;
-const DROPLET_NS: f64 = 3_500.0;
+const DROPLET_NS: f64 = 1_040.0;
 const SETTLE_NS: f64 = 50.0;
 const WATER_NS: f64 = 30.0;
 
@@ -644,7 +650,7 @@ impl Build {
     /// by what its work costs, its items times the measured cost of one.
     pub(crate) fn done(&self) -> f64 {
         let vertices = |cells: usize| real((cells + 1) * (cells + 1));
-        let run = |rate: f64, area: f64| f64::from(droplet_count(rate * area)) * DROPLET_NS;
+        let run = |rate: f64, area: f64| rate.max(0.0) * area * DROPLET_NS;
         let coarse_side = self.square.side() as usize;
         let relief = real(self.square.area()) * RELIEF_NS;
         let horizon_side = self.plan.horizon.map_or(1, |horizon| horizon.cells + 1);
@@ -685,7 +691,9 @@ impl Build {
         } else {
             0.0
         };
-        let left = |run: u32, total: u32| 1.0 - share(run as usize, total as usize);
+        let ran = |erosion: &Erosion| {
+            1.0 - f64::from(erosion.left()) / f64::from(erosion.total()).max(1.0)
+        };
         let wearing = |pass_index: u32, part: f64, within: f64| {
             relief + horizon + pass * (f64::from(pass_index) + (part + within.min(1.0)) / 6.0)
         };
@@ -713,9 +721,7 @@ impl Build {
             ),
             Step::Waters { .. } | Step::Road { .. } => worn,
             Step::Far { row, .. } => worn + far_fill * share(*row, far_side),
-            Step::FarDroplets { run, total, .. } => {
-                worn + far_fill + far_drops * left(*run, *total)
-            }
+            Step::FarDroplets { erosion, .. } => worn + far_fill + far_drops * ran(erosion),
             Step::FarSettle { row, .. } => {
                 worn + far_fill + far_drops + far_settle * share(*row, far_side)
             }
@@ -724,18 +730,16 @@ impl Build {
                 let (side, fill, ..) = nest(*level);
                 sited + nests_before(*level) + fill * share(*row, side)
             }
-            Step::NestDroplets {
-                level, run, total, ..
-            } => {
+            Step::NestDroplets { level, erosion } => {
                 let (_, fill, drops, _) = nest(*level);
-                sited + nests_before(*level) + fill + drops * left(*run, *total)
+                sited + nests_before(*level) + fill + drops * ran(erosion)
             }
             Step::NestSettle { level, row } => {
                 let (side, fill, drops, settle) = nest(*level);
                 sited + nests_before(*level) + fill + drops + settle * share(*row, side)
             }
             Step::Water(row) => laid + water * share(*row, far_side),
-            Step::Seal | Step::Done => return 1.0,
+            Step::Seal { .. } | Step::Done => return 1.0,
             Step::Gone => 0.0,
         };
         (spent / (laid + water).max(1.0)).min(1.0)
@@ -946,25 +950,20 @@ impl Build {
             Step::Far { network, row } => self.filling_far(fields, network, row, runner)?,
             Step::FarDroplets {
                 erosion,
-                run,
-                total,
                 before,
                 flux,
-            } => self.eroding_far(fields, erosion, (run, total), (before, flux))?,
+            } => self.eroding_far(fields, (erosion, runner), (before, flux))?,
             Step::FarSettle { row, before, flux } => {
-                self.settling_far(fields, row, (before, flux))?
+                self.settling_far(fields, (row, runner), (before, flux))?
             }
             Step::Sited => Step::Sited,
             Step::Nest { level, row } => self.filling_nest(fields, level, row, runner)?,
-            Step::NestDroplets {
-                level,
-                erosion,
-                run,
-                total,
-            } => self.eroding_nest(fields, level, erosion, (run, total))?,
-            Step::NestSettle { level, row } => self.settling_nest(fields, level, row)?,
+            Step::NestDroplets { level, erosion } => {
+                self.eroding_nest(fields, (level, erosion), runner)?
+            }
+            Step::NestSettle { level, row } => self.settling_nest(fields, (level, row), runner)?,
             Step::Water(row) => self.filling_water(fields, row, runner)?,
-            Step::Seal => self.sealing(fields)?,
+            Step::Seal { next, sealing } => self.sealing(fields, (next, sealing), runner)?,
             done @ Step::Done => done,
             Step::Gone => return None,
         };
@@ -979,7 +978,7 @@ impl Build {
         runner: &dyn JobRunner,
     ) -> Option<Step> {
         let field = fields.get_mut(self.horizon? as usize)?;
-        let end = (row + UNIT_ROWS * 8 * runner.width().max(1)).min(field.side());
+        let end = (row + UNIT_ROWS * runner.width().max(1)).min(field.side());
         self.fill_horizon(field, row..end, runner)?;
         if end < field.side() {
             Some(Step::Horizon(end))
@@ -1241,7 +1240,7 @@ impl Build {
     ) -> Option<Step> {
         let (horizon, field) = match self.horizon {
             Some(horizon) => {
-                let (horizon, field) = pair(fields, horizon as usize, self.far as usize)?;
+                let (field, horizon) = apart(fields, self.far as usize, horizon as usize)?;
                 (Some(horizon), field)
             }
             None => (None, fields.get_mut(self.far as usize)?),
@@ -1251,63 +1250,76 @@ impl Build {
         if end < field.side() {
             return Some(Step::Far { network, row: end });
         }
-        let count = droplet_count(self.plan.droplets * real(field.side() * field.side()));
         let seed = u64::from(self.plan.seed) ^ 0xd50b;
         let square = Square::new(u32::try_from(field.side()).ok()?);
+        let law = Self::droplets(self.far_placing().1);
         Some(Step::FarDroplets {
-            erosion: Erosion::new(square, Self::droplets(self.far_placing().1), seed).ok()?,
-            run: count,
-            total: count,
+            erosion: Erosion::new(square, law, self.plan.droplets, seed).ok()?,
             before: fallible::collected(field.heights().len(), field.heights().iter().copied())?,
             flux: fallible::filled(field.heights().len(), 0.0)?,
         })
     }
 
-    /// A unit of the droplets running over the far grid, `run` of `total`
-    /// left.
+    /// A turn of the droplets running over the far grid across `runner`.
     fn eroding_far(
         &self,
         fields: &mut [Heightfield],
-        mut erosion: Erosion,
-        (run, total): (u32, u32),
+        (mut erosion, runner): (Erosion, &dyn JobRunner),
         (before, mut flux): (Vec<f32>, Vec<f32>),
     ) -> Option<Step> {
         let field = fields.get_mut(self.far as usize)?;
-        let count = run.min(UNIT_DROPLETS);
-        erosion
-            .run(field.heights_mut(), count, Some(&mut flux))
+        let ran = erosion
+            .run(field.heights_mut(), Some(&mut flux), runner)
             .ok()?;
-        let left = run - count;
-        Some(if left > 0 {
-            Step::FarDroplets {
-                erosion,
-                run: left,
-                total,
+        Some(if ran {
+            Step::FarSettle {
+                row: 0,
                 before,
                 flux,
             }
         } else {
-            Step::FarSettle {
-                row: 0,
+            Step::FarDroplets {
+                erosion,
                 before,
                 flux,
             }
         })
     }
 
-    /// A unit of the far grid's rows from `row` settled after its droplets,
-    /// and its border blended into the horizon's once all are.
+    /// A unit of the far grid's rows from `row` across `runner`: settled
+    /// after its droplets, held to its clearing, and blended into the
+    /// horizon's along its border.
     fn settling_far(
         &self,
         fields: &mut [Heightfield],
-        row: usize,
+        (row, runner): (usize, &dyn JobRunner),
         (before, flux): (Vec<f32>, Vec<f32>),
     ) -> Option<Step> {
-        let field = fields.get_mut(self.far as usize)?;
-        let end = (row + UNIT_ROWS * 4).min(field.side());
-        settle(field, (&before, &flux), row..end, self.plan.roughness);
-        self.hold(field, row..end);
-        if end < field.side() {
+        let far = self.far_laid();
+        let (field, horizon) = match self.horizon {
+            Some(beyond) => {
+                let (field, horizon) = apart(fields, self.far as usize, beyond as usize)?;
+                (field, Some(horizon))
+            }
+            None => (fields.get_mut(self.far as usize)?, None),
+        };
+        let side = field.side();
+        let end = (row + UNIT_ROWS * runner.width().max(1)).min(side);
+        let placing = field.placing();
+        let roughness = self.plan.roughness;
+        field.each_row(row..end, runner, &|(row, heights, attributes)| {
+            let first = *row * side;
+            let (before, flux) = (
+                before.get(first..first + side).unwrap_or_default(),
+                flux.get(first..first + side).unwrap_or_default(),
+            );
+            settle_row((heights, attributes), (before, flux), roughness);
+            self.hold_row((*row, heights), placing);
+            if let Some(horizon) = horizon {
+                blend_row(far, horizon, (*row, heights), (placing, FAR_BAND));
+            }
+        });
+        if end < side {
             return Some(Step::FarSettle {
                 row: end,
                 before,
@@ -1315,10 +1327,6 @@ impl Build {
             });
         }
         if let Some(beyond) = self.horizon {
-            let far = self.far_laid();
-            let (horizon, field) = pair(fields, beyond as usize, self.far as usize)?;
-            let rows = field.side();
-            blend_border(far, (horizon, field), 0..rows, FAR_BAND);
             leave_out(far, fields.get_mut(beyond as usize)?);
         }
         Some(Step::Sited)
@@ -1341,7 +1349,7 @@ impl Build {
             *fields.get_mut(laid.field as usize)? =
                 Heightfield::new(nest.cells, origin, step, false)?;
         }
-        let (parent, grid) = pair(fields, self.parent_of(level)? as usize, laid.field as usize)?;
+        let (grid, parent) = apart(fields, laid.field as usize, self.parent_of(level)? as usize)?;
         let end = (row + UNIT_ROWS * runner.width().max(1)).min(grid.side());
         self.fill_nest((level, laid), (parent, grid), row..end, runner)?;
         if end < grid.side() {
@@ -1350,49 +1358,47 @@ impl Build {
         let (_, step) = grid.placing();
         let square = Square::new(u32::try_from(grid.side()).ok()?);
         let seed = u64::from(self.plan.seed) ^ 0x2ea7 ^ u64::try_from(level).ok()?;
-        let count = droplet_count(nest.droplets * real(grid.side() * grid.side()));
         Some(Step::NestDroplets {
             level,
-            erosion: Erosion::new(square, Self::droplets(step), seed).ok()?,
-            run: count,
-            total: count,
+            erosion: Erosion::new(square, Self::droplets(step), nest.droplets, seed).ok()?,
         })
     }
 
-    /// A unit of the droplets running over finer grid `level`, `run` of
-    /// `total` left.
+    /// A turn of the droplets running over finer grid `level` across
+    /// `runner`.
     fn eroding_nest(
         &self,
         fields: &mut [Heightfield],
-        level: usize,
-        mut erosion: Erosion,
-        (run, total): (u32, u32),
+        (level, mut erosion): (usize, Erosion),
+        runner: &dyn JobRunner,
     ) -> Option<Step> {
         let laid = self.nests.get(level).copied().flatten()?;
         let grid = fields.get_mut(laid.field as usize)?;
-        let count = run.min(UNIT_DROPLETS);
-        erosion.run(grid.heights_mut(), count, None).ok()?;
-        Some(if run > count {
-            Step::NestDroplets {
-                level,
-                erosion,
-                run: run - count,
-                total,
-            }
-        } else {
+        Some(if erosion.run(grid.heights_mut(), None, runner).ok()? {
             Step::NestSettle { level, row: 0 }
+        } else {
+            Step::NestDroplets { level, erosion }
         })
     }
 
-    /// A unit of finer grid `level`'s border held to the grid about it, from
-    /// row `row`, and the next finer grid begun once all of it is.
-    fn settling_nest(&self, fields: &mut [Heightfield], level: usize, row: usize) -> Option<Step> {
+    /// A unit of finer grid `level`'s rows from `row` across `runner`, its
+    /// border held to the grid about it and then its clearing, and the next
+    /// finer grid begun once all of it is.
+    fn settling_nest(
+        &self,
+        fields: &mut [Heightfield],
+        (level, row): (usize, usize),
+        runner: &dyn JobRunner,
+    ) -> Option<Step> {
         let laid = self.nests.get(level).copied().flatten()?;
         let parent = self.parent_of(level)? as usize;
-        let (around, grid) = pair(fields, parent, laid.field as usize)?;
-        let end = (row + UNIT_ROWS * 8).min(grid.side());
-        blend_border(laid, (around, grid), row..end, NEST_BAND);
-        self.hold(grid, row..end);
+        let (grid, around) = apart(fields, laid.field as usize, parent)?;
+        let end = (row + UNIT_ROWS * runner.width().max(1)).min(grid.side());
+        let placing = grid.placing();
+        grid.each_row(row..end, runner, &|(row, heights, _)| {
+            blend_row(laid, around, (*row, heights), (placing, NEST_BAND));
+            self.hold_row((*row, heights), placing);
+        });
         if end < grid.side() {
             return Some(Step::NestSettle { level, row: end });
         }
@@ -1408,39 +1414,51 @@ impl Build {
         runner: &dyn JobRunner,
     ) -> Option<Step> {
         let Some(index) = self.water else {
-            return Some(Step::Seal);
+            return Some(Step::SEALING);
         };
         let field = fields.get_mut(index as usize)?;
         if row == 0 && !self.watered() {
             // A dry land's water keeps its place as a grid of one empty cell.
             field.heights_mut().fill(ABSENT);
-            return Some(Step::Seal);
+            return Some(Step::SEALING);
         }
         if row == 0 {
             let (origin, step) = self.far_placing();
             *field = Heightfield::new(self.plan.cells.1, origin, step, false)?;
         }
-        let end = (row + UNIT_ROWS * 4 * runner.width().max(1)).min(field.side());
+        let end = (row + UNIT_ROWS * 2 * runner.width().max(1)).min(field.side());
         self.fill_water(field, row..end, runner)?;
         Some(if end >= field.side() {
-            Step::Seal
+            Step::SEALING
         } else {
             Step::Water(end)
         })
     }
 
-    /// Every grid the land laid, sealed.
-    fn sealing(&self, fields: &mut [Heightfield]) -> Option<Step> {
+    /// A unit of the land's grids sealed, from the `next` of them on.
+    fn sealing(
+        &self,
+        fields: &mut [Heightfield],
+        (next, mut sealing): (usize, Sealing),
+        runner: &dyn JobRunner,
+    ) -> Option<Step> {
         let nests = self.nests.iter().flatten().map(|laid| laid.field);
-        for index in [self.far]
+        let laid = [self.far]
             .into_iter()
             .chain(nests)
             .chain(self.water)
-            .chain(self.horizon)
-        {
-            fields.get_mut(index as usize)?.seal();
-        }
-        Some(Step::Done)
+            .chain(self.horizon);
+        let Some(index) = laid.into_iter().nth(next) else {
+            return Some(Step::Done);
+        };
+        Some(if sealing.step(fields.get_mut(index as usize)?, runner) {
+            Step::Seal {
+                next: next + 1,
+                sealing: Sealing::BEGUN,
+            }
+        } else {
+            Step::Seal { next, sealing }
+        })
     }
 
     /// Whether a lake or a river stands anywhere on the land.
@@ -1639,22 +1657,17 @@ impl Build {
 
     /// Hold the rows `rows` of `field` level in the relief's clearing, if it
     /// has one, whatever the droplets did to it.
-    fn hold(&self, field: &mut Heightfield, rows: Range<usize>) {
+    fn hold_row(&self, (row, heights): (usize, &mut [f32]), placing: ((f64, f64), f64)) {
         let relief = &self.plan.relief;
         if relief.clearing.is_none() {
             return;
         }
-        let side = field.side();
-        let ((origin_x, origin_z), step) = field.placing();
-        for row in rows {
-            let z = origin_z + real(row) * step;
-            for column in 0..side {
+        let ((origin_x, origin_z), step) = placing;
+        let z = origin_z + real(row) * step;
+        for (column, slot) in heights.iter_mut().enumerate() {
+            if slot.is_finite() {
                 let x = origin_x + real(column) * step;
-                if let Some(slot) = field.heights_mut().get_mut(row * side + column) {
-                    if slot.is_finite() {
-                        *slot = single(relief.pin(x, z, f64::from(*slot)));
-                    }
-                }
+                *slot = single(relief.pin(x, z, f64::from(*slot)));
             }
         }
     }
@@ -1983,7 +1996,7 @@ impl Build {
         rows: Range<usize>,
         runner: &dyn JobRunner,
     ) -> Option<()> {
-        if field.attributes_mut().is_empty() && !field.carry_attributes() {
+        if !field.carry_attributes() {
             return None;
         }
         let side = field.side();
@@ -2149,7 +2162,7 @@ impl Build {
         rows: Range<usize>,
         runner: &dyn JobRunner,
     ) -> Option<()> {
-        if grid.attributes_mut().is_empty() && !grid.carry_attributes() {
+        if !grid.carry_attributes() {
             return None;
         }
         let side = grid.side();
@@ -2238,11 +2251,6 @@ const MOST_ROAD_GRADE: f64 = 0.09;
 /// How far either rut of a track lies from its middle.
 pub(crate) const TRACK_GAUGE: f64 = 0.72;
 
-/// How many droplets `count` asks for, as a whole number.
-fn droplet_count(count: f64) -> u32 {
-    u32::try_from(mathf::round_i32(count.clamp(0.0, 4.0e6))).unwrap_or(0)
-}
-
 /// `natural` ground `near` a river: its channel's bed within its banks, the
 /// banks rising from the water to the land beyond, and never lower beside
 /// the river than its levees raise them; and how wet the place is.
@@ -2319,30 +2327,24 @@ fn border_blend(laid: Laid, (x, z): (f64, f64), (parent_step, band): (f64, (f64,
     smoothstep(band.0, band.1, inside / parent_step)
 }
 
-/// Hold rows `rows` of the finer grid `laid` describes to the surface of
-/// the grid about it, `parent`, across its border's `band`, once its
-/// droplets have run.
-fn blend_border(
+/// Hold row `row` of the finer grid `laid` describes, lying as `placing`
+/// says, to the surface of the grid about it, `parent`, across its border's
+/// `band`, once its droplets have run.
+fn blend_row(
     laid: Laid,
-    (parent, grid): (&Heightfield, &mut Heightfield),
-    rows: Range<usize>,
-    band: (f64, f64),
+    parent: &Heightfield,
+    (row, heights): (usize, &mut [f32]),
+    (placing, band): (((f64, f64), f64), (f64, f64)),
 ) {
-    let side = grid.side();
-    let ((origin_x, origin_z), step) = grid.placing();
+    let ((origin_x, origin_z), step) = placing;
     let (_, parent_step) = parent.placing();
-    for row in rows {
-        let z = origin_z + real(row) * step;
-        for column in 0..side {
-            let x = origin_x + real(column) * step;
-            let blend = border_blend(laid, (x, z), (parent_step, band));
-            if blend >= 1.0 {
-                continue;
-            }
+    let z = origin_z + real(row) * step;
+    for (column, slot) in heights.iter_mut().enumerate() {
+        let x = origin_x + real(column) * step;
+        let blend = border_blend(laid, (x, z), (parent_step, band));
+        if blend < 1.0 {
             let flat = single(parent.height_at(x, z));
-            if let Some(slot) = grid.heights_mut().get_mut(row * side + column) {
-                *slot = flat + (*slot - flat) * single(blend);
-            }
+            *slot = flat + (*slot - flat) * single(blend);
         }
     }
 }
@@ -2434,24 +2436,6 @@ const FAN_SPREAD: f64 = 0.7;
 /// How many channels a delta's river divides into across its fan.
 const DISTRIBUTARIES: f64 = 4.0;
 
-/// Two distinct grids of `fields`, the first shared and the second to fill.
-fn pair(
-    fields: &mut [Heightfield],
-    first: usize,
-    second: usize,
-) -> Option<(&Heightfield, &mut Heightfield)> {
-    if first == second {
-        return None;
-    }
-    if first < second {
-        let (low, high) = fields.split_at_mut(second);
-        Some((low.get(first)?, high.get_mut(0)?))
-    } else {
-        let (low, high) = fields.split_at_mut(first);
-        Some((high.first()?, low.get_mut(second)?))
-    }
-}
-
 /// A grid read through a Catmull–Rom patch at `(x, z)`: its height, and its
 /// slope along x and z.
 fn cubic_on(grid: &Heightfield, (x, z): (f64, f64)) -> (f64, f64, f64) {
@@ -2476,9 +2460,9 @@ fn cubic_on(grid: &Heightfield, (x, z): (f64, f64)) -> (f64, f64, f64) {
 /// Set `field`'s vertices from row `start` on to `values`, each a height and
 /// the attributes there.
 fn store(field: &mut Heightfield, start: usize, values: &[(f32, [u8; 4])]) {
-    let first = start * field.side();
-    let (heights, attributes) = field.surfaces_mut();
-    for (index, &(height, kept)) in (first..).zip(values) {
+    let rows = values.len().div_ceil(field.side().max(1));
+    let (heights, attributes) = field.rows_mut(start..start + rows);
+    for (index, &(height, kept)) in values.iter().enumerate() {
         if let Some(slot) = heights.get_mut(index) {
             *slot = height;
         }
@@ -2527,35 +2511,26 @@ fn catmull_rom_2d(at: &dyn Fn(i64, i64) -> f64, (across, down): (f64, f64)) -> (
     (value, across_rate, down_rate)
 }
 
-/// The far grid's rows `rows` settled after its droplets: what they wore away
-/// or laid down, and where their water ran.
-fn settle(
-    field: &mut Heightfield,
+/// A row of the far grid, its heights and attributes, settled after its
+/// droplets as the row's heights `before` them and the water `flux` they
+/// carried across it say: what they wore away or laid down, and where their
+/// water ran.
+fn settle_row(
+    (heights, attributes): (&[f32], &mut [[u8; 4]]),
     (before, flux): (&[f32], &[f32]),
-    rows: Range<usize>,
     roughness: f64,
 ) {
-    let side = field.side();
-    for row in rows {
-        for column in 0..side {
-            let index = row * side + column;
-            let (Some(&was), Some(&water)) = (before.get(index), flux.get(index)) else {
-                continue;
-            };
-            let now = field.heights().get(index).copied().unwrap_or(was);
-            let change = f64::from(now - was) / (0.2 * roughness.max(0.5));
-            let runs = (f64::from(water) / 12.0).clamp(0.0, 1.0);
-            if let Some(attributes) = field.attributes_mut().get_mut(index) {
-                let sediment = f64::from(attributes[1]) / 255.0 * 2.0 - 1.0;
-                attributes[1] = byte(127.5 + 127.5 * (sediment + change).clamp(-1.0, 1.0));
-                let wet = f64::from(attributes[0]) / 255.0;
-                attributes[0] = byte(255.0 * wet.max(0.8 * runs));
-                // Fresh wash and gullies grow less for a while.
-                let green = f64::from(attributes[3]) / 255.0;
-                attributes[3] =
-                    byte(255.0 * green * (1.0 - 0.5 * smoothstep(0.3, 1.0, change.abs())));
-            }
-        }
+    let settled = heights.iter().zip(attributes.iter_mut());
+    for ((&now, attributes), (&was, &water)) in settled.zip(before.iter().zip(flux)) {
+        let change = f64::from(now - was) / (0.2 * roughness.max(0.5));
+        let runs = (f64::from(water) / 12.0).clamp(0.0, 1.0);
+        let sediment = f64::from(attributes[1]) / 255.0 * 2.0 - 1.0;
+        attributes[1] = byte(127.5 + 127.5 * (sediment + change).clamp(-1.0, 1.0));
+        let wet = f64::from(attributes[0]) / 255.0;
+        attributes[0] = byte(255.0 * wet.max(0.8 * runs));
+        // Fresh wash and gullies grow less for a while.
+        let green = f64::from(attributes[3]) / 255.0;
+        attributes[3] = byte(255.0 * green * (1.0 - 0.5 * smoothstep(0.3, 1.0, change.abs())));
     }
 }
 

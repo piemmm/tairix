@@ -59,6 +59,7 @@ dropped is a category the surface then has to lie about.
 | **DS21** | The ray-traced screensaver (`screensaver.kind` = `raytrace`): scenes from `lib/raytrace` prepared and revealed coarse to fine on a tracing thread of its own with a progress readout, held, faded and replaced, on one core or every core as `screensaver.raytrace.cpu` sets, each finished picture kept when `screensaver.raytrace.save` asks | DS18, DS19 | DS21 | done |
 | **DS22** | The retro games screensaver (`screensaver.kind` = `retro_games`): a flight over a glowing grid towards a banded sun between two wireframe ranges, its reflection rippling on the floor, at a speed on the shared `Pace` ladder, where wireframe craft now and then play out retro arcade games — a starfighter, a flying saucer, a tank battle, and riders walling each other in | DS18, DS19 | DS22 | done |
 | **DS23** | The System Monitor screensaver (`screensaver.kind` = `system_monitor`): the machine's own readings set out to be read from across a room — processors, memory, tasks, storage and network under a verdict naming what needs attention — from the Switchboard's machine report, with whether the busiest tasks are named as its one option | DS18, DS19, `plans/NEW-SWITCHBOARD.md` M3 | DS23 | done |
+| **DS24** | The ray tracer's scene detail: `screensaver.raytrace.detail`, `simple` (the default) or `maximum`, a *Detail* dropdown in its group on the pane reading *Simple* or *Maximum realism*, carried to the tracing host at launch and falling back to Simple where the memory band says Maximum's peak is not free | DS21, `plans/RAYTRACE.md` RT39 | DS24 | planned |
 
 **DS9a, the plumbing the pane composes.** DS9's read half needs three
 answers of different authority, and its write half needs tools an
@@ -1703,6 +1704,27 @@ silence, staleness and an exited monitor; a report repainting only what it
 changed; the minute's orbit; the serve path refusing an unattested or
 malformed report and answering one nobody watches with `BrokenPipe`; and the
 watch lease's attest, re-offer and forget.
+
+### DS24 — The ray tracer's scene detail
+
+What it is to guarantee (the profiles themselves are `plans/RAYTRACE.md`
+RT39's):
+
+- **A choice of two.** `screensaver.raytrace.detail` is `simple`, the default,
+  or `maximum`; anything else is refused as the other options' bad values are.
+  `lib/wallpaper`'s settings document parses and stages it beside `cpu` and
+  `save`.
+- **On the pane.** The ray tracer's group gains a *Detail* dropdown — *Simple*
+  or *Maximum realism* — above *Test*.
+- **Carried at launch.** The value travels to the tracing host with `cpu` and
+  `save`, and every scene of that run is composed at it.
+- **Never refused partway.** Where the memory band says Maximum's peak is not
+  free, the scene is prepared at Simple instead and the session says so on
+  `stderr`.
+
+Tests: the option's parse, staging and refusals; the pane's row; the profile
+reaching `Draft::new` at launch; and the fallback under a band that cannot
+spare Maximum's peak.
 
 ### DS13 — the QEMU vertical, and docs
 
