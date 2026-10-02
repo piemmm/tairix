@@ -17,7 +17,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use super::{drive_urb, frame_completion, UrbCall, UrbClient, UrbEngine};
+use super::{
+    control_permitted, drive_urb, frame_completion, UrbCall, UrbClient, UrbEngine, UrbLink,
+    UrbScope,
+};
 use tairix_abi::usb_urb::{
     UrbRequest, UsbDirection, UsbTransferType, URB_COMPLETION_LEN, URB_REQUEST_LEN,
 };
@@ -54,11 +57,21 @@ struct MockEngine {
     /// When set, the next reaped bulk TD STALLs (consumed once).
     stall_next_bulk: bool,
     bulk_calls: usize,
+    /// The interface the mock serves.
+    scope: UrbScope,
+    /// The `request` each interrupt-IN poll carried, and the buffer it was
+    /// handed.
+    interrupt_requests: Vec<(usize, usize)>,
 }
 
-/// The interface's bulk endpoint numbers the mock serves.
+/// The interface's bulk endpoint numbers the mock serves; its interrupt-IN
+/// endpoint is endpoint 3.
 const BULK_IN_ENDPOINT: u8 = 1;
 const BULK_OUT_ENDPOINT: u8 = 2;
+const INTERRUPT_ENDPOINT: u8 = 3;
+
+/// Device Context Indices of the mock interface's three endpoints.
+const MOCK_ENDPOINTS: u32 = 1 << 3 | 1 << 4 | 1 << 7;
 
 impl MockEngine {
     fn new() -> Self {
@@ -75,6 +88,11 @@ impl MockEngine {
             bulk_out_armed: None,
             stall_next_bulk: false,
             bulk_calls: 0,
+            scope: UrbScope {
+                interface: 0,
+                endpoints: MOCK_ENDPOINTS,
+            },
+            interrupt_requests: Vec::new(),
         }
     }
 }
@@ -97,8 +115,17 @@ impl UrbEngine for MockEngine {
         Ok(())
     }
 
-    fn interrupt_in(&mut self, data: &mut [u8]) -> Result<Option<usize>, DriverError> {
+    fn scope(&self) -> Option<UrbScope> {
+        Some(self.scope)
+    }
+
+    fn interrupt_in(
+        &mut self,
+        request: usize,
+        data: &mut [u8],
+    ) -> Result<Option<usize>, DriverError> {
         self.interrupt_calls += 1;
+        self.interrupt_requests.push((request, data.len()));
         if self.reports.is_empty() {
             return Ok(None);
         }
@@ -204,8 +231,8 @@ fn control_in_round_trips_through_the_client() {
         buffer: buffer.clone(),
     });
 
-    // A GET_DESCRIPTOR(device) SETUP packet.
-    let setup = [0x80, 0x06, 0x00, 0x01, 0x00, 0x00, 0x12, 0x00];
+    // A GET_DESCRIPTOR(device) SETUP packet for its first eight bytes.
+    let setup = [0x80, 0x06, 0x00, 0x01, 0x00, 0x00, 0x08, 0x00];
     let transferred = client
         .control_in(setup, BUFFER_HANDLE, 8)
         .expect("control-IN completes");
@@ -229,7 +256,7 @@ fn interrupt_in_round_trips_and_then_reports_would_block() {
 
     // The first poll delivers the queued report.
     let transferred = client
-        .interrupt_in(1, BUFFER_HANDLE, 8)
+        .interrupt_in(INTERRUPT_ENDPOINT, BUFFER_HANDLE, 8)
         .expect("interrupt-IN completes");
     assert_eq!(transferred, 8);
     assert_eq!(&buffer.borrow()[..8], &report[..]);
@@ -237,10 +264,163 @@ fn interrupt_in_round_trips_and_then_reports_would_block() {
     // With nothing pending, a non-blocking poll fails closed with the
     // retryable `WouldBlock` rather than fabricating a report.
     assert_eq!(
-        client.interrupt_in(1, BUFFER_HANDLE, 8),
+        client.interrupt_in(INTERRUPT_ENDPOINT, BUFFER_HANDLE, 8),
         Err(Errno::WouldBlock)
     );
     assert_eq!(engine.borrow().interrupt_calls, 2);
+}
+
+#[test]
+fn an_interrupt_poll_names_its_length_and_receives_the_whole_buffer() {
+    let mut engine = MockEngine::new();
+    engine.reports = vec![vec![7; 40]];
+    let urb = UrbRequest {
+        endpoint: INTERRUPT_ENDPOINT,
+        transfer_type: UsbTransferType::Interrupt,
+        direction: UsbDirection::In,
+        buffer: BUFFER_HANDLE,
+        length: 9,
+        setup: [0; 8],
+    };
+    assert_eq!(
+        serve_one(&urb, 64, &mut engine),
+        Ok(40),
+        "a report may outrun the request"
+    );
+    assert_eq!(engine.interrupt_requests, [(9, 64)]);
+}
+
+#[test]
+fn an_interrupt_poll_on_another_interfaces_endpoint_is_refused() {
+    let mut engine = MockEngine::new();
+    for endpoint in [4, 2] {
+        let urb = UrbRequest {
+            endpoint,
+            transfer_type: UsbTransferType::Interrupt,
+            direction: UsbDirection::In,
+            buffer: BUFFER_HANDLE,
+            length: 8,
+            setup: [0; 8],
+        };
+        assert_eq!(
+            serve_one(&urb, 8, &mut engine),
+            Err(Errno::OutOfRange),
+            "endpoint {endpoint}"
+        );
+    }
+    assert_eq!(engine.interrupt_calls, 0);
+}
+
+/// A control-IN URB carrying `setup` for its own `wLength`.
+fn control(setup: [u8; 8]) -> UrbRequest {
+    let length = u32::from(u16::from_le_bytes([setup[6], setup[7]]));
+    UrbRequest {
+        endpoint: 0,
+        transfer_type: UsbTransferType::Control,
+        direction: if setup[0] & 0x80 != 0 {
+            UsbDirection::In
+        } else {
+            UsbDirection::Out
+        },
+        buffer: BUFFER_HANDLE,
+        length,
+        setup,
+    }
+}
+
+#[test]
+fn a_class_driver_may_read_the_device_and_drive_its_own_interface() {
+    let scope = UrbScope {
+        interface: 2,
+        endpoints: MOCK_ENDPOINTS,
+    };
+    let permitted = |setup: [u8; 8]| {
+        let urb = control(setup);
+        control_permitted(setup, urb.direction, urb.length, scope)
+    };
+    // Device, configuration and string descriptors; device and own endpoint status.
+    assert!(permitted([0x80, 0x06, 0x00, 0x02, 0x00, 0x00, 0x22, 0x00]));
+    assert!(permitted([0x80, 0x06, 0x02, 0x03, 0x09, 0x04, 0xFF, 0x00]));
+    assert!(permitted([0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00]));
+    assert!(permitted([0x82, 0x00, 0x00, 0x00, 0x83, 0x00, 0x02, 0x00]));
+    // The HID report descriptor, and HID class requests, on its own interface.
+    assert!(permitted([0x81, 0x06, 0x00, 0x22, 0x02, 0x00, 0x40, 0x01]));
+    assert!(permitted([0x21, 0x0B, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00]));
+    assert!(permitted([0xA1, 0x01, 0x05, 0x03, 0x02, 0x00, 0x03, 0x00]));
+    assert!(permitted([0x21, 0x09, 0x03, 0x03, 0x02, 0x00, 0x02, 0x00]));
+    // A vendor request to its own interface.
+    assert!(permitted([0xC1, 0x01, 0x00, 0x00, 0x02, 0x00, 0x04, 0x00]));
+}
+
+#[test]
+fn a_class_driver_may_not_change_the_device_or_reach_a_sibling() {
+    let scope = UrbScope {
+        interface: 2,
+        endpoints: MOCK_ENDPOINTS,
+    };
+    let refused = [
+        // SET_CONFIGURATION, SET_ADDRESS, SET_FEATURE(remote wakeup), SET_DESCRIPTOR.
+        [0x00, 0x09, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00],
+        [0x00, 0x05, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00],
+        [0x00, 0x03, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00],
+        [0x00, 0x07, 0x00, 0x01, 0x00, 0x00, 0x12, 0x00],
+        // SET_INTERFACE and SET_FEATURE on its own interface.
+        [0x01, 0x0B, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00],
+        [0x01, 0x03, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00],
+        // CLEAR_FEATURE(halt) on its own endpoint: halt recovery is the host's.
+        [0x02, 0x01, 0x00, 0x00, 0x83, 0x00, 0x00, 0x00],
+        // A sibling interface's report descriptor and class request.
+        [0x81, 0x06, 0x00, 0x22, 0x01, 0x00, 0x40, 0x00],
+        [0x21, 0x0B, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00],
+        // A sibling's endpoint, a class or vendor request to the device, a
+        // reserved request type.
+        [0x82, 0x00, 0x00, 0x00, 0x85, 0x00, 0x02, 0x00],
+        [0x20, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00],
+        [0xC0, 0x01, 0x00, 0x00, 0x02, 0x00, 0x04, 0x00],
+        [0xE1, 0x01, 0x00, 0x00, 0x02, 0x00, 0x04, 0x00],
+    ];
+    for setup in refused {
+        let urb = control(setup);
+        assert!(
+            !control_permitted(setup, urb.direction, urb.length, scope),
+            "{setup:02x?}"
+        );
+    }
+}
+
+#[test]
+fn a_control_request_must_state_the_urbs_own_data_stage() {
+    let scope = UrbScope {
+        interface: 0,
+        endpoints: MOCK_ENDPOINTS,
+    };
+    let setup = [0x80, 0x06, 0x00, 0x01, 0x00, 0x00, 0x12, 0x00];
+    assert!(control_permitted(setup, UsbDirection::In, 18, scope));
+    assert!(
+        !control_permitted(setup, UsbDirection::In, 8, scope),
+        "a shorter URB"
+    );
+    assert!(
+        !control_permitted(setup, UsbDirection::Out, 18, scope),
+        "a reversed direction"
+    );
+}
+
+#[test]
+fn a_refused_control_request_never_reaches_the_engine() {
+    let mut engine = MockEngine::new();
+    let urb = control([0x00, 0x09, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    assert_eq!(
+        serve_one(&urb, 8, &mut engine),
+        Err(Errno::PermissionDenied)
+    );
+    assert!(engine.no_data_setups.is_empty());
+    let urb = control([0x81, 0x06, 0x00, 0x22, 0x05, 0x00, 0x08, 0x00]);
+    assert_eq!(
+        serve_one(&urb, 8, &mut engine),
+        Err(Errno::PermissionDenied)
+    );
+    assert_eq!(engine.control_calls, 0);
 }
 
 #[test]
@@ -335,6 +515,7 @@ fn control_out_data_stage_delivers_the_shared_buffers_bytes() {
     // The CBI ADSC path: a control-OUT whose data stage carries the shared
     // buffer's bytes to the engine, completing with the full length.
     let mut engine = MockEngine::new();
+    engine.scope.interface = 1;
     let setup = [0x21, 0x00, 0, 0, 1, 0, 12, 0];
     let request = UrbRequest {
         endpoint: 0,
@@ -500,4 +681,97 @@ fn malformed_request_is_framed_in_band() {
     );
     assert_eq!(engine.control_calls, 0);
     assert_eq!(engine.interrupt_calls, 0);
+}
+
+/// A [`UrbCall`] answering each URB from a script, recording what it was sent.
+struct ScriptedCall {
+    replies: Vec<Result<u32, Errno>>,
+    sent: Rc<RefCell<Vec<UrbRequest>>>,
+}
+
+impl UrbCall for ScriptedCall {
+    fn call(&mut self, request: &[u8], reply: &mut [u8]) -> Result<usize, Errno> {
+        self.sent
+            .borrow_mut()
+            .push(UrbRequest::decode(request).expect("a well-formed URB"));
+        let result = if self.replies.is_empty() {
+            Err(Errno::WouldBlock)
+        } else {
+            self.replies.remove(0)
+        };
+        frame_completion(reply, result)
+    }
+}
+
+/// A link over `shm` whose URBs complete with `replies`, and what it sends.
+fn scripted_link(
+    shm: &mut [u8],
+    replies: Vec<Result<u32, Errno>>,
+) -> (UrbLink<'_, ScriptedCall>, Rc<RefCell<Vec<UrbRequest>>>) {
+    let sent = Rc::new(RefCell::new(Vec::new()));
+    let call = ScriptedCall {
+        replies,
+        sent: sent.clone(),
+    };
+    (UrbLink::new(UrbClient::new(call), shm), sent)
+}
+
+#[test]
+fn a_link_copies_out_what_a_control_read_delivered() {
+    let mut shm: Vec<u8> = (1..=32).collect();
+    let (mut link, sent) = scripted_link(&mut shm, vec![Ok(6)]);
+    let mut data = [0u8; 8];
+    assert_eq!(
+        link.control_in([0x80, 0x06, 0, 1, 0, 0, 8, 0], &mut data),
+        Ok(6)
+    );
+    assert_eq!(data, [1, 2, 3, 4, 5, 6, 0, 0]);
+    assert_eq!(sent.borrow()[0].length, 8);
+    let mut long = [0u8; 33];
+    assert_eq!(
+        link.control_in([0x80, 0x06, 0, 1, 0, 0, 33, 0], &mut long),
+        Err(Errno::LengthOutOfRange)
+    );
+}
+
+#[test]
+fn a_link_stages_a_control_writes_data_before_it_sends_it() {
+    let mut shm = vec![0u8; 16];
+    let (mut link, sent) = scripted_link(&mut shm, vec![Ok(3)]);
+    assert_eq!(
+        link.control_out([0x21, 0x09, 0, 3, 0, 0, 3, 0], &[7, 8, 9]),
+        Ok(())
+    );
+    assert_eq!(sent.borrow()[0].length, 3);
+    drop(link);
+    assert_eq!(shm[..3], [7, 8, 9]);
+}
+
+#[test]
+fn a_link_takes_a_report_longer_than_it_asked_for_but_never_truncates_one() {
+    let mut shm = vec![5u8; 64];
+    let (mut link, sent) = scripted_link(&mut shm, vec![Ok(20), Ok(20)]);
+    let mut short = [0u8; 8];
+    assert_eq!(
+        link.interrupt_in(INTERRUPT_ENDPOINT, 8, &mut short),
+        Err(Errno::BufferTooSmall)
+    );
+    let mut room = [0u8; 32];
+    assert_eq!(link.interrupt_in(INTERRUPT_ENDPOINT, 8, &mut room), Ok(20));
+    assert_eq!(room[..20], [5; 20]);
+    assert!(sent.borrow().iter().all(|urb| urb.length == 8));
+}
+
+#[test]
+fn a_link_splits_a_bulk_read_into_buffer_sized_urbs_and_stops_at_a_short_one() {
+    let mut shm = vec![9u8; 16];
+    let (mut link, sent) = scripted_link(&mut shm, vec![Ok(16), Ok(16), Ok(5)]);
+    let mut data = [0u8; 64];
+    assert_eq!(link.bulk_in(BULK_IN_ENDPOINT, &mut data), Ok(37));
+    assert_eq!(
+        sent.borrow().len(),
+        3,
+        "the short third chunk ends the transfer"
+    );
+    assert!(sent.borrow().iter().all(|urb| urb.length == 16));
 }

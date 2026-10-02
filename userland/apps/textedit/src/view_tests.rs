@@ -4,8 +4,9 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
 use tairix_abi::time::Duration64;
-use tairix_abi::window_ipc::{AppMenuItemId, AppMenuMark, AppMenuRowView, SCROLL_UNITS_PER_DETENT};
+use tairix_abi::window_ipc::{AppMenuItemId, AppMenuMark, AppMenuRowView};
 use tairix_controls::WHEEL_STEP;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};

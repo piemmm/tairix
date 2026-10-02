@@ -82,9 +82,9 @@ mod program {
     };
     use tairix_window::app::{self, Wake, WindowPane};
     use tairix_window::{
-        key_input_event, pointer_input_events, pointer_point, present_damage, DeclaredTip, Desktop,
-        EventDrain, EventError, EventMailbox, EventSource, Parked, Repaint, Target, WindowClient,
-        WindowEvents, WindowSizing,
+        key_input_event, pinch_input_events, pointer_input_events, pointer_point, present_damage,
+        scroll_input_events, DeclaredTip, Desktop, EventDrain, EventError, EventMailbox,
+        EventSource, Parked, Repaint, Target, WindowClient, WindowEvents, WindowSizing,
     };
 
     /// The name this program states its own refusals under.
@@ -1313,25 +1313,19 @@ mod program {
                     .on_key(key, modifiers, &layout, reported);
                 apply(app, index, outcome)
             }
-            WindowEvent::Pointer { x, y, action, .. } => {
-                let at = pointer_point(*x, *y);
-                let mut changed = false;
-                let mut asked = None;
-                for input in pointer_input_events(*action, at) {
-                    let outcome = app.windows[index]
-                        .view
-                        .on_pointer(&input, &layout, scale, theme, reported);
-                    changed |= outcome.changed;
-                    if outcome.pick || outcome.menu.is_some() || outcome.close {
-                        asked = Some(outcome);
-                    }
-                }
-                set_tip(&mut app.windows[index], app.client, &layout, (scale, theme));
-                match asked {
-                    Some(outcome) => apply(app, index, outcome),
-                    None if changed => Acted::Changed(Repaint::Reported),
-                    None => Acted::Idle,
-                }
+            WindowEvent::Pointer {
+                x,
+                y,
+                action,
+                modifiers,
+                ..
+            } => {
+                let held = key_input_event(KeyInput::ModifiersChanged {
+                    modifiers: *modifiers,
+                });
+                let inputs = core::iter::once(held)
+                    .chain(pointer_input_events(*action, pointer_point(*x, *y)));
+                route_pointer(app, index, inputs, &layout, (scale, theme), reported)
             }
             WindowEvent::MenuClosed {
                 open_id, outcome, ..
@@ -1351,15 +1345,43 @@ mod program {
                 apply(app, index, outcome)
             }
             // The wheel pans the canvas or scrolls the strip of tools,
-            // whichever it turned over.
-            WindowEvent::Scrolled { dx, dy, .. } => {
-                let wheel = InputEvent::PointerScrolled { dx: *dx, dy: *dy };
-                let outcome = app.windows[index]
-                    .view
-                    .on_pointer(&wheel, &layout, scale, theme, reported);
-                // A scrolled strip puts another tool under the pointer.
-                set_tip(&mut app.windows[index], app.client, &layout, (scale, theme));
-                apply(app, index, outcome)
+            // whichever it turned over; with Ctrl it zooms the canvas.
+            WindowEvent::Scrolled {
+                x,
+                y,
+                dx,
+                dy,
+                modifiers,
+                ..
+            } => {
+                let held = key_input_event(KeyInput::ModifiersChanged {
+                    modifiers: *modifiers,
+                });
+                let inputs = core::iter::once(held).chain(scroll_input_events(
+                    pointer_point(*x, *y),
+                    *dx,
+                    *dy,
+                ));
+                route_pointer(app, index, inputs, &layout, (scale, theme), reported)
+            }
+            // A pinch zooms the canvas, following the fingers.
+            WindowEvent::Pinch {
+                x,
+                y,
+                phase,
+                scale: spread,
+                modifiers,
+                ..
+            } => {
+                let held = key_input_event(KeyInput::ModifiersChanged {
+                    modifiers: *modifiers,
+                });
+                let inputs = core::iter::once(held).chain(pinch_input_events(
+                    pointer_point(*x, *y),
+                    *phase,
+                    *spread,
+                ));
+                route_pointer(app, index, inputs, &layout, (scale, theme), reported)
             }
             // A released key or a modifier change runs no command, and focus
             // or minimizing changes nothing drawn. The application-scoped
@@ -1413,6 +1435,37 @@ mod program {
     }
 
     /// Carry out whatever an engine outcome asked the embedder for.
+    /// Hand window `index`'s view each of `inputs` in order — the modifiers
+    /// held, the place, then what happened there — carry out what they asked,
+    /// and declare the tip of whatever is now under the pointer: a press can
+    /// move a slider and a turn can scroll the strip of tools.
+    fn route_pointer(
+        app: &mut App<'_>,
+        index: usize,
+        inputs: impl Iterator<Item = InputEvent>,
+        layout: &Layout,
+        (scale, theme): (Scale, &Theme),
+        reported: &mut Region,
+    ) -> Acted {
+        let mut changed = false;
+        let mut asked = None;
+        for input in inputs {
+            let outcome = app.windows[index]
+                .view
+                .on_pointer(&input, layout, scale, theme, reported);
+            changed |= outcome.changed;
+            if outcome.pick || outcome.menu.is_some() || outcome.close {
+                asked = Some(outcome);
+            }
+        }
+        set_tip(&mut app.windows[index], app.client, layout, (scale, theme));
+        match asked {
+            Some(outcome) => apply(app, index, outcome),
+            None if changed => Acted::Changed(Repaint::Reported),
+            None => Acted::Idle,
+        }
+    }
+
     fn apply(app: &mut App<'_>, index: usize, outcome: Outcome) -> Acted {
         if outcome.close {
             return Acted::Close;

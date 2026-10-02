@@ -32,7 +32,7 @@ the intersection the loader takes cannot be wider than this list:
 | Capability | Why |
 |---|---|
 | `CAP_DISPLAY` | hold the seat's exclusive revocable lease, configure the display service, and switch the display off while the screen sleeps |
-| `CAP_INPUT_READ` | drain the owned seat's keyboard and pointer channels |
+| `CAP_INPUT_READ` | drain the owned seat's keyboard, pointer and touch channels |
 | `CAP_SHM` | create the double-buffered frame region and grant it to the display service, so frames never cross the IPC |
 | `CAP_CONSOLE_WRITE` | state an abnormal exit's reason on `stderr` |
 | `CAP_LOG_EMIT` | its own audit records |
@@ -169,6 +169,16 @@ The seat reports *relative* motion, so the screen keeps the running position
 and holds it inside the frame, and hands the surface the absolute position it
 hit-tests. One seat report expands to at most two surface events (a button is
 a move **and** a transition) and they present as one frame, not two.
+
+Touch reaches the screen through the seat's gesture recogniser
+([`tairix-touch`](../lib/touch.md)) at its default settings — no user is
+signed in to have chosen others — so a touchpad moves and taps as it does on
+the desktop and a touchscreen puts the pointer where it is touched, pressing
+once the finger moves or rests. Its gestures take the same path as a mouse's
+reports; a scroll or a pinch finds nothing on the authentication surface to
+act on. Every wake drains the touch channel after the keyboard and the
+pointer, acts on a touch whose deadline has passed once every queued frame is
+read, and folds the recogniser's next deadline into the park.
 
 The pointer is also drawn, which is what makes it usable: the built-in
 `Arrow` from [`lib/cursor`](../desktop/cursors.md) is rasterised **once** at

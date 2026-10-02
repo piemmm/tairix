@@ -159,6 +159,7 @@ mod kernel {
 
     use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink};
     use tairix_itest_finisher::fail_point;
+    use tairix_itest_witness::field_str;
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
     use tairix_log::{Event, EventId, FieldValue, Sink};
@@ -216,20 +217,6 @@ mod kernel {
     /// own exit would tear the run down with the last scripted line still
     /// owed, which the harness fails as an incomplete script.
     static FIXTURE_EXITED: AtomicBool = AtomicBool::new(false);
-
-    /// The string value of `event`'s field `key`, if present.
-    fn field_str<'e>(event: &Event<'e>, key: &str) -> Option<&'e str> {
-        event.fields.iter().find_map(|field| {
-            if field.key == key {
-                match field.value {
-                    FieldValue::Str(s) => Some(s),
-                    _ => None,
-                }
-            } else {
-                None
-            }
-        })
-    }
 
     /// The unsigned value of `event`'s field `key`, if present.
     fn field_u64(event: &Event<'_>, key: &str) -> Option<u64> {

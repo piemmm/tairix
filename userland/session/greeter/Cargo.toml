@@ -60,6 +60,9 @@ tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
 tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
 # The routing input vocabulary the surface answers events in.
 tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
+# The seat's touch gesture recogniser: a tap or a touchscreen press at the
+# login screen means what it means on the desktop.
+tairix-touch = { path = "../../../lib/touch", version = "=0.0.0" }
 # The shared pointer artwork and its placement: the screen rasterises the
 # arrow once for the active scale and blends the `PlacedCursor` over its own
 # frame, the same hotspot-relative placement the compositor draws with.

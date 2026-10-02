@@ -9,7 +9,7 @@
 use alloc::string::String;
 use alloc::vec;
 
-use tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT;
+use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
 use tairix_abi::Errno;
 use tairix_controls::{damage, ScrollPart, WHEEL_STEP};
 use tairix_font::BitmapFont;
@@ -1543,4 +1543,259 @@ fn the_preferred_client_never_falls_below_the_derived_minimum() {
         want.0 >= floor.0 && want.1 >= floor.1,
         "a one-pixel picture would otherwise leave no room for the chrome ({want:?} against {floor:?})"
     );
+}
+
+/// Turn the wheel by `dy` scroll units with Ctrl held and the pointer at `at`.
+fn ctrl_wheel(view: &mut View, layout: &Layout, theme: &Theme, at: Point, dy: i32) -> Outcome {
+    view.on_pointer(
+        &InputEvent::ModifiersChanged {
+            modifiers: Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+        },
+        layout,
+        Scale::ONE,
+        theme,
+        &mut damage::sink(),
+    );
+    wheel(view, layout, theme, at, (0, dy), &mut damage::sink())
+}
+
+/// The point of the scaled picture drawn at canvas-local `at`, as a fraction
+/// of the scaled picture's extent, so two zooms can be compared.
+fn under(view: &View, layout: &Layout, natural: (u32, u32), at: Point) -> (f64, f64) {
+    let viewport = view.viewport();
+    let scaled = viewport.scaled(natural);
+    let placed = viewport.placement(natural, layout.canvas());
+    let visible = viewport.visible(natural, (layout.canvas().width, layout.canvas().height));
+    (
+        f64::from(visible.origin.x + (at.x - placed.origin.x)) / f64::from(scaled.0),
+        f64::from(visible.origin.y + (at.y - placed.origin.y)) / f64::from(scaled.1),
+    )
+}
+
+#[test]
+fn ctrl_and_the_wheel_zoom_a_rung_a_detent_holding_the_point_under_the_pointer() {
+    let natural = (4_000, 3_000);
+    let (mut view, layout, registry) = overflowing(still(natural.0, natural.1));
+    let theme = registry.active();
+    let canvas = layout.canvas();
+    let at = Point::new(
+        canvas.origin.x + tairix_geometry::to_i32(canvas.width / 3),
+        canvas.origin.y + tairix_geometry::to_i32(canvas.height / 4),
+    );
+    let before = under(&view, &layout, natural, at);
+    let outcome = ctrl_wheel(&mut view, &layout, theme, at, -SCROLL_UNITS_PER_DETENT);
+    assert!(outcome.changed);
+    assert_eq!(
+        view.viewport().zoom(),
+        crate::zoom_rung_above(ZOOM_ACTUAL_PER_MILLE),
+        "a detent away from the user is one rung in"
+    );
+    let after = under(&view, &layout, natural, at);
+    let pixel = 1.0 / f64::from(view.viewport().scaled(natural).0);
+    assert!(
+        (after.0 - before.0).abs() <= 2.0 * pixel && (after.1 - before.1).abs() <= 2.0 * pixel,
+        "the point under the pointer stayed: {before:?} then {after:?}"
+    );
+    // And a detent back is a rung back out, to where it began.
+    ctrl_wheel(&mut view, &layout, theme, at, SCROLL_UNITS_PER_DETENT);
+    assert_eq!(view.viewport().zoom(), ZOOM_ACTUAL_PER_MILLE);
+}
+
+#[test]
+fn a_fine_ctrl_wheel_zooms_a_rung_per_detent_turned_and_a_reversal_starts_afresh() {
+    let (mut view, layout, registry) = overflowing(still(4_000, 3_000));
+    let theme = registry.active();
+    let at = layout.canvas().center();
+    for _ in 0..7 {
+        ctrl_wheel(&mut view, &layout, theme, at, -15);
+    }
+    assert_eq!(
+        view.viewport().zoom(),
+        ZOOM_ACTUAL_PER_MILLE,
+        "seven eighths of a detent is no rung yet"
+    );
+    // A turn back drops what the turn in left, so it too needs a detent.
+    for _ in 0..7 {
+        ctrl_wheel(&mut view, &layout, theme, at, 15);
+    }
+    assert_eq!(view.viewport().zoom(), ZOOM_ACTUAL_PER_MILLE);
+    ctrl_wheel(&mut view, &layout, theme, at, 15);
+    assert_eq!(
+        view.viewport().zoom(),
+        crate::zoom_rung_below(ZOOM_ACTUAL_PER_MILLE),
+        "the eighth step of the turn back completes its detent"
+    );
+}
+
+#[test]
+fn without_ctrl_the_wheel_still_pans_and_a_released_ctrl_is_heard() {
+    let (mut view, layout, registry) = overflowing(still(4_000, 3_000));
+    let theme = registry.active();
+    let at = layout.canvas().center();
+    ctrl_wheel(&mut view, &layout, theme, at, -SCROLL_UNITS_PER_DETENT);
+    let zoomed = view.viewport().zoom();
+    view.on_pointer(
+        &InputEvent::ModifiersChanged {
+            modifiers: Modifiers::default(),
+        },
+        &layout,
+        Scale::ONE,
+        theme,
+        &mut damage::sink(),
+    );
+    let pan = view.viewport().pan();
+    wheel(
+        &mut view,
+        &layout,
+        theme,
+        at,
+        (0, SCROLL_UNITS_PER_DETENT),
+        &mut damage::sink(),
+    );
+    assert_eq!(view.viewport().zoom(), zoomed, "no zoom without Ctrl");
+    assert_ne!(view.viewport().pan(), pan, "the turn panned instead");
+}
+
+/// One step of a pinch at `at`, its place stated first as the window client
+/// states it.
+fn pinch(
+    view: &mut View,
+    layout: &Layout,
+    theme: &Theme,
+    phase: tairix_input::PinchPhase,
+    scale: u32,
+    at: Point,
+) -> Outcome {
+    let mut outcome = Outcome::changed(false);
+    for input in [
+        InputEvent::PointerMoved { to: at },
+        InputEvent::Pinch { phase, scale, at },
+    ] {
+        outcome = view.on_pointer(&input, layout, Scale::ONE, theme, &mut damage::sink());
+    }
+    outcome
+}
+
+#[test]
+fn a_pinch_zooms_continuously_holding_and_then_carrying_the_point_it_began_on() {
+    use tairix_abi::touch::PINCH_SCALE_ONE;
+    use tairix_input::PinchPhase;
+
+    let natural = (4_000, 3_000);
+    let (mut view, layout, registry) = overflowing(still(natural.0, natural.1));
+    let theme = registry.active();
+    let canvas = layout.canvas();
+    let at = Point::new(
+        canvas.origin.x + tairix_geometry::to_i32(canvas.width / 2),
+        canvas.origin.y + tairix_geometry::to_i32(canvas.height / 2),
+    );
+    let before = under(&view, &layout, natural, at);
+    pinch(
+        &mut view,
+        &layout,
+        theme,
+        PinchPhase::Begin,
+        PINCH_SCALE_ONE,
+        at,
+    );
+    let outcome = pinch(
+        &mut view,
+        &layout,
+        theme,
+        PinchPhase::Update,
+        PINCH_SCALE_ONE * 5 / 4,
+        at,
+    );
+    assert!(outcome.changed);
+    assert_eq!(
+        view.viewport().zoom(),
+        ZOOM_ACTUAL_PER_MILLE * 5 / 4,
+        "between the ladder's rungs"
+    );
+    let held = under(&view, &layout, natural, at);
+    let pixel = 1.0 / f64::from(view.viewport().scaled(natural).0);
+    assert!(
+        (held.0 - before.0).abs() <= 2.0 * pixel && (held.1 - before.1).abs() <= 2.0 * pixel,
+        "{before:?} then {held:?}"
+    );
+    // The fingers move: the point they began on goes with them.
+    let moved = Point::new(at.x - 40, at.y - 30);
+    pinch(
+        &mut view,
+        &layout,
+        theme,
+        PinchPhase::Update,
+        PINCH_SCALE_ONE * 5 / 4,
+        moved,
+    );
+    let carried = under(&view, &layout, natural, moved);
+    assert!(
+        (carried.0 - before.0).abs() <= 2.0 * pixel && (carried.1 - before.1).abs() <= 2.0 * pixel,
+        "{before:?} then {carried:?}"
+    );
+    pinch(
+        &mut view,
+        &layout,
+        theme,
+        PinchPhase::End,
+        PINCH_SCALE_ONE * 5 / 4,
+        moved,
+    );
+    assert_eq!(
+        view.viewport().zoom(),
+        ZOOM_ACTUAL_PER_MILLE * 5 / 4,
+        "the zoom stands"
+    );
+}
+
+#[test]
+fn a_cancelled_pinch_puts_the_view_back_and_an_unbegun_one_does_nothing() {
+    use tairix_abi::touch::PINCH_SCALE_ONE;
+    use tairix_input::PinchPhase;
+
+    let (mut view, layout, registry) = overflowing(still(4_000, 3_000));
+    let theme = registry.active();
+    let at = layout.canvas().center();
+    let before = *view.viewport();
+    assert!(
+        !pinch(
+            &mut view,
+            &layout,
+            theme,
+            PinchPhase::Update,
+            2 * PINCH_SCALE_ONE,
+            at
+        )
+        .changed,
+        "no pinch had begun"
+    );
+    pinch(
+        &mut view,
+        &layout,
+        theme,
+        PinchPhase::Begin,
+        PINCH_SCALE_ONE,
+        at,
+    );
+    pinch(
+        &mut view,
+        &layout,
+        theme,
+        PinchPhase::Update,
+        2 * PINCH_SCALE_ONE,
+        at,
+    );
+    assert_ne!(*view.viewport(), before);
+    pinch(
+        &mut view,
+        &layout,
+        theme,
+        PinchPhase::Cancel,
+        2 * PINCH_SCALE_ONE,
+        at,
+    );
+    assert_eq!(*view.viewport(), before, "put back");
 }

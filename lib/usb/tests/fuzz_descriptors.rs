@@ -29,13 +29,14 @@
 use tairix_abi::DriverError;
 use tairix_fuzzseed::Prng;
 use tairix_usb::device::{
-    first_langid, DeviceDescriptor, HubDescriptor, InterfaceInfo, SerialNumber, StringHeader,
+    first_langid, DeviceDescriptor, HubDescriptor, InterfaceInfo, PeriodicShape, SerialNumber,
+    StringHeader,
 };
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 20_000;
 
-/// Largest noise buffer, past the 512 bytes of configuration the engine reads.
+/// Largest noise buffer.
 const MAX_NOISE: usize = 1024;
 
 /// UTF-16 code units the longest string descriptor carries: a one-byte
@@ -149,6 +150,13 @@ const fn endpoint(address: u8, attributes: u8, max_packet: u16, interval: u8) ->
     [7, 0x05, address, attributes, low, high, interval]
 }
 
+/// A `SuperSpeed` endpoint companion bursting `burst` more packets, moving
+/// `bytes` an interval.
+const fn companion(burst: u8, bytes: u16) -> [u8; 6] {
+    let [low, high] = bytes.to_le_bytes();
+    [6, 0x30, burst, 0, low, high]
+}
+
 /// A HID class descriptor declaring a `report_len`-byte Report Descriptor.
 const fn hid(report_len: u16) -> [u8; 9] {
     let [low, high] = report_len.to_le_bytes();
@@ -167,11 +175,42 @@ fn configuration(value: u8, body: &[&[u8]]) -> Vec<u8> {
     chain
 }
 
+/// A `SuperSpeed` touch pad's interface: a long report descriptor and an
+/// endpoint bursting three packets an interval.
+fn superspeed_touchpad() -> Vec<u8> {
+    configuration(
+        1,
+        &[
+            &interface(0, 0, [0x03, 0x00, 0x00], 1),
+            &hid(700),
+            &endpoint(0x81, 0x03, 1024 | 2 << 11, 4),
+            &companion(2, 3072),
+        ],
+    )
+}
+
+/// A `SuperSpeed` storage interface whose bulk pipes each burst what the
+/// companion after them states.
+fn superspeed_storage() -> Vec<u8> {
+    configuration(
+        1,
+        &[
+            &interface(0, 0, [0x08, 0x06, 0x50], 2),
+            &endpoint(0x81, 0x02, 1024, 0),
+            &companion(15, 0),
+            &endpoint(0x02, 0x02, 1024, 0),
+            &companion(3, 0),
+        ],
+    )
+}
+
 /// The configurations the engine serves, and forged ones it must refuse
 /// parts of.
 fn configuration_seeds() -> Vec<Vec<u8>> {
     let (keyboard, mouse) = ([0x03, 0x01, 0x01], [0x03, 0x01, 0x02]);
     vec![
+        superspeed_touchpad(),
+        superspeed_storage(),
         configuration(
             1,
             &[
@@ -288,6 +327,7 @@ fn random_configuration(rng: &mut Prng) -> Vec<u8> {
             )
             .to_vec(),
             4 => hid(rng.next_u16()).to_vec(),
+            5 if rng.below(2) == 0 => companion(rng.next_u8(), rng.next_u16()).to_vec(),
             _ => {
                 let mut junk = vec![0u8; 2 + rng.at_most(14)];
                 rng.fill(&mut junk);
@@ -307,22 +347,53 @@ struct Chain {
     /// The first default-setting interface descriptor of each interface
     /// number, in order: its number and class triple.
     interfaces: Vec<(u8, u32)>,
-    /// Every endpoint descriptor: address, transfer type, masked max packet,
-    /// and interval.
-    endpoints: Vec<(u8, u8, u16, u8)>,
-    /// Every HID descriptor's `wDescriptorLength`.
-    report_lengths: Vec<u16>,
+    /// Every endpoint descriptor.
+    endpoints: Vec<Endpoint>,
+}
+
+/// One endpoint descriptor of a chain.
+struct Endpoint {
+    address: u8,
+    /// The transfer type.
+    kind: u8,
+    /// `wMaxPacketSize` bits 0:10.
+    max_packet: u16,
+    interval: u8,
+    /// The `bMaxBurst` and `wBytesPerInterval` of a companion immediately
+    /// following it.
+    companion: Option<(u8, u16)>,
+}
+
+/// What a decoded endpoint says of the companion that followed its
+/// descriptor.
+#[derive(Clone, Copy)]
+enum Follower {
+    /// An interrupt endpoint keeps the whole companion.
+    Interrupt(Option<(u8, u16)>),
+    /// A bulk endpoint keeps its burst, `0` without one.
+    Bulk(u8),
+}
+
+impl Follower {
+    fn matches(self, companion: Option<(u8, u16)>) -> bool {
+        match self {
+            Self::Interrupt(stated) => stated == companion,
+            Self::Bulk(burst) => burst == companion.map_or(0, |(burst, _)| burst),
+        }
+    }
 }
 
 impl Chain {
     fn walk(buf: &[u8]) -> Self {
         let mut chain = Self::default();
         let mut offset = usize::from(buf[0]);
+        let mut after_endpoint = false;
         while let Some(rest) = buf.get(offset..).filter(|rest| rest.len() >= 2) {
             let len = usize::from(rest[0]);
             let Some(descriptor) = rest.get(..len).filter(|_| len >= 2) else {
                 break;
             };
+            let follows_endpoint = core::mem::take(&mut after_endpoint);
             match descriptor[1] {
                 0x04 if len >= 9
                     && descriptor[3] == 0
@@ -336,15 +407,24 @@ impl Chain {
                         u32::from_be_bytes([0, descriptor[5], descriptor[6], descriptor[7]]),
                     ));
                 }
-                0x05 if len >= 7 => chain.endpoints.push((
-                    descriptor[2],
-                    descriptor[3] & 0x03,
-                    u16::from_le_bytes([descriptor[4], descriptor[5]]) & 0x07FF,
-                    descriptor[6],
-                )),
-                0x21 if len >= 9 => chain
-                    .report_lengths
-                    .push(u16::from_le_bytes([descriptor[7], descriptor[8]])),
+                0x05 if len >= 7 => {
+                    chain.endpoints.push(Endpoint {
+                        address: descriptor[2],
+                        kind: descriptor[3] & 0x03,
+                        max_packet: u16::from_le_bytes([descriptor[4], descriptor[5]]) & 0x07FF,
+                        interval: descriptor[6],
+                        companion: None,
+                    });
+                    after_endpoint = true;
+                }
+                0x30 if len >= 6 && follows_endpoint => {
+                    if let Some(endpoint) = chain.endpoints.last_mut() {
+                        endpoint.companion = Some((
+                            descriptor[2],
+                            u16::from_le_bytes([descriptor[4], descriptor[5]]),
+                        ));
+                    }
+                }
                 _ => {}
             }
             offset += len;
@@ -353,17 +433,24 @@ impl Chain {
     }
 
     /// Whether an endpoint descriptor of the chain is the one a decoded
-    /// endpoint at `dci` of transfer type `kind` was read from.
-    fn has_endpoint(&self, dci: u8, kind: u8, max_packet: u16, interval: Option<u8>) -> bool {
-        self.endpoints
-            .iter()
-            .any(|&(address, attributes, packet, every)| {
-                address & 0x0F == dci >> 1
-                    && (address & 0x80 != 0) == (dci % 2 == 1)
-                    && attributes == kind
-                    && packet == max_packet
-                    && interval.is_none_or(|interval| interval == every)
-            })
+    /// endpoint at `dci` of transfer type `kind` was read from, with the
+    /// companion that followed it.
+    fn has_endpoint(
+        &self,
+        dci: u8,
+        kind: u8,
+        max_packet: u16,
+        interval: Option<u8>,
+        follower: Follower,
+    ) -> bool {
+        self.endpoints.iter().any(|endpoint| {
+            endpoint.address & 0x0F == dci >> 1
+                && (endpoint.address & 0x80 != 0) == (dci % 2 == 1)
+                && endpoint.kind == kind
+                && endpoint.max_packet == max_packet
+                && interval.is_none_or(|interval| interval == endpoint.interval)
+                && follower.matches(endpoint.companion)
+        })
     }
 }
 
@@ -389,41 +476,52 @@ fn check_configuration(buf: &[u8]) {
             interfaces.any(|&found| found == (iface.interface_number, iface.class24)),
             "{iface:?} is not the first default setting of its number in {buf:02x?}, in order"
         );
-        if iface.class24 >> 16 == 0x03 {
-            assert_ne!(iface.int_dci, DCI_CONTROL, "HID without a report endpoint");
-        }
         if iface.int_dci == DCI_CONTROL {
-            assert_eq!((iface.int_max_packet, iface.int_b_interval), (0, 0));
+            assert_eq!(iface.int_shape, PeriodicShape::default());
+            assert_eq!(iface.int_b_interval, 0);
+        } else {
+            assert_ne!(
+                iface.int_shape.max_packet, 0,
+                "a periodic endpoint moving nothing"
+            );
+            assert!(iface.int_shape.transactions <= 3);
         }
-        assert!(
-            iface.report_descriptor_len == 0
-                || chain.report_lengths.contains(&iface.report_descriptor_len)
-        );
-        assert!(iface.bulk_in2_dci == 0 || iface.bulk_in_dci != 0);
-        assert!(iface.bulk_out2_dci == 0 || iface.bulk_out_dci != 0);
+        assert!(iface.bulk_in2.dci == 0 || iface.bulk_in.dci != 0);
+        assert!(iface.bulk_out2.dci == 0 || iface.bulk_out.dci != 0);
         let interrupt = (iface.int_dci != DCI_CONTROL).then_some((
             iface.int_dci,
             0x03,
-            iface.int_max_packet,
+            iface.int_shape.max_packet,
             Some(iface.int_b_interval),
             true,
+            Follower::Interrupt(iface.int_shape.companion),
         ));
         let bulk = [
-            (iface.bulk_in_dci, iface.bulk_in_max_packet, true),
-            (iface.bulk_in2_dci, iface.bulk_in2_max_packet, true),
-            (iface.bulk_out_dci, iface.bulk_out_max_packet, false),
-            (iface.bulk_out2_dci, iface.bulk_out2_max_packet, false),
+            (iface.bulk_in, true),
+            (iface.bulk_in2, true),
+            (iface.bulk_out, false),
+            (iface.bulk_out2, false),
         ]
         .into_iter()
-        .filter(|&(dci, _, _)| dci != 0)
-        .map(|(dci, max_packet, is_in)| (dci, 0x02, max_packet, None, is_in));
-        for (dci, kind, max_packet, interval, is_in) in interrupt.into_iter().chain(bulk) {
+        .filter(|&(pipe, _)| pipe.dci != 0)
+        .map(|(pipe, is_in)| {
+            (
+                pipe.dci,
+                0x02,
+                pipe.max_packet,
+                None,
+                is_in,
+                Follower::Bulk(pipe.max_burst),
+            )
+        });
+        for (dci, kind, max_packet, interval, is_in, follower) in interrupt.into_iter().chain(bulk)
+        {
             assert!(
                 (2..=31).contains(&dci) && (dci % 2 == 1) == is_in,
                 "{iface:?}: DCI {dci} names no device endpoint of its direction"
             );
             assert!(
-                chain.has_endpoint(dci, kind, max_packet, interval),
+                chain.has_endpoint(dci, kind, max_packet, interval, follower),
                 "{iface:?}: DCI {dci} was read from no endpoint descriptor of {buf:02x?}"
             );
             assert_eq!(

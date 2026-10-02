@@ -25,6 +25,12 @@ use core::cell::RefCell;
 /// status byte the caller can stash in its own descriptor).
 pub type DeviceShim = Box<dyn FnMut(&mut ChainView<'_>) -> Result<u32, VirtioError>>;
 
+/// A device model answering a configuration write: called with the whole
+/// configuration window once the written bytes have landed, so a device whose
+/// configuration is a query (virtio-input's `select`/`subsel`) can write its
+/// answer into the bytes that follow.
+pub type ConfigResponder = Box<dyn FnMut(&mut [u8])>;
+
 /// View the [`DeviceShim`] gets over a published chain.
 pub struct ChainView<'a> {
     /// Read-only descriptor segments (driver → device).
@@ -94,6 +100,8 @@ pub struct MockTransport {
     /// Resets still to confirm before every later one is refused; `None`
     /// confirms them all. See [`Self::refuse_resets_after`].
     resets_confirmed_left: Option<u32>,
+    /// The device model a configuration write is answered by, if any.
+    config_responder: Option<ConfigResponder>,
 }
 
 impl MockTransport {
@@ -122,6 +130,7 @@ impl MockTransport {
             ack_interrupts: 0,
             synchronous_notify: false,
             resets_confirmed_left: None,
+            config_responder: None,
         }
     }
 
@@ -152,6 +161,12 @@ impl MockTransport {
     /// / `virtio_net` unit tests to plant geometry / MAC bytes.
     pub fn set_config(&mut self, offset: usize, bytes: &[u8]) {
         self.config[offset..offset + bytes.len()].copy_from_slice(bytes);
+    }
+
+    /// Answer every configuration write with `responder`, replacing any
+    /// earlier one.
+    pub fn install_config_responder(&mut self, responder: ConfigResponder) {
+        self.config_responder = Some(responder);
     }
 
     /// Install a [`DeviceShim`] for `queue`. Existing shims are
@@ -447,6 +462,16 @@ impl Transport for MockTransport {
             }
         }
     }
+    fn write_config(&mut self, offset: usize, data: &[u8]) {
+        for (i, &b) in data.iter().enumerate() {
+            if let Some(slot) = offset.checked_add(i).and_then(|at| self.config.get_mut(at)) {
+                *slot = b;
+            }
+        }
+        if let Some(responder) = self.config_responder.as_mut() {
+            responder(&mut self.config);
+        }
+    }
     fn ack_interrupt(&mut self) {
         // No device line to de-assert; count the call so unit tests can
         // assert the driver acknowledged once per wait + drain cycle.
@@ -506,6 +531,9 @@ impl Transport for Rc<RefCell<MockTransport>> {
     fn read_config(&self, offset: usize, buf: &mut [u8]) {
         self.borrow().read_config(offset, buf);
     }
+    fn write_config(&mut self, offset: usize, data: &[u8]) {
+        self.borrow_mut().write_config(offset, data);
+    }
     fn ack_interrupt(&mut self) {
         self.borrow_mut().ack_interrupt();
     }
@@ -563,5 +591,24 @@ mod tests {
         let mut overflow = [0xCDu8; 4];
         t.read_config(8, &mut overflow);
         assert_eq!(overflow, [0u8; 4]);
+    }
+
+    #[test]
+    fn a_config_responder_answers_each_write_in_the_window() {
+        let mut t = MockTransport::new(1, 8, 0, 4);
+        t.install_config_responder(Box::new(|config: &mut [u8]| config[1] = config[0] * 2));
+        t.write_config(0, &[21]);
+        let mut answer = [0u8; 1];
+        t.read_config(1, &mut answer);
+        assert_eq!(answer, [42]);
+    }
+
+    #[test]
+    fn write_config_lands_in_the_window_and_drops_bytes_past_it() {
+        let mut t = MockTransport::new(1, 8, 0, 4);
+        t.write_config(2, &[9, 8, 7]);
+        let mut buf = [0u8; 4];
+        t.read_config(0, &mut buf);
+        assert_eq!(buf, [0, 0, 9, 8]);
     }
 }

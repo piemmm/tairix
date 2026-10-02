@@ -1375,8 +1375,16 @@ as its colour. See [theming](./theming.md) for the four roles.
   can never impersonate a real frame control (`plans/GUI-CONTROLS-DESIGN.md`
   §1, §11.17–§11.18). A wheel over a window with a root viewport moves its
   bars `WHEEL_STEP` logical pixels a detent, carrying what is short of a whole
-  pixel into the next turn; one over a window that scrolls its own content is
-  forwarded to it unconverted, in scroll units, as `AppScroll`. A
+  pixel into the next turn; one over the client area of a window that
+  scrolls its own content is forwarded to it unconverted, in scroll units, as
+  `AppScroll` with the client-local place and the modifiers held, and one
+  over a window's frame reaches no application. A vertical-only turn made
+  with Shift held arrives sideways, so a mouse with no tilt wheel scrolls
+  horizontally the one way it can. A pinch that begins over a window's client
+  area is that window's until it ends, as a drag is: every step reaches it as
+  `AppPinch` with the place clamped into the client, a second surface's pinch
+  beginning meanwhile joins it rather than taking it, and a pinch that begins
+  over a frame, the desktop or nothing reaches no application. A
   non-resizable window classifies its border as inert
   `Frame`, never a resize edge, so a fixed-size window cannot be dragged
   larger and every pixel of its client reaches it. The client-press position

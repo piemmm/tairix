@@ -11,7 +11,7 @@
 
 use alloc::vec::Vec;
 
-use tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT;
+use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};

@@ -54,6 +54,8 @@ dahinter.
 
 * `+` — auf die nächste Stufe vergrößern
 * `-` — auf die vorherige Stufe verkleinern
+* `Ctrl` + Mausrad — um den Zeiger herum vergrößern oder verkleinern
+* Zwei Finger spreizen oder zusammenführen — stufenlos vergrößern oder verkleinern; auf einem Touchscreen folgt das Bild den Fingern
 * `0` — das ganze Bild ins Fenster einpassen
 * `1` — Originalgröße, ein Bildpunkt je Bildschirmpunkt
 * `2` — die Breite des Bildes einpassen

@@ -1,43 +1,34 @@
-//! Deterministic fuzz harness for the `lib/hid` decoders of device-written
-//! bytes: the Report Descriptor parser, the report-protocol normaliser, and
-//! the boot-protocol keyboard and mouse decoders every report passes through.
+//! Deterministic fuzz harness for `lib/hid`: the report-descriptor model,
+//! the decoders every report passes through, and the configuration exchange.
 //!
-//! Each is held to a naive model of what it must do:
+//! Each is held to what it must do:
 //!
-//! * no input panics, and a descriptor declaring `2^32 - 1` fields parses in
-//!   the time its bytes take to walk;
-//! * an accepted map locates only fields the boot layout can read — a
-//!   one-bit-per-flag button or modifier bitmap, values 1..=32 bits wide,
-//!   never an empty field — each past the Report ID byte when the device uses
-//!   one, none overlapping another;
-//! * a map normalises the report it describes, and every normalised report
-//!   holds exactly what a naive bit reader takes from the located fields;
-//! * a long item, or global items a Push and Pop enclose, change nothing a
-//!   descriptor says;
-//! * the boot decoders report exactly the held-state changes each report
-//!   makes: never a key or button pressed twice or released unheld.
+//! * no input panics, and a descriptor declaring `2^32 - 1` fields is
+//!   refused in the time its bytes take to walk;
+//! * an accepted model places every field inside its own report, after its
+//!   report ID when it has one, under a collection that exists;
+//! * a long item, or global items a Push and Pop enclose, change nothing;
+//! * a report an application finds malformed delivers nothing;
+//! * a pointer button is never pressed twice or released unheld, and a
+//!   device let go of leaves no button and no contact held;
+//! * configuring a device fails only when the device has gone.
 //!
-//! A per-run-seeded `Prng` mutates real descriptors (the boot examples, the
-//! Report-ID keyboard and mouse, a wireless receiver's two interfaces, and the
-//! forged shapes the parser must refuse), assembles descriptors from random
-//! items, and feeds pure noise. A plain `cargo test` runs the
-//! [`SMOKE_ITERATIONS`] sweep once from a fresh, logged seed; `cargo xtask
-//! fuzz` exports `TAIRIX_FUZZ_BUDGET_SECS` to extend the loop to a wall-clock
-//! budget.
+//! A per-run-seeded `Prng` mutates real descriptors (boot layouts, report-ID
+//! keyboards and mice, a wireless receiver's two interfaces, a high-resolution
+//! mouse, a Precision Touchpad, a touchscreen, and the forged shapes the
+//! parser must refuse), assembles descriptors from random items, and feeds
+//! noise. A plain `cargo test` runs the [`SMOKE_ITERATIONS`] sweep once from a
+//! fresh, logged seed; `cargo xtask fuzz` extends it to a wall-clock budget.
 
-use std::cell::RefCell;
-use std::collections::VecDeque;
-use std::rc::Rc;
-
-use tairix_abi::driver::input::{Input, InputEvent, InputEventKind};
-use tairix_abi::input::KeyInput;
+use tairix_abi::driver::input::{InputEvent, InputEventKind};
+use tairix_abi::input::{KeyInput, PointerButtonCode, PointerInput};
+use tairix_abi::touch::{TouchFrame, TOUCH_CONTACTS_MAX};
 use tairix_abi::DriverError;
 use tairix_fuzzseed::Prng;
-use tairix_hid::keyboard::MODIFIER_USAGE_BASE;
+use tairix_hid::descriptor::{DescriptorError, ReportKind};
 use tairix_hid::{
-    parse_report_descriptor, BootKeyboard, BootMouse, HidReportMap, KeyboardConsole,
-    ReportFieldSummary, ReportMapSummary, ReportSource, AXIS_X, AXIS_Y, BOOT_KEYBOARD_NORM_LEN,
-    BOOT_MOUSE_NORM_LEN, MAX_REPORT_DESCRIPTOR, POINTER_BUTTON_CODE_BASE, REPORT_BUF_LEN,
+    boot, Decoded, HidDevice, HidTransport, KeyboardConsole, ReportDescriptor, ReportId, SeatSink,
+    MAX_DESCRIPTOR,
 };
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
@@ -116,6 +107,21 @@ const RECEIVER_MOUSE: &[u8] = &[
     0xFF, 0x00, 0x09, 0x02, 0x81, 0x00, 0x09, 0x02, 0x91, 0x00, 0xC0,
 ];
 
+/// A high-resolution pointer: 16-bit axes, the wheel and AC Pan each in a
+/// logical collection with its own Resolution Multiplier (physical 1..16),
+/// both multipliers in feature report 2.
+const HI_RES_MOUSE: &[u8] = &[
+    0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x85, 0x01, 0x09, 0x01, 0xA1, 0x00, 0x05, 0x09, 0x19, 0x01,
+    0x29, 0x03, 0x15, 0x00, 0x25, 0x01, 0x95, 0x03, 0x75, 0x01, 0x81, 0x02, 0x95, 0x01, 0x75, 0x05,
+    0x81, 0x01, 0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x16, 0x01, 0x80, 0x26, 0xFF, 0x7F, 0x75, 0x10,
+    0x95, 0x02, 0x81, 0x06, 0xA1, 0x02, 0x85, 0x02, 0x09, 0x48, 0x15, 0x00, 0x25, 0x01, 0x35, 0x01,
+    0x45, 0x10, 0x75, 0x02, 0x95, 0x01, 0xB1, 0x02, 0x85, 0x01, 0x09, 0x38, 0x35, 0x00, 0x45, 0x00,
+    0x15, 0x81, 0x25, 0x7F, 0x75, 0x08, 0x95, 0x01, 0x81, 0x06, 0xC0, 0xA1, 0x02, 0x85, 0x02, 0x09,
+    0x48, 0x15, 0x00, 0x25, 0x01, 0x35, 0x01, 0x45, 0x10, 0x75, 0x02, 0x95, 0x01, 0xB1, 0x02, 0x35,
+    0x00, 0x45, 0x00, 0x75, 0x04, 0xB1, 0x01, 0x85, 0x01, 0x05, 0x0C, 0x0A, 0x38, 0x02, 0x15, 0x81,
+    0x25, 0x7F, 0x75, 0x08, 0x95, 0x01, 0x81, 0x06, 0xC0, 0xC0, 0xC0,
+];
+
 /// Forged shapes the parser once got wrong: pointer fields placed before
 /// the first Report ID; buttons and X in report 1 with report 2's Y; report
 /// 1 re-entered after report 2; a Report ID saved by Push; axes of
@@ -156,6 +162,34 @@ const FORGED: [&[u8]; 6] = [
     ],
 ];
 
+/// A Precision Touchpad: two Finger collections (confidence, tip, a contact
+/// id, 12-bit X and Y over physical centimetres), the contact count and a
+/// button under report 1; Contact Count Maximum and Pad Type in feature 2; a
+/// Device Configuration with Input Mode in feature 3.
+const PRECISION_TOUCHPAD: &[u8] = &[
+    0x05, 0x0D, 0x09, 0x05, 0xA1, 0x01, 0x85, 0x01, 0x09, 0x22, 0xA1, 0x02, 0x15, 0x00, 0x25, 0x01,
+    0x75, 0x01, 0x95, 0x01, 0x09, 0x47, 0x81, 0x02, 0x09, 0x42, 0x81, 0x02, 0x95, 0x06, 0x81, 0x03,
+    0x75, 0x08, 0x95, 0x01, 0x25, 0x05, 0x09, 0x51, 0x81, 0x02, 0x05, 0x01, 0x26, 0xFF, 0x0F, 0x46,
+    0xE8, 0x03, 0x65, 0x11, 0x55, 0x0E, 0x75, 0x10, 0x09, 0x30, 0x81, 0x02, 0x46, 0xF4, 0x01, 0x09,
+    0x31, 0x81, 0x02, 0xC0, 0x05, 0x0D, 0x09, 0x22, 0xA1, 0x02, 0x15, 0x00, 0x25, 0x01, 0x75, 0x01,
+    0x95, 0x01, 0x09, 0x47, 0x81, 0x02, 0x09, 0x42, 0x81, 0x02, 0x95, 0x06, 0x81, 0x03, 0x75, 0x08,
+    0x95, 0x01, 0x25, 0x05, 0x09, 0x51, 0x81, 0x02, 0x05, 0x01, 0x26, 0xFF, 0x0F, 0x46, 0xE8, 0x03,
+    0x75, 0x10, 0x09, 0x30, 0x81, 0x02, 0x46, 0xF4, 0x01, 0x09, 0x31, 0x81, 0x02, 0xC0, 0x05, 0x0D,
+    0x15, 0x00, 0x25, 0x05, 0x75, 0x08, 0x95, 0x01, 0x09, 0x54, 0x81, 0x02, 0x05, 0x09, 0x09, 0x01,
+    0x25, 0x01, 0x75, 0x01, 0x81, 0x02, 0x95, 0x07, 0x81, 0x03, 0x05, 0x0D, 0x85, 0x02, 0x75, 0x08,
+    0x95, 0x01, 0x25, 0x05, 0x09, 0x55, 0xB1, 0x02, 0x25, 0x02, 0x09, 0x59, 0xB1, 0x02, 0xC0, 0x09,
+    0x0E, 0xA1, 0x01, 0x85, 0x03, 0x25, 0x0A, 0x09, 0x52, 0xB1, 0x02, 0xC0,
+];
+
+/// A one-finger touchscreen with In Range beside the tip switch.
+const TOUCHSCREEN: &[u8] = &[
+    0x05, 0x0D, 0x09, 0x04, 0xA1, 0x01, 0x85, 0x04, 0x09, 0x22, 0xA1, 0x02, 0x15, 0x00, 0x25, 0x01,
+    0x75, 0x01, 0x95, 0x01, 0x09, 0x42, 0x81, 0x02, 0x09, 0x32, 0x81, 0x02, 0x95, 0x06, 0x81, 0x03,
+    0x75, 0x08, 0x95, 0x01, 0x25, 0x0A, 0x09, 0x51, 0x81, 0x02, 0x05, 0x01, 0x26, 0xFF, 0x7F, 0x75,
+    0x10, 0x09, 0x30, 0x81, 0x02, 0x09, 0x31, 0x81, 0x02, 0xC0, 0x05, 0x0D, 0x25, 0x0A, 0x75, 0x08,
+    0x09, 0x54, 0x81, 0x02, 0xC0,
+];
+
 /// The descriptors the harness mutates.
 fn descriptor_seeds() -> Vec<&'static [u8]> {
     let mut seeds = vec![
@@ -167,10 +201,17 @@ fn descriptor_seeds() -> Vec<&'static [u8]> {
         TWELVE_BIT_MOUSE,
         RECEIVER_KEYBOARD,
         RECEIVER_MOUSE,
+        HI_RES_MOUSE,
+        PRECISION_TOUCHPAD,
+        TOUCHSCREEN,
     ];
     seeds.extend(FORGED);
     seeds
 }
+
+/// How many of [`descriptor_seeds`] are real devices' descriptors, ahead of
+/// the forged ones.
+const REAL_SEEDS: usize = 11;
 
 /// Item types (`bType`).
 const MAIN: u8 = 0;
@@ -221,7 +262,7 @@ fn random_item(rng: &mut Prng) -> Vec<u8> {
         0 => item(
             0x0,
             GLOBAL,
-            value(&[0x01, 0x07, 0x09, 0x0C, 0xFF00], rng),
+            value(&[0x01, 0x07, 0x09, 0x0C, 0x0D, 0xFF00], rng),
             wide,
         ),
         1 => item(
@@ -240,7 +281,13 @@ fn random_item(rng: &mut Prng) -> Vec<u8> {
         4 => item(
             0x0,
             LOCAL,
-            value(&[0x01, 0x02, 0x06, 0x30, 0x31, 0x38, 0xE0, 0xE7], rng),
+            value(
+                &[
+                    0x01, 0x02, 0x04, 0x05, 0x06, 0x22, 0x30, 0x31, 0x38, 0x42, 0x47, 0x48, 0x51,
+                    0x54, 0xE0, 0xE7,
+                ],
+                rng,
+            ),
             wide,
         ),
         5 => item(
@@ -300,14 +347,26 @@ fn item_kinds(desc: &[u8]) -> Vec<(u8, u8)> {
     kinds
 }
 
-/// A `Push`, random global items — a Report ID among them — and the `Pop`
+/// A report ID the parser takes: one byte, never zero.
+fn report_id(rng: &mut Prng) -> u32 {
+    u32::from(rng.next_u8().max(1))
+}
+
+/// A `Push`, valid global items — a Report ID among them — and the `Pop`
 /// that restores what they changed.
 fn shielded_globals(rng: &mut Prng) -> Vec<Vec<u8>> {
-    let mut items = vec![item(0xA, GLOBAL, 0, false)];
-    items.push(item(0x8, GLOBAL, u32::from(rng.next_u8()), false));
+    let mut items = vec![
+        item(0xA, GLOBAL, 0, false),
+        item(0x8, GLOBAL, report_id(rng), false),
+    ];
     for _ in 0..rng.at_most(3) {
-        let tag = *rng.pick(&[0x0, 0x7, 0x9, 0x8]);
-        items.push(item(tag, GLOBAL, u32::from(rng.next_u16()), false));
+        let global = match rng.below(4) {
+            0 => item(0x0, GLOBAL, u32::from(rng.next_u16()), false),
+            1 => item(0x7, GLOBAL, u32::from(rng.next_u16()), false),
+            2 => item(0x9, GLOBAL, u32::from(rng.next_u16()), false),
+            _ => item(0x8, GLOBAL, report_id(rng), false),
+        };
+        items.push(global);
     }
     items.push(item(0xB, GLOBAL, 0, false));
     items
@@ -331,441 +390,297 @@ fn mutate(template: &[u8], rng: &mut Prng) -> Vec<u8> {
     bytes
 }
 
-/// A field the parser located, as the bit range it covers.
-struct Located {
-    start: u32,
-    end: u32,
-}
-
-impl Located {
-    fn of(field: ReportFieldSummary) -> Self {
-        let start = u32::from(field.offset_bits);
-        Self {
-            start,
-            end: start + u32::from(field.size_bits) * u32::from(field.count),
-        }
-    }
-}
-
-/// The summary a mouse map gives when it located no button field.
-const NO_BUTTONS: ReportFieldSummary = ReportFieldSummary {
-    offset_bits: 0,
-    size_bits: 0,
-    count: 0,
-};
-
-fn is_bitmap(field: ReportFieldSummary) -> bool {
-    field.size_bits == 1 && field.count >= 1
-}
-
-fn is_values(field: ReportFieldSummary) -> bool {
-    (1..=32).contains(&field.size_bits) && field.count >= 1
-}
-
-/// Every field of an accepted map is readable, past its Report ID, and
-/// clear of every other; the map normalises the report it describes.
-fn check_map(map: &HidReportMap) {
-    let (report_id, fields) = match map.summary() {
-        ReportMapSummary::Mouse {
-            report_id,
-            buttons,
-            x,
-            y,
-            wheel,
-        } => {
+/// Check what an accepted model must hold.
+fn check_model(model: &ReportDescriptor) {
+    for (index, collection) in model.collections().iter().enumerate() {
+        if let Some(parent) = collection.parent {
             assert!(
-                buttons == NO_BUTTONS || is_bitmap(buttons),
-                "buttons {buttons:?}"
+                parent.get() < index,
+                "collection {index} names a later parent"
             );
-            for axis in [Some(x), Some(y), wheel].into_iter().flatten() {
-                assert!(is_values(axis) && axis.count == 1, "axis {axis:?}");
-            }
-            let buttons = (buttons != NO_BUTTONS).then_some(buttons);
-            (
-                report_id,
-                [buttons, Some(x), Some(y), wheel]
-                    .into_iter()
-                    .flatten()
-                    .collect::<Vec<_>>(),
-            )
         }
-        ReportMapSummary::Keyboard {
-            report_id,
-            modifiers,
-            keys,
-        } => {
-            assert!(is_bitmap(modifiers), "modifiers {modifiers:?}");
-            assert!(is_values(keys), "keys {keys:?}");
-            (report_id, vec![modifiers, keys])
-        }
-    };
-    let mut ranges: Vec<Located> = fields.into_iter().map(Located::of).collect();
-    if report_id.is_some() {
+    }
+    for field in model.fields() {
         assert!(
-            ranges.iter().all(|field| field.start >= 8),
-            "a field over the Report ID byte in {map:?}"
+            field.size >= 1 && field.count >= 1,
+            "an empty field: {field:?}"
         );
-    }
-    ranges.sort_by_key(|field| field.start);
-    for pair in ranges.windows(2) {
+        if let Some(id) = field.report.id() {
+            assert_ne!(id, 0, "report id zero");
+            assert!(field.offset >= 8, "a field over its report id: {field:?}");
+        }
+        let len = model
+            .report_len(field.kind, field.report)
+            .expect("its report has a length");
+        let end = u64::from(field.offset) + u64::from(field.size) * u64::from(field.count);
         assert!(
-            pair[0].end <= pair[1].start,
-            "overlapping fields in {map:?}"
+            end <= 8 * len as u64,
+            "a field past its report: {field:?}, {len} bytes"
         );
-    }
-    let end = ranges.iter().map(|field| field.end).max().unwrap_or(0);
-    let mut report = vec![0u8; usize::try_from(end.div_ceil(8)).unwrap_or(0)];
-    if let (Some(id), Some(first)) = (report_id, report.first_mut()) {
-        *first = id;
-    }
-    let mut out = [0u8; 8];
-    let expected = match map {
-        HidReportMap::Mouse(_) => BOOT_MOUSE_NORM_LEN,
-        HidReportMap::Keyboard(_) => BOOT_KEYBOARD_NORM_LEN,
-    };
-    assert_eq!(
-        map.normalize(&report, &mut out),
-        Some(expected),
-        "{map:?} does not normalise the report it describes"
-    );
-}
-
-/// `width` bits of `raw` from bit `offset`, least significant first: `None`
-/// past its end.
-fn bits(raw: &[u8], offset: u32, width: u32) -> Option<u32> {
-    let mut value = 0;
-    for bit in 0..width {
-        let at = offset + bit;
-        let byte = *raw.get(usize::try_from(at / 8).ok()?)?;
-        value |= u32::from((byte >> (at % 8)) & 1) << bit;
-    }
-    Some(value)
-}
-
-/// `value`, `width` bits wide, as a two's-complement displacement clamped to
-/// the boot report's signed byte.
-fn displacement(value: u32, width: u32) -> u8 {
-    let signed = if (value >> (width - 1)) & 1 == 1 {
-        i64::from(value) - (1i64 << width)
-    } else {
-        i64::from(value)
-    };
-    i8::try_from(signed.clamp(-128, 127)).map_or(0, |byte| byte.to_le_bytes()[0])
-}
-
-/// The low byte of `value`.
-fn low_byte(value: u32) -> u8 {
-    value.to_le_bytes()[0]
-}
-
-/// The boot report a naive reader takes from `raw` through `map`'s fields.
-fn expected_normalization(map: &HidReportMap, raw: &[u8]) -> Option<Vec<u8>> {
-    let field =
-        |field: ReportFieldSummary, width: u32| bits(raw, u32::from(field.offset_bits), width);
-    let prefixed = |report_id: Option<u8>| report_id.is_none_or(|id| raw.first() == Some(&id));
-    match map.summary() {
-        ReportMapSummary::Mouse {
-            report_id,
-            buttons,
-            x,
-            y,
-            wheel,
-        } => {
-            if !prefixed(report_id) {
-                return None;
-            }
-            let buttons = if buttons == NO_BUTTONS {
-                0
-            } else {
-                field(buttons, u32::from(buttons.count).min(8))?
-            };
-            let axis = |axis: ReportFieldSummary| {
-                let width = u32::from(axis.size_bits);
-                field(axis, width).map(|value| displacement(value, width))
-            };
-            let wheel = match wheel {
-                Some(wheel) => axis(wheel)?,
-                None => 0,
-            };
-            Some(vec![low_byte(buttons), axis(x)?, axis(y)?, wheel])
+        if let Some(collection) = field.collection {
+            assert!(collection.get() < model.collections().len());
         }
-        ReportMapSummary::Keyboard {
-            report_id,
-            modifiers,
-            keys,
-        } => {
-            if !prefixed(report_id) {
-                return None;
-            }
-            let mut out = vec![0u8; BOOT_KEYBOARD_NORM_LEN];
-            out[0] = low_byte(field(modifiers, u32::from(modifiers.count).min(8))?);
-            for slot in 0..u32::from(keys.count).min(6) {
-                let offset = u32::from(keys.offset_bits) + slot * u32::from(keys.size_bits);
-                let Some(usage) = bits(raw, offset, u32::from(keys.size_bits)) else {
-                    break;
-                };
-                out[2 + usize::try_from(slot).unwrap_or(0)] = low_byte(usage);
-            }
-            Some(out)
+        assert!(
+            !model.usages(field).is_empty(),
+            "a field naming no usage: {field:?}"
+        );
+        if model.uses_report_ids()
+            && !field
+                .flags
+                .contains(tairix_hid::descriptor::FieldFlags::CONSTANT)
+        {
+            assert!(
+                field.report.id().is_some(),
+                "an undemuxable field: {field:?}"
+            );
+        }
+        for element in 0..field.count.min(8) {
+            let _ = model.element_usage(field, element);
         }
     }
 }
 
-/// `map` normalises `raw` into exactly what the naive reader takes, and
-/// refuses an output buffer too small for the boot report.
-fn check_normalization(map: &HidReportMap, raw: &[u8]) {
-    let mut out = [0u8; 8];
-    let normalized = map.normalize(raw, &mut out).map(|len| out[..len].to_vec());
-    assert_eq!(
-        normalized,
-        expected_normalization(map, raw),
-        "{map:?} normalising {raw:02x?}"
-    );
-    assert_eq!(
-        map.normalize(raw, &mut [0u8; BOOT_MOUSE_NORM_LEN - 1]),
-        None,
-        "an output buffer short of the boot report"
-    );
-}
-
-/// Parse `desc` and hold whatever it yields to the model.
-fn exercise_descriptor(desc: &[u8], rng: &mut Prng) {
-    let map = parse_report_descriptor(desc);
-    if desc.is_empty() || desc.len() > MAX_REPORT_DESCRIPTOR {
-        assert_eq!(map, None, "a descriptor of {} bytes parsed", desc.len());
-    }
-    let Some(map) = map else {
-        return;
-    };
-    check_map(&map);
-    let report_id = match map.summary() {
-        ReportMapSummary::Mouse { report_id, .. }
-        | ReportMapSummary::Keyboard { report_id, .. } => report_id,
-    };
-    for _ in 0..4 {
-        let mut raw = vec![0u8; rng.at_most(24)];
-        rng.fill(&mut raw);
-        if let (Some(id), Some(first)) = (report_id, raw.first_mut()) {
-            if rng.below(4) != 0 {
-                *first = id;
-            }
+/// A descriptor drawn from the seeds, from random items, or from noise.
+fn random_descriptor(rng: &mut Prng, seeds: &[&[u8]]) -> Vec<u8> {
+    match rng.below(4) {
+        0 | 1 => mutate(rng.pick(seeds), rng),
+        2 => random_items(rng).concat(),
+        _ => {
+            let mut noise = vec![0u8; rng.at_most(96)];
+            rng.fill(&mut noise);
+            noise
         }
-        check_normalization(&map, &raw);
     }
 }
 
 #[test]
-fn a_parsed_map_locates_only_readable_fields_and_normalizes_exactly() {
+fn an_accepted_model_keeps_every_field_inside_its_report() {
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     let mut rng = Prng::new(tairix_fuzzseed::start(
-        "a_parsed_map_locates_only_readable_fields_and_normalizes_exactly",
+        "an_accepted_model_keeps_every_field_inside_its_report",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
     let seeds = descriptor_seeds();
-    for seed in &seeds[..8] {
-        let map = parse_report_descriptor(seed).expect("a real descriptor maps");
-        check_map(&map);
+    for seed in &seeds[..REAL_SEEDS] {
+        check_model(&ReportDescriptor::parse(seed).expect("a real descriptor parses"));
     }
     let mut iteration: u64 = 0;
     loop {
-        let seed = *rng.pick(&seeds);
-        exercise_descriptor(seed, &mut rng);
-        exercise_descriptor(&mutate(seed, &mut rng), &mut rng);
-
-        // Random items, and the same with a long item between two of them.
-        let mut items = random_items(&mut rng);
-        if rng.below(2) == 0 {
-            let at = rng.at_most(items.len());
-            items.insert(at, seed.to_vec());
+        let desc = random_descriptor(&mut rng, &seeds);
+        let parsed = ReportDescriptor::parse(&desc);
+        if desc.is_empty() || desc.len() > MAX_DESCRIPTOR {
+            assert_eq!(parsed, Err(DescriptorError::Length));
         }
-        let desc = items.concat();
-        exercise_descriptor(&desc, &mut rng);
-        let parsed = parse_report_descriptor(&desc);
-        let mut with_long = items.clone();
-        with_long.insert(rng.at_most(items.len()), long_item(&mut rng));
-        let with_long = with_long.concat();
-        if with_long.len() <= MAX_REPORT_DESCRIPTOR {
+        if let Ok(model) = parsed {
+            check_model(&model);
+        }
+        iteration += 1;
+        if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
+            break;
+        }
+    }
+}
+
+#[test]
+fn a_long_item_or_globals_a_push_and_pop_enclose_change_nothing() {
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
+    let mut rng = Prng::new(tairix_fuzzseed::start(
+        "a_long_item_or_globals_a_push_and_pop_enclose_change_nothing",
+        tairix_fuzzseed::FUZZ_SEED_ENV,
+    ));
+    let mut iteration: u64 = 0;
+    loop {
+        let items = random_items(&mut rng);
+        let original = items.concat();
+        // Where the global stack is shallow enough to take one more push.
+        let mut depth = 0usize;
+        let mut room = vec![0];
+        for (at, kind) in item_kinds(&original).into_iter().enumerate() {
+            match kind {
+                (GLOBAL, 0xA) => depth += 1,
+                (GLOBAL, 0xB) => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            if depth < 7 {
+                room.push(at + 1);
+            }
+        }
+        let at = *rng.pick(&room);
+        // An empty descriptor is refused for its length, which an insertion changes.
+        if !items.is_empty() {
+            let insert = if rng.below(2) == 0 {
+                vec![long_item(&mut rng)]
+            } else {
+                shielded_globals(&mut rng)
+            };
+            let mut altered = items[..at].to_vec();
+            altered.extend(insert);
+            altered.extend_from_slice(&items[at..]);
+            let altered = altered.concat();
             assert_eq!(
-                parse_report_descriptor(&with_long),
-                parsed,
-                "a long item changed what {desc:02x?} says"
+                ReportDescriptor::parse(&original).ok(),
+                ReportDescriptor::parse(&altered).ok(),
+                "{original:02x?} became {altered:02x?}"
             );
         }
+        iteration += 1;
+        if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
+            break;
+        }
+    }
+}
 
-        // Globals a Push and Pop enclose change nothing after them, once the
-        // descriptor declares Report IDs anyway and keeps no stack of its own.
-        let kinds = item_kinds(&desc);
-        let declares_ids = kinds.contains(&(GLOBAL, 0x8));
-        let stacks = kinds.contains(&(GLOBAL, 0xA)) || kinds.contains(&(GLOBAL, 0xB));
-        if declares_ids && !stacks {
-            let at = rng.at_most(items.len());
-            let mut shielded = items.clone();
-            shielded.splice(at..at, shielded_globals(&mut rng));
-            let shielded = shielded.concat();
-            if shielded.len() <= MAX_REPORT_DESCRIPTOR {
-                assert_eq!(
-                    parse_report_descriptor(&shielded),
-                    parsed,
-                    "a Push/Pop pair changed what {desc:02x?} says"
+/// Every record a device delivered, with the button state it implies.
+#[derive(Default)]
+struct Seat {
+    held: [bool; 3],
+    last_frame: Option<TouchFrame>,
+    records: usize,
+}
+
+impl Seat {
+    fn button(code: PointerButtonCode) -> usize {
+        match code {
+            PointerButtonCode::Primary => 0,
+            PointerButtonCode::Secondary => 1,
+            PointerButtonCode::Middle => 2,
+        }
+    }
+}
+
+impl SeatSink for Seat {
+    fn key(&mut self, record: &KeyInput) -> Result<(), DriverError> {
+        assert_eq!(KeyInput::from_bytes(&record.to_le_bytes()), Ok(*record));
+        self.records += 1;
+        Ok(())
+    }
+
+    fn pointer(&mut self, record: &PointerInput) -> Result<(), DriverError> {
+        match record {
+            PointerInput::Pressed(code) => {
+                let held = &mut self.held[Self::button(*code)];
+                assert!(!*held, "{code:?} pressed twice");
+                *held = true;
+            }
+            PointerInput::Released(code) => {
+                let held = &mut self.held[Self::button(*code)];
+                assert!(*held, "{code:?} released unheld");
+                *held = false;
+            }
+            _ => {}
+        }
+        self.records += 1;
+        Ok(())
+    }
+
+    fn touch(&mut self, frame: &TouchFrame) -> Result<(), DriverError> {
+        assert!(frame.contacts().len() <= TOUCH_CONTACTS_MAX);
+        assert_eq!(TouchFrame::from_bytes(&frame.to_le_bytes()), Ok(*frame));
+        self.last_frame = Some(*frame);
+        self.records += 1;
+        Ok(())
+    }
+}
+
+/// A device's feature exchange answered at random: noise, short answers,
+/// refusals, and now and then the device gone.
+struct RandomTransport<'a> {
+    rng: &'a mut Prng,
+    gone: bool,
+}
+
+impl RandomTransport<'_> {
+    fn refusal(&mut self) -> Option<DriverError> {
+        match self.rng.below(8) {
+            0 => {
+                self.gone = true;
+                Some(DriverError::NotFound)
+            }
+            1 | 2 => Some(DriverError::Unsupported),
+            _ => None,
+        }
+    }
+}
+
+impl HidTransport for RandomTransport<'_> {
+    fn get_feature(&mut self, _id: ReportId, report: &mut [u8]) -> Result<usize, DriverError> {
+        if let Some(error) = self.refusal() {
+            return Err(error);
+        }
+        let len = self.rng.at_most(report.len());
+        self.rng.fill(&mut report[..len]);
+        Ok(len)
+    }
+
+    fn set_feature(&mut self, _id: ReportId, _report: &[u8]) -> Result<(), DriverError> {
+        self.refusal().map_or(Ok(()), Err)
+    }
+}
+
+/// A report for `model`'s device: its own report ID most of the time.
+fn random_report(model: &ReportDescriptor, rng: &mut Prng) -> Vec<u8> {
+    let len = model.longest_report(ReportKind::Input) + 2;
+    let mut report = vec![0u8; rng.at_most(len)];
+    rng.fill(&mut report);
+    if let (Some(first), Some(field)) = (
+        report.first_mut(),
+        model.fields().get(rng.below(model.fields().len().max(1))),
+    ) {
+        if let (Some(id), true) = (field.report.id(), rng.below(4) != 0) {
+            *first = id;
+        }
+    }
+    report
+}
+
+#[test]
+fn a_device_delivers_nothing_from_a_malformed_report_and_holds_nothing_once_let_go() {
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
+    let mut rng = Prng::new(tairix_fuzzseed::start(
+        "a_device_delivers_nothing_from_a_malformed_report_and_holds_nothing_once_let_go",
+        tairix_fuzzseed::FUZZ_SEED_ENV,
+    ));
+    let seeds = descriptor_seeds();
+    let mut iteration: u64 = 0;
+    loop {
+        let desc = if rng.below(2) == 0 {
+            rng.pick(&seeds[..REAL_SEEDS]).to_vec()
+        } else {
+            random_descriptor(&mut rng, &seeds)
+        };
+        if let Some(mut device) = ReportDescriptor::parse(&desc).ok().and_then(HidDevice::new) {
+            let mut transport = RandomTransport {
+                rng: &mut rng,
+                gone: false,
+            };
+            let configured = device.configure(&mut transport);
+            if configured.is_err() {
+                assert!(
+                    transport.gone,
+                    "configuration failed with the device there: {configured:?}"
+                );
+                assert_eq!(configured, Err(DriverError::NotFound));
+            }
+            let mut seat = Seat::default();
+            for _ in 0..rng.at_most(12) {
+                let report = random_report(device.model(), &mut rng);
+                let before = seat.records;
+                let decoded = device
+                    .input(&report, &mut seat)
+                    .expect("the seat takes every record");
+                if decoded == Decoded::Malformed {
+                    assert_eq!(seat.records, before, "a malformed report delivered");
+                }
+            }
+            device.release(&mut seat).expect("released");
+            assert_eq!(seat.held, [false; 3], "a button left held");
+            if let Some(frame) = seat.last_frame {
+                assert!(
+                    frame.contacts().is_empty() && frame.buttons().bits() == 0,
+                    "a contact left down"
                 );
             }
         }
-
-        let mut noise = vec![0u8; rng.at_most(MAX_REPORT_DESCRIPTOR + 16)];
-        rng.fill(&mut noise);
-        exercise_descriptor(&noise, &mut rng);
-
-        iteration += 1;
-        if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
-            break;
-        }
-    }
-}
-
-/// Reports in the order a device sends them, each with the length it claims
-/// when that is not its own.
-type Script = VecDeque<(Vec<u8>, Option<usize>)>;
-
-/// A scripted interrupt-IN endpoint: its reports in order, each claiming its
-/// own length unless a forged one is scripted.
-#[derive(Clone, Default)]
-struct Endpoint(Rc<RefCell<Script>>);
-
-impl ReportSource for Endpoint {
-    fn next_report(&mut self, buf: &mut [u8]) -> Result<Option<usize>, DriverError> {
-        let Some((report, claimed)) = self.0.borrow_mut().pop_front() else {
-            return Ok(None);
-        };
-        let len = report.len().min(buf.len());
-        buf[..len].copy_from_slice(&report[..len]);
-        Ok(Some(claimed.unwrap_or(len)))
-    }
-}
-
-/// A report as a device may send it: keys, error usages, modifier usages,
-/// and repeats drawn often, and a claimed length past the buffer now and then.
-fn random_report(rng: &mut Prng) -> (Vec<u8>, Option<usize>) {
-    let report: Vec<u8> = (0..rng.at_most(REPORT_BUF_LEN + 2))
-        .map(|_| match rng.below(5) {
-            0 => rng.next_u8(),
-            1 => 0,
-            2 => 0xE0 + rng.next_u8() % 8,
-            _ => rng.next_u8() % 8,
-        })
-        .collect();
-    let forged = (rng.below(32) == 0).then(|| REPORT_BUF_LEN + 1 + rng.below(8));
-    (report, forged)
-}
-
-/// Drain `input` in random-sized polls until it has nothing more.
-fn drain(input: &mut impl Input, rng: &mut Prng) -> Result<Vec<InputEvent>, DriverError> {
-    let mut events = Vec::new();
-    loop {
-        let mut out = [InputEvent {
-            kind: InputEventKind::Key,
-            reserved0: 0,
-            code: 0,
-            value: 0,
-        }; 8];
-        let room = 1 + rng.below(out.len());
-        let written = input.poll(&mut out[..room])?;
-        assert!(written <= room);
-        if written == 0 {
-            return Ok(events);
-        }
-        events.extend_from_slice(&out[..written]);
-    }
-}
-
-/// The boot keyboard's held state, kept the way the decoder documents it.
-#[derive(Default)]
-struct KeyboardModel {
-    keys: [u8; 6],
-    modifiers: u8,
-}
-
-impl KeyboardModel {
-    /// The key edges `report` makes: releases, then presses, then modifier
-    /// changes. The key array is kept when it carries an error usage, and a
-    /// modifier usage in it is the bitmap's to report.
-    fn edges(&mut self, report: &[u8]) -> Vec<(u16, i32)> {
-        let mut keys = [0u8; 6];
-        let present = (report.len() - 2).min(6);
-        for (key, &usage) in keys.iter_mut().zip(&report[2..2 + present]) {
-            if !(0xE0..=0xE7).contains(&usage) {
-                *key = usage;
-            }
-        }
-        let mut edges = Vec::new();
-        if !keys.iter().any(|&key| (1..=3).contains(&key)) {
-            for (slot, &old) in self.keys.iter().enumerate() {
-                if old != 0 && !keys.contains(&old) && !self.keys[..slot].contains(&old) {
-                    edges.push((u16::from(old), 0));
-                }
-            }
-            for (slot, &new) in keys.iter().enumerate() {
-                if new != 0 && !self.keys.contains(&new) && !keys[..slot].contains(&new) {
-                    edges.push((u16::from(new), 1));
-                }
-            }
-            self.keys = keys;
-        }
-        for bit in 0..8u8 {
-            if ((self.modifiers ^ report[0]) >> bit) & 1 == 1 {
-                edges.push((
-                    MODIFIER_USAGE_BASE + u16::from(bit),
-                    i32::from((report[0] >> bit) & 1),
-                ));
-            }
-        }
-        self.modifiers = report[0];
-        edges
-    }
-}
-
-#[test]
-fn the_boot_keyboard_reports_exactly_the_changes_each_report_makes() {
-    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
-    let mut rng = Prng::new(tairix_fuzzseed::start(
-        "the_boot_keyboard_reports_exactly_the_changes_each_report_makes",
-        tairix_fuzzseed::FUZZ_SEED_ENV,
-    ));
-    let endpoint = Endpoint::default();
-    let mut keyboard = BootKeyboard::new(endpoint.clone());
-    let mut model = KeyboardModel::default();
-    let mut console = KeyboardConsole::new();
-    let mut held = [false; 256];
-    let mut iteration: u64 = 0;
-    loop {
-        let (report, forged) = random_report(&mut rng);
-        endpoint.0.borrow_mut().push_back((report.clone(), forged));
-        let delivered = &report[..report.len().min(REPORT_BUF_LEN)];
-        let expected = match (forged, delivered.len()) {
-            (Some(_), _) => Err(DriverError::DeviceFault),
-            (None, 0..2) => Err(DriverError::LengthOutOfRange),
-            (None, _) => Ok(model.edges(delivered)),
-        };
-        let decoded = drain(&mut keyboard, &mut rng).map(|events| {
-            events
-                .iter()
-                .map(|event| {
-                    assert_eq!(event.kind, InputEventKind::Key);
-                    let _ = console.feed(*event);
-                    (event.code, event.value)
-                })
-                .collect::<Vec<_>>()
-        });
-        assert_eq!(decoded, expected, "report {report:02x?}");
-        for &(code, value) in decoded.iter().flatten() {
-            assert!(
-                code <= 0xFF && (0..=1).contains(&value),
-                "{code:#06x} = {value}"
-            );
-            let slot = &mut held[usize::from(code)];
-            assert_ne!(*slot, value == 1, "{code:#04x} edge to the state it was in");
-            *slot = value == 1;
-        }
-
         iteration += 1;
         if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
             break;
@@ -774,59 +689,33 @@ fn the_boot_keyboard_reports_exactly_the_changes_each_report_makes() {
 }
 
 #[test]
-fn the_boot_mouse_reports_exactly_the_changes_each_report_makes() {
+fn a_boot_report_is_read_whatever_its_length() {
     let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
     let mut rng = Prng::new(tairix_fuzzseed::start(
-        "the_boot_mouse_reports_exactly_the_changes_each_report_makes",
+        "a_boot_report_is_read_whatever_its_length",
         tairix_fuzzseed::FUZZ_SEED_ENV,
     ));
-    let endpoint = Endpoint::default();
-    let mut mouse = BootMouse::new(endpoint.clone());
-    let mut buttons = 0u8;
+    let mut mouse = HidDevice::new(boot::mouse().expect("boot mouse")).expect("a mouse");
+    let mut keyboard =
+        HidDevice::new(boot::keyboard().expect("boot keyboard")).expect("a keyboard");
     let mut iteration: u64 = 0;
     loop {
-        let (report, forged) = random_report(&mut rng);
-        endpoint.0.borrow_mut().push_back((report.clone(), forged));
-        let delivered = &report[..report.len().min(REPORT_BUF_LEN)];
-        let expected = match (forged, delivered.len()) {
-            (Some(_), _) => Err(DriverError::DeviceFault),
-            (None, 0..3) => Err(DriverError::LengthOutOfRange),
-            (None, _) => {
-                let mut events = Vec::new();
-                let now = delivered[0] & 0b111;
-                for bit in 0..3u8 {
-                    if ((buttons ^ now) >> bit) & 1 == 1 {
-                        events.push((
-                            InputEventKind::Key,
-                            POINTER_BUTTON_CODE_BASE + u16::from(bit),
-                            i32::from((now >> bit) & 1),
-                        ));
-                    }
-                }
-                buttons = now;
-                // The wheel byte counts rotation away from the user and the
-                // shared axis counts downward, so it alone is negated.
-                let motion = [
-                    (InputEventKind::Pointer, AXIS_X, delivered.get(1), 1),
-                    (InputEventKind::Pointer, AXIS_Y, delivered.get(2), 1),
-                    (InputEventKind::Scroll, AXIS_Y, delivered.get(3), -1),
-                ];
-                for (kind, axis, delta, sign) in motion {
-                    if let Some(&delta) = delta.filter(|&&delta| delta != 0) {
-                        events.push((kind, axis, sign * i32::from(i8::from_le_bytes([delta]))));
-                    }
-                }
-                Ok(events)
-            }
-        };
-        let decoded = drain(&mut mouse, &mut rng).map(|events| {
-            events
-                .iter()
-                .map(|event| (event.kind, event.code, event.value))
-                .collect::<Vec<_>>()
-        });
-        assert_eq!(decoded, expected, "report {report:02x?}");
-
+        let mut report = vec![0u8; rng.at_most(12)];
+        rng.fill(&mut report);
+        let mut seat = Seat::default();
+        let decoded = mouse.input(&report, &mut seat).expect("delivered");
+        assert_eq!(
+            decoded == Decoded::Malformed,
+            report.len() < 3,
+            "{report:?}"
+        );
+        mouse.release(&mut seat).expect("released");
+        let decoded = keyboard.input(&report, &mut seat).expect("delivered");
+        assert_eq!(
+            decoded == Decoded::Malformed,
+            report.is_empty(),
+            "{report:?}"
+        );
         iteration += 1;
         if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {
             break;

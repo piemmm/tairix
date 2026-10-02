@@ -561,6 +561,10 @@ pub struct View {
     grid: bool,
     pointer: Point,
     modifiers: Modifiers,
+    /// What a Ctrl-wheel turn has left short of a whole zoom rung.
+    zoom_carry: i64,
+    /// A pinch under way: the view it began from and where it began.
+    pinch: Option<(Viewport, Point)>,
     message: Option<String>,
     modal: Option<Modal>,
     pending: Option<Pending>,
@@ -767,6 +771,8 @@ impl View {
             grid: false,
             pointer: Point::new(-1, -1),
             modifiers: Modifiers::default(),
+            zoom_carry: 0,
+            pinch: None,
             message: None,
             modal: None,
             pending: None,

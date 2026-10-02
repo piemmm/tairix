@@ -6,7 +6,7 @@
 //! paint can never leave a stale pixel on screen. What a real drag reports is
 //! [`crate::settings`]'s own to assert.
 
-use tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT;
+use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
 use tairix_controls::damage;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};

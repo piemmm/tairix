@@ -61,6 +61,7 @@ use tairix_abi::elevate::{elevate_endpoint, ElevateReply, ElevateRequest, ELEVAT
 use tairix_abi::input::{KeyInput, PointerInput};
 use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
 pub use tairix_abi::seat::ReleaseSurface;
+use tairix_abi::touch::TouchFrame;
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
 use tairix_abi::{
     BootFacts, BootId, BootSession, CapabilityId, Errno, FileStat, HwNode, HwRemoveFlags,
@@ -251,6 +252,12 @@ const NUM_POINTER_INJECT: u64 = SyscallNumber::POINTER_INJECT.as_u16() as u64;
 
 /// `pointer_read` syscall number (as above).
 const NUM_POINTER_READ: u64 = SyscallNumber::POINTER_READ.as_u16() as u64;
+
+/// `touch_inject` syscall number (as above).
+const NUM_TOUCH_INJECT: u64 = SyscallNumber::TOUCH_INJECT.as_u16() as u64;
+
+/// `touch_read` syscall number (as above).
+const NUM_TOUCH_READ: u64 = SyscallNumber::TOUCH_READ.as_u16() as u64;
 
 /// `seat_switch` syscall number (as above).
 const NUM_SEAT_SWITCH: u64 = SyscallNumber::SEAT_SWITCH.as_u16() as u64;
@@ -866,6 +873,42 @@ pub fn pointer_read(seat: u64, buf: &mut [u8]) -> i64 {
     // `&mut [u8]` for the duration of the call, so the `(ptr, len)` pair
     // denotes writable memory.
     let ret = unsafe { raw_syscall(NUM_POINTER_READ, [seat, ptr, buf.len() as u64, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Inject one touch frame into seat `seat` (`SyscallNumber::TOUCH_INJECT`),
+/// returning the raw signed register: the bytes consumed, else `-errno`.
+///
+/// The kernel validates `CAP_INPUT_INJECT`, the seat and the frame, stamps
+/// it with this task and its arrival over whatever the frame states, and
+/// queues it for the seat's owner, or discards it while the seat is unowned.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 count-or-errno encoding (count ≥ 0, else -errno).
+pub fn touch_inject(seat: u64, frame: &TouchFrame) -> i64 {
+    let bytes = frame.to_le_bytes();
+    let ptr = bytes.as_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // the `(buf, len)` pair against the caller's address space before reading
+    // it, and `bytes` is a live stack array for the duration of the call.
+    let ret = unsafe { raw_syscall(NUM_TOUCH_INJECT, [seat, ptr, bytes.len() as u64, 0, 0, 0]) };
+    ret as i64
+}
+
+/// Read one touch frame from seat `seat`'s touch channel into `buf`
+/// (`SyscallNumber::TOUCH_READ`), returning the raw signed register: the
+/// bytes written — one [`TouchFrame::WIRE_LEN`] frame, or `0` when the
+/// channel is momentarily drained — else `-errno`.
+///
+/// Owner-gated against the seat's live lease as [`pointer_read`] is; a `buf`
+/// shorter than a frame fails closed.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 count-or-errno encoding (count ≥ 0, else -errno).
+pub fn touch_read(seat: u64, buf: &mut [u8]) -> i64 {
+    let ptr = buf.as_mut_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates
+    // the `(buf, len)` pair against the caller's address space before writing
+    // it, and `buf` is a live exclusive borrow for the duration of the call.
+    let ret = unsafe { raw_syscall(NUM_TOUCH_READ, [seat, ptr, buf.len() as u64, 0, 0, 0]) };
     ret as i64
 }
 
@@ -6975,6 +7018,36 @@ mod tests {
         let (_, _) = capture(neg, || {
             assert_eq!(pointer_read(0, &mut buf), want);
         });
+    }
+
+    #[test]
+    fn touch_inject_and_read_marshal_the_seat_buffer_and_len() {
+        use tairix_abi::touch::{TouchButtons, TouchExtent, TouchSurface};
+        let frame = TouchFrame::new(
+            1,
+            TouchSurface::Clickpad,
+            TouchButtons::NONE,
+            TouchExtent::default(),
+        );
+        let want = i64::try_from(TouchFrame::WIRE_LEN).expect("WIRE_LEN fits an i64");
+        let (number, args) = capture(TouchFrame::WIRE_LEN as u64, || {
+            assert_eq!(touch_inject(3, &frame), want);
+        });
+        assert_eq!(number, NUM_TOUCH_INJECT);
+        assert_eq!(args[0], 3);
+        assert_ne!(args[1], 0);
+        assert_eq!(args[2], TouchFrame::WIRE_LEN as u64);
+        assert_eq!(&args[3..], &[0, 0, 0]);
+
+        let mut buf = [0u8; TouchFrame::WIRE_LEN];
+        let (number, args) = capture(TouchFrame::WIRE_LEN as u64, || {
+            assert_eq!(touch_read(3, &mut buf), want);
+        });
+        assert_eq!(number, NUM_TOUCH_READ);
+        assert_eq!(args[0], 3);
+        assert_ne!(args[1], 0);
+        assert_eq!(args[2], TouchFrame::WIRE_LEN as u64);
+        assert_eq!(&args[3..], &[0, 0, 0]);
     }
 
     #[test]

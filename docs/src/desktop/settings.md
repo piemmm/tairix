@@ -532,9 +532,9 @@ run, so re-reading would cost a second password for an answer already known,
 and the reader is left in place for the next change. The public directories
 are free, so they are read again at once.
 
-## Notifications, Mouse, Keyboard, Lock Screen and Screensaver
+## Notifications, Mouse, Trackpad, Keyboard, Lock Screen and Screensaver
 
-Five more panes over the desktop's own document, each **immediate** and each
+Six more panes over the desktop's own document, each **immediate** and each
 posting only its own keys, so no pane can reimpose a value another pane set.
 
 - **Notifications** is a desktop-wide switch (`notify.enabled`) and one row
@@ -554,6 +554,13 @@ posting only its own keys, so no pane can reimpose a value another pane set.
   one the whole desktop uses: the session publishes it in `DesktopInfo`, and
   the window manager's title bars, the desktop's icons and every application
   pair presses under it.
+- **Trackpad** sets whether a tap clicks (`touchpad.tap`), whether two fingers
+  move the content or the view (`touchpad.natural_scroll`), and how far a
+  finger moves the pointer from *Slow* to *Fast* (`touchpad.speed`), the
+  session handing them to the seat's gesture recogniser
+  ([`tairix-touch`](../lib/touch.md)). Its footnote says what needs no
+  setting: two fingers scroll and pinch, and a clickpad pressed with two
+  opens a menu.
 - **Keyboard** sets how long a key is held before it repeats, from *Long* to
   *Short*, and how often it then repeats, from *Off* to *Fast*. The session
   repeats the held key itself and drops a device's own repeats, so every

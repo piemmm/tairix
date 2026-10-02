@@ -11,18 +11,20 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::driver::display::Display;
-use tairix_abi::input::PointerInput;
+use tairix_abi::input::{PointerButtonCode, PointerInput};
 use tairix_abi::time::{Duration64, Time64};
+use tairix_abi::touch::TouchFrame;
 use tairix_abi::window_ipc::PointerAction;
 use tairix_abi::{DriverError, WAITSET_TIMEOUT_NONE};
 use tairix_cursor::{CursorImage, PlacedCursor};
 use tairix_display::{DisplaySleep, SwitchedOff};
-use tairix_geometry::{Rect, Scale};
+use tairix_geometry::{Point, Rect, Scale};
 use tairix_greeter::{AccountTile, AuthSurface, Backdrop, EventContext, Outcome};
-use tairix_input::InputEvent;
+use tairix_input::{InputEvent, PointerButton};
 use tairix_raster::Surface;
 use tairix_ribbon::SKY;
 use tairix_theme::{MotionInteraction, Theme};
+use tairix_touch::{Gesture, Recogniser, SurfacePoint, TouchPress, TouchSettings};
 use tairix_window::pointer_input_events;
 
 use crate::accounts::SessionTransport;
@@ -107,6 +109,19 @@ pub struct LoginScreen<T: SessionTransport> {
     /// Whether input has reached the screen while its display slept, so the
     /// display is owed a wake.
     wake_owed: bool,
+    /// What the seat's touch frames mean. No user is signed in to have chosen
+    /// otherwise, so a touch means what it means by default.
+    touch: Recogniser,
+}
+
+/// One pointing action, from a mouse report or a touch gesture.
+#[derive(Copy, Clone, Debug)]
+enum Pointing {
+    By(i32, i32),
+    To(SurfacePoint),
+    Pressed(PointerButtonCode),
+    Released(PointerButtonCode),
+    Nothing,
 }
 
 /// A repaint request: what changed, and which pixels it changed.
@@ -181,6 +196,9 @@ impl<T: SessionTransport> LoginScreen<T> {
         transport: T,
     ) -> Self {
         let cursor = Cursor::centred(scanout.mode());
+        let mut touch = Recogniser::new(TouchSettings::DEFAULT);
+        let mode = scanout.mode();
+        touch.set_screen(mode.width_px, mode.height_px, scale.dpi());
         Self {
             surface: AuthSurface::with_accounts(accounts.clone()),
             accounts,
@@ -198,6 +216,7 @@ impl<T: SessionTransport> LoginScreen<T> {
             idle: Idle::new(0),
             sleep: DisplaySleep::new(),
             wake_owed: false,
+            touch,
         }
     }
 
@@ -304,20 +323,69 @@ impl<T: SessionTransport> LoginScreen<T> {
     /// its wake, though motion still carries the pointer: it comes back where
     /// the hand put it.
     pub fn on_pointer(&mut self, input: &PointerInput, now_ns: u64) -> Step {
+        let action = match *input {
+            PointerInput::MovedBy { dx, dy } => Pointing::By(dx, dy),
+            PointerInput::Pressed(button) => Pointing::Pressed(button),
+            PointerInput::Released(button) => Pointing::Released(button),
+            // The authentication surface has nothing scrollable.
+            PointerInput::Scrolled { .. } => Pointing::Nothing,
+        };
+        self.point(action, now_ns)
+    }
+
+    /// Read one touch frame, adding what it meant to `gestures` for
+    /// [`on_gesture`](Self::on_gesture) to answer.
+    pub fn feed_touch(&mut self, frame: &TouchFrame, gestures: &mut Vec<Gesture>) {
+        self.touch
+            .feed(frame, &mut |gesture| gestures.push(gesture));
+    }
+
+    /// Add what a touch meant by waiting until `now_ns` to `gestures`; run
+    /// once every queued frame has been fed.
+    pub fn expire_touch(&mut self, now_ns: u64, gestures: &mut Vec<Gesture>) {
+        self.touch
+            .expire(now_ns, &mut |gesture| gestures.push(gesture));
+    }
+
+    /// Answer one touch gesture, as [`on_pointer`](Self::on_pointer) answers
+    /// a pointer report: a click the fingers made is the button it names.
+    pub fn on_gesture(&mut self, gesture: Gesture, now_ns: u64) -> Step {
+        let button = |press: TouchPress| match press {
+            TouchPress::Device(code) => code,
+            TouchPress::Fingers(PointerButton::Primary) => PointerButtonCode::Primary,
+            TouchPress::Fingers(PointerButton::Secondary) => PointerButtonCode::Secondary,
+            TouchPress::Fingers(PointerButton::Middle) => PointerButtonCode::Middle,
+        };
+        let action = match gesture {
+            Gesture::MovedBy { dx, dy } => Pointing::By(dx, dy),
+            Gesture::MovedTo(place) => Pointing::To(place),
+            Gesture::Pressed(press) => Pointing::Pressed(button(press)),
+            Gesture::Released(press) => Pointing::Released(button(press)),
+            // Nothing on the authentication surface scrolls or zooms.
+            Gesture::Scrolled { .. } | Gesture::Pinch(_) => Pointing::Nothing,
+        };
+        self.point(action, now_ns)
+    }
+
+    /// One pointing action through the surface. While the display sleeps it
+    /// reaches nothing and owes the display its wake, though motion still
+    /// carries the pointer.
+    fn point(&mut self, action: Pointing, now_ns: u64) -> Step {
         self.idle.input(now_ns);
+        let moved = match action {
+            Pointing::By(dx, dy) => self.move_pointer(dx, dy),
+            Pointing::To(place) => self.place_pointer(place),
+            Pointing::Pressed(_) | Pointing::Released(_) | Pointing::Nothing => None,
+        };
         if !self.sleep.is_awake() {
             self.wake_owed = true;
-            if let PointerInput::MovedBy { dx, dy } = *input {
-                let _ = self.move_pointer(dx, dy);
-            }
             return Step::quiet();
         }
-        let (action, moved) = match *input {
-            PointerInput::MovedBy { dx, dy } => (PointerAction::Moved, self.move_pointer(dx, dy)),
-            PointerInput::Pressed(button) => (PointerAction::Pressed(button), None),
-            PointerInput::Released(button) => (PointerAction::Released(button), None),
-            // The authentication surface has nothing scrollable.
-            PointerInput::Scrolled { .. } => return Step::quiet(),
+        let action = match action {
+            Pointing::By(..) | Pointing::To(_) => PointerAction::Moved,
+            Pointing::Pressed(button) => PointerAction::Pressed(button),
+            Pointing::Released(button) => PointerAction::Released(button),
+            Pointing::Nothing => return Step::quiet(),
         };
         let mut repaint = moved.map_or(Repaint::Nothing, |damage| Repaint::Scanout(Some(damage)));
         let mut verified = false;
@@ -392,6 +460,9 @@ impl<T: SessionTransport> LoginScreen<T> {
             self.surface.motion_due(now_ns),
             self.scene.as_ref().and_then(|scene| scene.due_in(now_ns)),
             Some(self.idle.timeout(now_ns)),
+            self.touch
+                .deadline_ns()
+                .map(|due| due.saturating_sub(now_ns)),
         ]
         .into_iter()
         .flatten()
@@ -526,10 +597,22 @@ impl<T: SessionTransport> LoginScreen<T> {
     /// cursor drawn to move, or once the screen is leaving and nothing is
     /// drawn for it — the position is still tracked either way.
     fn move_pointer(&mut self, dx: i32, dy: i32) -> Option<Rect> {
-        let screen = self.scanout.screen();
-        let drawn = self.draws_pointer();
         let was = self.cursor.at();
         let at = self.cursor.moved_by(dx, dy);
+        self.repoint(was, at)
+    }
+
+    fn place_pointer(&mut self, place: SurfacePoint) -> Option<Rect> {
+        let was = self.cursor.at();
+        let at = self.cursor.placed(place);
+        self.repoint(was, at)
+    }
+
+    /// Draw the pointer at `at`, moved from `was`, answering the pixels that
+    /// changed.
+    fn repoint(&mut self, was: Point, at: Point) -> Option<Rect> {
+        let screen = self.scanout.screen();
+        let drawn = self.draws_pointer();
         if at == was {
             return None;
         }

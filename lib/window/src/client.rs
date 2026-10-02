@@ -38,7 +38,7 @@ use tairix_abi::window_ipc::{
 };
 use tairix_abi::{Errno, ProcId};
 use tairix_geometry::{Point, Rect, Region};
-use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
+use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PinchPhase, PointerButton};
 
 use crate::server::{LayerSpec, PopupSpec, WindowSizeState, WindowSizing};
 
@@ -298,6 +298,37 @@ pub fn pointer_input_events(
     [Some(InputEvent::PointerMoved { to: point }), transition]
         .into_iter()
         .flatten()
+}
+
+/// The shared input events one delivered wheel turn at window-local `point`
+/// means, in the order a control must receive them: the position first, as
+/// for [`pointer_input_events`], so a control is never asked to take a turn at
+/// a place it has not been told about, then the turn itself.
+pub fn scroll_input_events(point: Point, dx: i32, dy: i32) -> impl Iterator<Item = InputEvent> {
+    [
+        InputEvent::PointerMoved { to: point },
+        InputEvent::PointerScrolled { dx, dy },
+    ]
+    .into_iter()
+}
+
+/// The shared input events one delivered step of a pinch at window-local
+/// `point` means: the position first, as for [`scroll_input_events`], then
+/// the pinch there.
+pub fn pinch_input_events(
+    point: Point,
+    phase: PinchPhase,
+    scale: u32,
+) -> impl Iterator<Item = InputEvent> {
+    [
+        InputEvent::PointerMoved { to: point },
+        InputEvent::Pinch {
+            phase,
+            scale,
+            at: point,
+        },
+    ]
+    .into_iter()
 }
 
 /// The control-facing button one wire button code names.

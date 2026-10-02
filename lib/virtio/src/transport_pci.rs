@@ -273,6 +273,12 @@ impl Transport for PciTransport {
             *b = self.windows.device.read_u8(offset + i).unwrap_or(0);
         }
     }
+
+    fn write_config(&mut self, offset: usize, data: &[u8]) {
+        for (i, &b) in data.iter().enumerate() {
+            let _ = self.windows.device.write_u8(offset + i, b);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -541,6 +547,14 @@ mod tests {
         let mut over = [0xCDu8; 4];
         t.read_config(6, &mut over);
         assert_eq!(over, [7, 8, 0, 0]);
+    }
+
+    #[test]
+    fn write_config_writes_the_device_window_and_drops_bytes_past_it() {
+        let dev = FakeDevice::new(8, 8, 0);
+        let mut t = dev.transport();
+        t.write_config(6, &[0xAA, 0xBB, 0xCC]);
+        assert_eq!(dev.dev_device().read_u32(4).unwrap(), 0xBBAA_0000);
     }
 
     #[test]

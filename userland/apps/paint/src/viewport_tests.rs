@@ -1,6 +1,6 @@
 use tairix_geometry::{Point, Rect};
 
-use super::{Viewport, ACTUAL, ZOOMS};
+use super::{Viewport, Zoom, ACTUAL, ZOOMS};
 use crate::shape::{Bounds, FX};
 
 const AREA: Rect = Rect::new(10, 20, 200, 100);
@@ -25,7 +25,8 @@ fn a_magnified_pixel_spans_its_zoom_and_a_point_inside_it_keeps_its_fraction() {
     let mut view = Viewport::new((1, 1));
     let picture = (1000, 1000);
     assert!(view.zoom_to(ACTUAL + 5, Point::new(10, 20), picture, AREA));
-    assert_eq!(ZOOMS[view.zoom()], (8, 1));
+    assert_eq!(view.zoom(), Zoom::of((8, 1)));
+    assert_eq!(view.rung(), Some(ACTUAL + 5));
     assert_eq!(view.pixel_span(), (8, 8));
     let (x, _) = view.to_picture(Point::new(50, 20), picture, AREA);
     let (next, _) = view.to_picture(Point::new(51, 20), picture, AREA);
@@ -110,4 +111,52 @@ fn a_reduced_view_maps_many_pixels_to_one() {
         (1, 1),
         "three pixels fall in one"
     );
+}
+
+#[test]
+fn every_rung_is_an_exact_zoom_and_a_pinch_scales_within_the_ladder() {
+    for (rung, &(num, den)) in ZOOMS.iter().enumerate() {
+        let zoom = Zoom::of((num, den));
+        assert_eq!(zoom.percent(), num * 100 / den, "rung {rung}");
+    }
+    let actual = Zoom::of(ZOOMS[ACTUAL]);
+    assert_eq!(
+        actual.scaled(tairix_abi::touch::PINCH_SCALE_ONE * 2),
+        Zoom::of((2, 1))
+    );
+    assert_eq!(actual.scaled(u32::MAX), Zoom::MOST, "held to the top");
+    assert_eq!(actual.scaled(1), Zoom::LEAST, "and to the bottom");
+}
+
+#[test]
+fn stepping_goes_from_the_nearest_rung_in_its_direction() {
+    let mut view = Viewport::new((1, 1));
+    let picture = (1000, 1000);
+    assert_eq!(view.rung_beside(1), ACTUAL + 1);
+    assert_eq!(view.rung_beside(-2), ACTUAL - 2);
+    assert_eq!(view.rung_beside(100), ZOOMS.len() - 1);
+    assert_eq!(view.rung_beside(-100), 0);
+    // Between 1:1 and 2:1, one step in either direction lands beside it.
+    assert!(view.magnify(
+        Zoom::of(ZOOMS[ACTUAL]).scaled(tairix_abi::touch::PINCH_SCALE_ONE * 3 / 2),
+        Point::new(10, 20),
+        picture,
+        AREA
+    ));
+    assert_eq!(view.rung(), None);
+    assert_eq!(view.rung_beside(1), ACTUAL + 1);
+    assert_eq!(view.rung_beside(-1), ACTUAL);
+    assert_eq!(view.rung_beside(2), ACTUAL + 2);
+}
+
+#[test]
+fn a_scroll_by_is_kept_to_the_picture() {
+    let mut view = Viewport::new((1, 1));
+    let picture = (1000, 1000);
+    assert!(view.scroll_by(30, 40, picture, AREA));
+    assert_eq!(view.scroll(), (30, 40));
+    assert!(view.scroll_by(-100, -100, picture, AREA));
+    assert_eq!(view.scroll(), (0, 0), "held at the top left");
+    assert!(view.scroll_by(i64::MAX, i64::MAX, picture, AREA));
+    assert_eq!(view.scroll(), (800, 900), "and at the far edge");
 }

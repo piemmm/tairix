@@ -370,7 +370,9 @@ where
     while let Some(event) = pointer.poll(now_ns)? {
         match event {
             InputEvent::PointerMoved { to } => seat.shell.track_pointer(to, seat.compositor),
-            InputEvent::PointerPressed { .. } | InputEvent::PointerScrolled { .. } => {
+            InputEvent::PointerPressed { .. }
+            | InputEvent::PointerScrolled { .. }
+            | InputEvent::Pinch { .. } => {
                 waking = Waking::Acted;
             }
             _ => {}

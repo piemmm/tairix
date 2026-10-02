@@ -2709,65 +2709,66 @@ fn pump_folds_a_run_of_wheel_ticks_over_one_window() {
         outcomes,
         alloc::vec![ShellOutcome::WindowManager(InputResponse::AppScroll {
             window,
+            local: Point::new(50, 50),
             dx: 0,
             dy: 3,
+            modifiers: tairix_wm::Modifiers::default(),
         })]
     );
 }
 
-/// A run of interactive-resize samples is one app-ward event, and the settle
-/// that ends the drag is its own.
-///
-/// The embedder reads the window's *current* client extent when it forwards a
-/// resize, and `pump` applies the whole batch before any outcome is forwarded
-/// — so every sample of a run would carry the size the last one settled on.
-/// Sending one per sample was a message and a wake per pointer sample to say
-/// the same thing, on the path a user watches for lag.
+/// A wheel turn is stamped with the modifiers the seat holds, which reach the
+/// window manager from the keyboard between pointer drains, so a Ctrl-wheel
+/// and the plain turn after it leave as the two gestures they are.
 #[test]
-fn pump_folds_a_run_of_resize_samples_over_one_window() {
+fn a_wheel_run_carries_the_modifiers_held_while_it_turned() {
     let mut shell = shell();
     let mut comp = compositor();
-    let window = opaque_window(&mut comp, Point::new(60, 60), 200, 140);
-    assert!(comp.set_window_frame(
-        window,
-        tairix_wm::WindowFrame::new(tairix_wm::WindowFurnitureState {
-            activation: tairix_wm::WindowActivationState::Active,
-            size: tairix_wm::WindowSizeState::Restored,
-            movable: true,
-            resizable: true,
-        })
-    ));
-    let bounds = comp.window(window).expect("live").bounds();
+    let window = opaque_window(&mut comp, Point::new(200, 200), 300, 300);
 
-    // Grab the bottom-right corner, then drag it out over four samples.
-    shell.handle(moved(bounds.right() - 1, bounds.bottom() - 1), &mut comp, 0);
+    shell.handle(moved(250, 250), &mut comp, 0);
     shell.handle(PRIMARY_PRESS, &mut comp, 0);
-
-    let events = &[
-        moved(bounds.right() + 9, bounds.bottom() + 9),
-        moved(bounds.right() + 19, bounds.bottom() + 19),
-        moved(bounds.right() + 29, bounds.bottom() + 29),
-        PRIMARY_RELEASE,
-    ];
-    let outcomes = pump_once(&mut shell, &mut comp, &mut MemoryInput::new(events))
-        .expect("source does not fault")
-        .0;
-
-    assert_eq!(
-        outcomes,
-        alloc::vec![
-            ShellOutcome::WindowManager(InputResponse::Resized { window }),
-            ShellOutcome::WindowManager(InputResponse::ResizeEnded { window }),
-        ],
-        "three samples fold to one; the settle stays its own"
+    shell.handle(PRIMARY_RELEASE, &mut comp, 0);
+    let ctrl = tairix_wm::Modifiers {
+        ctrl: true,
+        ..tairix_wm::Modifiers::default()
+    };
+    let turned = |shell: &mut DesktopShell, comp: &mut Compositor| {
+        let events = &[
+            InputEvent::PointerScrolled { dx: 0, dy: 1 },
+            InputEvent::PointerScrolled { dx: 0, dy: 1 },
+        ];
+        pump_once(shell, comp, &mut MemoryInput::new(events))
+            .expect("source does not fault")
+            .0
+    };
+    shell.handle(
+        InputEvent::ModifiersChanged { modifiers: ctrl },
+        &mut comp,
+        0,
     );
-    // The folded outcome is not a shortened drag: the window is where the
-    // last sample put it.
-    let dragged = comp.window(window).expect("live").bounds();
     assert_eq!(
-        (dragged.width, dragged.height),
-        (bounds.width + 30, bounds.height + 30)
+        turned(&mut shell, &mut comp),
+        alloc::vec![ShellOutcome::WindowManager(InputResponse::AppScroll {
+            window,
+            local: Point::new(50, 50),
+            dx: 0,
+            dy: 2,
+            modifiers: ctrl,
+        })]
     );
+    shell.handle(
+        InputEvent::ModifiersChanged {
+            modifiers: tairix_wm::Modifiers::default(),
+        },
+        &mut comp,
+        0,
+    );
+    assert!(matches!(
+        turned(&mut shell, &mut comp).as_slice(),
+        [ShellOutcome::WindowManager(InputResponse::AppScroll { dy: 2, modifiers, .. })]
+            if *modifiers == tairix_wm::Modifiers::default()
+    ));
 }
 
 /// A reversal is a separate gesture: folding it would move the app's scroll
@@ -2797,15 +2798,77 @@ fn pump_ends_a_wheel_run_at_a_reversal() {
         alloc::vec![
             ShellOutcome::WindowManager(InputResponse::AppScroll {
                 window,
+                local: Point::new(50, 50),
                 dx: 0,
                 dy: 2,
+                modifiers: tairix_wm::Modifiers::default(),
             }),
             ShellOutcome::WindowManager(InputResponse::AppScroll {
                 window,
+                local: Point::new(50, 50),
                 dx: 0,
                 dy: -1,
+                modifiers: tairix_wm::Modifiers::default(),
             }),
         ]
+    );
+}
+
+/// A pinch's scale is relative to where it began, so a run of updates folds
+/// to the newest; its beginning and end are edges that end a batch.
+#[test]
+fn pump_folds_a_run_of_pinch_updates_and_stops_at_its_edges() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let window = opaque_window(&mut comp, Point::new(200, 200), 300, 300);
+    let one = tairix_abi::touch::PINCH_SCALE_ONE;
+    let pinch = |phase, scale, x| InputEvent::Pinch {
+        phase,
+        scale,
+        at: Point::new(x, 250),
+    };
+    let events = &[
+        pinch(tairix_wm::PinchPhase::Begin, one, 250),
+        pinch(tairix_wm::PinchPhase::Update, one + 10, 251),
+        pinch(tairix_wm::PinchPhase::Update, one + 20, 252),
+        pinch(tairix_wm::PinchPhase::End, one + 20, 252),
+    ];
+    let mut source = MemoryInput::new(events);
+    let first = pump_once(&mut shell, &mut comp, &mut source)
+        .expect("source does not fault")
+        .0;
+    assert!(
+        matches!(
+            first.as_slice(),
+            [ShellOutcome::WindowManager(InputResponse::AppPinch {
+                phase: tairix_wm::PinchPhase::Begin,
+                ..
+            })]
+        ),
+        "the beginning is an edge: {first:?}"
+    );
+    let rest = pump_once(&mut shell, &mut comp, &mut source)
+        .expect("source does not fault")
+        .0;
+    assert_eq!(
+        rest,
+        alloc::vec![
+            ShellOutcome::WindowManager(InputResponse::AppPinch {
+                window,
+                local: Point::new(52, 50),
+                phase: tairix_wm::PinchPhase::Update,
+                scale: one + 20,
+                modifiers: tairix_wm::Modifiers::default(),
+            }),
+            ShellOutcome::WindowManager(InputResponse::AppPinch {
+                window,
+                local: Point::new(52, 50),
+                phase: tairix_wm::PinchPhase::End,
+                scale: one + 20,
+                modifiers: tairix_wm::Modifiers::default(),
+            }),
+        ],
+        "the updates fold to the newest, the end is kept"
     );
 }
 
@@ -4239,7 +4302,7 @@ fn long_root(count: usize) -> TreeSource {
 /// could be reached only with the keyboard.
 #[test]
 fn a_wheel_turn_over_the_picker_scrolls_its_listing() {
-    use tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT;
+    use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
     use tairix_browse::render::row_height;
     use tairix_controls::scroll::WHEEL_STEP;
 
@@ -7540,8 +7603,10 @@ fn a_scroll_where_a_window_covers_the_capsule_reaches_that_window() {
         shell.handle(InputEvent::PointerScrolled { dx: 0, dy: 1 }, &mut comp, 0),
         ShellOutcome::WindowManager(InputResponse::AppScroll {
             window,
+            local: Point::new(40, 40),
             dx: 0,
             dy: 1,
+            modifiers: tairix_wm::Modifiers::default(),
         })
     );
 }

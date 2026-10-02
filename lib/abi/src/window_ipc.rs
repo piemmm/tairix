@@ -43,6 +43,7 @@ use crate::input::KeyInput;
 use crate::input::Modifiers;
 use crate::input::PointerButtonCode;
 use crate::le::{put_i32, put_u16, put_u32, put_u64, read_i32, read_u16, read_u32, read_u64};
+use crate::touch::PinchPhase;
 use crate::{Errno, ProcId};
 
 /// Reserved well-known call-endpoint id of the desktop session's window
@@ -393,14 +394,6 @@ impl SaveEndings {
 /// each backdrop's edges and the physical radius after the desktop's UI
 /// scale is applied, so a client cannot ask for an unbounded one.
 pub const WINDOW_BACKDROP_BLUR_MAX_PX: u16 = 64;
-
-/// How many scroll units one wheel detent is worth in
-/// [`WindowEvent::Scrolled`].
-///
-/// A scroll is delivered in fractions of a detent rather than whole ones, so
-/// the seat can accelerate a fast spin by any amount and a viewport can turn
-/// it into pixels without rounding a slow one away.
-pub const SCROLL_UNITS_PER_DETENT: i32 = 120;
 
 /// Widest and tallest a **desktop layer surface** may be, in *logical*
 /// pixels ([`WindowRequest::OpenLayer`]).
@@ -5923,6 +5916,8 @@ const EV_TERRAIN_CHANGED: u16 = 18;
 const EV_LAYER_POINTER: u16 = 19;
 /// Wire kind of [`WindowEvent::PreviewRendered`].
 const EV_PREVIEW_RENDERED: u16 = 20;
+/// Wire kind of [`WindowEvent::Pinch`].
+const EV_PINCH: u16 = 21;
 
 /// Wire pointer-action discriminant of [`PointerAction::Moved`].
 const PTR_MOVED: u16 = 0;
@@ -6144,20 +6139,46 @@ pub enum WindowEvent {
         /// The window whose frame region the session let go.
         window_id: u64,
     },
-    /// The scroll wheel turned over the window while the window owns its
-    /// own content scrolling (it exposes no window-manager root viewport,
-    /// so the session forwards the scroll to the app instead of consuming
-    /// it into furniture). Both deltas are in scroll units,
-    /// [`SCROLL_UNITS_PER_DETENT`] to a detent, already accelerated by the
-    /// seat: positive `dx` toward the logical end, positive `dy` downward
-    /// (the `evdev` orientation).
+    /// The wheel turned over the window's client area while the window owns
+    /// its own content scrolling (it exposes no window-manager root
+    /// viewport). Both deltas are in scroll units,
+    /// [`SCROLL_UNITS_PER_DETENT`](crate::driver::input::SCROLL_UNITS_PER_DETENT)
+    /// to a detent, already accelerated by the seat: positive `dx` toward the
+    /// logical end, positive `dy` downward (the `evdev` orientation).
     Scrolled {
         /// The window the pointer was over when the wheel turned.
         window_id: u64,
+        /// Window-local x of the pointer, in pixels from the left edge.
+        x: u32,
+        /// Window-local y of the pointer, in pixels from the top edge.
+        y: u32,
         /// Signed horizontal scroll, in scroll units.
         dx: i32,
         /// Signed vertical scroll, in scroll units.
         dy: i32,
+        /// The keyboard modifiers held, so a wheel can be qualified by one
+        /// (Ctrl to zoom) without the app shadowing the seat's modifier state.
+        modifiers: Modifiers,
+    },
+    /// Fingers on a touch surface pinched over the window's client area: a
+    /// zoom about `(x, y)`. Every step of one pinch goes to the window it
+    /// began over, its place clamped into the client.
+    Pinch {
+        /// The window the pinch began over.
+        window_id: u64,
+        /// Window-local x of the pinch, in pixels from the left edge.
+        x: u32,
+        /// Window-local y of the pinch, in pixels from the top edge.
+        y: u32,
+        /// Where the pinch is in its life.
+        phase: PinchPhase,
+        /// The fingers' spread relative to when the pinch began, in 16.16
+        /// fixed point ([`PINCH_SCALE_ONE`](crate::touch::PINCH_SCALE_ONE)
+        /// unchanged); never zero. A zoom is the zoom it began at times the
+        /// scale.
+        scale: u32,
+        /// The keyboard modifiers held.
+        modifiers: Modifiers,
     },
     /// A primary click landed on the application's icon-bar slot and the
     /// click was the application's to handle ([`AppBar::click`]).
@@ -6280,6 +6301,52 @@ impl WindowEvent {
         out[24] = state.wire();
     }
 
+    /// Write a [`Self::Scrolled`]'s block into the already-headed frame `out`:
+    /// the place, the two deltas, and the modifiers. A no-op for any other
+    /// event.
+    fn write_scrolled(&self, out: &mut [u8; Self::WIRE_LEN]) {
+        let Self::Scrolled {
+            x,
+            y,
+            dx,
+            dy,
+            modifiers,
+            ..
+        } = *self
+        else {
+            return;
+        };
+        put_u16(out, 6, EV_SCROLLED);
+        put_u32(out, 16, x);
+        put_u32(out, 20, y);
+        put_i32(out, 24, dx);
+        put_i32(out, 28, dy);
+        put_u16(out, SCROLLED_MODIFIERS_OFFSET, modifiers.to_bits());
+    }
+
+    /// Write a [`Self::Pinch`]'s block into the already-headed frame `out`:
+    /// the place, the scale, the phase and the modifiers. A no-op for any
+    /// other event.
+    fn write_pinch(&self, out: &mut [u8; Self::WIRE_LEN]) {
+        let Self::Pinch {
+            x,
+            y,
+            phase,
+            scale,
+            modifiers,
+            ..
+        } = *self
+        else {
+            return;
+        };
+        put_u16(out, 6, EV_PINCH);
+        put_u32(out, 16, x);
+        put_u32(out, 20, y);
+        put_u32(out, 24, scale);
+        out[PINCH_PHASE_OFFSET] = phase.code();
+        put_u16(out, PINCH_MODIFIERS_OFFSET, modifiers.to_bits());
+    }
+
     /// Write a [`Self::PreviewRendered`]'s block into the already-headed
     /// frame `out`: the subject, the size, and whether it rendered. A no-op
     /// for any other event.
@@ -6322,6 +6389,7 @@ impl WindowEvent {
             | Self::RedrawRequested { window_id }
             | Self::ContentReleased { window_id }
             | Self::Scrolled { window_id, .. }
+            | Self::Pinch { window_id, .. }
             | Self::TerrainChanged { window_id, .. }
             | Self::LayerPointer { window_id, .. }
             | Self::MenuClosed { window_id, .. } => Some(window_id),
@@ -6385,11 +6453,8 @@ impl WindowEvent {
                 put_u16(&mut out, 6, EV_PICK_CANCELLED);
             }
             Self::PreviewRendered { .. } => self.write_preview_render(&mut out),
-            Self::Scrolled { dx, dy, .. } => {
-                put_u16(&mut out, 6, EV_SCROLLED);
-                put_i32(&mut out, 16, dx);
-                put_i32(&mut out, 20, dy);
-            }
+            Self::Scrolled { .. } => self.write_scrolled(&mut out),
+            Self::Pinch { .. } => self.write_pinch(&mut out),
             Self::TerrainChanged { .. } | Self::LayerPointer { .. } => {
                 self.write_layer_feed(&mut out);
             }
@@ -6521,12 +6586,8 @@ impl WindowEvent {
                 })
             }
             EV_PREVIEW_RENDERED => read_preview_render_event(window_id, bytes),
-            EV_SCROLLED => {
-                event_reserved_zero(bytes, 24)?;
-                let dx = read_i32(bytes, 16);
-                let dy = read_i32(bytes, 20);
-                Ok(Self::Scrolled { window_id, dx, dy })
-            }
+            EV_SCROLLED => read_scrolled_event(window_id, bytes),
+            EV_PINCH => read_pinch_event(window_id, bytes),
             EV_TERRAIN_CHANGED => {
                 event_reserved_zero(bytes, 24)?;
                 Ok(Self::TerrainChanged {
@@ -6567,6 +6628,52 @@ impl WindowEvent {
             _ => Err(Errno::OutOfRange),
         }
     }
+}
+
+/// Byte offset of a [`WindowEvent::Scrolled`]'s modifier bits, after its
+/// position and its two deltas.
+const SCROLLED_MODIFIERS_OFFSET: usize = 32;
+
+/// Decode a wheel turn over a window: where it landed, its two deltas, and
+/// the modifiers held.
+fn read_scrolled_event(window_id: u64, bytes: &[u8]) -> Result<WindowEvent, Errno> {
+    event_reserved_zero(bytes, SCROLLED_MODIFIERS_OFFSET + 2)?;
+    Ok(WindowEvent::Scrolled {
+        window_id,
+        x: read_u32(bytes, 16),
+        y: read_u32(bytes, 20),
+        dx: read_i32(bytes, 24),
+        dy: read_i32(bytes, 28),
+        modifiers: Modifiers::from_bits(read_u16(bytes, SCROLLED_MODIFIERS_OFFSET))?,
+    })
+}
+
+/// Byte offset of a [`WindowEvent::Pinch`]'s phase, after its place and its
+/// scale; a zero byte follows it.
+const PINCH_PHASE_OFFSET: usize = 28;
+
+/// Byte offset of a [`WindowEvent::Pinch`]'s modifier bits.
+const PINCH_MODIFIERS_OFFSET: usize = 30;
+
+/// Decode a step of a pinch over a window: its place, scale, phase and the
+/// modifiers held. A zero scale is no spread at all and is refused.
+fn read_pinch_event(window_id: u64, bytes: &[u8]) -> Result<WindowEvent, Errno> {
+    event_reserved_zero(bytes, PINCH_MODIFIERS_OFFSET + 2)?;
+    if bytes[PINCH_PHASE_OFFSET + 1] != 0 {
+        return Err(Errno::BadMagic);
+    }
+    let scale = read_u32(bytes, 24);
+    if scale == 0 {
+        return Err(Errno::OutOfRange);
+    }
+    Ok(WindowEvent::Pinch {
+        window_id,
+        x: read_u32(bytes, 16),
+        y: read_u32(bytes, 20),
+        phase: PinchPhase::from_code(bytes[PINCH_PHASE_OFFSET])?,
+        scale,
+        modifiers: Modifiers::from_bits(read_u16(bytes, PINCH_MODIFIERS_OFFSET))?,
+    })
 }
 
 /// Decode a window-local pointer event: the position, the action, and the
@@ -6746,19 +6853,19 @@ mod tests {
         encode_hand_over_reply, encode_menu_text_reply, encode_minted_id_reply,
         encode_notify_sources_reply, encode_open_target_reply, encode_picked_name_reply,
         encode_terrain_reply, encode_wallpapers_reply, hand_over_wire_len, open_menu_wire_len,
-        put_i32, put_u16, put_u64, read_u16, AppBar, AppBarClick, AppMenu, AppMenuBundle,
-        AppMenuEntry, AppMenuEntryText, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark,
-        AppMenuReason, AppMenuRole, AppMenuRow, AppMenuRowView, AppMenuShortcut, BundleRunPath,
-        ClipboardHeld, ClipboardKind, CursorShape, DocumentName, DropTarget, HandOverDocument,
-        HandOverOutcome, LayerDepth, MenuOutcome, MenuRefusal, OpenTarget, PickPurpose,
-        PointerAction, SaveEndings, TerrainPlate, TooltipText, WallpaperEntry, WindowEvent,
-        WindowRegion, WindowRequest, WindowSizeState, WindowSizing, WindowTitle,
-        APP_BAR_CLICK_OFFSET, APP_BAR_MAX_WIRE_LEN, APP_BAR_ROWS_OFFSET, APP_BAR_ROW_COUNT_OFFSET,
-        APP_BAR_TEXT_LEN_OFFSET, APP_MENU_ENTRY_MAX, APP_MENU_KIND_SEPARATOR,
-        APP_MENU_KIND_SUBMENU, APP_MENU_LABEL_MAX, APP_MENU_MAX_DEPTH, APP_MENU_MAX_ROWS,
-        APP_MENU_MAX_TOTAL_ROWS, APP_MENU_REASON_MAX, APP_MENU_ROW_ENTRY_LEN_OFFSET,
-        APP_MENU_ROW_FLAGS_OFFSET, APP_MENU_ROW_FLAG_ENABLED, APP_MENU_ROW_ID_OFFSET,
-        APP_MENU_ROW_LABEL_LEN_OFFSET, APP_MENU_ROW_PARENT_OFFSET,
+        put_i32, put_u16, put_u64, read_i32, read_u16, read_u32, AppBar, AppBarClick, AppMenu,
+        AppMenuBundle, AppMenuEntry, AppMenuEntryText, AppMenuItem, AppMenuItemId, AppMenuLabel,
+        AppMenuMark, AppMenuReason, AppMenuRole, AppMenuRow, AppMenuRowView, AppMenuShortcut,
+        BundleRunPath, ClipboardHeld, ClipboardKind, CursorShape, DocumentName, DropTarget,
+        HandOverDocument, HandOverOutcome, LayerDepth, MenuOutcome, MenuRefusal, OpenTarget,
+        PickPurpose, PinchPhase, PointerAction, SaveEndings, TerrainPlate, TooltipText,
+        WallpaperEntry, WindowEvent, WindowRegion, WindowRequest, WindowSizeState, WindowSizing,
+        WindowTitle, APP_BAR_CLICK_OFFSET, APP_BAR_MAX_WIRE_LEN, APP_BAR_ROWS_OFFSET,
+        APP_BAR_ROW_COUNT_OFFSET, APP_BAR_TEXT_LEN_OFFSET, APP_MENU_ENTRY_MAX,
+        APP_MENU_KIND_SEPARATOR, APP_MENU_KIND_SUBMENU, APP_MENU_LABEL_MAX, APP_MENU_MAX_DEPTH,
+        APP_MENU_MAX_ROWS, APP_MENU_MAX_TOTAL_ROWS, APP_MENU_REASON_MAX,
+        APP_MENU_ROW_ENTRY_LEN_OFFSET, APP_MENU_ROW_FLAGS_OFFSET, APP_MENU_ROW_FLAG_ENABLED,
+        APP_MENU_ROW_ID_OFFSET, APP_MENU_ROW_LABEL_LEN_OFFSET, APP_MENU_ROW_PARENT_OFFSET,
         APP_MENU_ROW_SHORTCUT_LEN_OFFSET, APP_MENU_ROW_WIRE_LEN, APP_MENU_SHORTCUT_MAX,
         APP_MENU_TEXT_BYTES, CLIPBOARD_HANDLE_OFFSET, CLIPBOARD_MAX_BYTES, CREATE_POPUP_WIRE_LEN,
         CREATE_SIZING_OFFSET, CREATE_WIRE_LEN, DESKTOP_LAYER_MAX_PLATES,
@@ -6772,17 +6879,17 @@ mod tests {
         OPEN_LAYER_WIRE_LEN, OPEN_MENU_ANCHOR_OFFSET, OPEN_MENU_MAX_WIRE_LEN,
         OPEN_MENU_ROWS_OFFSET, OPEN_MENU_ROW_COUNT_OFFSET, OPEN_MENU_TEXT_LEN_OFFSET,
         OPEN_MENU_TITLE_LEN_OFFSET, PICKED_NAME_REPLY_TEXT_OFFSET, PICK_NAME_LEN_OFFSET,
-        PICK_NAME_OFFSET, PICK_PURPOSE_OFFSET, PICK_PURPOSE_OPEN, PLACE_LAYER_WIRE_LEN,
-        PRESENT_WIRE_LEN, PREVIEW_EVENT_RENDERED_OFFSET, PREVIEW_EVENT_SIZE_OFFSET,
-        PREVIEW_EVENT_SUBJECT_OFFSET, PREVIEW_SCREENSAVER_LEN_OFFSET, QUERY_CURSOR_SETS_WIRE_LEN,
-        QUERY_WALLPAPERS_WIRE_LEN, RENDER_PREVIEW_SIZE_OFFSET, RENDER_PREVIEW_SUBJECT_OFFSET,
-        RENDER_PREVIEW_WIRE_LEN, REQUEST_HEADER_LEN, SAVE_ENDINGS_MAX, SAVE_ENDING_MAX,
-        SET_CLIPBOARD_KIND_OFFSET, SET_CLIPBOARD_LEN_OFFSET, SET_CURSOR_OFFSET,
-        SET_SIZE_STATE_OFFSET, SET_SIZING_OFFSET, SET_SIZING_WIRE_LEN, SET_TITLE_LEN_OFFSET,
-        SET_TITLE_TEXT_OFFSET, SET_TITLE_WIRE_LEN, SET_TOOLTIP_LEN_OFFSET,
-        SET_TOOLTIP_REGION_OFFSET, SET_TOOLTIP_TEXT_OFFSET, SET_TOOLTIP_WIRE_LEN,
-        SIZING_MAX_HEIGHT, SIZING_MAX_WIDTH, SIZING_MIN_HEIGHT, SIZING_MIN_WIDTH,
-        TAKE_MENU_TEXT_WIRE_LEN, TAKE_OPEN_TARGET_WIRE_LEN, TOOLTIP_TEXT_MAX,
+        PICK_NAME_OFFSET, PICK_PURPOSE_OFFSET, PICK_PURPOSE_OPEN, PINCH_MODIFIERS_OFFSET,
+        PINCH_PHASE_OFFSET, PLACE_LAYER_WIRE_LEN, PRESENT_WIRE_LEN, PREVIEW_EVENT_RENDERED_OFFSET,
+        PREVIEW_EVENT_SIZE_OFFSET, PREVIEW_EVENT_SUBJECT_OFFSET, PREVIEW_SCREENSAVER_LEN_OFFSET,
+        QUERY_CURSOR_SETS_WIRE_LEN, QUERY_WALLPAPERS_WIRE_LEN, RENDER_PREVIEW_SIZE_OFFSET,
+        RENDER_PREVIEW_SUBJECT_OFFSET, RENDER_PREVIEW_WIRE_LEN, REQUEST_HEADER_LEN,
+        SAVE_ENDINGS_MAX, SAVE_ENDING_MAX, SCROLLED_MODIFIERS_OFFSET, SET_CLIPBOARD_KIND_OFFSET,
+        SET_CLIPBOARD_LEN_OFFSET, SET_CURSOR_OFFSET, SET_SIZE_STATE_OFFSET, SET_SIZING_OFFSET,
+        SET_SIZING_WIRE_LEN, SET_TITLE_LEN_OFFSET, SET_TITLE_TEXT_OFFSET, SET_TITLE_WIRE_LEN,
+        SET_TOOLTIP_LEN_OFFSET, SET_TOOLTIP_REGION_OFFSET, SET_TOOLTIP_TEXT_OFFSET,
+        SET_TOOLTIP_WIRE_LEN, SIZING_MAX_HEIGHT, SIZING_MAX_WIDTH, SIZING_MIN_HEIGHT,
+        SIZING_MIN_WIDTH, TAKE_MENU_TEXT_WIRE_LEN, TAKE_OPEN_TARGET_WIRE_LEN, TOOLTIP_TEXT_MAX,
         WALLPAPERS_REPLY_COUNT_OFFSET, WINDOW_BACKDROP_BLUR_MAX_PX, WINDOW_CREATE_REPLY_LEN,
         WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DESKTOP_REPLY_LEN, WINDOW_DROP_TARGET_REPLY_MAX,
         WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC, WINDOW_HAND_OVER_REPLY_LEN, WINDOW_ID_WIRE_LEN,
@@ -9646,13 +9753,23 @@ mod tests {
             },
             WindowEvent::Scrolled {
                 window_id: 4,
+                x: 0,
+                y: 0,
                 dx: 0,
                 dy: 3,
+                modifiers: Modifiers::default(),
             },
             WindowEvent::Scrolled {
                 window_id: 4,
+                x: 640,
+                y: 17,
                 dx: -2,
                 dy: -5,
+                modifiers: Modifiers {
+                    ctrl: true,
+                    shift: true,
+                    ..Modifiers::default()
+                },
             },
             WindowEvent::RedrawRequested { window_id: 4 },
             WindowEvent::ContentReleased { window_id: 4 },
@@ -10509,18 +10626,79 @@ mod tests {
     }
 
     #[test]
-    fn scroll_events_carry_signed_ticks_and_fail_closed_on_a_dirty_tail() {
+    fn a_scroll_carries_its_place_signed_units_and_modifiers_and_fails_closed() {
         let event = WindowEvent::Scrolled {
             window_id: 9,
+            x: 31,
+            y: 4_000,
             dx: -7,
             dy: 11,
+            modifiers: Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
         };
         let bytes = event.to_le_bytes();
         assert_eq!(WindowEvent::from_bytes(&bytes), Ok(event));
-        // The 8 bytes past the two i32 ticks are reserved and must be zero.
-        let mut dirty = bytes;
-        dirty[24] = 1;
-        assert_eq!(WindowEvent::from_bytes(&dirty), Err(Errno::BadMagic));
+        assert_eq!(read_u32(&bytes, 16), 31);
+        assert_eq!(read_i32(&bytes, 28), 11);
+        // The tail past the modifiers is reserved and must be zero.
+        for at in SCROLLED_MODIFIERS_OFFSET + 2..WindowEvent::WIRE_LEN {
+            let mut dirty = bytes;
+            dirty[at] = 1;
+            assert_eq!(WindowEvent::from_bytes(&dirty), Err(Errno::BadMagic));
+        }
+        // A modifier bit this version does not define is refused, not dropped.
+        let mut unknown = bytes;
+        unknown[SCROLLED_MODIFIERS_OFFSET + 1] = 0x80;
+        assert_eq!(WindowEvent::from_bytes(&unknown), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn a_pinch_carries_its_place_phase_scale_and_modifiers_and_fails_closed() {
+        let event = WindowEvent::Pinch {
+            window_id: 9,
+            x: 31,
+            y: 4_000,
+            phase: PinchPhase::Begin,
+            scale: crate::touch::PINCH_SCALE_ONE,
+            modifiers: Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+        };
+        let bytes = event.to_le_bytes();
+        assert_eq!(WindowEvent::from_bytes(&bytes), Ok(event));
+        for phase in [PinchPhase::Update, PinchPhase::End, PinchPhase::Cancel] {
+            let step = WindowEvent::Pinch {
+                window_id: 4,
+                x: 0,
+                y: u32::MAX,
+                phase,
+                scale: 1,
+                modifiers: Modifiers {
+                    alt: true,
+                    ..Modifiers::default()
+                },
+            };
+            assert_eq!(WindowEvent::from_bytes(&step.to_le_bytes()), Ok(step));
+        }
+        let refused = |at: usize, value: u8, why: Errno| {
+            let mut forged = bytes;
+            forged[at] = value;
+            assert_eq!(WindowEvent::from_bytes(&forged), Err(why), "byte {at}");
+        };
+        refused(PINCH_PHASE_OFFSET, 0, Errno::OutOfRange);
+        refused(PINCH_PHASE_OFFSET, 5, Errno::OutOfRange);
+        refused(PINCH_PHASE_OFFSET + 1, 1, Errno::BadMagic);
+        refused(PINCH_MODIFIERS_OFFSET + 1, 0x80, Errno::OutOfRange);
+        for at in PINCH_MODIFIERS_OFFSET + 2..WindowEvent::WIRE_LEN {
+            refused(at, 1, Errno::BadMagic);
+        }
+        // No spread at all is not a scale.
+        let mut flat = bytes;
+        flat[24..28].copy_from_slice(&0u32.to_le_bytes());
+        assert_eq!(WindowEvent::from_bytes(&flat), Err(Errno::OutOfRange));
     }
 
     #[test]

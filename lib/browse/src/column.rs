@@ -151,7 +151,7 @@ impl ScrollColumn {
 #[cfg(test)]
 mod tests {
     use super::ScrollColumn;
-    use tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT;
+    use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
     use tairix_controls::damage::sink;
     use tairix_controls::scroll::{ScrollModel, ScrollRange, WHEEL_STEP};
     use tairix_controls::ScrollPart;

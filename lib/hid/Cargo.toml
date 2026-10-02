@@ -1,6 +1,6 @@
 [package]
 name = "tairix-hid"
-description = "TAIRiX HID boot-protocol decode + console producer (plans/USB.md): the arch-neutral, transport-agnostic HID boot-report decode the USB-HID class drivers compose, so a class driver does not re-implement it. Controller bring-up lives in the host-controller driver, not here. no_std, fail-closed."
+description = "TAIRiX HID (plans/HID.md): the report-descriptor model, the keyboard, mouse, touchpad and touchscreen decoders, and the device engine every HID class driver runs, whatever its transport. no_std, fail-closed."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,10 +9,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-# The platform-neutral input-event/`ReportSource`/`DriverHost` surface the
-# decoders and orchestration are written against, and the `DriverError` /
-# `CapabilityId` / `HwResource` vocabulary they fail closed with — one ABI
-# definition.
+# The seat records the decoders produce and the errors they fail closed with.
 tairix-abi = { path = "../abi", version = "=0.0.0" }
 # The decoded keyboard `Key` vocabulary the console producer resolves HID
 # usages into (a `lib/*` crate).

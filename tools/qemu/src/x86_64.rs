@@ -233,23 +233,12 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
         }
     }
 
-    // Attach a modern virtio-input keyboard (and, for an interactive session,
-    // a mouse) as PCI functions — the PCI form of the aarch64 virtio-mmio
-    // `virtio-keyboard-device`. The runner drives the scripted key or typed
-    // text through the QEMU monitor once the guest signals readiness; here we
-    // only present the device. `disable-legacy=on` pins the function to the
-    // modern virtio-1.x PCI layout so it reports device id `0x1040 +
-    // virtio-input` and the modern-only virtio-input-PCI discovery probe
-    // matches it — exactly as for virtio-blk / virtio-net above.
-    let interactive = spec.session == SessionKind::WindowedInteractive;
-    if spec.input_keyboard.is_some() || !spec.input_typing.is_empty() || interactive {
-        argv.push("-device".into());
-        argv.push(format!("virtio-keyboard-pci,{}", virtio_pci_options(spec)).into());
-    }
-    if interactive || spec.devices.mouse {
-        argv.push("-device".into());
-        argv.push(format!("virtio-mouse-pci,{}", virtio_pci_options(spec)).into());
-    }
+    // The input devices as PCI functions, pinned to the modern layout the
+    // virtio-input discovery probe matches, as virtio-blk and virtio-net are.
+    argv.extend(crate::input_device_args(
+        spec,
+        &format!("-pci,{}", virtio_pci_options(spec)),
+    ));
 
     // Attach a virtio sound device behind QEMU's `wav` backend, which writes
     // what the emulated card received to a host file the vertical then checks
@@ -679,16 +668,17 @@ mod tests {
     }
 
     #[test]
-    fn windowed_interactive_argv_attaches_keyboard_and_mouse() {
+    fn windowed_interactive_argv_attaches_keyboard_mouse_and_touchscreen() {
         let mut spec = fixture_spec(1);
         spec.session = SessionKind::WindowedInteractive;
         let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
-        assert!(argv
-            .iter()
-            .any(|a| a == "virtio-keyboard-pci,disable-legacy=on"));
-        assert!(argv
-            .iter()
-            .any(|a| a == "virtio-mouse-pci,disable-legacy=on"));
+        for device in [
+            "virtio-keyboard-pci,disable-legacy=on",
+            "virtio-mouse-pci,disable-legacy=on",
+            "virtio-multitouch-pci,disable-legacy=on",
+        ] {
+            assert!(argv.iter().any(|a| a == device), "{device}: {argv:?}");
+        }
     }
 
     #[test]

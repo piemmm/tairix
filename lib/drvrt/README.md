@@ -31,8 +31,9 @@ grants and:
   grants, and an optional non-coherent-interconnect cache shim.
 - `GrantedResource::new(handle, resource)` — pair a grant handle with the
   `HwResource` it names.
-- `GrantSyscalls` — the `mmio_map` / `dma_alloc` seam; production code uses
-  `RtGrantSyscalls`, which forwards to `tairix_rt`.
+- `GrantSyscalls` — the syscall seam, `unsafe` to implement because the host
+  trusts the mappings it answers; production code uses `RtGrantSyscalls`,
+  which forwards to `tairix_rt`.
 
 ## Design
 

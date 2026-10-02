@@ -81,7 +81,7 @@ use crate::{Compositor, PointerTarget};
 // compositor re-exports it so callers keep referring to
 // `tairix_wm::{InputEvent, PointerButton}` (one definition).
 pub use tairix_input::{
-    ClickKind, DoubleClickTracker, InputEvent, Key, Modifiers, NamedKey, PointerButton,
+    ClickKind, DoubleClickTracker, InputEvent, Key, Modifiers, NamedKey, PinchPhase, PointerButton,
     PointerFocus,
 };
 
@@ -184,20 +184,39 @@ pub enum InputResponse {
         /// The window whose furniture received the press.
         window: WindowId,
     },
-    /// A wheel gesture landed on a window that owns its own content
-    /// scrolling (it exposes no window-manager root viewport), so the
-    /// window manager consumed nothing and the scroll belongs to the
-    /// application. The embedder forwards it to that window's owner over
-    /// the window channel; the application applies it to its nested
-    /// scroll model. Both deltas are in scroll units (positive `dx` toward
-    /// the logical end, positive `dy` downward).
+    /// A wheel gesture landed on the client area of a window that owns its
+    /// own content scrolling (it exposes no window-manager root viewport), so
+    /// the window manager consumed nothing and the scroll belongs to the
+    /// application. The embedder forwards it to that window's owner over the
+    /// window channel, with where it landed and what was held. Both deltas
+    /// are in scroll units (positive `dx` toward the logical end, positive
+    /// `dy` downward).
     AppScroll {
         /// The window the pointer was over.
         window: WindowId,
+        /// The pointer, in the window's client-viewport coordinates.
+        local: Point,
         /// Signed horizontal scroll, in scroll units.
         dx: i32,
         /// Signed vertical scroll, in scroll units.
         dy: i32,
+        /// The keyboard modifiers held.
+        modifiers: Modifiers,
+    },
+    /// A step of a pinch that began over a window's client area, so the zoom
+    /// is the application's. Every step of one pinch goes to the window it
+    /// began over, as a drag's motion does.
+    AppPinch {
+        /// The window the pinch began over.
+        window: WindowId,
+        /// Where the pinch is, in the window's client-viewport coordinates.
+        local: Point,
+        /// Where the pinch is in its life.
+        phase: PinchPhase,
+        /// The fingers' spread relative to when the pinch began, 16.16.
+        scale: u32,
+        /// The keyboard modifiers held.
+        modifiers: Modifiers,
     },
     /// A window-command control on the decorated frame (close, minimize,
     /// put-to-back, size-toggle) was activated — by a completed primary
@@ -363,6 +382,9 @@ pub struct InputRouter {
     /// returns it, so a decorated window's content keeps its keys until the
     /// user reaches for the furniture.
     furniture_key_focus: bool,
+    /// The window the pinch in progress began over: every step of it is that
+    /// window's, and a second surface's pinch joins it rather than taking it.
+    pinch_grab: Option<WindowId>,
     /// The client window holding the implicit pointer grab a primary press on
     /// its content started, so the motion and the release complete on that
     /// same window — an in-content drag (a scrollbar thumb) or click (a tab, a
@@ -592,6 +614,7 @@ impl InputRouter {
                 }
             }
             InputEvent::PointerScrolled { dx, dy } => self.wheel(dx, dy, compositor),
+            InputEvent::Pinch { phase, scale, at } => self.pinch(phase, scale, at, compositor),
             InputEvent::PointerPressed {
                 button: PointerButton::Primary,
             } => self.press_primary(compositor, now_ns),
@@ -1072,23 +1095,78 @@ impl InputRouter {
     /// Route a scroll-wheel gesture to the window under the pointer.
     ///
     /// The scroll units drive the shared scroll model, [`WHEEL_STEP`]
-    /// logical pixels a detent; the pointer does not move. When the window
-    /// exposes a window-manager root viewport, the scroll moves it:
-    /// [`InputResponse::Scrolled`] if an offset changed, else
+    /// logical pixels a detent; the pointer does not move. A vertical-only
+    /// turn made with Shift held arrives sideways ([`sideways_with_shift`]).
+    /// When the window exposes a window-manager root viewport, the scroll
+    /// moves it: [`InputResponse::Scrolled`] if an offset changed, else
     /// [`InputResponse::Ignored`] (already at the bound). When the window owns
-    /// its own content scrolling (no root viewport), the scroll is the
-    /// application's: [`InputResponse::AppScroll`] names the recipient so the
-    /// embedder can forward it over the window channel. With no window under
-    /// the pointer the gesture is [`InputResponse::Ignored`].
+    /// its own content scrolling (no root viewport), a scroll over its client
+    /// area is the application's: [`InputResponse::AppScroll`] names the
+    /// recipient, the place and the modifiers so the embedder can forward it
+    /// over the window channel. A scroll over a window's frame, or over no
+    /// window, is [`InputResponse::Ignored`]: the frame has no content to
+    /// scroll.
     fn wheel(&mut self, dx: i32, dy: i32, compositor: &mut Compositor) -> InputResponse {
         let Some(window) = compositor.window_at(self.pointer) else {
             return InputResponse::Ignored;
         };
+        let (dx, dy) = sideways_with_shift(dx, dy, self.modifiers);
         let detent = u64::from(compositor.scale().scale_length(WHEEL_STEP).max(1));
         match compositor.scroll_root(window, |vp| vp.wheel(dx, dy, detent)) {
             Some(true) => InputResponse::Scrolled { window },
             Some(false) => InputResponse::Ignored,
-            None => InputResponse::AppScroll { window, dx, dy },
+            None => {
+                let client = compositor.window_client_rect(window);
+                match client {
+                    Some(client) if over_client(window, self.pointer, compositor) => {
+                        InputResponse::AppScroll {
+                            window,
+                            local: client_local(self.pointer, client),
+                            dx,
+                            dy,
+                            modifiers: self.modifiers,
+                        }
+                    }
+                    _ => InputResponse::Ignored,
+                }
+            }
+        }
+    }
+
+    /// Route a step of a pinch: a pinch that begins over a window's client
+    /// area belongs to that window until it ends; one that begins anywhere
+    /// else, or whose window has gone, is [`InputResponse::Ignored`].
+    fn pinch(
+        &mut self,
+        phase: PinchPhase,
+        scale: u32,
+        at: Point,
+        compositor: &Compositor,
+    ) -> InputResponse {
+        if phase == PinchPhase::Begin && self.pinch_grab.is_none() {
+            self.pinch_grab = compositor
+                .window_at(at)
+                .filter(|&window| over_client(window, at, compositor));
+        } else if phase == PinchPhase::Begin {
+            return InputResponse::Ignored;
+        }
+        let held = self.pinch_grab;
+        if phase.ends() {
+            self.pinch_grab = None;
+        }
+        let Some(window) = held else {
+            return InputResponse::Ignored;
+        };
+        let Some(client) = compositor.window_client_rect(window) else {
+            self.pinch_grab = None;
+            return InputResponse::Ignored;
+        };
+        InputResponse::AppPinch {
+            window,
+            local: client_local(at, client),
+            phase,
+            scale,
+            modifiers: self.modifiers,
         }
     }
 
@@ -1410,6 +1488,18 @@ fn clamp_move_origin(origin: Point, drag: Rect, screen: Rect) -> Point {
 /// Whether `point` over `window` falls on the client content rather than
 /// window furniture (the outer frame, title bar, or a root-viewport
 /// scrollbar). An undecorated window with no root viewport is all client.
+/// A wheel turn as the seat delivers it: a vertical-only turn made with Shift
+/// held scrolls sideways, as a mouse with no tilt wheel has no other way to.
+/// A turn already carrying a horizontal part is a two-axis device's own and is
+/// left as it came.
+const fn sideways_with_shift(dx: i32, dy: i32, modifiers: Modifiers) -> (i32, i32) {
+    if modifiers.shift && dx == 0 {
+        (dy, 0)
+    } else {
+        (dx, dy)
+    }
+}
+
 fn over_client(window: WindowId, point: Point, compositor: &Compositor) -> bool {
     if let Some(part) = compositor.frame_hit(window, point) {
         if !matches!(part, FurniturePart::Client) {

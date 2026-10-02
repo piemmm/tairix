@@ -79,6 +79,8 @@ neu adael gyda newidiadau heb eu cadw yn gofyn yn gyntaf.
 * `S`, `P`, `B`, `A`, `E`, `F`, `I`, `L`, `R`, `O` — yr offer, yn eu trefn
 * `X` — cyfnewid y lliwiau cynradd ac eilaidd
 * `+` / `-` — chwyddo i mewn neu allan; `1` — maint go iawn; `Ctrl+0` — ffitio
+* `Ctrl` + olwyn — chwyddo i mewn neu allan o amgylch y pwyntydd
+* Pinsio â dau fys — chwyddo'n llyfn; ar sgrin gyffwrdd mae'r llun yn dilyn y bysedd
 * `G` — dangos neu guddio'r grid rhwng picseli
 * `Page Up` / `Page Down` — y corlun cynt neu nesaf
 * bysellau saeth — symud dewis sy'n arnofio un picsel; gyda `Shift`, deg

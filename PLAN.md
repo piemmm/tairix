@@ -132,7 +132,12 @@ plan's ledger. A `blocked` row names its blocker.
 | Id | Item | Status |
 |---|---|---|
 | fixdrivers | Device logic lives in `drivers/`, not `lib/*` (`plans/fixdrivers.md`) | done |
-| USB | The modular USB stack and hot-removal (`plans/USB.md`) | done |
+| USB | The modular USB stack and hot-removal (`plans/USB.md`) | in progress |
+| HID | One report model and HID class driver for every transport (`plans/HID.md`) | in progress |
+| SUPPLIERS | Kernel-mediated links between hardware-tree nodes (`plans/SUPPLIERS.md`) | in progress |
+| GPIO | GPIO controllers and their line interrupts (`plans/GPIO.md`) | planned |
+| I2C | The shared-memory I2C protocol, its controllers, and HID over I2C (`plans/I2C.md`) | planned |
+| ACPI | The ACPI namespace bus driver and its AML interpreter (`plans/ACPI.md`) | planned |
 | SOUND | The audio stack and the `dmaengine-v1` DMA-engine seam (`plans/SOUND.md`) | in progress |
 | FIX-DISPLAY-ACCELERATION | Hardware layer composition and `gpu_virtio` (`plans/FIX-DISPLAY-ACCELERATION.md`) | blocked: Stage A waits on the scanout-memory decision |
 | GPU | The `lib/gpu` render and compute seam and its backends (`plans/GPU.md`) | planned |
@@ -171,13 +176,14 @@ plan's ledger. A `blocked` row names its blocker.
 | STRESSTEST | `sysmon`, `stress` and the observability they need (`plans/STRESSTEST.md`) | in progress |
 | VIEW | The picture and document viewer (`plans/VIEW.md`) | in progress |
 | TEXTEDIT | `TextEdit.app`, the desktop editor, and the desktop facilities it needed (`plans/TEXTEDIT.md`) | blocked: TE13 needs a VFS primitive that replaces a file's content atomically through a held descriptor |
-| PAINT | `Paint.app`, the desktop image editor, and the shared document host (`plans/PAINT.md`) | done |
+| PAINT | `Paint.app`, the desktop image editor, and the shared document host (`plans/PAINT.md`) | in progress |
 
 ### Desktop
 
 | Id | Item | Status |
 |---|---|---|
 | DISPLAY | Seats, the display lease and the graphical session (`plans/DISPLAY.md`) | in progress |
+| POINTING | The scroll unit and axes, high-resolution wheels, touch frames and the seat's gesture recogniser (`lib/touch`), gestures and pinch (`plans/POINTING.md`) | in progress |
 | NEW-DESKTOP-LOGIN | The greeter, the session authority and fast user switching (`plans/NEW-DESKTOP-LOGIN.md`) | in progress |
 | APPWIN | Default apps on live channels, and the file picker (`plans/APPWIN.md`) | done |
 | COMPOSITOR-WORK | Server-side window decorations (`plans/COMPOSITOR-WORK.md`) | done |
@@ -327,7 +333,7 @@ The per-class driver traits live in `lib/abi/src/driver/`. The driver host
 `CAP_DRV_LOAD` (and `CAP_DRV_KERNEL` for an in-kernel driver), a validated bind
 table, and a signature covering the header, capability list, bind table and
 payload. The first drivers are `display/{vesa,framebuffer}`,
-`input/{ps2,usb_kbd,usb_mouse,virtio_kbd}`, `storage/{virtio_blk,emmc2}`,
+`input/{ps2,usb_hid,virtio_kbd}`, `storage/{virtio_blk,emmc2}`,
 `network/virtio_net`, and `accelerator/virtio_crypto` (AES-CBC, with a session
 created and destroyed per job so no key outlives its call, and a published
 per-job ceiling a larger job is refused against). The bus drivers
@@ -381,10 +387,11 @@ a load, use, unload and reload QEMU vertical, and the Stage 4.D acceptance gate
   read-only `/System` volume mounted before the encrypted root is unlocked and
   kept mounted for life, so even the unlock keyboard is an autoloaded user-space
   driver (`plans/PI.md`, designs B and D).
-- **The Pi 4 USB keyboard** is five autoloaded pieces — FDT discovery,
-  `pcie_brcm`, `vcmailbox`, `vl805`, `usb_kbd` — ordered by the nodes they
-  publish, so the keyboard's node exists only once `vl805` has reloaded the
-  controller firmware; completion is MSI-driven. Its live run is PI-METAL.
+- **The Pi 4 USB keyboard** is a chain of autoloaded pieces — FDT discovery,
+  `pcie_brcm`, `vl805` (reloading the controller firmware through
+  `vcmailbox`), the `xhci` host controller and `usb_hid` — ordered by the nodes
+  they publish, so the keyboard's node exists only once `vl805` has reloaded
+  the controller firmware; completion is MSI-driven. Its live run is PI-METAL.
 
 The delivery items cited elsewhere were: 1, the drvhost spawn seam; 2, the bind
 table; 3, `devmgr`; 4, generic match-key emission; and 5, the Pi chain moved
@@ -885,6 +892,10 @@ plan's own text is corrected when it is next touched, or sooner.
 Why each `AGENTS.md` rule was added or changed, newest first; the rule itself
 lives in the charter.
 
+- **2026-10-02 — §18.2: AML runs in the ACPI bus driver, not the kernel.**
+  AML is untrusted firmware bytecode, so it is interpreted in a sandboxed bus
+  driver holding only its table and region grants; the static tables the port
+  boots from stay in the arch port.
 - **2026-10-01 — §2.20: a translation-unit family may know its unit.** A
   `kernel/iommu/<family>` crate is one vendor's register model by definition,
   bound to a discovered unit through the match path like a driver, so it sits

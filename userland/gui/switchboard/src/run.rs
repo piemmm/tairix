@@ -68,7 +68,7 @@ extern crate alloc;
 mod program {
     use alloc::boxed::Box;
 
-    use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode, PointerButtonCode};
+    use tairix_abi::input::KeyInput;
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
     use tairix_abi::reply::decode_status_reply;
     use tairix_abi::seat::SEAT_PRIMARY;
@@ -76,7 +76,7 @@ mod program {
         command_endpoint_for, decode_publish_reply, MachineReport, SwitchboardCommand,
         SwitchboardRequest, TraySummary, SWITCHBOARD_ENDPOINT, SWITCHBOARD_PUBLISH_REPLY_LEN,
     };
-    use tairix_abi::window_ipc::{AppMenu, PointerAction, WindowEvent, WindowRegion};
+    use tairix_abi::window_ipc::{AppMenu, WindowEvent, WindowRegion};
     use tairix_abi::{
         CapabilityId, CapabilityQuery, Errno, NoticeTopic, PowerAction, ProcId, SchedPriority,
         Signal, SignalIntakeOp, WaitSetOp, WaitSourceKind, ORIGIN_WIRE_LEN,
@@ -88,7 +88,7 @@ mod program {
         ArtworkRasteriser, ArtworkReader, ArtworkResolver, Delivered, IconArtworkSource, Resolved,
         MAX_ARTWORK_BYTES,
     };
-    use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
+    use tairix_input::{InputEvent, Key};
     use tairix_log::{
         log, Event as LogEvent, Field as LogField, FieldValue as LogFieldValue, Level as LogLevel,
     };
@@ -105,7 +105,8 @@ mod program {
     use tairix_theme::{TextRole, Theme, ThemeRegistry};
     use tairix_window::app::{self, AppWindow};
     use tairix_window::{
-        pointer_point, present_damage, Desktop, EventError, EventMailbox, Repaint, WindowEvents,
+        key_input_event, pointer_input_events, pointer_point, present_damage, scroll_input_events,
+        Desktop, EventError, EventMailbox, Repaint, WindowEvents,
     };
 
     /// The command mailbox's bounded capacity: the session sends a panel
@@ -665,91 +666,27 @@ mod program {
         }
     }
 
-    /// Map a wire [`PointerButtonCode`] onto the desktop [`PointerButton`].
-    fn to_button(code: PointerButtonCode) -> PointerButton {
-        match code {
-            PointerButtonCode::Primary => PointerButton::Primary,
-            PointerButtonCode::Secondary => PointerButton::Secondary,
-            PointerButtonCode::Middle => PointerButton::Middle,
-        }
-    }
-
-    /// Map a wire [`NamedKeyCode`] onto the desktop [`NamedKey`] (a total
-    /// map).
-    fn to_named_key(named: NamedKeyCode) -> NamedKey {
-        match named {
-            NamedKeyCode::Enter => NamedKey::Enter,
-            NamedKeyCode::Escape => NamedKey::Escape,
-            NamedKeyCode::Backspace => NamedKey::Backspace,
-            NamedKeyCode::Tab => NamedKey::Tab,
-            NamedKeyCode::Delete => NamedKey::Delete,
-            NamedKeyCode::Insert => NamedKey::Insert,
-            NamedKeyCode::Home => NamedKey::Home,
-            NamedKeyCode::End => NamedKey::End,
-            NamedKeyCode::PageUp => NamedKey::PageUp,
-            NamedKeyCode::PageDown => NamedKey::PageDown,
-            NamedKeyCode::Left => NamedKey::Left,
-            NamedKeyCode::Right => NamedKey::Right,
-            NamedKeyCode::Up => NamedKey::Up,
-            NamedKeyCode::Down => NamedKey::Down,
-            NamedKeyCode::F1 => NamedKey::Function { number: 1 },
-            NamedKeyCode::F2 => NamedKey::Function { number: 2 },
-            NamedKeyCode::F3 => NamedKey::Function { number: 3 },
-            NamedKeyCode::F4 => NamedKey::Function { number: 4 },
-            NamedKeyCode::F5 => NamedKey::Function { number: 5 },
-            NamedKeyCode::F6 => NamedKey::Function { number: 6 },
-            NamedKeyCode::F7 => NamedKey::Function { number: 7 },
-            NamedKeyCode::F8 => NamedKey::Function { number: 8 },
-            NamedKeyCode::F9 => NamedKey::Function { number: 9 },
-            NamedKeyCode::F10 => NamedKey::Function { number: 10 },
-            NamedKeyCode::F11 => NamedKey::Function { number: 11 },
-            NamedKeyCode::F12 => NamedKey::Function { number: 12 },
-        }
-    }
-
-    /// Feed one pointer position and its press/release to the composition,
-    /// returning whichever action it reported last.
-    fn route_pointer(
+    /// Feed `inputs` — a pointer or wheel event's place and what happened
+    /// there — to the composition in order, returning the last action it
+    /// reported.
+    fn route_inputs(
         service: &mut Service,
         host: &RtHost,
-        x: u32,
-        y: u32,
-        action: PointerAction,
+        inputs: impl Iterator<Item = InputEvent>,
     ) -> Option<SwitchboardAction> {
         let bounds = host.bounds()?;
         let theme = host.themes.active();
         let font = panel_font(theme, host.desktop.scale());
         let panel = service.panel_mut();
-        let at = pointer_point(x, y);
-        let moved = panel.on_pointer(
-            &InputEvent::PointerMoved { to: at },
-            bounds,
-            host.desktop.scale(),
-            theme,
-            font,
-        );
-        let acted = match action {
-            PointerAction::Moved => None,
-            PointerAction::Pressed(code) => panel.on_pointer(
-                &InputEvent::PointerPressed {
-                    button: to_button(code),
-                },
-                bounds,
-                host.desktop.scale(),
-                theme,
-                font,
-            ),
-            PointerAction::Released(code) => panel.on_pointer(
-                &InputEvent::PointerReleased {
-                    button: to_button(code),
-                },
-                bounds,
-                host.desktop.scale(),
-                theme,
-                font,
-            ),
-        };
-        acted.or(moved)
+        let mut reported = None;
+        for input in inputs {
+            if let Some(action) =
+                panel.on_pointer(&input, bounds, host.desktop.scale(), theme, font)
+            {
+                reported = Some(action);
+            }
+        }
+        reported
     }
 
     /// Feed one key to the composition, laid out exactly as a present would
@@ -762,25 +699,6 @@ mod program {
         service
             .panel_mut()
             .on_key(key, bounds, host.desktop.scale(), theme, font)
-    }
-
-    /// Feed one wheel gesture to the composition.
-    fn route_scroll(
-        service: &mut Service,
-        host: &RtHost,
-        dx: i32,
-        dy: i32,
-    ) -> Option<SwitchboardAction> {
-        let bounds = host.bounds()?;
-        let theme = host.themes.active();
-        let font = panel_font(theme, host.desktop.scale());
-        service.panel_mut().on_pointer(
-            &InputEvent::PointerScrolled { dx, dy },
-            bounds,
-            host.desktop.scale(),
-            theme,
-            font,
-        )
     }
 
     /// Apply one delivered window event.
@@ -823,17 +741,22 @@ mod program {
                 return;
             }
             WindowEvent::Key {
-                key: KeyInput::Pressed { key, .. },
+                key: pressed @ KeyInput::Pressed { .. },
                 ..
-            } => {
-                let key = match key {
-                    KeyValue::Char(ch) => Key::Char(ch),
-                    KeyValue::Named(named) => Key::Named(to_named_key(named)),
-                };
-                route_key(service, host, key)
-            }
-            WindowEvent::Pointer { x, y, action, .. } => route_pointer(service, host, x, y, action),
-            WindowEvent::Scrolled { dx, dy, .. } => route_scroll(service, host, dx, dy),
+            } => match key_input_event(pressed) {
+                InputEvent::KeyPressed { key, .. } => route_key(service, host, key),
+                _ => None,
+            },
+            WindowEvent::Pointer { x, y, action, .. } => route_inputs(
+                service,
+                host,
+                pointer_input_events(action, pointer_point(x, y)),
+            ),
+            WindowEvent::Scrolled { x, y, dx, dy, .. } => route_inputs(
+                service,
+                host,
+                scroll_input_events(pointer_point(x, y), dx, dy),
+            ),
             // The session reclaimed the retained pixels, so nothing partial
             // can stand on them and the blank window owes every one.
             WindowEvent::RedrawRequested { .. } => {
@@ -869,7 +792,8 @@ mod program {
             | WindowEvent::OpenRequested
             | WindowEvent::PickCancelled { .. }
             | WindowEvent::DragEnded { .. }
-            | WindowEvent::PreviewRendered { .. } => return,
+            | WindowEvent::PreviewRendered { .. }
+            | WindowEvent::Pinch { .. } => return,
         };
         if let Some(action) = action {
             service.panel_mut().act(host, action, authority);

@@ -64,6 +64,7 @@ mod kernel {
     use core::sync::atomic::{AtomicBool, Ordering};
 
     use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
+    use tairix_itest_witness::names_bundle;
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
     use tairix_log::{Event, Sink};
@@ -118,7 +119,7 @@ mod kernel {
                     continue;
                 }
                 if let tairix_log::FieldValue::Str(value) = field.value {
-                    if is_greeter_bundle(value) {
+                    if names_bundle(value, tairix_abi::SYSTEM_SERVICE_STORE, GREETER_BUNDLE_NAME) {
                         self.greeter_loaded.store(true, Ordering::Release);
                     }
                 }
@@ -178,17 +179,6 @@ mod kernel {
 
     /// The audit observer the boot pipeline is handed.
     static AUDIT_SINK: GreeterDefaultSink = GreeterDefaultSink::new();
-
-    /// Whether `bundle` is the greeter's own bundle in the system service
-    /// store, composed from the shared `lib/abi` spellings rather than
-    /// written out as a path.
-    fn is_greeter_bundle(bundle: &str) -> bool {
-        bundle
-            .strip_prefix(tairix_abi::SYSTEM_SERVICE_STORE)
-            .and_then(|rest| rest.strip_prefix('/'))
-            .and_then(|name| name.strip_suffix(tairix_abi::BUNDLE_SUFFIX))
-            .is_some_and(|name| name == GREETER_BUNDLE_NAME)
-    }
 
     /// The greeter bundle's name in the system service store — the bundle
     /// `tairix_login::session::GREETER_SERVICE_PATH` names. A rename makes

@@ -638,6 +638,13 @@ const MOUSE_SETTINGS: &[&str] = &[
     Setting::DoubleClick.label(),
 ];
 
+/// The Trackpad pane's setting labels.
+const TRACKPAD_SETTINGS: &[&str] = &[
+    Setting::TapToClick.label(),
+    Setting::NaturalScroll.label(),
+    Setting::TrackpadSpeed.label(),
+];
+
 /// The Keyboard pane's setting labels.
 const KEYBOARD_SETTINGS: &[&str] = &[Setting::RepeatDelay.label(), Setting::RepeatRate.label()];
 
@@ -947,12 +954,8 @@ pub const CATEGORIES: &[CategoryRow] = &[
             name: "trackpad",
             title: "Trackpad",
             icon: None,
-            backing: PaneBacking::None {
-                missing: "This system has no touchpad driver: the shared input decode \
-                          understands a plain mouse and nothing else.",
-                needs: "A multi-touch input driver.",
-            },
-            settings: &[],
+            backing: PaneBacking::Composed(PaneContent::Form(Composition::Trackpad)),
+            settings: TRACKPAD_SETTINGS,
         }],
     },
     CategoryRow {
@@ -966,10 +969,9 @@ pub const CATEGORIES: &[CategoryRow] = &[
             title: "Touchscreen",
             icon: None,
             backing: PaneBacking::None {
-                missing: "No touch reaches the desktop: there is no touch driver, and the shared \
-                          input vocabulary has no touch event to carry one.",
-                needs: "A multi-touch input driver, and a touch event in the shared input \
-                        vocabulary.",
+                missing: "A touchscreen covers the one screen edge to edge and has nothing to \
+                          set: a finger is the pointer, two scroll and pinch.",
+                needs: "A second screen, to choose which one a touchscreen covers.",
             },
             settings: &[],
         }],

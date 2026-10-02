@@ -83,6 +83,8 @@ enregistrées demande d'abord confirmation.
 * `S`, `P`, `B`, `A`, `E`, `F`, `I`, `L`, `R`, `O` — les outils, dans l'ordre
 * `X` — échanger les couleurs principale et secondaire
 * `+` / `-` — zoomer ou dézoomer ; `1` — taille réelle ; `Ctrl+0` — ajuster
+* `Ctrl` + molette — agrandir ou réduire autour du pointeur
+* Pincer à deux doigts — agrandir ou réduire en continu ; sur un écran tactile, l'image suit les doigts
 * `G` — afficher ou masquer la grille entre les pixels
 * `Page Up` / `Page Down` — le sprite précédent ou suivant
 * touches fléchées — déplacer une sélection flottante d'un pixel ; avec `Shift`, de dix

@@ -39,6 +39,13 @@ held key waits before it repeats (*Long* to *Short*) and how fast it then
 repeats (*Off* to *Fast*). Drag a slider or step it with the arrow keys; the
 change is kept where it comes to rest.
 
+**Trackpad** sets whether a tap clicks — one finger for the primary button, two
+for a menu, three for the middle button, and a tap followed at once by a touch
+drags — whether two fingers move what is shown, as on a touchscreen, or the
+view, as a wheel does, and how far a finger moves the pointer. Two fingers
+moving together scroll and two spreading or closing zoom wherever the program
+under the pointer zooms.
+
 **Storage** lists every mounted volume: where it is mounted, its filesystem,
 its device and medium, how full it is, and whether it is healthy. It is a
 report, not a control — mounting and unmounting are the file manager's and

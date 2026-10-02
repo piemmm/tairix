@@ -3295,6 +3295,48 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: Some(CapabilityId::SHM),
         audit: true,
     },
+    SyscallSpec {
+        number: SyscallNumber::TOUCH_INJECT,
+        name: "touch_inject",
+        arg_count: 3,
+        args: [
+            // The seat the touch surface belongs to, then the encoded frame.
+            AbiType::U64,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // The bytes consumed, or a negated errno, as `pointer_inject`.
+        ret: AbiType::U64,
+        // Gated and unaudited for `pointer_inject`'s reasons: a frame per
+        // device scan is far too frequent to audit, and the driver's load
+        // is the audited decision.
+        required_capability: Some(CapabilityId::INPUT_INJECT),
+        audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::TOUCH_READ,
+        name: "touch_read",
+        arg_count: 3,
+        args: [
+            // The seat whose touch channel is drained (only its owner may),
+            // then the frame buffer.
+            AbiType::U64,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // The bytes read, or a negated errno, as `pointer_read`.
+        ret: AbiType::U64,
+        // `CAP_INPUT_READ` and the seat's live lease, as `pointer_read`;
+        // unaudited as every high-volume stream reader is.
+        required_capability: Some(CapabilityId::INPUT_READ),
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in
@@ -3603,9 +3645,13 @@ mod tests {
         // arbiter, so it is gated on the privileged CAP_INPUT_INJECT — the
         // system keyboard stream is never ambient — and,
         // like the per-event stream operations, is not audited per call.
-        // pointer_inject is its pointer analogue: the same gate and the
-        // same unaudited per-event posture.
-        for n in [SyscallNumber::KEY_INJECT, SyscallNumber::POINTER_INJECT] {
+        // pointer_inject and touch_inject are its pointer and touch
+        // analogues: the same gate and the same unaudited per-event posture.
+        for n in [
+            SyscallNumber::KEY_INJECT,
+            SyscallNumber::POINTER_INJECT,
+            SyscallNumber::TOUCH_INJECT,
+        ] {
             let spec = spec_for(n).unwrap();
             assert_eq!(spec.required_capability, Some(CapabilityId::INPUT_INJECT));
             assert!(!spec.audit, "input injection must not audit per event");
@@ -3624,9 +3670,13 @@ mod tests {
         // keyboard_read drains the kernel keyboard channel for the seat
         // owner, gated on CAP_INPUT_READ (the kernel additionally
         // owner-gates the drain against the seat's live lease) and — like
-        // stream_read — not audited per call. pointer_read is its pointer
-        // analogue with the identical double gate.
-        for n in [SyscallNumber::KEYBOARD_READ, SyscallNumber::POINTER_READ] {
+        // stream_read — not audited per call. pointer_read and touch_read
+        // are its pointer and touch analogues with the identical double gate.
+        for n in [
+            SyscallNumber::KEYBOARD_READ,
+            SyscallNumber::POINTER_READ,
+            SyscallNumber::TOUCH_READ,
+        ] {
             let spec = spec_for(n).unwrap();
             assert_eq!(spec.required_capability, Some(CapabilityId::INPUT_READ));
             assert!(!spec.audit, "input drains must not audit per event");

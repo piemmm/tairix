@@ -233,13 +233,18 @@ pub const TARGETS: &[Target] = &[
                       deriving them from a read-only view made every publication a write the \
                       borrow never granted — which only an interpreter can see",
         features: &[],
-        scope: Scope::LibOnly(
-            "its `*_ring_spsc` integration tests deliberately alias two `&mut` views over one \
-             leaked region, which is how two processes map one `shm` object and is a situation \
-             outside the aliasing model entirely; the shipped code never aliases within an \
-             address space. The loom model does not build under the interpreter, and the fuzz \
-             harnesses read the clock for their budget, which isolation refuses",
-        ),
+        scope: Scope::LibExcept {
+            skip: &["switchboard_ipc::machine::tests::every_accepted_frame_is_the_encoding_of_what_it_decodes_to"],
+            reason: "its `*_ring_spsc` integration tests deliberately alias two `&mut` views over \
+                     one leaked region, which is how two processes map one `shm` object and is a \
+                     situation outside the aliasing model entirely; the shipped code never \
+                     aliases within an address space. The loom model does not build under the \
+                     interpreter, and the fuzz harnesses read the clock for their budget, which \
+                     isolation refuses. In the library, the machine report's single-byte sweep \
+                     decodes and re-encodes a 2.8 KiB frame seventeen thousand times through safe \
+                     code: interpreted that costs half an hour, it passes when run, and the \
+                     report's round-trip tests reach the same decoder",
+        },
         spread: Spread::PerCore(
             "over fifteen hundred tests, and interpreted they cost five minutes end to end in \
              one single-core process. Dealt across the host's cores the work is unchanged and \

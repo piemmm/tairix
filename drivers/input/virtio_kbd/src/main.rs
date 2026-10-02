@@ -1,5 +1,5 @@
-//! The `Run` entry-point binary of the virtio-input driver (keyboard *and*
-//! pointer), installed as a signed `/System/Drivers/` bundle and
+//! The `Run` entry-point binary of the virtio-input driver (keyboard,
+//! pointer *and* touch), installed as a signed `/System/Drivers/` bundle and
 //! **autoloaded into user space** by `devmgr` when a virtio-input device is
 //! discovered (`plans/PI.md` P10 chunk 5d-2-ii).
 //!
@@ -88,7 +88,7 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
-    use tairix_abi::driver::input::{Input, InputEvent, InputEventKind};
+    use tairix_abi::driver::input::{InputEvent, InputEventKind};
     use tairix_abi::driver::sole_register_window;
     use tairix_abi::driver::virtio::VirtioHost;
     use tairix_abi::driver::virtio_pci::{virtio_pci_windows, VirtioPciWindows};
@@ -97,7 +97,7 @@ mod program {
     use tairix_caps::CapabilitySet;
     use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
     use tairix_virtio::{MmioTransport, PciTransport, PciTransportWindows, Transport};
-    use tairix_virtio_input::{VirtioInput, VirtioKeyboardConsole};
+    use tairix_virtio_input::{Report, VirtioInput, VirtioKeyboardConsole};
 
     /// Exit code when the rt-backed driver host could not be built from the
     /// kernel-delivered grants (the `resource_grants` query was refused or the
@@ -134,18 +134,18 @@ mod program {
     /// rather than spin retrying a broken device. A reserved value.
     const EXIT_DEVICE_FAULT: i32 = 83;
 
-    /// Events drained from the device per poll. A batch size, not a capacity: undrained events stay queued in the eventq and are
-    /// read on the next poll.
-    const EVENT_BATCH: usize = 16;
+    /// Reports drained from the device per poll. A batch size, not a
+    /// capacity: what is not drained stays queued and is read next time.
+    const REPORT_BATCH: usize = 16;
 
-    /// A zeroed [`InputEvent`] used to initialise the poll batch; overwritten
-    /// by [`Input::poll`] before it is read.
-    const EVENT_ZERO: InputEvent = InputEvent {
+    /// What the poll batch starts as; every slot is overwritten before it is
+    /// read.
+    const REPORT_ZERO: Report = Report::Event(InputEvent {
         kind: InputEventKind::Key,
         reserved0: 0,
         code: 0,
         value: 0,
-    };
+    });
 
     /// The capability set the driver host re-checks up front before issuing a
     /// `mmio_map` / `dma_alloc` / `irq_bind` trap, so a missing grant fails
@@ -265,36 +265,41 @@ mod program {
             return EXIT_BRINGUP_FAILED;
         };
 
-        // Pump the device forever, injecting each decoded event for the
+        // Pump the device forever, injecting each decoded report for the
         // boot seat (`SEAT_PRIMARY`) — the seat a directly attached input
-        // device belongs to — into the input-focus arbiter: pointer records
-        // through `pointer_inject`, key edges through `key_inject`.
-        // `poll` parks on the bound device interrupt while nothing is
-        // pending (and acknowledges the device each cycle), so an idle
-        // keyboard holds the task off the run queue — no yield loop. An
-        // empty return is a spurious wake and simply re-parks; a hard fault
-        // is structural and exits fail-loud rather than spinning on a
-        // broken device.
+        // device belongs to: pointer records through `pointer_inject`, key
+        // edges through `key_inject`, a touch surface's frames through
+        // `touch_inject`. `poll_reports` parks on the bound device interrupt
+        // while nothing is pending, so an idle device holds the task off the
+        // run queue. A hard fault is structural and exits fail-loud, first
+        // lifting every contact a touch surface had down so none stays
+        // pressed.
+        let seat = tairix_abi::seat::SEAT_PRIMARY;
         let mut console = VirtioKeyboardConsole::new();
-        let mut events = [EVENT_ZERO; EVENT_BATCH];
+        let mut reports = [REPORT_ZERO; REPORT_BATCH];
         loop {
-            match input.poll(&mut events) {
-                Ok(drained) => {
-                    for event in &events[..drained] {
-                        // The pointer mapping claims the pointer vocabulary
-                        // (axis deltas, `BTN_*` edges, scroll ticks);
-                        // everything else is the keyboard producer's. The two
-                        // are disjoint by construction, so no event is ever
-                        // double-injected.
+            let Ok(drained) = input.poll_reports(&mut reports) else {
+                if let Some(lifted) = input.touch_lifted() {
+                    let _ = tairix_rt::touch_inject(seat, &lifted);
+                }
+                return EXIT_DEVICE_FAULT;
+            };
+            for report in &reports[..drained] {
+                match report {
+                    Report::Touch(frame) => {
+                        let _ = tairix_rt::touch_inject(seat, frame);
+                    }
+                    // The pointer mapping claims the pointer vocabulary;
+                    // everything else is the keyboard producer's, so no event
+                    // is ever injected twice.
+                    Report::Event(event) => {
                         if let Some(record) = PointerInput::from_device_event(event) {
-                            let _ =
-                                tairix_rt::pointer_inject(tairix_abi::seat::SEAT_PRIMARY, &record);
+                            let _ = tairix_rt::pointer_inject(seat, &record);
                         } else if let Some(record) = console.feed(*event) {
-                            let _ = tairix_rt::key_inject(tairix_abi::seat::SEAT_PRIMARY, &record);
+                            let _ = tairix_rt::key_inject(seat, &record);
                         }
                     }
                 }
-                Err(_) => return EXIT_DEVICE_FAULT,
             }
         }
     }

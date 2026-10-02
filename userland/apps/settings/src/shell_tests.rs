@@ -9,8 +9,8 @@
 use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::desktop::{Appearance, Contrast, Density};
 use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
+use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
 use tairix_abi::sysinfo::{MountAvailability, MountRecord, MountVolumeState};
-use tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT;
 use tairix_controls::testkit::keystroke;
 use tairix_controls::{ground_fill, plate_border, ChromeLayer, FieldGroup, WHEEL_STEP};
 use tairix_font::install_test_transport;
@@ -1373,7 +1373,8 @@ fn the_desktop_switch_posts_its_own_key() {
 }
 
 /// Each input pane posts its own keys alone, so the Keyboard pane cannot
-/// reimpose a pointer value, nor the Mouse pane a repeat.
+/// reimpose a pointer value, nor the Mouse pane a repeat, nor the Trackpad
+/// pane the mouse's speed.
 #[test]
 fn the_input_panes_post_only_their_own_keys() {
     for (pane, row, posted, withheld) in [
@@ -1387,6 +1388,12 @@ fn the_input_panes_post_only_their_own_keys() {
             Pane::Keyboard,
             1,
             "key.repeat_rate = off",
+            &SettingsKey::POINTER[..],
+        ),
+        (
+            Pane::Trackpad,
+            0,
+            "touchpad.tap = ",
             &SettingsKey::POINTER[..],
         ),
     ] {
@@ -2091,6 +2098,7 @@ fn a_composed_panes_settings_are_the_labels_its_rows_actually_draw() {
         (Pane::Dns, Composition::Dns),
         (Pane::Notifications, Composition::Notifications),
         (Pane::Mouse, Composition::Mouse),
+        (Pane::Trackpad, Composition::Trackpad),
         (Pane::Keyboard, Composition::Keyboard),
         (Pane::Screensaver, Composition::Screensaver),
         (Pane::LockScreen, Composition::LockScreen),

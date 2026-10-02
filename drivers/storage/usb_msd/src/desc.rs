@@ -24,6 +24,7 @@
 //! that cannot be parsed refuses the whole device rather than guessing.
 
 use tairix_abi::Errno;
+use tairix_usb::descriptor::{descriptors, Malformed};
 
 use crate::scsi::CommandSet;
 
@@ -229,10 +230,11 @@ impl Collect {
     }
 }
 
-/// Find the first servable mass-storage interface (alternate setting 0) in
-/// the full configuration descriptor stream and derive its transport
-/// endpoints — exactly the endpoints the host-controller driver configured
-/// at enumeration.
+/// Find mass-storage interface `interface` (alternate setting 0) in the full
+/// configuration descriptor stream and derive its transport endpoints —
+/// exactly the endpoints the host-controller driver configured at
+/// enumeration. `interface` is the one the driver's node names: its
+/// interface requests may address no other.
 ///
 /// # Errors
 ///
@@ -241,19 +243,16 @@ impl Collect {
 ///   length is shorter than its type requires or runs past the stream (a
 ///   zero `bLength` cannot advance the walk and is refused, never looped
 ///   on).
-/// * [`Errno::NotFound`] if no servable interface completes: none matches
-///   the accepted class/sub-class/protocol set, or the matched one lacks
-///   the endpoints its transport needs, or its UAS pipes are malformed.
-pub fn find_storage_interface(stream: &[u8]) -> Result<StorageInterface, Errno> {
+/// * [`Errno::NotFound`] if `interface` does not complete: it is absent,
+///   outside the accepted class/sub-class/protocol set, lacks the endpoints
+///   its transport needs, or its UAS pipes are malformed.
+pub fn find_storage_interface(stream: &[u8], interface: u8) -> Result<StorageInterface, Errno> {
     let total = configuration_total_length(stream)?;
     if stream.len() < total {
         return Err(Errno::LengthOutOfRange);
     }
     let stream = &stream[..total];
 
-    // Walk the descriptor stream. `offset` only ever advances by a
-    // validated, non-zero `bLength`, so the walk is bounded by the stream.
-    let mut offset = CONFIGURATION_HEADER_LEN;
     // The matched interface, once seen: (number, protocol, command set).
     // Descriptors that follow it (until the next interface descriptor)
     // belong to it. `poisoned` marks a matched interface whose UAS pipes
@@ -261,16 +260,9 @@ pub fn find_storage_interface(stream: &[u8]) -> Result<StorageInterface, Errno> 
     let mut matched: Option<(u8, u8, CommandSet)> = None;
     let mut poisoned = false;
     let mut collect = Collect::default();
-    while offset < stream.len() {
-        let remaining = &stream[offset..];
-        if remaining.len() < 2 {
-            return Err(Errno::LengthOutOfRange);
-        }
-        let length = usize::from(remaining[0]);
-        if length < 2 || length > remaining.len() {
-            return Err(Errno::LengthOutOfRange);
-        }
-        let descriptor = &remaining[..length];
+    for descriptor in descriptors(&stream[CONFIGURATION_HEADER_LEN..]) {
+        let descriptor = descriptor.map_err(|Malformed| Errno::LengthOutOfRange)?;
+        let length = descriptor.len();
         match descriptor[1] {
             DESC_TYPE_INTERFACE => {
                 if length < INTERFACE_DESC_LEN {
@@ -286,7 +278,10 @@ pub fn find_storage_interface(stream: &[u8]) -> Result<StorageInterface, Errno> 
                 let class = descriptor[5];
                 let sub_class = descriptor[6];
                 let protocol = descriptor[7];
-                if alternate_setting == 0 && class == CLASS_MASS_STORAGE {
+                if alternate_setting == 0
+                    && descriptor[2] == interface
+                    && class == CLASS_MASS_STORAGE
+                {
                     if let Some(command_set) = accepted_command_set(sub_class, protocol) {
                         matched = Some((descriptor[2], protocol, command_set));
                     }
@@ -346,7 +341,6 @@ pub fn find_storage_interface(stream: &[u8]) -> Result<StorageInterface, Errno> 
                 }
             }
         }
-        offset += length;
     }
     Err(Errno::NotFound)
 }

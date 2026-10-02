@@ -67,8 +67,9 @@ mod kernel {
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicBool, Ordering};
 
-    use tairix_abi::{Errno, FieldValue};
+    use tairix_abi::Errno;
     use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
+    use tairix_itest_witness::field_str;
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
     use tairix_log::{Event, EventId, Sink};
@@ -110,20 +111,6 @@ mod kernel {
     /// reference is still not writable. The PASS finisher fires on the next
     /// audited `exit`.
     static WRITE_REFUSED: AtomicBool = AtomicBool::new(false);
-
-    /// The string value of `event`'s field `key`, if present.
-    fn field_str<'e>(event: &Event<'e>, key: &str) -> Option<&'e str> {
-        event.fields.iter().find_map(|field| {
-            if field.key == key {
-                match field.value {
-                    FieldValue::Str(s) => Some(s),
-                    _ => None,
-                }
-            } else {
-                None
-            }
-        })
-    }
 
     /// `true` if `event` carries the dispatcher's `err` field with exactly
     /// `errno`'s decimal value — the same `format_i32` rendering the

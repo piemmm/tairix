@@ -5,7 +5,7 @@
 //! steps, range changes during drag, both orientations, keyboard bounds, and
 //! the fail-closed behaviour for degenerate ranges.
 
-use tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT;
+use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
 use tairix_geometry::{Point, Rect, Region};
 use tairix_raster::{Color, Pixel, Surface};
 

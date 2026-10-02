@@ -6,7 +6,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
-use tairix_abi::hwtree::{HwMatchKind, HwNode, HwResource, HwResourceKind};
+use tairix_abi::hwtree::{HwMatchKind, HwNode, HwProperty, HwResource, HwResourceKind};
 use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord, Suggestion};
 use tairix_devids::DevIds;
 use tairix_help::{own_short_help, HelpSource};
@@ -412,6 +412,12 @@ fn describe_resource(resource: &HwResource, line: &mut String) {
         Some(HwResourceKind::DmaRequest) => describe_dma_request(resource, line),
         Some(HwResourceKind::IommuStream) => describe_iommu_stream(resource, line),
         Some(HwResourceKind::IommuReserved) => describe_iommu_reserved(resource, line),
+        Some(HwResourceKind::Property) => match resource.property_value() {
+            Ok((HwProperty::UsbInterface, number)) => {
+                let _ = write!(line, "USB interface {number}");
+            }
+            Err(_) => line.push_str("Property (malformed)"),
+        },
         None => line.push_str("resource (unknown kind)"),
     }
 }
@@ -830,6 +836,22 @@ C 02  Network controller
                 "  Firmware DMA window at 0x7b800000 [size=0x100000] for stream 0x18",
             ]
         );
+    }
+
+    #[test]
+    fn verbose_names_the_usb_interface_a_node_is() {
+        let mut interface = HwNode::new(2, HW_NODE_ROOT, HwDeviceClass::Input);
+        interface
+            .push_match_key(HwMatchKey::pci(0x1af4, 0x1042, 0x0C_03_30))
+            .expect("key fits");
+        interface
+            .push_resource(HwResource::property(HwProperty::UsbInterface, 1))
+            .expect("resource fits");
+        let mut blob = HwTreeHeader::new(1, 1).to_le_bytes().to_vec();
+        blob.extend_from_slice(&interface.to_le_bytes());
+        let (out, result) = run_case(&["-v"], Ok(blob), true);
+        result.expect("listing succeeds");
+        assert_eq!(out.lines()[1..], ["  USB interface 1"]);
     }
 
     #[test]

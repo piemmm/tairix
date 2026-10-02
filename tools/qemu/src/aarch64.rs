@@ -192,21 +192,7 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
         argv.push("virtio-crypto-device,id=crypto0,cryptodev=cryptodev0".into());
     }
 
-    // Attach a virtio-mmio keyboard for the input vertical (the runner
-    // drives the scripted key or typed text through the QEMU monitor once
-    // the guest signals readiness) or for a human typing into the
-    // interactive window; here we only present the device. The interactive
-    // session also gets a virtio-mmio mouse for pointer input from the
-    // window.
-    let interactive = spec.session == SessionKind::WindowedInteractive;
-    if spec.input_keyboard.is_some() || !spec.input_typing.is_empty() || interactive {
-        argv.push("-device".into());
-        argv.push("virtio-keyboard-device".into());
-    }
-    if interactive || spec.devices.mouse {
-        argv.push("-device".into());
-        argv.push("virtio-mouse-device".into());
-    }
+    argv.extend(crate::input_device_args(spec, "-device"));
     argv
 }
 
@@ -293,6 +279,7 @@ mod tests {
         );
         assert!(argv.iter().any(|a| a == "virtio-keyboard-device"));
         assert!(argv.iter().any(|a| a == "virtio-mouse-device"));
+        assert!(argv.iter().any(|a| a == "virtio-multitouch-device"));
     }
 
     #[test]
@@ -523,7 +510,7 @@ mod tests {
             key: "a".into(),
             ready_occurrences: 1,
         });
-        spec.devices.mouse = true;
+        spec.devices.pointing.mouse = true;
         let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
         let kbd = argv
             .iter()
@@ -534,5 +521,16 @@ mod tests {
             .position(|a| a == "virtio-mouse-device")
             .expect("mouse attached");
         assert!(kbd < mouse, "mouse rides after the keyboard");
+    }
+
+    #[test]
+    fn argv_attaches_a_touchscreen_only_when_one_is_asked_for() {
+        let mut spec = fixture_spec(1);
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
+        assert!(!argv.iter().any(|a| a == "virtio-multitouch-device"));
+        spec.devices.pointing.touchscreen = true;
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
+        assert!(argv.iter().any(|a| a == "virtio-multitouch-device"));
+        assert!(!argv.iter().any(|a| a == "virtio-mouse-device"));
     }
 }

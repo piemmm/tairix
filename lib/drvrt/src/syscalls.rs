@@ -16,7 +16,17 @@
 /// [`tairix_abi::Errno`] discriminant as `-ret`). The host
 /// adds no authority; the kernel validates the grant handle and every bound on
 /// the far side of the trap.
-pub trait GrantSyscalls {
+///
+/// # Safety
+///
+/// The host builds register windows, DMA slabs and the shared buffer from the
+/// addresses these methods return, so an implementation must answer as the
+/// kernel does: a non-negative [`Self::mmio_map`], [`Self::dma_alloc`] or
+/// [`Self::shm_map`] is the base of a mapping of at least the length asked
+/// for (for `shm_map`, the length it writes), readable and writable, aliased
+/// by nothing else in this process, and mapped until the process ends — a
+/// carve until [`Self::dma_free`] releases it.
+pub unsafe trait GrantSyscalls {
     /// Map the `[offset, offset + len)` sub-region of the device MMIO window
     /// named by the kernel-issued grant `handle` into the calling task's own
     /// address space, returning the base user virtual address of the mapped
@@ -159,7 +169,10 @@ pub trait GrantSyscalls {
 #[derive(Debug, Default, Copy, Clone)]
 pub struct RtGrantSyscalls;
 
-impl GrantSyscalls for RtGrantSyscalls {
+// SAFETY: every answer is the kernel's own. It maps each window, carve and
+// shared region into this task alone, and unmaps none while the task runs but
+// a carve this task frees.
+unsafe impl GrantSyscalls for RtGrantSyscalls {
     #[inline]
     fn mmio_map(&self, handle: u64, offset: u64, len: usize) -> i64 {
         tairix_rt::mmio_map(handle, offset, len)

@@ -706,8 +706,11 @@ fn crowded() -> Places {
 fn wheel(detents: i32) -> WindowEvent {
     WindowEvent::Scrolled {
         window_id: WINDOW_ID,
+        x: 0,
+        y: 0,
         dx: 0,
-        dy: detents * tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT,
+        dy: detents * tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT,
+        modifiers: tairix_abi::input::Modifiers::default(),
     }
 }
 

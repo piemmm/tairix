@@ -6,7 +6,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT;
+use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
 use tairix_controls::testkit::keystroke;
 use tairix_controls::{damage, SelectionState, WHEEL_STEP};
 use tairix_font::BitmapFont;

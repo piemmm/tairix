@@ -74,6 +74,8 @@ first.
 * `S`, `P`, `B`, `A`, `E`, `F`, `I`, `L`, `R`, `O` — the tools, in order
 * `X` — swap the primary and secondary colours
 * `+` / `-` — zoom in or out; `1` — actual size; `Ctrl+0` — fit
+* `Ctrl` + wheel — zoom in or out about the pointer
+* Pinch with two fingers — zoom smoothly; on a touchscreen the picture follows the fingers
 * `G` — show or hide the grid between pixels
 * `Page Up` / `Page Down` — the sprite before or after
 * arrow keys — move a floating selection a pixel; with `Shift`, ten

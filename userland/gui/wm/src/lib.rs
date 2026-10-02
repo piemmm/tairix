@@ -94,7 +94,7 @@ pub use frost::{frost_cache, FrostEpoch, FrostedBackdrop};
 pub use geometry::{Point, Rect, Region, Scale};
 pub use input::{
     ClickKind, DoubleClickTracker, InputEvent, InputResponse, InputRouter, Key, Modifiers,
-    NamedKey, PointerButton, PointerFocus,
+    NamedKey, PinchPhase, PointerButton, PointerFocus,
 };
 pub use pointer::{Ghost, Halo, HaloRing, MAX_GHOSTS};
 pub use select::{

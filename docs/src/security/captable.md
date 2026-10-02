@@ -72,7 +72,7 @@ kernel-resolved state, through the one shared naming rule
 process — every bundle shares that leaf — so a final `Run` component attests
 the owning bundle directory's stem instead (`.app` suffix stripped:
 `/Apps/Example.app/Run` → `Example`, a driver bundle
-`/System/Drivers/input/usb_kbd/Run` → `usb_kbd`); any other path attests its
+`/System/Drivers/input/usb_hid/Run` → `usb_hid`); any other path attests its
 final non-empty component, and a path from which no name is derivable keeps
 the whole path bytes so a listing always shows something truthful. The
 `spawn` syscall applies the rule to the resolved executable path (the

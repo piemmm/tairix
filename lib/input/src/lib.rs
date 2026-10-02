@@ -53,6 +53,7 @@
 pub mod click;
 
 pub use click::{ClickKind, ClickRun, DoubleClickTracker};
+pub use tairix_abi::touch::PinchPhase;
 
 use tairix_geometry::Point;
 
@@ -283,12 +284,29 @@ pub enum InputEvent {
     /// delta, not an absolute position: the router routes it to the viewport
     /// under the pointer rather than moving the pointer.
     ///
-    /// [`SCROLL_UNITS_PER_DETENT`]: tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT
+    /// [`SCROLL_UNITS_PER_DETENT`]: tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT
     PointerScrolled {
         /// Signed horizontal scroll, in scroll units.
         dx: i32,
         /// Signed vertical scroll, in scroll units.
         dy: i32,
+    },
+    /// Fingers on a touch surface pinched: a zoom about `at`.
+    ///
+    /// `at` is the pointer on a touchpad and the fingers' centre on a
+    /// touchscreen, which moves as they pan. Every step of one pinch belongs
+    /// to the surface it began over, as a drag does.
+    Pinch {
+        /// Where the pinch is in its life.
+        phase: PinchPhase,
+        /// The fingers' spread relative to when the pinch began, in 16.16
+        /// fixed point ([`PINCH_SCALE_ONE`] unchanged), so a zoom is the zoom
+        /// it began at times the scale.
+        ///
+        /// [`PINCH_SCALE_ONE`]: tairix_abi::touch::PINCH_SCALE_ONE
+        scale: u32,
+        /// Where the pinch is, in screen coordinates.
+        at: Point,
     },
     /// A key was pressed; it is delivered to the focused surface.
     KeyPressed {
@@ -536,6 +554,21 @@ mod tests {
             InputEvent::PointerScrolled { dx: 0, dy: 1 },
             InputEvent::PointerScrolled { dx: 0, dy: -1 }
         );
+    }
+
+    #[test]
+    fn a_pinch_carries_its_phase_scale_and_place() {
+        let begin = InputEvent::Pinch {
+            phase: PinchPhase::Begin,
+            scale: tairix_abi::touch::PINCH_SCALE_ONE,
+            at: Point::new(10, 20),
+        };
+        let wider = InputEvent::Pinch {
+            phase: PinchPhase::Update,
+            scale: 2 * tairix_abi::touch::PINCH_SCALE_ONE,
+            at: Point::new(10, 20),
+        };
+        assert_ne!(begin, wider);
     }
 
     #[test]

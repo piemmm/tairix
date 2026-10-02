@@ -217,7 +217,7 @@ mod tests {
     #[test]
     fn read_delegates_to_the_reader_and_appends() {
         let mut fs = MockRootFs::new();
-        fs.add_file("/System/Drivers/usb_kbd", b"BUNDLE");
+        fs.add_file("/System/Drivers/usb_hid", b"BUNDLE");
         let service =
             SystemFileService::open(&mut fs, "/System/Drivers").expect("root mount builds");
 
@@ -225,7 +225,7 @@ mod tests {
         // non-empty prefix is preserved (the append contract).
         let mut buf = vec![0x01u8];
         service
-            .read("/System/Drivers/usb_kbd", &mut buf)
+            .read("/System/Drivers/usb_hid", &mut buf)
             .expect("a readable in-store bundle");
         assert_eq!(buf, vec![0x01, b'B', b'U', b'N', b'D', b'L', b'E']);
     }

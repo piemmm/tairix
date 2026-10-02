@@ -7,12 +7,12 @@ use alloc::vec::Vec;
 
 use tairix_abi::window_ipc::{AppMenu, AppMenuItemId};
 use tairix_controls::{
-    Dialog, DialogAction, FieldGroupAction, FieldRow, Keystroke, SaveChanges, ScrollAction,
-    SwatchAction, SwatchMark, ToolActivation, ToolbarOutcome,
+    wheel_steps, Dialog, DialogAction, FieldGroupAction, FieldRow, Keystroke, SaveChanges,
+    ScrollAction, SwatchAction, SwatchMark, ToolActivation, ToolbarOutcome,
 };
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_image::{SpriteMode, SpriteName, SpritePalette};
-use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
+use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PinchPhase, PointerButton};
 use tairix_rng::RandU64;
 use tairix_theme::Theme;
 use tairix_window::menu::{MenuBuilder, Plate};
@@ -34,7 +34,7 @@ use crate::shape::{line_pixels, Bounds, Point as Fx, Shape, FX};
 use crate::stroke::{Layer, Stroke};
 use crate::tool::{strip_item, tool_index, StripItem, Tool, ViewCommand};
 use crate::transform::{Depth, Transform, TransformError, Turn};
-use crate::viewport::{percent_of, ACTUAL, ZOOMS};
+use crate::viewport::{Zoom, ACTUAL, ZOOMS};
 
 /// What a clearing is said not to have managed.
 const CLEARING: &str = "clear that";
@@ -89,6 +89,10 @@ impl View {
         }
         if let InputEvent::PointerScrolled { dx, dy } = event {
             return self.wheel(*dx, *dy, layout, scale, theme, damage);
+        }
+        if let InputEvent::Pinch { phase, scale, at } = *event {
+            self.pinch(phase, scale, at, layout, damage);
+            return Outcome::none();
         }
         if self.gesture.is_none() {
             if let Some(outcome) = self.chrome_pointer(event, now_ns, layout, scale, theme, damage)
@@ -313,20 +317,15 @@ impl View {
             return Outcome::none();
         }
         if self.modifiers.ctrl {
-            let rung = self.viewport.zoom();
-            let next = match dy.cmp(&0) {
-                core::cmp::Ordering::Less => (rung + 1).min(ZOOMS.len() - 1),
-                core::cmp::Ordering::Greater => rung.saturating_sub(1),
-                core::cmp::Ordering::Equal => rung,
-            };
-            self.zoom_to(next, self.pointer, layout, damage);
+            // A detent's worth of turn away from the user is one rung in; a
+            // fine wheel's fractions add up, and a reversal starts afresh.
+            let rungs = wheel_steps(dy.saturating_neg(), 1, &mut self.zoom_carry);
+            if rungs != 0 {
+                let rung = self.viewport.rung_beside(rungs);
+                self.zoom_to(rung, self.pointer, layout, damage);
+            }
             return Outcome::none();
         }
-        let (dx, dy) = if self.modifiers.shift {
-            (dy, dx)
-        } else {
-            (dx, dy)
-        };
         let y = self
             .vertical
             .wheel(dx, dy, scale, layout.vertical_bar(), damage);
@@ -337,6 +336,50 @@ impl View {
             |action: Option<ScrollAction>| action.map(|ScrollAction::ScrollTo { offset }| offset);
         self.scroll_to(offset(x), offset(y), layout, damage);
         Outcome::none()
+    }
+
+    /// A step of a pinch begun over the canvas: the picture zooms by the
+    /// fingers' spread and follows their centre, both measured from where the
+    /// pinch began, so it accumulates no rounding; a cancelled pinch puts the
+    /// view back as it found it. A step with no pinch begun is ignored, as
+    /// one whose beginning the desktop could not deliver.
+    fn pinch(
+        &mut self,
+        phase: PinchPhase,
+        scale: u32,
+        at: Point,
+        layout: &Layout,
+        damage: &mut Region,
+    ) {
+        let area = layout.canvas();
+        if phase == PinchPhase::Begin {
+            self.pinch = area.contains(at).then_some((self.viewport, at));
+            return;
+        }
+        let Some((start, began)) = self.pinch else {
+            return;
+        };
+        if phase.ends() {
+            self.pinch = None;
+        }
+        let before = self.viewport;
+        self.viewport = start;
+        if phase != PinchPhase::Cancel {
+            let picture = self.picture_size();
+            self.viewport
+                .magnify(start.zoom().scaled(scale), began, picture, area);
+            self.viewport.scroll_by(
+                i64::from(began.x) - i64::from(at.x),
+                i64::from(began.y) - i64::from(at.y),
+                picture,
+                area,
+            );
+        }
+        if self.viewport != before {
+            damage.add(area);
+            damage.add(layout.zoom());
+        }
+        self.settle(layout, damage);
     }
 
     /// The toolbar's item at `index` was pressed.
@@ -1753,11 +1796,11 @@ impl View {
                 }
             }
             Action::ZoomIn => {
-                let rung = (self.viewport.zoom() + 1).min(ZOOMS.len() - 1);
+                let rung = self.viewport.rung_beside(1);
                 self.zoom_to(rung, self.pointer, layout, damage);
             }
             Action::ZoomOut => {
-                let rung = self.viewport.zoom().saturating_sub(1);
+                let rung = self.viewport.rung_beside(-1);
                 self.zoom_to(rung, self.pointer, layout, damage);
             }
             Action::Zoom(rung) => self.zoom_to(rung, area.center(), layout, damage),
@@ -2199,12 +2242,12 @@ impl View {
         let mut label = String::new();
         for (rung, &zoom) in ZOOMS.iter().enumerate().rev() {
             label.clear();
-            write_zoom(&mut label, percent_of(zoom));
+            write_zoom(&mut label, Zoom::of(zoom).percent());
             menu.radio(
                 Action::Zoom(rung),
                 &label,
                 "",
-                rung == self.viewport.zoom(),
+                self.viewport.rung() == Some(rung),
                 plate,
             );
         }

@@ -354,6 +354,12 @@ pub const TARGETS: &[Target] = &[
             "lib/hid Report Descriptor parser, report normaliser, and boot keyboard/mouse decoders (hostile device-written HID bytes)",
     },
     Target {
+        package: "tairix-touch",
+        test: "fuzz_touch",
+        description:
+            "lib/touch gesture recogniser (injector-supplied touch frames: press balance, pinch life, deadlines)",
+    },
+    Target {
         package: "tairix-vt",
         test: "fuzz_vt",
         description: "lib/vt escape-sequence parser (untrusted terminal / remote-host bytes)",

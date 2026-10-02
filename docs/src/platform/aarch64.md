@@ -1525,10 +1525,9 @@ The boot path's only role is discovery and Device-typing the windows:
   carves DMA, brings the controller up, enumerates every reachable device,
   and emits one interface node per served interface (a composite
   keyboard+mouse receiver publishes two); each class driver
-  (`usb_kbd` for the boot keyboard, `usb_msd` for a storage stick) binds its
-  interface node and drives its device over the URB transport — the
-  keyboard pumping decoded key edges into the input-focus arbiter through
-  `key_inject`. Each
+  (`usb_hid` for a keyboard, mouse or touch pad, `usb_msd` for a storage
+  stick) binds its interface node and drives its device over the URB
+  transport — the HID driver injecting its records into the seat. Each
   driver is granted only the resources its matched node requested (§18.3),
   reached through its rt-backed `DriverHost`. The bridge→CPU BAR translation
   is resolved in user space (`pcie_brcm` emits the BAR as a CPU-physical
@@ -2274,9 +2273,9 @@ models no Pi PCIe/USB, `AGENTS.md` §0.4).
 
 ### The D5d user-space move regressed two things — DMA coherency and the diagnostics
 
-Moving the keyboard bring-up out of the in-kernel scaffold into the
-autoloaded user-space `drivers/input/usb_kbd` process (the §4 steady state)
-silently dropped two things the metal-debugged scaffold relied on:
+Moving the controller bring-up out of the in-kernel scaffold into the
+autoloaded user-space host-controller driver (the §4 steady state) silently
+dropped two things the metal-debugged scaffold relied on:
 
 1. **DMA coherency.** The BCM2711 PCIe root complex is **not** I/O-coherent
    (it does not snoop the CPU caches). The in-kernel scaffold's
@@ -2301,19 +2300,19 @@ silently dropped two things the metal-debugged scaffold relied on:
 2. **The per-stage diagnostics.** The scaffold logged `4101`/`4106`/`4126`
    per-stage records; the user-space driver exited silently with code `82`.
    Restored as a user-space one-shot structured `log_emit` record:
-   `tairix_hid::bring_up_boot_keyboard_diagnostic` returns a
-   `KeyboardBringupError` (the failing `BringupPhase` plus the `Xhci::open`
+   `tairix_drv_bus_usb::bringup::bring_up_controller_diagnostic` returns a
+   `ControllerBringupError` (the failing `BringupPhase` plus the `Xhci::open`
    reset sub-stage + `USBCMD`/`USBSTS`, or the enumeration
    `stage`/`completion`/`reject`/`evtype` breadcrumbs + root-port `PORTSC`),
-   which `usb_kbd` emits as event `4126` (and a `4101` "controller up"
-   beacon) through `tairix_rt::LogSink`, gated on `CAP_LOG_EMIT`
+   which the host-controller driver emits as event `4126` (and a `4101`
+   "controller up" beacon) through `tairix_rt::LogSink`, gated on `CAP_LOG_EMIT`
    (`AGENTS.md` §15.7 / §19.4). A non-I/O-coherent stall now reads
    `phase=enumerate stage_hex=2 completion_hex=0` — the historical
    DMA-not-visible signature — instead of a blind exit.
 
 Both are host-proven (the coherent-DMA leaf in `kernel/arch/aarch64`'s
-`paging_tests`, the diagnostic surface in `lib/hid`'s `service_tests`); the
-live keyboard coming up over the user-space chain is the on-metal acceptance
+`paging_tests`, the diagnostic surface in the host-controller driver's
+`bringup_tests`); the live keyboard coming up over the user-space chain is the on-metal acceptance
 item (QEMU models no Pi PCIe/USB, `AGENTS.md` §0.4).
 
 ### DMA ordering — the barrier the non-coherent PCIe master needs

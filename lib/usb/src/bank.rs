@@ -23,13 +23,7 @@ use alloc::vec::Vec;
 use tairix_abi::driver::dma::{DmaHost, DmaSlab};
 use tairix_abi::DriverError;
 
-use crate::device::DmaBank;
-
-/// Alignment of each chunk's base offset in the bank's virtual offset
-/// space. Keeping chunk bases page-multiple-aligned means in-chunk layout
-/// arithmetic (64-byte packing, page-aligned scratchpad pages) holds in
-/// the virtual space exactly as it does chunk-relative.
-const CHUNK_ALIGN: usize = 4096;
+use crate::device::{DmaBank, DMA_CHUNK_ALIGN};
 
 /// One live chunk: its virtual base offset and the owned slab backing it.
 struct Chunk {
@@ -147,7 +141,7 @@ impl DmaBank for SlabBank<'_> {
         self.next_base = base
             .checked_add(len)
             .ok_or(DriverError::LengthOutOfRange)?
-            .next_multiple_of(CHUNK_ALIGN);
+            .next_multiple_of(DMA_CHUNK_ALIGN);
         self.chunks.push(Chunk { base, slab });
         Ok(base)
     }

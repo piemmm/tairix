@@ -53,11 +53,12 @@ The kernel hosts this state machine in its seat registry
 (`tairix_kernel_core::seat::SeatRegistry`): every seat on the machine,
 each holding its own `SeatState` under its own lock next to the input
 sinks it routes between — the seat's foreground text console type-ahead
-queue and its bounded desktop keyboard and pointer channels. The two
-desktop channels share one ring definition (`InputChannel`), differing
+queue and its bounded desktop keyboard, pointer and touch channels. The
+three desktop channels share one ring definition (`InputChannel`), differing
 only in capacity (64 key records; 256 pointer records — a pointing device
-emits far more events between per-frame drains) and both zero each record
-as it is drained, so a typed secret never lingers. Every seat-addressed
+emits far more events between per-frame drains; 64 touch frames, half a
+second of a touchpad scanning at 125 Hz) and all zero each record as it is
+drained, so a typed secret never lingers. Every seat-addressed
 syscall names its seat and fails closed with `Errno::NotFound` for one
 that does not (or no longer) exist.
 
@@ -87,7 +88,7 @@ that does not (or no longer) exist.
   button edge for its device's seat (a `PointerInput` record is
   screen-independent — the seat owner, which owns the compositor,
   accumulates displacements into the on-screen position; a scroll wheel
-  rides the same channel as a `Scrolled` record counting detents), the registry
+  rides the same channel as a `Scrolled` record in scroll units), the registry
   queues it on a held seat's pointer channel, and only the live lease
   owner drains it — the same `SeatState::access` gate as
   `keyboard_read`, so no other capability holder can observe the pointer
@@ -111,8 +112,16 @@ that does not (or no longer) exist.
   (`ClickDebounce`) is the seat's; the window and the clock are supplied to it,
   so it reads neither behind the caller's back. The first
   delivered record of each input kind emits that kind's one-shot
-  `INPUT_DELIVERED` witness (`kind=key` / `kind=pointer`), so keyboard
-  and pointer liveness are separately attributable from the log.
+  `INPUT_DELIVERED` witness (`kind=key` / `kind=pointer` / `kind=touch`), so
+  keyboard, pointer and touch liveness are separately attributable from the
+  log.
+- `touch_inject` (`abi-v1` 134, `CAP_INPUT_INJECT`) and `touch_read`
+  (`abi-v1` 135, `CAP_INPUT_READ`) carry touch frames — every contact on one
+  surface in one scan ([Input events](../abi/input.md)) — gated and routed as
+  the pointer pair is. The kernel stamps each frame with its injector and its
+  arrival over whatever the driver wrote, so the owner's gesture recogniser
+  ([`tairix-touch`](../lib/touch.md)) follows each surface by its true source
+  and times a tap by arrival rather than by when a busy desktop read it.
   Desktop input is deliberately *not* a named IPC port: a port's receive
   gate is capability-only and cannot express "only the live seat-lease
   holder may drain".
@@ -289,8 +298,8 @@ Its kernel surfaces are live:
 - **Park on seat input, never poll.** The wait-set accepts a `SeatInput`
   member (`waitset_ctl`, kind 3, `id` = seat id), owner-checked at add
   against the seat's live lease with the same oracle-free `NotFound` the
-  other member kinds use. The member is ready when the seat's keyboard
-  **or** pointer channel holds a record — and when the caller *loses* the
+  other member kinds use. The member is ready when the seat's keyboard,
+  pointer **or** touch channel holds a record — and when the caller *loses* the
   lease (release, administrative revoke, display hot-removal), so a
   parked session wakes, observes the typed `SeatRevoked`/`SeatNotOwner`
   on its next drain, and tears down instead of parking forever. The wake

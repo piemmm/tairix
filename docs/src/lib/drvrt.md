@@ -41,11 +41,14 @@ used.
 `RtDriverHost::resources()` exposes the granted `HwResource`s read-only, so a
 driver derives its concrete bring-up inputs — its register BAR window and DMA
 aperture bound — from the same grant set the host maps over, without a second
-`resource_grants` syscall (§2.16). The USB keyboard driver process
-(`drivers/input/usb_kbd`) uses it with
-`tairix_hid::derive_keyboard_resources` to fill the
-`bar_base`/`bar_len`/`dma_aperture_top` its bring-up needs (`plans/PI.md` P10
-chunk 5d-2-ii).
+`resource_grants` syscall (§2.16). `RtDriverHost::property(key)` answers a
+fact the node states (`HwProperty::UsbInterface`, the interface a USB class
+driver's requests address).
+
+`RtDriverHost::shared_buffer(least)` maps the node's shared buffer whole and
+hands it out once, as one exclusive slice for the life of the process, so a
+class driver never builds its own slice over a kernel-mapped address; a second
+call is refused, and a region shorter than `least` too.
 
 `tairix_drvrt::RtDriverHost` turns that grant table into the three traits a
 bus driver's `register()` consumes:
@@ -115,7 +118,10 @@ trait, so the host's grant delivery decode, grant resolution, bus→CPU
 translation, map-once caching, node publishing, and every fail-closed path are
 unit-tested on the host without a kernel (§7). Production driver processes use
 `RtGrantSyscalls`, which forwards to the matching `tairix_rt` wrappers — the
-one syscall trap (§2.2).
+one syscall trap (§2.2). The trait is `unsafe` to implement: the host builds
+windows, slabs and the shared buffer from the addresses it answers, so an
+implementation promises each is a live mapping of the length asked for, this
+process's alone.
 
 ## Stability
 

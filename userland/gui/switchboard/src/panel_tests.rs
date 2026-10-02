@@ -2,10 +2,11 @@
 //! application, driven entirely through the recording host.
 
 use tairix_abi::driver::display::DamageRect;
+use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
 use tairix_abi::switchboard_ipc::{CommandSection, FrameReport, SeatReport, SwitchboardRequest};
 use tairix_abi::sysinfo::ProcessState;
 use tairix_abi::window_ipc::{
-    AppMenuItemId, AppMenuRowView, MenuOutcome, MenuRefusal, WindowRegion, SCROLL_UNITS_PER_DETENT,
+    AppMenuItemId, AppMenuRowView, MenuOutcome, MenuRefusal, WindowRegion,
 };
 use tairix_abi::{Errno, ProcId, Signal};
 use tairix_controls::WHEEL_STEP;

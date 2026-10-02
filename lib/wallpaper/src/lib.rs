@@ -77,8 +77,8 @@ pub use catalog::{
 pub use fit::{decode_request, nominal_source_size, place, Placement};
 pub use idle::{DisplayOffAfter, IdleAfter, IdleWait, MAX_WAIT_MINUTES};
 pub use input::{
-    PointerSpeed, PrimaryButton, RepeatRate, REPEAT_DELAY_DEFAULT, REPEAT_DELAY_MAX,
-    REPEAT_DELAY_MIN,
+    PointerSpeed, PrimaryButton, RepeatRate, TouchpadSettings, REPEAT_DELAY_DEFAULT,
+    REPEAT_DELAY_MAX, REPEAT_DELAY_MIN,
 };
 pub use notify::{NotifyLevel, NotifyPolicy, PolicyFull};
 pub use saver::{

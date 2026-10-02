@@ -1093,6 +1093,51 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Inject one touch frame into a seat (`plans/POINTING.md`; the touch
+    /// analogue of [`Self::pointer_inject`]).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::INPUT_INJECT`] and that `buf` is a non-null `UserPtr`.
+    /// The implementation copies in and validates one
+    /// [`tairix_abi::touch::TouchFrame`], stamps it with the caller and its
+    /// arrival, and routes it to the seat's touch channel, returning the
+    /// bytes consumed.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]. The real handler is installed in
+    /// `kernel/core`.
+    fn touch_inject(
+        &self,
+        _caller: &CallerContext<'_>,
+        _seat: u64,
+        _buf: u64,
+        _len: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Read one touch frame from a seat's touch channel
+    /// (`plans/POINTING.md`; the touch analogue of [`Self::pointer_read`]).
+    ///
+    /// The dispatcher has already checked the caller holds
+    /// [`CapabilityId::INPUT_READ`] and that `buf` is a non-null `UserPtr`.
+    /// The implementation owner-gates the drain against the seat's live
+    /// lease, then copies one frame out, returning the bytes written or `0`
+    /// when the channel is drained.
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]. The real handler is installed in
+    /// `kernel/core`.
+    fn touch_read(
+        &self,
+        _caller: &CallerContext<'_>,
+        _seat: u64,
+        _buf: u64,
+        _len: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Map a granted device MMIO register window into the calling driver's
     /// own address space (`plans/PI.md` P10 chunk
     /// 5d-0).
@@ -3494,6 +3539,17 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 self.handlers
                     .pointer_read(caller, args.0[0], args.0[1], len)
             }
+            SyscallNumber::TOUCH_INJECT => {
+                // As `pointer_inject`: the seat, the frame, its length.
+                let len = decode_len(args.0[2])?;
+                self.handlers
+                    .touch_inject(caller, args.0[0], args.0[1], len)
+            }
+            SyscallNumber::TOUCH_READ => {
+                // As `pointer_read`: the seat, the buffer, its capacity.
+                let len = decode_len(args.0[2])?;
+                self.handlers.touch_read(caller, args.0[0], args.0[1], len)
+            }
             // `validate_arg` accepts args[0] as an opaque `Handle` u64; the
             // handler resolves it against the calling task and the grant
             // table (forgery + ownership are checked there). args[1] is the byte offset of the sub-region within the
@@ -4884,6 +4940,28 @@ mod tests {
             // Echo `seat + len` back so the reachability test can assert the
             // dispatcher decoded `(seat, buf, len)` without wiring a real
             // pointer channel here.
+            Ok(seat + len as u64)
+        }
+
+        fn touch_inject(
+            &self,
+            _c: &CallerContext<'_>,
+            seat: u64,
+            _buf: u64,
+            len: usize,
+        ) -> SyscallResult {
+            self.record("touch_inject");
+            Ok(seat + len as u64)
+        }
+
+        fn touch_read(
+            &self,
+            _c: &CallerContext<'_>,
+            seat: u64,
+            _buf: u64,
+            len: usize,
+        ) -> SyscallResult {
+            self.record("touch_read");
             Ok(seat + len as u64)
         }
 

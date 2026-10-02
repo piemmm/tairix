@@ -1449,6 +1449,7 @@ dependencies = [
  "tairix-svg",
  "tairix-taskbar",
  "tairix-theme",
+ "tairix-touch",
  "tairix-util",
  "tairix-vt",
  "tairix-wallpaper",
@@ -1637,7 +1638,6 @@ dependencies = [
  "tairix-abi",
  "tairix-caps",
  "tairix-drvrt",
- "tairix-hid",
  "tairix-log",
  "tairix-rt",
  "tairix-usb",
@@ -1781,21 +1781,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "tairix-drv-input-usb-kbd"
-version = "0.0.0"
-dependencies = [
- "tairix-abi",
- "tairix-caps",
- "tairix-drvrt",
- "tairix-hid",
- "tairix-log",
- "tairix-rt",
- "tairix-usb",
- "tairix-util",
-]
-
-[[package]]
-name = "tairix-drv-input-usb-mouse"
+name = "tairix-drv-input-usb-hid"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
@@ -2297,6 +2283,7 @@ dependencies = [
  "tairix-ribbon",
  "tairix-rt",
  "tairix-theme",
+ "tairix-touch",
  "tairix-users",
  "tairix-util",
  "tairix-window",
@@ -2463,6 +2450,14 @@ dependencies = [
  "tairix-net",
  "tairix-qemu",
  "tairix-syshelp",
+]
+
+[[package]]
+name = "tairix-itest-witness"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-log",
 ]
 
 [[package]]
@@ -3740,6 +3735,7 @@ dependencies = [
  "tairix-appload",
  "tairix-arch-aarch64",
  "tairix-itest-harness",
+ "tairix-itest-witness",
  "tairix-kalloc",
  "tairix-kernel",
  "tairix-kernel-ipc",
@@ -3778,6 +3774,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-arch-aarch64",
  "tairix-itest-harness",
+ "tairix-itest-witness",
  "tairix-kalloc",
  "tairix-kernel",
  "tairix-kernel-core",
@@ -3791,6 +3788,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-arch-riscv64",
  "tairix-itest-harness",
+ "tairix-itest-witness",
  "tairix-kalloc",
  "tairix-kernel",
  "tairix-kernel-core",
@@ -3804,6 +3802,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-arch-x86_64",
  "tairix-itest-harness",
+ "tairix-itest-witness",
  "tairix-kernel",
  "tairix-log",
  "tairix-test-audio-wire",
@@ -4077,6 +4076,7 @@ dependencies = [
  "tairix-appload",
  "tairix-arch-aarch64",
  "tairix-itest-harness",
+ "tairix-itest-witness",
  "tairix-kalloc",
  "tairix-kernel",
  "tairix-kernel-ipc",
@@ -4106,6 +4106,7 @@ dependencies = [
  "tairix-appload",
  "tairix-arch-aarch64",
  "tairix-itest-harness",
+ "tairix-itest-witness",
  "tairix-kalloc",
  "tairix-kernel",
  "tairix-kernel-core",
@@ -4135,6 +4136,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-arch-aarch64",
  "tairix-itest-harness",
+ "tairix-itest-witness",
  "tairix-kalloc",
  "tairix-kernel",
  "tairix-log",
@@ -4650,6 +4652,7 @@ dependencies = [
  "tairix-appload",
  "tairix-arch-aarch64",
  "tairix-itest-harness",
+ "tairix-itest-witness",
  "tairix-kalloc",
  "tairix-kernel",
  "tairix-kernel-ipc",
@@ -5075,6 +5078,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-arch-aarch64",
  "tairix-itest-harness",
+ "tairix-itest-witness",
  "tairix-kalloc",
  "tairix-kernel",
  "tairix-log",
@@ -5089,6 +5093,7 @@ dependencies = [
  "tairix-appload",
  "tairix-arch-aarch64",
  "tairix-itest-harness",
+ "tairix-itest-witness",
  "tairix-kalloc",
  "tairix-kernel",
  "tairix-kernel-ipc",
@@ -5270,6 +5275,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-arch-aarch64",
  "tairix-itest-harness",
+ "tairix-itest-witness",
  "tairix-kalloc",
  "tairix-kernel",
  "tairix-log",
@@ -5282,6 +5288,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-arch-aarch64",
  "tairix-itest-harness",
+ "tairix-itest-witness",
  "tairix-kalloc",
  "tairix-kernel",
  "tairix-log",
@@ -5294,6 +5301,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-arch-aarch64",
  "tairix-itest-harness",
+ "tairix-itest-witness",
  "tairix-kalloc",
  "tairix-kernel",
  "tairix-log",
@@ -5339,6 +5347,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-arch-aarch64",
  "tairix-itest-harness",
+ "tairix-itest-witness",
  "tairix-kalloc",
  "tairix-kernel",
  "tairix-log",
@@ -5351,6 +5360,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-arch-aarch64",
  "tairix-itest-harness",
+ "tairix-itest-witness",
  "tairix-kalloc",
  "tairix-kernel",
  "tairix-log",
@@ -5363,6 +5373,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-arch-aarch64",
  "tairix-itest-harness",
+ "tairix-itest-witness",
  "tairix-kalloc",
  "tairix-kernel",
  "tairix-log",
@@ -5420,6 +5431,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-arch-aarch64",
  "tairix-itest-harness",
+ "tairix-itest-witness",
  "tairix-kalloc",
  "tairix-kernel",
  "tairix-log",
@@ -5833,6 +5845,7 @@ dependencies = [
  "tairix-abi",
  "tairix-arch-aarch64",
  "tairix-itest-harness",
+ "tairix-itest-witness",
  "tairix-kalloc",
  "tairix-kernel",
  "tairix-log",
@@ -5848,6 +5861,7 @@ dependencies = [
  "tairix-arch-aarch64",
  "tairix-confd",
  "tairix-itest-harness",
+ "tairix-itest-witness",
  "tairix-kalloc",
  "tairix-kernel",
  "tairix-kernel-core",
@@ -6243,6 +6257,7 @@ dependencies = [
  "tairix-arch-aarch64",
  "tairix-itest-finisher",
  "tairix-itest-harness",
+ "tairix-itest-witness",
  "tairix-kalloc",
  "tairix-kernel",
  "tairix-log",
@@ -6255,6 +6270,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-arch-aarch64",
  "tairix-itest-harness",
+ "tairix-itest-witness",
  "tairix-kalloc",
  "tairix-kernel",
  "tairix-log",
@@ -6340,6 +6356,7 @@ dependencies = [
  "tairix-arch-aarch64",
  "tairix-itest-finisher",
  "tairix-itest-harness",
+ "tairix-itest-witness",
  "tairix-kalloc",
  "tairix-kernel",
  "tairix-log",
@@ -6408,6 +6425,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-arch-aarch64",
  "tairix-itest-harness",
+ "tairix-itest-witness",
  "tairix-kalloc",
  "tairix-kernel",
  "tairix-log",
@@ -6561,6 +6579,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-touch-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-appload",
+ "tairix-arch-aarch64",
+ "tairix-itest-harness",
+ "tairix-itest-witness",
+ "tairix-kalloc",
+ "tairix-kernel",
+ "tairix-kernel-core",
+ "tairix-log",
+ "tairix-test-appbar-qemu-aarch64",
+]
+
+[[package]]
 name = "tairix-test-tp-isolation-qemu-riscv64"
 version = "0.0.0"
 dependencies = [
@@ -6655,6 +6689,7 @@ dependencies = [
  "tairix-abi",
  "tairix-arch-aarch64",
  "tairix-itest-harness",
+ "tairix-itest-witness",
  "tairix-kalloc",
  "tairix-kernel",
  "tairix-log",
@@ -6878,6 +6913,7 @@ dependencies = [
  "tairix-appload",
  "tairix-arch-aarch64",
  "tairix-itest-harness",
+ "tairix-itest-witness",
  "tairix-kalloc",
  "tairix-kernel",
  "tairix-kernel-ipc",
@@ -7002,6 +7038,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-touch"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-fuzzseed",
+ "tairix-input",
+]
+
+[[package]]
 name = "tairix-true"
 version = "0.0.0"
 dependencies = [
@@ -7043,7 +7088,6 @@ dependencies = [
  "tairix-abi",
  "tairix-dma-barrier",
  "tairix-fuzzseed",
- "tairix-hid",
  "tairix-inline",
 ]
 
@@ -7406,8 +7450,7 @@ dependencies = [
  "tairix-drv-display-framebuffer",
  "tairix-drv-display-rpi-fb",
  "tairix-drv-dma-bcm2835",
- "tairix-drv-input-usb-kbd",
- "tairix-drv-input-usb-mouse",
+ "tairix-drv-input-usb-hid",
  "tairix-drv-input-virtio-input",
  "tairix-drv-network-genet",
  "tairix-drv-network-virtio-net",

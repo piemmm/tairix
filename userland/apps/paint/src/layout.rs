@@ -32,7 +32,7 @@ use tairix_theme::Theme;
 use crate::canvas::MAX_SIDE;
 use crate::document::MAX_ENTRIES;
 use crate::render::{write_position, write_sprite, write_zoom};
-use crate::viewport::{percent_of, ZOOMS};
+use crate::viewport::{Zoom, ZOOMS};
 
 /// The client area a new window opens at, in logical pixels.
 pub const WINDOW_SIZE: (u32, u32) = (900, 640);
@@ -340,7 +340,7 @@ fn status_slots(band: Rect, face: BitmapFont, gap: u32) -> (Rect, Rect, Rect, Re
     let zoom = ZOOMS
         .iter()
         .map(|&rung| {
-            write_zoom(&mut text, percent_of(rung));
+            write_zoom(&mut text, Zoom::of(rung).percent());
             room(&mut text)
         })
         .max()

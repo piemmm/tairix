@@ -4,6 +4,7 @@ use tairix_abi::driver::display::DisplayMode;
 use tairix_cursor::{CursorImage, CursorRegistry, CURSOR_BASE_SIDE_PX};
 use tairix_geometry::{Point, Scale};
 use tairix_theme::CursorKind;
+use tairix_touch::SurfacePoint;
 
 /// The pointer artwork for `scale`: the shared set's arrow, rasterised once
 /// at the reference side this density calls for.
@@ -52,6 +53,16 @@ impl Cursor {
     /// Where the pointer is now.
     #[must_use]
     pub const fn at(&self) -> Point {
+        self.at
+    }
+
+    /// Move to a touchscreen's `place` and report where that landed.
+    pub fn placed(&mut self, place: SurfacePoint) -> Point {
+        let (x, y) = place.on_screen(self.width.unsigned_abs(), self.height.unsigned_abs());
+        self.at = Point::new(
+            i32::try_from(x).unwrap_or(i32::MAX),
+            i32::try_from(y).unwrap_or(i32::MAX),
+        );
         self.at
     }
 
@@ -112,6 +123,25 @@ mod tests {
         let at = cursor.moved_by(100_000, 100_000);
         assert_eq!(at.x, 639);
         assert_eq!(at.y, 479);
+    }
+
+    #[test]
+    fn a_touchscreen_place_puts_the_pointer_there() {
+        let mut cursor = Cursor::centred(&mode(640, 480));
+        let corner = tairix_touch::SurfacePoint {
+            x: u16::MAX,
+            y: u16::MAX,
+        };
+        assert_eq!(cursor.placed(corner), Point::new(639, 479));
+        assert_eq!(
+            cursor.placed(tairix_touch::SurfacePoint { x: 0, y: 0 }),
+            Point::new(0, 0)
+        );
+        assert_eq!(
+            cursor.moved_by(5, 5),
+            Point::new(5, 5),
+            "motion goes on from there"
+        );
     }
 
     #[test]

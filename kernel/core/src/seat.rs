@@ -16,9 +16,10 @@
 //! * **Desktop foreground** (a held seat): the whole record is routed to the
 //!   seat's keyboard channel, where the seat owner (the window manager)
 //!   drains it with `keyboard_read`. Pointer events take the same shape
-//!   through the seat's pointer channel (`pointer_inject` → `pointer_read`);
-//!   while the seat is unowned they are consumed and discarded, because the
-//!   text console has no pointer consumer.
+//!   through the seat's pointer channel (`pointer_inject` → `pointer_read`),
+//!   and touch frames through its touch channel (`touch_inject` →
+//!   `touch_read`); while the seat is unowned both are consumed and
+//!   discarded, because the text console has no pointer consumer.
 //!
 //! Ownership is a kernel fact, not a capability side effect: `display_acquire`
 //! records the kernel-attested caller as the seat owner ([`SeatOwner`]), a
@@ -42,6 +43,7 @@ use tairix_abi::input::{ClickDebounce, KeyInput, PointerInput};
 use tairix_abi::seat::{DisplayLease, ReleaseSurface, SeatLease, SEAT_PRIMARY};
 use tairix_abi::sysinfo::{SeatRecord, SEAT_FLAG_OWNED};
 use tairix_abi::time::NANOS_PER_MILLI;
+use tairix_abi::touch::TouchFrame;
 use tairix_abi::{DriverError, Errno};
 use tairix_fbcon::Surface;
 use tairix_inline::SecretRing;
@@ -77,6 +79,15 @@ pub const KEYBOARD_CHANNEL_CAPACITY: usize = 64;
 /// blocks and never grows kernel memory.
 pub const POINTER_CHANNEL_CAPACITY: usize = 256;
 
+/// Capacity, in [`TouchFrame`]s, of the desktop touch channel's ring.
+///
+/// The same **fixed bound** rationale again: half a second of a touchpad
+/// scanning at its usual 125 Hz, so a desktop busy for a frame or two loses
+/// nothing, and overflow drops the oldest frame. The recogniser reads each
+/// frame as the whole set of contacts down, so a dropped frame costs motion,
+/// never a stuck contact.
+pub const TOUCH_CHANNEL_CAPACITY: usize = 64;
+
 /// A bounded, lock-protected channel of fixed-width input records the seat
 /// routes to the desktop while it is held, drained one record at a time by
 /// the seat owner (`keyboard_read` / `pointer_read`).
@@ -99,6 +110,9 @@ type KeyboardChannel = InputChannel<KEYBOARD_CHANNEL_CAPACITY, { KeyInput::WIRE_
 /// The desktop pointer channel: [`PointerInput`] records, drained by
 /// `pointer_read`.
 type PointerChannel = InputChannel<POINTER_CHANNEL_CAPACITY, { PointerInput::WIRE_LEN }>;
+
+/// The desktop touch channel: [`TouchFrame`]s, drained by `touch_read`.
+type TouchChannel = InputChannel<TOUCH_CHANNEL_CAPACITY, { TouchFrame::WIRE_LEN }>;
 
 impl<const CAP: usize, const REC: usize> InputChannel<CAP, REC> {
     const fn new() -> Self {
@@ -179,7 +193,7 @@ pub fn seat_errno(err: SeatError) -> Errno {
 
 /// One seat's kernel-side backing: the shared [`SeatState`] owner/lease
 /// state machine under its own lock, the seat's text sink, and its desktop
-/// keyboard and pointer channels.
+/// keyboard, pointer and touch channels.
 ///
 /// Each seat's state and channel are independent — one seat's input, owner,
 /// and revocations never touch another's — and each slot carries its own
@@ -196,6 +210,8 @@ struct SeatSlot {
     channel: KeyboardChannel,
     /// The desktop pointer channel — the seat's desktop pointer sink.
     pointer: PointerChannel,
+    /// The desktop touch channel — the seat's desktop touch sink.
+    touch: TouchChannel,
     /// The seat's pointer-button chatter filter. The seat is the one funnel
     /// every pointer injector passes through, so the window is applied here
     /// rather than in each driver — and a driver holds no configuration
@@ -210,17 +226,19 @@ impl SeatSlot {
             text_sink,
             channel: KeyboardChannel::new(),
             pointer: PointerChannel::new(),
+            touch: TouchChannel::new(),
             debounce: SpinLock::new(ClickDebounce::new()),
         }
     }
 
-    /// Discard both desktop input channels' queued records, zeroing them.
+    /// Discard every desktop input channel's queued records, zeroing them.
     ///
-    /// One call for the pair, so no lease transition can remember to purge
-    /// the keystrokes and forget the pointer trail.
+    /// One call for all three, so no lease transition can remember to purge
+    /// the keystrokes and forget the pointer trail or the touches.
     fn purge_channels(&self) {
         self.channel.purge();
         self.pointer.purge();
+        self.touch.purge();
     }
 
     /// One wire-encodable snapshot of this seat, taken under its state lock
@@ -345,15 +363,17 @@ pub struct SeatRegistry {
     /// ever increases.
     next_seat_id: AtomicU64,
     /// One-shot latches, one per input kind: `false` until the first key
-    /// edge (respectively pointer record) is delivered to any seat, then
-    /// `true` forever. They let the `key_inject` / `pointer_inject`
-    /// syscall handlers emit one audit witness per input kind the first
+    /// edge (respectively pointer record, touch frame) is delivered to any
+    /// seat, then `true` forever. They let the `key_inject` /
+    /// `pointer_inject` / `touch_inject` syscall handlers emit one audit
+    /// witness per input kind the first
     /// time a (typically autoloaded) driver of that kind delivers input —
     /// proof each input path is live and attributable per kind — without
     /// logging one record per event, which would leak typed secrets and
     /// their timing (no input-content/timing noise — secret hygiene).
     first_key_delivery: AtomicBool,
     first_pointer_delivery: AtomicBool,
+    first_touch_delivery: AtomicBool,
 }
 
 /// The input kind a first-delivery witness attributes
@@ -365,6 +385,8 @@ pub enum DeliveredInputKind {
     Key,
     /// A pointer motion or button record (`pointer_inject`).
     Pointer,
+    /// A touch frame (`touch_inject`).
+    Touch,
 }
 
 impl DeliveredInputKind {
@@ -374,6 +396,7 @@ impl DeliveredInputKind {
         match self {
             Self::Key => "key",
             Self::Pointer => "pointer",
+            Self::Touch => "touch",
         }
     }
 }
@@ -394,6 +417,7 @@ impl SeatRegistry {
             next_seat_id: AtomicU64::new(SEAT_PRIMARY + 1),
             first_key_delivery: AtomicBool::new(false),
             first_pointer_delivery: AtomicBool::new(false),
+            first_touch_delivery: AtomicBool::new(false),
         }
     }
 
@@ -648,6 +672,31 @@ impl SeatRegistry {
         Ok(PointerInput::WIRE_LEN)
     }
 
+    /// Route one touch frame, already stamped with its injector and arrival,
+    /// to seat `seat_id`'s current foreground sink, returning the bytes
+    /// consumed ([`TouchFrame::WIRE_LEN`]).
+    ///
+    /// A **held** seat queues the frame on its touch channel; an **unowned**
+    /// seat consumes and discards it, as it does a pointer record.
+    ///
+    /// # Errors
+    ///
+    /// - [`Errno::NotFound`] — no live seat has that id.
+    pub fn inject_touch(&self, seat_id: u64, frame: &TouchFrame) -> Result<usize, Errno> {
+        let slot = self.resolve(seat_id)?;
+        let state = slot.state.lock();
+        if let Route::Desktop(_) = state.route() {
+            let mut bytes = frame.to_le_bytes();
+            // Decided and delivered under one guard: touches never cross a
+            // lease boundary.
+            slot.touch.push(&bytes);
+            drop(state);
+            bytes.zeroize();
+            crate::waitq::seat_input_wake();
+        }
+        Ok(TouchFrame::WIRE_LEN)
+    }
+
     /// Record that an input record of `kind` has been delivered to the
     /// seat and report whether this was the **first** delivery of that
     /// kind since boot.
@@ -659,8 +708,8 @@ impl SeatRegistry {
     /// successful [`Self::inject`] / [`Self::inject_pointer`] and emit one
     /// audit witness ([`crate::audit::AuditEvent::InputDelivered`], with a
     /// `kind` field) per `true`, so the log records that an (autoloaded)
-    /// driver of each input class is live — at most two records over the
-    /// kernel's lifetime, never one per event (no input-content/timing
+    /// driver of each input class is live — at most one record per kind over
+    /// the kernel's lifetime, never one per event (no input-content/timing
     /// noise — secret hygiene). It carries no event content; only the fact
     /// of the kind's first delivery.
     #[must_use]
@@ -668,6 +717,7 @@ impl SeatRegistry {
         let latch = match kind {
             DeliveredInputKind::Key => &self.first_key_delivery,
             DeliveredInputKind::Pointer => &self.first_pointer_delivery,
+            DeliveredInputKind::Touch => &self.first_touch_delivery,
         };
         latch
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -733,6 +783,33 @@ impl SeatRegistry {
         let slot = self.resolve(seat_id)?;
         slot.state.lock().access(owner).map_err(seat_errno)?;
         Ok(slot.pointer.drain_one(out))
+    }
+
+    /// Drain one touch frame from seat `seat_id`'s touch channel into `out`
+    /// for the kernel-attested `owner`, returning the bytes written — one
+    /// [`TouchFrame`], or `0` when the channel is drained (`touch_read`).
+    ///
+    /// Owner-gated through the seat's live lease exactly like
+    /// [`Self::read_pointer`].
+    ///
+    /// # Errors
+    ///
+    /// - [`Errno::BufferTooSmall`] — `out` cannot hold a whole frame.
+    /// - [`Errno::NotFound`] — no live seat has that id.
+    /// - [`Errno::SeatNotOwner`] — `owner` does not hold the seat.
+    /// - [`Errno::SeatRevoked`] — `owner`'s lease was revoked.
+    pub fn read_touch(
+        &self,
+        seat_id: u64,
+        owner: SeatOwner,
+        out: &mut [u8],
+    ) -> Result<usize, Errno> {
+        if out.len() < TouchFrame::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let slot = self.resolve(seat_id)?;
+        slot.state.lock().access(owner).map_err(seat_errno)?;
+        Ok(slot.touch.drain_one(out))
     }
 
     /// The task currently holding seat `seat_id`, if any
@@ -1006,13 +1083,14 @@ impl SeatRegistry {
     /// Whether a `SeatInput` wait-set member observing seat `seat_id` for
     /// `owner` is ready (`plans/DISPLAY.md` D7a). A non-consuming peek:
     ///
-    /// - a record is queued on the seat's keyboard **or** pointer channel
-    ///   while `owner` holds the live lease — there is input to drain; or
+    /// - a record is queued on the seat's keyboard, pointer **or** touch
+    ///   channel while `owner` holds the live lease — there is input to
+    ///   drain; or
     /// - `owner` no longer holds the live lease (released, revoked, seat
     ///   destroyed) — the loss itself is the event: the woken owner's next
     ///   drain returns the typed refusal and the session tears down.
     ///
-    /// Only "the lease is live and both channels are empty" parks.
+    /// Only "the lease is live and every channel is empty" parks.
     #[must_use]
     pub fn input_ready(&self, seat_id: u64, owner: SeatOwner) -> bool {
         let Ok(slot) = self.resolve(seat_id) else {
@@ -1021,7 +1099,7 @@ impl SeatRegistry {
         if slot.state.lock().access(owner).is_err() {
             return true;
         }
-        slot.channel.pending() || slot.pointer.pending()
+        slot.channel.pending() || slot.pointer.pending() || slot.touch.pending()
     }
 
     /// The live seat-lease gate for the client holding `lease` — the one
@@ -1186,6 +1264,22 @@ mod tests {
             key: KeyValue::Char(c),
             modifiers: Modifiers::default(),
         }
+    }
+
+    /// A touchscreen frame with one finger at `(x, 0)`, stamped as the
+    /// kernel stamps it.
+    fn touch_at(x: u16) -> TouchFrame {
+        use tairix_abi::touch::{Contact, TouchButtons, TouchExtent, TouchSurface};
+        let mut frame = TouchFrame::new(
+            0,
+            TouchSurface::Screen,
+            TouchButtons::NONE,
+            TouchExtent::default(),
+        );
+        frame
+            .push(Contact::finger(1, x, 0))
+            .expect("room for a contact");
+        frame.stamped(WM.0, TEST_NOW_NS)
     }
 
     fn text_queue() -> &'static ConsoleInputQueue {
@@ -1410,6 +1504,8 @@ mod tests {
                 TEST_NOW_NS,
             )
             .expect("moved");
+            seat.inject_touch(SEAT_PRIMARY, &touch_at(5))
+                .expect("touched");
 
             end_lease(&seat);
             seat.acquire(SEAT_PRIMARY, INTRUDER).expect("reacquired");
@@ -1425,6 +1521,12 @@ mod tests {
                 seat.read_pointer(SEAT_PRIMARY, INTRUDER, &mut ptr),
                 Ok(0),
                 "the previous session's pointer trail is gone"
+            );
+            let mut touch = [0u8; TouchFrame::WIRE_LEN];
+            assert_eq!(
+                seat.read_touch(SEAT_PRIMARY, INTRUDER, &mut touch),
+                Ok(0),
+                "the previous session's touches are gone"
             );
             assert!(!seat.input_ready(SEAT_PRIMARY, INTRUDER));
         }
@@ -1476,8 +1578,8 @@ mod tests {
         assert!(shown(console));
     }
 
-    /// The `SeatInput` readiness probe: only "the lease is live and both
-    /// desktop channels are empty" parks. Queued input, a released or
+    /// The `SeatInput` readiness probe: only "the lease is live and every
+    /// desktop channel is empty" parks. Queued input, a released or
     /// revoked lease, a foreign observer, and a destroyed seat are all
     /// ready — the loss of the seat is itself the observable event.
     #[test]
@@ -1512,6 +1614,18 @@ mod tests {
         assert_eq!(
             seat.read_pointer(SEAT_PRIMARY, WM, &mut pbuf),
             Ok(PointerInput::WIRE_LEN)
+        );
+        assert!(!seat.input_ready(SEAT_PRIMARY, WM));
+        // And a touch frame through the third.
+        assert_eq!(
+            seat.inject_touch(SEAT_PRIMARY, &touch_at(9)),
+            Ok(TouchFrame::WIRE_LEN)
+        );
+        assert!(seat.input_ready(SEAT_PRIMARY, WM));
+        let mut tbuf = [0u8; TouchFrame::WIRE_LEN];
+        assert_eq!(
+            seat.read_touch(SEAT_PRIMARY, WM, &mut tbuf),
+            Ok(TouchFrame::WIRE_LEN)
         );
         assert!(!seat.input_ready(SEAT_PRIMARY, WM));
         // A task that is not the live owner never parks unwoken: it is
@@ -1735,6 +1849,9 @@ mod tests {
         assert!(seat.note_first_delivery(DeliveredInputKind::Pointer));
         assert!(!seat.note_first_delivery(DeliveredInputKind::Pointer));
         assert!(!seat.note_first_delivery(DeliveredInputKind::Key));
+        assert!(seat.note_first_delivery(DeliveredInputKind::Touch));
+        assert!(!seat.note_first_delivery(DeliveredInputKind::Touch));
+        assert_eq!(DeliveredInputKind::Touch.as_str(), "touch");
     }
 
     #[test]
@@ -1880,6 +1997,71 @@ mod tests {
         assert_eq!(
             seat.read_key(SEAT_PRIMARY, WM, &mut buf),
             Ok(KeyInput::WIRE_LEN)
+        );
+    }
+
+    #[test]
+    fn a_held_seat_queues_touch_frames_for_its_owner_alone() {
+        let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
+        // Unowned: the frame is consumed and gone.
+        assert_eq!(
+            seat.inject_touch(SEAT_PRIMARY, &touch_at(1)),
+            Ok(TouchFrame::WIRE_LEN)
+        );
+        let mut buf = [0u8; TouchFrame::WIRE_LEN];
+        assert_eq!(
+            seat.read_touch(SEAT_PRIMARY, WM, &mut buf),
+            Err(Errno::SeatNotOwner)
+        );
+        seat.acquire(SEAT_PRIMARY, WM)
+            .expect("fresh seat is acquirable");
+        assert_eq!(seat.read_touch(SEAT_PRIMARY, WM, &mut buf), Ok(0));
+        let frame = touch_at(2);
+        assert_eq!(
+            seat.inject_touch(SEAT_PRIMARY, &frame),
+            Ok(TouchFrame::WIRE_LEN)
+        );
+        assert_eq!(
+            seat.read_touch(SEAT_PRIMARY, INTRUDER, &mut buf),
+            Err(Errno::SeatNotOwner),
+            "the frame stays queued for the owner"
+        );
+        assert_eq!(
+            seat.read_touch(SEAT_PRIMARY, WM, &mut buf),
+            Ok(TouchFrame::WIRE_LEN)
+        );
+        assert_eq!(TouchFrame::from_bytes(&buf), Ok(frame));
+        let mut short = [0u8; TouchFrame::WIRE_LEN - 1];
+        assert_eq!(
+            seat.read_touch(SEAT_PRIMARY, WM, &mut short),
+            Err(Errno::BufferTooSmall)
+        );
+        assert_eq!(
+            seat.inject_touch(999, &frame),
+            Err(Errno::NotFound),
+            "an unknown seat fails closed"
+        );
+    }
+
+    #[test]
+    fn touch_channel_drops_the_oldest_frame_on_overflow() {
+        let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
+        seat.acquire(SEAT_PRIMARY, WM)
+            .expect("fresh seat is acquirable");
+        for x in 0..=TOUCH_CHANNEL_CAPACITY {
+            seat.inject_touch(SEAT_PRIMARY, &touch_at(u16::try_from(x).unwrap()))
+                .expect("queued");
+        }
+        let mut buf = [0u8; TouchFrame::WIRE_LEN];
+        assert_eq!(
+            seat.read_touch(SEAT_PRIMARY, WM, &mut buf),
+            Ok(TouchFrame::WIRE_LEN)
+        );
+        assert_eq!(TouchFrame::from_bytes(&buf), Ok(touch_at(1)));
+        // The touch channel never answers a pointer or key drain.
+        assert_eq!(
+            seat.read_pointer(SEAT_PRIMARY, WM, &mut buf[..PointerInput::WIRE_LEN]),
+            Ok(0)
         );
     }
 

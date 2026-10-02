@@ -399,6 +399,26 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn touch_inject(
+        &self,
+        _c: &CallerContext<'_>,
+        _seat: u64,
+        _buf: u64,
+        _len: usize,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
+    fn touch_read(
+        &self,
+        _c: &CallerContext<'_>,
+        _seat: u64,
+        _buf: u64,
+        _len: usize,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
     fn call_grant(&self, _c: &CallerContext<'_>, _endpoint: u64, _recipient: u64) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)

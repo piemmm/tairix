@@ -51,6 +51,8 @@ fel un dryloyw ac nid fel y lliw sydd y tu ôl iddi.
 
 * `+` — chwyddo i'r cam nesaf
 * `-` — lleihau i'r cam blaenorol
+* `Ctrl` + olwyn — chwyddo i mewn neu allan o amgylch y pwyntydd
+* Pinsio â dau fys — chwyddo'n llyfn; ar sgrin gyffwrdd mae'r llun yn dilyn y bysedd
 * `0` — ffitio'r ddelwedd gyfan yn y ffenestr
 * `1` — maint gwirioneddol, un picsel delwedd i bob picsel sgrin
 * `2` — ffitio lled y ddelwedd

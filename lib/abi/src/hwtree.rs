@@ -582,6 +582,43 @@ pub enum HwResourceKind {
     /// still masters it (a VT-d RMRR, an AMD-Vi IVMD unity range). Recovered
     /// through [`HwResource::iommu_reserved`].
     IommuReserved = 13,
+    /// A **named fact** the node's driver needs: `base` is the
+    /// [`HwProperty`] key, `xlate` its value, `len` `1`. Recovered through
+    /// [`HwResource::property`].
+    ///
+    /// The publisher states it about the device it describes; the kernel
+    /// never reads one and holding one authorises nothing.
+    Property = 14,
+}
+
+/// What a [`HwResourceKind::Property`] states.
+#[repr(u32)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub enum HwProperty {
+    /// The node is a USB interface: its `bInterfaceNumber`, which the
+    /// `wIndex` of its interface requests names (USB 2.0 §9.3.4).
+    UsbInterface = 1,
+}
+
+impl HwProperty {
+    /// Every key, so the C view is generated from the ABI rather than a
+    /// hand-kept list.
+    pub const ALL: &'static [Self] = &[Self::UsbInterface];
+
+    /// Raw on-wire key.
+    #[must_use]
+    pub const fn as_u32(self) -> u32 {
+        self as u32
+    }
+
+    /// Inverse of [`Self::as_u32`]; `None` for an unknown key.
+    #[must_use]
+    pub const fn from_u32(v: u32) -> Option<Self> {
+        match v {
+            1 => Some(Self::UsbInterface),
+            _ => None,
+        }
+    }
 }
 
 /// A reserved block of call-endpoint ids, one per hardware-tree node id.
@@ -685,6 +722,7 @@ impl HwResourceKind {
         Self::DmaRequest,
         Self::IommuStream,
         Self::IommuReserved,
+        Self::Property,
     ];
 
     /// Raw on-wire discriminant.
@@ -711,6 +749,7 @@ impl HwResourceKind {
             11 => Some(Self::DmaRequest),
             12 => Some(Self::IommuStream),
             13 => Some(Self::IommuReserved),
+            14 => Some(Self::Property),
             _ => None,
         }
     }
@@ -739,7 +778,9 @@ impl HwResourceKind {
             Self::Shared => CapabilityId::SHM,
             // Read straight out of the record: no syscall resolves any of them
             // and holding one authorises nothing.
-            Self::LinkAddress | Self::IommuStream | Self::IommuReserved => return None,
+            Self::LinkAddress | Self::IommuStream | Self::IommuReserved | Self::Property => {
+                return None
+            }
             // A bus-child or DMA-controller duty authorises binding a
             // reserved id, which is a privileged bind.
             Self::BusChild | Self::DmaController => CapabilityId::IPC_BIND_PRIVILEGED,
@@ -1279,6 +1320,40 @@ impl HwResource {
         }
         let stream = u32::try_from(self.xlate).map_err(|_| Errno::BadMagic)?;
         IommuReservedWindow::new(stream, self.base, self.len).map_err(|_| Errno::BadMagic)
+    }
+
+    /// A [`HwResourceKind::Property`] stating `value` for `key`.
+    #[must_use]
+    pub fn property(key: HwProperty, value: u64) -> Self {
+        Self::new_xlate(
+            HwResourceKind::Property,
+            u64::from(key.as_u32()),
+            1,
+            0,
+            value,
+        )
+    }
+
+    /// The key and value a [`HwResourceKind::Property`] resource carries.
+    ///
+    /// Only the canonical encoding [`Self::property`] produces decodes.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for another kind, or [`Errno::BadMagic`] for a
+    /// capability, flag or length the kind does not carry, or an unknown key.
+    pub fn property_value(&self) -> Result<(HwProperty, u64), Errno> {
+        if self.kind() != Some(HwResourceKind::Property) {
+            return Err(Errno::OutOfRange);
+        }
+        if self.capability != 0 || self.flags != 0 || self.len != 1 {
+            return Err(Errno::BadMagic);
+        }
+        let key = u32::try_from(self.base)
+            .ok()
+            .and_then(HwProperty::from_u32)
+            .ok_or(Errno::BadMagic)?;
+        Ok((key, self.xlate))
     }
 
     /// The link-layer address a [`HwResourceKind::LinkAddress`] resource
@@ -2709,6 +2784,38 @@ mod tests {
         assert_eq!(HwResource::from_bytes(&fact.to_le_bytes()), Ok(fact));
         assert!(streams.contains(0x0013) && !streams.contains(0x0014));
         assert!(!streams.contains(0x000F));
+    }
+
+    #[test]
+    fn a_property_round_trips_and_confers_nothing() {
+        let fact = HwResource::property(HwProperty::UsbInterface, 2);
+        assert_eq!(fact.kind(), Some(HwResourceKind::Property));
+        assert_eq!(fact.required_capability(), Ok(None));
+        assert_eq!(fact.property_value(), Ok((HwProperty::UsbInterface, 2)));
+        assert_eq!(HwResource::from_bytes(&fact.to_le_bytes()), Ok(fact));
+        assert_eq!(
+            HwResource::endpoint(2).property_value(),
+            Err(Errno::OutOfRange)
+        );
+        assert!(!fact.covers(&fact), "a property is stated, never delegated");
+        for key in HwProperty::ALL {
+            assert_eq!(HwProperty::from_u32(key.as_u32()), Some(*key));
+        }
+        assert_eq!(HwProperty::from_u32(0), None);
+    }
+
+    #[test]
+    fn a_property_refuses_every_non_canonical_field() {
+        let good = HwResource::property(HwProperty::UsbInterface, 0);
+        for (at, value) in [(2, 1u8), (4, 1), (16, 2), (8, 9)] {
+            let mut wire = good.to_le_bytes();
+            wire[at] = value;
+            assert_eq!(
+                HwResource::from_bytes(&wire).and_then(|fact| fact.property_value()),
+                Err(Errno::BadMagic),
+                "byte {at}"
+            );
+        }
     }
 
     #[test]

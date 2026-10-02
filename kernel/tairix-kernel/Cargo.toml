@@ -375,7 +375,7 @@ tairix-kernel-syscall = { path = "../syscall", version = "=0.0.0" }
 # the match data never drifts), and signs with the
 # build's deterministic Ed25519 driver-signing key — the trust anchor the
 # kernel embeds. The compiled-in floor is storage-only:
-# the bus chain (`pcie_brcm` / `vl805` / `usb_kbd`) is installed as signed
+# the bus chain (`pcie_brcm` / `vl805` / `xhci` / `usb_hid`) is installed as signed
 # `/System/Drivers/` bundles by the image pipeline (`tools/xtask`), not baked
 # here. Host-only build glue; the production image stays
 # Rust-only.

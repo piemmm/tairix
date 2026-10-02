@@ -30,6 +30,8 @@ tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
 # the IPC layer's `CallReplied`, matched against the shared `lib/abi`
 # spellings of the service store and the display endpoint.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The bundle-name reading every guest sink shares.
+tairix-itest-witness = { path = "../witness", version = "=0.0.0" }
 tairix-appload = { path = "../../../lib/appload", version = "=0.0.0" }
 tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
 tairix-kernel-ipc = { path = "../../../kernel/ipc", version = "=0.0.0" }

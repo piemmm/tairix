@@ -39,11 +39,15 @@
 //!   occurrence it must witness. A later one overwrites the held one where
 //!   it stands, so one window owes at most one of each.
 //! * A **position sample** (`Pointer`/`Moved`) is level-triggered: the
-//!   newest supersedes an unbroken run of its predecessors.
+//!   newest supersedes an unbroken run of its predecessors. So is a pinch's
+//!   `Update`, whose scale is relative to where the pinch began, while the
+//!   modifiers stay the same.
 //! * A **wheel delta** (`Scrolled`) is additive: a run in one direction
-//!   sums. A reversal is a distinct gesture — a tick that clamped at a
-//!   range end is not undone by the tick back — and ends the run, decided
-//!   by the same `shell::continues` predicate the live drain uses.
+//!   made with the same modifiers held sums, at the newest place. A reversal
+//!   is a distinct gesture — a turn that clamped at a range end is not undone
+//!   by the turn back — and so is a change of modifier (Ctrl let go mid-turn
+//!   ends the zoom), each ending the run, decided by the same
+//!   `shell::continues` predicate the live drain uses.
 //! * Everything else is **discrete** — a key, a button press or release, a
 //!   pick conclusion — and every one is owed.
 //!
@@ -68,6 +72,7 @@
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 
+use tairix_abi::touch::PinchPhase;
 use tairix_abi::window_ipc::{PointerAction, WindowEvent};
 use tairix_abi::Errno;
 
@@ -350,18 +355,52 @@ fn fold(queue: &mut VecDeque<WindowEvent>, next: &WindowEvent) -> bool {
         }
         (
             Some(WindowEvent::Scrolled {
+                x,
+                y,
                 dx: sideways,
                 dy: downward,
+                modifiers,
                 ..
             }),
             WindowEvent::Scrolled {
+                x: newest_x,
+                y: newest_y,
                 dx: across,
                 dy: down,
+                modifiers: newest_modifiers,
                 ..
             },
-        ) if continues(*sideways, across) && continues(*downward, down) => {
+        ) if *modifiers == newest_modifiers
+            && continues(*sideways, across)
+            && continues(*downward, down) =>
+        {
             *sideways = sideways.saturating_add(across);
             *downward = downward.saturating_add(down);
+            *x = newest_x;
+            *y = newest_y;
+            true
+        }
+        (
+            Some(WindowEvent::Pinch {
+                phase: PinchPhase::Update,
+                x,
+                y,
+                scale,
+                modifiers,
+                ..
+            }),
+            WindowEvent::Pinch {
+                phase: PinchPhase::Update,
+                x: newest_x,
+                y: newest_y,
+                scale: newest_scale,
+                modifiers: newest_modifiers,
+                ..
+            },
+        ) if *modifiers == newest_modifiers => {
+            *x = newest_x;
+            *y = newest_y;
+            *scale = newest_scale;
             true
         }
         _ => false,
@@ -408,7 +447,10 @@ const fn is_state_edge(event: &WindowEvent) -> bool {
 const fn is_input(event: &WindowEvent) -> bool {
     matches!(
         event,
-        WindowEvent::Key { .. } | WindowEvent::Pointer { .. } | WindowEvent::Scrolled { .. }
+        WindowEvent::Key { .. }
+            | WindowEvent::Pointer { .. }
+            | WindowEvent::Scrolled { .. }
+            | WindowEvent::Pinch { .. }
     )
 }
 

@@ -1,0 +1,35 @@
+[package]
+name = "tairix-drv-input-usb-hid"
+description = "TAIRiX USB HID class driver (plans/HID.md H5): binds every HID interface node a host-controller driver publishes, reads and configures the interface over the URB transport, and serves every keyboard, mouse, touch pad and touch screen on it through lib/hid."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# A `lib` (the bind table and capability set the image builder authors the
+# signed manifest from, and the host-testable bring-up) and the `Run` binary
+# devmgr autoloads. It reaches its host-controller driver only through the URB
+# transport, so no `drivers/*` crate is a dependency.
+[dependencies]
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The report-descriptor model, the decoders and the device engine.
+tairix-hid = { path = "../../../lib/hid", version = "=0.0.0" }
+# The configuration descriptor walk, the shared SETUP builders, and the URB
+# link the program drives.
+tairix-usb = { path = "../../../lib/usb", version = "=0.0.0" }
+
+[target.'cfg(target_os = "none")'.dependencies]
+# The capability set the rt-backed driver host is built over.
+tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+# The grants the matched node carried: the URB endpoint, the shared buffer,
+# the interface number.
+tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }
+# `_start`, `ipc_call`, the seat injections, and the log sink.
+tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }

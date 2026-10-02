@@ -38,7 +38,7 @@
 //! | 4042 | Info | `DRIVER_STORE_SCANNED` | audit | The `/System/Drivers/` signed-driver store was enumerated for autoload candidates. The `drivers` field carries the count of bundle image paths found; `skipped` the count of entries refused fail-closed during the walk. |
 //! | 4045 | Info | `USER_ADMIN_APPLIED` | audit | A `CAP_USER_ADMIN` account-administration operation was validated, persisted, and made live. The `op`, `target`, and `caller_uid` fields name the operation, the affected account/group, and the kernel-attested caller. |
 //! | 4046 | Warn | `USER_ADMIN_REJECTED` | audit | A `CAP_USER_ADMIN` account-administration operation was refused; nothing changed (fail closed). The `op`, `target`, `caller_uid`, and `errno` fields name the operation, the affected account/group, the caller, and the refusal. |
-//! | 4050 | Info | `INPUT_DELIVERED` | audit | An input driver delivered the **first** record of its kind to the input-focus arbiter — `kind=key` for the first `key_inject` edge, `kind=pointer` for the first `pointer_inject` record. Emitted at most once per input kind over the kernel's lifetime, carries no event content or timing — it witnesses that an autoloaded driver of that class is live, never a per-event record. |
+//! | 4050 | Info | `INPUT_DELIVERED` | audit | An input driver delivered the **first** record of its kind to the input-focus arbiter — `kind=key` for the first `key_inject` edge, `kind=pointer` for the first `pointer_inject` record, `kind=touch` for the first `touch_inject` frame. Emitted at most once per input kind over the kernel's lifetime, carries no event content or timing — it witnesses that an autoloaded driver of that class is live, never a per-event record. |
 //! | 4051 | Info | `SEAT_SWITCHED` | audit | A `CAP_SEAT_ADMIN` `seat_switch` retargeted a seat's foreground text console. The `seat` and `console` fields name the seat and the new foreground. |
 //! | 4052 | Warn | `SEAT_LEASE_REVOKED` | audit | A `CAP_SEAT_ADMIN` `seat_revoke` forcibly evicted a seat's lease holder. The `seat` and `evicted` fields name the seat and the evicted owner's task id. |
 //! | 4100 | Info | `FS_NODE_MUTATED` | audit | A capability- and permission-checked filesystem mutation succeeded (`fs_mkdir`/`fs_unlink`/`fs_rename`/`fs_set_mode`/`fs_set_owner`). The `op`, `uid`, and `path` fields name the operation, the caller's kernel-attested uid, and the target; `to` carries a rename's destination, `mode` a chmod's new mode (octal), and `owner`/`group` a chown's new ids. Paths are bounded to the log field limit. |
@@ -284,14 +284,14 @@ pub enum AuditEvent {
     /// seat registry (`crate::seat`, `plans/PI.md` P11 —
     /// the autoload-by-discovery witness).
     ///
-    /// Emitted by the `key_inject` / `pointer_inject` syscall handlers the
-    /// first time [`crate::seat::SeatRegistry::inject`] /
-    /// [`crate::seat::SeatRegistry::inject_pointer`] succeeds for that
-    /// input kind, gated by a per-kind one-shot latch
-    /// ([`crate::seat::SeatRegistry::note_first_delivery`]), so it fires
-    /// at most once per kind — twice over the kernel's lifetime — with a
-    /// `kind` field (`key` / `pointer`) attributing which input class
-    /// proved itself live. It carries **no** event content, count, or
+    /// Emitted by the `key_inject` / `pointer_inject` / `touch_inject`
+    /// syscall handlers the first time [`crate::seat::SeatRegistry::inject`]
+    /// / [`crate::seat::SeatRegistry::inject_pointer`] /
+    /// [`crate::seat::SeatRegistry::inject_touch`] succeeds for that input
+    /// kind, gated by a per-kind one-shot latch
+    /// ([`crate::seat::SeatRegistry::note_first_delivery`]), so it fires at
+    /// most once per kind with a `kind` field (`key` / `pointer` / `touch`)
+    /// attributing which input class proved itself live. It carries **no** event content, count, or
     /// timing — a per-event record would leak typed secrets and is
     /// forbidden: no input content or timing reaches the log.
     InputDelivered,

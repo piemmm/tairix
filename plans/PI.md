@@ -1935,17 +1935,17 @@ driver bundles, each its own crate with its device logic co-located as a
 `lib` target (§2.22): `drivers/bus/pcie_brcm` trains the link and emits the
 VL805 PCI node, `drivers/bus/mailbox/vcmailbox` serves the VideoCore mailbox
 (layout shared via `lib/vcmailbox`), `drivers/bus/usb/vl805` reloads the
-firmware and emits the `usb,xhci` node, and `drivers/input/usb_kbd` binds it,
-brings the controller up over the shared `lib/usb` xHCI protocol, enumerates,
-and pumps. The kernel's bootstrap floor is storage-only (§18.6). **The
+firmware and emits the `usb,xhci` node, `drivers/bus/usb/xhci` binds it,
+brings the controller up over the shared `lib/usb` xHCI protocol and
+enumerates, and `drivers/input/usb_hid` serves each HID interface it publishes.
+The kernel's bootstrap floor is storage-only (§18.6). **The
 historical "Landed" subsections below describe the superseded in-kernel
 diagnostic path (the old `drivers/bus/usb` path is now `drivers/bus/usb/xhci`);
 they are retained for the PCIe root-cause findings that still apply to
-`drivers/bus/pcie_brcm`.** **The user-space USB-HID keyboard chain is
-accepted on metal** (attach → keystroke, detach → `usb_kbd` unloads while
-the controller stays up, re-attach → autoloads again, and cold boot with
-the keyboard unplugged then plugged in); the operator's UART logs are the
-recorded acceptance artefact. **Metal-pending (`plans/OPEN-DEFECTS.md`
+`drivers/bus/pcie_brcm`.** The chain's live acceptance with `usb_hid` (attach
+→ keystroke, detach → `usb_hid` unloads while the controller stays up,
+re-attach → autoloads again, and cold boot with the keyboard unplugged then
+plugged in) is `plans/USB.md` UM. **Metal-pending (`plans/OPEN-DEFECTS.md`
 D167):** a driver restart that recovers its predecessor's quarantined DMA —
 `vcmailbox`'s firmware-revision probe, which rests on the VideoCore answering
 property requests in posting order, the VL805's `HCRST` before
@@ -3392,7 +3392,7 @@ table, so a new board is match **data**, not new code. Sub-increments
         `tairix-rt` there would inject a duplicate `panic_impl`/`_start` into the
         kernel). Both are resolved by extracting the reusable HID logic into a
         **new `lib/hid` (`tairix-hid`)** crate — the decoders (`BootKeyboard`,
-        `BootMouse`), the console producer (`KeyboardConsole`, `pump_once`,
+        `HidMouse`), the console producer (`KeyboardConsole`, `pump_once`,
         `ConsoleSink`), and the xHCI boot-keyboard orchestration
         (`bring_up_boot_keyboard`, `derive_keyboard_resources`,
         `KeyboardResources`) — the USB analogue of `lib/usb` ↔ `drivers/bus/usb`
@@ -3733,7 +3733,7 @@ to *type the encrypted-root unlock passphrase* (`root_unlock.rs`:
 cannot be autoloaded *from* the encrypted root — that volume is not mounted
 until the passphrase is entered (chicken-and-egg). The proven `-M virt`
 autoload vertical sidesteps this only because its passphrase is typed on the
-UART while `usb_kbd`/`virtio_kbd` autoloads *post-mount*. A keyboard-served
+UART while the keyboard driver autoloads *post-mount*. A keyboard-served
 HDMI unlock prompt needs the input driver up **before** unlock.
 
 **The decision (operator-approved): a dedicated read-only, signed `/System`
@@ -3882,9 +3882,8 @@ keyboard never regresses (§2.17), until the final flip:
   `WouldBlock`, so `login` waits without prompting; once it resolves the
   installed database is picked up (or the deny-all prompt runs).
 - **B5 (= 5e / D5d) — the flip — DONE (whole gate green).** The image now
-  installs all four signed bundles into `/System/Drivers/` —
-  `bus_mailbox/vcmailbox`, `bus_pcie/bcm2711`, `bus_usb/vl805`,
-  `input/usb_kbd` — through `tools/xtask` `commands/image_drivers.rs` over the
+  installs the signed bus bundles and the USB class drivers into
+  `/System/Drivers/` through `tools/xtask` `commands/image_drivers.rs` over the
   `tools/mkimage` `drivers` seam. The in-kernel keyboard scaffold
   (`keyboard_service.rs` + `usb_keyboard.rs`, the init-seam bring-up call, the
   boot PCIe/mailbox stash, and `unlock_service::augment_boot_tree`) is deleted
@@ -3894,7 +3893,8 @@ keyboard never regresses (§2.17), until the final flip:
   entirely in user space: `FdtDiscovery` seeds the discovered
   `brcm,bcm2711-pcie` + VideoCore mailbox nodes, `devmgr` autoloads the
   recursive chain (pcie_brcm → emits VL805 fn → vl805 reloads firmware + emits
-  `usb,xhci` → usb_kbd binds + pumps), and `autoload_caps` carries
+  `usb,xhci` → `xhci` enumerates → `usb_hid` serves the keyboard), and
+  `autoload_caps` carries
   `CAP_HW_EMIT` + `CAP_MAILBOX` so the bus bundles can emit nodes / call the
   mailbox (per-driver manifest∩ still binds, §5.2). The `hw_remove_node`
   syscall (no. 38) landed as the kernel-side mirror of `hw_emit_node`

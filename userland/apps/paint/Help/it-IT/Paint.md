@@ -81,6 +81,8 @@ conferma.
 * `S`, `P`, `B`, `A`, `E`, `F`, `I`, `L`, `R`, `O` — gli strumenti, in ordine
 * `X` — scambiare i colori principale e secondario
 * `+` / `-` — ingrandire o ridurre; `1` — dimensione reale; `Ctrl+0` — adattare
+* `Ctrl` + rotella — ingrandire o ridurre attorno al puntatore
+* Pizzicare con due dita — ingrandire o ridurre in modo continuo; su uno schermo tattile l'immagine segue le dita
 * `G` — mostrare o nascondere la griglia tra i pixel
 * `Page Up` / `Page Down` — lo sprite precedente o successivo
 * tasti freccia — spostare una selezione sospesa di un pixel; con `Shift`, di dieci

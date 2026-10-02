@@ -157,6 +157,8 @@ extern "C" {
 #define TAIRIX_SYS_CALL_PEER_NODE 131u
 #define TAIRIX_SYS_FD_REDEEM_FROM 132u
 #define TAIRIX_SYS_SHM_MAP_FROM 133u
+#define TAIRIX_SYS_TOUCH_INJECT 134u
+#define TAIRIX_SYS_TOUCH_READ 135u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns TAIRIX_E_WOULD_BLOCK when a
@@ -578,6 +580,8 @@ int32_t tairix_sys_peer_watch(uint32_t a0, void * a1, uintptr_t a2);
 uint64_t tairix_sys_call_peer_node(uint64_t a0, uint64_t a1, void * a2, uintptr_t a3);
 uint64_t tairix_sys_fd_redeem_from(uint64_t a0, void * a1, uintptr_t a2);
 uint64_t tairix_sys_shm_map_from(uint64_t a0, void * a1, uintptr_t a2, void * a3);
+uint64_t tairix_sys_touch_inject(uint64_t a0, void * a1, uintptr_t a2);
+uint64_t tairix_sys_touch_read(uint64_t a0, void * a1, uintptr_t a2);
 
 #ifdef __cplusplus
 } /* extern "C" */

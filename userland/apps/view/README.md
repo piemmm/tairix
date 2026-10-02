@@ -62,8 +62,10 @@ The toolbar carries zoom out/in, fit, actual size, previous/next entry, rotate
 left/right, mirror, play/pause and information, with a continuous zoom slider
 at its trailing edge. Drag the canvas to pan when the picture overflows;
 the wheel pans the desktop's one fixed distance a detent, over the picture or
-its scrollbars alike; a secondary press opens the app's menu (drawn by the
-session, never by the app).
+its scrollbars alike, and with Ctrl held zooms a rung of the ladder for each
+detent's worth of turn, anchored so the picture point under the pointer stays
+under it; a secondary press opens the app's menu (drawn by the session, never
+by the app).
 
 The keyboard reaches every command: `+`/`-` zoom, `0` fits, `1` is actual
 size, `2` fits the width, `[`/`]` rotate, `M` mirrors, `I` toggles the

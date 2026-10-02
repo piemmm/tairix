@@ -1,11 +1,11 @@
 # `tairix-virtio-input`
 
-Arch-neutral, transport-agnostic virtio-input (keyboard / pointer) device
-logic: the virtio-1.1 §5.8 open/poll/decode engine over the bus-agnostic
+Arch-neutral, transport-agnostic virtio-input (keyboard / pointer / touch)
+device logic: the virtio-1.1 §5.8 open/poll/decode engine over the bus-agnostic
 `lib/virtio` `Transport`. It lives in `lib/*` so both the in-kernel `-M virt`
 input verticals and the user-space input-driver process compose it without a
 `drivers/*`→`drivers/*` dependency (`AGENTS.md` §17.4 / §2.2 — the virtio
-analogue of `lib/hid` ↔ `drivers/input/usb_kbd`). The thin
+analogue of `lib/hid` ↔ `drivers/input/usb_hid`). The thin
 `drivers/input/virtio_input` crate keeps only the §8 `register` entry and the
 §18.3 bind table built from `VIRTIO_INPUT_DEVICE_ID`.
 
@@ -22,6 +22,11 @@ See `docs/src/drivers/input.md` for the full description and test surface.
   completion that wrote nothing surfaces no event. Dropping it resets the
   device, and withholds the event pool from a device whose reset does not
   confirm.
+- `poll_reports` / `Report` — the drain a touch device is read through: the
+  same events, plus one `tairix_abi::touch::TouchFrame` per `SYN_REPORT` of
+  a device that reports slotted contacts (the multi-touch protocol, type B).
+  `touch_lifted` is the frame its driver injects when the device stops, so
+  no contact stays held.
 - `VIRTIO_INPUT_DEVICE_ID` — the virtio device id (18) the driver crate's
   `BIND_KEYS` match key is built from (the single source of truth, §2.2).
 - `VirtioKeyboardConsole` (`console` module) — the keyboard producer half:
@@ -52,6 +57,6 @@ exchanges are governed by `lib/abi`.
 
 ## Tests
 
-`cargo test -p tairix-virtio-input` — decode, poll-drain, and teardown unit
-tests against the in-process `lib/virtio` `MockTransport` / `MockHost`, plus the
+`cargo test -p tairix-virtio-input` — decode, multi-touch framing,
+poll-drain, and teardown unit tests against the in-process `lib/virtio` `MockTransport` / `MockHost`, plus the
 `console` producer's keycode/modifier/lock resolution tests (`AGENTS.md` §7).

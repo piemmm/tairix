@@ -42,6 +42,8 @@ use tairix_abi::pinboard_ipc::PinboardRequest;
 use tairix_abi::time::Duration64;
 use tairix_abi::Errno;
 use tairix_appdata::{AppDataHost, Settings as SettingsStore};
+use tairix_geometry::Scale;
+use tairix_touch::TouchSettings;
 use tairix_wallpaper::{merge, DesktopSettings, DocumentRefusal, PointerSpeed, PrimaryButton};
 
 use crate::keyboard::KeyRepeat;
@@ -101,7 +103,8 @@ impl PinboardApplyRefusal {
     }
 }
 
-/// What the pointer and keyboard are driven by, as the settings name it.
+/// What the pointer, the touch surfaces and the keyboard are driven by, as the
+/// settings name it.
 ///
 /// The one reading of the input keys, so the seat's sources, the window
 /// manager and every application are handed the same policy.
@@ -115,6 +118,11 @@ pub struct InputPolicy {
     pub double_click: Duration64,
     /// How a held key repeats.
     pub repeat: KeyRepeat,
+    /// What a touch means.
+    pub touch: TouchSettings,
+    /// The density the desktop is drawn at, which a touchscreen stating no
+    /// size of its own is measured by.
+    pub density: Scale,
 }
 
 impl InputPolicy {
@@ -129,6 +137,12 @@ impl InputPolicy {
                 delay: settings.repeat_delay,
                 interval: settings.repeat_rate.interval(),
             },
+            touch: TouchSettings {
+                tap_to_click: settings.touchpad.tap,
+                natural_scroll: settings.touchpad.natural_scroll,
+                speed_percent: settings.touchpad.speed.percent(),
+            },
+            density: settings.scale,
         }
     }
 }

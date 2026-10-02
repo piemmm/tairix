@@ -30,7 +30,7 @@
 
 use core::ops::Range;
 
-use tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT;
+use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
 use tairix_geometry::{to_i32, Point, Rect, Region};
 use tairix_input::InputEvent;
 use tairix_raster::Surface;

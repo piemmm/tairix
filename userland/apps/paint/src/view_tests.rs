@@ -1,5 +1,6 @@
 use alloc::string::String;
 use alloc::vec;
+use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
 
 use tairix_abi::time::Duration64;
 use tairix_abi::window_ipc::{AppMenuItemId, AppMenuRowView};
@@ -738,8 +739,8 @@ fn zooming_with_the_wheel_keeps_the_pixel_under_the_pointer() {
     let at = window.screen_of((30, 40));
     window.move_to(at);
     window.key(Key::Named(NamedKey::Escape), plain());
-    let mut zoom_in = window.view.viewport().zoom();
-    for _ in 0..3 {
+    let start = window.view.viewport().rung().expect("on a rung");
+    for step in 1..=3 {
         window.view.on_pointer(
             &InputEvent::ModifiersChanged { modifiers: ctrl() },
             0,
@@ -748,9 +749,15 @@ fn zooming_with_the_wheel_keeps_the_pixel_under_the_pointer() {
             window.registry.active(),
             &mut Region::new(),
         );
-        window.pointer(InputEvent::PointerScrolled { dx: 0, dy: -1 });
-        assert!(window.view.viewport().zoom() > zoom_in);
-        zoom_in = window.view.viewport().zoom();
+        window.pointer(InputEvent::PointerScrolled {
+            dx: 0,
+            dy: -SCROLL_UNITS_PER_DETENT,
+        });
+        assert_eq!(
+            window.view.viewport().rung(),
+            Some(start + step),
+            "a rung a detent"
+        );
     }
     assert_eq!(window.view.hover(), Some((30, 40)));
     let still = window
@@ -758,6 +765,124 @@ fn zooming_with_the_wheel_keeps_the_pixel_under_the_pointer() {
         .viewport()
         .pixel_at(at, window.size(), window.layout.canvas());
     assert_eq!(still, Some((30, 40)));
+}
+
+/// A fine wheel's fractions of a detent add up to a rung, and a turn back
+/// starts afresh rather than being shortened by what the turn in left.
+#[test]
+fn a_fine_ctrl_wheel_zooms_a_rung_per_detent_turned() {
+    let mut window = Window::white(2000, 2000);
+    window.move_to(window.screen_of((30, 40)));
+    window.view.on_pointer(
+        &InputEvent::ModifiersChanged { modifiers: ctrl() },
+        0,
+        &window.layout,
+        Scale::ONE,
+        window.registry.active(),
+        &mut Region::new(),
+    );
+    let start = window.view.viewport().rung().expect("on a rung");
+    let turn = |window: &mut Window, dy: i32, times: usize| {
+        for _ in 0..times {
+            window.pointer(InputEvent::PointerScrolled { dx: 0, dy });
+        }
+    };
+    turn(&mut window, -15, 7);
+    assert_eq!(
+        window.view.viewport().rung(),
+        Some(start),
+        "seven eighths of a detent"
+    );
+    turn(&mut window, -15, 1);
+    assert_eq!(window.view.viewport().rung(), Some(start + 1));
+    turn(&mut window, 15, 7);
+    assert_eq!(
+        window.view.viewport().rung(),
+        Some(start + 1),
+        "the turn back starts afresh"
+    );
+    turn(&mut window, 15, 1);
+    assert_eq!(window.view.viewport().rung(), Some(start));
+}
+
+fn pinching(phase: tairix_input::PinchPhase, scale: u32, at: Point) -> InputEvent {
+    InputEvent::Pinch { phase, scale, at }
+}
+
+/// A pinch zooms continuously by the fingers' spread, follows their centre
+/// as it moves, and once it ends the stepping commands go on from the
+/// nearest rung in their direction.
+#[test]
+fn a_pinch_zooms_smoothly_about_where_it_began_and_follows_the_fingers() {
+    use tairix_abi::touch::PINCH_SCALE_ONE;
+    use tairix_input::PinchPhase;
+
+    let mut window = Window::white(2000, 2000);
+    let at = window.screen_of((30, 40));
+    window.move_to(at);
+    let start = window.view.viewport().zoom();
+    window.pointer(pinching(PinchPhase::Begin, PINCH_SCALE_ONE, at));
+    window.pointer(pinching(PinchPhase::Update, PINCH_SCALE_ONE * 3 / 2, at));
+    let viewport = window.view.viewport();
+    assert_eq!(viewport.zoom(), start.scaled(PINCH_SCALE_ONE * 3 / 2));
+    assert_eq!(viewport.rung(), None, "between two rungs");
+    assert_eq!(
+        viewport.pixel_at(at, window.size(), window.layout.canvas()),
+        Some((30, 40)),
+        "the pixel under the pinch stays under it"
+    );
+    // The fingers' centre moves: the picture follows it, toward the far
+    // edges, where it has room to go.
+    let moved = Point::new(at.x - 25, at.y - 15);
+    assert!(window.layout.canvas().contains(moved));
+    window.pointer(pinching(PinchPhase::Update, PINCH_SCALE_ONE * 3 / 2, moved));
+    assert_eq!(
+        window
+            .view
+            .viewport()
+            .pixel_at(moved, window.size(), window.layout.canvas()),
+        Some((30, 40)),
+        "carried to the fingers"
+    );
+    window.pointer(pinching(PinchPhase::End, PINCH_SCALE_ONE * 3 / 2, moved));
+    let ended = window.view.viewport().zoom();
+    assert_eq!(
+        ended,
+        start.scaled(PINCH_SCALE_ONE * 3 / 2),
+        "the zoom stands"
+    );
+    window.act(Action::ZoomOut);
+    assert_eq!(
+        window.view.viewport().zoom(),
+        start,
+        "zooming out lands on the rung just below"
+    );
+}
+
+/// A cancelled pinch puts the view back; a step that never began, or one that
+/// began off the canvas, moves nothing.
+#[test]
+fn a_cancelled_pinch_puts_the_view_back_and_a_stray_step_moves_nothing() {
+    use tairix_abi::touch::PINCH_SCALE_ONE;
+    use tairix_input::PinchPhase;
+
+    let mut window = Window::white(2000, 2000);
+    let at = window.screen_of((30, 40));
+    window.move_to(at);
+    let before = *window.view.viewport();
+    window.pointer(pinching(PinchPhase::Update, 2 * PINCH_SCALE_ONE, at));
+    assert_eq!(*window.view.viewport(), before, "no pinch had begun");
+    window.pointer(pinching(PinchPhase::Begin, PINCH_SCALE_ONE, at));
+    window.pointer(pinching(PinchPhase::Update, 4 * PINCH_SCALE_ONE, at));
+    assert_ne!(*window.view.viewport(), before);
+    window.pointer(pinching(PinchPhase::Cancel, 4 * PINCH_SCALE_ONE, at));
+    assert_eq!(*window.view.viewport(), before, "put back");
+
+    let off = Point::new(0, 0);
+    assert!(!window.layout.canvas().contains(off));
+    window.pointer(pinching(PinchPhase::Begin, PINCH_SCALE_ONE, off));
+    window.pointer(pinching(PinchPhase::Update, 4 * PINCH_SCALE_ONE, off));
+    assert_eq!(*window.view.viewport(), before, "begun off the canvas");
 }
 
 /// Begin a pencil stroke at picture pixel `from` and carry it to `to`,

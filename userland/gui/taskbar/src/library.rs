@@ -729,6 +729,7 @@ impl LibraryPopup {
                 }
             }
             InputEvent::PointerReleased { .. }
+            | InputEvent::Pinch { .. }
             | InputEvent::KeyPressed { .. }
             | InputEvent::KeyReleased { .. }
             | InputEvent::ModifiersChanged { .. } => changed_outcome(changed),

@@ -72,8 +72,8 @@ const TAP_HOLD_MAX_NS: u64 = 1_000_000_000;
 /// and no other modifier between.
 ///
 /// Only what the keyboard reported can spoil one, so a pointer button pressed
-/// while Ctrl was down is the embedder's to check
-/// ([`DeviceInputSource::buttons_quiet_since`](crate::DeviceInputSource::buttons_quiet_since)).
+/// or the wheel turned while Ctrl was down is the embedder's to check
+/// ([`DeviceInputSource::quiet_since`](crate::DeviceInputSource::quiet_since)).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct CtrlTap {
     /// When Ctrl went down.

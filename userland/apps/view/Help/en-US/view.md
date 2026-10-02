@@ -49,6 +49,8 @@ as transparent rather than as the colour behind it.
 
 * `+` — magnify to the next step
 * `-` — reduce to the previous step
+* `Ctrl` + wheel — zoom in or out about the pointer
+* Pinch with two fingers — zoom smoothly; on a touchscreen the picture follows the fingers
 * `0` — fit the whole picture in the window
 * `1` — actual size, one picture pixel per screen pixel
 * `2` — fit the picture's width

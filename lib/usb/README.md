@@ -20,10 +20,11 @@ other (§17.4 — `drivers/* → lib/*` only).
   structures and runs the controller; `reset_port` / `set_port_power` /
   `ring_doorbell` / `ack_event` drive the root hub and rings.
 - `device::UsbDevice` — the multi-device enumeration engine (Enable Slot →
-  Address Device → descriptors → Configure Endpoint → `SET_CONFIGURATION` →
-  HID protocol set-up), implementing the `tairix_abi::driver::input`
-  `ReportSource` seam so the `lib/hid` decoders (composed by the `usb_kbd`/`usb_mouse` class drivers) read reports
-  straight off the transfer ring. Each slot's output context, EP0 ring, and
+  Address Device → descriptors → Configure Endpoint → `SET_CONFIGURATION`),
+  knowing no device class: each interface's class driver reads its own
+  descriptors, sends its own class requests inside its interface's
+  `transport::UrbScope`, and receives its reports as the device sent them.
+  Each slot's output context, EP0 ring, and
   control data buffer live in its own region, so a device that answers a
   timed-out control transfer late writes only that region. A control transfer
   that does not complete — refused, ended by any error, or left unanswered past
@@ -60,7 +61,7 @@ other (§17.4 — `drivers/* → lib/*` only).
 ## Design
 
 - `no_std` + `alloc`, `#![forbid(unsafe_op_in_unsafe_fn)]`, depends only on
-  `lib/*` crates (`lib/abi`, `lib/dma-barrier`, `lib/hid`, `lib/inline`), so it
+  `lib/*` crates (`lib/abi`, `lib/dma-barrier`, `lib/inline`), so it
   builds for every Tier-1 target. The enumeration engine's
   tables and DMA chunks grow with the devices actually served, through the
   fallible allocation paths (exhaustion is a typed error, never a panic):

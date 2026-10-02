@@ -251,28 +251,12 @@ fn probe_device<S: tairix_drvrt::GrantSyscalls>(
     host: &RtDriverHost<S>,
     endpoint: u64,
 ) -> Result<(Vec<VolumePlan>, PlanSummary), i32> {
-    // The kernel reports the mapped window's true base and length; a window
-    // too small for the blkio data protocol, or a base this target cannot
-    // address, is a mis-provisioned node refused before any slice is built
-    // over it.
-    let Ok((window_base, window_len)) = host.map_shared() else {
+    // A window too small for the blkio data protocol is a mis-provisioned
+    // node, refused before any slice is built over it.
+    let Ok(window) = host.shared_buffer(BLK_DATA_LEN) else {
         return Err(EXIT_NO_TRANSPORT);
     };
-    let Ok(base) = usize::try_from(window_base) else {
-        return Err(EXIT_NO_TRANSPORT);
-    };
-    if window_len < BLK_DATA_LEN {
-        return Err(EXIT_NO_TRANSPORT);
-    }
-    // SAFETY: `map_shared` mapped the serving driver's shared data window
-    // into this process at `window_base`, and the kernel-reported length was
-    // verified above to hold at least `BLK_DATA_LEN` bytes (the one length
-    // both sides build from). The mapping lives for the rest of this process
-    // and nothing else in this address space aliases it — this is the
-    // program's only window slice, built here once — so the exclusive
-    // `&mut [u8]` is sound. The serving driver writes it only while serving
-    // this process's own blocking blkio calls.
-    let window = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, BLK_DATA_LEN) };
+    let window = &mut window[..BLK_DATA_LEN];
 
     // The one wait-set this program's block transport parks its replies on.
     // The kernel reclaims it when this process exits.

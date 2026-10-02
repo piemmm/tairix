@@ -156,8 +156,8 @@ impl ProcName {
     ///   bundle shares that leaf. The owning bundle directory's stem names
     ///   it instead, with a [`tairix_abi::BUNDLE_SUFFIX`] (`.app`) suffix
     ///   stripped, so `/Apps/Example.app/Run` attests `Example` and a
-    ///   driver bundle `/System/Drivers/input/usb_kbd/Run` attests
-    ///   `usb_kbd`.
+    ///   driver bundle `/System/Drivers/input/usb_hid/Run` attests
+    ///   `usb_hid`.
     /// * Any other path names its final non-empty `/`-separated component.
     /// * A path from which no name is derivable (`"/"`, `""`, a bare
     ///   `Run` with no owning directory) keeps the whole path bytes rather
@@ -1749,13 +1749,13 @@ mod tests {
     #[test]
     fn proc_name_from_path_keeps_the_final_non_empty_component() {
         // The ordinary case: an absolute path names its final component.
-        let name = ProcName::from_path(b"/System/Drivers/input/usb_kbd");
-        assert_eq!(name.as_str(), "usb_kbd");
+        let name = ProcName::from_path(b"/System/Drivers/input/usb_hid");
+        assert_eq!(name.as_str(), "usb_hid");
 
         // A trailing slash never attests an empty name: the last non-empty
         // component still names the process.
-        let trailing = ProcName::from_path(b"/System/Drivers/input/usb_kbd/");
-        assert_eq!(trailing.as_str(), "usb_kbd");
+        let trailing = ProcName::from_path(b"/System/Drivers/input/usb_hid/");
+        assert_eq!(trailing.as_str(), "usb_hid");
 
         // A bare name (no separator) is its own basename.
         let bare = ProcName::from_path(b"virtio_blk");
@@ -1781,8 +1781,8 @@ mod tests {
         // `Run` leaf every bundle shares, so a process listing showed `Run`
         // for every autoloaded driver. The owning bundle directory names
         // the process instead.
-        let driver = ProcName::from_path(b"/System/Drivers/input/usb_kbd/Run");
-        assert_eq!(driver.as_str(), "usb_kbd");
+        let driver = ProcName::from_path(b"/System/Drivers/input/usb_hid/Run");
+        assert_eq!(driver.as_str(), "usb_hid");
 
         // An application bundle's `.app` suffix is stripped: the stem is
         // the command/program name, matching the spawn syscall's bundle
@@ -1793,8 +1793,8 @@ mod tests {
         assert_eq!(store.as_str(), "ps");
 
         // Empty components never hide the owning directory.
-        let doubled = ProcName::from_path(b"/System/Drivers//input/usb_kbd//Run/");
-        assert_eq!(doubled.as_str(), "usb_kbd");
+        let doubled = ProcName::from_path(b"/System/Drivers//input/usb_hid//Run/");
+        assert_eq!(doubled.as_str(), "usb_hid");
 
         // A directory named exactly `.app` has an empty stem; the suffix is
         // then kept rather than attesting an empty name.

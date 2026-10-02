@@ -774,8 +774,9 @@ const SUPERVISOR_MOUNT_SCRIPT: &[(&str, Duration, &str)] = &[
 const AUTOLOAD_INPUT_KEY_MARKER: &str = "sc=irq_bind";
 
 /// How many times [`AUTOLOAD_INPUT_KEY_MARKER`] must appear before typing:
-/// once per autoloaded input-driver instance (keyboard + mouse), so the
-/// keyboard's own arming — possibly the second — is never raced.
+/// once per autoloaded input-driver instance — the keyboard and the one
+/// pointing device a script drives — so the keyboard's own arming, possibly
+/// the second, is never raced ([`armed_input_drivers`]).
 const AUTOLOAD_INPUT_ARMED_OCCURRENCES: u32 = 2;
 
 /// [`AUTOLOAD_INPUT_ARMED_OCCURRENCES`] for a vertical that drives the
@@ -9314,6 +9315,39 @@ static TESTS: &[QemuTest] = &[
         serial: &[],
         expect: Expect::Pass,
     },
+    // `plans/POINTING.md` PO9: touch end to end. The desktop world with a
+    // touchscreen as its only pointing device; two taps launch the terminal
+    // from the program library ([`touch_pointer_script`]), and the guest
+    // passes on that launch with the kernel's touch-delivery witness.
+    QemuTest {
+        package: "tairix-test-touch-qemu-aarch64",
+        binary: "tairix-test-touch-qemu-aarch64",
+        target: "aarch64-unknown-none",
+        cpus: 1,
+        timeout: Duration::from_secs(300),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: true,
+        crypto: false,
+        fs_disk: FsDisk::AutoloadRootDisk,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[
+            TypedStep::text(
+                AUTOLOAD_INPUT_KEY_MARKER,
+                AUTOLOAD_INPUT_ARMED_OCCURRENCES,
+                UNLOCK_PASSPHRASE_LINE,
+            ),
+            TypedStep::text(AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
+        ],
+        screendumps: &[],
+        pointer_script: Some(touch_pointer_script),
+        bounded_pointer_script: false,
+        x86_64_cpu: None,
+        serial: &[],
+        expect: Expect::Pass,
+    },
     // `plans/SVG.md` S23/S24: the SVG-text vertical — the only test in which a
     // sandboxed decode's glyphs travel from a live font service, over the
     // parser-sandbox pipe, into a picture, on a running machine.
@@ -12959,6 +12993,22 @@ impl PointerPen {
         );
     }
 
+    /// Turn the wheel `detents` detents `turn`-ward with the pointer at `at`,
+    /// once `marker` has appeared `occurrences` times.
+    fn wheel(
+        &mut self,
+        marker: &str,
+        occurrences: u32,
+        at: tairix_geometry::Point,
+        turn: tairix_qemu::WheelTurn,
+        detents: u32,
+    ) {
+        self.aim(marker, occurrences, at);
+        for _ in 0..detents {
+            self.push(marker, occurrences, tairix_qemu::PointerAction::Wheel(turn));
+        }
+    }
+
     /// The ordered script.
     fn steps(self) -> Vec<tairix_qemu::PointerStep> {
         self.steps
@@ -13037,7 +13087,8 @@ struct SettingsWalk {
     settings_row: tairix_geometry::Point,
     lock_row: tairix_geometry::Point,
     absence_row: tairix_geometry::Point,
-    strip_page: tairix_geometry::Point,
+    strip_wheel: tairix_geometry::Point,
+    strip_detents: u32,
     storage_row: tairix_geometry::Point,
     strip_page_up: tairix_geometry::Point,
     appearance_row: tairix_geometry::Point,
@@ -13211,6 +13262,63 @@ fn settings_page_strip(
     Ok(at)
 }
 
+/// The most detents a wheel turn may take to bring the strip to its end before
+/// the reconstruction is taken to have found a strip that never stops.
+const SETTINGS_STRIP_DETENTS_MAX: u32 = 64;
+
+/// Turn the wheel toward the user over the strip, a detent at a time, until a
+/// detent moves it no further, and check `goal`'s row is then in the column.
+///
+/// Answers where the wheel turned and how many detents it took, the last of
+/// them the one that moved nothing. The guest's seat may accelerate a turn of
+/// many detents, but acceleration only ever scrolls further, and the strip
+/// stops at its end, so the guest arrives exactly where this does.
+fn settings_wheel_strip_to_end(
+    shell: &mut tairix_settings::Shell,
+    over: tairix_settings::Category,
+    goal: tairix_settings::Category,
+    viewport: tairix_geometry::Rect,
+    theme: &tairix_theme::Theme,
+) -> Result<(tairix_geometry::Point, u32), String> {
+    use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
+    use tairix_controls::ScrollPart;
+    use tairix_input::InputEvent;
+
+    let at = settings_row_centre(shell, over, viewport, theme)?;
+    let mut damage = tairix_geometry::Region::new();
+    let thumb = |shell: &tairix_settings::Shell| {
+        shell.strip_scroll_rect(ScrollPart::Thumb, viewport, RECONSTRUCTION_SCALE, theme)
+    };
+    shell.on_pointer(
+        &InputEvent::PointerMoved { to: at },
+        viewport,
+        RECONSTRUCTION_SCALE,
+        theme,
+        &mut damage,
+    );
+    for detents in 1..=SETTINGS_STRIP_DETENTS_MAX {
+        let before = thumb(shell);
+        shell.on_pointer(
+            &InputEvent::PointerScrolled {
+                dx: 0,
+                dy: SCROLL_UNITS_PER_DETENT,
+            },
+            viewport,
+            RECONSTRUCTION_SCALE,
+            theme,
+            &mut damage,
+        );
+        if thumb(shell) == before {
+            settings_row_centre(shell, goal, viewport, theme)
+                .map_err(|_| format!("settings script: the strip's end does not show {goal:?}"))?;
+            return Ok((at, detents));
+        }
+    }
+    Err(format!(
+        "settings script: {SETTINGS_STRIP_DETENTS_MAX} detents never brought the strip to its end"
+    ))
+}
+
 /// Press `category`'s strip row and check the shell went there.
 fn settings_walk_to(
     shell: &mut tairix_settings::Shell,
@@ -13338,11 +13446,12 @@ fn reconstruct_settings_walk() -> Result<SettingsWalk, String> {
                 .to_string(),
         );
     }
-    // The track after the thumb pages the strip down; the end button beneath
-    // it sits in the client's outermost pixels, which the resize zone claims.
-    let strip_page = settings_page_strip(
+    // The wheel turned over the strip scrolls it down to its end, which is
+    // what brings Storage in: the whole path from the pointer device's wheel
+    // to the strip's own scroll view.
+    let (strip_wheel, strip_detents) = settings_wheel_strip_to_end(
         &mut shell,
-        ScrollPart::TrackAfter,
+        Category::Appearance,
         Category::Storage,
         viewport,
         &theme,
@@ -13388,7 +13497,8 @@ fn reconstruct_settings_walk() -> Result<SettingsWalk, String> {
         settings_row,
         lock_row: to_screen(lock_row)?,
         absence_row: to_screen(absence_row)?,
-        strip_page: to_screen(strip_page)?,
+        strip_wheel: to_screen(strip_wheel)?,
+        strip_detents,
         storage_row: to_screen(storage_row)?,
         strip_page_up: to_screen(strip_page_up)?,
         appearance_row: to_screen(appearance_row)?,
@@ -13404,8 +13514,8 @@ fn reconstruct_settings_walk() -> Result<SettingsWalk, String> {
 }
 
 /// Open Settings from the capsule's system menu, walk its strip to a stated
-/// absence, down past the fold to Storage, and back up to Appearance, choose
-/// Light, then choose Compact density on the same pane.
+/// absence, wheel it down past the fold to Storage, page it back up to
+/// Appearance, choose Light, then choose Compact density on the same pane.
 ///
 /// Every gate is the session's own witness that what the next press aims at is
 /// on screen: the menu drawn, the window's first frame, and — for each pane —
@@ -13435,11 +13545,12 @@ fn settings_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
         MouseButton::Primary,
         walk.absence_row,
     );
-    pen.click(
+    pen.wheel(
         WINDOW_RETITLED_MARKER,
         2,
-        MouseButton::Primary,
-        walk.strip_page,
+        walk.strip_wheel,
+        tairix_qemu::WheelTurn::Toward,
+        walk.strip_detents,
     );
     pen.click(
         WINDOW_RETITLED_MARKER,
@@ -15009,6 +15120,43 @@ fn desktop_pressure_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
     Ok(pen.steps())
 }
 
+/// The touch vertical's script: tap the Library button, then the terminal's
+/// row in the popup it opens ([`reconstruct_bar_launch`]).
+///
+/// The first tap waits on [`APPBAR_SETTLED_MARKER`], the session's word that
+/// the desktop is revealed with its bar drawn, and the second on the popup's
+/// own witness. One device carries both, so the guest reads them in order with
+/// nothing between them to witness.
+fn touch_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
+    let BarLaunch {
+        library_button,
+        entry_row,
+        ..
+    } = reconstruct_bar_launch()?;
+    Ok(vec![
+        touch_tap(APPBAR_SETTLED_MARKER, library_button)?,
+        touch_tap(LIBRARY_SHOWN_MARKER, entry_row)?,
+    ])
+}
+
+/// A tap at the board-screen point `at`, fired at the first `marker`.
+fn touch_tap(marker: &str, at: tairix_geometry::Point) -> Result<tairix_qemu::PointerStep, String> {
+    let (width, height) = ramfb_screen();
+    let axis = |pixel: i32, extent: u32| {
+        u32::try_from(pixel)
+            .map(|pixel| tairix_qemu::touch_axis(pixel, extent))
+            .map_err(|_| format!("touch script: {at:?} is off the screen"))
+    };
+    Ok(tairix_qemu::PointerStep {
+        ready_marker: marker.to_owned(),
+        ready_occurrences: 1,
+        action: tairix_qemu::PointerAction::Tap {
+            x: axis(at.x, width)?,
+            y: axis(at.y, height)?,
+        },
+    })
+}
+
 /// The desktop-menu vertical's screendump names. Two frames: the terminal
 /// window alone, and the same screen with the chain's plate over it.
 const MENU_WINDOW_DUMP: &str = "window";
@@ -16040,6 +16188,34 @@ const MEMTEST_TAKEOVER_LOOP_MARKER: &str = "memtest: completed test loop";
 /// rather than stalling the matrix forever.
 const MEMTEST_TAKEOVER_RUNTIME_CEILING: Duration = Duration::from_mins(15);
 
+/// Let the runner drive `t`'s computed script step by step, each once its own
+/// marker appears; the steps attach the pointing devices they are delivered
+/// through, after the keyboard.
+///
+/// Each input driver instance arms and prints the readiness marker once, so
+/// the key injection waits for all of them: injecting on an earlier one would
+/// race the keyboard's own arming and lose the press.
+fn attach_pointer_script(t: &QemuTest, mut spec: Spec) -> Result<Spec, String> {
+    let Some(build_script) = t.pointer_script else {
+        return Ok(spec);
+    };
+    for step in build_script().map_err(|e| format!("test --qemu ({}): {e}", t.package))? {
+        spec = spec.with_pointer_step(step.ready_marker, step.ready_occurrences, step.action);
+    }
+    let armed = armed_input_drivers(spec.devices.pointing);
+    spec = spec.with_keyboard_ready_occurrences(armed);
+    if t.bounded_pointer_script {
+        spec = spec.with_bounded_pointer_script();
+    }
+    Ok(spec)
+}
+
+/// How many input driver instances arm on a board with a keyboard and
+/// `pointing`: one per virtio-input device.
+fn armed_input_drivers(pointing: tairix_qemu::PointingDevices) -> u32 {
+    1 + u32::from(pointing.mouse) + u32::from(pointing.touchscreen)
+}
+
 /// Attach `t`'s virtio-net interface(s) to `spec` and start the harness-side
 /// `netpeer` link peer, returning the updated spec, the running peer (if any),
 /// and the wire's reserved socket paths. Every frame is captured to a
@@ -16050,28 +16226,6 @@ const MEMTEST_TAKEOVER_RUNTIME_CEILING: Duration = Duration::from_mins(15);
 /// enough to bind (a unix socket's `sun_path` is 104 bytes on macOS and the
 /// temp directory alone can take half of that) and unique per wire per
 /// process, so concurrent runs stay on private wires. The returned guards must
-/// Attach the pointer sibling after the keyboard — the interactive session's
-/// two-identical-virtio-input-nodes topology — and let the runner drive `t`'s
-/// computed script step by step, each once its own marker appears.
-///
-/// Each driver instance arms and prints the readiness marker once, so the key
-/// injection waits for both markers: injecting on the first (possibly the
-/// mouse's) would race the keyboard's own arming and lose the press. Kept out
-/// of [`finish_run`] so that function stays within the line budget.
-fn attach_pointer_script(t: &QemuTest, mut spec: Spec) -> Result<Spec, String> {
-    let Some(build_script) = t.pointer_script else {
-        return Ok(spec);
-    };
-    for step in build_script().map_err(|e| format!("test --qemu ({}): {e}", t.package))? {
-        spec = spec.with_pointer_step(step.ready_marker, step.ready_occurrences, step.action);
-    }
-    spec = spec.with_keyboard_ready_occurrences(2);
-    if t.bounded_pointer_script {
-        spec = spec.with_bounded_pointer_script();
-    }
-    Ok(spec)
-}
-
 /// outlive the run: dropping one removes its socket file. Kept out of
 /// [`finish_run`] so that function stays within the line budget.
 fn attach_net_peer(
@@ -16504,20 +16658,20 @@ mod tests {
     use tairix_qemu::Outcome;
 
     use super::{
-        appbar_pointer_script, autoload_desktop_pointer_script, build_targets,
+        appbar_pointer_script, armed_input_drivers, autoload_desktop_pointer_script, build_targets,
         desktop_hover_pointer_script, fatal_verdict, filepick_pointer_script, fold_peer_verdict,
         handover_pointer_script, login_type_plant, persist_serial, qemu_host_budget_for,
         qemu_job_weight, row_holds_track, screendump_ext, screendump_path, settings_pointer_script,
-        sidecar_path, Expect, FsDisk, PrimePlan, QemuTest, TypedStep, AARCH64_TARGET,
-        AUDIOTONE_PASS_PREFIX, AUTOLOAD_INPUT_ARMED_OCCURRENCES, AUTOLOAD_INPUT_KEY_MARKER,
+        sidecar_path, touch_pointer_script, Expect, FsDisk, PrimePlan, QemuTest, TypedStep,
+        AARCH64_TARGET, APPBAR_SETTLED_MARKER, AUDIOTONE_PASS_PREFIX, AUTOLOAD_INPUT_KEY_MARKER,
         BOOT_DISK_HEALTH_MARKER, BOOT_DISK_SERVICE_MARKER, DESKTOP_PRESSURE_ICONS_DRAWN_DUMP,
-        DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP, KEYBOARD_ONLY_ARMED_OCCURRENCES, MEMSOAK_PASS_PREFIX,
-        RISCV64_TARGET, STALLTRACE_COMMAND_LINE, STALLTRACE_PROVOKED_MARKER,
-        SUPERVISOR_ESC_AT_PROMPT_SCRIPT, SUPERVISOR_ESC_SCRIPT, SUPERVISOR_MOUNT_SCRIPT,
-        SVGTEXT_MEASURED_MARKER, TCPECHO_PASS_PREFIX, TCPSERVE_PASS_PREFIX, TESTS,
-        UNLOCK_PASSPHRASE_LINE, UNPROVISIONED_MACHINE_ID_MARKER, VALUE_OPERAND_PHYSICAL_LINE,
-        VALUE_OPERAND_PHYSICAL_MARKER, VALUE_PIPE_PHYSICAL_LINE, VALUE_PIPE_PHYSICAL_MARKER,
-        VALUE_PIPE_WRITE_REFUSED_MARKER, X86_64_TARGET,
+        DESKTOP_PRESSURE_UNDER_PRESSURE_DUMP, KEYBOARD_ONLY_ARMED_OCCURRENCES,
+        LIBRARY_SHOWN_MARKER, MEMSOAK_PASS_PREFIX, RISCV64_TARGET, STALLTRACE_COMMAND_LINE,
+        STALLTRACE_PROVOKED_MARKER, SUPERVISOR_ESC_AT_PROMPT_SCRIPT, SUPERVISOR_ESC_SCRIPT,
+        SUPERVISOR_MOUNT_SCRIPT, SVGTEXT_MEASURED_MARKER, TCPECHO_PASS_PREFIX,
+        TCPSERVE_PASS_PREFIX, TESTS, UNLOCK_PASSPHRASE_LINE, UNPROVISIONED_MACHINE_ID_MARKER,
+        VALUE_OPERAND_PHYSICAL_LINE, VALUE_OPERAND_PHYSICAL_MARKER, VALUE_PIPE_PHYSICAL_LINE,
+        VALUE_PIPE_PHYSICAL_MARKER, VALUE_PIPE_WRITE_REFUSED_MARKER, X86_64_TARGET,
     };
     use std::path::Path;
     use std::time::Duration;
@@ -17430,8 +17584,9 @@ mod tests {
 
     /// Every enrolment that waits on the input-driver arming marker waits
     /// for exactly as many occurrences as it attaches input drivers: the
-    /// board carries a mouse only when the test scripts a pointer, so the
-    /// count is a function of the enrolment and never a copied constant.
+    /// board carries a mouse or a touchscreen only when the script drives
+    /// one, so the count is a function of the script and never a copied
+    /// constant.
     ///
     /// Pinned because the failure mode is silent and expensive — a count of
     /// two on a keyboard-only board never releases, so nothing is ever
@@ -17447,19 +17602,41 @@ mod tests {
             else {
                 continue;
             };
-            let expected = if t.pointer_script.is_some() {
-                AUTOLOAD_INPUT_ARMED_OCCURRENCES
-            } else {
-                KEYBOARD_ONLY_ARMED_OCCURRENCES
-            };
+            let mut pointing = tairix_qemu::PointingDevices::NONE;
+            for step in t
+                .pointer_script
+                .map_or(Ok(Vec::new()), |build| build())
+                .expect("the script builds")
+            {
+                pointing.attach_for(step.action);
+            }
             assert_eq!(
                 *occurrences,
-                expected,
-                "{}: a board with {} input driver(s) raises the arming marker {expected} time(s)",
+                armed_input_drivers(pointing),
+                "{}: one arming per input driver on a board with {pointing:?}",
                 t.binary,
-                if t.pointer_script.is_some() { 2 } else { 1 },
             );
         }
+        assert_eq!(
+            armed_input_drivers(tairix_qemu::PointingDevices::NONE),
+            KEYBOARD_ONLY_ARMED_OCCURRENCES
+        );
+    }
+
+    /// The touch guest attributes the launch to the touchscreen because no
+    /// other pointing device is on its board, so its script may hold nothing
+    /// but taps — one mouse step would attach a mouse.
+    #[test]
+    fn the_touch_script_reaches_the_terminal_by_taps_alone() {
+        let steps = touch_pointer_script().expect("the script builds");
+        let markers: Vec<&str> = steps
+            .iter()
+            .map(|step| step.ready_marker.as_str())
+            .collect();
+        assert_eq!(markers, [APPBAR_SETTLED_MARKER, LIBRARY_SHOWN_MARKER]);
+        assert!(steps
+            .iter()
+            .all(|step| matches!(step.action, tairix_qemu::PointerAction::Tap { .. })));
     }
 
     /// The SVG-text vertical types the fixture's own command word and waits

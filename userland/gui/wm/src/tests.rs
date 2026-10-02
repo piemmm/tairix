@@ -6,7 +6,7 @@ use tairix_abi::driver::display::{
     AccelCaps, AccelLayer, AcceleratedDisplay, DamageRect, Display, DisplayFormat, DisplayMode,
     MAX_DAMAGE_RECTS,
 };
-use tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT;
+use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
 use tairix_abi::DriverError;
 
 use crate::color::{div255, Color, Pixel};
@@ -1407,7 +1407,7 @@ fn theme_corner_radius_shapes_windows() {
 
 use crate::input::{
     ClickKind, DoubleClickTracker, InputEvent, InputResponse, InputRouter, Key, Modifiers,
-    NamedKey, PointerButton, PointerFocus,
+    NamedKey, PinchPhase, PointerButton, PointerFocus,
 };
 
 /// The clock reading an event is delivered at when its *time* is immaterial,
@@ -3350,14 +3350,17 @@ fn wheel_over_a_window_without_a_root_viewport_is_forwarded_to_the_app() {
     let mut router = InputRouter::new();
 
     // A wheel over it consumes no furniture; the scroll belongs to the app,
-    // reported verbatim (both axes, signed) for the session to forward.
-    router.handle(moved(10, 10), &mut c, T0);
+    // reported verbatim (both axes, signed) with where it landed and what
+    // was held, for the session to forward.
+    router.handle(moved(10, 12), &mut c, T0);
     assert_eq!(
         router.handle(scrolled(-2, 3), &mut c, T0),
         InputResponse::AppScroll {
             window: id,
+            local: Point::new(10, 12),
             dx: -2,
             dy: 3,
+            modifiers: Modifiers::default(),
         }
     );
 
@@ -3367,6 +3370,200 @@ fn wheel_over_a_window_without_a_root_viewport_is_forwarded_to_the_app() {
         router.handle(scrolled(0, 5), &mut c, T0),
         InputResponse::Ignored
     );
+}
+
+#[test]
+fn a_scroll_states_the_modifiers_it_was_made_with() {
+    let mut c = new_compositor(mode(200, 200), BLUE).expect("compositor");
+    let id = c.add_window(Point::new(20, 30), opaque(100, 100, RED));
+    let mut router = InputRouter::new();
+    let ctrl = Modifiers {
+        ctrl: true,
+        ..Modifiers::default()
+    };
+    router.handle(InputEvent::ModifiersChanged { modifiers: ctrl }, &mut c, T0);
+    router.handle(moved(25, 40), &mut c, T0);
+    assert_eq!(
+        router.handle(scrolled(0, -SCROLL_UNITS_PER_DETENT), &mut c, T0),
+        InputResponse::AppScroll {
+            window: id,
+            local: Point::new(5, 10),
+            dx: 0,
+            dy: -SCROLL_UNITS_PER_DETENT,
+            modifiers: ctrl,
+        },
+        "the place is window-local and Ctrl is stated"
+    );
+}
+
+#[test]
+fn shift_turns_a_vertical_wheel_sideways_but_leaves_a_two_axis_turn_as_it_came() {
+    let mut c = new_compositor(mode(200, 200), BLUE).expect("compositor");
+    let id = c.add_window(Point::ORIGIN, opaque(100, 100, RED));
+    let mut router = InputRouter::new();
+    let shift = Modifiers {
+        shift: true,
+        ..Modifiers::default()
+    };
+    router.handle(
+        InputEvent::ModifiersChanged { modifiers: shift },
+        &mut c,
+        T0,
+    );
+    router.handle(moved(10, 10), &mut c, T0);
+    let delivered = |router: &mut InputRouter, c: &mut Compositor, dx, dy| match router.handle(
+        scrolled(dx, dy),
+        c,
+        T0,
+    ) {
+        InputResponse::AppScroll {
+            window,
+            dx,
+            dy,
+            modifiers,
+            ..
+        } => {
+            assert_eq!((window, modifiers), (id, shift));
+            (dx, dy)
+        }
+        other => panic!("expected the app's scroll, got {other:?}"),
+    };
+    assert_eq!(delivered(&mut router, &mut c, 0, 240), (240, 0));
+    assert_eq!(delivered(&mut router, &mut c, 0, -15), (-15, 0));
+    assert_eq!(
+        delivered(&mut router, &mut c, 30, 90),
+        (30, 90),
+        "a two-axis device's own turn"
+    );
+    router.handle(
+        InputEvent::ModifiersChanged {
+            modifiers: Modifiers::default(),
+        },
+        &mut c,
+        T0,
+    );
+    assert!(matches!(
+        router.handle(scrolled(0, 240), &mut c, T0),
+        InputResponse::AppScroll { dx: 0, dy: 240, .. }
+    ));
+}
+
+#[test]
+fn a_wheel_over_a_windows_frame_reaches_no_application() {
+    let (mut c, id) = decorated_compositor();
+    let mut router = InputRouter::new();
+    let client = c.window_client_rect(id).expect("a client area");
+    // The title bar sits above the client.
+    router.handle(moved(client.left() + 10, client.top() - 4), &mut c, T0);
+    assert_eq!(
+        router.handle(scrolled(0, SCROLL_UNITS_PER_DETENT), &mut c, T0),
+        InputResponse::Ignored,
+        "the frame has no content to scroll"
+    );
+    router.handle(moved(client.left() + 10, client.top() + 10), &mut c, T0);
+    assert!(matches!(
+        router.handle(scrolled(0, SCROLL_UNITS_PER_DETENT), &mut c, T0),
+        InputResponse::AppScroll { window, local, .. }
+            if window == id && local == Point::new(10, 10)
+    ));
+}
+
+fn pinch(phase: PinchPhase, scale: u32, x: i32, y: i32) -> InputEvent {
+    InputEvent::Pinch {
+        phase,
+        scale,
+        at: Point::new(x, y),
+    }
+}
+
+#[test]
+fn a_pinch_belongs_to_the_window_it_began_over_until_it_ends() {
+    let mut c = new_compositor(mode(200, 200), BLUE).expect("compositor");
+    let id = c.add_window(Point::new(20, 30), opaque(100, 100, RED));
+    let mut router = InputRouter::new();
+    let one = tairix_abi::touch::PINCH_SCALE_ONE;
+    assert_eq!(
+        router.handle(pinch(PinchPhase::Begin, one, 25, 40), &mut c, T0),
+        InputResponse::AppPinch {
+            window: id,
+            local: Point::new(5, 10),
+            phase: PinchPhase::Begin,
+            scale: one,
+            modifiers: Modifiers::default(),
+        }
+    );
+    // The fingers wander off the window: the pinch stays its, the place
+    // clamped into the client.
+    assert_eq!(
+        router.handle(pinch(PinchPhase::Update, 2 * one, 180, 190), &mut c, T0),
+        InputResponse::AppPinch {
+            window: id,
+            local: Point::new(99, 99),
+            phase: PinchPhase::Update,
+            scale: 2 * one,
+            modifiers: Modifiers::default(),
+        }
+    );
+    // Another surface's pinch beginning meanwhile joins this one.
+    assert_eq!(
+        router.handle(pinch(PinchPhase::Begin, one, 190, 190), &mut c, T0),
+        InputResponse::Ignored
+    );
+    assert!(matches!(
+        router.handle(pinch(PinchPhase::End, 2 * one, 30, 40), &mut c, T0),
+        InputResponse::AppPinch {
+            phase: PinchPhase::End,
+            window,
+            ..
+        } if window == id
+    ));
+    assert_eq!(
+        router.handle(pinch(PinchPhase::Update, one, 30, 40), &mut c, T0),
+        InputResponse::Ignored,
+        "an ended pinch holds no window"
+    );
+}
+
+#[test]
+fn a_pinch_begun_over_no_client_reaches_no_application() {
+    let (mut c, id) = decorated_compositor();
+    let mut router = InputRouter::new();
+    let one = tairix_abi::touch::PINCH_SCALE_ONE;
+    let client = c.window_client_rect(id).expect("a client area");
+    let (x, title) = (client.left() + 10, client.top() - 4);
+    assert_eq!(
+        router.handle(pinch(PinchPhase::Begin, one, x, title), &mut c, T0),
+        InputResponse::Ignored,
+        "over the frame"
+    );
+    assert_eq!(
+        router.handle(
+            pinch(PinchPhase::Update, one, x, client.top() + 10),
+            &mut c,
+            T0
+        ),
+        InputResponse::Ignored,
+        "the pinch never became the window's"
+    );
+    assert_eq!(
+        router.handle(pinch(PinchPhase::Cancel, one, x, title), &mut c, T0),
+        InputResponse::Ignored
+    );
+    // Its window gone mid-pinch, a pinch is let go.
+    let held = c.add_window(Point::new(150, 150), opaque(40, 40, RED));
+    assert!(matches!(
+        router.handle(pinch(PinchPhase::Begin, one, 160, 160), &mut c, T0),
+        InputResponse::AppPinch { window, .. } if window == held
+    ));
+    assert!(c.remove(held));
+    assert_eq!(
+        router.handle(pinch(PinchPhase::Update, one, 160, 160), &mut c, T0),
+        InputResponse::Ignored
+    );
+    assert!(matches!(
+        router.handle(pinch(PinchPhase::Begin, one, x, client.top() + 10), &mut c, T0),
+        InputResponse::AppPinch { window, .. } if window == id
+    ));
 }
 
 #[test]

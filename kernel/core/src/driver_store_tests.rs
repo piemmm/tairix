@@ -277,7 +277,7 @@ fn a_nested_store_enumerates_every_regular_file_in_order() {
     // The chain drivers, organised `<class>[/<vendor>]/<driver>`.
     fs.add_file("/System/Drivers/bus_usb");
     fs.add_file("/System/Drivers/pcie/brcm/bcm2711");
-    fs.add_file("/System/Drivers/usb_kbd");
+    fs.add_file("/System/Drivers/usb_hid");
 
     let sink = TestSink::new();
     let drivers = scan(&mut fs, &sink);
@@ -287,7 +287,7 @@ fn a_nested_store_enumerates_every_regular_file_in_order() {
         alloc::vec![
             "/System/Drivers/bus_usb".to_string(),
             "/System/Drivers/pcie/brcm/bcm2711".to_string(),
-            "/System/Drivers/usb_kbd".to_string(),
+            "/System/Drivers/usb_hid".to_string(),
         ]
     );
     assert_eq!(scanned_record(&sink), (3, 0));
@@ -400,7 +400,7 @@ fn an_empty_store_directory_yields_nothing() {
 fn read_image_returns_a_bundle_byte_for_byte() {
     let mut fs = MockStore::new();
     let bytes = b"\x7fELF-ish driver bundle";
-    fs.add_file_with("/System/Drivers/usb_kbd", bytes);
+    fs.add_file_with("/System/Drivers/usb_hid", bytes);
 
     let reader = DriverImageReader::open().expect("root mount builds");
     let mut buf = Vec::new();
@@ -408,7 +408,7 @@ fn read_image_returns_a_bundle_byte_for_byte() {
         .read_image(
             &mut fs,
             DRIVER_STORE_PATH,
-            "/System/Drivers/usb_kbd",
+            "/System/Drivers/usb_hid",
             &mut buf,
         )
         .expect("a readable in-store file");

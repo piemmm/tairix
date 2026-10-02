@@ -62,7 +62,7 @@ fn finds_the_bulk_pair_of_a_bot_interface() {
         &endpoint(0x04, 0x02), // bulk-OUT, EP4
     ]);
     assert_eq!(
-        find_storage_interface(&bytes),
+        find_storage_interface(&bytes, 0),
         Ok(StorageInterface {
             interface_number: 0,
             command_set: CommandSet::Transparent,
@@ -81,7 +81,7 @@ fn a_ufi_bot_floppy_reports_the_ufi_command_set() {
         &endpoint(0x81, 0x02),
         &endpoint(0x02, 0x02),
     ]);
-    let found = find_storage_interface(&bytes).expect("servable");
+    let found = find_storage_interface(&bytes, 0).expect("servable");
     assert_eq!(found.command_set, CommandSet::Ufi);
     assert_eq!(
         found.protocol,
@@ -100,7 +100,7 @@ fn a_cbi_floppy_needs_its_interrupt_endpoint() {
         &endpoint(0x81, 0x02),
         &endpoint(0x02, 0x02),
     ]);
-    assert_eq!(find_storage_interface(&bytes), Err(Errno::NotFound));
+    assert_eq!(find_storage_interface(&bytes, 0), Err(Errno::NotFound));
 
     // With it, all three endpoints are derived.
     let bytes = stream(&[
@@ -110,7 +110,7 @@ fn a_cbi_floppy_needs_its_interrupt_endpoint() {
         &endpoint(0x83, 0x03), // interrupt-IN, EP3
     ]);
     assert_eq!(
-        find_storage_interface(&bytes),
+        find_storage_interface(&bytes, 0),
         Ok(StorageInterface {
             interface_number: 0,
             command_set: CommandSet::Ufi,
@@ -137,7 +137,7 @@ fn uas_pipes_are_derived_from_the_pipe_usage_descriptors() {
         &pipe_usage(0x04),     // data-out
     ]);
     assert_eq!(
-        find_storage_interface(&bytes),
+        find_storage_interface(&bytes, 0),
         Ok(StorageInterface {
             interface_number: 0,
             command_set: CommandSet::Transparent,
@@ -165,7 +165,7 @@ fn uas_pipe_order_follows_the_descriptors_not_an_assumption() {
         &endpoint(0x08, 0x02),
         &pipe_usage(0x01), // command on EP8
     ]);
-    let found = find_storage_interface(&bytes).expect("servable");
+    let found = find_storage_interface(&bytes, 0).expect("servable");
     assert_eq!(
         found.protocol,
         StorageProtocol::Uas(UasEndpoints {
@@ -189,7 +189,8 @@ fn a_uas_pipe_on_the_wrong_direction_poisons_the_interface() {
         &endpoint(0x82, 0x02),
         &endpoint(0x03, 0x02),
     ]);
-    let found = find_storage_interface(&bytes).expect("sibling serves");
+    assert_eq!(find_storage_interface(&bytes, 0), Err(Errno::NotFound));
+    let found = find_storage_interface(&bytes, 1).expect("sibling serves");
     assert_eq!(found.interface_number, 1);
 }
 
@@ -206,7 +207,7 @@ fn a_duplicate_uas_pipe_id_poisons_the_interface() {
         &endpoint(0x84, 0x02),
         &pipe_usage(0x03),
     ]);
-    assert_eq!(find_storage_interface(&bytes), Err(Errno::NotFound));
+    assert_eq!(find_storage_interface(&bytes, 0), Err(Errno::NotFound));
 }
 
 #[test]
@@ -217,7 +218,7 @@ fn unsupported_class_combinations_are_left_unserved() {
         &endpoint(0x81, 0x02),
         &endpoint(0x02, 0x02),
     ]);
-    assert_eq!(find_storage_interface(&bytes), Err(Errno::NotFound));
+    assert_eq!(find_storage_interface(&bytes, 0), Err(Errno::NotFound));
 
     // An ATAPI sub-class over BOT is not implemented either.
     let bytes = stream(&[
@@ -225,7 +226,7 @@ fn unsupported_class_combinations_are_left_unserved() {
         &endpoint(0x81, 0x02),
         &endpoint(0x02, 0x02),
     ]);
-    assert_eq!(find_storage_interface(&bytes), Err(Errno::NotFound));
+    assert_eq!(find_storage_interface(&bytes, 0), Err(Errno::NotFound));
 }
 
 #[test]
@@ -237,8 +238,9 @@ fn skips_foreign_interfaces_and_their_endpoints() {
         &endpoint(0x02, 0x02), // bulk-OUT first
         &endpoint(0x85, 0x02), // bulk-IN second
     ]);
+    assert_eq!(find_storage_interface(&bytes, 0), Err(Errno::NotFound));
     assert_eq!(
-        find_storage_interface(&bytes),
+        find_storage_interface(&bytes, 1),
         Ok(StorageInterface {
             interface_number: 1,
             command_set: CommandSet::Transparent,
@@ -259,7 +261,7 @@ fn a_bot_interface_ignores_a_stray_interrupt_endpoint() {
         &endpoint(0x03, 0x02), // bulk-OUT, EP3
     ]);
     assert_eq!(
-        find_storage_interface(&bytes),
+        find_storage_interface(&bytes, 0),
         Ok(StorageInterface {
             interface_number: 0,
             command_set: CommandSet::Transparent,
@@ -274,7 +276,7 @@ fn a_bot_interface_ignores_a_stray_interrupt_endpoint() {
 #[test]
 fn refuses_a_stream_with_no_storage_interface() {
     let bytes = stream(&[&interface(0, [0x03, 0x01, 0x01]), &endpoint(0x81, 0x03)]);
-    assert_eq!(find_storage_interface(&bytes), Err(Errno::NotFound));
+    assert_eq!(find_storage_interface(&bytes, 0), Err(Errno::NotFound));
 }
 
 #[test]
@@ -283,7 +285,7 @@ fn refuses_an_interface_missing_a_bulk_direction() {
         &interface(0, BOT_SCSI),
         &endpoint(0x81, 0x02), // bulk-IN only
     ]);
-    assert_eq!(find_storage_interface(&bytes), Err(Errno::NotFound));
+    assert_eq!(find_storage_interface(&bytes, 0), Err(Errno::NotFound));
 }
 
 #[test]
@@ -294,7 +296,10 @@ fn refuses_a_zero_length_descriptor_rather_than_looping() {
     bytes.extend_from_slice(&[0, DESC_TYPE_ENDPOINT]);
     let total = u16::try_from(bytes.len()).expect("fits");
     bytes[2..4].copy_from_slice(&total.to_le_bytes());
-    assert_eq!(find_storage_interface(&bytes), Err(Errno::LengthOutOfRange));
+    assert_eq!(
+        find_storage_interface(&bytes, 0),
+        Err(Errno::LengthOutOfRange)
+    );
 }
 
 #[test]
@@ -304,7 +309,10 @@ fn refuses_a_descriptor_running_past_the_stream() {
     bytes.extend_from_slice(&[9, DESC_TYPE_ENDPOINT, 0x81, 0x02]);
     let total = u16::try_from(bytes.len()).expect("fits");
     bytes[2..4].copy_from_slice(&total.to_le_bytes());
-    assert_eq!(find_storage_interface(&bytes), Err(Errno::LengthOutOfRange));
+    assert_eq!(
+        find_storage_interface(&bytes, 0),
+        Err(Errno::LengthOutOfRange)
+    );
 }
 
 #[test]
@@ -327,21 +335,23 @@ fn refuses_a_truncated_or_mistyped_header() {
 fn refuses_a_stream_shorter_than_its_announced_total() {
     let bytes = stream(&[&interface(0, BOT_SCSI)]);
     assert_eq!(
-        find_storage_interface(&bytes[..bytes.len() - 1]),
+        find_storage_interface(&bytes[..bytes.len() - 1], 0),
         Err(Errno::LengthOutOfRange)
     );
 }
 
 #[test]
-fn a_second_matching_interface_serves_when_the_first_lacks_endpoints() {
+fn only_the_named_interface_is_served() {
     let bytes = stream(&[
         &interface(0, BOT_SCSI), // no endpoints follow
         &interface(1, BOT_SCSI),
         &endpoint(0x81, 0x02),
         &endpoint(0x02, 0x02),
     ]);
+    assert_eq!(find_storage_interface(&bytes, 0), Err(Errno::NotFound));
+    assert_eq!(find_storage_interface(&bytes, 2), Err(Errno::NotFound));
     assert_eq!(
-        find_storage_interface(&bytes),
+        find_storage_interface(&bytes, 1),
         Ok(StorageInterface {
             interface_number: 1,
             command_set: CommandSet::Transparent,

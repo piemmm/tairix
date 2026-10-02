@@ -251,10 +251,11 @@ the machine running: the port keeps the Arch-HAL `poweroff` default rather
 than poking a guessed chipset control port. Closing it needs an ACPI
 power-management path that parses the FADT (and the DSDT `\_S5` object) for
 the PM1a/PM1b control block and sleep-type values, then writes the `SLP_TYP`
-+ `SLP_EN` sequence — real firmware parsing, not a constant. aarch64 (PSCI
-`SYSTEM_OFF`) and riscv64 (SBI SRST) already power off. Vertical: a QEMU
-x86_64 scenario asserting the guest exits on `PowerOff`, mirroring the
-equivalents on the two ports that have it.
++ `SLP_EN` sequence — real firmware parsing, not a constant. The `\_S5`
+evaluation is the ACPI bus driver's (`plans/ACPI.md` A6), since AML runs
+outside the kernel. aarch64 (PSCI `SYSTEM_OFF`) and riscv64 (SBI SRST)
+already power off. Vertical: a QEMU x86_64 scenario asserting the guest exits
+on `PowerOff`, mirroring the equivalents on the two ports that have it.
 
 ### A8 — x86_64 hardening unblock
 

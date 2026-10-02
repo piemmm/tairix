@@ -25,14 +25,6 @@ tairix-abi = { path = "../abi", version = "=0.0.0" }
 # event-ring cycle-bit read before the entry body. Arch-specific instruction,
 # host/wasm32 no-op.
 tairix-dma-barrier = { path = "../dma-barrier", version = "=0.0.0" }
-# The HID report-descriptor parser + boot-layout normaliser. The HID
-# enumeration engine runs a report-protocol HID device (so `SET_IDLE` quiesces
-# an idle device instead of it streaming a duplicate report every interval) and
-# rewrites each report-protocol report back into the fixed boot layout the
-# class drivers already consume — one HID decode definition, reused
-# rather than a second parser here. No cycle: `lib/hid` does not depend on this
-# crate.
-tairix-hid = { path = "../hid", version = "=0.0.0" }
 # The fixed 256-bit set the configuration decoder records the interface
 # numbers and endpoint contexts a device has claimed in.
 tairix-inline = { path = "../inline", version = "=0.0.0" }

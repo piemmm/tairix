@@ -88,9 +88,10 @@ mod kernel {
     use core::sync::atomic::{AtomicBool, Ordering};
 
     use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
+    use tairix_itest_witness::field_str;
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
-    use tairix_log::{Event, EventId, FieldValue, Sink};
+    use tairix_log::{Event, EventId, Sink};
 
     // The canonical QEMU `virt` device tree, dumped and embedded at build
     // time (`build.rs`). The boot pipeline discovers the board from it
@@ -128,20 +129,6 @@ mod kernel {
     /// verified round-trip bytes provably reached the transcript before
     /// the run ended.
     static ROUND_TRIP_DONE: AtomicBool = AtomicBool::new(false);
-
-    /// The string value of `event`'s field `key`, if present.
-    fn field_str<'e>(event: &Event<'e>, key: &str) -> Option<&'e str> {
-        event.fields.iter().find_map(|field| {
-            if field.key == key {
-                match field.value {
-                    FieldValue::Str(s) => Some(s),
-                    _ => None,
-                }
-            } else {
-                None
-            }
-        })
-    }
 
     /// Sink that replays every event through [`SERIAL_SINK`] and reports
     /// PASS once the round trip's `cat` has exited and the shell's

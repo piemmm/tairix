@@ -108,7 +108,6 @@ mod program {
     use tairix_drv_bus_usb::interfaces::{Interfaces, Note, Seam, UrbBuffer, ENDPOINT_CAPACITY};
     use tairix_drv_bus_usb::serve::UrbReply;
     use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
-    use tairix_hid::{ReportFieldSummary, ReportMapSummary};
     use tairix_log::{log, Event, EventId, Field, Level};
     use tairix_rt::shm::SharedRegion;
     use tairix_rt::{ClockDelay, LogSink};
@@ -117,7 +116,7 @@ mod program {
         XHCI_MAX_SLOTS,
     };
     use tairix_usb::{SlabBank, XhciOpenStage};
-    use tairix_util::fmt::{format_hex_bytes, format_hex_u64};
+    use tairix_util::fmt::format_hex_u64;
 
     /// Exit code when the rt-backed driver host could not be built from the
     /// kernel-delivered grants. A reserved, fail-closed value.
@@ -173,111 +172,9 @@ mod program {
     /// Diagnostic event id: a wait-set or IPC transport error happened.
     const HCD_WAIT_ERROR: EventId = EventId(4154);
 
-    /// Diagnostic event id: a served HID interface's enumeration decision
-    /// (report vs boot protocol, parsed field layout, armed transfer size) and
-    /// the Report Descriptor it was derived from. Logged once per interface at
-    /// node publish, so a metal capture shows how a keyboard/mouse's reports
-    /// will be read *and* whether that reading is right (QEMU models no Pi
-    /// USB).
-    const HCD_HID_ENUM: EventId = EventId(4150);
-
-    /// Field slots the HID enumeration record fills: the five interface facts,
-    /// `keyboard` + `report_id`, and the widest map's located fields (a mouse's
-    /// buttons with a count, plus three two-key axes).
-    const HID_ENUM_FIELDS_MAX: usize = 16;
-
-    const _: () = assert!(HID_ENUM_FIELDS_MAX <= tairix_abi::LOG_FIELDS_MAX);
-
-    /// Bytes of Report Descriptor per dump record. Two hex characters each, so
-    /// a record's value stays inside the ABI's field-value bound; a longer
-    /// descriptor spans further records naming their own byte offset.
-    const HID_DESC_CHUNK: usize = 64;
-
-    const _: () = assert!(HID_DESC_CHUNK * 2 <= tairix_abi::LOG_FIELD_VALUE_MAX);
-
-    /// The diagnostic keys one located report field logs under: its bit
-    /// offset, its per-element width, and its element count where a count is
-    /// meaningful (a scalar axis has none).
-    #[derive(Copy, Clone)]
-    struct LocKeys {
-        offset: &'static str,
-        size: &'static str,
-        count: Option<&'static str>,
-    }
-
-    const BUTTON_KEYS: LocKeys = LocKeys {
-        offset: "btn_off_bits",
-        size: "btn_size_bits",
-        count: Some("btn_count"),
-    };
-    const X_KEYS: LocKeys = LocKeys {
-        offset: "x_off_bits",
-        size: "x_size_bits",
-        count: None,
-    };
-    const Y_KEYS: LocKeys = LocKeys {
-        offset: "y_off_bits",
-        size: "y_size_bits",
-        count: None,
-    };
-    const WHEEL_KEYS: LocKeys = LocKeys {
-        offset: "wheel_off_bits",
-        size: "wheel_size_bits",
-        count: None,
-    };
-    const MODIFIER_KEYS: LocKeys = LocKeys {
-        offset: "mod_off_bits",
-        size: "mod_size_bits",
-        count: None,
-    };
-    const KEY_ARRAY_KEYS: LocKeys = LocKeys {
-        offset: "keys_off_bits",
-        size: "keys_size_bits",
-        count: Some("keys_count"),
-    };
-
-    /// Append `key = value` at `count`, advancing it. A full buffer drops the
-    /// field rather than panicking; the compile-time bound above is what keeps
-    /// that from happening.
-    fn push_field(
-        fields: &mut [Field<'static>],
-        count: &mut usize,
-        key: &'static str,
-        value: tairix_log::FieldValue<'static>,
-    ) {
-        if let Some(slot) = fields.get_mut(*count) {
-            *slot = Field { key, value };
-            *count += 1;
-        }
-    }
-
-    /// Append the map's Report ID, distinguishing "this device declares none"
-    /// from an id that happens to be zero.
-    ///
-    /// A device with no Report IDs needs no demux at all, while one with them
-    /// must have every report matched — logging both as `0` hid exactly the
-    /// difference a mis-read report turns on, so the absent case is `Null`.
-    fn push_report_id(fields: &mut [Field<'static>], count: &mut usize, report_id: Option<u8>) {
-        let value = report_id.map_or(tairix_log::FieldValue::Null, |id| {
-            tairix_log::FieldValue::UnsignedInt(u64::from(id))
-        });
-        push_field(fields, count, "report_id", value);
-    }
-
-    /// Append one located field's offset, width, and element count.
-    fn push_loc(
-        fields: &mut [Field<'static>],
-        count: &mut usize,
-        keys: LocKeys,
-        loc: ReportFieldSummary,
-    ) {
-        let u = tairix_log::FieldValue::UnsignedInt;
-        push_field(fields, count, keys.offset, u(u64::from(loc.offset_bits)));
-        push_field(fields, count, keys.size, u(u64::from(loc.size_bits)));
-        if let Some(key) = keys.count {
-            push_field(fields, count, key, u(u64::from(loc.count)));
-        }
-    }
+    /// Security event id: a class driver's control request reached past its
+    /// own interface and was refused.
+    const HCD_URB_REFUSED: EventId = EventId(4249);
 
     /// Interior fault-domain event id: the controller faulted and the whole
     /// subtree entered its shared recovery grace window (`plans/FIX-IO.md`
@@ -561,7 +458,7 @@ mod program {
 
         fn note(&mut self, note: Note) {
             match note {
-                Note::Published { index, node } => {
+                Note::Published { node } => {
                     log_hex_event(
                         HCD_ATTACHED,
                         Level::Info,
@@ -569,11 +466,6 @@ mod program {
                         "node_hex",
                         u64::from(node),
                     );
-                    // How the interface's reports will be read, and the
-                    // descriptor that decision came from: a silenced device's
-                    // only diagnosis on metal.
-                    log_hid_enum_diag(self.device, index);
-                    log_hid_report_descriptor(self.device, index);
                 }
                 Note::UrbFailed { index, errno } => log_urb_error(self.device, index, errno),
                 Note::FaultDetached => {
@@ -831,174 +723,6 @@ mod program {
         }
     }
 
-    /// Log the HID enumeration decision for the interface at `index` once, at
-    /// node publish: whether it runs report or boot protocol, its declared
-    /// report-descriptor length, the interrupt endpoint's `wMaxPacketSize` and
-    /// the armed transfer length, and — when a report map was parsed — the
-    /// located field layout. This is the metal window on *how* a device's
-    /// reports will be read (QEMU models no Pi USB); a non-HID interface has no
-    /// diagnostic and logs nothing.
-    fn log_hid_enum_diag(
-        device: &mut tairix_drv_bus_usb::bringup::ControllerDevice<'_>,
-        index: usize,
-    ) {
-        let Some(diag) = device.hid_enum_diag(index) else {
-            return;
-        };
-        let u = |v: u64| tairix_log::FieldValue::UnsignedInt(v);
-        let b = tairix_log::FieldValue::Bool;
-        // The interface's own enumeration facts, common to both arms.
-        let mut fields = [Field {
-            key: "",
-            value: tairix_log::FieldValue::Null,
-        }; HID_ENUM_FIELDS_MAX];
-        let mut count = 0usize;
-        push_field(&mut fields, &mut count, "index", u(index as u64));
-        push_field(
-            &mut fields,
-            &mut count,
-            "report_proto",
-            b(diag.report_protocol),
-        );
-        push_field(
-            &mut fields,
-            &mut count,
-            "desc_len",
-            u(u64::from(diag.report_descriptor_len)),
-        );
-        push_field(
-            &mut fields,
-            &mut count,
-            "max_packet",
-            u(u64::from(diag.int_max_packet)),
-        );
-        push_field(
-            &mut fields,
-            &mut count,
-            "capture_len",
-            u(u64::from(diag.capture_len)),
-        );
-        let Some(map) = diag.map else {
-            // A refused interface delivers no report at all, so it must never
-            // read in the log as a working boot-protocol device: it is the one
-            // outcome a user would otherwise see only as silent hardware.
-            let (level, message) = if diag.reports_refused {
-                (
-                    Level::Warn,
-                    "usb-hcd: HID interface refused (device in report protocol, no usable map)",
-                )
-            } else {
-                (Level::Info, "usb-hcd: HID interface boot-protocol fallback")
-            };
-            log(
-                &LogSink,
-                &Event {
-                    level,
-                    id: HCD_HID_ENUM,
-                    message,
-                    fields: &fields[..count],
-                },
-            );
-            return;
-        };
-        // Every field the parser located, so the log shows where each one is
-        // read from rather than only the first of them: a pointer whose axes
-        // are misread produces flickering button bits, and only the offsets
-        // side by side show it.
-        match map {
-            ReportMapSummary::Mouse {
-                report_id,
-                buttons,
-                x,
-                y,
-                wheel,
-            } => {
-                push_field(&mut fields, &mut count, "keyboard", b(false));
-                push_report_id(&mut fields, &mut count, report_id);
-                push_loc(&mut fields, &mut count, BUTTON_KEYS, buttons);
-                push_loc(&mut fields, &mut count, X_KEYS, x);
-                push_loc(&mut fields, &mut count, Y_KEYS, y);
-                match wheel {
-                    Some(loc) => push_loc(&mut fields, &mut count, WHEEL_KEYS, loc),
-                    // An absent wheel is stated, never a zero offset a reader
-                    // would take for a located field.
-                    None => push_field(
-                        &mut fields,
-                        &mut count,
-                        WHEEL_KEYS.offset,
-                        tairix_log::FieldValue::Null,
-                    ),
-                }
-            }
-            ReportMapSummary::Keyboard {
-                report_id,
-                modifiers,
-                keys,
-            } => {
-                push_field(&mut fields, &mut count, "keyboard", b(true));
-                push_report_id(&mut fields, &mut count, report_id);
-                push_loc(&mut fields, &mut count, MODIFIER_KEYS, modifiers);
-                push_loc(&mut fields, &mut count, KEY_ARRAY_KEYS, keys);
-            }
-        }
-        log(
-            &LogSink,
-            &Event {
-                level: Level::Info,
-                id: HCD_HID_ENUM,
-                message: "usb-hcd: HID interface report protocol",
-                fields: &fields[..count],
-            },
-        );
-    }
-
-    /// Log interface `index`'s HID Report Descriptor as hex, [`HID_DESC_CHUNK`]
-    /// bytes per record, each naming the byte offset it starts at.
-    ///
-    /// [`log_hid_enum_diag`] records what the parsed map *says*; this records
-    /// what it was derived *from*, which is what makes a wrong map diagnosable
-    /// rather than merely visible — an interface whose descriptor declares
-    /// Report IDs the map did not pin to reads its sibling collections' reports
-    /// as its own, and only the bytes show it. A Report Descriptor is a device
-    /// capability blob, so no keystroke or pointer movement passes through it.
-    /// An interface that declared none logs nothing.
-    fn log_hid_report_descriptor(
-        device: &tairix_drv_bus_usb::bringup::ControllerDevice<'_>,
-        index: usize,
-    ) {
-        for (record, chunk) in device
-            .hid_report_descriptor(index)
-            .chunks(HID_DESC_CHUNK)
-            .enumerate()
-        {
-            let mut hex = [0u8; HID_DESC_CHUNK * 2];
-            log(
-                &LogSink,
-                &Event {
-                    level: Level::Info,
-                    id: HCD_HID_ENUM,
-                    message: "usb-hcd: HID interface report descriptor",
-                    fields: &[
-                        Field {
-                            key: "index",
-                            value: tairix_log::FieldValue::UnsignedInt(index as u64),
-                        },
-                        Field {
-                            key: "offset",
-                            value: tairix_log::FieldValue::UnsignedInt(
-                                (record * HID_DESC_CHUNK) as u64,
-                            ),
-                        },
-                        Field {
-                            key: "hex",
-                            value: tairix_log::FieldValue::Str(format_hex_bytes(chunk, &mut hex)),
-                        },
-                    ],
-                },
-            );
-        }
-    }
-
     /// A diagnostic field carrying a controller value that may not have been
     /// readable: an unreadable register is logged `Null`, never a fabricated
     /// zero.
@@ -1022,12 +746,20 @@ mod program {
         index: usize,
         errno: Errno,
     ) {
+        let (id, message) = if errno == Errno::PermissionDenied {
+            (
+                HCD_URB_REFUSED,
+                "usb-hcd: a class driver's control request outside its interface was refused",
+            )
+        } else {
+            (HCD_WAIT_ERROR, "usb-hcd: URB completed with an error")
+        };
         log(
             &LogSink,
             &Event {
                 level: Level::Warn,
-                id: HCD_WAIT_ERROR,
-                message: "usb-hcd: URB completed with an error",
+                id,
+                message,
                 fields: &[
                     Field {
                         key: "index",

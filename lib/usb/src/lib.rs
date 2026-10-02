@@ -52,6 +52,7 @@ extern crate std;
 use tairix_abi::{DriverError, RegisterBlock};
 
 pub mod bank;
+pub mod descriptor;
 pub mod device;
 pub mod regs;
 pub mod ring;
@@ -94,7 +95,7 @@ pub const XHCI_BAR_INDEX: u8 = 0;
 /// It is an xHCI-protocol identity (the controller class), not a board or
 /// vendor name, so it lives here beside the controller engine as the single
 /// definition both the emitting bus driver (`drivers/bus/usb/vl805`) and the
-/// binding controller driver (`drivers/input/usb_kbd`) depend on, never a
+/// binding controller driver (`drivers/bus/usb/xhci`) depend on, never a
 /// copy in each.
 pub const XHCI_COMPATIBLE: &[u8] = b"usb,xhci";
 

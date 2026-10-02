@@ -122,6 +122,11 @@ fn the_render_is_canonical_and_round_trips() {
         primary_button: PrimaryButton::Right,
         double_click: Duration64::from_millis(300),
         pointer_speed: PointerSpeed::from_percent(150).expect("a speed"),
+        touchpad: crate::TouchpadSettings {
+            tap: false,
+            natural_scroll: false,
+            speed: PointerSpeed::from_percent(75).expect("a speed"),
+        },
         repeat_delay: Duration64::from_millis(250),
         repeat_rate: RepeatRate::Off,
         screensaver_after: IdleAfter::Minutes(5),
@@ -154,6 +159,9 @@ fn the_render_is_canonical_and_round_trips() {
          pointer.primary = right\n\
          pointer.double_click_ms = 300\n\
          pointer.speed = 150\n\
+         touchpad.tap = false\n\
+         touchpad.natural_scroll = false\n\
+         touchpad.speed = 75\n\
          key.repeat_delay_ms = 250\n\
          key.repeat_rate = off\n\
          screensaver.after_min = 5\n\
@@ -233,6 +241,12 @@ fn the_input_keys_default_to_the_documented_policy() {
         tairix_abi::desktop::DOUBLE_CLICK_DEFAULT
     );
     assert_eq!(settings.pointer_speed, PointerSpeed::NORMAL);
+    assert!(settings.touchpad.tap, "a tap clicks");
+    assert!(
+        settings.touchpad.natural_scroll,
+        "the content follows the fingers"
+    );
+    assert_eq!(settings.touchpad.speed, PointerSpeed::NORMAL);
     assert_eq!(settings.repeat_delay, crate::input::REPEAT_DELAY_DEFAULT);
     assert_eq!(settings.repeat_rate, RepeatRate::PerSecond(30));
     assert_eq!(settings.screensaver_after, IdleAfter::Minutes(10));
@@ -248,6 +262,9 @@ fn an_input_value_outside_its_bounds_is_refused_whole() {
         ("pointer.double_click_ms = 50", SettingsKey::DoubleClick),
         ("pointer.double_click_ms = 0.5", SettingsKey::DoubleClick),
         ("pointer.speed = 500", SettingsKey::PointerSpeed),
+        ("touchpad.tap = sometimes", SettingsKey::TouchpadTap),
+        ("touchpad.natural_scroll = 1", SettingsKey::TouchpadNatural),
+        ("touchpad.speed = 20", SettingsKey::TouchpadSpeed),
         ("key.repeat_delay_ms = 3000", SettingsKey::RepeatDelay),
         ("key.repeat_rate = 0", SettingsKey::RepeatRate),
         ("screensaver.after_min = 0", SettingsKey::ScreensaverAfter),
@@ -900,11 +917,12 @@ fn a_refused_merge_changes_nothing_at_all() {
 fn the_key_groups_partition_the_registry() {
     // Every key belongs to exactly one group, so a surface that renders
     // its group can never leave a key with no owner or post one twice.
-    let groups: [&[SettingsKey]; 7] = [
+    let groups: [&[SettingsKey]; 8] = [
         &SettingsKey::PINBOARD,
         &SettingsKey::APPEARANCE,
         &SettingsKey::NOTIFICATIONS,
         &SettingsKey::POINTER,
+        &SettingsKey::TOUCHPAD,
         &SettingsKey::KEYBOARD,
         &SettingsKey::SCREENSAVER,
         &SettingsKey::LOCK,

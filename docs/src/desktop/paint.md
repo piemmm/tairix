@@ -11,8 +11,16 @@ A picture is edited at the depth it is stored in: a 1, 2, 4 or 8-bit palette,
 or 32-bit colour with alpha. A toolbar strip runs across the top — the tools,
 then the view's own commands (zoom in and out, fit, actual size, grid) — with
 the panel down the left, the canvas and its bars beside it and the status band
-along the bottom. The window shows the picture at a zoom from 1/16 to 64
-(`viewport::ZOOMS`), as tall or wide as the sprite's pixels are, over a
+along the bottom. The window shows the picture at any zoom from 1/16 to 64,
+kept in 4096ths of actual size (`viewport::Zoom`), every rung of the ladder
+(`viewport::ZOOMS`) exactly. Ctrl and the wheel step it a rung for each
+detent's worth of turn, a fine wheel's fractions adding up, anchored so the
+pixel under the pointer stays under it, and from between two rungs the first
+step lands on the nearer one in its direction; zoom in and out step the same
+way. A pinch begun over the canvas zooms smoothly by the fingers' spread and
+follows their centre, both measured from where it began, so it accumulates no
+rounding, and a cancelled pinch puts the view back. The picture is drawn as
+tall or wide as the sprite's pixels are, over a
 checkerboard where it is clear, with a grid between pixels once one spans
 `GRID_FROM` screen pixels. Beside it the panel holds the primary and secondary
 colours, the picture's palette — the desktop's sixteen colours for a

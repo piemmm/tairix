@@ -2650,6 +2650,11 @@ share of the canvas. A pan repaints only the bars: the picture held is drawn
 where it was until the render the pan asks for lands, and that answer repaints
 the canvas.
 
+A pinch begun over the picture zooms it smoothly by the fingers' spread,
+holding the point it began on under the fingers and carrying it with their
+centre as they move — both measured from where the pinch began, so a long
+pinch accumulates no rounding — and a cancelled pinch puts the view back.
+
 Transparency is drawn against a checkerboard, so a transparent picture reads
 as transparent rather than as the colour behind it.
 

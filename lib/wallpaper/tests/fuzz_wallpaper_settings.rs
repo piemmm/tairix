@@ -111,6 +111,17 @@ const KEYS: &[(&str, &[&str], &[&str])] = &[
         &["25", "50", "100", "150", "400"],
         &["24", "401"],
     ),
+    ("touchpad.tap", &["true", "false"], &["on", "yes"]),
+    (
+        "touchpad.natural_scroll",
+        &["true", "false"],
+        &["1", "natural"],
+    ),
+    (
+        "touchpad.speed",
+        &["25", "75", "100", "250", "400"],
+        &["24", "401"],
+    ),
     (
         "key.repeat_delay_ms",
         &["100", "250", "500", "1000", "2000"],

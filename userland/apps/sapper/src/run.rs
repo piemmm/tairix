@@ -596,6 +596,7 @@ mod program {
             | WindowEvent::PickCancelled { .. }
             | WindowEvent::DragEnded { .. }
             | WindowEvent::PreviewRendered { .. }
+            | WindowEvent::Pinch { .. }
             | WindowEvent::OpenRequested => Acted::Idle,
         }
     }

@@ -53,6 +53,8 @@ lise comme transparente et non comme la couleur derrière elle.
 
 * `+` — agrandir d'un cran
 * `-` — réduire d'un cran
+* `Ctrl` + molette — agrandir ou réduire autour du pointeur
+* Pincer à deux doigts — agrandir ou réduire en continu ; sur un écran tactile, l'image suit les doigts
 * `0` — ajuster toute l'image à la fenêtre
 * `1` — taille réelle, un pixel d'image par pixel d'écran
 * `2` — ajuster la largeur de l'image

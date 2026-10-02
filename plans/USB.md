@@ -25,22 +25,22 @@ type today is allowed; it requires regenerating the C header
 | U3a2 | Cross-process shared-memory primitive | done |
 | U3a3 | Wait-set multi-event wait primitive | done |
 | U3b | The xHCI HCD process | done |
-| U4 | `usb_kbd` as a pure HID class driver | done |
+| U4 | Class drivers bind interface nodes and reach their device only over the URB transport | done |
 | U5 | Event-driven hot-plug, re-enumeration, and a controller-fault recovery that keeps the devices that come back | done |
-| U6 | `usb_mouse` class driver and broken-device isolation | done |
+| U6 | Broken-device isolation: one device's failure never costs another its service | done |
 | U7 | Composite (multi-interface) devices | done |
 | U8 | EP0 max-packet discovery and exact-length descriptor reads | done |
 | U9 | Multi-tier hubs (a hub plugged into a hub) | done |
 | U10 | Each node gets a fresh shared buffer; a reused endpoint refuses the previous node's driver | done |
-| UM | Live metal acceptance of attach, detach, re-attach, cold boot unplugged, and a controller reset under a live keyboard | blocked: the operator's Pi 4 run (QEMU models no Pi USB) |
+| U11 | The host controller is class-neutral: raw interrupt-IN reports sized by the class driver, a one-page control data stage, a control-request policy scoped to the node's own interface, and the interface number on the node (`plans/HID.md` H4) | done |
+| UM | Live metal acceptance of attach, detach, re-attach, cold boot unplugged, and a controller reset under a live keyboard, with `usb_hid` serving a keyboard, a mouse and a touchpad | blocked: the operator's Pi 4 run (QEMU models no Pi USB) |
 
 ---
 
-## 0. The problem this plan fixes
+## 0. Why the controller and the class are separate processes
 
-The metal-proven keyboard chain (`plans/PI.md` B5/D5) folded two distinct
-responsibilities into one process. Today `drivers/input/usb_kbd` binds the
-`usb,xhci` controller node **directly** and performs the *whole* job:
+A driver that binds the `usb,xhci` controller node **directly** and performs
+the *whole* job folds two distinct responsibilities into one process:
 
 1. maps the controller's register BAR, owns its DMA rings and root-hub ports,
    brings the xHCI controller up, and enumerates the attached device; **and**
@@ -68,10 +68,8 @@ process means:
   drivers exist. TAIRiX may carry several controller drivers and several class
   drivers; none may be wired to a specific sibling.
 
-`drivers/bus/usb/xhci` already exists as the intended HCD crate, but it is
-currently only a vestigial kernel-linked `register` / `BIND_KEYS` stub — the
-live path bypasses it. This plan makes it the real HCD and reduces `usb_kbd`
-to a pure HID class driver.
+`drivers/bus/usb/xhci` is that host-controller driver, and every class driver
+binds an interface node it publishes.
 
 ---
 
@@ -97,8 +95,8 @@ ABI — never by naming a sibling crate (§17.4, §2.20):
                                                              │ per-interface node
                                               ┌──────────────┴───────────────┐
                                               │  USB class driver(s)          │
-                                              │  drivers/input/usb_kbd (HID), │
-                                              │  a future usb_mouse, …        │
+                                              │  drivers/input/usb_hid,       │
+                                              │  drivers/storage/usb_msd, …   │
                                               │  binds an emitted interface   │
                                               │  node, submits/reaps URBs over│
                                               │  the transport IPC. Touches   │
@@ -130,8 +128,7 @@ ABI — never by naming a sibling crate (§17.4, §2.20):
   and emits, and the device manager autoloads the matching class driver — so
   re-plug works with no reboot (§18.4).
 - It knows nothing of PCIe, the VL805, or any board: it received its register
-  window and DMA constraint as grants on its matched node, exactly as today
-  (`usb_kbd`'s current platform-neutral bring-up moves here unchanged).
+  window and DMA constraint as grants on its matched node.
 - **It is a single asynchronous event loop, never a per-URB blocking server
   (§2.23).** The HCD must service two independent event streams at once —
   incoming URB-submit IPC calls on the per-interface endpoints it serves, and
@@ -148,14 +145,14 @@ ABI — never by naming a sibling crate (§17.4, §2.20):
 
 ### 1.2 The class driver
 
-- `drivers/input/usb_kbd` becomes a pure HID boot-keyboard **class driver**. It
-  binds an emitted USB-interface node matched by the HID boot-keyboard class
-  key — never the controller node.
+- A class driver binds an emitted USB-interface node by its class key — never
+  the controller node. Every HID interface is served by the one HID class
+  driver, `drivers/input/usb_hid`, which reads and parses its own report
+  descriptor and serves every application on the interface (`plans/HID.md`).
 - It owns **no** controller register and carves **no** controller DMA. It
-  submits interrupt-IN transfers (URBs) for its interface and reaps completions
-  over the URB transport IPC (§1.3), decoding each HID boot report through the
-  arch-neutral `tairix_hid` composition and injecting keystrokes through the
-  existing `key_inject` syscall.
+  submits control and interrupt-IN transfers (URBs) for its interface and
+  reaps completions over the URB transport IPC (§1.3), injecting what it
+  decodes through the seat's inject syscalls.
 - It knows neither the controller type nor the bus: the same binary would work
   unchanged behind a different host controller, because it speaks only the
   bus-agnostic URB transport ABI.
@@ -179,8 +176,10 @@ ABI — never by naming a sibling crate (§17.4, §2.20):
   sees a controller register or another interface's buffer.
 - Every URB is validated by the HCD before it touches a ring (endpoint belongs
   to this interface, length within the buffer, direction legal); it fails
-  closed (§5.4). Parsing of device-supplied descriptors during enumeration is
-  the HCD's job and is bounded/fail-closed (it already is, in `lib/usb`).
+  closed (§5.4). Parsing the standard descriptors during enumeration
+  (device, configuration, interface, endpoint, hub) is the HCD's job and is
+  bounded/fail-closed (it already is, in `lib/usb`); a class-specific
+  descriptor, such as a HID report descriptor, is its class driver's.
 
 ### 1.4 Device manager hot-removal reaction
 
@@ -220,8 +219,9 @@ ABI — never by naming a sibling crate (§17.4, §2.20):
 - **No sibling hardwiring (§2.20, §17.4).** The HCD names no class driver and
   no bus; class drivers name no controller and no bus; bus drivers name no USB.
   Every edge is discovery (`hw_emit_node`) + match (`lib/devmatch`) + the public
-  URB ABI. Adding a USB mouse is a new class-driver bundle and zero edits
-  elsewhere; supporting USB behind a different controller is a new HCD bundle.
+  URB ABI. Adding a USB device class is a new class-driver bundle and zero
+  edits elsewhere; supporting USB behind a different controller is a new HCD
+  bundle.
 - **Hotplug is structural, not bolted on.** Connect → enumerate → emit →
   autoload; disconnect → `hw_remove_node` → devmgr unload. Both directions use
   the same generation-bump path the device manager already runs (§18.4).
@@ -275,7 +275,7 @@ the live controller behaviour is host- and CI-proven first.
   surface (`cargo xtask c-header` produced no `include/` diff). `lib/usb` gained
   the `transport` module: the `UrbEngine` controller-side seam (`UsbDevice`
   implements it — `control_in` over the EP0 control transfer, `interrupt_in`
-  over the `ReportSource` poll), `serve_urb` (decode → validate against the
+  over the interface's report queue), `serve_urb` (decode → validate against the
   interface fail-closed → drive the engine over the shared buffer → frame the
   completion in band; a not-yet-arrived report is `WouldBlock`), and the
   class-side `UrbCall`/`UrbClient` (`control_in`/`interrupt_in` build, submit,
@@ -418,21 +418,14 @@ the live controller behaviour is host- and CI-proven first.
   - `hw_emit_node` was evolved to **return the kernel-assigned node id** (the
     emitter cannot choose it but needs it to `hw_remove_node` on disconnect);
     `drvrt`/existing bus drivers treat `≥0` as success unchanged.
-- **U4 — `usb_kbd` as a pure HID class driver.** Rewritten as a
-  `lib`+`Run` crate binding the HID boot-keyboard **interface** key
-  (`HwMatchKey::usb(0,0,0x03_01_01)`, in its own `lib` `BIND_KEYS`), holding no
-  MMIO/DMA/IRQ — only `CAP_INPUT_INJECT`/`CAP_SHM`/`CAP_IPC_ENDPOINT`/
-  `CAP_LOG_EMIT`. It `map_shared`s the granted buffer and runs `pump_once` over
-  a `UrbReportSource: ReportSource` that submits a **blocking** interrupt-IN URB
-  (`UrbClient` over `ipc_call`) and copies the report out of the shared buffer —
-  event-driven, parking in the kernel between keystrokes (§2.23). `NotFound`
-  from the URB transport is terminal: the old class-driver process exits so a
-  re-emitted node loads a fresh instance instead of retrying a vanished
-  interface. The
-  controller bring-up is deleted (§2.14); the redundant never-shipped
-  `drivers/input/usb_hid` stub is deleted. Image builder ships both the
-  `xhci` HCD bundle (`bus_usb/xhci`) and the retuned `usb_kbd` class-driver
-  bundle.
+- **U4 — class drivers over the transport.** A class driver is a `lib`+`Run`
+  crate binding an **interface** key in its own `lib` `BIND_KEYS`, holding no
+  MMIO, DMA or IRQ grant. It takes the node's shared buffer
+  (`RtDriverHost::shared_buffer`) and submits **blocking** URBs over
+  `UrbLink` (`ipc_call`), parking in the kernel between reports. `NotFound`
+  from the transport is terminal: the process exits, so a re-emitted node
+  loads a fresh instance rather than retrying a vanished interface. The image
+  ships the `xhci` HCD bundle (`bus_usb/xhci`) and each class driver's bundle.
 - **U5 — event-driven hot-plug + re-enumeration** (live metal acceptance is
   UM). Both staged refinements are built in
   `lib/usb`, and the HCD services them:
@@ -465,7 +458,7 @@ the live controller behaviour is host- and CI-proven first.
     requirement): on connect the engine resets the downstream port and
     enumerates on a fresh slot; the HCD re-emits a **new** interface node
     carrying the index's endpoint and a fresh shared buffer, so `devmgr`
-    re-autoloads `usb_kbd` onto it and keystrokes resume to the same OS sink.
+    re-autoloads its class driver onto it and input resumes to the same seat.
     Re-attach zeroes the reused EP0/interrupt ring regions first (stale TRBs at
     the producer cycle would otherwise be consumed past the new enqueue
     pointer — a real-hardware correctness fix). A disconnect also aborts any
@@ -674,8 +667,7 @@ the live controller behaviour is host- and CI-proven first.
     that streams a report every service interval — a mouse polling every
     microframe posts thousands per second — then floods the CPU with one
     interrupt per report, pegging the host-controller and class drivers even
-    while the pointer is idle (the on-metal `xhci`/`usb_mouse` CPU-storm
-    defect). The 1 ms default coalesces such a stream to ≤~1000 interrupts/s
+    while the pointer is idle (an on-metal CPU storm). The 1 ms default coalesces such a stream to ≤~1000 interrupts/s
     (each drain retiring every report the interval accumulated) and adds no
     perceptible latency to genuine, sparse input, exactly as production xHCI
     drivers run. Regression: `start_enables_the_interrupter` asserts
@@ -1195,44 +1187,27 @@ the live controller behaviour is host- and CI-proven first.
     returns the unique spawned PID as the driver handle. Host regression: the
     store-server `a_load_spawns_the_matched_signed_driver_with_the_nodes_resources`
     test asserts the reported handle is the spawned PID, not the host counter.
-  - **Metal acceptance (UM):** attach → keystroke, detach → `usb_kbd`
+  - **Metal acceptance (UM):** attach → keystroke, detach → `usb_hid`
     unloaded (controller stays up), re-attach → autoloads again, cold boot
     with the keyboard unplugged then plugged in, and a controller reset under
     a live keyboard that keeps typing with its driver unreloaded — inherently
     metal-only (QEMU models no Pi USB, §0.4). Update the `README.md` matrix on
     metal sign-off.
 
-- **U6 — `usb_mouse` class driver + broken-device isolation** (live path
-  metal-only). `drivers/input/usb_mouse` is the HID boot-mouse
-  sibling of `usb_kbd`: a `lib`+`Run` crate binding the boot-mouse interface
-  key (`HwMatchKey::usb(0,0,0x03_01_02)`), same least-privilege caps
-  (`CAP_INPUT_INJECT`/`CAP_SHM`/`CAP_IPC_ENDPOINT`/`CAP_LOG_EMIT`), pumping
-  blocking interrupt-IN URBs through `tairix_hid::BootMouse` and injecting
-  each decoded event through the one shared `PointerInput::from_device_event`
-  mapping → `pointer_inject` (motion, button edges, and scroll ticks all
-  inject; the desktop scrollbar consumes scroll). `NotFound` exits for reload;
-  repeated faults exit fail-closed. The bundle ships in the Pi image
-  (`Drivers/input/usb_mouse/Run`, signed).
-  Two engine defects found while landing it (the metal boot log's ~4 s
-  `hub status-change service failed err_hex=a` loop with a mouse connected):
-  - **A failed downstream attach left the port's latched changes set**, so
-    the hub status-change endpoint re-reported the same stale change forever
-    and every re-service re-ran the failing multi-second enumeration —
-    starving every other port's service (the keyboard died the moment a
-    problematic device shared the hub). `attach_hub_port` and
-    `attach_downstream_device` now drain the port's whole latch set
-    (best-effort) on the failed path too, so a broken device costs one
-    surfaced error per genuine change, never a fault loop.
-  - **One port's failure aborted the whole hot-plug scan**
-    (`process_hub_change` propagated the first attach error with `?`),
-    so a broken device's connect change starved a healthy device's event in
-    the same report. The scan is now per-port fail-soft, mirroring the
-    bring-up walk: the failing port is drained and skipped, the remaining
-    changed ports are serviced, and the first failure is surfaced only when
-    no actionable event was found.
-  Host regressions (the mock gained a scripted boot mouse on its own port
-  with a second, slot-attributed interrupt endpoint, and a
-  port-never-enables knob):
+- **U6 — broken-device isolation** (live path metal-only).
+  - **A failed downstream attach drains the port's latched changes.**
+    `attach_hub_port` and `attach_downstream_device` clear the port's whole
+    latch set (best-effort) on the failed path too, so the hub's
+    status-change endpoint never re-reports a stale change and a broken device
+    costs one surfaced error per genuine change, never a multi-second
+    enumeration loop starving every other port.
+  - **The hot-plug scan is per-port fail-soft.** `process_hub_change` drains
+    and skips a failing port, services the remaining changed ports, and
+    surfaces the first failure only when no actionable event was found, so a
+    broken device's connect never starves a healthy device's event in the same
+    report.
+  Host regressions (a scripted boot mouse on its own port with a second,
+  slot-attributed interrupt endpoint, and a port-never-enables knob):
   `bring_up_serves_a_keyboard_and_a_mouse_behind_the_hub_together`,
   `a_failing_port_at_bring_up_never_costs_the_keyboard_its_service`,
   `a_failed_hot_plug_attach_drains_the_port_latches_so_the_watch_stays_quiet`.
@@ -1250,22 +1225,20 @@ the live controller behaviour is host- and CI-proven first.
   The engine now realises §1.1's "one node per interface" for composite
   devices:
   - `InterfaceInfo::decode_all` decodes **every** default-alternate
-    interface (bounded by `MAX_INTERFACES`, alternate settings skipped, a
-    malformed HID interface with no interrupt-IN endpoint dropped so a
-    well-formed sibling is still served; an endpoint descriptor for endpoint
+    interface (bounded by `MAX_INTERFACES`, alternate settings skipped, an
+    interface with neither an interrupt-IN endpoint nor a bulk pair dropped so
+    a servable sibling is still served; an endpoint descriptor for endpoint
     0, an endpoint named twice, and a second default setting of an interface
     number already taken are skipped, the last with its endpoints); the
-    control-data buffer
-    (`CTRL_DATA_LEN`, 512 B) holds a composite device's whole configuration
-    in one read.
+    control-data buffer (`CTRL_DATA_LEN`, one page) holds a composite
+    device's whole configuration in one read.
   - `finish_enumeration` plans one device-table entry per servable
     interface: the primary at the caller's index (it owns the slot's parked
     EP0 cursor via `active_device`), each sibling at its own free index and
     ring region while **sharing the device's slot and EP0**. Every
     Configure Endpoint carries Context Entries covering the highest served
-    DCI, `SET_CONFIGURATION` runs once, and the per-HID-interface protocol
-    setup (see the report-protocol item below) runs per HID interface. A
-    sibling's control transfers route through the slot's EP0 owner
+    DCI, and `SET_CONFIGURATION` runs once. A sibling's control transfers
+    route through the slot's EP0 owner
     (`ep0_owner_index`); the (slot, DCI) event demux and the per-index
     report/bulk paths are unchanged.
   - `detach_device` frees **every** entry sharing the vanished device's
@@ -1280,192 +1253,11 @@ the live controller behaviour is host- and CI-proven first.
     decoy, and a `composite_downstream_port` knob capturing the same slot's
     second interrupt endpoint):
     `interface_info_decodes_every_interface_of_a_composite_device`,
-    `interface_info_drops_a_malformed_hid_interface_but_serves_its_sibling`,
+    `an_interface_with_nothing_to_serve_leaves_its_sibling_served`,
     `interface_info_bounds_the_decoded_interface_set`,
     `bring_up_serves_both_interfaces_of_a_composite_receiver`,
     `unplugging_a_composite_receiver_frees_both_interfaces_and_a_replug_reserves_them`,
     `a_composite_receiver_beside_the_keyboard_costs_it_nothing`.
-
-- **Report protocol is scoped to the mouse; a keyboard runs boot protocol.**
-  A pointer honours `SET_IDLE` — reporting only on change instead of streaming
-  a duplicate report every polling interval — **only in report protocol** (an
-  on-metal mouse streamed at its ~1 ms poll rate in boot protocol and pegged
-  `xhci`/`usb_mouse` while idle; neither device-side `SET_IDLE` in boot
-  protocol nor controller-side `IMOD` moderation made it quiet). So a **mouse**
-  interface reads `GET_DESCRIPTOR(Report)` and, when the descriptor parses
-  (`tairix_hid::parse_report_descriptor` → `HidReportMap`), runs in report
-  protocol (`SET_PROTOCOL(report)` + `SET_IDLE`, `configure_hid_protocol`); an
-  unreadable/STALLing/unparsable descriptor falls back to boot protocol. Each
-  captured report-protocol report is normalised back into the fixed boot layout
-  the class drivers consume (`enqueue_captured_report` →
-  `HidReportMap::normalize`), so `drivers/input/usb_mouse` and the URB ABI are
-  unchanged; a report whose Report ID is not the interface's is dropped like an
-  idle no-op, keeping the URB parked.
-  - A **keyboard** (`InterfaceInfo::is_keyboard`, HID `bInterfaceProtocol` = 1)
-    is driven in the standardised **boot protocol** (`SET_PROTOCOL(boot)` +
-    `SET_IDLE`) and its Report Descriptor decides nothing (it is read only as
-    diagnostic evidence, below): it reports only on a
-    key-state change and so never causes the idle interrupt storm a mouse does,
-    and the fixed 8-byte boot report the boot decoder consumes directly avoids
-    a report-descriptor parse a composite keyboard's multiple Report IDs (or an
-    NKRO layout) can misread. This was the metal defect: a composite keyboard,
-    put in report protocol, streamed its native keyboard report under a Report
-    ID the parser had *not* pinned to (it pinned the first keyboard
-    collection's ID = 1, but the device reported under ID 6), so
-    `report_body_offset` (raw[0] ≠ 1) dropped every keypress. Boot protocol
-    makes the device emit the report the boot decoder is built for.
-  - **`SET_PROTOCOL` is optional, so the protocol in force is read back, never
-    assumed.** A device may accept the request and carry on in report protocol
-    — the on-metal shape is a composite interface that declares boot-keyboard
-    while its keyboard collection sits behind a vendor one under a Report ID.
-    Boot-decoding such an interface reads each report's leading Report ID byte
-    as the boot *modifier* byte, so a vendor or consumer report becomes phantom
-    held modifiers (`0x01` = LeftControl, `0x04` = LeftAlt) and garbage key
-    usages — input fabricated out of unrelated traffic. `GET_PROTOCOL`
-    (HID 1.11 §7.2.5, `EnumStage::GetProtocol`) therefore reads the mode back,
-    and `DeviceState::report_decode` carries three states rather than two:
-    `Boot` (reports already are the boot layout), `Mapped` (rewrite through the
-    parsed map, which also demuxes this interface's Report ID from its
-    siblings'), and `Refused` (the device is in report protocol and its
-    descriptor yields no map — nothing is delivered, because a silent interface
-    is honest and fabricated input is not). A refused interface logs at `Warn`
-    so it is never mistaken for a working boot device. The read-back is issued
-    *before* `SET_IDLE` so a healthy enumeration still closes on that request's
-    Success, and a STALL or unreadable answer is treated as boot protocol —
-    what was asked for, and the mode every HID boot device must implement.
-    Regressions: `a_keyboard_that_ignored_set_protocol_is_normalised_not_boot_decoded`,
-    `an_interface_in_report_protocol_with_no_map_delivers_nothing`
-    (mock knob `ignores_set_protocol`).
-  - **A Report ID of `0` no longer means "no Report IDs".** `MouseMap` /
-    `KeyboardMap` carry `Option<u8>`, and the parser pins each boot field to a
-    `FieldReport` (`Unprefixed` / `Prefixed(id)`). The two were
-    indistinguishable while "none" was spelled `0`, and `report_body_offset`
-    read that as "skip the demux" — so *every* sibling collection's report on
-    the endpoint was normalised as this interface's own, its Report ID byte
-    landing where the button bitmap is read from and fabricating button edges.
-    A field located before the descriptor's first Report ID item in a
-    descriptor that *does* declare IDs is undemuxable (its offsets are a byte
-    out and its report is indistinguishable from a sibling's), so the map is
-    refused and the caller falls back to boot protocol. Every field is read
-    only from its own report, a re-entered Report ID continues its offsets,
-    Pop restores the Report ID with the rest of the global state, and a map
-    locating a field the boot layout cannot read (a zero or over-32-bit axis,
-    multi-bit buttons or modifiers) is refused the same way (`plans/OPEN-DEFECTS.md`
-    D239). Regressions:
-    `fields_located_before_the_first_report_id_refuse_the_map`,
-    `a_descriptor_with_no_report_ids_still_maps_and_needs_no_demux`.
-  - The interrupt-IN transfer lands in a `CAPTURE_LEN`-byte (64) buffer (a
-    report-protocol mouse report can exceed the 8-byte boot `REPORT_LEN`), but
-    is **armed** to the endpoint's own `wMaxPacketSize`
-    (`DeviceState::int_capture_len` = `min(int_max_packet, CAPTURE_LEN)`),
-    **never** the full 64-byte buffer: a full/low-speed HID endpoint behind the
-    high-speed hub's transaction translator faults with a Split Transaction
-    Error (completion code 36) when a transfer exceeds the per-interval budget
-    the TT scheduled, retracting the interface. `normalize` is fail-soft — a
-    report captured a byte short still delivers the fields that arrived.
-  - The HID Report Descriptor parser + boot-layout normaliser is the shared
-    `tairix_hid::report` (one HID decode definition, §2.2). Interrupt
-    moderation stays at the 1 ms xHCI reset default as defence-in-depth.
-  - Regressions:
-    `a_report_protocol_mouse_is_configured_and_normalizes_reports`,
-    `a_keyboard_runs_boot_protocol_even_when_its_report_descriptor_parses`,
-    `a_report_transfer_is_armed_to_the_endpoint_max_packet_not_the_capture_buffer`,
-    `a_device_without_a_report_descriptor_falls_back_to_boot_protocol`,
-    `decode_all_captures_the_hid_report_descriptor_length`, and the
-    `tairix_hid::report` parser/normalizer unit tests
-    (`report_id_keyboard_offsets_follow_the_id_byte`,
-    `full_report_id_keyboard_report_normalizes`,
-    `truncated_report_id_keyboard_keeps_present_fields`).
-
-- **Enumeration decision is logged for metal (the live report path is
-  invisible under QEMU).** The engine latches, per served HID interface, its
-  enumeration decision, and the HCD logs it once (`publish_interface`) so a
-  metal boot shows *how* each device's reports are read — a keyboard as
-  boot-protocol, a mouse as report-protocol — without guessing:
-  `UsbDevice::hid_enum_diag(index)` → `HidEnumDiag` (report vs boot protocol,
-  declared report-descriptor length, the parsed `tairix_hid::ReportMapSummary`
-  field layout when in report protocol, `int_max_packet`, and the armed
-  `capture_len`), logged as `usb-hcd: HID interface report protocol` /
-  `… boot-protocol fallback` (event id 4150). It carries no report payload (no
-  keystroke ever reaches the log). Coverage:
-  `a_keyboard_runs_boot_protocol_even_when_its_report_descriptor_parses`,
-  `a_report_protocol_mouse_is_configured_and_normalizes_reports`.
-
-- **The Report Descriptor itself is logged beside that decision.** The
-  enumeration diagnostic reports what the parsed map *says*; a map is only as
-  right as its input, and the located layout alone cannot show a *wrong* map.
-  The failure mode that needs the bytes: an interface whose descriptor declares
-  Report IDs the parser did not pin to. Pinning too high over-filters and drops
-  every report (the keyboard defect above); pinning `0` is worse, because
-  `report_body_offset` reads `0` as "this device declares no Report IDs" and
-  skips the demux entirely — every sibling collection's report on that endpoint
-  is then normalised as this interface's own, with the Report ID byte read as
-  the mouse button bitmap, fabricating button edges from unrelated traffic.
-  `UsbDevice::hid_report_descriptor(index)` therefore retains the delivered
-  bytes (bounded by `REPORT_DESCRIPTOR_LEN`, the parser's own
-  `MAX_REPORT_DESCRIPTOR` bound against one control transfer's buffer) and the
-  HCD logs them at node publish as `usb-hcd: HID interface report descriptor`
-  under the same event id, `HID_DESC_CHUNK` (64) bytes of hex per record, each
-  naming its byte offset, so a record's value stays inside
-  `LOG_FIELD_VALUE_MAX`. `GET_DESCRIPTOR(Report)` is issued for **every** HID
-  interface, a keyboard's included — it is the only evidence of what an
-  interface really is, and a metal capture cannot otherwise tell a genuine boot
-  keyboard from a sibling collection that merely declares the boot protocol.
-  Reading it decides nothing: a keyboard still runs boot protocol whatever its
-  descriptor says. A Report Descriptor is a device *capability* blob, not report
-  data, so unlike a report it carries no keystroke or pointer movement.
-  - **A diagnostic read must not cost a bring-up.** Because a keyboard's read
-    is purely observational, a non-STALL fault reading it is tolerated and the
-    interface enumerates with no retained descriptor — otherwise a device that
-    faults that one request would be left with no keyboard at all, which is
-    exactly what extending the read to keyboards must not cause. A *pointer's*
-    read is load bearing (it selects report protocol), so a non-STALL fault
-    there still fails closed. A real controller fault is not hidden either way:
-    it surfaces on the `SET_PROTOCOL`/`SET_IDLE` transfers that follow.
-  - Coverage: the two tests above assert the retained bytes for a
-    report-protocol mouse and for a boot-protocol keyboard;
-    `a_keyboard_whose_descriptor_read_faults_still_enumerates` and
-    `a_mouse_whose_descriptor_read_faults_fails_closed` pin the asymmetry (mock
-    knob `fault_report_descriptor_request`); `tairix_util`'s
-    `format_hex_bytes` tests cover the shared renderer.
-
-- **The boot-keyboard decoder tolerates a short native report.** A real
-  Raspberry Pi 4B composite keyboard that ignores `SET_PROTOCOL(boot)`
-  delivers a **6-byte** interrupt-IN report (four key-array slots), not the
-  standard 8. `tairix_hid::keyboard::KeyboardState::decode` previously required
-  *exactly* `BOOT_KEYBOARD_REPORT_LEN` (8) bytes and returned
-  `LengthOutOfRange` for anything else, so the first keypress during boot
-  faulted the pump four times and the class driver exited fail-closed (code
-  81); with no consumer draining, the HCD then stormed `usb-hcd: interrupt
-  reports dropped; class driver stalled` (event id 4154). The decoder now
-  rejects only a report shorter than `BOOT_KEYBOARD_REPORT_MIN` (2 bytes:
-  modifier + reserved) and reads whatever key-array slots are present
-  (`min(len - 2, KEY_SLOTS)`), mirroring the mouse decoder's tolerance of a
-  short report. Byte 1 stays reserved/OEM and uninterpreted, and the standard
-  8-byte report is unchanged. Regressions:
-  `keyboard_decodes_short_native_report` (the 6-byte metal case),
-  `keyboard_decodes_two_byte_modifier_only_report`,
-  `keyboard_rejects_report_below_minimum`.
-
-- **The class driver's pump failure is logged with its cause, for metal.**
-  When `pump_once` returns an error the keyboard driver's fail-closed path
-  (`usb-keyboard: pump_once returned an error`, event id 4148) carries the
-  concrete `DriverError` code (`err_hex`) and the raw byte count the last
-  interrupt-IN URB claimed to transfer (`transferred_hex`) alongside the
-  consecutive-error count — this is the diagnostic that pinned the short-report
-  fault above on metal (`err_hex=4` `LengthOutOfRange`, `transferred_hex=6`).
-  The report *content* is never logged — an interrupt-IN body is keystrokes;
-  only its length reaches the log (`UrbReportSource::last_transferred`, no
-  `last_head`).
-
-- **A mouse's poll rate is capped at ~100 Hz.** A mouse interface's
-  endpoint-context Interval is raised to at least `pointer_min_interval`
-  (derived from `POINTER_MAX_REPORT_HZ` = 100) in `configure_interrupt_endpoint`
-  when `InterfaceInfo::is_mouse` (HID `bInterfaceProtocol` = 2). A 1000 Hz
-  gaming mouse otherwise woke the HCD and its class driver a thousand times a
-  second while moving; the cap only lowers an aggressive rate, never raises a
-  slower one, and a keyboard is untouched. Regression:
-  `a_fast_mouses_poll_rate_is_capped`.
 
 - **U8 — EP0 max-packet discovery + exact-length descriptor reads** (live
   path metal-only). Enumeration assumed the speed's
@@ -1557,9 +1349,51 @@ the live controller behaviour is host- and CI-proven first.
   `NotFound` before it publishes another node on it, so nothing the previous
   driver posted, before or after the removal, reaches the new device.
 
+- **U11 — the host controller is class-neutral** (`plans/HID.md` H4). The HCD
+  serves any interface with an interrupt-IN endpoint or a bulk pair and holds
+  no knowledge of the class above it; HID is parsed and configured in
+  `drivers/input/usb_hid` (`plans/HID.md` H5).
+  - **Interrupt-IN reports are raw and sized by their class driver.** The
+    transfer length is fixed at the interface's first interrupt-IN URB, as the
+    larger of that request and one service interval's payload, and a later URB
+    naming a different length is refused; nothing is armed before that first
+    request. A report up to `INT_TRANSFER_MAX` (one page) arrives whole, and a
+    full packet never babbles. The endpoint context carries the payload its
+    speed and descriptors allow (`PeriodicShape::payload`): `wMaxPacketSize`
+    at full and low speed, times the high-bandwidth transaction count at high
+    speed, and the SuperSpeed companion's burst and `wBytesPerInterval`.
+  - **Control requests are scoped to the node's own interface**
+    (`transport::control_permitted`): standard device reads, standard
+    interface reads naming the interface, `GET_STATUS` on its own endpoints,
+    and class or vendor requests addressed to the interface or one of its
+    endpoints. Anything else — a `SET_CONFIGURATION`, a `SET_ADDRESS`, a
+    request naming a sibling — is refused `PermissionDenied` and logged
+    (event 4249), so a class driver cannot reconfigure the device its
+    siblings share. `wLength` must equal the URB length and the direction must
+    match. The control data stage is one page (`CTRL_DATA_LEN`).
+  - **The interface number is a node property** (`HwProperty::UsbInterface`),
+    a fact the kernel carries without a grant, read by the class driver
+    through `RtDriverHost::property`.
+  - **No transfer buffer crosses a page**, so none crosses the 64 KiB boundary
+    a TRB may not span (xHCI 1.2 §4.11.7.1).
+  - **A `SuperSpeed` bulk endpoint bursts what its companion states**
+    (`BulkEndpoint::burst`, at most sixteen packets); a companion completes
+    only the endpoint descriptor it immediately follows.
+  - Regressions:
+    `a_superspeed_bulk_endpoint_bursts_what_its_companion_states`,
+    `a_companion_completes_only_the_endpoint_it_follows`,
+    `the_first_report_request_fixes_the_transfer_length`,
+    `nothing_is_armed_before_the_class_driver_asks`,
+    `a_report_longer_than_a_packet_arrives_whole`,
+    `a_periodic_endpoint_moves_what_its_speed_and_descriptors_allow`,
+    `a_mouse_is_polled_at_its_own_interval_with_its_own_payload`,
+    `no_transfer_buffer_crosses_a_page_so_none_crosses_64_kib`,
+    `a_class_driver_reaches_its_own_interface_and_never_the_device`,
+    `a_configuration_longer_than_512_bytes_is_read_whole`.
+
 The modular USB stack — bus driver → user-space HCD owning one controller and
-serving the URB transport → per-interface class drivers (keyboard, mouse, mass
-storage), with event-driven hub hot-plug on every tier, recursive multi-tier
+serving the URB transport → per-interface class drivers (HID, mass storage),
+with event-driven hub hot-plug on every tier, recursive multi-tier
 hub descent with cascade teardown, fresh re-enumeration, controller-fault
 recovery that keeps the devices that come back, per-port failure isolation,
 composite (multi-interface) devices served one node per interface, and EP0
@@ -1570,19 +1404,8 @@ attach/detach/re-attach behaviour is metal-only (QEMU models no Pi USB, §0.4).
 
 ## 4. Out of scope (explicitly)
 
-- Arbitrary (non-boot-vocabulary) HID collections — gamepads, consumer
-  controls, custom report layouts beyond the mouse/keyboard boot fields — a
-  later class driver on top of this seam. (Report protocol itself is now *used*
-  for a **mouse** — the
-  enumeration parses its Report Descriptor and runs it in report protocol so
-  `SET_IDLE` quiesces the otherwise-streaming pointer, normalising its reports
-  back into the boot vocabulary; a keyboard stays in boot protocol, and any
-  device the parser cannot handle falls back to boot protocol.) (Hub
-  *hot-plug* is in: U5 services each hub's status-change endpoint
-  event-driven, and U9 descends and watches **multi-tier** hubs — a hub
-  plugged into a hub — with cascade teardown. Bulk transfers themselves have
-  since landed on this seam — `plans/DEVICES.md` D1 — and the mass-storage
-  class driver followed as DEVICES.md D2.)
+- HID applications the seat has no channel for (consumer and system controls,
+  gamepads, vendor collections): `plans/HID.md` non-goals.
 - A second host-controller driver (a non-xHCI controller): the architecture
   admits it (it binds a different controller node and serves the same URB ABI),
   but none is planned here.

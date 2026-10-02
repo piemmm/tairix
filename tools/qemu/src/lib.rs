@@ -85,6 +85,7 @@ use tairix_binfmt::elf::{ElfView, SHT_SYMTAB};
 pub mod aarch64;
 pub mod disk;
 pub mod display;
+mod qmp;
 pub mod riscv64;
 pub mod screendump;
 pub mod x86_64;
@@ -476,11 +477,17 @@ impl TypedKeys {
 /// [`ready_marker`](Self::ready_marker) has appeared the required number
 /// of times on the serial console, and no earlier-requested screendump is
 /// pending unverified (so a dump of the frame *before* a click can never
-/// race the click). QEMU delivers each action to the attached
+/// race the click). QEMU delivers each mouse action to the attached
 /// `virtio-mouse-device` in send order (`EV_REL` motions and `EV_KEY`
 /// button edges share the device's one event queue), so the guest decodes
-/// a real device-originated stream in the scripted order. Requires
-/// [`Spec::with_virtio_mouse`] (implied by the builder).
+/// a real device-originated stream in the scripted order; a
+/// [`Tap`](PointerAction::Tap) reaches the touchscreen instead. The builder
+/// attaches whichever devices the steps name.
+///
+/// Each device has its own driver, so the guest orders the mouse's events
+/// and the touchscreen's only among themselves: a script that moves from one
+/// device to the other gates that step on a guest witness that the earlier
+/// device's input took effect.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PointerStep {
     /// Serial-console substring the runner waits for before this step —
@@ -527,6 +534,58 @@ pub enum PointerAction {
     /// gesture whose *duration* is the point — a tap-or-hold, a drag — where
     /// the steps between them are exactly what the script is expressing.
     Click(MouseButton),
+    /// Turn the wheel one detent: `mouse_move 0 0 <dz>`. QEMU's
+    /// `hmp_mouse_move` (`ui/ui-hmp-cmds.c`) presses and releases one wheel
+    /// button for any non-zero `dz` whatever its magnitude, so a step is
+    /// exactly one detent and a longer turn is that many steps.
+    Wheel(WheelTurn),
+    /// Touch the touchscreen at (`x`, `y`) and lift, as one step for the
+    /// reason a [`Click`](Self::Click) is one. Sent over the QMP control
+    /// monitor, the only one that can place a contact.
+    Tap {
+        /// Across the screen, `0..=TOUCH_AXIS_MAX` ([`touch_axis`]).
+        x: u32,
+        /// Down the screen, `0..=TOUCH_AXIS_MAX` ([`touch_axis`]).
+        y: u32,
+    },
+}
+
+/// The touchscreen's far edge on either axis: QEMU reports contacts over
+/// `0..=INPUT_EVENT_ABS_MAX` whatever the display's size.
+pub const TOUCH_AXIS_MAX: u32 = 0x7FFF;
+
+/// The touch coordinate nearest `pixel` on a screen axis `extent` pixels
+/// long; a pixel past the axis is its last.
+#[must_use]
+pub fn touch_axis(pixel: u32, extent: u32) -> u32 {
+    let last = u64::from(extent.saturating_sub(1));
+    if last == 0 {
+        return 0;
+    }
+    let pixel = u64::from(pixel).min(last);
+    u32::try_from((pixel * u64::from(TOUCH_AXIS_MAX) + last / 2) / last).unwrap_or(TOUCH_AXIS_MAX)
+}
+
+/// Which way a [`PointerAction::Wheel`] step turns the wheel.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WheelTurn {
+    /// Away from the user: `dz` positive, QEMU's `INPUT_BUTTON_WHEEL_UP`,
+    /// which scrolls toward the start.
+    Away,
+    /// Toward the user: `dz` negative, `INPUT_BUTTON_WHEEL_DOWN`, which
+    /// scrolls toward the end.
+    Toward,
+}
+
+impl WheelTurn {
+    /// The `dz` argument of the `mouse_move` that turns it.
+    #[must_use]
+    pub const fn dz(self) -> i32 {
+        match self {
+            Self::Away => 1,
+            Self::Toward => -1,
+        }
+    }
 }
 
 /// A pointer button a [`PointerAction`] presses or releases, named by
@@ -737,6 +796,32 @@ pub fn audio_wav_args(spec: &Spec, device: &str) -> Vec<OsString> {
     ]
 }
 
+/// The `-device` arguments for the virtio-input devices `spec` drives — or,
+/// for an interactive session, the ones the window forwards a human's
+/// keyboard, mouse and touchscreen to — each named `virtio-<kind><suffix>`
+/// for the port's transport (`-device` on the virtio-mmio boards, x86_64's
+/// `-pci,…`). Keyboard, then mouse, then touchscreen, so a scripted run
+/// enumerates its devices in the order an interactive one does.
+#[must_use]
+pub fn input_device_args(spec: &Spec, suffix: &str) -> Vec<OsString> {
+    let interactive = spec.session == SessionKind::WindowedInteractive;
+    let keyboard = spec.input_keyboard.is_some() || !spec.input_typing.is_empty();
+    [
+        (keyboard, "keyboard"),
+        (spec.devices.pointing.mouse, "mouse"),
+        (spec.devices.pointing.touchscreen, "multitouch"),
+    ]
+    .into_iter()
+    .filter(|&(driven, _)| driven || interactive)
+    .flat_map(|(_, kind)| {
+        [
+            OsString::from("-device"),
+            OsString::from(format!("virtio-{kind}{suffix}")),
+        ]
+    })
+    .collect()
+}
+
 /// Multiple of the inactivity budget that bounds a run's total wall clock
 /// when the run does not declare a ceiling of its own.
 ///
@@ -772,12 +857,39 @@ pub struct AttachedDevices {
     /// AES-CBC, which is what the accelerator vertical checks the device's
     /// arithmetic against. Only the aarch64 argv honours it today.
     pub crypto_accelerator: bool,
-    /// A `virtio-mouse-device` after the keyboard — the same
-    /// two-identical-virtio-input-nodes topology an interactive session
-    /// presents — so a vertical can prove the keyboard is still driven when a
-    /// pointer sibling is enumerated beside it. Only the aarch64 argv honours
-    /// it today.
+    /// The pointing devices beside the keyboard.
+    pub pointing: PointingDevices,
+}
+
+/// The pointing devices a run attaches after its keyboard, in this order on
+/// every port ([`input_device_args`]).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PointingDevices {
+    /// A virtio mouse, driven over the human monitor.
     pub mouse: bool,
+    /// A virtio multitouch touchscreen spanning the display, driven over the
+    /// QMP control monitor the run then attaches.
+    pub touchscreen: bool,
+}
+
+impl PointingDevices {
+    /// Neither.
+    pub const NONE: Self = Self {
+        mouse: false,
+        touchscreen: false,
+    };
+
+    /// Attach the device `action` is delivered through.
+    pub const fn attach_for(&mut self, action: PointerAction) {
+        match action {
+            PointerAction::Move { .. }
+            | PointerAction::Press(_)
+            | PointerAction::Release(_)
+            | PointerAction::Click(_)
+            | PointerAction::Wheel(_) => self.mouse = true,
+            PointerAction::Tap { .. } => self.touchscreen = true,
+        }
+    }
 }
 
 impl AttachedDevices {
@@ -785,7 +897,7 @@ impl AttachedDevices {
     pub const NONE: Self = Self {
         ramfb: false,
         crypto_accelerator: false,
-        mouse: false,
+        pointing: PointingDevices::NONE,
     };
 }
 
@@ -874,24 +986,23 @@ pub struct Spec {
     /// per-arch defaults. Use sparingly — they bypass the runner's input
     /// validation.
     pub extra_args: Vec<OsString>,
-    /// When `Some`, attach a `virtio-keyboard-device` and inject the
-    /// described key once the guest prints the readiness marker on the
-    /// serial console. `None` attaches no input device. Used by the
-    /// aarch64 virtio-input vertical; other arches ignore it today.
+    /// When `Some`, attach a virtio keyboard ([`input_device_args`]) and
+    /// inject the described key once the guest prints the readiness marker
+    /// on the serial console.
     pub input_keyboard: Option<KeyInjection>,
-    /// When non-empty, attach a `virtio-keyboard-device` and type each
-    /// step's text through paced monitor `sendkey`s once that step's
-    /// readiness marker has appeared — the scripted-dialogue path for a
-    /// guest whose primary console is the display, where
-    /// [`Spec::serial_input`] cannot reach. Steps run strictly in order:
-    /// a step types only after the previous step finished *and* its own
-    /// marker was seen. Only the aarch64 argv honours it today.
+    /// When non-empty, attach a virtio keyboard ([`input_device_args`]) and
+    /// type each step's text through paced monitor `sendkey`s once that
+    /// step's readiness marker has appeared — the scripted-dialogue path for
+    /// a guest whose primary console is the display, where
+    /// [`Spec::serial_input`] cannot reach. Steps run strictly in order: a
+    /// step types only after the previous step finished *and* its own marker
+    /// was seen.
     pub input_typing: Vec<KeyTyping>,
-    /// When non-empty, inject the described pointer actions through the
-    /// QEMU monitor strictly in order, each once its readiness marker has
-    /// appeared on the serial console and every earlier-requested
-    /// screendump has verified. Meaningful only with
-    /// [`AttachedDevices::mouse`]; empty injects nothing.
+    /// When non-empty, inject the described pointer actions strictly in
+    /// order, each once its readiness marker has appeared on the serial
+    /// console and every earlier-requested screendump has verified, through
+    /// the devices [`Spec::with_pointer_step`] attached; empty injects
+    /// nothing.
     pub pointer_script: Vec<PointerStep>,
     /// When `true`, the pointer script is an upper *bound* on the gesture
     /// rather than an exchange to exhaust: an unsent tail is not a failure.
@@ -1018,8 +1129,8 @@ pub enum SessionKind {
     HeadlessTest,
     /// Interactive windowed session: QEMU's default display backend
     /// (cocoa/gtk/sdl) so the guest's `ramfb` scan-out is visible, plus
-    /// human-driven `virtio-keyboard-device` and `virtio-mouse-device`
-    /// input from the window — the [`Runner::run_interactive`] shape
+    /// the window's keyboard, mouse and touchscreen input
+    /// ([`input_device_args`]) — the [`Runner::run_interactive`] shape
     /// `cargo xtask run` launches.
     WindowedInteractive,
 }
@@ -1476,15 +1587,15 @@ impl Spec {
     /// pointer sibling matches the same driver bundle.
     #[must_use]
     pub fn with_virtio_mouse(mut self) -> Self {
-        self.devices.mouse = true;
+        self.devices.pointing.mouse = true;
         self
     }
 
     /// Append one step to the ordered pointer-injection script, fired
     /// once `ready_marker` has appeared `occurrences` times (clamped at
     /// `>= 1`) on the serial console, after every earlier step. Also
-    /// attaches the `virtio-mouse-device` the actions target, so a spec
-    /// cannot ask for pointer input with no device to deliver it to.
+    /// attaches the device the action targets, so a spec cannot ask for
+    /// pointer input with no device to deliver it to.
     #[must_use]
     pub fn with_pointer_step(
         mut self,
@@ -1492,7 +1603,7 @@ impl Spec {
         occurrences: u32,
         action: PointerAction,
     ) -> Self {
-        self.devices.mouse = true;
+        self.devices.pointing.attach_for(action);
         self.pointer_script.push(PointerStep {
             ready_marker: ready_marker.into(),
             ready_occurrences: occurrences.max(1),
@@ -1618,26 +1729,22 @@ impl Runner {
             cmd.arg(a);
         }
 
-        // Attach a QEMU monitor on a private unix socket for *every* run.
-        // Verticals that inject keys or take screendumps drive it during the
-        // run; the rest need it only once, at the end, and only if things go
-        // wrong — a guest that has to be killed as hung is interrogated over
-        // it first, and a hang whose report
-        // cannot say what the CPUs were doing can only be diagnosed by
-        // re-running it, which is not a diagnosis. The socket is server-side
-        // in QEMU (created at startup, well before any guest output) and the
-        // runner connects as a client.
-        let monitor = ReservedSocket::reserve("mon")
-            .map(Some)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-        if let Some(mon) = &monitor {
-            cmd.arg("-chardev");
-            let mut chardev = OsString::from("socket,id=tairix-mon,server=on,wait=off,path=");
-            chardev.push(mon.path());
-            cmd.arg(chardev);
-            cmd.arg("-mon");
-            cmd.arg("chardev=tairix-mon,mode=readline");
-        }
+        // Every run gets a human monitor, even one that injects nothing: a
+        // guest killed as hung is interrogated over it first, so the report
+        // says what the CPUs were doing.
+        let reserve = |role| {
+            ReservedSocket::reserve(role)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
+        };
+        let monitor = reserve("mon")?;
+        attach_monitor(&mut cmd, &monitor, "tairix-mon", "readline");
+        let control = if spec.devices.pointing.touchscreen {
+            let control = reserve("qmp")?;
+            attach_monitor(&mut cmd, &control, "tairix-qmp", "control");
+            Some(control)
+        } else {
+            None
+        };
 
         if std::env::var_os("TAIRIX_QEMU_DEBUG").is_some() {
             eprintln!("tairix-qemu: {cmd:?}");
@@ -1654,7 +1761,7 @@ impl Runner {
         cmd.stderr(Stdio::piped());
 
         let child = cmd.spawn()?;
-        supervise(child, spec, monitor.as_ref())
+        supervise(child, spec, Some(&monitor), control)
     }
 
     /// Launch QEMU as an **interactive** session and wait for it to end.
@@ -1757,6 +1864,15 @@ fn validate_boot_inputs(spec: &Spec) -> io::Result<()> {
     Ok(())
 }
 
+/// Attach a QEMU monitor in `mode` (`readline` or `control`) on `socket`,
+/// which QEMU creates at startup as the server the runner connects to.
+fn attach_monitor(cmd: &mut Command, socket: &ReservedSocket, id: &str, mode: &str) {
+    let mut chardev = OsString::from(format!("socket,id={id},server=on,wait=off,path="));
+    chardev.push(socket.path());
+    cmd.arg("-chardev").arg(chardev);
+    cmd.arg("-mon").arg(format!("chardev={id},mode={mode}"));
+}
+
 /// Supervise a spawned QEMU child to completion: drain its serial output
 /// on a background thread, inject a key once the guest signals readiness
 /// (if requested), enforce the inactivity deadline, and assemble the
@@ -1768,6 +1884,7 @@ fn supervise(
     mut child: Child,
     spec: &Spec,
     monitor: Option<&ReservedSocket>,
+    control: Option<ReservedSocket>,
 ) -> io::Result<Outcome> {
     // The inactivity heartbeat: the guest is declared hung once `spec.timeout`
     // elapses with no new serial output. A guest that is merely running slowly
@@ -1819,7 +1936,7 @@ fn supervise(
     };
     let mut err_reader = Some(err_reader);
 
-    let mut injections = InjectionState::new(spec);
+    let mut injections = InjectionState::new(spec, control);
     // Serial-input script cursor: the next step to send, and the byte
     // offset in the captured serial log just past the previous step's
     // matched marker. Matching only ever advances, so each marker must
@@ -1876,7 +1993,7 @@ struct WaitLoop<'a> {
     child: &'a mut Child,
     /// The test spec: deadline, injections, and optional completion gate.
     spec: &'a Spec,
-    /// The QMP monitor connection, when the spec drives one.
+    /// The human monitor every run attaches.
     monitor: Option<&'a ReservedSocket>,
     /// The serial-drain thread handle, polled for an early drain failure.
     reader: &'a mut Option<std::thread::JoinHandle<io::Result<()>>>,
@@ -2960,6 +3077,43 @@ struct InjectionState {
     /// once every command was sent, or when none was requested).
     monitor_step: usize,
     conn: Option<UnixStream>,
+    /// The touchscreen's control monitor, when the run attaches one.
+    touchscreen: Option<TouchScreen>,
+}
+
+/// The control monitor a run's taps are sent over: the socket QEMU serves
+/// it on, the connection the first tap opens, and the contact the next tap
+/// is.
+struct TouchScreen {
+    socket: ReservedSocket,
+    qmp: Option<qmp::Qmp>,
+    next_contact: u16,
+}
+
+impl TouchScreen {
+    fn new(socket: ReservedSocket) -> Self {
+        Self {
+            socket,
+            qmp: None,
+            next_contact: 0,
+        }
+    }
+
+    /// Touch (`x`, `y`) and lift, each contact its own tracking id as a
+    /// finger's is.
+    fn tap(&mut self, x: u32, y: u32) -> io::Result<()> {
+        let qmp = match self.qmp.take() {
+            Some(qmp) => qmp,
+            None => qmp::Qmp::connect(self.socket.path())?,
+        };
+        let qmp = self.qmp.insert(qmp);
+        let contact = self.next_contact;
+        self.next_contact = contact.wrapping_add(1);
+        for command in qmp::tap_commands(x, y, contact) {
+            qmp.execute(&command)?;
+        }
+        Ok(())
+    }
 }
 
 /// Progress of the current screendump, in order: the command has not been
@@ -3002,7 +3156,7 @@ struct InjectionMarkers<'a> {
 impl InjectionState {
     /// Each cursor starts "done" only through its list being empty, so
     /// [`Self::drive`] only ever acts on requested injections.
-    fn new(spec: &Spec) -> Self {
+    fn new(spec: &Spec, control: Option<ReservedSocket>) -> Self {
         Self {
             key_sent: spec.input_keyboard.is_none(),
             pointer_step: 0,
@@ -3014,6 +3168,7 @@ impl InjectionState {
             dump_state: DumpState::NotSent,
             monitor_step: 0,
             conn: None,
+            touchscreen: control.map(TouchScreen::new),
         }
     }
 
@@ -3114,12 +3269,11 @@ impl InjectionState {
         monitor: Option<&ReservedSocket>,
         markers: &InjectionMarkers<'_>,
     ) -> Result<(), String> {
-        // Safe to unwrap inside the closures: each `*_sent` flag is only
-        // `false` when its injection request and `monitor` are both `Some`.
-        if !self.key_sent && markers.key.load(Ordering::Acquire) {
-            let key = &spec.input_keyboard.as_ref().expect("key present").key;
-            self.send(monitor, "key", &format!("sendkey {key}"))?;
-            self.key_sent = true;
+        if let Some(injection) = &spec.input_keyboard {
+            if !self.key_sent && markers.key.load(Ordering::Acquire) {
+                self.send(monitor, "key", &format!("sendkey {}", injection.key))?;
+                self.key_sent = true;
+            }
         }
         self.drive_monitor_commands(spec, monitor, markers.monitor)?;
         if let Some(typing) = spec.input_typing.get(self.typed_step) {
@@ -3210,6 +3364,18 @@ impl InjectionState {
                         self.send_button_mask(monitor)?;
                         self.pointer_button_mask &= !button.mask_bit();
                         self.send_button_mask(monitor)?;
+                    }
+                    PointerAction::Wheel(turn) => {
+                        self.send(monitor, "pointer", &format!("mouse_move 0 0 {}", turn.dz()))?;
+                    }
+                    PointerAction::Tap { x, y } => {
+                        let screen = self
+                            .touchscreen
+                            .as_mut()
+                            .ok_or("touch injection failed: no touchscreen attached")?;
+                        screen
+                            .tap(x, y)
+                            .map_err(|e| format!("touch injection failed: {e}"))?;
                     }
                 }
                 self.pointer_step += 1;
@@ -3399,7 +3565,7 @@ mod tests {
         };
         let at = |step: usize| InjectionState {
             pointer_step: step,
-            ..InjectionState::new(&Spec::for_aarch64_kernel("/kernel"))
+            ..InjectionState::new(&Spec::for_aarch64_kernel("/kernel"), None)
         };
 
         let exhaustive = script(false);
@@ -3864,7 +4030,7 @@ mod tests {
 
         let spec = Spec::for_riscv64_kernel("/tmp/k").with_timeout(Duration::from_secs(2));
         let started = Instant::now();
-        let outcome = supervise(child, &spec, None).expect("supervision must not error");
+        let outcome = supervise(child, &spec, None, None).expect("supervision must not error");
         let elapsed = started.elapsed();
 
         match outcome {
@@ -4442,7 +4608,7 @@ mod tests {
             screendump: &dumps,
             monitor: &[],
         };
-        let mut state = InjectionState::new(&spec);
+        let mut state = InjectionState::new(&spec, None);
 
         state.drive(&spec, Some(&socket), &markers).expect("drives");
         let (mut peer, _) = listener.accept().expect("the runner connected");
@@ -4505,6 +4671,117 @@ mod tests {
     }
 
     #[test]
+    fn each_pointer_step_attaches_the_device_it_is_delivered_through() {
+        let tapped = Spec::for_aarch64_kernel("/kernel").with_pointer_step(
+            "ready",
+            1,
+            PointerAction::Tap { x: 1, y: 2 },
+        );
+        let pointing = tapped.devices.pointing;
+        assert!(pointing.touchscreen && !pointing.mouse);
+        let both = tapped.with_pointer_step("ready", 1, PointerAction::Click(MouseButton::Primary));
+        assert!(both.devices.pointing.touchscreen && both.devices.pointing.mouse);
+    }
+
+    #[test]
+    fn a_touch_coordinate_spans_the_screen_edge_to_edge() {
+        assert_eq!(touch_axis(0, 1024), 0);
+        assert_eq!(touch_axis(1023, 1024), TOUCH_AXIS_MAX);
+        assert_eq!(touch_axis(5000, 1024), TOUCH_AXIS_MAX, "past the axis");
+        assert_eq!(touch_axis(7, 1), 0, "a one-pixel axis");
+        assert_eq!(touch_axis(7, 0), 0, "an empty axis");
+        let places: Vec<u32> = (0..1024).map(|pixel| touch_axis(pixel, 1024)).collect();
+        assert!(places.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    /// A control monitor on its own thread that greets, then answers each of
+    /// `commands` commands with `answer` behind an interleaved event, and
+    /// hands back what it was sent.
+    fn control_monitor(
+        commands: usize,
+        answer: &'static str,
+    ) -> (ReservedSocket, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::net::UnixListener;
+
+        let socket = ReservedSocket::reserve("tapqmp").expect("a socket path");
+        let listener = UnixListener::bind(socket.path()).expect("the monitor binds");
+        let monitor = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("the runner connected");
+            let mut reader = BufReader::new(stream.try_clone().expect("a reading handle"));
+            stream
+                .write_all(b"{\"QMP\": {\"version\": {}, \"capabilities\": []}}\n")
+                .expect("greets");
+            let mut sent = Vec::new();
+            for _ in 0..commands {
+                let mut line = String::new();
+                reader.read_line(&mut line).expect("a command");
+                sent.push(line);
+                stream
+                    .write_all(b"{\"timestamp\": {}, \"event\": \"RESUME\"}\n")
+                    .expect("an event");
+                stream.write_all(answer.as_bytes()).expect("answers");
+            }
+            sent
+        });
+        (socket, monitor)
+    }
+
+    /// Drive a one-tap script whose step is ready against `control`,
+    /// answering how the drive went and whether the step counts as sent.
+    fn drive_one_tap(control: Option<ReservedSocket>) -> (Result<(), String>, bool) {
+        let spec = Spec::for_aarch64_kernel("/kernel").with_pointer_step(
+            "ready",
+            1,
+            PointerAction::Tap { x: 3, y: 4 },
+        );
+        let pointer = [Arc::new(AtomicBool::new(true))];
+        let key = AtomicBool::new(false);
+        let markers = InjectionMarkers {
+            key: &key,
+            typing: &[],
+            pointer: &pointer,
+            screendump: &[],
+            monitor: &[],
+        };
+        let mut state = InjectionState::new(&spec, control);
+        let driven = state.drive(&spec, None, &markers);
+        (driven, state.pointer_done(&spec))
+    }
+
+    #[test]
+    fn a_tap_negotiates_the_control_monitor_then_touches_and_lifts() {
+        let (control, monitor) = control_monitor(3, "{\"return\": {}}\n");
+        assert_eq!(drive_one_tap(Some(control)), (Ok(()), true));
+        let sent = monitor.join().expect("the monitor saw the tap");
+        assert!(sent[0].contains("qmp_capabilities"), "{sent:?}");
+        assert!(sent[1].contains(r#""type":"begin""#), "{sent:?}");
+        assert!(sent[1].contains(r#""axis":"y","value":4"#), "{sent:?}");
+        assert!(sent[2].contains(r#""type":"end""#), "{sent:?}");
+    }
+
+    #[test]
+    fn a_refused_tap_fails_the_run_with_qemus_reason() {
+        let (control, monitor) = control_monitor(
+            2,
+            "{\"error\": {\"class\": \"GenericError\", \"desc\": \"VM not running\"}}\n",
+        );
+        let (driven, sent) = drive_one_tap(Some(control));
+        let refused = driven.expect_err("the tap was refused");
+        assert!(refused.contains("VM not running"), "{refused}");
+        assert!(!sent, "a refused step is not sent");
+        drop(monitor.join());
+    }
+
+    #[test]
+    fn a_tap_with_no_touchscreen_fails_rather_than_vanishing() {
+        let (driven, sent) = drive_one_tap(None);
+        let failed = driven.expect_err("nothing to tap");
+        assert!(failed.contains("no touchscreen"), "{failed}");
+        assert!(!sent, "the step was not sent");
+    }
+
+    #[test]
     fn with_screendump_records_ordered_requests_and_clamps_occurrences() {
         let s = Spec::for_aarch64_kernel("/tmp/k")
             .with_screendump("presented", 0, "/tmp/d1.ppm")
@@ -4533,7 +4810,10 @@ mod tests {
             )
             .with_pointer_step("presented", 1, PointerAction::Press(MouseButton::Primary))
             .with_pointer_step("menu open", 1, PointerAction::Release(MouseButton::Primary));
-        assert!(s.devices.mouse, "a pointer script implies the mouse device");
+        assert!(
+            s.devices.pointing.mouse,
+            "a pointer script implies the mouse device"
+        );
         assert_eq!(s.pointer_script.len(), 3, "steps append in order");
         let p = &s.pointer_script[0];
         assert_eq!(p.ready_marker, "presented");

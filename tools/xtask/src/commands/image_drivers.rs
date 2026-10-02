@@ -72,13 +72,9 @@ pub const VL805_STORE_PATH: &[&[u8]] = &[b"Drivers", b"bus_usb", b"vl805", b"Run
 /// host-controller class it drives.
 pub const USB_XHCI_STORE_PATH: &[&[u8]] = &[b"Drivers", b"bus_usb", b"xhci", b"Run"];
 
-/// Store path of the USB boot-keyboard class-driver bundle: class `input`, the
-/// `usb_kbd` leaf naming the (vendor-neutral) driver.
-pub const USB_KBD_STORE_PATH: &[&[u8]] = &[b"Drivers", b"input", b"usb_kbd", b"Run"];
-
-/// Store path of the USB boot-mouse class-driver bundle: class `input`, the
-/// `usb_mouse` leaf naming the (vendor-neutral) driver.
-pub const USB_MOUSE_STORE_PATH: &[&[u8]] = &[b"Drivers", b"input", b"usb_mouse", b"Run"];
+/// Store path of the USB HID class-driver bundle: class `input`, the
+/// `usb_hid` leaf naming the (vendor-neutral) driver.
+pub const USB_HID_STORE_PATH: &[&[u8]] = &[b"Drivers", b"input", b"usb_hid", b"Run"];
 
 /// Store path of the virtio-input keyboard/pointer driver bundle: class
 /// `input`, the `virtio_kbd` leaf naming the (vendor-neutral) driver — the
@@ -353,20 +349,19 @@ pub fn build_xhci_bundle(
     )
 }
 
-/// Build and sign the USB boot-keyboard **class**-driver bundle.
+/// Build and sign the USB HID **class**-driver bundle.
 ///
-/// A pure HID class driver: it injects decoded key edges into the kernel
-/// input-focus arbiter (`CAP_INPUT_INJECT`), maps the shared URB buffer its
-/// host-controller driver forwarded (`CAP_SHM`), submits URBs on its one
-/// interface's transport endpoint (`CAP_IPC_ENDPOINT`), and emits a one-shot
-/// beacon (`CAP_LOG_EMIT`) — and nothing more. It holds **no** MMIO, DMA, or
-/// IRQ authority. Carries `tairix_drv_input_usb_kbd::BIND_KEYS`, so it
-/// autoloads against the HID boot-keyboard interface node the HCD emitted.
+/// Its manifest is authored from the driver crate's own `REQUIRED_CAPS` and
+/// `BIND_KEYS`, so the granted set is the set the program requests: inject
+/// seat records, map its interface's shared buffer, call its interface's URB
+/// endpoint, and log. It holds **no** MMIO, DMA, or IRQ authority, and
+/// autoloads against every HID interface node a host-controller driver emits
+/// (`plans/HID.md` H5).
 ///
 /// # Errors
 ///
 /// As [`build_vcmailbox_bundle`].
-pub fn build_usb_kbd_bundle(
+pub fn build_usb_hid_bundle(
     ctx: &Context,
     arch: PieArch,
     profile: ImageProfile,
@@ -374,47 +369,9 @@ pub fn build_usb_kbd_bundle(
     build_bundle(
         ctx,
         arch,
-        "tairix-drv-input-usb-kbd",
-        &[
-            CapabilityId::INPUT_INJECT,
-            CapabilityId::SHM,
-            CapabilityId::IPC_ENDPOINT,
-            CapabilityId::LOG_EMIT,
-        ],
-        tairix_drv_input_usb_kbd::BIND_KEYS,
-        profile,
-    )
-}
-
-/// Build and sign the USB boot-mouse **class**-driver bundle.
-///
-/// A pure HID class driver: it injects decoded pointer records into the
-/// kernel input-focus arbiter (`CAP_INPUT_INJECT`), maps the shared URB
-/// buffer its host-controller driver forwarded (`CAP_SHM`), submits URBs on
-/// its one interface's transport endpoint (`CAP_IPC_ENDPOINT`), and emits a
-/// one-shot beacon (`CAP_LOG_EMIT`) — and nothing more. It holds **no** MMIO,
-/// DMA, or IRQ authority. Carries `tairix_drv_input_usb_mouse::BIND_KEYS`, so
-/// it autoloads against the HID boot-mouse interface node the HCD emitted.
-///
-/// # Errors
-///
-/// As [`build_vcmailbox_bundle`].
-pub fn build_usb_mouse_bundle(
-    ctx: &Context,
-    arch: PieArch,
-    profile: ImageProfile,
-) -> Result<Vec<u8>, String> {
-    build_bundle(
-        ctx,
-        arch,
-        "tairix-drv-input-usb-mouse",
-        &[
-            CapabilityId::INPUT_INJECT,
-            CapabilityId::SHM,
-            CapabilityId::IPC_ENDPOINT,
-            CapabilityId::LOG_EMIT,
-        ],
-        tairix_drv_input_usb_mouse::BIND_KEYS,
+        "tairix-drv-input-usb-hid",
+        tairix_drv_input_usb_hid::REQUIRED_CAPS,
+        tairix_drv_input_usb_hid::BIND_KEYS,
         profile,
     )
 }

@@ -2451,14 +2451,17 @@ unmapped form: the button order (a new order waits until no button is held,
 so a press and its release always map through the same one) and the speed, a
 percentage each displacement is scaled by with its sub-count remainder carried,
 so slow motion is never lost.
-A `Scrolled` record's detents become the scroll units every window receives —
-`SCROLL_UNITS_PER_DETENT` a detent — accelerated by how fast the wheel is
-turning. The rate is measured between separate drains over the last 200 ms: up
-to eight detents a second is a deliberate turn and moves one detent's worth
-each, and a faster one is multiplied in proportion, up to six times. Detents
-read in one drain count as one sample, so a busy session that reads several at
-once never takes them for a fast spin, and a reversal or a pause longer than
-the window starts the turn afresh.
+A `Scrolled` record arrives in scroll units — `SCROLL_UNITS_PER_DETENT` a
+detent, a fine wheel's fraction of one as it is — and is accelerated by how
+fast the wheel is turning. The rate is measured in scroll units between
+separate drains over the last 200 ms: up to eight detents' worth a second is a
+deliberate turn and moves as far as it turned, and a faster one is multiplied
+in proportion, up to six times, so a fine wheel's small steps accelerate
+exactly as a detent wheel's detents would. Turns read in one drain count as
+one sample, so a busy session that reads several at once never takes them for
+a fast spin, and a reversal or a pause longer than the window starts the turn
+afresh. A turn is a gesture as a click is: Ctrl held across one is not the
+lone Ctrl that shows where the pointer is.
 The accumulation lives here deliberately: the seat channel is
 screen-independent, and only this seat-owning session knows the compositor's
 pixel extent, so a driver never needs display-geometry authority and a
@@ -2471,6 +2474,27 @@ applied (`AGENTS.md` §5.4 / §2.9). The ABI record itself is the seat-channel
 pointer record documented in [Input events](../abi/input.md); it is a
 distinct layer from the device-level driver input ABI, not a duplicate of it
 (`AGENTS.md` §2.2).
+
+The same source drains the seat's touch channel through a second seam,
+`TouchInputChannel`, feeding each frame to the seat's gesture recogniser
+([`tairix-touch`](../lib/touch.md)) and handing on what it answers: a
+touchpad's motion moves the same pointer a mouse does, already at the user's
+touchpad speed and so not scaled again; a touchscreen's place puts the pointer
+there; a click the fingers made is the button it names, and a touchpad's own
+button maps through the button order as a mouse's does; a two-finger scroll
+arrives in scroll units unaccelerated, its rate already in proportion to the
+fingers' travel; and a pinch arrives as `InputEvent::Pinch` at the pointer, or
+on a touchscreen at the fingers' centre. Every frame queued is fed before a
+deadline acts, and the recogniser's next deadline — a held tap's release, a
+touchscreen's waiting press — is folded into the park, a wait that times out
+for it being served as seat input exactly as a key repeat is. Each source's
+press and release reaches the desktop as it happens, so a press whose driver
+died before releasing it (D508) is undone by the next release of that button
+from any device rather than holding it down for every other one. The touch
+settings — tap to click, natural scrolling, the touchpad speed — and the
+density a touchscreen stating no size of its own is measured by are applied
+with the rest of the input policy, on the loop head and after a resumed mode
+rebuilds the source.
 
 ## Live keyboard input source
 
@@ -2501,14 +2525,15 @@ misinterpreted (`AGENTS.md` §5.4 / §2.9). The ABI record is documented in
 
 ## Seat-backed input channels
 
-The `PointerInputChannel` and `KeyInputChannel` seams above are backed by the
-kernel **seat registry**, not by IPC ports: `SeatInputChannel` (the `seat`
+The `PointerInputChannel`, `TouchInputChannel` and `KeyInputChannel` seams
+above are backed by the kernel **seat registry**, not by IPC ports: `SeatInputChannel` (the `seat`
 module) drains each fixed-width input record from the per-seat, owner-gated
 channel the kernel routed the desktop's input to
 ([the seat page](./seat.md)). The records arrive through an injected
 `SeatEventReader` seam — the seat-addressed
-[`pointer_read` / `keyboard_read`](../architecture/syscalls.md) syscalls
-(`tairix_rt::pointer_read` / `tairix_rt::keyboard_read`) on a running system,
+[`pointer_read` / `touch_read` / `keyboard_read`](../architecture/syscalls.md)
+syscalls (`tairix_rt::pointer_read` / `tairix_rt::touch_read` /
+`tairix_rt::keyboard_read`) on a running system,
 an in-memory queue in tests (`AGENTS.md` §7) — so the crate holds no seat
 lease of its own and stays host-testable (`AGENTS.md` §17.4).
 
@@ -2522,11 +2547,12 @@ drain". The channel's own validation is narrow and fail-closed (`AGENTS.md`
 exactly one whole record (`WIRE_LEN` bytes) surfaces `LengthOutOfRange`
 rather than handing truncated bytes to the decoder.
 
-A pointer record and a key record are each a fixed-width drain from the
-caller's own seat, so `SeatInputChannel` implements **both** seam traits
-through one shared validation path rather than two (`AGENTS.md` §2.2); which
-records flow is decided by the reader it wraps — a pointer reader wrapped in
-`DeviceInputSource`, a keyboard reader in `KeyboardInputSource`.
+A pointer record, a touch frame and a key record are each a fixed-width drain
+from the caller's own seat, so `SeatInputChannel` implements **all three** seam
+traits through one shared validation path (`AGENTS.md` §2.2); which records
+flow is decided by the reader it wraps — a pointer and a touch reader wrapped
+in `DeviceInputSource`, a keyboard reader in `KeyboardInputSource`. Every
+wake drains all three, because the seat's readiness includes them all.
 
 Relaying a theme switch to the apps over IPC remains a later increment; the
 desktop now reads a live pointer **and** keyboard event stream end to end,

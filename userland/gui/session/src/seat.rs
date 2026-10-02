@@ -35,9 +35,10 @@
 //! (a pointer reader or a keyboard reader), not by the channel type.
 
 use tairix_abi::input::{KeyInput, PointerInput};
+use tairix_abi::touch::TouchFrame;
 use tairix_abi::Errno;
 
-use crate::device::PointerInputChannel;
+use crate::device::{PointerInputChannel, TouchInputChannel};
 use crate::keyboard::KeyInputChannel;
 
 /// A source of fixed-width input records drained from the kernel seat
@@ -138,10 +139,16 @@ impl<R: SeatEventReader> KeyInputChannel for SeatInputChannel<R> {
     }
 }
 
+impl<R: SeatEventReader> TouchInputChannel for SeatInputChannel<R> {
+    fn next_frame(&mut self) -> Result<Option<[u8; TouchFrame::WIRE_LEN]>, Errno> {
+        self.drain_record::<{ TouchFrame::WIRE_LEN }>()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{SeatEventReader, SeatInputChannel};
-    use crate::device::{DeviceInputSource, PointerInputChannel};
+    use crate::device::{DeviceInputSource, PointerInputChannel, TouchInputChannel};
     use crate::keyboard::KeyboardInputSource;
     use crate::shell::InputSource;
     use alloc::collections::VecDeque;
@@ -150,6 +157,7 @@ mod tests {
         KeyInput, KeyValue, Modifiers as AbiModifiers, NamedKeyCode, PointerButtonCode,
         PointerInput,
     };
+    use tairix_abi::touch::{TouchButtons, TouchExtent, TouchFrame, TouchSurface};
     use tairix_abi::Errno;
     use tairix_wm::{InputEvent, Key, NamedKey, Point, Rect};
 
@@ -201,12 +209,42 @@ mod tests {
         SeatInputChannel::new(QueueReader::new())
     }
 
+    fn touch_channel() -> SeatInputChannel<QueueReader> {
+        SeatInputChannel::new(QueueReader::new())
+    }
+
+    #[test]
+    fn drains_a_whole_touch_frame_and_refuses_a_partial_one() {
+        let mut channel = touch_channel();
+        let frame = TouchFrame::new(
+            2,
+            TouchSurface::Touchpad,
+            TouchButtons::NONE,
+            TouchExtent::default(),
+        )
+        .stamped(7, 9);
+        channel.reader_mut().push(frame.to_le_bytes().to_vec());
+        assert_eq!(
+            TouchInputChannel::next_frame(&mut channel),
+            Ok(Some(frame.to_le_bytes()))
+        );
+        assert_eq!(TouchInputChannel::next_frame(&mut channel), Ok(None));
+        channel
+            .reader_mut()
+            .push(alloc::vec![0u8; TouchFrame::WIRE_LEN - 1]);
+        assert_eq!(
+            TouchInputChannel::next_frame(&mut channel),
+            Err(Errno::LengthOutOfRange)
+        );
+    }
+
     #[test]
     fn drains_a_pointer_move_from_the_seat_channel() {
         let mut channel = pointer_channel();
         let record = PointerInput::MovedBy { dx: 7, dy: -3 };
         channel.reader_mut().push(record.to_le_bytes().to_vec());
-        let mut source = DeviceInputSource::new(channel, SCREEN).expect("non-empty screen");
+        let mut source =
+            DeviceInputSource::new(channel, touch_channel(), SCREEN).expect("non-empty screen");
         // The displacement is applied to the centre start position.
         assert_eq!(
             source.poll(0),
@@ -305,7 +343,8 @@ mod tests {
         channel
             .reader_mut()
             .push(alloc::vec![0u8; PointerInput::WIRE_LEN]);
-        let mut source = DeviceInputSource::new(channel, SCREEN).expect("non-empty screen");
+        let mut source =
+            DeviceInputSource::new(channel, touch_channel(), SCREEN).expect("non-empty screen");
         assert_eq!(source.poll(0), Err(Errno::BadMagic));
     }
 

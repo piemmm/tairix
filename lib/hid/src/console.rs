@@ -1,32 +1,17 @@
-//! Console-input producer for a boot-protocol keyboard (`plans/PI.md` P11).
+//! The keyboard's console producer: a key edge, named by its HID usage,
+//! resolved through the held modifiers and the caps and num locks into the
+//! [`Key`] a US layout produces, and emitted as the [`KeyInput`] record the
+//! seat routes (`plans/PI.md` P11).
 //!
-//! [`BootKeyboard`] decodes the device's reports into
-//! [`InputEvent`] key edges whose `code` is the raw HID usage ID. This module
-//! is the second half of the producer: it tracks the held modifiers and the
-//! caps-/num-lock state and resolves each printable or named key edge into the
-//! [`Key`] a US keyboard layout produces, then emits the *device-resolved key
-//! edge* — a [`tairix_abi::input::KeyInput`] record built through the shared
-//! [`tairix_keymap::key_input`] map — leaving the encoding and routing to the
-//! kernel input-focus arbiter (`plans/PI.md` P11). A keyboard
-//! driver injects each record into the kernel through the `key_inject` syscall,
-//! which decides by who holds input focus whether to encode the press to a text
-//! console's tty bytes or deliver the whole record to the desktop.
-//!
-//! The HID-usage→[`Key`] table is HID-specific (a `ps2` keyboard decodes
-//! scancode set 1 into the same [`Key`] vocabulary), so it lives here; the
-//! [`Key`]→[`KeyInput`] map is shared in `lib/keymap`.
-//!
-//! Everything here is allocation-free and fail-closed: an
-//! unknown usage or a non-key event produces no record rather than guessing.
+//! The usage-to-[`Key`] table is HID's own; the [`Key`]-to-[`KeyInput`] map is
+//! `lib/keymap`'s. An unknown usage or a non-key event produces nothing.
 
-use tairix_abi::driver::input::{Input, InputEvent, InputEventKind};
+use tairix_abi::driver::input::{InputEvent, InputEventKind};
 use tairix_abi::input::KeyInput;
-use tairix_abi::DriverError;
 use tairix_input::{Key, ModifierKey, ModifierSide, ModifierState, NamedKey};
-
-use crate::keyboard::{BootKeyboard, MODIFIER_USAGE_BASE};
-use crate::ReportSource;
 use tairix_keymap::{key_input, modifier_change};
+
+use crate::usages::MODIFIER_FIRST;
 
 /// HID usage of the Caps Lock key (HID Usage Tables, page `0x07`).
 const USAGE_CAPS_LOCK: u16 = 0x39;
@@ -35,10 +20,9 @@ const USAGE_CAPS_LOCK: u16 = 0x39;
 const USAGE_NUM_LOCK: u16 = 0x53;
 
 /// The modifier a usage names, or [`None`] if it is not one of the eight
-/// modifiers the boot protocol reports at [`MODIFIER_USAGE_BASE`] (HID Usage
-/// Tables, page `0x07`).
+/// keyboard modifiers (HID Usage Tables, page `0x07`).
 const fn modifier_of(usage: u16) -> Option<(ModifierKey, ModifierSide)> {
-    let Some(offset) = usage.checked_sub(MODIFIER_USAGE_BASE) else {
+    let Some(offset) = usage.checked_sub(MODIFIER_FIRST) else {
         return None;
     };
     Some(match offset {
@@ -59,29 +43,11 @@ const VALUE_PRESS: i32 = 1;
 /// `value` of a release edge.
 const VALUE_RELEASE: i32 = 0;
 
-/// Sink the [`KeyboardConsole`] producer writes decoded key-edge records to.
-///
-/// On metal the keyboard driver implements this by calling the `key_inject`
-/// syscall with the record's wire bytes; host tests implement it by recording
-/// the records (the same seam style as
-/// [`crate::ReportSource`]).
-pub trait ConsoleSink {
-    /// Inject one [`KeyInput`] record's wire bytes
-    /// ([`KeyInput::WIRE_LEN`]) into the kernel input-focus arbiter.
-    ///
-    /// # Errors
-    ///
-    /// Returns a [`DriverError`] if the underlying delivery failed; the
-    /// producer propagates it rather than dropping input.
-    fn write(&mut self, bytes: &[u8]) -> Result<(), DriverError>;
-}
-
-/// Stateful translation of boot-keyboard [`InputEvent`] edges into console
-/// bytes.
+/// Key edges, each an [`InputEvent`] naming a HID usage, resolved into
+/// [`KeyInput`] records.
 ///
 /// The only state carried between [`feed`](Self::feed) calls is the held
-/// modifiers and the two lock toggles, so a reload starts from a clean
-/// state by constructing a fresh instance.
+/// modifiers and the two lock toggles.
 #[derive(Debug, Default)]
 pub struct KeyboardConsole {
     modifiers: ModifierState,
@@ -157,77 +123,6 @@ impl KeyboardConsole {
         key_input(key, modifiers, pressed)
     }
 }
-
-/// Poll `keyboard` once and feed every decoded event through `console`,
-/// injecting each produced [`KeyInput`] record's wire bytes into `sink`.
-///
-/// This is the keyboard driver's per-iteration loop: on metal the driver calls
-/// it in its service loop with a [`ConsoleSink`] that invokes `key_inject`;
-/// host tests call it with a recording sink. Returns the number of events
-/// drained from the keyboard this call.
-///
-/// # Errors
-///
-/// Propagates a [`DriverError`] from the keyboard `poll` or from the `sink` —
-/// input is never silently dropped.
-///
-/// # Capabilities
-///
-/// None beyond those the keyboard and sink already hold.
-pub fn pump_once<I: Input, S: ConsoleSink>(
-    keyboard: &mut I,
-    console: &mut KeyboardConsole,
-    sink: &mut S,
-) -> Result<usize, DriverError> {
-    let mut events = [crate::EVENT_ZERO; EVENT_BATCH];
-    let drained = keyboard.poll(&mut events)?;
-    deliver(&events[..drained], console, sink)?;
-    Ok(drained)
-}
-
-/// Deliver the release of every key `keyboard` last reported held, through
-/// `console` into `sink`: what a keyboard driver says before it exits, so a
-/// key held as its device went away does not stay down.
-///
-/// # Errors
-///
-/// Propagates a [`DriverError`] from the decoder or the `sink`.
-pub fn release_held<S: ReportSource, K: ConsoleSink>(
-    keyboard: &mut BootKeyboard<S>,
-    console: &mut KeyboardConsole,
-    sink: &mut K,
-) -> Result<(), DriverError> {
-    let mut events = [crate::EVENT_ZERO; EVENT_BATCH];
-    loop {
-        let drained = keyboard.release_all(&mut events)?;
-        if drained == 0 {
-            return Ok(());
-        }
-        deliver(&events[..drained], console, sink)?;
-    }
-}
-
-/// Resolve each of `events` through `console` and inject what it produces.
-fn deliver<S: ConsoleSink>(
-    events: &[InputEvent],
-    console: &mut KeyboardConsole,
-    sink: &mut S,
-) -> Result<(), DriverError> {
-    for event in events {
-        if let Some(record) = console.feed(*event) {
-            sink.write(&record.to_le_bytes())?;
-        }
-    }
-    Ok(())
-}
-
-/// Events drained from the keyboard per [`pump_once`] call.
-///
-/// The USB keyboard driver uses a blocking interrupt-IN report source, so the
-/// pump asks the decoder for one key edge at a time. That delivers a completed
-/// key press to the focused console before the next report read can park for a
-/// later key or release.
-pub const EVENT_BATCH: usize = 1;
 
 /// Resolve a HID page-`0x07` usage to the [`Key`] a US keyboard layout
 /// produces, given the active `shift`, `caps`, and `num` lock state.

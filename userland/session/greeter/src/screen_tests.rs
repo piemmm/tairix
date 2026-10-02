@@ -1300,6 +1300,68 @@ fn a_button_where_nothing_answers_it_presents_nothing() {
     assert_eq!(login.frame(), bare.as_slice());
 }
 
+/// A touchscreen points and clicks as the mouse does: a finger puts the
+/// pointer where it lands, its press waits on a deadline the park honours, and
+/// a scroll or a pinch finds nothing on the authentication surface to act on.
+#[test]
+fn a_touch_points_and_clicks_as_the_mouse_does() {
+    use tairix_abi::touch::{Contact, TouchButtons, TouchExtent, TouchFrame, TouchSurface};
+    use tairix_input::PointerButton;
+    use tairix_touch::{Gesture, SurfacePoint, TouchPress};
+
+    let mut login = screen(
+        vec![AccountTile::new("Ann Example", "ann")],
+        Authority::accepting("ann", SECRET),
+    );
+    login.set_pointer(arrow());
+    login.repaint();
+    let mut frame = TouchFrame::new(
+        0,
+        TouchSurface::Screen,
+        TouchButtons::NONE,
+        TouchExtent::default(),
+    );
+    frame
+        .push(Contact::finger(1, 0, 0))
+        .expect("room for a contact");
+    let mut gestures = Vec::new();
+    login.feed_touch(&frame.stamped(1, 0), &mut gestures);
+    assert_eq!(gestures, [Gesture::MovedTo(SurfacePoint { x: 0, y: 0 })]);
+    let step = login.on_gesture(gestures[0], 0);
+    assert_ne!(
+        step.present,
+        Present::Nothing,
+        "the pointer moved to the corner"
+    );
+
+    let hold_ns = 100_000_000;
+    assert!(
+        login.park_timeout(0, None) <= hold_ns,
+        "the press's wait is parked on"
+    );
+    gestures.clear();
+    login.expire_touch(hold_ns, &mut gestures);
+    let press = Gesture::Pressed(TouchPress::Fingers(PointerButton::Primary));
+    assert_eq!(gestures, [press]);
+    let pressed = login.on_gesture(press, hold_ns);
+    assert_eq!(
+        pressed.present,
+        Present::Nothing,
+        "the backdrop answers no press"
+    );
+    assert!(!pressed.verified);
+    for nothing in [
+        Gesture::Scrolled { dx: 0, dy: 120 },
+        Gesture::Pinch(tairix_touch::Pinch {
+            phase: tairix_abi::touch::PinchPhase::Begin,
+            scale: tairix_abi::touch::PINCH_SCALE_ONE,
+            at: None,
+        }),
+    ] {
+        assert_eq!(login.on_gesture(nothing, hold_ns).present, Present::Nothing);
+    }
+}
+
 #[test]
 fn the_account_the_authority_was_asked_about_is_the_one_picked() {
     let mut login = screen(

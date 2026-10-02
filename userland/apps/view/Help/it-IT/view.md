@@ -53,6 +53,8 @@ trasparente si legga come trasparente e non come il colore dietro di essa.
 
 * `+` — ingrandisci al passo successivo
 * `-` — riduci al passo precedente
+* `Ctrl` + rotella — ingrandire o ridurre attorno al puntatore
+* Pizzicare con due dita — ingrandire o ridurre in modo continuo; su uno schermo tattile l'immagine segue le dita
 * `0` — adatta l'intera immagine alla finestra
 * `1` — dimensione reale, un pixel d'immagine per pixel di schermo
 * `2` — adatta la larghezza dell'immagine

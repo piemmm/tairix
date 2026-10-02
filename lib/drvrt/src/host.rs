@@ -9,7 +9,7 @@ use tairix_abi::driver::mailbox::{MailboxChannel, MAILBOX_PROPERTY_WORDS};
 use tairix_abi::driver::net::MAC_ADDRESS_LEN;
 use tairix_abi::driver::virtio::VirtioHost;
 use tairix_abi::driver::CompletionSignal;
-use tairix_abi::hwtree::{HwResource, HwResourceKind};
+use tairix_abi::hwtree::{HwProperty, HwResource, HwResourceKind};
 use tairix_abi::{i2c_ipc, mailbox_ipc};
 use tairix_abi::{
     CapabilityId, DriverError, DriverHost, DriverKind, Errno, MmioMapError, MmioMapper,
@@ -79,6 +79,8 @@ pub struct RtDriverHost<S: GrantSyscalls> {
     /// The grant slot of the `Dma` window every carve goes under, when the
     /// driver chose one; otherwise the node's first `Dma` grant.
     dma_window: Option<usize>,
+    /// The shared buffer has been handed out ([`Self::shared_buffer`]).
+    shared_taken: Cell<bool>,
 }
 
 impl<S: GrantSyscalls> RtDriverHost<S> {
@@ -212,6 +214,7 @@ impl<S: GrantSyscalls> RtDriverHost<S> {
             coherency,
             irq_handle: Cell::new(0),
             dma_window: None,
+            shared_taken: Cell::new(false),
         }
     }
 
@@ -439,6 +442,17 @@ impl<S: GrantSyscalls> RtDriverHost<S> {
         self.syscalls.irq_wait(self.irq_handle.get(), timeout_ns) == 0
     }
 
+    /// The value the driver's matched node states for `key`, or [`None`] when
+    /// it states none.
+    #[must_use]
+    pub fn property(&self, key: HwProperty) -> Option<u64> {
+        self.grants
+            .iter()
+            .flatten()
+            .filter_map(|slot| slot.resource.property_value().ok())
+            .find_map(|(held, value)| (held == key).then_some(value))
+    }
+
     /// The call-endpoint id of the single [`HwResourceKind::Endpoint`]
     /// grant the driver's matched node carried, or `None` if it holds no
     /// such grant.
@@ -498,7 +512,7 @@ impl<S: GrantSyscalls> RtDriverHost<S> {
     /// * [`DriverError::PermissionDenied`] if the kernel refuses the map (the
     ///   driver lacks `CAP_SHM`), else [`DriverError::Unsupported`] for any
     ///   other kernel refusal.
-    pub fn map_shared(&self) -> Result<(u64, usize), DriverError> {
+    pub(crate) fn map_shared(&self) -> Result<(u64, usize), DriverError> {
         let slot = self
             .grants
             .iter()
@@ -518,6 +532,46 @@ impl<S: GrantSyscalls> RtDriverHost<S> {
         let len = usize::try_from(len).map_err(|_| DriverError::Unsupported)?;
         #[allow(clippy::cast_sign_loss)] // `ret >= 0` checked above; it is a user VA.
         Ok((ret as u64, len))
+    }
+}
+
+impl<S: GrantSyscalls> RtDriverHost<S> {
+    /// The driver's granted shared buffer, mapped whole: the kernel's own
+    /// length for it, at least `least` bytes. A second call is refused, so
+    /// the buffer is one exclusive slice for the life of the process.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::Busy`] once handed out.
+    /// * [`DriverError::NotFound`] without a shared-region grant.
+    /// * [`DriverError::PermissionDenied`] when the kernel refuses the map,
+    ///   [`DriverError::Unsupported`] for any other refusal.
+    /// * [`DriverError::LengthOutOfRange`] for a region shorter than `least`
+    ///   or at an address no slice may be built over.
+    pub fn shared_buffer(&self, least: usize) -> Result<&'static mut [u8], DriverError> {
+        if self.shared_taken.replace(true) {
+            return Err(DriverError::Busy);
+        }
+        let (base, len) = self.map_shared()?;
+        let base = usize::try_from(base)
+            .ok()
+            .filter(|&base| base != 0 && base.checked_add(len).is_some())
+            .ok_or(DriverError::LengthOutOfRange)?;
+        if len < least {
+            return Err(DriverError::LengthOutOfRange);
+        }
+        // SAFETY: `map_shared` had the kernel map `len` bytes read-write at
+        // `base` into this process, its own record of the region's size, for
+        // the rest of the process's life: a driver's node grant is not
+        // unmapped while it runs. `shared_taken` makes this the only slice
+        // ever built over the region in this process, so the `&mut` is
+        // exclusive on this side; the serving driver writes the region only
+        // while it answers this driver's own blocking calls. The address
+        // arrives from the kernel as an integer, so its provenance is the
+        // mapping's exposed one.
+        Ok(unsafe {
+            core::slice::from_raw_parts_mut(core::ptr::with_exposed_provenance_mut::<u8>(base), len)
+        })
     }
 }
 

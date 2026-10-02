@@ -1,0 +1,19 @@
+[package]
+name = "tairix-itest-witness"
+description = "What the freestanding QEMU integration kernels' PASS witnesses read off an audit record, defined once and host-unit-tested so no vertical re-derives it. Test scaffolding: nothing in TAIRiX itself links it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }

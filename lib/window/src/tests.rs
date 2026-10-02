@@ -3702,6 +3702,45 @@ fn a_wire_pointer_event_translates_to_the_position_then_the_button() {
 }
 
 #[test]
+fn a_wire_scroll_translates_to_its_place_then_the_turn() {
+    use crate::scroll_input_events;
+    use tairix_geometry::Point;
+    use tairix_input::InputEvent;
+
+    let at = Point::new(12, 640);
+    let delivered: Vec<InputEvent> = scroll_input_events(at, -15, 240).collect();
+    assert_eq!(
+        delivered,
+        [
+            InputEvent::PointerMoved { to: at },
+            InputEvent::PointerScrolled { dx: -15, dy: 240 }
+        ]
+    );
+}
+
+#[test]
+fn a_wire_pinch_translates_to_its_place_then_the_pinch_there() {
+    use crate::pinch_input_events;
+    use tairix_geometry::Point;
+    use tairix_input::{InputEvent, PinchPhase};
+
+    let at = Point::new(3, 70);
+    let scale = 2 * tairix_abi::touch::PINCH_SCALE_ONE;
+    let delivered: Vec<InputEvent> = pinch_input_events(at, PinchPhase::Update, scale).collect();
+    assert_eq!(
+        delivered,
+        [
+            InputEvent::PointerMoved { to: at },
+            InputEvent::Pinch {
+                phase: PinchPhase::Update,
+                scale,
+                at
+            }
+        ]
+    );
+}
+
+#[test]
 fn a_wire_key_event_translates_to_the_shared_key_vocabulary() {
     use crate::key_input_event;
     use tairix_abi::input::NamedKeyCode;

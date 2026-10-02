@@ -78,6 +78,8 @@ Cerrar una ventana o salir con cambios sin guardar pregunta primero.
 * `S`, `P`, `B`, `A`, `E`, `F`, `I`, `L`, `R`, `O` — las herramientas, en orden
 * `X` — intercambiar los colores principal y secundario
 * `+` / `-` — acercar o alejar; `1` — tamaño real; `Ctrl+0` — ajustar
+* `Ctrl` + rueda — acercar o alejar en torno al puntero
+* Pellizcar con dos dedos — acercar o alejar con suavidad; en una pantalla táctil la imagen sigue a los dedos
 * `G` — mostrar u ocultar la cuadrícula entre píxeles
 * `Page Up` / `Page Down` — el sprite anterior o siguiente
 * teclas de flecha — mover una selección flotante un píxel; con `Shift`, diez

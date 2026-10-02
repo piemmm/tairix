@@ -38,18 +38,19 @@ mod program {
     use tairix_abi::driver::display::{DamageRect, DisplayMode};
     use tairix_abi::input::KeyInput;
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
-    use tairix_abi::window_ipc::{AppBarClick, PointerAction, WindowEvent, WindowSizing};
+    use tairix_abi::window_ipc::{AppBarClick, WindowEvent, WindowSizing};
     use tairix_abi::{Errno, ProcId};
     use tairix_controls::Keystroke;
     use tairix_font::BitmapFont;
-    use tairix_geometry::{Point, Rect, Region, Scale};
+    use tairix_geometry::{Rect, Region, Scale};
     use tairix_input::InputEvent;
     use tairix_theme::{TextRole, Theme, ThemeRegistry};
     use tairix_widgets::Gallery;
     use tairix_window::app::{self, AppWindow, Wake, EXIT_CHANNEL_LOST};
     use tairix_window::{
-        key_input_event, pointer_input_events, pointer_point, present_damage, Desktop, EventDrain,
-        EventError, EventMailbox, EventSource, Parked, Repaint, WindowClient, WindowEvents,
+        key_input_event, pointer_input_events, pointer_point, present_damage, scroll_input_events,
+        Desktop, EventDrain, EventError, EventMailbox, EventSource, Parked, Repaint, WindowClient,
+        WindowEvents,
     };
 
     /// The gallery window's logical width in physical pixels.
@@ -244,17 +245,20 @@ mod program {
                 }),
             WindowEvent::Pointer { x, y, action, .. } => changed(apply_pointer(
                 gallery,
-                pointer_point(*x, *y),
-                *action,
+                pointer_input_events(*action, pointer_point(*x, *y)),
                 viewport,
                 scale,
                 theme,
                 damage,
             )),
-            WindowEvent::Scrolled { dx, dy, .. } => {
-                let scroll = InputEvent::PointerScrolled { dx: *dx, dy: *dy };
-                changed(gallery.on_pointer(&scroll, viewport, scale, theme, damage))
-            }
+            WindowEvent::Scrolled { x, y, dx, dy, .. } => changed(apply_pointer(
+                gallery,
+                scroll_input_events(pointer_point(*x, *y), *dx, *dy),
+                viewport,
+                scale,
+                theme,
+                damage,
+            )),
             // A redraw request needs nothing here: the client library
             // re-presents the last frame, and the gallery it drew has not
             // changed. The rest are events the gallery does not act on: a
@@ -282,6 +286,7 @@ mod program {
             | WindowEvent::PickCancelled { .. }
             | WindowEvent::DragEnded { .. }
             | WindowEvent::PreviewRendered { .. }
+            | WindowEvent::Pinch { .. }
             // The gallery shows its own controls, so it declares no file
             // association and has no document an open target could name.
             | WindowEvent::OpenRequested => Acted::Idle,
@@ -307,15 +312,14 @@ mod program {
     /// the press/release the action names. Returns whether the view changed.
     fn apply_pointer(
         gallery: &mut Gallery,
-        at: Point,
-        action: PointerAction,
+        inputs: impl Iterator<Item = InputEvent>,
         viewport: Rect,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) -> bool {
         let mut acted = false;
-        for input in pointer_input_events(action, at) {
+        for input in inputs {
             acted |= gallery.on_pointer(&input, viewport, scale, theme, damage);
         }
         acted

@@ -29,7 +29,7 @@ use core::fmt::Display;
 use core::mem;
 use core::ops::ControlFlow;
 
-use tairix_abi::input::KeyInput;
+use tairix_abi::input::{KeyInput, Modifiers as AbiModifiers};
 use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
 use tairix_abi::window_ipc::{
     AppBar, AppBarClick, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow, CursorShape,
@@ -48,8 +48,9 @@ use super::{DocumentView, Relayout, Request, ViewOutcome};
 use crate::app::{self, fail, report, RtWindowTransport, Wake, WindowPane};
 use crate::appbar::{declaration, declare_app_bar, is_quit, QUIT_ROW};
 use crate::client::{
-    key_input_event, pointer_input_events, pointer_point, present_damage, DeclaredTip, EventDrain,
-    EventError, EventSource, Parked, Repaint, Target, WindowClient, WindowEvents,
+    key_input_event, pinch_input_events, pointer_input_events, pointer_point, present_damage,
+    scroll_input_events, DeclaredTip, EventDrain, EventError, EventSource, Parked, Repaint, Target,
+    WindowClient, WindowEvents,
 };
 use crate::desktop::Desktop;
 use crate::document::{Access, DocumentFile, PickFor, SaveJob, SaveStep, SavedDocument, UNTITLED};
@@ -1232,6 +1233,27 @@ impl<A: DocumentApp> Host<A> {
 
     /// Feed `inputs` to window `index` in turn, carrying out what each asks
     /// for — stopping should one close the window.
+    /// Window `index`'s pointer is at `at`, with `modifiers` held, and
+    /// `inputs` are what it did there: note where it is, owe the tip and
+    /// cursor beneath it a check, and feed the view the modifiers and then
+    /// `inputs` unless the window is still loading.
+    fn point(
+        &mut self,
+        index: usize,
+        at: Point,
+        modifiers: AbiModifiers,
+        inputs: impl Iterator<Item = InputEvent>,
+    ) {
+        let window = &mut self.windows[index];
+        window.pointing.at = Some(at);
+        window.pointing.owed = true;
+        if window.loading {
+            return;
+        }
+        let held = key_input_event(KeyInput::ModifiersChanged { modifiers });
+        self.feed(index, core::iter::once(held).chain(inputs));
+    }
+
     fn feed(&mut self, index: usize, inputs: impl Iterator<Item = InputEvent>) {
         let id = self.windows[index].id();
         let now = tairix_rt::clock_get();
@@ -1366,24 +1388,36 @@ impl<A: DocumentApp> Host<A> {
                 ..
             } => {
                 let at = pointer_point(*x, *y);
-                window.pointing.at = Some(at);
-                window.pointing.owed = true;
-                if window.loading {
-                    return;
-                }
-                let modifiers = key_input_event(KeyInput::ModifiersChanged {
-                    modifiers: *modifiers,
-                });
-                let inputs = core::iter::once(modifiers).chain(pointer_input_events(*action, at));
-                self.feed(index, inputs);
+                self.point(index, at, *modifiers, pointer_input_events(*action, at));
             }
-            WindowEvent::Scrolled { dx, dy, .. } => {
-                if !window.loading {
-                    // A scrolled strip puts another tool under the pointer.
-                    window.pointing.owed = true;
-                    let wheel = InputEvent::PointerScrolled { dx: *dx, dy: *dy };
-                    self.feed(index, core::iter::once(wheel));
-                }
+            // A scrolled strip puts another tool under the pointer, which is
+            // why a turn is owed a hover check as a move is.
+            WindowEvent::Scrolled {
+                x,
+                y,
+                dx,
+                dy,
+                modifiers,
+                ..
+            } => {
+                let at = pointer_point(*x, *y);
+                self.point(index, at, *modifiers, scroll_input_events(at, *dx, *dy));
+            }
+            WindowEvent::Pinch {
+                x,
+                y,
+                phase,
+                scale,
+                modifiers,
+                ..
+            } => {
+                let at = pointer_point(*x, *y);
+                self.point(
+                    index,
+                    at,
+                    *modifiers,
+                    pinch_input_events(at, *phase, *scale),
+                );
             }
             WindowEvent::Minimized { .. }
             | WindowEvent::AppBarDefault

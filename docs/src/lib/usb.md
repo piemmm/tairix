@@ -5,7 +5,7 @@ host-provable, controller-agnostic layers of an xHCI stack, with no PCI or
 board coupling. It is the USB analogue of `lib/virtio` — the protocol lives in
 `lib/` so more than one crate can consume it (`AGENTS.md` §2.2 / §6 / §17.4),
 and it depends only on `lib/*` crates (`lib/abi`, `lib/dma-barrier`,
-`lib/hid`, `lib/inline`), so it builds for every Tier-1 target and is
+`lib/inline`), so it builds for every Tier-1 target and is
 identical on `aarch64`, `x86_64`, and `riscv64` (the USB protocol does not vary
 by architecture).
 
@@ -13,13 +13,11 @@ by architecture).
 
 The USB host-controller protocol used to live inside `drivers/bus/usb`. But the
 §17.4 layering forbids a `drivers/*` (or `userland/*`) crate from depending on
-another `drivers/*` crate, so an arch-neutral user-space keyboard driver could
-not reuse the xHCI engine and the HID enumeration path while they sat in the bus
-driver. Moving the protocol into `lib/usb` lets both the concrete
-host-controller driver (`drivers/bus/usb`, which adds the PCI
-discovery/BAR/DMA wiring and the §8 `register` entry) and the keyboard driver
-build on the *same* engine without depending on each other — exactly the split
-`lib/virtio` ↔ `drivers/bus/virtio` already uses.
+another `drivers/*` crate, so a class driver could not share the URB transport
+while it sat in the bus driver. In `lib/usb`, the host-controller driver
+(`drivers/bus/usb`, which adds the PCI discovery/BAR/DMA wiring and the §8
+`register` entry) and the class drivers build on the *same* protocol without
+depending on each other — the split `lib/virtio` ↔ `drivers/bus/virtio` uses.
 
 ## What it provides
 
@@ -41,45 +39,25 @@ build on the *same* engine without depending on each other — exactly the split
   validated `bMaxPacketSize0` drives an Evaluate Context EP0 fix-up when
   it differs from the speed's assumed worst case (a full-speed receiver's
   8-byte EP0) → the full `GET_DESCRIPTOR` reads (the configuration at its
-  exact advertised `wTotalLength`) → `SET_CONFIGURATION` → per HID interface
-  the protocol it needs: a **mouse** interface reads `GET_DESCRIPTOR(Report)`
-  and, when it parses, runs **report protocol** (`SET_PROTOCOL(report)` +
-  `SET_IDLE(indefinite)`) — report protocol is what lets `SET_IDLE` quiesce a
-  pointer that would otherwise stream a duplicate report every polling interval
-  and storm the controller — while a **keyboard** runs the standardised **boot
-  protocol** (`SET_PROTOCOL(boot)` + `SET_IDLE`, its Report Descriptor not
-  read): it reports only on a key-state change (so never causes that idle
-  storm) and its fixed 8-byte boot report avoids a report-descriptor parse a
-  composite keyboard's multiple Report IDs (or NKRO layout) can misread — the
-  metal "keyboard registers no keypresses" defect, where a report-protocol
-  keyboard streamed its native report under a Report ID the parser had not
-  pinned to and every keypress was dropped. A device the parser cannot handle
-  also falls back to boot protocol. Each report-protocol report is normalised
-  back into the fixed boot layout (`tairix_hid`) the class drivers read, so
-  they and the URB ABI are unchanged. The interrupt-IN transfer lands in a
-  `CAPTURE_LEN`-byte buffer (not the 8-byte boot `REPORT_LEN`), so a
-  report-protocol mouse report longer than eight bytes is captured in full;
-  normalisation is also fail-soft, keeping the fields that did arrive. The
-  transfer is *armed* to the endpoint's own `wMaxPacketSize`, never the full
-  capture buffer: a full/low-speed HID endpoint behind a high-speed hub's
+  exact advertised `wTotalLength`, up to `CTRL_DATA_LEN`) → Configure
+  Endpoint → `SET_CONFIGURATION`. It knows no device class: a class driver
+  reads its own interface's descriptors, sends its own class requests, and
+  receives its interrupt-IN reports exactly as the device sent them. Every
+  interface with an interrupt-IN endpoint or a bulk pair is served, whatever
+  its class. The interrupt-IN transfer is armed only once the class driver's
+  first report request names the longest report it expects, to that or to one
+  service interval's payload (`PeriodicShape::payload`: the packet times the
+  high-speed transactions or `SuperSpeed` burst) if longer, and never more than
+  a report needs: a full/low-speed endpoint behind a high-speed hub's
   transaction translator faults with a Split Transaction Error when a transfer
-  exceeds the per-interval budget the TT scheduled. Because that live report
-  path is invisible under QEMU, the engine latches the per-interface
-  enumeration decision the HCD logs once — `hid_enum_diag` (report vs boot
-  protocol, the parsed `tairix_hid::ReportMapSummary` field layout when in
-  report protocol, `wMaxPacketSize`, armed capture length) at node publish — so
-  a metal boot shows how each device's reports are read (a keyboard as
-  boot-protocol, a mouse as report-protocol); it carries no report payload.
-  The descriptor that decision was made from is retained
-  (`hid_report_descriptor`) and logged beside it, because a map is only as right
-  as its input. `SET_PROTOCOL` being optional, the mode in force is read back
-  with `GET_PROTOCOL`, and reports are read one of three ways — boot layout,
-  rewritten through the parsed map, or *refused* when the device is in report
-  protocol with no usable map, so nothing is delivered rather than
-  boot-decoding an ID-prefixed report into phantom modifiers and keys.
-  Enumeration decode
-  → Configure Endpoint, into a
-  growable table of concurrently served **interfaces**, each with its own
+  outruns the interval budget the TT scheduled. Captured reports are queued
+  per device in memory sized to that length (`REPORT_QUEUE_CAP` deep, the
+  oldest dropped and counted when a consumer stalls). An interrupt endpoint's
+  context carries its own interval, Max Burst Size and Max ESIT Payload, and a
+  `SuperSpeed` bulk endpoint's carries its companion's burst
+  (`BulkEndpoint::burst`), so a USB 3 storage device moves up to sixteen
+  packets a burst.
+  Enumerated interfaces go into a growable table of concurrently served **interfaces**, each with its own
   demand-allocated DMA region (EP0 / interrupt / bulk rings and buffers)
   claimed on attach and released on detach — the only concurrency bounds
   are the controller's reported slot count and genuine memory exhaustion,
@@ -195,8 +173,8 @@ build on the *same* engine without depending on each other — exactly the split
     same path for a SETUP-only class request (the BOT Mass Storage Reset,
     `plans/DEVICES.md` D2), `control_out` for a class request carrying an
     OUT data stage (the CBI ADSC command channel, `plans/DEVICES.md` D5),
-    `interrupt_in` over the `ReportSource` report poll — a HID report
-    endpoint or a CBI interface's completion endpoint alike — and
+    `interrupt_in` over the report queue — a HID report endpoint or a CBI
+    interface's completion endpoint alike — and
     `bulk_in` / `bulk_out` over the interface's configured bulk endpoints:
     the IN/OUT pair a BOT/CBI interface carries, or the two pairs a UAS
     interface's four pipes need (`plans/DEVICES.md` D1/D5), addressed by
@@ -204,11 +182,16 @@ build on the *same* engine without depending on each other — exactly the split
   - `drive_urb` — the controller-side server transformation: decode a URB,
     validate it fail-closed against the interface (control ⇒ endpoint 0,
     served as IN, the zero-length no-data OUT, or the data-stage OUT
-    carrying the shared buffer's bytes; interrupt/bulk ⇒ a device
-    endpoint; an oversize length or a
-    malformed frame is refused **before** the engine is touched), drive the
-    engine over the shared buffer, and frame the
-    completion in band. A not-yet-arrived interrupt-IN report — or a bulk
+    carrying the shared buffer's bytes; interrupt/bulk ⇒ one of the
+    interface's own endpoints; an oversize length or a malformed frame is
+    refused **before** the engine is touched), drive the engine over the
+    shared buffer, and frame the completion in band. A control request must
+    stay inside the interface's `UrbScope` (`control_permitted`): a class
+    driver may read the device's descriptors and status and do anything to
+    its own interface and its own endpoints, but never set the
+    configuration, the address, an alternate setting, a halt or a power
+    feature, which reach every interface of the device — those are refused
+    `PermissionDenied`, and the HCD logs each refusal. A not-yet-arrived interrupt-IN report — or a bulk
     transfer still in flight — leaves the HCD's IPC ticket outstanding until
     the controller event arrives, so the class driver parks instead of
     retrying.
@@ -220,7 +203,19 @@ build on the *same* engine without depending on each other — exactly the split
     submit it, and decode the completion. A class driver speaks only
     this ABI, so the same binary works behind any controller that serves it —
     it touches no controller register and no other interface's buffer (§5.4,
-    `plans/USB.md` §1.3).
+    `plans/USB.md` §1.3). An interrupt-IN completion may carry more than the
+    request named, up to one service interval's payload, so the report lands
+    anywhere in the shared buffer.
+  - `UrbLink` — a class driver's link to its interface: the client and its
+    mapping of the shared buffer, moving each transfer's bytes in and out,
+    splitting bulk transfers into buffer-sized URBs, and refusing an
+    interrupt report too long for the caller's buffer rather than truncating
+    it. The mass-storage and HID class drivers both drive their interface
+    through it.
+  - `descriptor::descriptors` — the one walk over a configuration descriptor
+    stream every reader of one shares (this crate's decoder, the
+    mass-storage and HID class drivers): each descriptor its `bLength`
+    bytes, a trailing fragment ending the walk, a malformed one refused.
   - Bulk endpoints are served through per-pipe transfer rings with
     per-slot staging buffers (several TDs may be outstanding per pipe,
     completing in order; a UAS interface's second pair shares the
@@ -259,12 +254,9 @@ build on the *same* engine without depending on each other — exactly the split
   a completion, the power-on-good + attach-debounce window for the boot
   connect scan). Only the brief register handshakes (`Xhci` open/start/
   reset readiness) keep the bounded iteration poll budget.
-- A **mouse**'s poll rate is capped (`pointer_min_interval`, derived from
-  `POINTER_MAX_REPORT_HZ` = 100): a mouse interface's endpoint-context Interval
-  is raised so it is polled no faster than ~100 Hz, so a 1000 Hz gaming mouse
-  cannot wake the HCD and its class driver a thousand times a second while
-  moving. The cap only lowers an aggressive rate; a slower mouse keeps its own
-  interval, and a keyboard is never touched.
+- Every endpoint is polled at the interval its descriptor states; a device
+  that has nothing new to report is quiet because its class driver set its
+  idle rate, not because the host slowed it.
 - Fail-closed (§2.9): an implausible capability block, an out-of-range port or
   doorbell target, a malformed descriptor, or an exhausted wait budget is a
   typed `DriverError`, never a panic or an unbounded spin (§2.1). The device,

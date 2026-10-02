@@ -1,154 +1,254 @@
-//! HID boot-protocol mouse report decode (USB HID 1.11 §B.2).
-//!
-//! A boot mouse delivers a report of at least 3 bytes:
-//!
-//! | byte | content                                              |
-//! |------|------------------------------------------------------|
-//! | 0    | button bitmap (bit 0 left, bit 1 right, bit 2 middle) |
-//! | 1    | signed X displacement (two's complement)             |
-//! | 2    | signed Y displacement (two's complement)             |
-//! | 3    | signed wheel displacement (common extension, optional) |
-//! | 4..  | device-specific (ignored)                            |
-//!
-//! Buttons carry *state* and are diffed against the previous report;
-//! displacements are *edges* and surface as `Pointer` / `Scroll` deltas on
-//! the shared axis encoding ([`crate::AXIS_X`] / [`crate::AXIS_Y`]), which
-//! counts downward: the wheel byte counts rotation away from the user, so it
-//! is negated on the way.
+//! The mouse decoder: buttons, relative motion, and both wheels in scroll
+//! units at the resolution the device confirmed (`plans/POINTING.md` PO2).
 
-use tairix_abi::driver::input::{Input, InputEvent, InputEventKind};
+use core::num::NonZeroU8;
+
+use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
+use tairix_abi::input::{PointerButtonCode, PointerInput};
 use tairix_abi::DriverError;
 
-use crate::{
-    poll_source, PendingEvents, ReportDecode, ReportSource, AXIS_X, AXIS_Y,
-    POINTER_BUTTON_CODE_BASE, POINTER_BUTTON_COUNT,
-};
+use crate::descriptor::{CollectionIndex, Field, ReportDescriptor, ReportKind, Usage};
+use crate::usages::{AC_PAN, PAGE_BUTTON, WHEEL, X, Y};
+use crate::{in_application, Decoded, SeatSink};
 
-/// Minimum byte length of a boot mouse input report.
-pub const BOOT_MOUSE_REPORT_MIN: usize = 3;
-
-/// Buttons the boot protocol defines (bits 0..3 of byte 0) — exactly the
-/// shared platform-neutral button set. Bits 3..8 are device-specific per
-/// §B.2 and deliberately not interpreted.
-#[allow(clippy::cast_possible_truncation)] // 3 fits a u8 by definition.
-const BUTTON_COUNT: u8 = POINTER_BUTTON_COUNT as u8;
-
-/// Mask selecting the boot-protocol button bits.
-const BUTTON_MASK: u8 = (1 << BUTTON_COUNT) - 1;
-
-/// Worst-case events one report can decode to: three button edges plus
-/// X, Y, and wheel deltas.
-const MAX_EVENTS: usize = BUTTON_COUNT as usize + 3;
-
-/// Boot-protocol mouse state: the previously reported button bitmap.
-///
-/// Kept separate from [`BootMouse`] so the shared [`poll_source`] drain
-/// can borrow the state and the report source disjointly.
-pub(crate) struct MouseState {
-    buttons: u8,
+/// Where one value sits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Slot {
+    pub(crate) field: usize,
+    pub(crate) element: u16,
 }
 
-impl MouseState {
-    const fn new() -> Self {
-        Self { buttons: 0 }
-    }
+/// The buttons the seat names: primary, secondary, middle.
+const BUTTONS: [PointerButtonCode; 3] = [
+    PointerButtonCode::Primary,
+    PointerButtonCode::Secondary,
+    PointerButtonCode::Middle,
+];
+
+/// One mouse application.
+#[derive(Debug)]
+pub struct MouseDecoder {
+    buttons: [Option<Slot>; 3],
+    x: Slot,
+    y: Slot,
+    wheel: Option<Slot>,
+    pan: Option<Slot>,
+    wheel_per_detent: NonZeroU8,
+    pan_per_detent: NonZeroU8,
+    held: [bool; 3],
+    wheel_carry: i64,
+    pan_carry: i64,
 }
 
-/// Append a motion event when `delta` is non-zero.
-fn push_motion(
-    pending: &mut PendingEvents<MAX_EVENTS>,
-    kind: InputEventKind,
-    axis: u16,
-    delta: i32,
-) -> Result<(), DriverError> {
-    if delta == 0 {
-        return Ok(());
-    }
-    pending.push(InputEvent {
-        kind,
-        reserved0: 0,
-        code: axis,
-        value: delta,
-    })
+/// How a field carries one of a pointer's values.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Carriage {
+    Absent,
+    Relative(Slot),
+    Absolute,
 }
 
-impl ReportDecode<MAX_EVENTS> for MouseState {
-    /// Validate and decode one boot mouse report.
-    ///
-    /// Rejects any report shorter than [`BOOT_MOUSE_REPORT_MIN`] bytes
-    /// ([`DriverError::LengthOutOfRange`]) without touching the button
-    /// state; reports longer than [`crate::REPORT_BUF_LEN`] never reach
-    /// the decoder (the source contract caps them). Byte 3, when
-    /// present, is the de-facto wheel extension; trailing bytes beyond
-    /// it are device-specific and not interpreted.
-    fn decode(
-        &mut self,
-        report: &[u8],
-        pending: &mut PendingEvents<MAX_EVENTS>,
-    ) -> Result<(), DriverError> {
-        if report.len() < BOOT_MOUSE_REPORT_MIN {
-            return Err(DriverError::LengthOutOfRange);
+impl Carriage {
+    fn of(model: &ReportDescriptor, index: usize, field: &Field, usage: Usage) -> Self {
+        if !field.flags.is_variable() {
+            return Self::Absent;
         }
-        let buttons = report[0] & BUTTON_MASK;
-        let changed = self.buttons ^ buttons;
-        for bit in 0..BUTTON_COUNT {
-            if changed & (1 << bit) != 0 {
-                let pressed = buttons & (1 << bit) != 0;
-                pending.push(InputEvent {
-                    kind: InputEventKind::Key,
-                    reserved0: 0,
-                    code: POINTER_BUTTON_CODE_BASE + u16::from(bit),
-                    value: i32::from(pressed),
+        match model.element_of(field, usage) {
+            Some(element) if field.flags.is_relative() => Self::Relative(Slot {
+                field: index,
+                element,
+            }),
+            Some(_) => Self::Absolute,
+            None => Self::Absent,
+        }
+    }
+
+    const fn relative(self) -> Option<Slot> {
+        match self {
+            Self::Relative(slot) => Some(slot),
+            Self::Absent | Self::Absolute => None,
+        }
+    }
+}
+
+impl MouseDecoder {
+    /// The decoder for `application`, or `None` when it is not a relative
+    /// pointer: it moves no X and Y, or places them absolutely.
+    #[must_use]
+    pub fn new(model: &ReportDescriptor, application: CollectionIndex) -> Option<Self> {
+        let (mut x, mut y, mut wheel, mut pan) = (None, None, None, None);
+        let mut buttons = [None; 3];
+        for (index, field) in model.fields().iter().enumerate() {
+            if field.kind != ReportKind::Input
+                || field.size > 32
+                || !in_application(model, field, application)
+            {
+                continue;
+            }
+            if field.flags.is_variable() {
+                for element in 0..field.count {
+                    let Some(usage) = model.element_usage(field, element) else {
+                        continue;
+                    };
+                    let button = usage.id.checked_sub(1).map(usize::from);
+                    if let (PAGE_BUTTON, Some(slot @ None)) =
+                        (usage.page, button.and_then(|at| buttons.get_mut(at)))
+                    {
+                        *slot = Some(Slot {
+                            field: index,
+                            element,
+                        });
+                    }
+                }
+            }
+            let (across, down) = (
+                Carriage::of(model, index, field, X),
+                Carriage::of(model, index, field, Y),
+            );
+            if across == Carriage::Absolute || down == Carriage::Absolute {
+                return None;
+            }
+            x = x.or(across.relative());
+            y = y.or(down.relative());
+            wheel = wheel.or(Carriage::of(model, index, field, WHEEL).relative());
+            pan = pan.or(Carriage::of(model, index, field, AC_PAN).relative());
+        }
+        Some(Self {
+            buttons,
+            x: x?,
+            y: y?,
+            wheel,
+            pan,
+            wheel_per_detent: NonZeroU8::MIN,
+            pan_per_detent: NonZeroU8::MIN,
+            held: [false; 3],
+            wheel_carry: 0,
+            pan_carry: 0,
+        })
+    }
+
+    /// The field the wheel is read from, and the AC Pan's.
+    pub(crate) const fn wheels(&self) -> (Option<Slot>, Option<Slot>) {
+        (self.wheel, self.pan)
+    }
+
+    /// Count the wheel, or the pan, at `per_detent` counts a detent from now
+    /// on: the resolution the device confirmed.
+    pub(crate) fn adopt(&mut self, wheel: Option<NonZeroU8>, pan: Option<NonZeroU8>) {
+        if let Some(per_detent) = wheel {
+            self.wheel_per_detent = per_detent;
+        }
+        if let Some(per_detent) = pan {
+            self.pan_per_detent = per_detent;
+        }
+    }
+
+    /// Decode `report` into pointer records on `sink`.
+    ///
+    /// # Errors
+    ///
+    /// What `sink` refuses.
+    pub fn decode(
+        &mut self,
+        model: &ReportDescriptor,
+        report: &[u8],
+        sink: &mut dyn SeatSink,
+    ) -> Result<Decoded, DriverError> {
+        let fields = model.fields();
+        let carried = |slot: Slot| fields[slot.field].report.matches(report);
+        let mine = carried(self.x)
+            || carried(self.y)
+            || self.buttons.iter().flatten().any(|&slot| carried(slot));
+        if !mine {
+            return Ok(Decoded::NotMine);
+        }
+        let read = |slot: Slot| fields[slot.field].value(report, slot.element);
+        let mandatory = |slot: Slot| {
+            if carried(slot) {
+                read(slot).map(Some)
+            } else {
+                Some(None)
+            }
+        };
+        let (Some(dx), Some(dy)) = (mandatory(self.x), mandatory(self.y)) else {
+            return Ok(Decoded::Malformed);
+        };
+        let mut buttons = self.held;
+        for (held, slot) in buttons.iter_mut().zip(self.buttons) {
+            match slot.map(mandatory) {
+                Some(Some(Some(value))) => *held = value != 0,
+                Some(None) => return Ok(Decoded::Malformed),
+                Some(Some(None)) | None => {}
+            }
+        }
+        // A wheel past a short report did not turn: a boot mouse sends three
+        // bytes or four.
+        let optional = |slot: Option<Slot>| {
+            slot.filter(|&slot| carried(slot))
+                .and_then(read)
+                .unwrap_or(0)
+        };
+        let (wheel, pan) = (optional(self.wheel), optional(self.pan));
+
+        for (code, (was, is)) in BUTTONS.into_iter().zip(self.held.into_iter().zip(buttons)) {
+            if was != is {
+                sink.pointer(&if is {
+                    PointerInput::Pressed(code)
+                } else {
+                    PointerInput::Released(code)
                 })?;
             }
         }
-        self.buttons = buttons;
-        let delta = |byte: u8| i32::from(i8::from_le_bytes([byte]));
-        push_motion(pending, InputEventKind::Pointer, AXIS_X, delta(report[1]))?;
-        push_motion(pending, InputEventKind::Pointer, AXIS_Y, delta(report[2]))?;
-        if report.len() > BOOT_MOUSE_REPORT_MIN {
-            push_motion(pending, InputEventKind::Scroll, AXIS_Y, -delta(report[3]))?;
+        self.held = buttons;
+        let (dx, dy) = (clamp(dx.unwrap_or(0)), clamp(dy.unwrap_or(0)));
+        if dx != 0 || dy != 0 {
+            sink.pointer(&PointerInput::MovedBy { dx, dy })?;
         }
+        let down =
+            scroll_units(wheel, self.wheel_per_detent, &mut self.wheel_carry).saturating_neg();
+        let right = scroll_units(pan, self.pan_per_detent, &mut self.pan_carry);
+        if down != 0 || right != 0 {
+            sink.pointer(&PointerInput::Scrolled {
+                dx: right,
+                dy: down,
+            })?;
+        }
+        Ok(Decoded::Applied)
+    }
+
+    /// Release every button held.
+    ///
+    /// # Errors
+    ///
+    /// What `sink` refuses.
+    pub fn release(&mut self, sink: &mut dyn SeatSink) -> Result<(), DriverError> {
+        for (code, held) in BUTTONS.into_iter().zip(self.held) {
+            if held {
+                sink.pointer(&PointerInput::Released(code))?;
+            }
+        }
+        self.held = [false; 3];
         Ok(())
     }
 }
 
-/// A USB boot-protocol mouse, reached through a [`ReportSource`].
-///
-/// The driver holds the source for the whole load; dropping the
-/// [`BootMouse`] is the quiesce step (the decoder issues the device
-/// nothing, so a reload is constructing a fresh instance over the same
-/// endpoint). The button bitmap and the undrained-event latch are the
-/// only state carried between [`poll`](Input::poll) calls.
-pub struct BootMouse<S: ReportSource> {
-    source: S,
-    state: MouseState,
-    pending: PendingEvents<MAX_EVENTS>,
+fn clamp(value: i64) -> i32 {
+    i32::try_from(value).unwrap_or(if value < 0 { i32::MIN } else { i32::MAX })
 }
 
-impl<S: ReportSource> BootMouse<S> {
-    /// Bind the decoder to the report stream reachable through
-    /// `source`. Performs no I/O; the first [`poll`](Input::poll) is
-    /// the first access.
-    #[must_use]
-    pub fn new(source: S) -> Self {
-        Self {
-            source,
-            state: MouseState::new(),
-            pending: PendingEvents::new(),
-        }
-    }
+/// The scroll units `counts` counted at `per_detent` a detent are worth,
+/// carrying the remainder so a fine wheel reports exactly a detent's units for
+/// every detent it turns.
+fn scroll_units(counts: i64, per_detent: NonZeroU8, carry: &mut i64) -> i32 {
+    let total = counts
+        .saturating_mul(i64::from(SCROLL_UNITS_PER_DETENT))
+        .saturating_add(*carry);
+    let per_detent = i64::from(per_detent.get());
+    let units = total / per_detent;
+    *carry = total - units * per_detent;
+    clamp(units)
 }
 
-impl<S: ReportSource> Input for BootMouse<S> {
-    /// Drain pending mouse reports into `events`.
-    ///
-    /// Button edges are diffed against the previous report; X/Y/wheel
-    /// deltas surface directly. Events that do not fit are latched for
-    /// the next `poll`, and the per-call report budget
-    /// ([`crate::REPORT_POLL_BUDGET`]) bounds the work a flooding
-    /// device can force on one `poll`.
-    fn poll(&mut self, events: &mut [InputEvent]) -> Result<usize, DriverError> {
-        poll_source(&mut self.source, &mut self.state, &mut self.pending, events)
-    }
-}
+#[cfg(test)]
+#[path = "mouse_tests.rs"]
+mod tests;

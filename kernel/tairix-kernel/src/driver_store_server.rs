@@ -878,11 +878,11 @@ mod tests {
     fn a_load_spawns_the_matched_signed_driver_with_the_nodes_resources() {
         let key = HwMatchKey::virtio(0x1234);
         let keys = [DriverBindKey::new(5, key)];
-        let payload = b"the-usb-kbd-rxe-bytes";
+        let payload = b"the-usb-hid-rxe-bytes";
         let sk = signing_key();
         let mut fs = MockRootFs::new();
         fs.add_file(
-            "/System/Drivers/usb_kbd",
+            "/System/Drivers/usb_hid",
             &build_signed_bundle(&sk, &[CapabilityId::MMIO_MAP], &keys, payload),
         );
         let service = SystemFileService::open(&mut fs, "/System/Drivers").expect("mount");
@@ -952,7 +952,7 @@ mod tests {
         let sk = signing_key();
         let mut fs = MockRootFs::new();
         fs.add_file(
-            "/System/Drivers/usb_kbd",
+            "/System/Drivers/usb_hid",
             &build_signed_bundle(&sk, &[CapabilityId::MMIO_MAP], &keys, payload),
         );
         let service = SystemFileService::open(&mut fs, "/System/Drivers").expect("mount");
@@ -1019,7 +1019,7 @@ mod tests {
         let sk = signing_key();
         let mut fs = MockRootFs::new();
         fs.add_file(
-            "/System/Drivers/usb_kbd",
+            "/System/Drivers/usb_hid",
             &build_signed_bundle(&sk, &[CapabilityId::MMIO_MAP], &keys, b"x"),
         );
         let service = SystemFileService::open(&mut fs, "/System/Drivers").expect("mount");
@@ -1047,7 +1047,7 @@ mod tests {
         let sk = signing_key();
         let mut fs = MockRootFs::new();
         fs.add_file(
-            "/System/Drivers/usb_kbd",
+            "/System/Drivers/usb_hid",
             &build_signed_bundle(&sk, &[CapabilityId::MMIO_MAP], &keys, b"x"),
         );
         let service = SystemFileService::open(&mut fs, "/System/Drivers").expect("mount");
@@ -1076,7 +1076,7 @@ mod tests {
         let sk = untrusted_key();
         let mut fs = MockRootFs::new();
         fs.add_file(
-            "/System/Drivers/usb_kbd",
+            "/System/Drivers/usb_hid",
             &build_signed_bundle(&sk, &[CapabilityId::MMIO_MAP], &keys, b"x"),
         );
         let service = SystemFileService::open(&mut fs, "/System/Drivers").expect("mount");
@@ -1189,7 +1189,7 @@ mod tests {
         // assertion reflects this call alone (the registry is process-global).
         tairix_kernel_core::callreg::unregister(EndpointId(DRIVER_STORE_ENDPOINT));
 
-        let mut volume = service_with(&[("/System/Drivers/usb_kbd", b"BUNDLE")]);
+        let mut volume = service_with(&[("/System/Drivers/usb_hid", b"BUNDLE")]);
         // A binder holding no capabilities — in particular not
         // `IPC_BIND_PRIVILEGED` — may not bind a restricted-sender endpoint.
         let binder = TaskCapabilities::derive(

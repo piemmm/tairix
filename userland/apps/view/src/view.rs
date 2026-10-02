@@ -12,14 +12,14 @@ use alloc::vec::Vec;
 
 use tairix_abi::Errno;
 use tairix_controls::{
-    ControlRole, IconButton, ScrollAction, ScrollBar, ScrollModel, ScrollOrientation, ScrollRange,
-    Slider, SliderAction, Toolbar, ToolbarAction, ToolbarOutcome, REPEAT_DELAY_NS,
+    wheel_steps, ControlRole, IconButton, ScrollAction, ScrollBar, ScrollModel, ScrollOrientation,
+    ScrollRange, Slider, SliderAction, Toolbar, ToolbarAction, ToolbarOutcome, REPEAT_DELAY_NS,
     REPEAT_INTERVAL_NS,
 };
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::IconKind;
-use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
+use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PinchPhase, PointerButton};
 use tairix_raster::{Reorient, Surface};
 use tairix_sandbox::imagerender::{ViewDocument, ViewFailure, ViewPage};
 use tairix_theme::Theme;
@@ -259,6 +259,12 @@ pub struct View {
     drag: Option<Point>,
     /// The latest pointer position, for the context menu and hit-testing.
     pointer: Point,
+    /// The keyboard modifiers last stated with a pointer or wheel event.
+    modifiers: Modifiers,
+    /// What a Ctrl-wheel turn has left short of a whole zoom rung.
+    zoom_carry: i64,
+    /// A pinch under way: the view it began from and where, canvas-local.
+    pinch: Option<(Viewport, (i64, i64))>,
 }
 
 impl View {
@@ -297,6 +303,9 @@ impl View {
             canvas: (0, 0),
             drag: None,
             pointer: Point::ORIGIN,
+            modifiers: Modifiers::default(),
+            zoom_carry: 0,
+            pinch: None,
         }
     }
 
@@ -1037,8 +1046,10 @@ impl View {
         theme: &Theme,
         damage: &mut Region,
     ) -> Outcome {
-        if let InputEvent::PointerMoved { to } = event {
-            self.pointer = *to;
+        match event {
+            InputEvent::PointerMoved { to } => self.pointer = *to,
+            InputEvent::ModifiersChanged { modifiers } => self.modifiers = *modifiers,
+            _ => {}
         }
         // The wheel over the tools scrolls the strip rather than reaching the
         // canvas beneath it, so a strip too narrow for its tools is reachable
@@ -1161,11 +1172,101 @@ impl View {
                 report_bars(layout, damage);
                 Outcome::changed(true)
             }
+            InputEvent::PointerScrolled { dy, .. } if over && self.modifiers.ctrl => {
+                self.wheel_zoom(*dy, layout, damage)
+            }
             InputEvent::PointerScrolled { dx, dy } if over => {
                 self.wheel(*dx, *dy, layout, scale, damage)
             }
+            InputEvent::Pinch { phase, scale, at } => {
+                self.pinch(*phase, *scale, *at, layout, damage)
+            }
             _ => Outcome::changed(false),
         }
+    }
+
+    /// A step of a pinch begun over the picture: it zooms by the fingers'
+    /// spread and follows their centre, both from where the pinch began, so
+    /// it accumulates no rounding; a cancelled pinch puts the view back. A
+    /// step with no pinch begun is ignored.
+    fn pinch(
+        &mut self,
+        phase: PinchPhase,
+        scale: u32,
+        at: Point,
+        layout: &Layout,
+        damage: &mut Region,
+    ) -> Outcome {
+        let canvas = layout.canvas();
+        let local = (
+            i64::from(at.x) - i64::from(canvas.origin.x),
+            i64::from(at.y) - i64::from(canvas.origin.y),
+        );
+        if phase == PinchPhase::Begin {
+            self.pinch = canvas.contains(at).then_some((self.viewport, local));
+            return Outcome::changed(false);
+        }
+        let (Some((start, began)), Some(natural)) = (self.pinch, self.natural()) else {
+            return Outcome::changed(false);
+        };
+        if phase.ends() {
+            self.pinch = None;
+        }
+        let before = (self.viewport.zoom(), self.viewport.pan());
+        self.viewport = start;
+        if phase != PinchPhase::Cancel {
+            let zoom = u64::from(start.zoom()) * u64::from(scale)
+                / u64::from(tairix_abi::touch::PINCH_SCALE_ONE);
+            self.viewport.zoom_about(
+                u32::try_from(zoom).unwrap_or(u32::MAX),
+                began,
+                natural,
+                self.canvas,
+            );
+            self.viewport
+                .pan_by(began.0 - local.0, began.1 - local.1, natural, self.canvas);
+        }
+        if (self.viewport.zoom(), self.viewport.pan()) == before {
+            return Outcome::changed(false);
+        }
+        self.sync_controls();
+        self.report_framing(layout, damage);
+        Outcome::changed(true)
+    }
+
+    /// Zoom one rung of the ladder for every detent's worth of `dy` turned
+    /// away from the user (toward the user zooms out), keeping the picture
+    /// point under the pointer where it is.
+    fn wheel_zoom(&mut self, dy: i32, layout: &Layout, damage: &mut Region) -> Outcome {
+        let rungs = wheel_steps(dy.saturating_neg(), 1, &mut self.zoom_carry);
+        let Some(natural) = self.natural() else {
+            return Outcome::changed(false);
+        };
+        if rungs == 0 {
+            return Outcome::changed(false);
+        }
+        let mut target = self.viewport.zoom();
+        for _ in 0..rungs.unsigned_abs().min(u64::from(crate::ZOOM_RUNG_COUNT)) {
+            target = if rungs > 0 {
+                zoom_rung_above(target)
+            } else {
+                zoom_rung_below(target)
+            };
+        }
+        let canvas = layout.canvas();
+        let anchor = (
+            i64::from(self.pointer.x) - i64::from(canvas.origin.x),
+            i64::from(self.pointer.y) - i64::from(canvas.origin.y),
+        );
+        let before = (self.viewport.zoom(), self.viewport.pan());
+        self.viewport
+            .zoom_about(target, anchor, natural, self.canvas);
+        if (self.viewport.zoom(), self.viewport.pan()) == before {
+            return Outcome::changed(false);
+        }
+        self.sync_controls();
+        self.report_framing(layout, damage);
+        Outcome::changed(true)
     }
 
     /// Pan by the wheel's `dx`/`dy` scroll units.

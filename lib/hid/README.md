@@ -1,58 +1,44 @@
 # `tairix-hid`
 
-Arch-neutral, transport-agnostic HID logic: the boot-protocol keyboard/mouse
-report decoders, the Report Descriptor parser and report-protocol normaliser,
-and the console-input producer. This is **generic** HID-protocol code — it
-names no device, board, PCI id, or SoC — so it lives in `lib/*` as shared
-common code (`AGENTS.md` §6 / §2.2), *not* under the §2.20 / §2.22
-single-device carve-out. The user-space keyboard and mouse class-driver
-processes (`drivers/input/usb_kbd`, `drivers/input/usb_mouse`) and the xHCI
-enumeration engine (`lib/usb`) compose it without a `drivers/*`→`drivers/*`
-dependency (`AGENTS.md` §17.4 / §2.2).
+The HID protocol every HID class driver runs, whatever its transport
+(`plans/HID.md`): the report-descriptor model, the keyboard, mouse, touchpad
+and touchscreen decoders over it, the configuration a device needs, and the
+device engine that drives them from a transport to seat records. It names no
+device, bus or board, so the USB and I2C class drivers share it from `lib/*`.
 
-See `docs/src/lib/hid.md` for the full description and test surface.
+See `docs/src/lib/hid.md`.
 
 ## Public surface
 
-- `BootKeyboard`, `BootMouse` — boot-protocol report decoders over the
-  `tairix_abi::driver::input::ReportSource` seam. The keyboard's modifier
-  bitmap alone reports the modifiers, and a usage repeated across slots is
-  pressed and released once.
-- `parse_report_descriptor` → `HidReportMap`, `HidReportMap::normalize`,
-  `HidReportMap::summary` — the Report Descriptor parser that locates the boot
-  fields inside a report-protocol report, and the normaliser that rewrites one
-  such report into the boot layout. A map locating a field the boot layout
-  cannot read is refused, so the caller falls back to boot protocol.
-- `KeyboardConsole`, `pump_once`, `ConsoleSink` — the console-input producer
-  that resolves HID usages to `KeyInput` records (via `lib/keymap`) and injects
-  them through a sink. Held modifiers are tracked over the shared
-  `tairix_input::ModifierState`, and a modifier edge that changes the
-  *observable* set emits a `KeyInput::ModifiersChanged` record so the desktop
-  can qualify a gesture that is not a key (a shift-click); a repeat, or letting
-  go of one shift key while the other is held, emits nothing.
-- `transport_error`, `pump_error_limit_reached` — the pump loop's error
-  policy: which refusal means the transport itself has gone (and so a clean
-  unplug), and the saturating consecutive-failure limit that fails a wedged
-  device closed. Shared by every boot-protocol driver, so an unreadable
-  refusal cannot read as a removed device in one driver and a fault in the
-  next.
-- `AXIS_X`, `AXIS_Y`, `REPORT_BUF_LEN`, `REPORT_POLL_BUDGET`, and the
-  `ReportSource` re-export.
+- `ReportDescriptor::parse` — the model: every Input, Output and Feature item
+  a `Field` (its report, bit offset, element size and count, flags, usages,
+  logical and physical range, unit), every `Collection` with its kind, usage
+  and parent. A descriptor outside the fixed bounds is refused whole.
+- `HidDevice` — one interface's applications: `new` keeps those the seat has
+  a channel for, `configure` exchanges feature reports over a `HidTransport`,
+  `input` decodes one report onto a `SeatSink`, and `release` lets go of every
+  key, button and contact held.
+- `KeyboardDecoder`, `MouseDecoder`, `TouchDecoder` — the per-application
+  decoders a `HidDevice` composes.
+- `boot::keyboard`, `boot::mouse` — the boot-protocol report layouts, as
+  models.
+- `KeyboardConsole` — key usages resolved to `KeyInput` records through
+  `lib/keymap`.
+- `transport_error`, `pump_error_limit_reached` — a driver loop's refusal
+  policy.
 
 ## Dependencies
 
-`lib/abi`, `lib/input`, `lib/keymap` — all `lib/*` (§17.4). Names no board,
-PCI, or SoC detail (`AGENTS.md` §2.20).
+`lib/abi`, `lib/input`, `lib/keymap`.
 
 ## Stability
 
-Tier: `experimental`. The decode/console surface is still evolving alongside
-the `plans/USB.md` class drivers; `abi-v1` types it exchanges are governed by
-`lib/abi`.
+Tier: `experimental`.
 
 ## Tests
 
-`cargo test -p tairix-hid` — decode, report-descriptor, and console-producer
-unit tests against in-process mocks (`AGENTS.md` §7). Fuzzed:
-`tests/fuzz_hid_report.rs` (registered with `cargo xtask fuzz`) holds the parser,
-the normaliser, and both boot decoders to a naive model of each.
+`cargo test -p tairix-hid`: the model, each decoder and the engine against
+built descriptors and a mock transport. `tests/fuzz_hid_report.rs`
+(`cargo xtask fuzz`) holds the parser, the decoders and the configuration
+exchange to their invariants over mutated real descriptors, random items and
+noise.

@@ -15,6 +15,13 @@ its address space and everything that grows with the picture off its loop.
 | PT5 | The shared document host (`tairix_window::docapp`) both editors run in, with the shared title, save question, rectangle and surface helpers | done |
 | PT6 | The `Run` binary: the decode worker and the painter's own work over the host | done |
 | PT7 | The bundle: manifest, icon, Help in every required locale, docs, registration | done |
+| PT8 | Zoom by the wheel and by pinch, anchored on the pointer, continuous between the ladder's rungs (`plans/POINTING.md` PO4, PO7) | done |
+| PT9 | Colour: one colour-model home (HSV, HSL, hex notation) every copy in the tree moves onto; a `lib/controls` colour picker; Paint's colour dock; Terminal's scheme editor moved onto the picker | planned |
+| PT10 | The window: a vertical tool box, the tool-controls bar of the tool in use, number fields, the palette strip, the colour dock and the status band | planned |
+| PT11 | File types: TIFF, BMP and GIF encoders and lossless reading of what they hold; New chooses a format; the Save As sheet holds the format and that format's options alone | planned |
+| PT12 | The engine: `lib/raster` row coverage, exact and centre-sampled (D476); soft selection masks with rectangle, ellipse, lasso, polygon and magic-wand selection, combining modes and feathering; the dab brush engine (size, hardness, opacity, flow, spacing, antialias) with an antialiased airbrush; fills, gradients, clone, text, shapes, crop, hand and zoom | planned |
+| PT13 | Adjustments and filters, previewed live | planned |
+| PT14 | Layers, and OpenRaster as the format that keeps them | planned |
 
 ## What it is
 
@@ -78,8 +85,13 @@ without touching the file.
   flips, invert, mask and depth conversion — to the desktop palette or an
   optimised median-cut one, with Floyd–Steinberg diffusion — run there too,
   the picture taking no edits until they are back.
-- **Viewport**: zoom from 1/16 to 64, anchored on the pointer, centred when
-  the picture is smaller than the window; a paint reads only the rows in view,
+- **Viewport**: a continuous zoom from 1/16 to 64 in 4096ths of actual size
+  (`viewport::Zoom`), every rung of the ladder exactly, anchored on the
+  pointer and centred when the picture is smaller than the window; Ctrl and
+  the wheel step it a rung per detent's worth of turn through the shared
+  `wheel_steps` carry, from between rungs to the nearer one in the turn's
+  direction; a pinch zooms by the spread and pans with the fingers' centre,
+  both from where it began; a paint reads only the rows in view,
   maps its columns once, and, zoomed out, reads only the pixels it samples.
 - **Gestures**: a drag belongs to the button that began it; anything that
   takes the pointer or changes the picture under it finishes the drag first,

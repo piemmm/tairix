@@ -110,6 +110,7 @@
   - [`tairix-termcap`](./lib/termcap.md)
   - [`tairix-terrain`](./lib/terrain.md)
   - [`tairix-timesync`](./lib/timesync.md)
+  - [`tairix-touch`](./lib/touch.md)
   - [`tairix-usb`](./lib/usb.md)
   - [`tairix-useradmin`](./lib/useradmin.md)
   - [`tairix-users`](./lib/users.md)

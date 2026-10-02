@@ -76,6 +76,10 @@
 #define TAIRIX_HW_RES_DMA_REQUEST ((uint16_t)11u)
 #define TAIRIX_HW_RES_IOMMU_STREAM ((uint16_t)12u)
 #define TAIRIX_HW_RES_IOMMU_RESERVED ((uint16_t)13u)
+#define TAIRIX_HW_RES_PROPERTY ((uint16_t)14u)
+
+/* Property keys (uint32_t). */
+#define TAIRIX_HW_PROPERTY_USB_INTERFACE ((uint32_t)1u)
 
 /* One match key on a node. Mirrors the #[repr(C)] layout; the packed
 * little-endian wire size is TAIRIX_HW_MATCH_KEY_WIRE_LEN. */

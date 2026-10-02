@@ -64,8 +64,8 @@ use tairix_wallpaper::{
 };
 use tairix_wm::{
     cursor_cache, Color, Compositor, Corners, CursorController, InputEvent, InputResponse,
-    Modifiers, Point, PointerCatch, Rect, Scale, Surface, WindowActivationState, WindowFrame,
-    WindowFurnitureState, WindowId, WindowSizeState,
+    Modifiers, PinchPhase, Point, PointerCatch, Rect, Scale, Surface, WindowActivationState,
+    WindowFrame, WindowFurnitureState, WindowId, WindowSizeState,
 };
 
 use crate::aids::{AidPolicy, PointerAids};
@@ -2307,6 +2307,7 @@ impl DesktopShell {
             | InputResponse::Key { .. }
             | InputResponse::Scrolled { .. }
             | InputResponse::AppScroll { .. }
+            | InputResponse::AppPinch { .. }
             // A client-area hover/drag/release acts on the already-focused
             // window (the press that armed the grab moved focus), so none of
             // them changes the highlighted task.
@@ -2321,7 +2322,8 @@ impl DesktopShell {
     /// including the next edge, applying each event against `now_ns`, and say
     /// where it stopped.
     ///
-    /// An edge is any event but a motion or scroll sample. Routing one can
+    /// An edge is any event but a motion, scroll or pinch-update sample.
+    /// Routing one can
     /// hand the seat to another holder — a menu chain, the lock, another
     /// session — so the batch ends there and the embedder routes it before
     /// draining the rest into whoever holds the seat then. Samples never move
@@ -2332,11 +2334,13 @@ impl DesktopShell {
     /// Every event is applied in order, so the window manager's hover, drag
     /// and cursor state follow the whole stream; only the outcomes handed on
     /// are folded, so a dense gesture does not flood the owning app's bounded
-    /// mailbox. Motion and interactive-resize samples are level-triggered, so
-    /// the newest of a run supersedes the rest; wheel ticks are additive, so a
-    /// run in one direction sums and a reversal ends it. A run holds only over
-    /// one window and one kind of sample, and anything else ends it, so
-    /// nothing an app must see is dropped or reordered.
+    /// mailbox. Motion, interactive-resize and pinch-update samples are
+    /// level-triggered — a pinch's scale is relative to where it began — so
+    /// the newest of a run supersedes the rest; wheel turns are additive, so a
+    /// run in one direction with the same modifiers held sums and a reversal
+    /// or a modifier change ends it. A run holds only over one window and one
+    /// kind of sample, and anything else ends it, so nothing an app must see
+    /// is dropped or reordered.
     ///
     /// The batch settles its frame once, at the end. The next batch's owner
     /// lookup hit-tests the windows the taskbar presenter placed, so a surface
@@ -2364,7 +2368,12 @@ impl DesktopShell {
                 Ok(Some(event)) => {
                     let edge = !matches!(
                         event,
-                        InputEvent::PointerMoved { .. } | InputEvent::PointerScrolled { .. }
+                        InputEvent::PointerMoved { .. }
+                            | InputEvent::PointerScrolled { .. }
+                            | InputEvent::Pinch {
+                                phase: PinchPhase::Update,
+                                ..
+                            }
                     );
                     let outcome = self.apply(event, compositor, now_ns);
                     applied = true;
@@ -2479,10 +2488,11 @@ fn flatten_ground(picture: &Surface, colour: Color) -> Option<Surface> {
 }
 
 /// Fold `next` into `last` when the two are one continuing gesture over the
-/// same window — motion and resize by latest-wins, wheel ticks by summing a
-/// run in one direction — returning [`None`] once folded and `Some(next)`
-/// when it must be kept as its own outcome. [`DesktopShell::pump`] states the
-/// rules.
+/// same window — motion, resize and pinch updates by latest-wins, wheel turns
+/// by summing a
+/// run in one direction made with the same modifiers held, at the newest
+/// place — returning [`None`] once folded and `Some(next)` when it must be
+/// kept as its own outcome. [`DesktopShell::pump`] states the rules.
 fn fold_outcome(last: &mut ShellOutcome, next: ShellOutcome) -> Option<ShellOutcome> {
     match (&mut *last, next) {
         (
@@ -2499,15 +2509,45 @@ fn fold_outcome(last: &mut ShellOutcome, next: ShellOutcome) -> Option<ShellOutc
             ShellOutcome::WindowManager(InputResponse::Resized { window }),
         ) if *into == window => None,
         (
+            ShellOutcome::WindowManager(InputResponse::AppPinch {
+                window: into,
+                phase: PinchPhase::Update,
+                modifiers: held,
+                ..
+            }),
+            update @ ShellOutcome::WindowManager(InputResponse::AppPinch {
+                window,
+                phase: PinchPhase::Update,
+                modifiers,
+                ..
+            }),
+        ) if *into == window && *held == modifiers => {
+            *last = update;
+            None
+        }
+        (
             ShellOutcome::WindowManager(InputResponse::AppScroll {
                 window: into,
+                local: at,
                 dx: sideways,
                 dy: downward,
+                modifiers: held,
             }),
-            ShellOutcome::WindowManager(InputResponse::AppScroll { window, dx, dy }),
-        ) if *into == window && continues(*sideways, dx) && continues(*downward, dy) => {
+            ShellOutcome::WindowManager(InputResponse::AppScroll {
+                window,
+                local,
+                dx,
+                dy,
+                modifiers,
+            }),
+        ) if *into == window
+            && *held == modifiers
+            && continues(*sideways, dx)
+            && continues(*downward, dy) =>
+        {
             *sideways = sideways.saturating_add(dx);
             *downward = downward.saturating_add(dy);
+            *at = local;
             None
         }
         (_, next) => Some(next),

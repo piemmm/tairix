@@ -212,7 +212,7 @@ complex, `plans/PI.md` P10) is `tairix_kernel::run_with_driver_host`
 
 ### In-kernel chain admission (the Pi 4 USB keyboard)
 
-The Pi 4 USB-keyboard chain (`pcie_brcm` → `bus_usb` → `usb_kbd`) is the
+The Pi 4 USB chain (`pcie_brcm` → `vl805` → `bus_usb`) is the
 first *production* caller of the `Host::load` gate (`plans/PI.md` P10
 5c-ii). Its drivers are statically linked, and their §8 `register()`
 entries are admission-only (a `CAP_DRV_LOAD` check returning a marker),

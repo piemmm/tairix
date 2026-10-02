@@ -61,10 +61,12 @@ is a volatile write per byte, and the same `dma` test costs 716 s under Stacked
 Borrows, 208 s under Tree Borrows and 44 s with the model off. Stacked Borrows
 stands — it is the stricter of the two, and the one intrusive pointer code is
 likeliest to violate — so where the interpreted extent is a sample rather than
-the assertion it is scaled under `cfg(miri)`. One `dma` test is excluded by
-name instead: a full-gigabyte window streaming thirteen 32-page device regions
-costs four hours interpreted, and the `unsafe` it reaches is reached by the
-rest of its module. The registry carries both reasons.
+the assertion it is scaled under `cfg(miri)`. Two tests are excluded by name
+instead: a `dma` test whose full-gigabyte window streams thirteen 32-page
+device regions costs four hours interpreted, and the `unsafe` it reaches is
+reached by the rest of its module; and `lib/abi`'s single-byte sweep of the
+2.8 KiB machine report, seventeen thousand decodes through safe code, costs
+half an hour. The registry carries every reason.
 
 Figures in this table are wall clock, taken from outside. Miri's own clock is
 virtual: the `finished in …` line a test binary prints under the interpreter is

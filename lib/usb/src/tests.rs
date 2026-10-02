@@ -10,19 +10,25 @@ use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 
 use super::device::{
-    first_langid, hub_port_connected, hub_port_enabled, hub_port_speed, interrupt_interval,
-    pointer_min_interval, route_for_child, AttachOutcome, BulkDirection, BulkPipe,
-    DeviceDescriptor, DeviceIdentity, DmaBank, EnumStage, EventWait, HubDescriptor, HubEvent,
-    InterfaceInfo, SerialNumber, StringHeader, UsbDevice, BULK_BUF_LEN, BULK_SLOTS, CAPTURE_LEN,
-    EVENT_RING_SEGMENT_MIN_TRBS, INT_ARM_DEPTH, MAX_HUB_DEPTH, PORT_RESET_POLLS,
-    PORT_RESET_POLL_US, PORT_RESET_SETTLE_US, REPORT_LEN, REPORT_QUEUE_CAP, RING_TRBS, SPEED_HIGH,
+    first_langid, hub_port_connected, hub_port_enabled, hub_port_speed, route_for_child,
+    AttachOutcome, BulkDirection, BulkEndpoint, BulkPipe, DeviceDescriptor, DeviceIdentity,
+    DeviceRegion, DmaBank, EnumStage, EventWait, HubDescriptor, HubEvent, InterfaceInfo,
+    PeriodicShape, SerialNumber, StringHeader, UsbDevice, BULK_BUF_LEN, BULK_SLOTS,
+    DMA_CHUNK_ALIGN, EVENT_RING_SEGMENT_MIN_TRBS, INT_ARM_DEPTH, INT_TRANSFER_MAX, MAX_HUB_DEPTH,
+    PORT_RESET_POLLS, PORT_RESET_POLL_US, PORT_RESET_SETTLE_US, REPORT_QUEUE_CAP, RING_TRBS,
+    SPEED_FULL, SPEED_HIGH, SPEED_SUPER,
 };
 use super::ring::{EventRingCursor, ProducerRing};
+use super::transport::{drive_urb, UrbEngine, UrbScope};
 use super::trb::{CompletionCode, Trb, TrbType, CONTROL_CYCLE, TRB_LEN};
 use super::*;
-use tairix_abi::driver::input::Input;
+use tairix_abi::usb_urb::{UrbRequest, UsbDirection, UsbTransferType, URB_REQUEST_LEN};
 use tairix_abi::Delay;
-use tairix_hid::BootKeyboard;
+use tairix_abi::{Errno, HwProperty};
+
+/// The boot keyboard report the mocks' keyboards send, and the longest report
+/// the tests' class driver asks for.
+const BOOT_REPORT_LEN: usize = 8;
 
 /// The primary bulk pipes most fixtures exercise (BOT-shaped devices).
 const IN_PIPE: BulkPipe = BulkPipe::primary(BulkDirection::In);
@@ -637,6 +643,27 @@ const MOCK_MSD_CONFIG_DESCRIPTOR: [u8; 32] = [
     0x07, 0x05, 0x04, 0x02, 0x00, 0x02, 0x00,
 ];
 
+/// As [`MOCK_MSD_DESCRIPTOR`], but a `SuperSpeed` device: `bcdUSB` 3.00 and
+/// EP0's fixed 512 bytes as the exponent 9.
+const MOCK_SS_MSD_DESCRIPTOR: [u8; 18] = {
+    let mut bytes = MOCK_MSD_DESCRIPTOR;
+    bytes[3] = 0x03;
+    bytes[7] = 9;
+    bytes
+};
+
+/// As [`MOCK_MSD_CONFIG_DESCRIPTOR`] at `SuperSpeed`: 1024-byte bulk
+/// endpoints, each followed by its companion, the IN pipe bursting sixteen
+/// packets and the OUT pipe four.
+const MOCK_SS_MSD_CONFIG_DESCRIPTOR: [u8; 44] = [
+    0x09, 0x02, 0x2C, 0x00, 0x01, 0x01, 0x00, 0x80, 0x32, //
+    0x09, 0x04, 0x00, 0x00, 0x02, 0x08, 0x06, 0x50, 0x00, //
+    0x07, 0x05, 0x83, 0x02, 0x00, 0x04, 0x00, //
+    0x06, 0x30, 0x0F, 0x00, 0x00, 0x00, //
+    0x07, 0x05, 0x04, 0x02, 0x00, 0x04, 0x00, //
+    0x06, 0x30, 0x03, 0x00, 0x00, 0x00,
+];
+
 /// The device descriptor fixture for a HID boot **mouse** (class in the
 /// interface descriptor, vendor `0x046D` product `0xC539` — a generic
 /// three-button wheel mouse identity, deliberately distinct from the
@@ -656,76 +683,6 @@ const MOCK_MOUSE_CONFIG_DESCRIPTOR: [u8; 25] = [
     0x09, 0x04, 0x00, 0x00, 0x01, 0x03, 0x01, 0x02, 0x00, //
     // Endpoint: 0x81 interrupt IN, wMaxPacketSize=4, bInterval=10.
     0x07, 0x05, 0x81, 0x03, 0x04, 0x00, 0x0A,
-];
-
-/// A boot-mouse configuration that also carries a **HID class descriptor**
-/// (type `0x21`) declaring a Report Descriptor length: interface `0x03_01_02`
-/// (HID boot mouse), HID descriptor pointing at a 50-byte Report Descriptor,
-/// then the interrupt-IN endpoint. `wTotalLength` = 34 (a 9-byte config, 9-byte
-/// interface, 9-byte HID, and 7-byte endpoint descriptor). A device serving
-/// this together with [`MOCK_MOUSE_REPORT_DESCRIPTOR`] runs in report protocol
-/// (so `SET_IDLE` quiesces it).
-const MOCK_MOUSE_REPORT_CONFIG_DESCRIPTOR: [u8; 34] = [
-    // Configuration: wTotalLength=34, 1 interface.
-    0x09, 0x02, 0x22, 0x00, 0x01, 0x01, 0x00, 0xA0, 0x32, //
-    // Interface: class=0x03 (HID), sub=0x01 (boot), protocol=0x02 (mouse).
-    0x09, 0x04, 0x00, 0x00, 0x01, 0x03, 0x01, 0x02, 0x00, //
-    // HID descriptor (type 0x21): bcdHID 1.11, one Report Descriptor
-    // (type 0x22) of wDescriptorLength = 50.
-    0x09, 0x21, 0x11, 0x01, 0x00, 0x01, 0x22, 0x32, 0x00, //
-    // Endpoint: 0x81 interrupt IN, wMaxPacketSize=4, bInterval=10.
-    0x07, 0x05, 0x81, 0x03, 0x04, 0x00, 0x0A,
-];
-
-/// The canonical boot-mouse Report Descriptor (USB HID 1.11 Appendix E.10),
-/// the model answers `GET_DESCRIPTOR(Report)` with: 3 button bits + 5 padding
-/// bits, then 8-bit relative X and Y. It parses to the boot-mouse layout, so a
-/// 3-byte `[buttons, x, y]` report-protocol report normalises to the 4-byte
-/// `[buttons, x, y, wheel=0]` boot report.
-const MOCK_MOUSE_REPORT_DESCRIPTOR: [u8; 50] = [
-    0x05, 0x01, 0x09, 0x02, 0xA1, 0x01, 0x09, 0x01, 0xA1, 0x00, 0x05, 0x09, 0x19, 0x01, 0x29, 0x03,
-    0x15, 0x00, 0x25, 0x01, 0x95, 0x03, 0x75, 0x01, 0x81, 0x02, 0x95, 0x01, 0x75, 0x05, 0x81, 0x01,
-    0x05, 0x01, 0x09, 0x30, 0x09, 0x31, 0x15, 0x81, 0x25, 0x7F, 0x75, 0x08, 0x95, 0x02, 0x81, 0x06,
-    0xC0, 0xC0,
-];
-
-/// A boot-keyboard configuration whose HID class descriptor points at a
-/// **Report-ID** Report Descriptor and whose interrupt-IN endpoint carries a
-/// nine-byte max packet: interface `0x03_01_01` (HID boot keyboard), a 47-byte
-/// Report Descriptor ([`MOCK_REPORT_ID_KEYBOARD_DESCRIPTOR`]), then a 9-byte
-/// interrupt-IN endpoint. A device serving this runs in report protocol and
-/// emits a nine-byte report (the leading Report ID byte) — the report that
-/// used to be clipped to eight bytes and dropped.
-const MOCK_REPORT_ID_KEYBOARD_CONFIG_DESCRIPTOR: [u8; 34] = [
-    // Configuration: wTotalLength=34, 1 interface.
-    0x09, 0x02, 0x22, 0x00, 0x01, 0x01, 0x00, 0xA0, 0x32, //
-    // Interface: class=0x03 (HID), sub=0x01 (boot), protocol=0x01 (keyboard).
-    0x09, 0x04, 0x00, 0x00, 0x01, 0x03, 0x01, 0x01, 0x00, //
-    // HID descriptor (type 0x21): one Report Descriptor of length 47.
-    0x09, 0x21, 0x11, 0x01, 0x00, 0x01, 0x22, 0x2F, 0x00, //
-    // Endpoint: 0x81 interrupt IN, wMaxPacketSize=9, bInterval=10.
-    0x07, 0x05, 0x81, 0x03, 0x09, 0x00, 0x0A,
-];
-
-/// As [`MOCK_MOUSE_REPORT_CONFIG_DESCRIPTOR`], but the interrupt-IN endpoint
-/// advertises `bInterval` = 4 — a 1 ms (1000 Hz) high-speed poll, the
-/// aggressive rate a gaming mouse reports. The driver must clamp it down to
-/// the pointer cap rather than poll it 1000 times a second.
-const MOCK_FAST_MOUSE_REPORT_CONFIG_DESCRIPTOR: [u8; 34] = [
-    0x09, 0x02, 0x22, 0x00, 0x01, 0x01, 0x00, 0xA0, 0x32, //
-    0x09, 0x04, 0x00, 0x00, 0x01, 0x03, 0x01, 0x02, 0x00, //
-    0x09, 0x21, 0x11, 0x01, 0x00, 0x01, 0x22, 0x32, 0x00, //
-    // Endpoint: 0x81 interrupt IN, wMaxPacketSize=4, bInterval=4 (1 ms HS).
-    0x07, 0x05, 0x81, 0x03, 0x04, 0x00, 0x04,
-];
-
-/// A keyboard Report Descriptor that declares a Report ID (item `0x85 0x01`),
-/// so its reports are prefixed with the ID byte: modifiers at bit 8, the
-/// reserved byte at 16, and the six-key array at bit 24 — a nine-byte report.
-const MOCK_REPORT_ID_KEYBOARD_DESCRIPTOR: [u8; 47] = [
-    0x05, 0x01, 0x09, 0x06, 0xA1, 0x01, 0x85, 0x01, 0x05, 0x07, 0x19, 0xE0, 0x29, 0xE7, 0x15, 0x00,
-    0x25, 0x01, 0x75, 0x01, 0x95, 0x08, 0x81, 0x02, 0x95, 0x01, 0x75, 0x08, 0x81, 0x01, 0x95, 0x06,
-    0x75, 0x08, 0x15, 0x00, 0x25, 0x65, 0x05, 0x07, 0x19, 0x00, 0x29, 0x65, 0x81, 0x00, 0xC0,
 ];
 
 /// The device descriptor fixture for a **composite** wireless
@@ -943,32 +900,12 @@ struct MockXhci {
     addressed: bool,
     configured: bool,
     configuration: Option<u8>,
-    protocol: Option<u8>,
-    /// The `wValue` of the last HID `SET_IDLE` (`0x21, 0x0A`) received on a
-    /// configured HID interface (`None` until the request arrives). The high
-    /// byte is the idle duration (`0` = indefinite / report-on-change), so a
-    /// test can pin that enumeration quiesces the device against the
-    /// interrupt-storm defect.
-    idle_value: Option<u16>,
+    /// `SET_CONFIGURATION` answers a transaction error.
+    fault_set_configuration: bool,
     pending_setup: Option<[u8; 8]>,
     /// Pending IN data stage: TRB address, buffer, length, ISP.
     pending_data: Option<(u64, u64, u32, bool)>,
     pending_reports: VecDeque<Vec<u8>>,
-    /// When set, class requests (`SET_PROTOCOL`) answer STALL — the
-    /// optional-request case `control_optional` tolerates.
-    stall_class_requests: bool,
-    /// When set, class requests (`SET_PROTOCOL`) answer a non-STALL
-    /// transaction error — a genuine fault `control_optional` must
-    /// still surface.
-    fault_class_requests: bool,
-    /// When set, `GET_DESCRIPTOR(Report)` alone answers a non-STALL
-    /// transaction error while every other class request succeeds — the
-    /// device that faults the diagnostic descriptor read but is otherwise
-    /// perfectly serviceable.
-    fault_report_descriptor_request: bool,
-    /// When set, `SET_PROTOCOL` is accepted but `GET_PROTOCOL` still answers
-    /// report protocol: the device ignored the request.
-    ignores_set_protocol: bool,
     /// When set, report completions forge a residual above the TRB
     /// length (a hostile controller claim).
     forge_report_residual: bool,
@@ -1239,6 +1176,9 @@ struct MockXhci {
     /// the descriptor fixtures switch to the MSD pair (interface class
     /// `08:06:50` with the bulk endpoint pair) instead of the HID keyboard.
     msd_device: bool,
+    /// The mass-storage device is `SuperSpeed`
+    /// ([`MOCK_SS_MSD_CONFIG_DESCRIPTOR`]).
+    superspeed_msd: bool,
     /// A second downstream hub port carrying a mass-storage device, so a
     /// keyboard and a storage stick hang off the hub at once (`0` = none).
     /// It shares [`Self::hub_downstream_status`]; the change latch stays
@@ -1349,6 +1289,8 @@ struct MockBulk {
     index: usize,
     cycle: bool,
     dci: u8,
+    /// The endpoint context's Max Burst Size.
+    max_burst: u8,
     /// One-shot: the next serviced TD on this endpoint STALLs and halts it.
     stall_next: bool,
     /// Endpoint recovery state, modelling the xHCI order the silicon
@@ -1367,6 +1309,7 @@ impl MockBulk {
             index: 0,
             cycle: true,
             dci: 0,
+            max_burst: 0,
             stall_next: false,
             halt: 0,
         }
@@ -1526,15 +1469,10 @@ impl MockXhci {
             addressed: false,
             configured: false,
             configuration: None,
-            protocol: None,
-            idle_value: None,
+            fault_set_configuration: false,
             pending_setup: None,
             pending_data: None,
             pending_reports: VecDeque::new(),
-            stall_class_requests: false,
-            fault_class_requests: false,
-            fault_report_descriptor_request: false,
-            ignores_set_protocol: false,
             forge_report_residual: false,
             fault_one_report_completion: None,
             fault_next_address_device: None,
@@ -1589,6 +1527,7 @@ impl MockXhci {
             report_descriptor: None,
             int_dci: 3,
             msd_device: false,
+            superspeed_msd: false,
             msd_downstream_port: 0,
             mouse_downstream_port: 0,
             composite_downstream_port: 0,
@@ -1714,6 +1653,15 @@ impl MockXhci {
         mock
     }
 
+    /// As [`Self::with_msd_device`], but the device trained at `SuperSpeed`.
+    fn with_ss_msd_device(mem: &SharedMem) -> Self {
+        let mut mock = Self::with_msd_device(mem);
+        mock.superspeed_msd = true;
+        mock.portsc[0] =
+            regs::PORTSC_CCS | regs::PORTSC_PED | regs::PORTSC_PP | (4 << regs::PORTSC_SPEED_SHIFT);
+        mock
+    }
+
     /// As [`Self::with_device`], but the controller requires `count`
     /// page-sized scratchpad buffers (the VL805 needs 31) and reports a
     /// 4 KiB page size — and, modelling the real hardware, posts **no**
@@ -1727,40 +1675,6 @@ impl MockXhci {
         let hi = (count >> 5) & 0x1F;
         mock.hcsparams2 = (lo << 27) | (hi << 21);
         mock.pagesize = 1;
-        mock
-    }
-
-    /// As [`Self::with_device`], but the attached device serves a HID Report
-    /// Descriptor ([`MOCK_MOUSE_REPORT_DESCRIPTOR`]) and a configuration that
-    /// declares it ([`MOCK_MOUSE_REPORT_CONFIG_DESCRIPTOR`]), so enumeration
-    /// reads and parses it and runs the mouse in **report protocol** — the
-    /// mode in which `SET_IDLE` quiesces the device — normalising its
-    /// report-protocol reports back into the boot layout.
-    fn with_report_mouse(mem: &SharedMem) -> Self {
-        let mut mock = Self::with_device(mem);
-        mock.keyboard_config = &MOCK_MOUSE_REPORT_CONFIG_DESCRIPTOR;
-        mock.report_descriptor = Some(&MOCK_MOUSE_REPORT_DESCRIPTOR);
-        mock
-    }
-
-    /// As [`Self::with_report_mouse`], but a keyboard whose Report Descriptor
-    /// declares a Report ID ([`MOCK_REPORT_ID_KEYBOARD_DESCRIPTOR`]) and whose
-    /// interrupt-IN endpoint carries a nine-byte report — the shape that used
-    /// to be clipped to the eight-byte capture buffer and dropped.
-    fn with_report_id_keyboard(mem: &SharedMem) -> Self {
-        let mut mock = Self::with_device(mem);
-        mock.keyboard_config = &MOCK_REPORT_ID_KEYBOARD_CONFIG_DESCRIPTOR;
-        mock.report_descriptor = Some(&MOCK_REPORT_ID_KEYBOARD_DESCRIPTOR);
-        mock
-    }
-
-    /// As [`Self::with_report_mouse`], but the mouse advertises a 1 ms
-    /// (1000 Hz) interrupt interval ([`MOCK_FAST_MOUSE_REPORT_CONFIG_DESCRIPTOR`]),
-    /// so a test can prove the driver caps the pointer poll rate.
-    fn with_fast_report_mouse(mem: &SharedMem) -> Self {
-        let mut mock = Self::with_device(mem);
-        mock.keyboard_config = &MOCK_FAST_MOUSE_REPORT_CONFIG_DESCRIPTOR;
-        mock.report_descriptor = Some(&MOCK_MOUSE_REPORT_DESCRIPTOR);
         mock
     }
 
@@ -2545,11 +2459,13 @@ impl MockXhci {
                 let ep_ctx_off = input_ctx + (1 + u64::from(dci)) * MOCK_CTX_SIZE as u64;
                 let ctx = self.read_dwords(ep_ctx_off, 4);
                 let ep_type = (ctx[1] >> 3) & 0x7;
+                let max_burst = u8::try_from((ctx[1] >> 8) & 0xFF).expect("eight bits");
                 let dequeue = self.ep_ctx_dequeue(ep_ctx_off);
                 match ep_type {
                     // Bulk IN.
                     6 => {
                         self.bulk_in.dci = u8::try_from(dci).expect("DCI fits a byte");
+                        self.bulk_in.max_burst = max_burst;
                         self.bulk_in.base = dequeue;
                         self.bulk_in.index = 0;
                         self.bulk_in.cycle = true;
@@ -2558,6 +2474,7 @@ impl MockXhci {
                     // Bulk OUT.
                     2 => {
                         self.bulk_out.dci = u8::try_from(dci).expect("DCI fits a byte");
+                        self.bulk_out.max_burst = max_burst;
                         self.bulk_out.base = dequeue;
                         self.bulk_out.index = 0;
                         self.bulk_out.cycle = true;
@@ -2778,6 +2695,8 @@ impl MockXhci {
         let is_composite = self.composite_downstream_port != 0
             && self.downstream_route_port == self.composite_downstream_port;
         match (desc_type, is_hub_device) {
+            (0x01, false) if is_msd && self.superspeed_msd => &MOCK_SS_MSD_DESCRIPTOR,
+            (_, false) if is_msd && self.superspeed_msd => &MOCK_SS_MSD_CONFIG_DESCRIPTOR,
             (0x01, false) if is_msd && self.names_serial => &MOCK_MSD_SERIAL_DESCRIPTOR,
             (0x01, false) if is_msd => &MOCK_MSD_DESCRIPTOR,
             (0x01, false) if is_mouse => &MOCK_MOUSE_DESCRIPTOR,
@@ -2946,29 +2865,6 @@ impl MockXhci {
         self.deliver_in_data(data, &descriptor, w_length, status_addr)
     }
 
-    /// Post the fault/STALL a HID class request (`SET_PROTOCOL` / `SET_IDLE`)
-    /// answers under the scripted knobs, returning `true` when it did so (the
-    /// caller must then stop). A scripted `fault_class_requests` answers a
-    /// non-STALL transaction error; a hub (not a HID device) or a scripted
-    /// `stall_class_requests` answers a protocol STALL, which halts EP0
-    /// exactly as real hardware does. `false` means the request is accepted
-    /// and the caller records its effect.
-    fn reject_hid_class_request(&mut self, status_addr: u64) -> bool {
-        if self.fault_class_requests {
-            self.post_transfer_event(status_addr, CompletionCode::UsbTransactionError, 1, 0);
-            return true;
-        }
-        // A hub is not a HID device, so it STALLs this HID class request — and
-        // a STALL halts EP0, exactly the metal failure that breaks a following
-        // hub-descriptor read. The downstream device *is* a HID keyboard, so
-        // once it is addressed the request succeeds.
-        if self.stall_class_requests || (self.hub_ports > 0 && !self.downstream_active) {
-            self.post_transfer_event(status_addr, CompletionCode::StallError, 1, 0);
-            return true;
-        }
-        false
-    }
-
     /// Execute the assembled control TD, posting its transfer events.
     fn execute_control(&mut self, status_addr: u64) {
         let Some(setup) = self.pending_setup.take() else {
@@ -3003,15 +2899,6 @@ impl MockXhci {
             // serves no report descriptor, for which the driver falls back to
             // boot protocol.
             (0x81, 0x06) if setup[3] == 0x22 => {
-                if self.fault_report_descriptor_request {
-                    self.post_transfer_event(
-                        status_addr,
-                        CompletionCode::UsbTransactionError,
-                        1,
-                        0,
-                    );
-                    return;
-                }
                 let Some(report_descriptor) = self.report_descriptor else {
                     self.post_transfer_event(status_addr, CompletionCode::StallError, 1, 0);
                     return;
@@ -3067,7 +2954,18 @@ impl MockXhci {
                 }
             }
             // SET_CONFIGURATION
-            (0x00, 0x09) => self.configuration = Some(setup[2]),
+            (0x00, 0x09) => {
+                if self.fault_set_configuration {
+                    self.post_transfer_event(
+                        status_addr,
+                        CompletionCode::UsbTransactionError,
+                        1,
+                        0,
+                    );
+                    return;
+                }
+                self.configuration = Some(setup[2]);
+            }
             // Class ADSC (a control-OUT data stage — the CBI command
             // channel): capture the delivered command block.
             (0x21, 0x00) => {
@@ -3078,52 +2976,12 @@ impl MockXhci {
                 let block = self.read_mem(buffer, len as usize);
                 self.adsc_blocks.push(block);
             }
-            // The HID class protocol/idle requests, which share the same
-            // STALL/fault knobs.
-            (0x21, 0x0A | 0x0B) | (0xA1, 0x03) => {
-                if !self.execute_hid_class(setup, data, w_length, status_addr) {
-                    return;
-                }
-            }
             _ => {
                 self.post_transfer_event(status_addr, CompletionCode::StallError, 1, 0);
                 return;
             }
         }
         self.post_transfer_event(status_addr, CompletionCode::Success, 1, 0);
-    }
-
-    /// Answer one HID class request — `SET_PROTOCOL`, `GET_PROTOCOL`, or
-    /// `SET_IDLE`. Returns `false` when it posted its own (STALL/fault or data)
-    /// transfer event and the caller must not post the standard Success.
-    ///
-    /// A scripted `ignores_set_protocol` accepts `SET_PROTOCOL` and then
-    /// answers report protocol from `GET_PROTOCOL` anyway: the composite
-    /// interface whose keyboard collection sits behind a vendor one and never
-    /// implements the boot layout.
-    fn execute_hid_class(
-        &mut self,
-        setup: [u8; 8],
-        data: Option<(u64, u64, u32, bool)>,
-        w_length: usize,
-        status_addr: u64,
-    ) -> bool {
-        if self.reject_hid_class_request(status_addr) {
-            return false;
-        }
-        match (setup[0], setup[1]) {
-            (0x21, 0x0B) => self.protocol = Some(setup[2]),
-            (0xA1, 0x03) => {
-                let answer = if self.ignores_set_protocol {
-                    [HID_PROTOCOL_REPORT]
-                } else {
-                    [self.protocol.unwrap_or(HID_PROTOCOL_BOOT)]
-                };
-                return self.deliver_in_data(data, &answer, w_length, status_addr);
-            }
-            _ => self.idle_value = Some(u16::from_le_bytes([setup[2], setup[3]])),
-        }
-        true
     }
 
     /// Model a device-side `CLEAR_FEATURE(ENDPOINT_HALT)` (USB 2.0 §9.4.1),
@@ -4814,9 +4672,9 @@ fn arm_report_request(device: &mut UsbDevice<'_, ModelXhci, MockDma>) {
 /// [`arm_report_request`] for the served device at `index` (a leaf behind
 /// a hub sits above the hub's own entry).
 fn arm_report_request_for(device: &mut UsbDevice<'_, ModelXhci, MockDma>, index: usize) {
-    let mut buf = [0u8; REPORT_LEN];
+    let mut buf = [0u8; BOOT_REPORT_LEN];
     assert_eq!(
-        device.next_report(index, &mut buf),
+        device.next_report(index, BOOT_REPORT_LEN, &mut buf),
         Ok(None),
         "a class report request arms one interrupt-IN transfer and then parks"
     );
@@ -5020,7 +4878,13 @@ fn root_attach_full_chain() {
     assert!(mock.addressed, "Address Device reached the model");
     assert!(mock.configured, "Configure Endpoint reached the model");
     assert_eq!(mock.configuration, Some(1), "SET_CONFIGURATION(1) issued");
-    assert_eq!(mock.protocol, Some(0), "SET_PROTOCOL selected boot");
+    assert!(
+        !mock
+            .control_requests
+            .iter()
+            .any(|setup| setup[0] & 0x60 == 0x20),
+        "the host controller sends the keyboard no class request"
+    );
 }
 
 #[test]
@@ -5428,38 +5292,7 @@ fn root_port_status_raw_reports_each_port_and_rejects_a_bad_port() {
     );
 }
 
-#[test]
-fn root_attach_tolerates_a_stalled_set_protocol() {
-    // `SET_PROTOCOL(boot)` is optional (HID 1.11 §7.2.6): a device that
-    // does not implement it STALLs, which is a protocol stall the
-    // default control endpoint recovers from. The Pi 4 VL805 keyboard
-    // does exactly this (metal `4126 stage=8 completion=6`); the engine
-    // must absorb it and finish enumeration rather than aborting an
-    // otherwise-usable keyboard, leaving the device in its default
-    // protocol (the mock therefore never records a selected protocol).
-    let mem = shared_mem();
-    let mut mock = MockXhci::with_device(&mem);
-    mock.stall_class_requests = true;
-    let mut device = started_device(mock, &mem);
-    let index = attach_root_device(&mut device, 1).expect("a stalled SET_PROTOCOL is tolerated");
-    let identity = device.device_identity(index).expect("identity captured");
-    assert_eq!(identity.vendor_id, 0x046D);
-    assert_eq!(device.enum_stage(), EnumStage::Configured);
-    // The STALL was observed (the diagnostic preserves it) but absorbed.
-    assert_eq!(
-        device.last_completion_code(),
-        CompletionCode::StallError.as_u8()
-    );
-    assert_eq!(
-        device.host_mut().model_mut().protocol,
-        None,
-        "the stalled request selected no protocol"
-    );
-}
-
 /// `GET_PROTOCOL`'s answers (USB HID 1.11 §7.2.5), as the mock returns them.
-const HID_PROTOCOL_BOOT: u8 = 0;
-const HID_PROTOCOL_REPORT: u8 = 1;
 
 #[test]
 fn root_attach_records_the_configured_stage_on_success() {
@@ -5474,75 +5307,6 @@ fn root_attach_records_the_configured_stage_on_success() {
     assert_eq!(
         device.last_completion_code(),
         CompletionCode::Success.as_u8()
-    );
-}
-
-#[test]
-fn root_attach_sets_the_hid_endpoint_idle_indefinite() {
-    // A boot HID device is told `SET_IDLE(indefinite)` (idle duration 0,
-    // all reports) during enumeration so its interrupt-IN endpoint reports
-    // only when the report data changes and NAKs otherwise. Without it a
-    // mouse streams a duplicate report every polling interval after the
-    // first movement — a controller interrupt storm on an idle device —
-    // and a keyboard auto-repeats. The high byte of the recorded `wValue`
-    // is the idle duration, which must be 0 (indefinite).
-    let mem = shared_mem();
-    let mut device = started_device(MockXhci::with_device(&mem), &mem);
-    attach_root_device(&mut device, 1).expect("enumeration succeeds");
-    let idle = device
-        .host_mut()
-        .model_mut()
-        .idle_value
-        .expect("SET_IDLE was issued to the HID interface");
-    assert_eq!(
-        idle >> 8,
-        0,
-        "the idle duration is indefinite (report only on change)"
-    );
-    assert_eq!(idle & 0xFF, 0, "SET_IDLE targets all reports (report id 0)");
-}
-
-#[test]
-fn root_attach_tolerates_a_stalled_set_idle() {
-    // `SET_IDLE` is optional (HID 1.11 §7.2.4): a device that does not
-    // implement it STALLs, which the default control endpoint recovers
-    // from. Enumeration must absorb the STALL and still finish, exactly as
-    // it does for a stalled `SET_PROTOCOL`, rather than aborting an
-    // otherwise-usable device.
-    let mem = shared_mem();
-    let mut mock = MockXhci::with_device(&mem);
-    mock.stall_class_requests = true;
-    let mut device = started_device(mock, &mem);
-    let index = attach_root_device(&mut device, 1).expect("a stalled SET_IDLE is tolerated");
-    let identity = device.device_identity(index).expect("identity captured");
-    assert_eq!(identity.vendor_id, 0x046D);
-    assert_eq!(device.enum_stage(), EnumStage::Configured);
-    assert_eq!(
-        device.host_mut().model_mut().idle_value,
-        None,
-        "the stalled request recorded no idle value"
-    );
-}
-
-#[test]
-fn root_attach_fails_closed_on_a_non_stall_class_fault() {
-    // A STALL on the optional SET_PROTOCOL is tolerated, but a *genuine*
-    // class-request fault (here a USB transaction error) is not optional
-    // — it still fails closed, leaving the breadcrumb
-    // at exactly that step with the raw completion code so a metal
-    // capture pins the faulting xHCI operation.
-    let mem = shared_mem();
-    let mut mock = MockXhci::with_device(&mem);
-    mock.fault_class_requests = true;
-    let mut device = started_device(mock, &mem);
-    assert_eq!(
-        device.attach_root_on_port(1, &TestDelay::default()).err(),
-        Some(DriverError::DeviceFault)
-    );
-    assert_eq!(device.enum_stage(), EnumStage::SetProtocol);
-    assert_eq!(
-        device.last_completion_code(),
-        CompletionCode::UsbTransactionError.as_u8()
     );
 }
 
@@ -5565,21 +5329,21 @@ fn root_attach_recognises_a_hub_via_the_device_class() {
 
 #[test]
 fn enumerating_a_hub_leaves_ep0_usable_for_the_hub_descriptor() {
-    // A hub is not a HID device: issuing the HID `SET_PROTOCOL(boot)` to
-    // it STALLs, and an xHCI STALL halts the control endpoint, so a
-    // following hub-descriptor read on EP0 faults (the metal `reading
-    // the hub descriptor failed err=device_fault`). The bring-up must
-    // therefore not send `SET_PROTOCOL` to a non-HID interface; this
-    // asserts the hub never selects a protocol, EP0 stays unhalted, and
-    // the hub-descriptor read succeeds. It fails before that gate.
+    // A request a hub does not implement STALLs, and an xHCI STALL halts the
+    // control endpoint, so a following hub-descriptor read on EP0 faults (the
+    // metal `reading the hub descriptor failed err=device_fault`).
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_hub(&mem, 4, 2), &mem);
     let _hub = install_root_hub_on_port_1(&mut device);
 
-    assert_eq!(
-        device.host_mut().model_mut().protocol,
-        None,
-        "a hub is not sent the HID SET_PROTOCOL request"
+    assert!(
+        !device
+            .host_mut()
+            .model_mut()
+            .control_requests
+            .iter()
+            .any(|setup| matches!(setup[0], 0x21 | 0xA1)),
+        "a hub is sent no interface class request"
     );
     assert!(
         !device.host_mut().model_mut().ep0_halted(),
@@ -5796,12 +5560,12 @@ fn enumerate_downstream_hid_addresses_a_full_speed_keyboard_through_the_hub() {
         .pending_reports
         .push_back(alloc::vec![0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00,]);
     device.host_mut().model_mut().process_int_ring();
-    let mut buf = [0u8; REPORT_LEN];
+    let mut buf = [0u8; BOOT_REPORT_LEN];
     let len = device
-        .next_report(keyboard, &mut buf)
+        .next_report(keyboard, BOOT_REPORT_LEN, &mut buf)
         .expect("a report drains")
         .expect("a report is available");
-    assert_eq!(len, REPORT_LEN);
+    assert_eq!(len, BOOT_REPORT_LEN);
     assert_eq!(buf[2], 0x04, "the 'a' keycode reaches the report buffer");
 }
 
@@ -5857,351 +5621,281 @@ fn bring_up_keyboard_returns_a_directly_attached_keyboard() {
         .pending_reports
         .push_back(alloc::vec![0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]);
     device.host_mut().model_mut().process_int_ring();
-    let mut buf = [0u8; REPORT_LEN];
+    let mut buf = [0u8; BOOT_REPORT_LEN];
     let len = device
-        .next_report(0, &mut buf)
+        .next_report(0, BOOT_REPORT_LEN, &mut buf)
         .expect("a report drains")
         .expect("a report is available");
-    assert_eq!(len, REPORT_LEN);
+    assert_eq!(len, BOOT_REPORT_LEN);
     assert_eq!(buf[2], 0x04, "the 'a' keycode reaches the report buffer");
 }
 
 #[test]
-fn decode_all_captures_the_hid_report_descriptor_length() {
-    // A configuration carrying a HID class descriptor exposes its Report
-    // Descriptor length, so enumeration knows how many bytes to fetch.
-    let ifaces = InterfaceInfo::decode_all(&MOCK_MOUSE_REPORT_CONFIG_DESCRIPTOR).expect("decodes");
-    let iface = ifaces[0].expect("one interface");
-    assert!(iface.is_hid());
-    assert_eq!(iface.report_descriptor_len, 50);
-    // A configuration with no HID descriptor reports a zero length, so the
-    // interface falls back to boot protocol.
-    let plain = InterfaceInfo::decode_all(&MOCK_MOUSE_CONFIG_DESCRIPTOR).expect("decodes");
-    assert_eq!(plain[0].expect("one interface").report_descriptor_len, 0);
-}
-
-#[test]
-fn a_report_protocol_mouse_is_configured_and_normalizes_reports() {
-    // A mouse whose Report Descriptor can be read and parsed is driven in
-    // report protocol — SET_PROTOCOL(report), wValue 1 — so SET_IDLE quiesces
-    // it (the on-metal mouse that streamed a duplicate report every polling
-    // interval in boot protocol and pegged a core). Its report-protocol
-    // reports are normalized back into the boot layout the class driver reads.
+fn the_first_report_request_fixes_the_transfer_length() {
     let mem = shared_mem();
-    let mut device = started_device(MockXhci::with_report_mouse(&mem), &mem);
-    let delay = TestDelay::default();
+    let mut device = started_device(MockXhci::with_device(&mem), &mem);
     device
-        .bring_up(&delay)
-        .expect("the report-protocol mouse enumerates");
+        .bring_up(&TestDelay::default())
+        .expect("the boot keyboard enumerates");
+    let mut buf = [0u8; INT_TRANSFER_MAX];
     assert_eq!(
-        device.host_mut().model_mut().protocol,
-        Some(1),
-        "report protocol selected so SET_IDLE takes effect"
+        device.next_report(0, 0, &mut buf),
+        Err(DriverError::LengthOutOfRange)
     );
     assert_eq!(
-        device.host_mut().model_mut().idle_value,
-        Some(0),
-        "SET_IDLE(indefinite) issued for all reports"
+        device.next_report(0, INT_TRANSFER_MAX + 1, &mut buf),
+        Err(DriverError::LengthOutOfRange)
     );
-
-    // The enumeration diagnostic (the payload-free window a metal boot logs,
-    // as QEMU models no Pi USB) reports report protocol with the parsed
-    // pointer field layout.
-    let enum_diag = device
-        .hid_enum_diag(0)
-        .expect("a HID interface has an enumeration diagnostic");
-    assert!(enum_diag.report_protocol, "the mouse runs report protocol");
-    assert!(
-        matches!(
-            enum_diag.map,
-            Some(tairix_hid::ReportMapSummary::Mouse { .. })
-        ),
-        "a parsed mouse report map, not a keyboard"
-    );
-
-    // A report-protocol report [buttons=right, x=+3, y=-2] normalizes to the
-    // 4-byte boot report [buttons, x, y, wheel=0].
-    arm_report_request(&mut device);
-    device
-        .host_mut()
-        .model_mut()
-        .pending_reports
-        .push_back(alloc::vec![0x02, 0x03, 0xFE]);
-    device.host_mut().model_mut().process_int_ring();
-    let mut buf = [0u8; REPORT_LEN];
-    let len = device
-        .next_report(0, &mut buf)
-        .expect("a report drains")
-        .expect("a normalized report is available");
-    assert_eq!(len, 4, "the normalized boot mouse report is four bytes");
-    assert_eq!(buf[0], 0x02, "the button byte");
-    assert_eq!(buf[1], 3, "the X delta");
-    assert_eq!(i8::from_le_bytes([buf[2]]), -2, "the Y delta");
-    assert_eq!(buf[3], 0, "no wheel field, so a zero wheel byte");
-
-    // The descriptor the map was parsed from is retained beside it. A map is
-    // only as right as its input, so a metal capture that disagrees with the
-    // located layout — a device reporting under a Report ID the parser did not
-    // pin to, whose sibling collections are then read as this interface's own
-    // reports — is diagnosable from the bytes rather than by guesswork.
+    // Shorter than the endpoint's eight-byte interval payload: the payload.
+    assert_eq!(device.next_report(0, 3, &mut buf), Ok(None));
+    let model = device.host_mut().model_mut();
+    model.pending_reports.push_back(alloc::vec![7; 8]);
+    model.process_int_ring();
+    assert_eq!(model.int_armed_len, 8);
     assert_eq!(
-        device.hid_report_descriptor(0),
-        &MOCK_MOUSE_REPORT_DESCRIPTOR[..],
-        "the delivered Report Descriptor is retained exactly"
+        device.next_report(0, 4, &mut buf),
+        Err(DriverError::OutOfRange),
+        "a later request names the first one's length"
+    );
+    assert_eq!(
+        device.next_report(0, 3, &mut buf),
+        Ok(Some(8)),
+        "a report may outrun the request"
     );
 }
 
 #[test]
-fn a_keyboard_runs_boot_protocol_even_when_its_report_descriptor_parses() {
-    // The metal defect: a composite keyboard streamed its native keyboard
-    // report under a Report ID the descriptor parser had not pinned to (it
-    // pinned the first keyboard collection's ID, but the device reported under
-    // a later one), so report-protocol normalisation dropped every keypress. A
-    // keyboard needs none of report protocol — it reports only on a key-state
-    // change and so never causes the idle interrupt storm a mouse does — so it
-    // is driven in the standardised boot protocol, whose fixed 8-byte report
-    // the boot decoder consumes directly, regardless of what its Report
-    // Descriptor declares. This fixture's descriptor *parses* as a keyboard
-    // (it declares a Report ID); the interface must still be boot protocol.
+fn nothing_is_armed_before_the_class_driver_asks() {
     let mem = shared_mem();
-    let mut device = started_device(MockXhci::with_report_id_keyboard(&mem), &mem);
-    let delay = TestDelay::default();
-    device.bring_up(&delay).expect("the keyboard enumerates");
-    assert_eq!(
-        device.host_mut().model_mut().protocol,
-        Some(0),
-        "boot protocol for a keyboard, not report protocol"
-    );
-
-    // The enumeration diagnostic confirms boot protocol: no report map is used,
-    // so no Report-ID demux can drop the device's reports.
-    let enum_diag = device
-        .hid_enum_diag(0)
-        .expect("a HID interface has an enumeration diagnostic");
-    assert!(
-        !enum_diag.report_protocol,
-        "the keyboard interface runs boot protocol"
-    );
-    assert!(enum_diag.map.is_none(), "no report map in boot protocol");
-
-    // A standard 8-byte boot keyboard report [modifiers, reserved, k1..k6] is
-    // delivered as-is (LeftShift held, key A pressed).
-    arm_report_request(&mut device);
+    let mut device = started_device(MockXhci::with_device(&mem), &mem);
     device
-        .host_mut()
-        .model_mut()
-        .pending_reports
-        .push_back(alloc::vec![0x02, 0x00, 0x04, 0, 0, 0, 0, 0]);
-    device.host_mut().model_mut().process_int_ring();
-    let mut buf = [0u8; REPORT_LEN];
-    let len = device
-        .next_report(0, &mut buf)
-        .expect("a report drains")
-        .expect("the keyboard report is delivered, not dropped");
-    assert_eq!(len, REPORT_LEN, "the boot keyboard report");
-    assert_eq!(buf[0], 0x02, "the LeftShift modifier");
-    assert_eq!(buf[2], 0x04, "the key");
-
-    // The transfer is still armed to the endpoint's own wMaxPacketSize, never
-    // the full capture buffer (which would fault a hub's TT split).
+        .bring_up(&TestDelay::default())
+        .expect("the boot keyboard enumerates");
+    device.pump_reports().expect("the pump runs");
+    let model = device.host_mut().model_mut();
+    model.pending_reports.push_back(alloc::vec![0; 8]);
+    model.process_int_ring();
     assert_eq!(
-        device.host_mut().model_mut().int_armed_len,
-        9,
-        "armed to the endpoint max packet, not the capture buffer"
-    );
-
-    // A keyboard's descriptor is read and retained even though it decides
-    // nothing here: it is the only evidence of what the interface really is,
-    // and without it a metal capture cannot tell a genuine boot keyboard from
-    // a sibling collection that merely declares the boot protocol.
-    assert_eq!(
-        device.hid_report_descriptor(0),
-        &MOCK_REPORT_ID_KEYBOARD_DESCRIPTOR[..],
-        "the keyboard's Report Descriptor is retained despite boot protocol"
+        model.pending_reports.len(),
+        1,
+        "no transfer was armed to take it"
     );
 }
 
 #[test]
-fn a_keyboard_whose_descriptor_read_faults_still_enumerates() {
-    // The descriptor read is diagnostic for a keyboard — boot protocol is
-    // chosen whatever it says — so a device that faults that one request while
-    // answering everything else must not lose its keyboard over it. Before the
-    // read was extended to keyboards this request was never issued for one, so
-    // tolerating its fault is what keeps that unchanged.
+fn a_report_longer_than_a_packet_arrives_whole() {
     let mem = shared_mem();
-    let mut mock = MockXhci::with_report_id_keyboard(&mem);
-    mock.fault_report_descriptor_request = true;
-    let mut device = started_device(mock, &mem);
-    let delay = TestDelay::default();
+    let mut device = started_device(MockXhci::with_device(&mem), &mem);
     device
-        .bring_up(&delay)
-        .expect("the keyboard enumerates despite the faulting descriptor read");
-    assert_eq!(
-        device.host_mut().model_mut().protocol,
-        Some(0),
-        "still boot protocol, chosen without the descriptor"
-    );
-    assert!(
-        device.hid_report_descriptor(0).is_empty(),
-        "a faulted read retains nothing rather than a partial descriptor"
-    );
-
-    // The keyboard is fully serviceable: its reports still reach the class
-    // driver, which is the whole point of not failing the bring-up.
-    arm_report_request(&mut device);
-    device
-        .host_mut()
-        .model_mut()
-        .pending_reports
-        .push_back(alloc::vec![0x02, 0x00, 0x04, 0, 0, 0, 0, 0]);
-    device.host_mut().model_mut().process_int_ring();
-    let mut buf = [0u8; REPORT_LEN];
-    let len = device
-        .next_report(0, &mut buf)
-        .expect("a report drains")
-        .expect("the keyboard report is delivered");
-    assert!(len >= 3, "a boot keyboard report");
-    assert_eq!(buf[2], 0x04, "key A reaches the class driver");
+        .bring_up(&TestDelay::default())
+        .expect("the boot keyboard enumerates");
+    let mut buf = [0u8; INT_TRANSFER_MAX];
+    assert_eq!(device.next_report(0, 20, &mut buf), Ok(None));
+    let report: Vec<u8> = (1..=20).collect();
+    let model = device.host_mut().model_mut();
+    model.pending_reports.push_back(report.clone());
+    model.process_int_ring();
+    assert_eq!(model.int_armed_len, 20, "one transfer spans the intervals");
+    assert_eq!(device.next_report(0, 20, &mut buf), Ok(Some(20)));
+    assert_eq!(buf[..20], report[..]);
 }
 
 #[test]
-fn a_keyboard_that_ignored_set_protocol_is_normalised_not_boot_decoded() {
-    // The metal shape this exists for: a composite interface that declares the
-    // boot keyboard protocol but whose keyboard collection sits behind a vendor
-    // one under a Report ID. `SET_PROTOCOL(boot)` is optional and such a device
-    // accepts it and carries on sending ID-prefixed reports. Boot-decoding
-    // those reads each leading Report ID byte as the boot modifier byte, so a
-    // vendor report becomes phantom held modifiers and garbage key usages.
-    // Reading the protocol back is what catches it; the parsed map then
-    // demuxes the interface's own reports and drops its siblings'.
-    let mem = shared_mem();
-    let mut mock = MockXhci::with_report_id_keyboard(&mem);
-    mock.ignores_set_protocol = true;
-    let mut device = started_device(mock, &mem);
-    let delay = TestDelay::default();
-    device.bring_up(&delay).expect("the keyboard enumerates");
-    let diag = device
-        .hid_enum_diag(0)
-        .expect("a HID enumeration diagnostic");
-    assert!(
-        diag.report_protocol,
-        "the device said it stayed in report protocol, so its map is used"
-    );
-    assert!(!diag.reports_refused, "a map was available, so not refused");
-
-    // A report under the map's own Report ID normalises to the boot layout.
-    arm_report_request(&mut device);
-    device
-        .host_mut()
-        .model_mut()
-        .pending_reports
-        .push_back(alloc::vec![0x01, 0x02, 0x00, 0x04, 0, 0, 0, 0]);
-    device.host_mut().model_mut().process_int_ring();
-    let mut buf = [0u8; REPORT_LEN];
-    let len = device
-        .next_report(0, &mut buf)
-        .expect("a report drains")
-        .expect("the mapped report is delivered");
-    assert!(len >= 3, "a normalised boot keyboard report");
-    assert_eq!(buf[0], 0x02, "the real modifier byte, not the Report ID");
-    assert_eq!(buf[2], 0x04, "key A");
-
-    // A sibling collection's report carries a different Report ID and is
-    // dropped rather than decoded as this interface's own.
-    device
-        .host_mut()
-        .model_mut()
-        .pending_reports
-        .push_back(alloc::vec![0x09, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0]);
-    device.host_mut().model_mut().process_int_ring();
+fn a_periodic_endpoint_moves_what_its_speed_and_descriptors_allow() {
+    let full = PeriodicShape {
+        max_packet: 8,
+        transactions: 2,
+        companion: None,
+    };
     assert_eq!(
-        device.next_report(0, &mut buf),
-        Ok(None),
-        "another collection's report is not this keyboard's"
+        full.payload(SPEED_FULL),
+        (0, 8),
+        "full speed has no extra transactions"
+    );
+    let high = PeriodicShape {
+        max_packet: 1024,
+        transactions: 2,
+        companion: None,
+    };
+    assert_eq!(high.payload(SPEED_HIGH), (2, 3072));
+    assert_eq!(
+        PeriodicShape {
+            transactions: 3,
+            ..high
+        }
+        .payload(SPEED_HIGH),
+        (2, 3072),
+        "the reserved value is held to two"
+    );
+    let superspeed = PeriodicShape {
+        max_packet: 1024,
+        transactions: 0,
+        companion: Some((2, 3072)),
+    };
+    assert_eq!(superspeed.payload(SPEED_SUPER), (2, 3072));
+    assert_eq!(
+        PeriodicShape {
+            companion: Some((9, 9000)),
+            ..superspeed
+        }
+        .payload(SPEED_SUPER),
+        (2, 3072),
+        "a companion stating more than its burst can move"
+    );
+    assert_eq!(
+        PeriodicShape {
+            companion: Some((0, 0)),
+            ..superspeed
+        }
+        .payload(SPEED_SUPER),
+        (0, 1)
+    );
+    assert_eq!(
+        PeriodicShape {
+            companion: None,
+            ..superspeed
+        }
+        .payload(SPEED_SUPER),
+        (0, 1024)
     );
 }
 
+/// A boot mouse asking to be polled every service interval its speed has.
+static MOCK_FAST_MOUSE_CONFIG_DESCRIPTOR: [u8; 25] = [
+    0x09, 0x02, 0x19, 0x00, 0x01, 0x01, 0x00, 0xA0, 0x32, //
+    0x09, 0x04, 0x00, 0x00, 0x01, 0x03, 0x01, 0x02, 0x00, //
+    0x07, 0x05, 0x81, 0x03, 0x04, 0x00, 0x01,
+];
+
 #[test]
-fn an_interface_in_report_protocol_with_no_map_delivers_nothing() {
-    // The same read-back, with no map to fall back on: neither reading is
-    // safe, so no report is delivered. A silent interface is the honest
-    // outcome — boot-decoding would fabricate modifiers and keys from
-    // whatever the device happens to send.
+fn a_mouse_is_polled_at_its_own_interval_with_its_own_payload() {
     let mem = shared_mem();
     let mut mock = MockXhci::with_device(&mem);
-    mock.ignores_set_protocol = true;
+    mock.keyboard_config = &MOCK_FAST_MOUSE_CONFIG_DESCRIPTOR;
     let mut device = started_device(mock, &mem);
-    let delay = TestDelay::default();
-    device
-        .bring_up(&delay)
-        .expect("the device still enumerates");
-    let diag = device
-        .hid_enum_diag(0)
-        .expect("a HID enumeration diagnostic");
-    assert!(!diag.report_protocol, "no map, so not report protocol");
-    assert!(
-        diag.reports_refused,
-        "report protocol with no map refuses every report"
-    );
-
-    arm_report_request(&mut device);
-    device
-        .host_mut()
-        .model_mut()
-        .pending_reports
-        .push_back(alloc::vec![0x02, 0x00, 0x04, 0, 0, 0, 0, 0]);
-    device.host_mut().model_mut().process_int_ring();
-    let mut buf = [0u8; REPORT_LEN];
+    attach_root_device(&mut device, 1).expect("enumeration succeeds");
+    let model = device.host_mut().model_mut();
     assert_eq!(
-        device.next_report(0, &mut buf),
-        Ok(None),
-        "nothing is delivered rather than a boot-decoded guess"
+        model.int_interval, 0,
+        "every microframe, as the high-speed device asks"
     );
+    assert_eq!(model.int_max_esit, 4, "its four-byte packet an interval");
 }
 
 #[test]
-fn a_mouse_whose_descriptor_read_faults_fails_closed() {
-    // A pointer's descriptor read *is* load bearing — it selects report
-    // protocol — so a non-STALL fault there still fails the *attach* rather
-    // than silently running a mouse the engine could not characterise. Only
-    // the keyboard's observational read is tolerated. The controller itself
-    // is healthy, so the port is a counted skip and the walk still succeeds.
+fn no_transfer_buffer_crosses_a_page_so_none_crosses_64_kib() {
+    for ctx_size in [32, 64] {
+        for (offset, len) in DeviceRegion::transfer_buffers(ctx_size) {
+            assert!(
+                offset % DMA_CHUNK_ALIGN + len <= DMA_CHUNK_ALIGN,
+                "a {len}-byte buffer at {offset:#x} crosses a page"
+            );
+        }
+    }
+}
+
+/// Serve one control URB carrying `setup` for its own `wLength` through
+/// interface `index`'s engine, over `shared`.
+fn serve_control(
+    device: &mut UsbDevice<'_, ModelXhci, MockDma>,
+    index: usize,
+    setup: [u8; 8],
+    shared: &mut [u8],
+) -> Result<Option<u32>, Errno> {
+    let urb = UrbRequest {
+        endpoint: 0,
+        transfer_type: UsbTransferType::Control,
+        direction: if setup[0] & 0x80 == 0 {
+            UsbDirection::Out
+        } else {
+            UsbDirection::In
+        },
+        buffer: 0,
+        length: u32::from(u16::from_le_bytes([setup[6], setup[7]])),
+        setup,
+    };
+    let mut frame = [0u8; URB_REQUEST_LEN];
+    let len = urb.encode(&mut frame).expect("encodes");
+    drive_urb(&frame[..len], shared, &mut device.engine_for(index))
+}
+
+/// A keyboard's Report Descriptor, as the mock serves it.
+static MOCK_REPORT_DESCRIPTOR: [u8; 7] = [0x05, 0x01, 0x09, 0x06, 0xA1, 0x01, 0xC0];
+
+#[test]
+fn a_class_driver_reaches_its_own_interface_and_never_the_device() {
     let mem = shared_mem();
-    let mut mock = MockXhci::with_report_mouse(&mem);
-    mock.fault_report_descriptor_request = true;
+    let mut mock = MockXhci::with_device(&mem);
+    mock.report_descriptor = Some(&MOCK_REPORT_DESCRIPTOR);
     let mut device = started_device(mock, &mem);
-    let delay = TestDelay::default();
-    device
-        .bring_up(&delay)
-        .expect("one unservable device never fails the controller's bring-up");
-    assert!(
-        !device.any_device_live(),
-        "a pointer's faulting descriptor read fails closed: it is not served"
-    );
+    attach_root_device(&mut device, 1).expect("enumeration succeeds");
     assert_eq!(
-        device.skipped_port_count(),
-        1,
-        "the unservable port is counted, not silently absent"
+        device.engine_for(0).scope(),
+        Some(UrbScope {
+            interface: 0,
+            endpoints: 1 << 3,
+        })
     );
+    let sent = device.host_mut().model_mut().control_requests.len();
+    let mut shared = [0u8; BULK_BUF_LEN];
+    let report_descriptor = [0x81, 0x06, 0x00, 0x22, 0x00, 0x00, 0x07, 0x00];
     assert_eq!(
-        device.last_attach_fault().map(|fault| fault.port),
-        Some(1),
-        "the failing port is named for the driver's diagnostic"
+        serve_control(&mut device, 0, report_descriptor, &mut shared),
+        Ok(Some(7))
+    );
+    assert_eq!(shared[..7], MOCK_REPORT_DESCRIPTOR);
+    let refused = [
+        [0x00, 0x09, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00],
+        [0x81, 0x06, 0x00, 0x22, 0x01, 0x00, 0x07, 0x00],
+    ];
+    for setup in refused {
+        assert_eq!(
+            serve_control(&mut device, 0, setup, &mut shared),
+            Err(Errno::PermissionDenied),
+            "{setup:02x?}"
+        );
+    }
+    assert_eq!(
+        device.host_mut().model_mut().control_requests.len(),
+        sent + 1,
+        "only the permitted request reached the device"
     );
 }
 
+/// A configuration longer than 512 bytes: a keyboard, class-specific
+/// descriptors past the old data-stage bound, then a mouse.
+fn long_configuration() -> &'static [u8] {
+    let mut config = alloc::vec![0x09u8, 0x02, 0, 0, 0x02, 0x01, 0x00, 0xA0, 0x32];
+    config.extend_from_slice(&[0x09, 0x04, 0x00, 0x00, 0x01, 0x03, 0x01, 0x01, 0x00]);
+    config.extend_from_slice(&[0x07, 0x05, 0x81, 0x03, 0x08, 0x00, 0x0A]);
+    while config.len() < 600 {
+        config.extend_from_slice(&[0x0A, 0x24, 0, 0, 0, 0, 0, 0, 0, 0]);
+    }
+    config.extend_from_slice(&[0x09, 0x04, 0x01, 0x00, 0x01, 0x03, 0x01, 0x02, 0x00]);
+    config.extend_from_slice(&[0x07, 0x05, 0x82, 0x03, 0x04, 0x00, 0x0A]);
+    let total = u16::try_from(config.len()).expect("fits");
+    config[2..4].copy_from_slice(&total.to_le_bytes());
+    alloc::boxed::Box::leak(config.into_boxed_slice())
+}
+
 #[test]
-fn a_report_transfer_is_armed_to_the_endpoint_max_packet_not_the_capture_buffer() {
-    // The metal "keyboard registers no keypresses" defect for a keyboard behind
-    // the Pi 4 hub. Arming every interrupt-IN transfer to the full 64-byte
-    // capture buffer made a full/low-speed endpoint's periodic split through
-    // the hub's transaction translator exceed the per-interval budget the TT
-    // scheduled, which the controller reported as a Split Transaction Error and
-    // then retracted the interface. The transfer must be armed to the
-    // endpoint's own wMaxPacketSize (eight bytes for a boot keyboard); a
-    // directly-attached high-speed device tolerated the over-length transfer
-    // (it short-packets with no split), which is why only the hub-attached
-    // keyboard failed.
+fn a_configuration_longer_than_512_bytes_is_read_whole() {
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_device(&mem);
+    mock.keyboard_config = long_configuration();
+    let mut device = started_device(mock, &mem);
+    attach_root_device(&mut device, 1).expect("enumeration succeeds");
+    let mouse = device
+        .device_identity(1)
+        .expect("the interface past 512 bytes is served");
+    assert_eq!(mouse.interface_class, 0x03_01_02);
+}
+
+#[test]
+fn a_report_transfer_is_armed_no_longer_than_the_report_needs() {
+    // A full/low-speed endpoint behind a high-speed hub faults with a Split
+    // Transaction Error when a transfer outruns the interval budget its
+    // transaction translator scheduled: the Pi 4 keyboard behind its hub.
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
     let delay = TestDelay::default();
@@ -6219,63 +5913,21 @@ fn a_report_transfer_is_armed_to_the_endpoint_max_packet_not_the_capture_buffer(
     let armed =
         usize::try_from(device.host_mut().model_mut().int_armed_len).expect("armed length fits");
     assert_eq!(
-        armed, REPORT_LEN,
-        "the transfer is armed to the endpoint's eight-byte max packet"
-    );
-    assert!(
-        armed < CAPTURE_LEN,
-        "never to the full capture buffer, which faults the hub's TT split"
+        armed, BOOT_REPORT_LEN,
+        "the transfer is armed to the eight-byte report and max packet"
     );
 
-    let mut buf = [0u8; REPORT_LEN];
+    let mut buf = [0u8; BOOT_REPORT_LEN];
     let len = device
-        .next_report(0, &mut buf)
+        .next_report(0, BOOT_REPORT_LEN, &mut buf)
         .expect("a report drains")
         .expect("the keyboard report is delivered");
-    assert_eq!(len, REPORT_LEN, "the packet-sized capture still delivers");
+    assert_eq!(
+        len, BOOT_REPORT_LEN,
+        "the packet-sized capture still delivers"
+    );
     assert_eq!(buf[0], 0x02, "the modifier byte survives");
     assert_eq!(buf[2], 0x04, "the key survives the packet-sized capture");
-}
-
-#[test]
-fn a_fast_mouses_poll_rate_is_capped() {
-    // A 1000 Hz (1 ms, bInterval=4) high-speed mouse would otherwise wake the
-    // HCD and its class driver a thousand times a second while moving. The
-    // driver raises its endpoint-context Interval to the pointer cap so it is
-    // polled no faster than ~100 Hz.
-    let mem = shared_mem();
-    let mut device = started_device(MockXhci::with_fast_report_mouse(&mem), &mem);
-    let delay = TestDelay::default();
-    device.bring_up(&delay).expect("the fast mouse enumerates");
-    let advertised = interrupt_interval(SPEED_HIGH, 4);
-    assert!(
-        pointer_min_interval() > advertised,
-        "the fixture must advertise a rate faster than the cap"
-    );
-    assert_eq!(
-        device.host_mut().model_mut().int_interval,
-        pointer_min_interval(),
-        "the mouse poll rate is clamped to the pointer cap"
-    );
-}
-
-#[test]
-fn a_device_without_a_report_descriptor_falls_back_to_boot_protocol() {
-    // A HID device that serves no Report Descriptor (the model STALLs
-    // GET_DESCRIPTOR(Report)) is driven in boot protocol —
-    // SET_PROTOCOL(boot), wValue 0 — unchanged, so a device the parser cannot
-    // handle is never left unconfigured.
-    let mem = shared_mem();
-    let mut device = started_device(MockXhci::with_device(&mem), &mem);
-    let delay = TestDelay::default();
-    device
-        .bring_up(&delay)
-        .expect("the boot-protocol keyboard enumerates");
-    assert_eq!(
-        device.host_mut().model_mut().protocol,
-        Some(0),
-        "boot protocol when no report descriptor is served"
-    );
 }
 
 #[test]
@@ -6299,9 +5951,9 @@ fn a_report_arriving_in_the_class_driver_resubmit_gap_is_not_lost() {
 
     // The first class URB arms the endpoint (to depth) and parks: no report
     // has arrived yet.
-    let mut buf = [0u8; REPORT_LEN];
+    let mut buf = [0u8; BOOT_REPORT_LEN];
     assert_eq!(
-        device.next_report(0, &mut buf),
+        device.next_report(0, BOOT_REPORT_LEN, &mut buf),
         Ok(None),
         "the first submit arms the endpoint and parks"
     );
@@ -6314,10 +5966,10 @@ fn a_report_arriving_in_the_class_driver_resubmit_gap_is_not_lost() {
         .push_back(alloc::vec![0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]);
     device.host_mut().model_mut().process_int_ring();
     let len = device
-        .next_report(0, &mut buf)
+        .next_report(0, BOOT_REPORT_LEN, &mut buf)
         .expect("a report drains")
         .expect("report 1 is available");
-    assert_eq!(len, REPORT_LEN);
+    assert_eq!(len, BOOT_REPORT_LEN);
     assert_eq!(buf[2], 0x04, "the first keystroke is delivered");
 
     // The class driver is now busy decoding/injecting report 1 and has NOT
@@ -6335,10 +5987,10 @@ fn a_report_arriving_in_the_class_driver_resubmit_gap_is_not_lost() {
     // The class driver finally re-submits and receives the keystroke that
     // arrived during the gap: none lost.
     let len = device
-        .next_report(0, &mut buf)
+        .next_report(0, BOOT_REPORT_LEN, &mut buf)
         .expect("a report drains")
         .expect("the keystroke typed during the re-submit gap is captured, not lost");
-    assert_eq!(len, REPORT_LEN);
+    assert_eq!(len, BOOT_REPORT_LEN);
     assert_eq!(
         buf[2], 0x05,
         "the keystroke typed while the class driver was busy is delivered"
@@ -6361,9 +6013,9 @@ fn a_burst_of_reports_before_the_class_driver_drains_any_is_kept_up_to_depth() {
         .bring_up(&delay)
         .expect("the directly-attached keyboard enumerates");
 
-    let mut buf = [0u8; REPORT_LEN];
+    let mut buf = [0u8; BOOT_REPORT_LEN];
     // Arm the endpoint to depth (first submit, nothing queued yet).
-    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+    assert_eq!(device.next_report(0, BOOT_REPORT_LEN, &mut buf), Ok(None));
 
     // A burst of distinct keystrokes, fewer than INT_ARM_DEPTH, arrives
     // before the class driver drains any.
@@ -6381,16 +6033,16 @@ fn a_burst_of_reports_before_the_class_driver_drains_any_is_kept_up_to_depth() {
     // Every keystroke is drained in order, one per URB — none dropped.
     for &code in &codes {
         let len = device
-            .next_report(0, &mut buf)
+            .next_report(0, BOOT_REPORT_LEN, &mut buf)
             .expect("a report drains")
             .expect("a buffered report is available");
-        assert_eq!(len, REPORT_LEN);
+        assert_eq!(len, BOOT_REPORT_LEN);
         assert_eq!(buf[2], code, "the burst is delivered in order");
     }
 
     // The queue is empty again; the next submit parks (endpoint still armed).
     assert_eq!(
-        device.next_report(0, &mut buf),
+        device.next_report(0, BOOT_REPORT_LEN, &mut buf),
         Ok(None),
         "with the burst drained the endpoint parks, still armed"
     );
@@ -6398,15 +6050,9 @@ fn a_burst_of_reports_before_the_class_driver_drains_any_is_kept_up_to_depth() {
 
 #[test]
 fn the_interrupt_pump_keeps_reports_flowing_past_the_armed_depth_with_no_class_urb() {
-    // The robust, consumer-independent fix. The previous depth-armed ring
-    // re-armed only from inside `next_report`, so a class driver that stopped
-    // submitting left the endpoint drained after `INT_ARM_DEPTH` reports and
-    // every later report was lost at the hardware. `pump_reports` — driven off
-    // the controller interrupt — captures completions AND re-arms the endpoint
-    // on every interrupt regardless of any class-driver URB, so device polling
-    // is decoupled from how starved the class driver is: reports keep flowing
-    // well past the armed depth even though `next_report` is never called
-    // until the very end.
+    // `pump_reports`, driven off the controller interrupt, captures completions
+    // and re-arms the endpoint whatever the class driver is doing, so reports
+    // keep flowing past the armed depth with no URB outstanding.
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
     let delay = TestDelay::default();
@@ -6414,9 +6060,9 @@ fn the_interrupt_pump_keeps_reports_flowing_past_the_armed_depth_with_no_class_u
         .bring_up(&delay)
         .expect("the directly-attached keyboard enumerates");
 
-    // The controller interrupt pump arms the endpoint to depth — no
-    // class-driver URB has been submitted (none ever is, until the end).
-    device.pump_reports().expect("the pump arms the endpoint");
+    // The class driver's first request fixes the transfer length; it then
+    // submits nothing more until the end.
+    arm_report_request(&mut device);
 
     // More distinct keystrokes than a single armed depth arrive, one per
     // controller interval, each captured by the pump on its interrupt. With
@@ -6449,17 +6095,17 @@ fn the_interrupt_pump_keeps_reports_flowing_past_the_armed_depth_with_no_class_u
 
     // The class driver finally runs and collects the whole backlog, in order,
     // with nothing dropped — the endpoint never went unarmed.
-    let mut buf = [0u8; REPORT_LEN];
+    let mut buf = [0u8; BOOT_REPORT_LEN];
     for i in 0..count {
         let code = 0x04 + u8::try_from(i).expect("keycode fits");
         let len = device
-            .next_report(0, &mut buf)
+            .next_report(0, BOOT_REPORT_LEN, &mut buf)
             .expect("a report drains")
             .expect("every pumped report is buffered");
-        assert_eq!(len, REPORT_LEN);
+        assert_eq!(len, BOOT_REPORT_LEN);
         assert_eq!(buf[2], code, "reports are delivered in order, none lost");
     }
-    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+    assert_eq!(device.next_report(0, BOOT_REPORT_LEN, &mut buf), Ok(None));
     assert_eq!(
         device.dropped_report_total(),
         0,
@@ -6481,7 +6127,7 @@ fn a_permanently_stalled_consumer_bounds_the_buffer_and_counts_dropped_reports()
     device
         .bring_up(&delay)
         .expect("the directly-attached keyboard enumerates");
-    device.pump_reports().expect("the pump arms the endpoint");
+    arm_report_request(&mut device);
 
     // Deliver more reports than the buffer holds, never draining any.
     let overflow = 4;
@@ -6507,18 +6153,18 @@ fn a_permanently_stalled_consumer_bounds_the_buffer_and_counts_dropped_reports()
 
     // What remains is the newest REPORT_QUEUE_CAP reports, in order: the
     // oldest `overflow` keycodes were dropped.
-    let mut buf = [0u8; REPORT_LEN];
+    let mut buf = [0u8; BOOT_REPORT_LEN];
     for i in overflow..total {
         let code = 0x04 + u8::try_from(i).expect("keycode fits");
         let len = device
-            .next_report(0, &mut buf)
+            .next_report(0, BOOT_REPORT_LEN, &mut buf)
             .expect("a report drains")
             .expect("a buffered report is available");
-        assert_eq!(len, REPORT_LEN);
+        assert_eq!(len, BOOT_REPORT_LEN);
         assert_eq!(buf[2], code, "the newest reports are kept, in order");
     }
     assert_eq!(
-        device.next_report(0, &mut buf),
+        device.next_report(0, BOOT_REPORT_LEN, &mut buf),
         Ok(None),
         "the buffer held exactly REPORT_QUEUE_CAP reports"
     );
@@ -6547,9 +6193,10 @@ fn the_interrupt_pump_captures_a_mouse_the_same_way_as_a_keyboard() {
         "a HID boot-mouse interface"
     );
 
-    // Arm both interrupt-IN endpoints via the controller interrupt pump — no
-    // class-driver URB is outstanding for either device.
-    device.pump_reports().expect("the pump arms both endpoints");
+    // Each class driver's first request fixes its endpoint's transfer
+    // length; the pump then keeps both armed with no URB outstanding.
+    arm_report_request_for(&mut device, 1);
+    arm_report_request_for(&mut device, 2);
 
     // A burst of mouse reports arrives past the armed depth, each captured by
     // the pump on its interrupt.
@@ -6570,17 +6217,17 @@ fn the_interrupt_pump_captures_a_mouse_the_same_way_as_a_keyboard() {
 
     // The mouse class driver collects the whole backlog from its own index,
     // in order, none lost — proving the decoupled capture is device-generic.
-    let mut buf = [0u8; REPORT_LEN];
+    let mut buf = [0u8; BOOT_REPORT_LEN];
     for i in 0..count {
         let dx = 0x01 + u8::try_from(i).expect("delta fits");
         let len = device
-            .next_report(1, &mut buf)
+            .next_report(1, BOOT_REPORT_LEN, &mut buf)
             .expect("a mouse report drains")
             .expect("every pumped mouse report is buffered");
-        assert_eq!(len, 4);
+        assert_eq!(len, 4, "a report arrives as the mouse sent it");
         assert_eq!(buf[1], dx, "the X deltas are delivered in order, none lost");
     }
-    assert_eq!(device.next_report(1, &mut buf), Ok(None));
+    assert_eq!(device.next_report(1, BOOT_REPORT_LEN, &mut buf), Ok(None));
     assert_eq!(device.dropped_report_total(), 0);
 }
 
@@ -6633,12 +6280,12 @@ fn bring_up_keyboard_descends_through_a_hub_to_the_keyboard() {
         .pending_reports
         .push_back(alloc::vec![0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]);
     device.host_mut().model_mut().process_int_ring();
-    let mut buf = [0u8; REPORT_LEN];
+    let mut buf = [0u8; BOOT_REPORT_LEN];
     let len = device
-        .next_report(1, &mut buf)
+        .next_report(1, BOOT_REPORT_LEN, &mut buf)
         .expect("a report drains")
         .expect("a report is available");
-    assert_eq!(len, REPORT_LEN);
+    assert_eq!(len, BOOT_REPORT_LEN);
     assert_eq!(buf[2], 0x04);
 }
 
@@ -6734,12 +6381,12 @@ fn bring_up_keyboard_then_a_downstream_connect_enumerates_a_fresh_keyboard() {
         .pending_reports
         .push_back(alloc::vec![0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]);
     device.host_mut().model_mut().process_int_ring();
-    let mut buf = [0u8; REPORT_LEN];
+    let mut buf = [0u8; BOOT_REPORT_LEN];
     let len = device
-        .next_report(index, &mut buf)
+        .next_report(index, BOOT_REPORT_LEN, &mut buf)
         .expect("a report drains")
         .expect("a report is available after the cold-boot attach");
-    assert_eq!(len, REPORT_LEN);
+    assert_eq!(len, BOOT_REPORT_LEN);
     assert_eq!(buf[2], 0x04, "the 'a' keycode reaches the report buffer");
 }
 
@@ -6785,12 +6432,12 @@ fn addressing_a_downstream_keyboard_marks_the_parent_hub_as_a_hub() {
         .pending_reports
         .push_back(alloc::vec![0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00,]);
     device.host_mut().model_mut().process_int_ring();
-    let mut buf = [0u8; REPORT_LEN];
+    let mut buf = [0u8; BOOT_REPORT_LEN];
     let len = device
-        .next_report(keyboard, &mut buf)
+        .next_report(keyboard, BOOT_REPORT_LEN, &mut buf)
         .expect("a report drains")
         .expect("a report is available once the hub is marked");
-    assert_eq!(len, REPORT_LEN);
+    assert_eq!(len, BOOT_REPORT_LEN);
     assert_eq!(buf[2], 0x04);
 }
 
@@ -6831,12 +6478,12 @@ fn the_downstream_interrupt_endpoint_carries_a_nonzero_max_esit_payload() {
         .pending_reports
         .push_back(alloc::vec![0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00,]);
     device.host_mut().model_mut().process_int_ring();
-    let mut buf = [0u8; REPORT_LEN];
+    let mut buf = [0u8; BOOT_REPORT_LEN];
     let len = device
-        .next_report(keyboard, &mut buf)
+        .next_report(keyboard, BOOT_REPORT_LEN, &mut buf)
         .expect("a report drains")
         .expect("a report is available once the endpoint has bandwidth");
-    assert_eq!(len, REPORT_LEN);
+    assert_eq!(len, BOOT_REPORT_LEN);
     assert_eq!(buf[2], 0x04);
 }
 
@@ -6886,12 +6533,12 @@ fn downstream_keyboard_is_serviced_on_its_descriptor_reported_endpoint() {
         .pending_reports
         .push_back(alloc::vec![0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00,]);
     device.host_mut().model_mut().process_int_ring();
-    let mut buf = [0u8; REPORT_LEN];
+    let mut buf = [0u8; BOOT_REPORT_LEN];
     let len = device
-        .next_report(keyboard, &mut buf)
+        .next_report(keyboard, BOOT_REPORT_LEN, &mut buf)
         .expect("a report drains")
         .expect("a report is available on the endpoint the keyboard actually uses");
-    assert_eq!(len, REPORT_LEN);
+    assert_eq!(len, BOOT_REPORT_LEN);
     assert_eq!(buf[2], 0x04, "the 'a' keycode reaches the report buffer");
 }
 
@@ -7128,28 +6775,34 @@ fn reports_flow_through_the_report_source() {
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
     attach_root_device(&mut device, 1).expect("enumeration succeeds");
 
-    let mut buf = [0u8; REPORT_LEN];
-    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+    let mut buf = [0u8; BOOT_REPORT_LEN];
+    assert_eq!(device.next_report(0, BOOT_REPORT_LEN, &mut buf), Ok(None));
     device
         .host_mut()
         .model_mut()
         .pending_reports
         .push_back(alloc::vec![0, 0, 0x04, 0, 0, 0, 0, 0]);
     device.host_mut().model_mut().process_int_ring();
-    assert_eq!(device.next_report(0, &mut buf), Ok(Some(REPORT_LEN)));
-    assert_eq!(buf, [0, 0, 0x04, 0, 0, 0, 0, 0]);
+    assert_eq!(
+        device.next_report(0, BOOT_REPORT_LEN, &mut buf),
+        Ok(Some(BOOT_REPORT_LEN))
+    );
+    assert_eq!(buf[..BOOT_REPORT_LEN], [0, 0, 0x04, 0, 0, 0, 0, 0]);
 
     // The 3-byte mouse report arrives as a short packet.
-    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+    assert_eq!(device.next_report(0, BOOT_REPORT_LEN, &mut buf), Ok(None));
     device
         .host_mut()
         .model_mut()
         .pending_reports
         .push_back(alloc::vec![0x01, 0xFF, 0x02]);
     device.host_mut().model_mut().process_int_ring();
-    assert_eq!(device.next_report(0, &mut buf), Ok(Some(3)));
+    assert_eq!(
+        device.next_report(0, BOOT_REPORT_LEN, &mut buf),
+        Ok(Some(3))
+    );
     assert_eq!(buf[..3], [0x01, 0xFF, 0x02]);
-    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+    assert_eq!(device.next_report(0, BOOT_REPORT_LEN, &mut buf), Ok(None));
 }
 
 #[test]
@@ -7168,10 +6821,10 @@ fn a_zero_length_completion_parks_and_rearms_rather_than_faulting() {
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
     attach_root_device(&mut device, 1).expect("enumeration succeeds");
 
-    let mut buf = [0u8; REPORT_LEN];
+    let mut buf = [0u8; BOOT_REPORT_LEN];
     // Arm the first transfer, then complete it with an empty report (a
     // ShortPacket whose residual is the whole request → zero bytes).
-    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+    assert_eq!(device.next_report(0, BOOT_REPORT_LEN, &mut buf), Ok(None));
     device
         .host_mut()
         .model_mut()
@@ -7179,7 +6832,7 @@ fn a_zero_length_completion_parks_and_rearms_rather_than_faulting() {
         .push_back(alloc::vec![]);
     device.host_mut().model_mut().process_int_ring();
     assert_eq!(
-        device.next_report(0, &mut buf),
+        device.next_report(0, BOOT_REPORT_LEN, &mut buf),
         Ok(None),
         "a zero-length completion parks (re-armed), never a fault"
     );
@@ -7192,9 +6845,12 @@ fn a_zero_length_completion_parks_and_rearms_rather_than_faulting() {
         .pending_reports
         .push_back(alloc::vec![0x01, 0x05, 0xFB]);
     device.host_mut().model_mut().process_int_ring();
-    assert_eq!(device.next_report(0, &mut buf), Ok(Some(3)));
+    assert_eq!(
+        device.next_report(0, BOOT_REPORT_LEN, &mut buf),
+        Ok(Some(3))
+    );
     assert_eq!(buf[..3], [0x01, 0x05, 0xFB]);
-    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+    assert_eq!(device.next_report(0, BOOT_REPORT_LEN, &mut buf), Ok(None));
 }
 
 #[test]
@@ -7207,20 +6863,23 @@ fn report_source_rearms_across_the_ring_wrap() {
     // proves retire + on-demand arm keep the ring live across the Link-TRB wrap.
     let total = 2 * RING_TRBS;
 
-    let mut buf = [0u8; REPORT_LEN];
+    let mut buf = [0u8; BOOT_REPORT_LEN];
     for index in 0..total {
         let marker = u8::try_from(index).expect("small index");
-        assert_eq!(device.next_report(0, &mut buf), Ok(None));
+        assert_eq!(device.next_report(0, BOOT_REPORT_LEN, &mut buf), Ok(None));
         device
             .host_mut()
             .model_mut()
             .pending_reports
             .push_back(alloc::vec![marker, 0, 0, 0, 0, 0, 0, 0]);
         device.host_mut().model_mut().process_int_ring();
-        assert_eq!(device.next_report(0, &mut buf), Ok(Some(REPORT_LEN)));
+        assert_eq!(
+            device.next_report(0, BOOT_REPORT_LEN, &mut buf),
+            Ok(Some(BOOT_REPORT_LEN))
+        );
         assert_eq!(buf[0], marker, "reports arrive in order");
     }
-    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+    assert_eq!(device.next_report(0, BOOT_REPORT_LEN, &mut buf), Ok(None));
 }
 
 #[test]
@@ -7244,8 +6903,8 @@ fn report_source_recovers_a_halted_endpoint_without_faulting_the_class_driver() 
 
     // Arm a transfer, then post a STALL completion for it: the mock halts the
     // endpoint, exactly as the silicon does.
-    let mut buf = [0u8; REPORT_LEN];
-    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+    let mut buf = [0u8; BOOT_REPORT_LEN];
+    assert_eq!(device.next_report(0, BOOT_REPORT_LEN, &mut buf), Ok(None));
     device.host_mut().model_mut().fault_one_report_completion = Some(CompletionCode::StallError);
     device
         .host_mut()
@@ -7256,7 +6915,7 @@ fn report_source_recovers_a_halted_endpoint_without_faulting_the_class_driver() 
 
     // The halting fault is recovered and the URB held parked — no error is
     // surfaced to the class driver (`Ok(None)`, not `Err`).
-    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+    assert_eq!(device.next_report(0, BOOT_REPORT_LEN, &mut buf), Ok(None));
 
     // The endpoint is live again: the next good report is delivered, proving
     // the reset/re-arm actually cleared the halt rather than leaving the
@@ -7267,9 +6926,12 @@ fn report_source_recovers_a_halted_endpoint_without_faulting_the_class_driver() 
         .pending_reports
         .push_back(alloc::vec![0, 0, 0x05, 0, 0, 0, 0, 0]);
     device.host_mut().model_mut().process_int_ring();
-    assert_eq!(device.next_report(0, &mut buf), Ok(Some(REPORT_LEN)));
-    assert_eq!(buf, [0, 0, 0x05, 0, 0, 0, 0, 0]);
-    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+    assert_eq!(
+        device.next_report(0, BOOT_REPORT_LEN, &mut buf),
+        Ok(Some(BOOT_REPORT_LEN))
+    );
+    assert_eq!(buf[..BOOT_REPORT_LEN], [0, 0, 0x05, 0, 0, 0, 0, 0]);
+    assert_eq!(device.next_report(0, BOOT_REPORT_LEN, &mut buf), Ok(None));
 }
 
 #[test]
@@ -7283,8 +6945,8 @@ fn report_source_recovers_a_babble_halt_the_same_way() {
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
     attach_root_device(&mut device, 1).expect("enumeration succeeds");
 
-    let mut buf = [0u8; REPORT_LEN];
-    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+    let mut buf = [0u8; BOOT_REPORT_LEN];
+    assert_eq!(device.next_report(0, BOOT_REPORT_LEN, &mut buf), Ok(None));
     device.host_mut().model_mut().fault_one_report_completion =
         Some(CompletionCode::BabbleDetected);
     device
@@ -7295,7 +6957,7 @@ fn report_source_recovers_a_babble_halt_the_same_way() {
     device.host_mut().model_mut().process_int_ring();
 
     // Recovered, not surfaced: the class driver never sees the babble fault.
-    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+    assert_eq!(device.next_report(0, BOOT_REPORT_LEN, &mut buf), Ok(None));
 
     device
         .host_mut()
@@ -7303,9 +6965,12 @@ fn report_source_recovers_a_babble_halt_the_same_way() {
         .pending_reports
         .push_back(alloc::vec![0, 0, 0x04, 0, 0, 0, 0, 0]);
     device.host_mut().model_mut().process_int_ring();
-    assert_eq!(device.next_report(0, &mut buf), Ok(Some(REPORT_LEN)));
-    assert_eq!(buf, [0, 0, 0x04, 0, 0, 0, 0, 0]);
-    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+    assert_eq!(
+        device.next_report(0, BOOT_REPORT_LEN, &mut buf),
+        Ok(Some(BOOT_REPORT_LEN))
+    );
+    assert_eq!(buf[..BOOT_REPORT_LEN], [0, 0, 0x04, 0, 0, 0, 0, 0]);
+    assert_eq!(device.next_report(0, BOOT_REPORT_LEN, &mut buf), Ok(None));
 }
 
 #[test]
@@ -7326,8 +6991,8 @@ fn a_transient_transaction_error_during_bringup_recovers_and_keeps_the_keyboard(
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
     attach_root_device(&mut device, 1).expect("enumeration succeeds");
 
-    let mut buf = [0u8; REPORT_LEN];
-    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+    let mut buf = [0u8; BOOT_REPORT_LEN];
+    assert_eq!(device.next_report(0, BOOT_REPORT_LEN, &mut buf), Ok(None));
     // The device stays present (`device_gone` unset): its recovery handshake
     // succeeds, distinguishing this transient fault from a real unplug.
     device.host_mut().model_mut().fault_one_report_completion =
@@ -7341,7 +7006,7 @@ fn a_transient_transaction_error_during_bringup_recovers_and_keeps_the_keyboard(
 
     // Recovered and held parked — the class driver never sees the fault, and no
     // device-gone verdict lingers to trip a later detach.
-    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+    assert_eq!(device.next_report(0, BOOT_REPORT_LEN, &mut buf), Ok(None));
     assert!(
         device.device_live(0),
         "a transient transaction error never tears the present device down"
@@ -7365,9 +7030,12 @@ fn a_transient_transaction_error_during_bringup_recovers_and_keeps_the_keyboard(
         .pending_reports
         .push_back(alloc::vec![0, 0, 0x05, 0, 0, 0, 0, 0]);
     device.host_mut().model_mut().process_int_ring();
-    assert_eq!(device.next_report(0, &mut buf), Ok(Some(REPORT_LEN)));
-    assert_eq!(buf, [0, 0, 0x05, 0, 0, 0, 0, 0]);
-    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+    assert_eq!(
+        device.next_report(0, BOOT_REPORT_LEN, &mut buf),
+        Ok(Some(BOOT_REPORT_LEN))
+    );
+    assert_eq!(buf[..BOOT_REPORT_LEN], [0, 0, 0x05, 0, 0, 0, 0, 0]);
+    assert_eq!(device.next_report(0, BOOT_REPORT_LEN, &mut buf), Ok(None));
 }
 
 #[test]
@@ -7387,8 +7055,8 @@ fn a_keystroke_landing_during_recovery_is_deferred_and_never_recurses() {
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
     attach_root_device(&mut device, 1).expect("enumeration succeeds");
 
-    let mut buf = [0u8; REPORT_LEN];
-    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+    let mut buf = [0u8; BOOT_REPORT_LEN];
+    assert_eq!(device.next_report(0, BOOT_REPORT_LEN, &mut buf), Ok(None));
 
     // The device is present (no `device_gone`), so its recovery handshake
     // succeeds. Arm a fault on the first report *and*, one-shot, a second fault
@@ -7407,7 +7075,7 @@ fn a_keystroke_landing_during_recovery_is_deferred_and_never_recurses() {
     // Recovery ran once, deferred the re-entrant fault, and did not recurse:
     // the device is still live, the class driver saw no fault, and no
     // device-gone verdict lingers.
-    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+    assert_eq!(device.next_report(0, BOOT_REPORT_LEN, &mut buf), Ok(None));
     assert!(
         device.device_live(0),
         "the present device survives a keystroke landing during recovery"
@@ -7432,9 +7100,12 @@ fn a_keystroke_landing_during_recovery_is_deferred_and_never_recurses() {
         .pending_reports
         .push_back(alloc::vec![0, 0, 0x07, 0, 0, 0, 0, 0]);
     device.host_mut().model_mut().process_int_ring();
-    assert_eq!(device.next_report(0, &mut buf), Ok(Some(REPORT_LEN)));
-    assert_eq!(buf, [0, 0, 0x07, 0, 0, 0, 0, 0]);
-    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+    assert_eq!(
+        device.next_report(0, BOOT_REPORT_LEN, &mut buf),
+        Ok(Some(BOOT_REPORT_LEN))
+    );
+    assert_eq!(buf[..BOOT_REPORT_LEN], [0, 0, 0x07, 0, 0, 0, 0, 0]);
+    assert_eq!(device.next_report(0, BOOT_REPORT_LEN, &mut buf), Ok(None));
 }
 
 #[test]
@@ -7464,11 +7135,11 @@ fn rejected_report_records_its_completion_code_surviving_a_later_control_transfe
     // unreachable completion the decode rejects, and the halted endpoint's
     // recovery cannot complete (the gone device does not answer CLEAR_FEATURE),
     // so the fault is surfaced.
-    let mut buf = [0u8; REPORT_LEN];
+    let mut buf = [0u8; BOOT_REPORT_LEN];
     device.host_mut().model_mut().device_gone = true;
     device.host_mut().model_mut().fault_one_report_completion =
         Some(CompletionCode::UsbTransactionError);
-    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+    assert_eq!(device.next_report(0, BOOT_REPORT_LEN, &mut buf), Ok(None));
     device
         .host_mut()
         .model_mut()
@@ -7476,7 +7147,7 @@ fn rejected_report_records_its_completion_code_surviving_a_later_control_transfe
         .push_back(alloc::vec![0xAA, 0, 0, 0, 0, 0, 0, 0]);
     device.host_mut().model_mut().process_int_ring();
     assert_eq!(
-        device.next_report(0, &mut buf),
+        device.next_report(0, BOOT_REPORT_LEN, &mut buf),
         Err(DriverError::DeviceFault)
     );
     assert_eq!(
@@ -7559,12 +7230,12 @@ fn a_transient_split_fault_during_enumeration_retries_and_serves_the_device() {
         .pending_reports
         .push_back(alloc::vec![0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]);
     device.host_mut().model_mut().process_int_ring();
-    let mut buf = [0u8; REPORT_LEN];
+    let mut buf = [0u8; BOOT_REPORT_LEN];
     let len = device
-        .next_report(keyboard, &mut buf)
+        .next_report(keyboard, BOOT_REPORT_LEN, &mut buf)
         .expect("a report drains")
         .expect("a report is available");
-    assert_eq!(len, REPORT_LEN);
+    assert_eq!(len, BOOT_REPORT_LEN);
     assert_eq!(buf[2], 0x04, "the 'a' keycode reaches the report buffer");
 }
 
@@ -7607,9 +7278,9 @@ fn an_active_device_error_during_enumeration_is_not_retried() {
 fn next_report_before_enumeration_fails_closed() {
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
-    let mut buf = [0u8; REPORT_LEN];
+    let mut buf = [0u8; BOOT_REPORT_LEN];
     assert_eq!(
-        device.next_report(0, &mut buf),
+        device.next_report(0, BOOT_REPORT_LEN, &mut buf),
         Err(DriverError::DeviceFault)
     );
 }
@@ -7831,8 +7502,8 @@ fn acknowledge_clears_ip_only_and_a_zero_event_wake_never_writes_erdp() {
     // The (empty) drain dequeues nothing: `next_report` only arms a transfer
     // and writes no ERDP — so the controller is given no stale pointer to
     // re-assert on, and the loop does not spin.
-    let mut buf = [0u8; REPORT_LEN];
-    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+    let mut buf = [0u8; BOOT_REPORT_LEN];
+    assert_eq!(device.next_report(0, BOOT_REPORT_LEN, &mut buf), Ok(None));
     assert_eq!(
         device.host_mut().model_mut().erdp[0],
         erdp_before,
@@ -7848,7 +7519,10 @@ fn acknowledge_clears_ip_only_and_a_zero_event_wake_never_writes_erdp() {
         .pending_reports
         .push_back(alloc::vec![0, 0, 0x04, 0, 0, 0, 0, 0]);
     device.host_mut().model_mut().process_int_ring();
-    assert!(matches!(device.next_report(0, &mut buf), Ok(Some(_))));
+    assert!(matches!(
+        device.next_report(0, BOOT_REPORT_LEN, &mut buf),
+        Ok(Some(_))
+    ));
     assert!(
         !device.host_mut().model_mut().event_handler_busy,
         "the per-event ERDP advance releases Event Handler Busy"
@@ -7878,8 +7552,12 @@ fn a_cycle_owned_but_not_yet_landed_event_is_not_consumed_until_its_body_arrives
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
     attach_root_device(&mut device, 1).expect("enumeration succeeds");
-    let mut buf = [0u8; REPORT_LEN];
-    assert_eq!(device.next_report(0, &mut buf), Ok(None), "arms a transfer");
+    let mut buf = [0u8; BOOT_REPORT_LEN];
+    assert_eq!(
+        device.next_report(0, BOOT_REPORT_LEN, &mut buf),
+        Ok(None),
+        "arms a transfer"
+    );
 
     // The controller posts the report event (its cycle bit is visible) but its
     // body has not yet reached RAM — the entry reads as cycle-owned, all-zero.
@@ -7895,7 +7573,7 @@ fn a_cycle_owned_but_not_yet_landed_event_is_not_consumed_until_its_body_arrives
     // The drain leaves the not-yet-landed entry alone: no consume, no fault,
     // and crucially no ERDP write (which would desync the ring and wedge EHB).
     assert_eq!(
-        device.next_report(0, &mut buf),
+        device.next_report(0, BOOT_REPORT_LEN, &mut buf),
         Ok(None),
         "a cycle-owned but zero-body entry is not consumed"
     );
@@ -7908,7 +7586,10 @@ fn a_cycle_owned_but_not_yet_landed_event_is_not_consumed_until_its_body_arrives
     // report is delivered.
     device.host_mut().model_mut().land_last_event();
     assert!(
-        matches!(device.next_report(0, &mut buf), Ok(Some(_))),
+        matches!(
+            device.next_report(0, BOOT_REPORT_LEN, &mut buf),
+            Ok(Some(_))
+        ),
         "the report is delivered once its body lands"
     );
     assert_ne!(
@@ -7968,8 +7649,8 @@ fn forged_report_residual_fails_closed() {
     let mem = shared_mem();
     let mut device = started_device(MockXhci::with_device(&mem), &mem);
     attach_root_device(&mut device, 1).expect("enumeration succeeds");
-    let mut buf = [0u8; REPORT_LEN];
-    assert_eq!(device.next_report(0, &mut buf), Ok(None));
+    let mut buf = [0u8; BOOT_REPORT_LEN];
+    assert_eq!(device.next_report(0, BOOT_REPORT_LEN, &mut buf), Ok(None));
     device.host_mut().model_mut().forge_report_residual = true;
     device
         .host_mut()
@@ -7978,41 +7659,9 @@ fn forged_report_residual_fails_closed() {
         .push_back(alloc::vec![0, 0, 0x04, 0, 0, 0, 0, 0]);
     device.host_mut().model_mut().process_int_ring();
     assert_eq!(
-        device.next_report(0, &mut buf),
+        device.next_report(0, BOOT_REPORT_LEN, &mut buf),
         Err(DriverError::DeviceFault)
     );
-}
-
-#[test]
-fn boot_keyboard_decodes_over_the_xhci_transfer_ring() {
-    let mem = shared_mem();
-    let mut device = started_device(MockXhci::with_device(&mem), &mem);
-    attach_root_device(&mut device, 1).expect("enumeration succeeds");
-    let mut arm = [0u8; REPORT_LEN];
-    assert_eq!(device.next_report(0, &mut arm), Ok(None));
-    // Left Shift held plus key usage 0x04 (`A`).
-    device
-        .host_mut()
-        .model_mut()
-        .pending_reports
-        .push_back(alloc::vec![0x02, 0, 0x04, 0, 0, 0, 0, 0]);
-    device.host_mut().model_mut().process_int_ring();
-
-    let mut keyboard = BootKeyboard::new(device.engine_for(0));
-    let zero = tairix_abi::driver::input::InputEvent {
-        kind: tairix_abi::driver::input::InputEventKind::Key,
-        reserved0: 0,
-        code: 0,
-        value: 0,
-    };
-    let mut events = [zero; 4];
-    let drained = keyboard.poll(&mut events).expect("poll succeeds");
-    assert_eq!(drained, 2);
-    assert_eq!(events[0].code, 0x04, "key press decoded");
-    assert_eq!(events[0].value, 1);
-    assert_eq!(events[1].code, 0xE1, "left-shift modifier edge");
-    assert_eq!(events[1].value, 1);
-    assert_eq!(keyboard.poll(&mut events), Ok(0));
 }
 
 /// Decode a fixture and return its interfaces, panicking (test-only) on a
@@ -8033,7 +7682,7 @@ fn interface_info_decodes_and_fails_closed() {
     assert!(info.is_servable());
     // A HID interface carries no bulk endpoints.
     assert!(!info.has_bulk_pair());
-    assert_eq!((info.bulk_in_dci, info.bulk_out_dci), (0, 0));
+    assert_eq!((info.bulk_in.dci, info.bulk_out.dci), (0, 0));
     assert_eq!(
         interfaces[1], None,
         "a single-interface device stays single"
@@ -8045,10 +7694,10 @@ fn interface_info_decodes_and_fails_closed() {
     let msd = decoded(&MOCK_MSD_CONFIG_DESCRIPTOR)[0].expect("MSD interface decodes");
     assert_eq!(msd.class24, 0x08_06_50);
     assert!(msd.has_bulk_pair());
-    assert_eq!(msd.bulk_in_dci, 7);
-    assert_eq!(msd.bulk_in_max_packet, 512);
-    assert_eq!(msd.bulk_out_dci, 8);
-    assert_eq!(msd.bulk_out_max_packet, 512);
+    assert_eq!(msd.bulk_in.dci, 7);
+    assert_eq!(msd.bulk_in.max_packet, 512);
+    assert_eq!(msd.bulk_out.dci, 8);
+    assert_eq!(msd.bulk_out.max_packet, 512);
 
     // Too short to hold the configuration header.
     assert_eq!(
@@ -8107,10 +7756,8 @@ fn interface_info_decodes_every_interface_of_a_composite_device() {
 }
 
 #[test]
-fn interface_info_drops_a_malformed_hid_interface_but_serves_its_sibling() {
-    // Interface 0 is a HID interface with **no** interrupt-IN endpoint
-    // (malformed — nothing to poll); interface 1 is a well-formed boot
-    // mouse. The malformed one is dropped, the sibling still served.
+fn an_interface_with_nothing_to_serve_leaves_its_sibling_served() {
+    // Interface 0 carries no endpoint at all; interface 1 is a boot mouse.
     let config: [u8; 34] = [
         // Configuration: wTotalLength=34, 2 interfaces.
         0x09, 0x02, 0x22, 0x00, 0x02, 0x01, 0x00, 0xA0, 0x32, //
@@ -8121,16 +7768,11 @@ fn interface_info_drops_a_malformed_hid_interface_but_serves_its_sibling() {
         0x07, 0x05, 0x81, 0x03, 0x04, 0x00, 0x0A,
     ];
     let interfaces = decoded(&config);
-    let mouse = interfaces[0].expect("the well-formed sibling is served");
+    let empty = interfaces[0].expect("the empty interface decodes");
+    assert!(!empty.is_servable(), "nothing to poll");
+    let mouse = interfaces[1].expect("the sibling decodes");
     assert_eq!(mouse.class24, 0x03_01_02);
-    assert_eq!(interfaces[1], None);
-
-    // A device whose *only* interface is the malformed HID one has nothing
-    // decodable and is rejected whole.
-    assert_eq!(
-        InterfaceInfo::decode_all(&config[..18]),
-        Err(DriverError::BadMagic)
-    );
+    assert!(mouse.is_servable());
 }
 
 #[test]
@@ -8175,8 +7817,7 @@ fn describe_device_emits_the_hid_child_node() {
     let emitted = node.match_keys()[0];
     assert_eq!(emitted, HwMatchKey::usb(0x046D, 0xC077, 0x03_01_01));
 
-    // A HID boot-keyboard class bind key (HID class `0x03_01_01`, the key the
-    // `usb_kbd` class driver carries) resolves against the emitted node by
+    // A HID boot-keyboard class bind key resolves against the emitted node by
     // class (vendor/product wildcard), exactly as `devmgr` will. Constructed
     // inline so this protocol crate does not depend on a concrete driver.
     let keyboard_key = HwMatchKey::usb(0, 0, 0x03_01_01);
@@ -8185,6 +7826,13 @@ fn describe_device_emits_the_hid_child_node() {
     // interface.
     let mouse_key = HwMatchKey::usb(0, 0, 0x03_01_02);
     assert!(!mouse_key.matches(&emitted));
+    assert_eq!(
+        node.resources()
+            .iter()
+            .find_map(|resource| resource.property_value().ok()),
+        Some((HwProperty::UsbInterface, 0)),
+        "the node names the interface its driver's requests address"
+    );
 }
 
 #[test]
@@ -8232,6 +7880,62 @@ fn enumerating_a_mass_storage_device_configures_its_bulk_endpoint_pair() {
     let emitted = node.match_keys()[0];
     assert_eq!(emitted, HwMatchKey::usb(0x0781, 0x5567, 0x08_06_50));
     assert!(HwMatchKey::usb(0, 0, 0x08_06_50).matches(&emitted));
+}
+
+#[test]
+fn a_superspeed_bulk_endpoint_bursts_what_its_companion_states() {
+    let msd = decoded(&MOCK_SS_MSD_CONFIG_DESCRIPTOR)[0].expect("SS MSD interface decodes");
+    let bulk_in = BulkEndpoint {
+        dci: 7,
+        max_packet: 1024,
+        max_burst: 15,
+    };
+    assert_eq!(msd.bulk_in, bulk_in);
+    assert_eq!(
+        msd.bulk_out,
+        BulkEndpoint {
+            dci: 8,
+            max_packet: 1024,
+            max_burst: 3,
+        }
+    );
+    assert_eq!(bulk_in.burst(SPEED_SUPER), 15);
+    assert_eq!(bulk_in.burst(SPEED_HIGH), 0, "only SuperSpeed bulk bursts");
+    assert_eq!(
+        BulkEndpoint {
+            max_burst: 200,
+            ..bulk_in
+        }
+        .burst(SPEED_SUPER),
+        15,
+        "a companion stating more than USB 3 allows"
+    );
+
+    let mem = shared_mem();
+    let mut device = started_device(MockXhci::with_ss_msd_device(&mem), &mem);
+    attach_root_device(&mut device, 1).expect("the SS MSD enumerates");
+    let model = device.host_mut().model_mut();
+    assert_eq!((model.bulk_in.dci, model.bulk_in.max_burst), (7, 15));
+    assert_eq!((model.bulk_out.dci, model.bulk_out.max_burst), (8, 3));
+}
+
+#[test]
+fn a_companion_completes_only_the_endpoint_it_follows() {
+    let config: [u8; 42] = [
+        0x09, 0x02, 0x2A, 0x00, 0x01, 0x01, 0x00, 0x80, 0x32, //
+        0x09, 0x04, 0x00, 0x00, 0x02, 0x08, 0x06, 0x50, 0x00, //
+        0x07, 0x05, 0x83, 0x02, 0x00, 0x04, 0x00, //
+        0x04, 0x24, 0x00, 0x00, //
+        0x06, 0x30, 0x0F, 0x00, 0x00, 0x00, //
+        0x07, 0x05, 0x04, 0x02, 0x00, 0x04, 0x00,
+    ];
+    let msd = decoded(&config)[0].expect("interface decodes");
+    assert_eq!(
+        (msd.bulk_in.dci, msd.bulk_in.max_burst),
+        (7, 0),
+        "a descriptor between"
+    );
+    assert_eq!((msd.bulk_out.dci, msd.bulk_out.max_burst), (8, 0));
 }
 
 #[test]
@@ -8337,10 +8041,10 @@ fn decode_all_captures_a_second_bulk_pair_for_uas_pipes() {
     config[2..4].copy_from_slice(&total.to_le_bytes());
     let interfaces = InterfaceInfo::decode_all(&config).expect("decodes");
     let iface = interfaces[0].expect("one interface");
-    assert_eq!(iface.bulk_out_dci, 2); // EP1 OUT
-    assert_eq!(iface.bulk_in_dci, 5); // EP2 IN
-    assert_eq!(iface.bulk_in2_dci, 7); // EP3 IN
-    assert_eq!(iface.bulk_out2_dci, 8); // EP4 OUT
+    assert_eq!(iface.bulk_out.dci, 2); // EP1 OUT
+    assert_eq!(iface.bulk_in.dci, 5); // EP2 IN
+    assert_eq!(iface.bulk_in2.dci, 7); // EP3 IN
+    assert_eq!(iface.bulk_out2.dci, 8); // EP4 OUT
 }
 
 /// One interface of a [`configuration`]: its number, its class triple, and
@@ -8392,8 +8096,8 @@ fn an_endpoint_descriptor_for_endpoint_zero_is_skipped() {
     let msd = [0x08, 0x06, 0x50];
     let config = configuration(&[(0, msd, &[bulk(0x80), bulk(0x81), bulk(0x02)])]);
     let iface = decoded(&config)[0].expect("the interface decodes");
-    assert_eq!((iface.bulk_in_dci, iface.bulk_out_dci), (3, 4));
-    assert_eq!(iface.bulk_in2_dci, 0, "EP0 took no pipe");
+    assert_eq!((iface.bulk_in.dci, iface.bulk_out.dci), (3, 4));
+    assert_eq!(iface.bulk_in2.dci, 0, "EP0 took no pipe");
 
     let keyboard = [0x03, 0x01, 0x01];
     let config = configuration(&[(0, keyboard, &[interrupt(0x80), interrupt(0x81)])]);
@@ -8401,11 +8105,12 @@ fn an_endpoint_descriptor_for_endpoint_zero_is_skipped() {
     assert_eq!(iface.int_dci, 3, "the real report endpoint, never EP0");
 
     let config = configuration(&[(0, keyboard, &[interrupt(0x80)])]);
+    let iface = decoded(&config)[0].expect("the interface decodes");
     assert_eq!(
-        InterfaceInfo::decode_all(&config),
-        Err(DriverError::BadMagic),
+        iface.int_dci, 1,
         "a keyboard whose only report endpoint is EP0 has none"
     );
+    assert!(!iface.is_servable());
 }
 
 #[test]
@@ -8413,9 +8118,9 @@ fn an_endpoint_named_twice_in_one_configuration_is_skipped() {
     let uas = [0x08, 0x06, 0x62];
     let config = configuration(&[(0, uas, &[bulk(0x81), bulk(0x81), bulk(0x02), bulk(0x02)])]);
     let iface = decoded(&config)[0].expect("the interface decodes");
-    assert_eq!((iface.bulk_in_dci, iface.bulk_out_dci), (3, 4));
+    assert_eq!((iface.bulk_in.dci, iface.bulk_out.dci), (3, 4));
     assert_eq!(
-        (iface.bulk_in2_dci, iface.bulk_out2_dci),
+        (iface.bulk_in2.dci, iface.bulk_out2.dci),
         (0, 0),
         "no second pipe over the first's context"
     );
@@ -8880,7 +8585,7 @@ fn faulted_downstream_report_can_confirm_and_detach_a_gone_device() {
     device
         .bring_up(&delay)
         .expect("the keyboard behind the hub is reached");
-    let mut buf = [0u8; REPORT_LEN];
+    let mut buf = [0u8; BOOT_REPORT_LEN];
     // A downstream low/full-speed device's hot-removal surfaces as a Split
     // Transaction Error on its own endpoint (the hub's transaction translator
     // can no longer reach it). The endpoint halts; its recovery cannot complete
@@ -8890,7 +8595,7 @@ fn faulted_downstream_report_can_confirm_and_detach_a_gone_device() {
     device.host_mut().model_mut().device_gone = true;
     device.host_mut().model_mut().fault_one_report_completion =
         Some(CompletionCode::SplitTransactionError);
-    assert_eq!(device.next_report(1, &mut buf), Ok(None));
+    assert_eq!(device.next_report(1, BOOT_REPORT_LEN, &mut buf), Ok(None));
     device
         .host_mut()
         .model_mut()
@@ -8900,7 +8605,7 @@ fn faulted_downstream_report_can_confirm_and_detach_a_gone_device() {
 
     device.host_mut().model_mut().hub_downstream_status = 0;
     assert_eq!(
-        device.next_report(1, &mut buf),
+        device.next_report(1, BOOT_REPORT_LEN, &mut buf),
         Err(DriverError::DeviceFault)
     );
     assert_eq!(device.detach_if_device_gone(1), Ok(true));
@@ -8922,7 +8627,7 @@ fn fault_driven_detach_rearms_a_stashed_hub_change_for_reattach() {
     device
         .bring_up(&delay)
         .expect("the keyboard behind the hub is reached");
-    let mut buf = [0u8; REPORT_LEN];
+    let mut buf = [0u8; BOOT_REPORT_LEN];
     // The downstream device is unplugged: its interrupt-IN endpoint faults
     // with a Split Transaction Error, halts, and cannot recover (the gone
     // device does not answer CLEAR_FEATURE), so the fault is surfaced and the
@@ -8930,7 +8635,7 @@ fn fault_driven_detach_rearms_a_stashed_hub_change_for_reattach() {
     device.host_mut().model_mut().device_gone = true;
     device.host_mut().model_mut().fault_one_report_completion =
         Some(CompletionCode::SplitTransactionError);
-    assert_eq!(device.next_report(1, &mut buf), Ok(None));
+    assert_eq!(device.next_report(1, BOOT_REPORT_LEN, &mut buf), Ok(None));
     device.host_mut().model_mut().hub_downstream_status = 0;
     device.host_mut().model_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
     device
@@ -8945,7 +8650,7 @@ fn fault_driven_detach_rearms_a_stashed_hub_change_for_reattach() {
     device.host_mut().model_mut().process_int_ring();
 
     assert_eq!(
-        device.next_report(1, &mut buf),
+        device.next_report(1, BOOT_REPORT_LEN, &mut buf),
         Err(DriverError::DeviceFault)
     );
     assert_eq!(device.detach_if_device_gone(1), Ok(true));
@@ -8990,11 +8695,11 @@ fn trailing_freed_slot_transfer_event_is_drained_not_faulted() {
     // recovery cannot complete (the gone device does not answer
     // CLEAR_FEATURE), so the fault path confirms the downstream port is gone
     // and frees the device slot.
-    let mut buf = [0u8; REPORT_LEN];
+    let mut buf = [0u8; BOOT_REPORT_LEN];
     device.host_mut().model_mut().device_gone = true;
     device.host_mut().model_mut().fault_one_report_completion =
         Some(CompletionCode::SplitTransactionError);
-    assert_eq!(device.next_report(1, &mut buf), Ok(None));
+    assert_eq!(device.next_report(1, BOOT_REPORT_LEN, &mut buf), Ok(None));
     device.host_mut().model_mut().hub_downstream_status = 0;
     device
         .host_mut()
@@ -9003,7 +8708,7 @@ fn trailing_freed_slot_transfer_event_is_drained_not_faulted() {
         .push_back(alloc::vec![0xAA, 0, 0, 0, 0, 0, 0, 0]);
     device.host_mut().model_mut().process_int_ring();
     assert_eq!(
-        device.next_report(1, &mut buf),
+        device.next_report(1, BOOT_REPORT_LEN, &mut buf),
         Err(DriverError::DeviceFault)
     );
     assert_eq!(device.detach_if_device_gone(1), Ok(true));
@@ -9067,13 +8772,13 @@ fn fault_driven_detach_leaves_unposted_hub_latch_for_rearm() {
     device
         .bring_up(&delay)
         .expect("the keyboard behind the hub is reached");
-    let mut buf = [0u8; REPORT_LEN];
+    let mut buf = [0u8; BOOT_REPORT_LEN];
     // Unplug: the endpoint faults and cannot recover (the gone device does not
     // answer CLEAR_FEATURE), so the slot is freed on the captured code.
     device.host_mut().model_mut().device_gone = true;
     device.host_mut().model_mut().fault_one_report_completion =
         Some(CompletionCode::SplitTransactionError);
-    assert_eq!(device.next_report(1, &mut buf), Ok(None));
+    assert_eq!(device.next_report(1, BOOT_REPORT_LEN, &mut buf), Ok(None));
     device.host_mut().model_mut().hub_downstream_status = 0;
     device.host_mut().model_mut().hub_downstream_change = PORT_CHANGE_CONNECTION;
     device
@@ -9084,7 +8789,7 @@ fn fault_driven_detach_leaves_unposted_hub_latch_for_rearm() {
     device.host_mut().model_mut().process_int_ring();
 
     assert_eq!(
-        device.next_report(1, &mut buf),
+        device.next_report(1, BOOT_REPORT_LEN, &mut buf),
         Err(DriverError::DeviceFault)
     );
     assert_eq!(device.detach_if_device_gone(1), Ok(true));
@@ -9137,8 +8842,8 @@ fn live_downstream_report_fault_recovers_the_endpoint_and_keeps_the_device() {
     device
         .bring_up(&delay)
         .expect("the keyboard behind the hub is reached");
-    let mut buf = [0u8; REPORT_LEN];
-    assert_eq!(device.next_report(1, &mut buf), Ok(None));
+    let mut buf = [0u8; BOOT_REPORT_LEN];
+    assert_eq!(device.next_report(1, BOOT_REPORT_LEN, &mut buf), Ok(None));
     device.host_mut().model_mut().fault_one_report_completion = Some(CompletionCode::StallError);
     device
         .host_mut()
@@ -9149,7 +8854,7 @@ fn live_downstream_report_fault_recovers_the_endpoint_and_keeps_the_device() {
 
     // The halt is recovered and the URB held parked — no fault reaches the
     // class driver, and the device stays enumerated.
-    assert_eq!(device.next_report(1, &mut buf), Ok(None));
+    assert_eq!(device.next_report(1, BOOT_REPORT_LEN, &mut buf), Ok(None));
     assert!(
         device.device_live(1),
         "a live device's recoverable halt never tears the device down"
@@ -9166,8 +8871,11 @@ fn live_downstream_report_fault_recovers_the_endpoint_and_keeps_the_device() {
         .pending_reports
         .push_back(alloc::vec![0, 0, 0x05, 0, 0, 0, 0, 0]);
     device.host_mut().model_mut().process_int_ring();
-    assert_eq!(device.next_report(1, &mut buf), Ok(Some(REPORT_LEN)));
-    assert_eq!(buf, [0, 0, 0x05, 0, 0, 0, 0, 0]);
+    assert_eq!(
+        device.next_report(1, BOOT_REPORT_LEN, &mut buf),
+        Ok(Some(BOOT_REPORT_LEN))
+    );
+    assert_eq!(buf[..BOOT_REPORT_LEN], [0, 0, 0x05, 0, 0, 0, 0, 0]);
 }
 
 #[test]
@@ -9194,11 +8902,11 @@ fn split_transaction_fault_detaches_without_a_hub_status_confirmation() {
         .bring_up(&delay)
         .expect("the keyboard behind the hub is reached");
 
-    let mut buf = [0u8; REPORT_LEN];
+    let mut buf = [0u8; BOOT_REPORT_LEN];
     device.host_mut().model_mut().device_gone = true;
     device.host_mut().model_mut().fault_one_report_completion =
         Some(CompletionCode::SplitTransactionError);
-    assert_eq!(device.next_report(1, &mut buf), Ok(None));
+    assert_eq!(device.next_report(1, BOOT_REPORT_LEN, &mut buf), Ok(None));
     device
         .host_mut()
         .model_mut()
@@ -9206,7 +8914,7 @@ fn split_transaction_fault_detaches_without_a_hub_status_confirmation() {
         .push_back(alloc::vec![0xAA, 0, 0, 0, 0, 0, 0, 0]);
     device.host_mut().model_mut().process_int_ring();
     assert_eq!(
-        device.next_report(1, &mut buf),
+        device.next_report(1, BOOT_REPORT_LEN, &mut buf),
         Err(DriverError::DeviceFault)
     );
     assert_eq!(
@@ -9275,11 +8983,11 @@ fn split_transaction_detach_frees_the_slot_even_when_disable_is_never_confirmed(
         .bring_up(&delay)
         .expect("the keyboard behind the hub is reached");
 
-    let mut buf = [0u8; REPORT_LEN];
+    let mut buf = [0u8; BOOT_REPORT_LEN];
     device.host_mut().model_mut().device_gone = true;
     device.host_mut().model_mut().fault_one_report_completion =
         Some(CompletionCode::SplitTransactionError);
-    assert_eq!(device.next_report(1, &mut buf), Ok(None));
+    assert_eq!(device.next_report(1, BOOT_REPORT_LEN, &mut buf), Ok(None));
     device
         .host_mut()
         .model_mut()
@@ -9287,7 +8995,7 @@ fn split_transaction_detach_frees_the_slot_even_when_disable_is_never_confirmed(
         .push_back(alloc::vec![0xAA, 0, 0, 0, 0, 0, 0, 0]);
     device.host_mut().model_mut().process_int_ring();
     assert_eq!(
-        device.next_report(1, &mut buf),
+        device.next_report(1, BOOT_REPORT_LEN, &mut buf),
         Err(DriverError::DeviceFault)
     );
 
@@ -9363,11 +9071,11 @@ fn a_failed_status_change_service_re_arms_the_watch_so_a_replug_is_still_seen() 
     // Transaction Error, halts, and cannot recover (the gone device does not
     // answer CLEAR_FEATURE); the slot is then freed directly on the captured
     // device-unreachable code, without a hub confirmation.
-    let mut buf = [0u8; REPORT_LEN];
+    let mut buf = [0u8; BOOT_REPORT_LEN];
     device.host_mut().model_mut().device_gone = true;
     device.host_mut().model_mut().fault_one_report_completion =
         Some(CompletionCode::SplitTransactionError);
-    assert_eq!(device.next_report(1, &mut buf), Ok(None));
+    assert_eq!(device.next_report(1, BOOT_REPORT_LEN, &mut buf), Ok(None));
     device
         .host_mut()
         .model_mut()
@@ -9375,7 +9083,7 @@ fn a_failed_status_change_service_re_arms_the_watch_so_a_replug_is_still_seen() 
         .push_back(alloc::vec![0xAA, 0, 0, 0, 0, 0, 0, 0]);
     device.host_mut().model_mut().process_int_ring();
     assert_eq!(
-        device.next_report(1, &mut buf),
+        device.next_report(1, BOOT_REPORT_LEN, &mut buf),
         Err(DriverError::DeviceFault)
     );
     assert_eq!(device.detach_if_device_gone(1), Ok(true));
@@ -10314,9 +10022,9 @@ fn a_failed_composite_attach_on_a_slot_that_will_not_disable_withholds_every_reg
     let mut device = started_device(mock, &mem);
     let (hub, status) = install_hub_and_ready_port(&mut device, 4);
     let held = device.dma_ref().live_chunks();
-    // The receiver's first HID class request faults once both interfaces'
-    // regions are claimed and configured, and its slot will not disable.
-    device.host_mut().model_mut().fault_class_requests = true;
+    // The receiver's SET_CONFIGURATION faults once both interfaces' regions
+    // are claimed and configured, and its slot will not disable.
+    device.host_mut().model_mut().fault_set_configuration = true;
     device.host_mut().model_mut().suppress_disable_completion = true;
     assert_eq!(
         device.attach_downstream_device(hub, 4, hub_port_speed(status), &TestDelay::default()),
@@ -11125,15 +10833,18 @@ fn bring_up_serves_a_keyboard_and_a_storage_stick_behind_the_hub_together() {
     assert_eq!(kbd_node.class(), Some(tairix_abi::HwDeviceClass::Input));
 
     // The keyboard's reports flow on its own index...
-    let mut buf = [0u8; REPORT_LEN];
-    assert_eq!(device.next_report(2, &mut buf), Ok(None));
+    let mut buf = [0u8; BOOT_REPORT_LEN];
+    assert_eq!(device.next_report(2, BOOT_REPORT_LEN, &mut buf), Ok(None));
     device
         .host_mut()
         .model_mut()
         .pending_reports
         .push_back(alloc::vec![0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]);
     device.host_mut().model_mut().process_int_ring();
-    assert_eq!(device.next_report(2, &mut buf), Ok(Some(REPORT_LEN)));
+    assert_eq!(
+        device.next_report(2, BOOT_REPORT_LEN, &mut buf),
+        Ok(Some(BOOT_REPORT_LEN))
+    );
     assert_eq!(buf[2], 0x04, "the keystroke reaches the keyboard's index");
 
     // ...and the stick's bulk transfers on its own index, concurrently.
@@ -11269,31 +10980,40 @@ fn bring_up_serves_a_keyboard_and_a_mouse_behind_the_hub_together() {
     assert_eq!(kbd_node.address(), (1 << 20) | 4);
 
     // The keyboard's reports flow on its own index...
-    let mut buf = [0u8; REPORT_LEN];
-    assert_eq!(device.next_report(2, &mut buf), Ok(None));
+    let mut buf = [0u8; BOOT_REPORT_LEN];
+    assert_eq!(device.next_report(2, BOOT_REPORT_LEN, &mut buf), Ok(None));
     device
         .host_mut()
         .model_mut()
         .pending_reports
         .push_back(alloc::vec![0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]);
     device.host_mut().model_mut().process_int_ring();
-    assert_eq!(device.next_report(2, &mut buf), Ok(Some(REPORT_LEN)));
+    assert_eq!(
+        device.next_report(2, BOOT_REPORT_LEN, &mut buf),
+        Ok(Some(BOOT_REPORT_LEN))
+    );
     assert_eq!(buf[2], 0x04, "the keystroke reaches the keyboard's index");
 
     // ...and the mouse's boot reports on its own index, concurrently.
-    let mut mouse_buf = [0u8; REPORT_LEN];
-    assert_eq!(device.next_report(1, &mut mouse_buf), Ok(None));
+    let mut mouse_buf = [0u8; BOOT_REPORT_LEN];
+    assert_eq!(
+        device.next_report(1, BOOT_REPORT_LEN, &mut mouse_buf),
+        Ok(None)
+    );
     device
         .host_mut()
         .model_mut()
         .pending_reports2
         .push_back(alloc::vec![0x01, 0x05, 0xFB, 0x00]);
     device.host_mut().model_mut().process_int2_ring();
-    assert_eq!(device.next_report(1, &mut mouse_buf), Ok(Some(4)));
     assert_eq!(
-        &mouse_buf[..4],
-        &[0x01, 0x05, 0xFB, 0x00],
-        "left button + X/Y deltas reach the mouse's index"
+        device.next_report(1, BOOT_REPORT_LEN, &mut mouse_buf),
+        Ok(Some(4))
+    );
+    assert_eq!(
+        mouse_buf[..4],
+        [0x01, 0x05, 0xFB, 0x00],
+        "the mouse's report reaches its own index as sent"
     );
 }
 
@@ -11442,28 +11162,37 @@ fn bring_up_serves_both_interfaces_of_a_composite_receiver() {
     assert_eq!(kbd_node.address(), mouse_node.address());
 
     // Keystrokes flow on the keyboard interface's index...
-    let mut buf = [0u8; REPORT_LEN];
-    assert_eq!(device.next_report(1, &mut buf), Ok(None));
+    let mut buf = [0u8; BOOT_REPORT_LEN];
+    assert_eq!(device.next_report(1, BOOT_REPORT_LEN, &mut buf), Ok(None));
     device
         .host_mut()
         .model_mut()
         .pending_reports
         .push_back(alloc::vec![0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]);
     device.host_mut().model_mut().process_int_ring();
-    assert_eq!(device.next_report(1, &mut buf), Ok(Some(REPORT_LEN)));
+    assert_eq!(
+        device.next_report(1, BOOT_REPORT_LEN, &mut buf),
+        Ok(Some(BOOT_REPORT_LEN))
+    );
     assert_eq!(buf[2], 0x04);
 
     // ...and mouse reports on the mouse interface's index, concurrently.
-    let mut mouse_buf = [0u8; REPORT_LEN];
-    assert_eq!(device.next_report(2, &mut mouse_buf), Ok(None));
+    let mut mouse_buf = [0u8; BOOT_REPORT_LEN];
+    assert_eq!(
+        device.next_report(2, BOOT_REPORT_LEN, &mut mouse_buf),
+        Ok(None)
+    );
     device
         .host_mut()
         .model_mut()
         .pending_reports2
         .push_back(alloc::vec![0x01, 0x05, 0xFB, 0x00]);
     device.host_mut().model_mut().process_int2_ring();
-    assert_eq!(device.next_report(2, &mut mouse_buf), Ok(Some(4)));
-    assert_eq!(&mouse_buf[..4], &[0x01, 0x05, 0xFB, 0x00]);
+    assert_eq!(
+        device.next_report(2, BOOT_REPORT_LEN, &mut mouse_buf),
+        Ok(Some(4))
+    );
+    assert_eq!(mouse_buf[..4], [0x01, 0x05, 0xFB, 0x00]);
 
     // A control transfer through the SIBLING index routes through the
     // slot's EP0 owner (the primary entry parked it), so a mouse class
@@ -11735,8 +11464,8 @@ fn bring_up_serves_a_keyboard_behind_a_nested_hub() {
     assert!(device.hub_watch_active());
 
     // Keystrokes flow end to end through both tiers.
-    let mut buf = [0u8; REPORT_LEN];
-    assert_eq!(device.next_report(2, &mut buf), Ok(None));
+    let mut buf = [0u8; BOOT_REPORT_LEN];
+    assert_eq!(device.next_report(2, BOOT_REPORT_LEN, &mut buf), Ok(None));
     device
         .host_mut()
         .model_mut()
@@ -11744,10 +11473,10 @@ fn bring_up_serves_a_keyboard_behind_a_nested_hub() {
         .push_back(alloc::vec![0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00]);
     device.host_mut().model_mut().process_int_ring();
     let len = device
-        .next_report(2, &mut buf)
+        .next_report(2, BOOT_REPORT_LEN, &mut buf)
         .expect("a report drains")
         .expect("a report is available");
-    assert_eq!(len, REPORT_LEN);
+    assert_eq!(len, BOOT_REPORT_LEN);
     assert_eq!(buf[2], 0x04, "the 'a' keycode crosses both hub tiers");
 }
 
@@ -11996,8 +11725,8 @@ fn hub_with_a_mouse_report_posted(mem: &SharedMem) -> UsbDevice<'static, ModelXh
     let delay = TestDelay::default();
     device.bring_up(&delay).expect("hub, keyboard and mouse");
     device.pump_reports().expect("both endpoints arm");
-    let mut buf = [0u8; REPORT_LEN];
-    let _ = device.next_report(1, &mut buf);
+    let mut buf = [0u8; BOOT_REPORT_LEN];
+    let _ = device.next_report(1, BOOT_REPORT_LEN, &mut buf);
     // Bring-up attaches the ports directly, so the scan is still armed from
     // start-up; settle it, since the steady state a mouse in motion pays for is
     // what this measures.
@@ -12018,7 +11747,7 @@ fn one_report_interrupt_cost(
     device: &mut UsbDevice<'_, ModelXhci, MockDma>,
 ) -> (usize, usize, usize) {
     let delay = TestDelay::default();
-    let mut buf = [0u8; REPORT_LEN];
+    let mut buf = [0u8; BOOT_REPORT_LEN];
     let regs = device.host_mut().model_mut().reg_reads;
     let bytes = device.dma_mut().read_bytes;
     let calls = device.dma_mut().read_calls;
@@ -12030,11 +11759,11 @@ fn one_report_interrupt_cost(
     assert_eq!(device.next_root_change(&delay), Ok(HubEvent::None));
     assert_eq!(device.next_hub_change(&delay), Ok(HubEvent::None));
     device
-        .next_report(1, &mut buf)
+        .next_report(1, BOOT_REPORT_LEN, &mut buf)
         .expect("the report drains")
         .expect("the posted mouse report is delivered");
     // The class driver's next submit finds nothing buffered and parks.
-    assert_eq!(device.next_report(1, &mut buf), Ok(None));
+    assert_eq!(device.next_report(1, BOOT_REPORT_LEN, &mut buf), Ok(None));
 
     (
         device.host_mut().model_mut().reg_reads - regs,

@@ -18,7 +18,7 @@ use tairix_abi::usb_urb::{
     decode_completion, UrbRequest, UsbDirection, UsbTransferType, URB_REQUEST_LEN,
 };
 use tairix_abi::{DriverError, Errno, HwDeviceClass, HwMatchKey, HwNode};
-use tairix_usb::transport::UrbEngine;
+use tairix_usb::transport::{UrbEngine, UrbScope};
 
 /// An arbitrary shared-buffer handle the URB names; the state machine uses the
 /// `shm` slice it is handed, not this value.
@@ -80,7 +80,18 @@ impl UrbEngine for MockEngine {
         Err(DriverError::NotFound)
     }
 
-    fn interrupt_in(&mut self, data: &mut [u8]) -> Result<Option<usize>, DriverError> {
+    fn scope(&self) -> Option<UrbScope> {
+        Some(UrbScope {
+            interface: 0,
+            endpoints: u32::MAX << 2,
+        })
+    }
+
+    fn interrupt_in(
+        &mut self,
+        _request: usize,
+        data: &mut [u8],
+    ) -> Result<Option<usize>, DriverError> {
         self.interrupt_calls += 1;
         if let Some(err) = self.interrupt_fault.take() {
             return Err(err);

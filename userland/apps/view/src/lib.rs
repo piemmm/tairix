@@ -448,6 +448,31 @@ impl Viewport {
         (scaled.0 > canvas.0, scaled.1 > canvas.1)
     }
 
+    /// Zoom to `per_mille`, held to this picture's ceiling, keeping the point
+    /// of the picture drawn at canvas-local `anchor` drawn there, as far as
+    /// the pan can reach. An anchor in the margin around a picture smaller
+    /// than the canvas holds the picture's nearest edge.
+    pub fn zoom_about(
+        &mut self,
+        per_mille: u32,
+        anchor: (i64, i64),
+        natural: (u32, u32),
+        canvas: (u32, u32),
+    ) {
+        let before = self.scaled(natural);
+        let held = (
+            anchored(self.pan.0, before.0, canvas.0, anchor.0),
+            anchored(self.pan.1, before.1, canvas.1, anchor.1),
+        );
+        self.set_zoom(per_mille);
+        self.cap_zoom(natural);
+        let after = self.scaled(natural);
+        self.pan = (
+            pan_holding(held.0, before.0, after.0, canvas.0, anchor.0),
+            pan_holding(held.1, before.1, after.1, canvas.1, anchor.1),
+        );
+    }
+
     /// Turn the picture a quarter turn, composing onto whatever the user has
     /// already done to it.
     ///
@@ -502,6 +527,28 @@ fn scale_axis(extent: u32, zoom: u32) -> u32 {
     u32::try_from(scaled)
         .unwrap_or(tairix_raster::MAX_DRAWING_EXTENT)
         .clamp(1, tairix_raster::MAX_DRAWING_EXTENT)
+}
+
+/// How far into the scaled picture, on one axis, the canvas-local `anchor`
+/// lies: past the pan, less the margin a picture smaller than the canvas is
+/// centred in, held to the picture.
+fn anchored(pan: u32, scaled: u32, canvas: u32, anchor: i64) -> i64 {
+    let margin = i64::from(canvas.saturating_sub(scaled) / 2);
+    (i64::from(pan) + anchor - margin).clamp(0, i64::from(scaled))
+}
+
+/// The pan that draws the point `held` pixels into a picture `before` wide at
+/// canvas-local `anchor` once it is `after` wide, within what the pan can
+/// reach.
+fn pan_holding(held: i64, before: u32, after: u32, canvas: u32, anchor: i64) -> u32 {
+    let moved = if before == 0 {
+        0
+    } else {
+        held * i64::from(after) / i64::from(before)
+    };
+    let margin = i64::from(canvas.saturating_sub(after) / 2);
+    let limit = pan_limit(after, canvas);
+    u32::try_from((moved - anchor + margin).clamp(0, i64::from(limit))).unwrap_or(limit)
 }
 
 /// How far the pan may reach on one axis: what the scaled picture has that

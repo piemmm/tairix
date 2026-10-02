@@ -21,7 +21,7 @@ use std::rc::Rc;
 
 use tairix_abi::driver::dma::{DmaHost, SlabCoherencyFn};
 use tairix_abi::driver::CompletionSignal;
-use tairix_abi::hwtree::HwResource;
+use tairix_abi::hwtree::{HwProperty, HwResource};
 use tairix_abi::{
     CapabilityId, DriverError, DriverHost, DriverKind, Errno, MmioMapError, MmioMapper,
 };
@@ -36,8 +36,41 @@ type IrqObservers = (Rc<Cell<u32>>, Rc<Cell<u32>>, Rc<Cell<u32>>);
 /// plus the device-visible base it reports for a DMA carve.
 struct Backing {
     handle: u64,
-    buffer: Box<[u8]>,
+    buffer: Mapping,
     device_base: u64,
+}
+
+/// One page of a [`Mapping`].
+#[derive(Clone, Copy)]
+#[repr(C, align(4096))]
+struct Page([u8; 4096]);
+
+/// A mock mapping's memory, page-aligned as every kernel mapping is, so a
+/// register access through it is aligned exactly as on hardware.
+struct Mapping {
+    pages: Box<[Page]>,
+    len: usize,
+}
+
+impl Mapping {
+    fn zeroed(len: usize) -> Self {
+        Self {
+            pages: vec![Page([0; 4096]); len.div_ceil(4096)].into_boxed_slice(),
+            len,
+        }
+    }
+
+    const fn len(&self) -> usize {
+        self.len
+    }
+
+    fn as_ptr(&self) -> *const u8 {
+        self.pages.as_ptr().cast()
+    }
+
+    fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.pages.as_mut_ptr().cast()
+    }
 }
 
 /// A stateful mock `GrantSyscalls`. The `Rc<Cell>` call counters are cloned
@@ -167,7 +200,7 @@ impl MockSyscalls {
     /// across later `Vec` growth, so the value stays valid after the mock
     /// moves into the host).
     fn back(&self, handle: u64, len: usize, device_base: u64) -> u64 {
-        let buffer = vec![0u8; len].into_boxed_slice();
+        let buffer = Mapping::zeroed(len);
         let base = buffer.as_ptr() as usize as u64;
         self.backings.borrow_mut().push(Backing {
             handle,
@@ -199,7 +232,9 @@ impl MockSyscalls {
     }
 }
 
-impl GrantSyscalls for MockSyscalls {
+// SAFETY: every address answered is inside a backing buffer the mock owns,
+// handed out with write access, and no test uses one after the mock is dropped.
+unsafe impl GrantSyscalls for MockSyscalls {
     fn boot_facts(&self) -> Option<tairix_abi::BootFacts> {
         Some(tairix_abi::BootFacts {
             arch: tairix_abi::Arch::Aarch64,
@@ -212,8 +247,8 @@ impl GrantSyscalls for MockSyscalls {
     fn mmio_map(&self, handle: u64, offset: u64, len: usize) -> i64 {
         self.mmio_calls.set(self.mmio_calls.get() + 1);
         self.last_mmio.set((offset, len));
-        let backings = self.backings.borrow();
-        match backings.iter().find(|b| b.handle == handle) {
+        let mut backings = self.backings.borrow_mut();
+        match backings.iter_mut().find(|b| b.handle == handle) {
             // Mirror the kernel: the `[offset, offset + len)` sub-region must
             // lie wholly inside the granted backing, and the returned VA is
             // the sub-region's base (`backing_base + offset`), never the whole
@@ -225,7 +260,7 @@ impl GrantSyscalls for MockSyscalls {
                 if len == 0 || end > b.buffer.len() as u64 {
                     return -i64::from(Errno::OutOfRange.as_i32());
                 }
-                b.buffer.as_ptr() as usize as i64 + offset as i64
+                b.buffer.as_mut_ptr() as usize as i64 + offset as i64
             }
             None => -i64::from(Errno::NotFound.as_i32()),
         }
@@ -233,11 +268,11 @@ impl GrantSyscalls for MockSyscalls {
 
     fn dma_alloc(&self, handle: u64, len: usize, device_out: &mut u64) -> i64 {
         self.dma_calls.set(self.dma_calls.get() + 1);
-        let backings = self.backings.borrow();
-        match backings.iter().find(|b| b.handle == handle) {
+        let mut backings = self.backings.borrow_mut();
+        match backings.iter_mut().find(|b| b.handle == handle) {
             Some(b) if len <= b.buffer.len() => {
                 *device_out = b.device_base;
-                b.buffer.as_ptr() as usize as i64
+                b.buffer.as_mut_ptr() as usize as i64
             }
             Some(_) => -i64::from(Errno::OutOfMemory.as_i32()),
             None => -i64::from(Errno::NotFound.as_i32()),
@@ -319,11 +354,11 @@ impl GrantSyscalls for MockSyscalls {
         // region's frames into the caller and writing the registry's own
         // record of the size. An unknown handle fails closed `NotFound`
         // with `len_out` untouched.
-        let backings = self.backings.borrow();
-        match backings.iter().find(|b| b.handle == handle) {
+        let mut backings = self.backings.borrow_mut();
+        match backings.iter_mut().find(|b| b.handle == handle) {
             Some(b) => {
                 *len_out = b.buffer.len() as u64;
-                b.buffer.as_ptr() as usize as i64
+                b.buffer.as_mut_ptr() as usize as i64
             }
             None => -i64::from(Errno::NotFound.as_i32()),
         }
@@ -1275,6 +1310,29 @@ fn endpoint_grant_reads_the_endpoint_grant_base() {
 }
 
 #[test]
+fn a_property_reads_its_own_key_alone() {
+    let host = RtDriverHost::new(
+        caps(&[]),
+        MockSyscalls::new(),
+        &[
+            GrantedResource::new(7, HwResource::endpoint(0xD012_5701)),
+            GrantedResource::new(8, HwResource::property(HwProperty::UsbInterface, 3)),
+        ],
+        None,
+    )
+    .unwrap();
+    assert_eq!(host.property(HwProperty::UsbInterface), Some(3));
+    let bare = RtDriverHost::new(
+        caps(&[CapabilityId::MMIO_MAP]),
+        MockSyscalls::new(),
+        &[regs_grant()],
+        None,
+    )
+    .unwrap();
+    assert_eq!(bare.property(HwProperty::UsbInterface), None);
+}
+
+#[test]
 fn endpoint_grant_is_none_without_an_endpoint_grant() {
     let mock = MockSyscalls::new();
     let host =
@@ -1329,6 +1387,42 @@ fn map_shared_maps_the_granted_region() {
     // Both the base and the kernel-reported region length come back; the
     // driver never sizes the shared bytes from the granting task's claim.
     assert_eq!(host.map_shared(), Ok((base, 64)));
+}
+
+#[test]
+fn the_shared_buffer_is_handed_out_once_and_whole() {
+    let mock = MockSyscalls::new();
+    mock.back(SHM_HANDLE, 64, 0);
+    let host = RtDriverHost::new(
+        caps(&[CapabilityId::SHM]),
+        mock,
+        &[GrantedResource::new(SHM_HANDLE, HwResource::shared(0x5147))],
+        None,
+    )
+    .unwrap();
+    let buffer = host.shared_buffer(32).expect("mapped");
+    assert_eq!(buffer.len(), 64, "the kernel's own length");
+    buffer[63] = 7;
+    assert_eq!(buffer[63], 7);
+    assert_eq!(
+        host.shared_buffer(32),
+        Err(DriverError::Busy),
+        "never a second alias"
+    );
+}
+
+#[test]
+fn a_shared_buffer_shorter_than_asked_is_refused() {
+    let mock = MockSyscalls::new();
+    mock.back(SHM_HANDLE, 64, 0);
+    let host = RtDriverHost::new(
+        caps(&[CapabilityId::SHM]),
+        mock,
+        &[GrantedResource::new(SHM_HANDLE, HwResource::shared(0x5147))],
+        None,
+    )
+    .unwrap();
+    assert_eq!(host.shared_buffer(65), Err(DriverError::LengthOutOfRange));
 }
 
 #[test]

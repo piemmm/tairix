@@ -1,8 +1,8 @@
 //! Input driver class (`drivers/input/*`).
 //!
 //! Input drivers report user-generated events: keyboard, pointer, and
-//! scroll. The shipped drivers are `ps2`, `usb_kbd`, `usb_mouse`, and the
-//! virtio-input pair.
+//! scroll. The shipped drivers are `ps2`, `usb_hid`, and the virtio-input
+//! pair.
 
 use super::DriverError;
 
@@ -17,10 +17,20 @@ pub enum InputEventKind {
     /// Pointer motion along an axis; `code` selects the axis
     /// (`0 = X`, `1 = Y`), `value` carries the signed delta.
     Pointer = 2,
-    /// Scroll wheel along an axis; encoding matches `Pointer`, so a positive
-    /// `Y` value is a detent toward the user, scrolling toward the end.
+    /// Scroll wheel along an axis, in scroll units
+    /// ([`SCROLL_UNITS_PER_DETENT`] to a detent); `code` selects the axis as
+    /// for `Pointer`. A positive `Y` value is toward the user and a positive
+    /// `X` value toward the logical end, both scrolling toward the end.
     Scroll = 3,
 }
+
+/// How many scroll units one wheel detent is worth.
+///
+/// The one unit every layer carries a scroll in — the device decode, the seat
+/// channel, and the window event — so a fine wheel reports its own fraction
+/// of a detent and nothing between the device and the viewport rounds a slow
+/// turn away. It is the evdev hi-res and Windows `WHEEL_DELTA` convention.
+pub const SCROLL_UNITS_PER_DETENT: i32 = 120;
 
 impl InputEventKind {
     /// Raw on-wire value.
@@ -109,36 +119,6 @@ pub trait Input {
     ///
     /// [`DriverHandle`]: crate::driver::DriverHandle
     fn poll(&mut self, events: &mut [InputEvent]) -> Result<usize, DriverError>;
-}
-
-/// The HID report-delivery seam between the bus driver that services
-/// a device's interrupt-IN endpoint and the input decoder that turns
-/// reports into [`InputEvent`]s.
-///
-/// The seam lives here because its two sides are *sibling* drivers —
-/// `drivers/bus/usb` produces reports, the HID class drivers
-/// (`drivers/input/usb_kbd`, `drivers/input/usb_mouse`) consume them — and drivers may depend only on `lib/*`, never on
-/// each other. Host tests drive a decoder over a
-/// mock queue; on metal the implementation drains the device's
-/// interrupt-IN endpoint through the xHCI transfer ring.
-pub trait ReportSource {
-    /// Copy the next pending input report into `buf`.
-    ///
-    /// Returns `Ok(None)` when no report is pending and
-    /// `Ok(Some(len))` — the report's byte length, `<= buf.len()` —
-    /// when one was delivered. A source must never claim more bytes
-    /// than `buf` holds; consumers reject such a claim as a
-    /// [`DriverError::DeviceFault`] (fail closed).
-    ///
-    /// # Errors
-    ///
-    /// [`DriverError::DeviceFault`] if the transport reported an
-    /// unrecoverable error.
-    ///
-    /// # Capabilities
-    ///
-    /// None beyond those the implementing transport already holds.
-    fn next_report(&mut self, buf: &mut [u8]) -> Result<Option<usize>, DriverError>;
 }
 
 #[cfg(test)]

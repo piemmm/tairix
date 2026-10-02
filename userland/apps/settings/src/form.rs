@@ -181,6 +181,13 @@ pub enum Setting {
     DoubleClick,
     /// How far the pointer moves for a movement of the mouse.
     PointerSpeed,
+    /// Whether a tap on a touchpad clicks.
+    TapToClick,
+    /// Whether two fingers on a touchpad move the content rather than the
+    /// view.
+    NaturalScroll,
+    /// How far a touchpad finger moves the pointer.
+    TrackpadSpeed,
     /// How long a key is held before it repeats.
     RepeatDelay,
     /// How often a held key repeats.
@@ -219,6 +226,9 @@ impl Setting {
             Self::PrimaryButton => SettingsKey::PointerPrimary,
             Self::DoubleClick => SettingsKey::DoubleClick,
             Self::PointerSpeed => SettingsKey::PointerSpeed,
+            Self::TapToClick => SettingsKey::TouchpadTap,
+            Self::NaturalScroll => SettingsKey::TouchpadNatural,
+            Self::TrackpadSpeed => SettingsKey::TouchpadSpeed,
             Self::RepeatDelay => SettingsKey::RepeatDelay,
             Self::RepeatRate => SettingsKey::RepeatRate,
             Self::ScreensaverAfter => SettingsKey::ScreensaverAfter,
@@ -251,6 +261,9 @@ impl Setting {
             Self::PrimaryButton => "Primary button",
             Self::DoubleClick => "Double-click speed",
             Self::PointerSpeed => "Pointer speed",
+            Self::TapToClick => "Tap to click",
+            Self::NaturalScroll => "Natural scrolling",
+            Self::TrackpadSpeed => "Tracking speed",
             Self::RepeatDelay => "Repeat delay",
             Self::RepeatRate => "Repeat rate",
             Self::ScreensaverAfter => "Start after",
@@ -314,6 +327,18 @@ impl Setting {
                  program on the desktop uses the same interval."
             }
             Self::PointerSpeed => "How far the pointer moves for a movement of the mouse.",
+            Self::TapToClick => {
+                "Tap with one finger to click, two to open a menu, three for the middle button. \
+                 Tap and touch again at once to drag."
+            }
+            Self::NaturalScroll => {
+                "Two fingers move what is shown, as on a touchscreen. Off, they move the view, \
+                 as a wheel does."
+            }
+            Self::TrackpadSpeed => {
+                "How far the pointer moves for a movement of a finger. A faster movement always \
+                 goes further."
+            }
             Self::RepeatDelay => "How long a key is held before it starts to repeat.",
             Self::RepeatRate => {
                 "How often a held key repeats. Off types it once, however long it is held."
@@ -395,6 +420,17 @@ impl Setting {
             Self::PointerSpeed => Offer::scale(
                 &speed_ladder(settings.pointer_speed),
                 &settings.pointer_speed,
+                ("Slow", "Fast"),
+            ),
+            Self::TapToClick => list(pick(&SWITCH, settings.touchpad.tap, switch_label)),
+            Self::NaturalScroll => list(pick(
+                &SWITCH,
+                settings.touchpad.natural_scroll,
+                switch_label,
+            )),
+            Self::TrackpadSpeed => Offer::scale(
+                &speed_ladder(settings.touchpad.speed),
+                &settings.touchpad.speed,
                 ("Slow", "Fast"),
             ),
             Self::RepeatDelay => Offer::scale(
@@ -484,6 +520,13 @@ impl Setting {
                 &speed_ladder(settings.pointer_speed),
                 index,
                 &mut settings.pointer_speed,
+            ),
+            Self::TapToClick => set(&SWITCH, index, &mut settings.touchpad.tap),
+            Self::NaturalScroll => set(&SWITCH, index, &mut settings.touchpad.natural_scroll),
+            Self::TrackpadSpeed => set(
+                &speed_ladder(settings.touchpad.speed),
+                index,
+                &mut settings.touchpad.speed,
             ),
             Self::RepeatDelay => set(
                 &millis_ladder(&REPEAT_DELAY_LADDER_MS, settings.repeat_delay),
@@ -1201,6 +1244,21 @@ const MOUSE_GROUPS: [GroupSpec; 1] = [GroupSpec {
     footnote: None,
 }];
 
+/// The Trackpad pane's one group.
+const TRACKPAD_GROUPS: [GroupSpec; 1] = [GroupSpec {
+    caption: "TOUCHPAD",
+    settings: &[
+        Declared::Desktop(Setting::TapToClick),
+        Declared::Desktop(Setting::NaturalScroll),
+        Declared::Desktop(Setting::TrackpadSpeed),
+    ],
+    pictures: None,
+    footnote: Some(
+        "Two fingers moving together scroll and two spreading or closing zoom, wherever \
+         the program under the pointer zooms. A clickpad pressed with two fingers opens a menu.",
+    ),
+}];
+
 /// The Keyboard pane's one group, and what the pane cannot offer.
 const KEYBOARD_GROUPS: [GroupSpec; 1] = [GroupSpec {
     caption: "KEY REPEAT",
@@ -1323,6 +1381,8 @@ pub enum Composition {
     Notifications,
     /// The Mouse pane.
     Mouse,
+    /// The Trackpad pane.
+    Trackpad,
     /// The Keyboard pane.
     Keyboard,
     /// The Screensaver pane.
@@ -1344,6 +1404,7 @@ impl Composition {
             Self::TcpIp => &TCP_IP_GROUPS,
             Self::Notifications => &NOTIFICATION_GROUPS,
             Self::Mouse => &MOUSE_GROUPS,
+            Self::Trackpad => &TRACKPAD_GROUPS,
             Self::Keyboard => &KEYBOARD_GROUPS,
             Self::Screensaver => &SCREENSAVER_GROUPS,
             Self::LockScreen => &LOCK_GROUPS,
@@ -1360,6 +1421,7 @@ impl Composition {
             | Self::Wallpaper
             | Self::Notifications
             | Self::Mouse
+            | Self::Trackpad
             | Self::Keyboard
             | Self::Screensaver
             | Self::LockScreen => Posture::Immediate,
@@ -1392,6 +1454,7 @@ impl Composition {
                 | Self::Wallpaper
                 | Self::Notifications
                 | Self::Mouse
+                | Self::Trackpad
                 | Self::Keyboard
                 | Self::Screensaver
                 | Self::LockScreen
@@ -1453,6 +1516,7 @@ impl Composition {
             Self::Wallpaper => &SettingsKey::PINBOARD,
             Self::Notifications => &SettingsKey::NOTIFICATIONS,
             Self::Mouse => &SettingsKey::POINTER,
+            Self::Trackpad => &SettingsKey::TOUCHPAD,
             Self::Keyboard => &SettingsKey::KEYBOARD,
             Self::Screensaver => &SettingsKey::SCREENSAVER,
             Self::LockScreen => &SettingsKey::LOCK,

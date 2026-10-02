@@ -14,8 +14,9 @@
 //!   ([`client::EventDrain`], plus [`client::EventSource`] where the source
 //!   parks), so an app creates, presents, closes, and reads events without
 //!   ever polling, plus
-//!   [`pointer_input_events`] and [`key_input_event`] — the one
-//!   translation from a delivered wire pointer or key event into the input
+//!   [`pointer_input_events`], [`scroll_input_events`],
+//!   [`pinch_input_events`] and [`key_input_event`] — the one translation
+//!   from a delivered wire pointer, wheel, pinch or key event into the input
 //!   vocabulary the shared controls consume, so no app carries a private
 //!   copy of it.
 //!
@@ -79,9 +80,9 @@ pub use appbar::{
     QUIT_ROW,
 };
 pub use client::{
-    damage_in, key_input_event, pointer_input_events, pointer_point, present_damage, DeclaredTip,
-    EventDrain, EventError, EventSource, Parked, Repaint, Target, WindowClient, WindowEvents,
-    WindowTransport, EVENT_MAILBOX_CAPACITY,
+    damage_in, key_input_event, pinch_input_events, pointer_input_events, pointer_point,
+    present_damage, scroll_input_events, DeclaredTip, EventDrain, EventError, EventSource, Parked,
+    Repaint, Target, WindowClient, WindowEvents, WindowTransport, EVENT_MAILBOX_CAPACITY,
 };
 pub use desktop::Desktop;
 #[cfg(feature = "rt")]

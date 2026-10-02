@@ -3624,7 +3624,7 @@ mod tests {
         caps.insert(tairix_abi::CapabilityId::DRV_LOAD);
         let pid = ctx
             .spawn_driver_process(
-                "/System/Drivers/input/usb_kbd/Run",
+                "/System/Drivers/input/usb_hid/Run",
                 b"driver-image-bytes",
                 caps,
                 &[],
@@ -3639,7 +3639,7 @@ mod tests {
             .expect("the admitted bundled driver has a capability record");
         assert_eq!(
             record.name(),
-            "usb_kbd",
+            "usb_hid",
             "a bundle's `Run` entry point names its owning driver directory"
         );
     }

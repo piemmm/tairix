@@ -41,9 +41,10 @@ mod kernel {
     use core::sync::atomic::{AtomicU8, Ordering};
 
     use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
+    use tairix_itest_witness::field_str;
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
-    use tairix_log::{Event, EventId, FieldValue, Sink};
+    use tairix_log::{Event, EventId, Sink};
 
     // The canonical QEMU `virt` device tree, dumped and embedded at build
     // time: QEMU passes no `x0` DTB pointer at an ELF `-kernel` entry.
@@ -77,14 +78,6 @@ mod kernel {
 
     /// The `dns-sd` exits seen so far.
     static LOOKUPS_EXITED: AtomicU8 = AtomicU8::new(0);
-
-    /// The string value of `event`'s field `key`, if present.
-    fn field_str<'e>(event: &Event<'e>, key: &str) -> Option<&'e str> {
-        event.fields.iter().find_map(|field| match field.value {
-            FieldValue::Str(s) if field.key == key => Some(s),
-            _ => None,
-        })
-    }
 
     /// Sink that replays every audit record through the serial sink and
     /// reports PASS on the first audited `exit` after the last lookup's.

@@ -3,7 +3,7 @@
 Shared terminal key map for TAIRiX console-input producers (`lib/keymap`,
 `AGENTS.md` §6 / §2.2 — `plans/PI.md` P11).
 
-A directly attached keyboard driver (`drivers/input/usb_kbd`,
+A directly attached keyboard driver (`drivers/input/usb_hid`,
 `drivers/input/ps2`) decodes its device's scancodes into the `tairix_input::Key`
 vocabulary, then must turn each key press into the byte sequence a terminal
 sends down its input stream — a printable character as itself, `Ctrl-C` as

@@ -19,7 +19,7 @@ use tairix_abi::{DriverError, RegisterWindow};
 #[cfg(any(test, feature = "mock"))]
 mod mock;
 #[cfg(any(test, feature = "mock"))]
-pub use mock::{ChainView, DeviceShim, MockTransport};
+pub use mock::{ChainView, ConfigResponder, DeviceShim, MockTransport};
 
 /// `VIRTIO_F_VERSION_1` (virtio 1.2 §6): the device follows the modern
 /// interface rather than the legacy one.
@@ -259,6 +259,16 @@ pub trait Transport {
     /// Read `buf.len()` bytes from the device-configuration area
     /// starting at byte `offset`.
     fn read_config(&self, offset: usize, buf: &mut [u8]);
+
+    /// Write `data` to the device-configuration area starting at byte
+    /// `offset`, one byte at a time in ascending order.
+    ///
+    /// A device whose configuration is a query (virtio-input's
+    /// `select`/`subsel`) answers in the bytes that follow, so a driver writes
+    /// the query here and reads the answer back through
+    /// [`read_config`](Self::read_config). A byte outside the window is not
+    /// written.
+    fn write_config(&mut self, offset: usize, data: &[u8]);
 
     /// Acknowledge the device's interrupt after the driver has consumed
     /// the completions it signalled, so the device de-asserts its line.

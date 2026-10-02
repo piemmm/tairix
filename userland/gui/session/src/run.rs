@@ -395,6 +395,21 @@ mod program {
         }
     }
 
+    /// The production touch [`SeatEventReader`]: the seat-addressed
+    /// `touch_read` drain of the boot seat's touch channel, owner-gated
+    /// kernel-side against the live lease on every call.
+    struct TouchReader;
+
+    impl SeatEventReader for TouchReader {
+        fn read(&mut self, buf: &mut [u8]) -> Result<usize, Errno> {
+            let ret = tairix_rt::touch_read(SEAT_PRIMARY, buf);
+            if ret < 0 {
+                return Err(Errno::from_syscall(ret));
+            }
+            usize::try_from(ret).map_err(|_| Errno::LengthOutOfRange)
+        }
+    }
+
     /// The production keyboard [`SeatEventReader`]: the seat-addressed
     /// `keyboard_read` drain of the boot seat's keyboard channel,
     /// owner-gated kernel-side against the live lease on every call.
@@ -835,6 +850,14 @@ mod program {
             width: screen.width,
             height: screen.height,
         })
+    }
+
+    /// Drive the seat's pointer by `policy`: the button order and speed, what
+    /// a touch means, and the density a touchscreen is measured by.
+    fn drive_pointer<C, T>(pointer: &mut DeviceInputSource<C, T>, policy: &InputPolicy) {
+        pointer.set_policy(policy.primary, policy.speed);
+        pointer.set_touch(policy.touch);
+        pointer.set_density(policy.density);
     }
 
     /// Classify one drain fault: losing the seat is the session's normal
@@ -1840,8 +1863,11 @@ mod program {
         let memory_total =
             tairix_procinfo::memory_total_bytes(&tairix_procinfo::IpcTransport).unwrap_or(0);
         let screen = Rect::new(0, 0, mode.width_px, mode.height_px);
-        let Ok(mut pointer) = DeviceInputSource::new(SeatInputChannel::new(PointerReader), screen)
-        else {
+        let Ok(mut pointer) = DeviceInputSource::new(
+            SeatInputChannel::new(PointerReader),
+            SeatInputChannel::new(TouchReader),
+            screen,
+        ) else {
             return app::fail(
                 APP_NAME,
                 EXIT_BAD_MODE,
@@ -1851,6 +1877,7 @@ mod program {
         // Built on the defaults; the loop head reconciles the user's policy
         // into it, and into the pointer, once the settings load.
         let mut input_policy = InputPolicy::of(&DesktopSettings::default());
+        drive_pointer(&mut pointer, &input_policy);
         let mut keyboard =
             KeyboardInputSource::new(SeatInputChannel::new(KeyboardReader), input_policy.repeat);
 
@@ -2548,7 +2575,7 @@ mod program {
             }
             let input_now = InputPolicy::of(desktop.settings());
             if input_now != input_policy {
-                pointer.set_policy(input_now.primary, input_now.speed);
+                drive_pointer(&mut pointer, &input_now);
                 keyboard.set_repeat(input_now.repeat);
                 compositor.set_double_click(input_now.double_click);
                 if input_now.double_click != input_policy.double_click {
@@ -2636,16 +2663,19 @@ mod program {
                 park = lock.park_deadline_ns(now_ns, park);
                 park = elevate.park_deadline_ns(now_ns, park);
                 park = keyboard.park_deadline_ns(now_ns, park);
+                park = pointer.park_deadline_ns(now_ns, park);
                 park = idle.park_deadline_ns(now_ns, park);
                 park = saver.park_deadline_ns(now_ns, park);
                 serve_park_ns(&switch, departure.as_ref(), now_ns, park)
             };
             let waited = tairix_rt::waitset_wait(set, timeout_ns, &mut token);
-            // A held key's repeat is seat input the device never sent, so a
-            // wait that ended for one is served exactly as the seat's input is.
-            let repeat_due = waited != 0
-                && Errno::from_syscall(waited) == Errno::TimedOut
-                && keyboard.repeat_due(tairix_rt::clock_get());
+            // A held key's repeat, and a touch acting at its deadline, are
+            // seat input the device never sent, so a wait that ended for one
+            // is served exactly as the seat's input is.
+            let repeat_due = waited != 0 && Errno::from_syscall(waited) == Errno::TimedOut && {
+                let now_ns = tairix_rt::clock_get();
+                keyboard.repeat_due(now_ns) || pointer.touch_due(now_ns)
+            };
             if repeat_due {
                 token = SEAT_TOKEN;
             } else if waited != 0 || idle.is_due(tairix_rt::clock_get()) {
@@ -3387,8 +3417,8 @@ mod program {
                         // rebuilt for the mode now in force rather than left
                         // on the one this session came up with.
                         let screen_rect = Rect::new(0, 0, mode.width_px, mode.height_px);
-                        let Ok(rebuilt) =
-                            DeviceInputSource::new(pointer.into_channel(), screen_rect)
+                        let (channel, touch) = pointer.into_channels();
+                        let Ok(rebuilt) = DeviceInputSource::new(channel, touch, screen_rect)
                         else {
                             shell.teardown(&mut compositor);
                             return app::fail(
@@ -3398,9 +3428,9 @@ mod program {
                             );
                         };
                         pointer = rebuilt;
-                        // Keep the user's button order and speed, and restart
+                        // Keep the user's pointer and touch policy, and restart
                         // idleness so the screen does not blank or lock at once.
-                        pointer.set_policy(input_policy.primary, input_policy.speed);
+                        drive_pointer(&mut pointer, &input_policy);
                         idle.input(tairix_rt::clock_get());
                     }
                     Ok(SessionWake::End) => {
@@ -3640,10 +3670,10 @@ mod program {
             // and the frame report's rate limit share it.
             let now_ns = tairix_rt::clock_get();
             // A lone press of Ctrl typed this wake shows where the pointer
-            // is, unless a button went with it: Ctrl-click is a gesture of
-            // its own.
+            // is, unless a button or the wheel went with it: Ctrl-click and
+            // Ctrl-wheel are gestures of their own.
             if let Some(tap) = keyboard.take_ctrl_tap() {
-                if pointer.buttons_quiet_since(tap.pressed_ns) && !switch.is_background() {
+                if pointer.quiet_since(tap.pressed_ns) && !switch.is_background() {
                     shell.locate_pointer(now_ns);
                 }
             }
@@ -6191,10 +6221,20 @@ mod program {
                 // belongs to the application, so forward it to that window's
                 // owner over the window channel. The picker is the session's
                 // own window, so a turn over it scrolls its listing here.
-                InputResponse::AppScroll { window, dx, dy } => {
+                InputResponse::AppScroll {
+                    window,
+                    local,
+                    dx,
+                    dy,
+                    modifiers,
+                } => {
                     if picker.wm_id() == Some(window) {
                         picker.scroll((dx, dy), shell, compositor);
-                    } else if let Some(window_id) = windows.ipc_id(window) {
+                    } else if let (Some(window_id), Ok(x), Ok(y)) = (
+                        windows.ipc_id(window),
+                        u32::try_from(local.x),
+                        u32::try_from(local.y),
+                    ) {
                         deliver(
                             server,
                             sink,
@@ -6204,7 +6244,48 @@ mod program {
                             picker,
                             &mut apps.service,
                             menu,
-                            &WindowEvent::Scrolled { window_id, dx, dy },
+                            &WindowEvent::Scrolled {
+                                window_id,
+                                x,
+                                y,
+                                dx,
+                                dy,
+                                modifiers: modifiers_to_abi(modifiers),
+                            },
+                        );
+                    }
+                }
+                // A step of a pinch that began over a client window: the
+                // zoom is the application's. The picker zooms nothing.
+                InputResponse::AppPinch {
+                    window,
+                    local,
+                    phase,
+                    scale,
+                    modifiers,
+                } => {
+                    if let (Some(window_id), Ok(x), Ok(y)) = (
+                        windows.ipc_id(window),
+                        u32::try_from(local.x),
+                        u32::try_from(local.y),
+                    ) {
+                        deliver(
+                            server,
+                            sink,
+                            shell,
+                            compositor,
+                            windows,
+                            picker,
+                            &mut apps.service,
+                            menu,
+                            &WindowEvent::Pinch {
+                                window_id,
+                                x,
+                                y,
+                                phase,
+                                scale,
+                                modifiers: modifiers_to_abi(modifiers),
+                            },
                         );
                     }
                 }

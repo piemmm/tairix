@@ -1,238 +1,263 @@
-//! HID boot-protocol keyboard report decode (USB HID 1.11 §B.1).
-//!
-//! A boot keyboard delivers a fixed 8-byte input report:
-//!
-//! | byte | content                                            |
-//! |------|----------------------------------------------------|
-//! | 0    | modifier bitmap (usages `0xE0..=0xE7`, bit `n` = `0xE0 + n`) |
-//! | 1    | reserved / OEM (not interpreted)                   |
-//! | 2..8 | up to six concurrently held key usage IDs (page 7) |
-//!
-//! The report carries *state*, not edges: every held key appears in
-//! every report. The decoder state therefore diffs each accepted report
-//! against the previous one and emits one [`InputEvent`] per key edge —
-//! release events first, then presses, then modifier changes — exactly
-//! once per edge.
+//! The keyboard decoder: a keyboard application's modifier and key fields read
+//! into the set of keys held, and every change between sets a key edge.
 
-use tairix_abi::driver::input::{Input, InputEvent, InputEventKind};
+use alloc::vec::Vec;
+
+use tairix_abi::driver::input::{InputEvent, InputEventKind};
 use tairix_abi::DriverError;
 
-use crate::{poll_source, PendingEvents, ReportDecode, ReportSource};
+use crate::console::KeyboardConsole;
+use crate::descriptor::{CollectionIndex, Field, ReportDescriptor, ReportId, ReportKind};
+use crate::usages::{KEY_ERROR_ROLL_OVER, MODIFIER_FIRST, MODIFIER_LAST, PAGE_KEYBOARD};
+use crate::{in_application, try_push, Decoded, SeatSink};
 
-/// Byte length of a *standard* boot keyboard input report (HID 1.11
-/// §B.1): one modifier byte, one reserved byte, and six key-array
-/// slots. Real hardware is not obliged to fill all six slots — see
-/// [`BOOT_KEYBOARD_REPORT_MIN`].
-pub const BOOT_KEYBOARD_REPORT_LEN: usize = 8;
+/// Keyboard usages held, one bit per usage `0..=255`; the page defines none
+/// above `0xE7`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct KeySet([u64; 4]);
 
-/// Smallest boot keyboard report the decoder accepts: the modifier byte
-/// plus the reserved byte, with zero key-array slots present.
-///
-/// The standard report is [`BOOT_KEYBOARD_REPORT_LEN`] (8) bytes, but
-/// real keyboards — especially composite devices that ignore
-/// `SET_PROTOCOL(boot)` — deliver a native interrupt-IN report shorter
-/// than that (a 6-byte report carrying only four key-array slots is
-/// common). Refusing such a report kills the whole keyboard; instead the
-/// decoder reads whatever key-array slots are present, exactly as the
-/// mouse decoder reads whatever axes a short mouse report carries.
-pub const BOOT_KEYBOARD_REPORT_MIN: usize = 2;
-
-/// Maximum key-array slots in a boot keyboard report (bytes 2..8). A
-/// shorter report carries fewer; a longer one is read only up to here.
-const KEY_SLOTS: usize = 6;
-
-/// HID usage ID of the first modifier (`LeftControl`); modifier bit `n`
-/// of report byte 0 surfaces as the `Key` code `MODIFIER_USAGE_BASE + n`
-/// (`0xE0..=0xE7`, HID Usage Tables).
-pub const MODIFIER_USAGE_BASE: u16 = 0xE0;
-
-/// Largest key-array error usage (`0x01` `ErrorRollOver`, `0x02`
-/// `POSTFail`, `0x03` `ErrorUndefined`). An array slot in `0x01..=0x03`
-/// marks the whole array as invalid for that report.
-const ERROR_USAGE_MAX: u8 = 0x03;
-
-/// Key-array value meaning "no key in this slot".
-const USAGE_NONE: u8 = 0x00;
-
-/// Worst-case events one report can decode to: six releases plus six
-/// presses (the key array fully replaced) plus eight modifier edges.
-const MAX_EVENTS: usize = 2 * KEY_SLOTS + 8;
-
-/// Boot-protocol keyboard state: the previously reported hold set.
-///
-/// Kept separate from [`BootKeyboard`] so the shared
-/// [`poll_source`] drain can borrow the state and the report source
-/// disjointly.
-pub(crate) struct KeyboardState {
-    modifiers: u8,
-    keys: [u8; KEY_SLOTS],
-}
-
-impl KeyboardState {
-    const fn new() -> Self {
-        Self {
-            modifiers: 0,
-            keys: [USAGE_NONE; KEY_SLOTS],
+impl KeySet {
+    fn insert(&mut self, usage: u16) {
+        if let Some(word) = self.0.get_mut(usize::from(usage / 64)) {
+            *word |= 1 << (usage % 64);
         }
     }
 
-    fn push_key(
-        pending: &mut PendingEvents<MAX_EVENTS>,
-        code: u16,
-        pressed: bool,
-    ) -> Result<(), DriverError> {
-        pending.push(InputEvent {
-            kind: InputEventKind::Key,
-            reserved0: 0,
-            code,
-            value: i32::from(pressed),
+    fn union(self, other: Self) -> Self {
+        let mut words = self.0;
+        for (word, other) in words.iter_mut().zip(other.0) {
+            *word |= other;
+        }
+        Self(words)
+    }
+
+    fn minus(self, other: Self) -> Self {
+        let mut words = self.0;
+        for (word, other) in words.iter_mut().zip(other.0) {
+            *word &= !other;
+        }
+        Self(words)
+    }
+
+    /// The usages held, ascending.
+    fn usages(self) -> impl Iterator<Item = u16> {
+        self.0.into_iter().zip(0u16..).flat_map(|(mut word, base)| {
+            core::iter::from_fn(move || {
+                let bit = u16::try_from(word.trailing_zeros())
+                    .ok()
+                    .filter(|&bit| bit < 64)?;
+                word &= word - 1;
+                Some(base * 64 + bit)
+            })
         })
     }
 }
 
-impl ReportDecode<MAX_EVENTS> for KeyboardState {
-    /// Validate and diff one boot keyboard report.
+/// The keys the last of one report held.
+#[derive(Clone, Copy, Debug)]
+struct Held {
+    report: ReportId,
+    keys: KeySet,
+}
+
+/// One keyboard application.
+#[derive(Debug)]
+pub struct KeyboardDecoder {
+    fields: Vec<usize>,
+    held: Vec<Held>,
+    /// The modifiers are a bitmap of their own, so a modifier usage in the
+    /// key array is not a second word on them.
+    modifier_bitmap: bool,
+    console: KeyboardConsole,
+}
+
+const fn is_modifier(usage: u16) -> bool {
+    usage >= MODIFIER_FIRST && usage <= MODIFIER_LAST
+}
+
+impl KeyboardDecoder {
+    /// The decoder for `application`, or `None` when it reads no key or
+    /// memory for it runs out.
+    #[must_use]
+    pub fn new(model: &ReportDescriptor, application: CollectionIndex) -> Option<Self> {
+        let mut fields = Vec::new();
+        let mut held: Vec<Held> = Vec::new();
+        for (index, field) in model.fields().iter().enumerate() {
+            let keyboard = field.kind == ReportKind::Input
+                && field.size <= 32
+                && in_application(model, field, application)
+                && model.usages(field).iter().any(|entry| {
+                    entry
+                        .nth(0)
+                        .is_some_and(|usage| usage.page == PAGE_KEYBOARD)
+                });
+            if !keyboard {
+                continue;
+            }
+            try_push(&mut fields, index)?;
+            if !held.iter().any(|held| held.report == field.report) {
+                try_push(
+                    &mut held,
+                    Held {
+                        report: field.report,
+                        keys: KeySet::default(),
+                    },
+                )?;
+            }
+        }
+        if fields.is_empty() {
+            return None;
+        }
+        let modifier_bitmap = fields.iter().any(|&index| {
+            let field = &model.fields()[index];
+            field.flags.is_variable()
+                && (0..field.count).any(|element| {
+                    model
+                        .element_usage(field, element)
+                        .is_some_and(|usage| usage.page == PAGE_KEYBOARD && is_modifier(usage.id))
+                })
+        });
+        Some(Self {
+            fields,
+            held,
+            modifier_bitmap,
+            console: KeyboardConsole::new(),
+        })
+    }
+
+    /// Decode `report` into key edges on `sink`.
     ///
-    /// Rejects only a report shorter than [`BOOT_KEYBOARD_REPORT_MIN`]
-    /// bytes ([`DriverError::LengthOutOfRange`]) without touching the
-    /// held state; a report that is longer than the buffer never
-    /// reaches the decoder (the source contract caps it). The key array
-    /// is bytes `2..len` capped at [`KEY_SLOTS`], so a keyboard that
-    /// delivers fewer than six slots (a short native report from a
-    /// device that ignores `SET_PROTOCOL(boot)`) is decoded rather than
-    /// refused. Byte 1 is reserved/OEM by the spec and deliberately not
-    /// interpreted — real keyboards put vendor data there, so enforcing
-    /// zero would refuse conforming hardware.
+    /// # Errors
     ///
-    /// If any key-array slot carries an error usage (`0x01..=0x03` —
-    /// rollover or POST failure), the array is unknown for this report:
-    /// the modifier bitmap (still valid per §B.1) is diffed, the held
-    /// key set is left untouched, and no key edges are fabricated
-    /// (never guess). A modifier usage in the array is the bitmap's to
-    /// report, and is not a key.
-    fn decode(
+    /// What `sink` refuses.
+    pub fn decode(
         &mut self,
+        model: &ReportDescriptor,
         report: &[u8],
-        pending: &mut PendingEvents<MAX_EVENTS>,
-    ) -> Result<(), DriverError> {
-        if report.len() < BOOT_KEYBOARD_REPORT_MIN {
-            return Err(DriverError::LengthOutOfRange);
-        }
-        let modifiers = report[0];
-        let present = (report.len() - BOOT_KEYBOARD_REPORT_MIN).min(KEY_SLOTS);
-        let mut keys = [USAGE_NONE; KEY_SLOTS];
-        keys[..present].copy_from_slice(&report[2..2 + present]);
-        // The bitmap alone says which modifiers are held: a modifier usage
-        // in the array would press a key the bitmap reports too.
-        for key in &mut keys {
-            if (MODIFIER_USAGE_BASE..MODIFIER_USAGE_BASE + 8).contains(&u16::from(*key)) {
-                *key = USAGE_NONE;
-            }
-        }
-        let array_valid = !keys
+        sink: &mut dyn SeatSink,
+    ) -> Result<Decoded, DriverError> {
+        let Some(slot) = self
+            .held
             .iter()
-            .any(|&k| k != USAGE_NONE && k <= ERROR_USAGE_MAX);
-
-        if array_valid {
-            // Releases first: keys held before but absent now. The held
-            // array keeps a hostile report's repeats, so a usage is released
-            // once however many slots it filled.
-            for (slot, &old) in self.keys.iter().enumerate() {
-                if old != USAGE_NONE && !keys.contains(&old) && !self.keys[..slot].contains(&old) {
-                    Self::push_key(pending, u16::from(old), false)?;
-                }
+            .position(|held| held.report.matches(report))
+        else {
+            return Ok(Decoded::NotMine);
+        };
+        let id = self.held[slot].report;
+        let mut keys = KeySet::default();
+        for &index in &self.fields {
+            let field = &model.fields()[index];
+            if field.report != id {
+                continue;
             }
-            // Presses: keys present now but not before. The duplicate
-            // guard means a hostile report repeating one usage in
-            // several slots still produces a single press.
-            for (slot, &new) in keys.iter().enumerate() {
-                if new != USAGE_NONE && !self.keys.contains(&new) && !keys[..slot].contains(&new) {
-                    Self::push_key(pending, u16::from(new), true)?;
-                }
-            }
-            self.keys = keys;
-        }
-
-        let changed = self.modifiers ^ modifiers;
-        for bit in 0u8..8 {
-            if changed & (1 << bit) != 0 {
-                let pressed = modifiers & (1 << bit) != 0;
-                Self::push_key(pending, MODIFIER_USAGE_BASE + u16::from(bit), pressed)?;
+            match read_keys(model, field, report, self.modifier_bitmap, &mut keys) {
+                Read::Keys => {}
+                Read::Phantom => return Ok(Decoded::Applied),
+                Read::Malformed => return Ok(Decoded::Malformed),
             }
         }
-        self.modifiers = modifiers;
+        let before = self.held_keys();
+        self.held[slot].keys = keys;
+        let after = self.held_keys();
+        self.emit(before.minus(after), false, sink)?;
+        self.emit(after.minus(before), true, sink)?;
+        Ok(Decoded::Applied)
+    }
+
+    /// Release every key held.
+    ///
+    /// # Errors
+    ///
+    /// What `sink` refuses.
+    pub fn release(&mut self, sink: &mut dyn SeatSink) -> Result<(), DriverError> {
+        let held = self.held_keys();
+        for held in &mut self.held {
+            held.keys = KeySet::default();
+        }
+        self.emit(held, false, sink)
+    }
+
+    fn held_keys(&self) -> KeySet {
+        self.held
+            .iter()
+            .fold(KeySet::default(), |keys, held| keys.union(held.keys))
+    }
+
+    /// One edge per usage in `keys`: a press puts its modifiers down before
+    /// its other keys, and a release lets the other keys go before the
+    /// modifiers, so a shifted key resolves under the shift it was typed with.
+    fn emit(
+        &mut self,
+        keys: KeySet,
+        pressed: bool,
+        sink: &mut dyn SeatSink,
+    ) -> Result<(), DriverError> {
+        let modifiers_first = pressed;
+        for pass in [modifiers_first, !modifiers_first] {
+            for usage in keys.usages().filter(|&usage| is_modifier(usage) == pass) {
+                let edge = InputEvent {
+                    kind: InputEventKind::Key,
+                    reserved0: 0,
+                    code: usage,
+                    value: i32::from(pressed),
+                };
+                if let Some(record) = self.console.feed(edge) {
+                    sink.key(&record)?;
+                }
+            }
+        }
         Ok(())
     }
 }
 
-/// A USB boot-protocol keyboard, reached through a [`ReportSource`].
-///
-/// The driver holds the source for the whole load; dropping the
-/// [`BootKeyboard`] is the quiesce step (the decoder issues the device
-/// nothing, so a reload is constructing a fresh instance over the same
-/// endpoint). The held-key set and the undrained-event latch are the
-/// only state carried between [`poll`](Input::poll) calls.
-pub struct BootKeyboard<S: ReportSource> {
-    source: S,
-    state: KeyboardState,
-    pending: PendingEvents<MAX_EVENTS>,
+enum Read {
+    Keys,
+    Phantom,
+    Malformed,
 }
 
-impl<S: ReportSource> BootKeyboard<S> {
-    /// Bind the decoder to the report stream reachable through
-    /// `source`. Performs no I/O; the first [`poll`](Input::poll) is
-    /// the first access.
-    #[must_use]
-    pub fn new(source: S) -> Self {
-        Self {
-            source,
-            state: KeyboardState::new(),
-            pending: PendingEvents::new(),
+/// The keys `field` holds in `report`. A modifier bitmap must be wholly in
+/// the report; a key slot past a short report holds no key, as a clipped
+/// report still carries the keys that arrived.
+fn read_keys(
+    model: &ReportDescriptor,
+    field: &Field,
+    report: &[u8],
+    modifier_bitmap: bool,
+    keys: &mut KeySet,
+) -> Read {
+    for element in 0..field.count {
+        let usage = if field.flags.is_variable() {
+            let Some(usage) = model.element_usage(field, element) else {
+                continue;
+            };
+            match field.value(report, element) {
+                Some(0) => continue,
+                Some(_) => usage,
+                None if is_modifier(usage.id) => return Read::Malformed,
+                None => continue,
+            }
+        } else {
+            let Some(value) = field.value(report, element) else {
+                continue;
+            };
+            match model.array_usage(field, value) {
+                Some(usage) if modifier_bitmap && is_modifier(usage.id) => continue,
+                Some(usage) => usage,
+                None => continue,
+            }
+        };
+        if usage.page != PAGE_KEYBOARD || usage.id == 0 {
+            continue;
         }
-    }
-
-    /// Mutable access to the underlying report source.
-    ///
-    /// A driver that owns the concrete source (e.g. the USB boot-keyboard
-    /// driver holding an xHCI [`ReportSource`]) reaches it through here to
-    /// drive source-specific controls the generic decoder has no business
-    /// knowing about — enabling the controller's completion interrupt and
-    /// acknowledging it around an `irq_wait`, so the keyboard is serviced
-    /// on its interrupt rather than busy-polled. The decode state is
-    /// untouched, so interleaving these calls with [`Input::poll`] is safe.
-    pub fn source_mut(&mut self) -> &mut S {
-        &mut self.source
-    }
-
-    /// Release every key and modifier the device last reported held, as a
-    /// report with nothing pressed would, so a key held as the device went
-    /// away is not left down. Edges already latched come first; call until it
-    /// returns `0`.
-    ///
-    /// # Errors
-    ///
-    /// [`DriverError::BufferTooSmall`] for an empty `events`.
-    pub fn release_all(&mut self, events: &mut [InputEvent]) -> Result<usize, DriverError> {
-        if events.is_empty() {
-            return Err(DriverError::BufferTooSmall);
+        if usage.id == KEY_ERROR_ROLL_OVER {
+            return Read::Phantom;
         }
-        if self.pending.is_empty() {
-            self.state
-                .decode(&[0; BOOT_KEYBOARD_REPORT_MIN], &mut self.pending)?;
-        }
-        Ok(self.pending.drain_into(events))
+        keys.insert(usage.id);
     }
+    Read::Keys
 }
 
-impl<S: ReportSource> Input for BootKeyboard<S> {
-    /// Drain pending keyboard reports into `events`.
-    ///
-    /// Each consumed report is diffed against the previous one and its
-    /// key edges appended; events that do not fit are latched for the
-    /// next `poll`, so a too-small buffer loses nothing. The per-call
-    /// report budget ([`crate::REPORT_POLL_BUDGET`]) bounds the work a
-    /// flooding device can force on one `poll`.
-    fn poll(&mut self, events: &mut [InputEvent]) -> Result<usize, DriverError> {
-        poll_source(&mut self.source, &mut self.state, &mut self.pending, events)
-    }
-}
+#[cfg(test)]
+#[path = "keyboard_tests.rs"]
+mod tests;

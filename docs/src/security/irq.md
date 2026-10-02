@@ -136,7 +136,7 @@ re-asserting every time the kernel re-arms it: a wedged or never-quiesced
 controller (a USB host controller whose interrupt condition the driver's
 acknowledge did not clear), or a hostile device, can drive the
 mask → wake → drain → re-arm → re-assert cycle indefinitely and peg the CPU
-that services it — the observed "usb_mouse / xhci pegged at 100% CPU"
+that services it — the observed "mouse driver / xhci pegged at 100% CPU"
 symptom, and a hard-lockup trigger when it coincides with an in-kernel park.
 
 The kernel therefore rate-limits each line. Under mask-before-wake a bound

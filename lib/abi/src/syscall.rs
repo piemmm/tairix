@@ -2684,6 +2684,37 @@ impl SyscallNumber {
     /// [`crate::CapabilityId::SHM`] and audited.
     pub const SHM_MAP_FROM: Self = Self(133);
 
+    /// Inject one touch frame into a seat (`plans/POINTING.md`; the touch
+    /// analogue of [`SyscallNumber::POINTER_INJECT`]).
+    ///
+    /// Arguments: `seat: u64` (the seat the touch surface belongs to; an
+    /// unknown id fails closed with [`crate::Errno::NotFound`]),
+    /// `buf: *const u8` (one [`crate::touch::TouchFrame`] record) and
+    /// `len: usize` (its length, [`crate::touch::TouchFrame::WIRE_LEN`]).
+    /// Returns the bytes consumed, or a negative error code. The kernel
+    /// validates the frame, stamps it with the injecting task and the
+    /// monotonic instant it arrived — over whatever the driver wrote — and
+    /// queues it on the seat's touch channel while the desktop holds the
+    /// seat, the oldest frame dropped when the channel is full; while the
+    /// seat is unowned the frame is consumed and discarded. Gated by
+    /// [`crate::CapabilityId::INPUT_INJECT`]. A malformed frame is refused
+    /// fail-closed.
+    pub const TOUCH_INJECT: Self = Self(134);
+
+    /// Read one touch frame from a seat's touch channel (`plans/POINTING.md`;
+    /// the touch analogue of [`SyscallNumber::POINTER_READ`]).
+    ///
+    /// Arguments: `seat: u64`, `buf: *mut u8` (at least
+    /// [`crate::touch::TouchFrame::WIRE_LEN`] bytes) and `len: usize`.
+    /// Returns the bytes written — one [`crate::touch::TouchFrame`] — or `0`
+    /// when the channel is momentarily drained; a buffer too small for a
+    /// frame fails closed with [`crate::Errno::BufferTooSmall`]. Gated by
+    /// [`crate::CapabilityId::INPUT_READ`] **and** owner-gated against the
+    /// seat's live lease, exactly as [`SyscallNumber::POINTER_READ`]: a
+    /// touchscreen's contacts can spell what was typed on an on-screen
+    /// keyboard, so they reach only the seat's owner.
+    pub const TOUCH_READ: Self = Self(135);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 

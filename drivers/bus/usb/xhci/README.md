@@ -5,8 +5,11 @@ sole owner of one xHCI controller. It maps the controller's register BAR, owns
 its DMA rings and root-hub ports, brings it up, enumerates the attached device,
 publishes one hardware-tree node per USB interface once a device is present,
 and **serves that interface's transfers** over the bus-agnostic URB transport to
-an autoloaded **class** driver (`drivers/input/usb_kbd`, …). It names no class
-driver, no board, and no bus (`AGENTS.md` §2.20 / §17.4). A device absent at
+an autoloaded **class** driver (`drivers/input/usb_hid`,
+`drivers/storage/usb_msd`). Each node names its interface number
+(`HwProperty::UsbInterface`), and a class driver's control requests may reach
+no other interface. It names no class driver, no board, and no bus (`AGENTS.md`
+§2.20 / §17.4). A device absent at
 boot is a first-class state: the controller comes up and waits for the first
 hot-plug connect (the onboard hub's status-change watch, or a root-port
 connect), so a cold boot with the keyboard unplugged works.
@@ -157,8 +160,8 @@ controller behaviour is a metal checklist (`plans/PI.md` §0.4).
 ## Test surface
 
 The xHCI protocol layers (bring-up, port/doorbell decode, ring state machines,
-DMA programming, the full HID enumeration chain, the `ReportSource` report path,
-and the URB transport) are tested in `lib/usb` (`cargo test -p tairix-usb`).
+DMA programming, enumeration, the report path, and the URB transport with its
+control-request scope) are tested in `lib/usb` (`cargo test -p tairix-usb`).
 
 `cargo test -p tairix-drv-bus-usb` exercises the pieces here: the `bringup`
 fail-closed paths up to the controller hand-off (the inert mock window faults —

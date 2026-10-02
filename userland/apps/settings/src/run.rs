@@ -53,11 +53,11 @@ mod program {
     use tairix_abi::pinboard_ipc::PinboardDocument;
     use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_abi::sysinfo::{SysinfoQueryId, SystemIdentity, Uptime};
-    use tairix_abi::window_ipc::{PointerAction, PreviewSubject, WindowEvent};
+    use tairix_abi::window_ipc::{PreviewSubject, WindowEvent};
     use tairix_abi::{Errno, ProcId};
     use tairix_appdata::RtHost;
     use tairix_controls::Keystroke;
-    use tairix_geometry::{Point, Rect, Region, Scale};
+    use tairix_geometry::{Rect, Region, Scale};
     use tairix_icon::{
         artwork_cache, ArtworkCache, IconArtworkSource, InlineArtwork, NoArtworkSeam,
     };
@@ -75,8 +75,9 @@ mod program {
     use tairix_wallpaper::{ApplyOutcome, CatalogItem, DesktopSettings, PINBOARD_PUBLISHER};
     use tairix_window::app::{self, AppWindow, Wake, EXIT_CHANNEL_LOST};
     use tairix_window::{
-        key_input_event, pointer_input_events, pointer_point, present_damage, Desktop, EventDrain,
-        EventError, EventMailbox, EventSource, Parked, Repaint, Target, WindowEvents,
+        key_input_event, pointer_input_events, pointer_point, present_damage, scroll_input_events,
+        Desktop, EventDrain, EventError, EventMailbox, EventSource, Parked, Repaint, Target,
+        WindowEvents,
     };
 
     /// The wait-set token of the applier's wake pipe: readable exactly when
@@ -1181,17 +1182,20 @@ mod program {
                 }),
             WindowEvent::Pointer { x, y, action, .. } => concluded(apply_pointer(
                 shell,
-                pointer_point(*x, *y),
-                *action,
+                pointer_input_events(*action, pointer_point(*x, *y)),
                 viewport,
                 scale,
                 theme,
                 damage,
             )),
-            WindowEvent::Scrolled { dx, dy, .. } => {
-                let scroll = InputEvent::PointerScrolled { dx: *dx, dy: *dy };
-                concluded(shell.on_pointer(&scroll, viewport, scale, theme, damage))
-            }
+            WindowEvent::Scrolled { x, y, dx, dy, .. } => concluded(apply_pointer(
+                shell,
+                scroll_input_events(pointer_point(*x, *y), *dx, *dy),
+                viewport,
+                scale,
+                theme,
+                damage,
+            )),
             // The desktop queued at least one target for this instance.
             WindowEvent::OpenRequested => Acted::Opened,
             // A picture a pane asked for. Answered by the loop, which holds
@@ -1225,6 +1229,7 @@ mod program {
             | WindowEvent::MenuClosed { .. }
             | WindowEvent::TerrainChanged { .. }
             | WindowEvent::LayerPointer { .. }
+            | WindowEvent::Pinch { .. }
             | WindowEvent::Key { .. }
             | WindowEvent::Focus { .. }
             | WindowEvent::Minimized { .. }
@@ -1302,15 +1307,14 @@ mod program {
     /// release asked for is not lost behind the press's bare repaint.
     fn apply_pointer(
         shell: &mut Shell,
-        at: Point,
-        action: PointerAction,
+        inputs: impl Iterator<Item = InputEvent>,
         viewport: Rect,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) -> ShellOutcome {
         let mut concluded = ShellOutcome::Idle;
-        for input in pointer_input_events(action, at) {
+        for input in inputs {
             let acted = shell.on_pointer(&input, viewport, scale, theme, damage);
             // A conclusion the caller must act on outranks a repaint: a
             // press and its release are two events, and the one that asked

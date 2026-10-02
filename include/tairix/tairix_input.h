@@ -21,6 +21,21 @@
 #define TAIRIX_KEY_INPUT_MAGIC 0x314e494bu
 #define TAIRIX_POINTER_INPUT_WIRE_LEN 20u
 #define TAIRIX_KEY_INPUT_WIRE_LEN 20u
+#define TAIRIX_SCROLL_UNITS_PER_DETENT ((int32_t)120)
+
+/* Touch frame ("TCH1"): magic, size, contact bound. */
+#define TAIRIX_TOUCH_FRAME_MAGIC 0x31484354u
+#define TAIRIX_TOUCH_FRAME_WIRE_LEN 112u
+#define TAIRIX_TOUCH_CONTACTS_MAX 10u
+/* Touch `surface` codes, button bits and contact flags (uint8_t). */
+#define TAIRIX_TOUCH_SURFACE_TOUCHPAD ((uint8_t)1u)
+#define TAIRIX_TOUCH_SURFACE_CLICKPAD ((uint8_t)2u)
+#define TAIRIX_TOUCH_SURFACE_SCREEN ((uint8_t)3u)
+#define TAIRIX_TOUCH_BUTTON_PRIMARY ((uint8_t)1u)
+#define TAIRIX_TOUCH_BUTTON_SECONDARY ((uint8_t)2u)
+#define TAIRIX_TOUCH_BUTTON_MIDDLE ((uint8_t)4u)
+#define TAIRIX_TOUCH_CONTACT_TOUCHING ((uint8_t)1u)
+#define TAIRIX_TOUCH_CONTACT_PALM ((uint8_t)2u)
 
 /* Record `kind` codes: pointer moves/clicks/scroll then key down/up (uint16_t). */
 #define TAIRIX_INPUT_KIND_MOVED_BY ((uint16_t)0u)

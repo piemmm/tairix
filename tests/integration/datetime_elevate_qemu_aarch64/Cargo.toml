@@ -39,6 +39,8 @@ tairix-appload = { path = "../../../lib/appload", version = "=0.0.0" }
 # system application store / bundle suffix spellings the witnesses are
 # composed from.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The bundle-name reading every guest sink shares.
+tairix-itest-witness = { path = "../witness", version = "=0.0.0" }
 # `format_hex_u64` — the same renderer the kernel/ipc audit fields use, so
 # the endpoint witness compares the exact on-wire spelling.
 tairix-util = { path = "../../../lib/util", version = "=0.0.0" }

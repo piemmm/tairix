@@ -372,7 +372,7 @@ mod program {
         /// like the rail above, so one window's chrome is not another's.
         chrome: Chrome,
         /// Where the pointer last was over this window, or `None` before it
-        /// has been: a wheel turn carries no position of its own.
+        /// has been.
         pointer: Option<Point>,
         /// This window's unanswered context-menu gesture, if one is up.
         ///
@@ -552,11 +552,12 @@ mod program {
     impl BrowserWindow {
         /// Record where `event`, addressed to this window, puts the pointer.
         ///
-        /// Every pointer event carries the position, whatever mode the window
-        /// is in and whether or not it draws a rail, so the wheel is never
-        /// routed by where the pointer was before the rail was hidden.
+        /// Every pointer event and every wheel turn carries the position,
+        /// whatever mode the window is in and whether or not it draws a rail,
+        /// so the wheel is routed by where it turned, never by where the
+        /// pointer was before.
         fn note_pointer(&mut self, event: &WindowEvent) {
-            if let WindowEvent::Pointer { x, y, .. } = event {
+            if let WindowEvent::Pointer { x, y, .. } | WindowEvent::Scrolled { x, y, .. } = event {
                 self.pointer = Some(pointer_point(*x, *y));
             }
         }
@@ -3641,6 +3642,7 @@ mod program {
             | WindowEvent::PickCancelled { .. }
             | WindowEvent::DragEnded { .. }
             | WindowEvent::PreviewRendered { .. }
+            | WindowEvent::Pinch { .. }
             // An open target opens a *new* window rather than moving this
             // one, so it is answered where the window set is (`bar_routed`)
             // and repaints nothing here.

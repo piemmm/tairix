@@ -169,8 +169,9 @@ child), each free of ambient authority:
   BAR + DMA grants. The VL805 firmware policy is co-located in that driver
   crate's `lib` target (`AGENTS.md` §2.22); the board-neutral xHCI protocol
   it builds on is the shared `lib/usb` / `drivers/bus/usb/xhci`.
-* **`drivers/input/usb_kbd`** binds the `usb,xhci` node, brings the
-  controller up, enumerates the boot keyboard, and pumps key edges.
+* **`drivers/bus/usb/xhci`** binds the `usb,xhci` node, brings the
+  controller up, enumerates its devices, and publishes one node per
+  interface; **`drivers/input/usb_hid`** serves each HID interface.
 
 The board-specific PCIe half is `tairix_drv_bus_pcie_brcm::wiring`: it reads
 the controller register window + the inbound/outbound address windows off the
@@ -189,7 +190,7 @@ BAR (`mmio_mapper()`), carves the device-shared DMA region (`dma_host()`
 seam, not `virtio_host()`), brings the controller up, enumerates the boot
 device, augments the enumerated HID `HwNode` with its xHCI-BAR
 (`HwResource::mmio`) and DMA (`HwResource::dma`) grant *requests* — exactly
-what the matched user-space `usb_kbd` driver receives, no more
+what the matched user-space host-controller driver receives, no more
 (`AGENTS.md` §4) — and `emit_node()`s it. QEMU models no Pi USB
 controller, so its host tests prove the composition and its fail-closed
 paths up to the controller hand-off; the live enumerate→emit path is the
@@ -516,16 +517,6 @@ transport).
 
 Event records are `InputEvent { kind, reserved0, code, value }`;
 `InputEventKind` is `Key`, `Pointer`, or `Scroll`.
-
-The module also carries `trait ReportSource { next_report(&mut, &mut
-[u8]) }` — the HID report-delivery seam between the bus driver that
-services a device's interrupt-IN endpoint (`drivers/bus/usb`) and the
-input decoder that turns reports into events
-(`drivers/input/usb_kbd`, `drivers/input/usb_mouse`). It lives here because its two sides are
-sibling drivers and drivers depend only on `lib/*` (`AGENTS.md`
-§17.4). A source must never claim more bytes than the caller's buffer
-holds; consumers reject such a claim as a `DeviceFault` (`AGENTS.md`
-§5.4).
 
 Legacy x86 input controllers are byte-addressed, so the
 `tairix_abi::driver::port_io` module ships an 8-bit port-access seam,

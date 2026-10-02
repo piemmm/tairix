@@ -81,9 +81,10 @@ mod kernel {
     use core::sync::atomic::{AtomicBool, Ordering};
 
     use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
+    use tairix_itest_witness::field_str;
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
-    use tairix_log::{Event, EventId, FieldValue, Sink};
+    use tairix_log::{Event, EventId, Sink};
     use tairix_test_memsoak::COMMAND;
 
     // The canonical QEMU `virt` device tree, dumped and embedded at build
@@ -118,20 +119,6 @@ mod kernel {
     /// `MEMSOAK PASS` marker appeared, so the numeric verdict provably
     /// reached the transcript before the run ended.
     static SOAK_EXITED: AtomicBool = AtomicBool::new(false);
-
-    /// The string value of `event`'s field `key`, if present.
-    fn field_str<'e>(event: &Event<'e>, key: &str) -> Option<&'e str> {
-        event.fields.iter().find_map(|field| {
-            if field.key == key {
-                match field.value {
-                    FieldValue::Str(s) => Some(s),
-                    _ => None,
-                }
-            } else {
-                None
-            }
-        })
-    }
 
     /// Sink that replays every event through [`SERIAL_SINK`] and reports
     /// PASS once the memsoak fixture's audited `exit` has been observed and

@@ -95,8 +95,10 @@ pub enum WaitSourceKind {
     /// A seat's desktop input channels (its `id` is the seat id). Adding the
     /// member is owner-checked against the seat's **live lease**: only the
     /// task that acquired the seat (`display_acquire`) may observe its input.
-    /// Ready when the seat's keyboard **or** pointer channel holds a record
-    /// for the member's task, and *also* when that task no longer holds the
+    /// Ready when the seat's keyboard, pointer **or** touch channel holds a
+    /// record for the member's task — so an owner drains all three on every
+    /// wake, or the member stays ready — and *also* when that task no longer
+    /// holds the
     /// live lease (the lease was revoked, released, or the seat was
     /// hot-removed) — the wake-on-loss makes losing the seat observable: the
     /// woken owner's next drain fails closed with the typed refusal and the

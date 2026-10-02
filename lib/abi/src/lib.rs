@@ -76,6 +76,7 @@ pub mod syscalls;
 pub mod sysinfo;
 pub mod terminal;
 pub mod time;
+pub mod touch;
 pub mod usb_urb;
 pub mod users_admin;
 pub mod volume;
@@ -129,11 +130,11 @@ pub use fs::{
     FS_OWNER_UNCHANGED, FS_PATH_MAX, FS_SETGID_BIT, FS_SETUID_BIT, FS_SYMLINK_MAX,
 };
 pub use hwtree::{
-    snapshot_nodes, HwDeviceClass, HwMatchKey, HwMatchKind, HwNode, HwRemoveFlags, HwResource,
-    HwResourceKind, HwTreeHeader, HwTreeNodes, IommuReservedWindow, IommuStreams, MsiAllocation,
-    HWTREE_VERSION_V1, HW_COMPATIBLE_MAX, HW_NODE_HEADER_LEN, HW_NODE_MAX_MATCH_KEYS,
-    HW_NODE_MAX_RESOURCES, HW_NODE_ROOT, HW_NODE_ROOT_ID, HW_VIRTUAL_BUS_COMPATIBLE,
-    SIMPLE_FRAMEBUFFER_COMPATIBLE,
+    snapshot_nodes, HwDeviceClass, HwMatchKey, HwMatchKind, HwNode, HwProperty, HwRemoveFlags,
+    HwResource, HwResourceKind, HwTreeHeader, HwTreeNodes, IommuReservedWindow, IommuStreams,
+    MsiAllocation, HWTREE_VERSION_V1, HW_COMPATIBLE_MAX, HW_NODE_HEADER_LEN,
+    HW_NODE_MAX_MATCH_KEYS, HW_NODE_MAX_RESOURCES, HW_NODE_ROOT, HW_NODE_ROOT_ID,
+    HW_VIRTUAL_BUS_COMPATIBLE, SIMPLE_FRAMEBUFFER_COMPATIBLE,
 };
 pub use input::{
     KeyInput, KeyValue, Modifiers, NamedKeyCode, PointerButtonCode, PointerInput, BUTTON_NONE,

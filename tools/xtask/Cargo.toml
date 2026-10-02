@@ -197,8 +197,7 @@ tairix-vcmailbox = { path = "../../lib/vcmailbox", version = "=0.0.0" }
 tairix-drv-bus-pcie-brcm = { path = "../../drivers/bus/pcie_brcm", version = "=0.0.0" }
 tairix-drv-bus-usb-vl805 = { path = "../../drivers/bus/usb/vl805", version = "=0.0.0" }
 tairix-drv-bus-usb = { path = "../../drivers/bus/usb/xhci", version = "=0.0.0" }
-tairix-drv-input-usb-kbd = { path = "../../drivers/input/usb_kbd", version = "=0.0.0" }
-tairix-drv-input-usb-mouse = { path = "../../drivers/input/usb_mouse", version = "=0.0.0" }
+tairix-drv-input-usb-hid = { path = "../../drivers/input/usb_hid", version = "=0.0.0" }
 tairix-drv-input-virtio-input = { path = "../../drivers/input/virtio_input", version = "=0.0.0" }
 # The virtio-net link-layer driver's canonical bind table (and its
 # single-source virtio device id, used by the autoload-match tests): the

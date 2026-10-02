@@ -47,11 +47,12 @@ mod kernel {
     use core::sync::atomic::{AtomicBool, Ordering};
 
     use tairix_arch_x86_64::qemu_exit;
+    use tairix_itest_witness::field_str;
     use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
     use tairix_kernel::{
         boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
     };
-    use tairix_log::{Event, EventId, FieldValue, Sink};
+    use tairix_log::{Event, EventId, Sink};
     use tairix_test_audio_wire::COMMAND;
 
     /// `SyscallInvoked`, the audited record the finisher below counts.
@@ -59,20 +60,6 @@ mod kernel {
 
     /// Whether the fixture's own audited `exit` has been seen.
     static TONE_EXITED: AtomicBool = AtomicBool::new(false);
-
-    /// The string value of `event`'s field `key`, if present.
-    fn field_str<'e>(event: &Event<'e>, key: &str) -> Option<&'e str> {
-        event.fields.iter().find_map(|field| {
-            if field.key == key {
-                match field.value {
-                    FieldValue::Str(s) => Some(s),
-                    _ => None,
-                }
-            } else {
-                None
-            }
-        })
-    }
 
     /// Sink that replays every event through [`SERIAL_SINK`] and finishes
     /// the run once the fixture's audited `exit` has been seen and the

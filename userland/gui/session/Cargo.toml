@@ -72,6 +72,9 @@ tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
 # along and the trail itself, and the row bands a screensaver frame hands the
 # compositor's participants, so neither touches the heap each frame.
 tairix-inline = { path = "../../../lib/inline", version = "=0.0.0" }
+# The seat's touch gesture recogniser: what the frames drained from the touch
+# channel mean, decided once for the desktop and the greeter.
+tairix-touch = { path = "../../../lib/touch", version = "=0.0.0" }
 # The cursor and icon set builders: the session reads the desktop's
 # on-disk SVG assets from `/System/Graphics` and builds a `CursorTheme` /
 # `IconSet` for the window manager and taskbar. The decode/fallback logic

@@ -246,13 +246,7 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
         }
     }
 
-    // Attach a virtio-mmio keyboard for the input vertical. The runner
-    // (not this builder) drives the actual key through the QEMU monitor
-    // once the guest signals readiness; here we only present the device.
-    if spec.input_keyboard.is_some() {
-        argv.push("-device".into());
-        argv.push("virtio-keyboard-device".into());
-    }
+    argv.extend(crate::input_device_args(spec, "-device"));
     // Attach a virtio sound device behind QEMU's `wav` backend, which writes
     // what the emulated card received to a host file the vertical then checks
     // sample for sample.
@@ -559,6 +553,35 @@ mod tests {
         });
         let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
         assert!(argv.iter().any(|a| a == "virtio-keyboard-device"));
+    }
+
+    #[test]
+    fn argv_attaches_the_keyboard_a_typing_script_types_at() {
+        let mut spec = fixture_spec(1);
+        spec.input_typing = vec![crate::KeyTyping {
+            ready_marker: "armed".into(),
+            ready_occurrences: 1,
+            keys: crate::TypedKeys::Text("root\n".into()),
+        }];
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
+        assert!(argv.iter().any(|a| a == "virtio-keyboard-device"));
+    }
+
+    #[test]
+    fn windowed_interactive_argv_attaches_keyboard_mouse_and_touchscreen() {
+        let mut spec = fixture_spec(1);
+        spec.session = SessionKind::WindowedInteractive;
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
+        let at = |device: &str| argv.iter().position(|a| a == device);
+        let (keyboard, mouse, touch) = (
+            at("virtio-keyboard-device"),
+            at("virtio-mouse-device"),
+            at("virtio-multitouch-device"),
+        );
+        assert!(
+            keyboard.is_some() && keyboard < mouse && mouse < touch,
+            "{argv:?}"
+        );
     }
 
     #[test]

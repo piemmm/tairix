@@ -365,7 +365,7 @@ boundary (task context, so the interrupt-context `fire` path stays
 lock-free), naming the `line` and owning `task`; a fresh `irq_bind` clears
 the quarantine so a driver can recover the line. This is the kernel's
 analogue of Linux's `note_interrupt` spurious-IRQ disable, adapted to the
-user-space IRQ model, and is what turns the "usb_mouse / xhci pegged at 100%
+user-space IRQ model, and is what turns the "mouse driver / xhci pegged at 100%
 CPU" storm into a bounded, logged, fail-closed event.
 
 `DMA_QUARANTINED` and `DMA_QUARANTINE_RELEASED` record a dead driver's DMA
@@ -663,12 +663,13 @@ heartbeats have never been stamped, the watchdog stays silent (fail
 closed): it never fabricates a lockup and never panics.
 
 `INPUT_DELIVERED` is the one-shot input-path witness (`AGENTS.md` §18.3 /
-§20, `plans/PI.md` P11). The `key_inject` syscall handler emits it the
-first time a key edge is successfully delivered to the seat registry
-(`tairix_kernel_core::seat`), gated by a one-shot latch
-(`SeatRegistry::note_first_delivery`) so it fires exactly once over the
-kernel's lifetime — proof that an (autoloaded) keyboard driver has come up
-and is routing input. It carries **no** key content, count, or timing: a
+§20, `plans/PI.md` P11). The `key_inject`, `pointer_inject` and
+`touch_inject` syscall handlers emit it the first time a record of their kind
+is successfully delivered to the seat registry (`tairix_kernel_core::seat`),
+with a `kind` field (`key` / `pointer` / `touch`), each gated by its own
+one-shot latch (`SeatRegistry::note_first_delivery`) so it fires at most once
+per kind over the kernel's lifetime — proof that an (autoloaded) driver of
+that class has come up and is routing input. It carries **no** content, count, or timing: a
 per-keystroke record would leak typed secrets and their cadence and is
 forbidden (`AGENTS.md` §20 — no input-content/timing noise on the log;
 §23.1 — secret hygiene).

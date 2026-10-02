@@ -42,8 +42,6 @@ pub trait UrbBuffer {
 pub enum Note {
     /// A node was published.
     Published {
-        /// The device-table index it serves.
-        index: usize,
         /// The id the kernel assigned it.
         node: u32,
     },
@@ -291,7 +289,7 @@ impl<B: UrbBuffer> Interfaces<B> {
             index,
             buffer,
         });
-        seam.note(Note::Published { index, node: id });
+        seam.note(Note::Published { node: id });
     }
 
     /// A watched transport carrying no node, opening one when none is free.

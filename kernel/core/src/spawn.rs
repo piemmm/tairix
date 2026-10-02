@@ -340,8 +340,8 @@ pub trait InitSpawnCtx {
     /// spawn is not a node-matched driver load.
     ///
     /// `path` is the kernel-resolved driver-store path the signed load gate
-    /// verified the image from (a plain `/System/Drivers/input/usb_kbd` or a
-    /// store bundle's `/System/Drivers/input/usb_kbd/Run` entry point). The
+    /// verified the image from (a plain `/System/Drivers/input/usb_hid` or a
+    /// store bundle's `/System/Drivers/input/usb_hid/Run` entry point). The
     /// production implementation attests the child's process name from it
     /// through the one shared naming rule — a bundle's generic `Run` leaf
     /// names its owning driver directory, any other path its final component
@@ -1671,7 +1671,7 @@ mod tests {
         let ctx = StubInitCtx::new();
         let init: &dyn InitSpawnCtx = &ctx;
         let result = init.spawn_driver_process(
-            "/System/Drivers/input/usb_kbd",
+            "/System/Drivers/input/usb_hid",
             b"unused-rxe",
             CapabilitySet::empty(),
             &[],

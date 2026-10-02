@@ -92,6 +92,7 @@ use tairix_abi::sysinfo::{
 };
 #[cfg(feature = "watchdog-diagnostics")]
 use tairix_abi::time::NANOS_PER_MILLI;
+use tairix_abi::touch::TouchFrame;
 use tairix_abi::{
     decode_log_record, BootFacts, BootId, CallRecvFlags, CapabilityId, CapabilityQuery,
     DescriptorTable, DirEntry, Errno, FdWire, FileId, FileStat, InputMode, IntrospectDomain,
@@ -1815,10 +1816,10 @@ where
 
     /// Emit the one-shot first-delivery audit witness for `kind` if this
     /// delivery was that kind's first — the single definition the
-    /// `key_inject` and `pointer_inject` handlers share. The event carries
-    /// only the input kind (`kind=key` / `kind=pointer`), never event
-    /// content, count, or timing, and fires at most once per kind over the
-    /// kernel's lifetime.
+    /// `key_inject`, `pointer_inject` and `touch_inject` handlers share. The
+    /// event carries only the input kind (`kind=key` / `kind=pointer` /
+    /// `kind=touch`), never event content, count, or timing, and fires at
+    /// most once per kind over the kernel's lifetime.
     fn witness_first_delivery(&self, kind: crate::seat::DeliveredInputKind) {
         if self.seat_registry.note_first_delivery(kind) {
             crate::audit::emit(
@@ -7068,6 +7069,73 @@ where
         }
     }
 
+    fn touch_inject(
+        &self,
+        caller: &CallerContext<'_>,
+        seat: u64,
+        buf: u64,
+        len: usize,
+    ) -> SyscallResult {
+        // The dispatcher checked `CAP_INPUT_INJECT` and that `buf` is
+        // non-null. A frame is fixed-width; a shorter `len` is refused rather
+        // than decoded.
+        if len < TouchFrame::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        // A touchscreen's contacts can spell what was typed on an on-screen
+        // keyboard, so the staging copy is wiped on every exit, as a key's is.
+        let mut frame_bytes = [0u8; TouchFrame::WIRE_LEN];
+        let copied = match self.with_caller_aspace(caller, |space, physmap| {
+            copy_in(space, physmap, VirtAddr::new(buf), &mut frame_bytes)
+        }) {
+            Some(Ok(())) => TouchFrame::from_bytes(&frame_bytes),
+            Some(Err(err)) => Err(copy_fault_errno(err)),
+            None => Err(Errno::BadAddress),
+        };
+        frame_bytes.zeroize();
+        // The kernel's stamp replaces whatever the driver wrote: the frame is
+        // attributed to its real injector and timed by its arrival, not by
+        // when the seat owner gets round to it.
+        let now_ns = self
+            .arch
+            .monotonic_ns(SchedulerArch::current_cpu(self.arch));
+        let frame = copied?.stamped(caller.process().0, now_ns);
+        let consumed = self.seat_registry.inject_touch(seat, &frame)?;
+        self.witness_first_delivery(crate::seat::DeliveredInputKind::Touch);
+        Ok(consumed as u64)
+    }
+
+    fn touch_read(
+        &self,
+        caller: &CallerContext<'_>,
+        seat: u64,
+        buf: u64,
+        len: usize,
+    ) -> SyscallResult {
+        // The dispatcher checked `CAP_INPUT_READ` and that `buf` is non-null;
+        // `read_touch` owner-gates the drain against the seat's live lease.
+        if len < TouchFrame::WIRE_LEN {
+            return Err(Errno::BufferTooSmall);
+        }
+        let mut frame_bytes = [0u8; TouchFrame::WIRE_LEN];
+        let read = self
+            .seat_registry
+            .read_touch(seat, seat_owner(caller), &mut frame_bytes);
+        let result = match read {
+            Ok(0) => Ok(0),
+            Ok(read) => match self.with_caller_aspace(caller, |space, physmap| {
+                copy_out(space, physmap, VirtAddr::new(buf), &frame_bytes[..read])
+            }) {
+                Some(Ok(())) => Ok(read as u64),
+                Some(Err(err)) => Err(copy_fault_errno(err)),
+                None => Err(Errno::BadAddress),
+            },
+            Err(err) => Err(err),
+        };
+        frame_bytes.zeroize();
+        result
+    }
+
     fn mem_map(
         &self,
         caller: &CallerContext<'_>,
@@ -9394,7 +9462,13 @@ where
             let Some(parent_id) = aspaces.loaded_node(caller.process()) else {
                 return Err(Errno::PermissionDenied);
             };
-            for resource in decoded.resources() {
+            // A property only describes the device to the child's own driver,
+            // whose whole transport the emitter already serves.
+            for resource in decoded
+                .resources()
+                .iter()
+                .filter(|resource| resource.kind() != Some(HwResourceKind::Property))
+            {
                 if !aspaces.grant_covers_for_child(caller.process(), resource, parent_id) {
                     return Err(Errno::PermissionDenied);
                 }
@@ -24653,6 +24727,155 @@ mod tests {
         assert_eq!(witnesses(sink), 1, "no further witness on later injects");
     }
 
+    /// A touch handler over a fresh seat registry, its caller (task 2) given an
+    /// address space at `0x1000` holding `bytes`.
+    macro_rules! touch_handlers {
+        ($bytes:expr => $h:ident, $ctx:ident, $arch:ident, $sink:ident) => {
+            install_trace_filter();
+            let $sink = make_sink();
+            let $arch = Arc::new(TestArch::with_cpus(1));
+            let sched = make_sched($arch.clone());
+            let table = RwLock::new(CapTable::new());
+            let ipc = RwLock::new(PortRegistry::new());
+            let aspaces = RwLock::new(AddressSpaceRegistry::new());
+            let (space, physmap) =
+                send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, $bytes);
+            aspaces
+                .write()
+                .register(ProcessId(2), space, physmap)
+                .expect("registration succeeds");
+            let rng = unseeded_rng();
+            let irq = IrqTable::new(31);
+            let ctl = UnsupportedController;
+            let caps = make_caps_record(2, &[], $sink);
+            let $ctx = CallerContext {
+                task_id: SecTaskId(2),
+                caps: &caps,
+            };
+            let queue: &'static crate::console::ConsoleInputQueue =
+                Box::leak(Box::new(crate::console::ConsoleInputQueue::new()));
+            let seat: &'static SeatRegistry = Box::leak(Box::new(SeatRegistry::new(queue)));
+            let $h = KernelSyscallHandlers::new(
+                &sched, &table, &$arch, $sink, &irq, &ctl, &ipc, &aspaces, &rng,
+            )
+            .with_seat_registry(seat);
+        };
+    }
+
+    /// `touch_inject` replaces whatever injector and time the driver wrote
+    /// with its own stamp and routes the frame to the seat owner's
+    /// `touch_read` alone.
+    #[test]
+    fn touch_inject_stamps_the_injector_and_routes_to_the_owner() {
+        use tairix_abi::touch::{Contact, TouchButtons, TouchExtent, TouchSurface};
+        let mut frame = TouchFrame::new(
+            4,
+            TouchSurface::Touchpad,
+            TouchButtons::NONE,
+            TouchExtent::default(),
+        );
+        frame
+            .push(Contact::finger(3, 1_000, 2_000))
+            .expect("room for a contact");
+        let forged = frame.stamped(0xBAD, 0xBAD).to_le_bytes();
+        touch_handlers!(&forged => h, ctx, arch, _sink);
+        let len = TouchFrame::WIRE_LEN;
+
+        assert_eq!(
+            h.touch_read(&ctx, SEAT_PRIMARY, 0x1000, len),
+            Err(Errno::SeatNotOwner),
+            "an unowned seat's channel denies"
+        );
+        assert_eq!(
+            h.touch_inject(&ctx, SEAT_PRIMARY, 0x1000, len),
+            Ok(len as u64),
+            "consumed and discarded while unowned"
+        );
+        assert_eq!(h.display_acquire(&ctx, SEAT_PRIMARY), Ok(1));
+        assert_eq!(
+            h.touch_read(&ctx, SEAT_PRIMARY, 0x1000, len),
+            Ok(0),
+            "the frame injected while unowned was not kept"
+        );
+        let before = arch.monotonic_ns(0);
+        assert_eq!(
+            h.touch_inject(&ctx, SEAT_PRIMARY, 0x1000, len),
+            Ok(len as u64)
+        );
+        let after = arch.monotonic_ns(0);
+        assert_eq!(
+            h.touch_read(&ctx, SEAT_PRIMARY, 0x1000, len),
+            Ok(len as u64)
+        );
+        let read_back = h
+            .with_caller_aspace(&ctx, |space, physmap| {
+                let mut buf = [0u8; TouchFrame::WIRE_LEN];
+                copy_in(space, physmap, VirtAddr::new(0x1000), &mut buf).expect("readable");
+                buf
+            })
+            .expect("caller has a registered space");
+        let delivered = TouchFrame::from_bytes(&read_back).expect("a valid frame");
+        assert_eq!(delivered.source(), ctx.process().0, "the real injector");
+        assert!(
+            delivered.time_ns() > before && delivered.time_ns() < after,
+            "timed by its arrival"
+        );
+        assert_eq!(delivered.contacts(), frame.contacts());
+        assert_eq!(delivered.device(), 4);
+    }
+
+    /// A buffer too short for a frame, or a frame the decode refuses, never
+    /// reaches the registry; the first frame a seat consumes witnesses the
+    /// touch path once, with `kind=touch`.
+    #[test]
+    fn touch_inject_refuses_what_is_no_frame_and_witnesses_the_path_once() {
+        use tairix_abi::touch::{TouchButtons, TouchExtent, TouchSurface};
+        let frame = TouchFrame::new(
+            0,
+            TouchSurface::Screen,
+            TouchButtons::NONE,
+            TouchExtent::default(),
+        )
+        .to_le_bytes();
+        touch_handlers!(&frame => h, ctx, _arch, sink);
+        let len = TouchFrame::WIRE_LEN;
+        assert_eq!(
+            h.touch_inject(&ctx, SEAT_PRIMARY, 0x1000, len - 1),
+            Err(Errno::BufferTooSmall)
+        );
+        assert_eq!(
+            h.touch_read(&ctx, SEAT_PRIMARY, 0x1000, len - 1),
+            Err(Errno::BufferTooSmall)
+        );
+        sink.clear();
+        for _ in 0..3 {
+            assert_eq!(
+                h.touch_inject(&ctx, SEAT_PRIMARY, 0x1000, len),
+                Ok(len as u64)
+            );
+        }
+        let witnesses = sink
+            .event_ids()
+            .iter()
+            .filter(|id| **id == AuditEvent::InputDelivered.id().0)
+            .count();
+        assert_eq!(witnesses, 1, "one witness for the touch path");
+        h.with_caller_aspace(&ctx, |space, physmap| {
+            copy_out(
+                space,
+                physmap,
+                VirtAddr::new(0x1000),
+                &[0u8; TouchFrame::WIRE_LEN],
+            )
+        })
+        .expect("caller has a registered space")
+        .expect("writable");
+        assert_eq!(
+            h.touch_inject(&ctx, SEAT_PRIMARY, 0x1000, len),
+            Err(Errno::BadMagic)
+        );
+    }
+
     /// `display_acquire` binds the caller as the seat owner and routes
     /// injected records whole to the owner's `keyboard_read`;
     /// `display_release` (owner-checked) returns input to the text
@@ -34181,6 +34404,54 @@ mod tests {
         // An input-class publish is not a display: no seat was minted and
         // nothing seat-related was audited.
         assert!(!sink.event_ids().contains(&AuditEvent::SeatCreated.id().0));
+    }
+
+    /// A property needs no grant behind it: it describes the child to its
+    /// own driver and authorises nothing.
+    #[test]
+    fn hw_emit_node_publishes_a_property_no_grant_backs() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let mut node = tairix_abi::HwNode::new(3, 2, tairix_abi::HwDeviceClass::Input);
+        node.push_resource(tairix_abi::HwResource::property(
+            tairix_abi::HwProperty::UsbInterface,
+            1,
+        ))
+        .expect("resource fits");
+        let bytes = node.to_le_bytes();
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &bytes);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("registration succeeds");
+        aspaces
+            .write()
+            .admit_driver(ProcessId(2), 9, false)
+            .expect("the node has no live driver");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let source: &'static StaticHwTree =
+            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_hw_tree(source);
+        assert_eq!(
+            h.hw_emit_node(&ctx, 0x1000, tairix_abi::HwNode::WIRE_LEN),
+            Ok(100)
+        );
+        assert_eq!(source.published.read()[0].1, node);
     }
 
     /// A child's resources must come from the emitter's own node or from no

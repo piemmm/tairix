@@ -55,10 +55,10 @@ use tairix_abi::{
     AbiType, AppInfoHeader, BufferClass, BundleEntry, CallRecvFlags, CapabilityId, DriverBindKey,
     DriverError, DriverHandle, DriverKind, DriverManifest, DriverRegisterReply, Duration64, Errno,
     GroupDirectoryRecord, GroupDirectoryRequest, HwDeviceClass, HwMatchKey, HwMatchKind, HwNode,
-    HwResource, HwResourceKind, IpcMessageHeader, KernelMemoryStats, KeyInput, LibraryCategory,
-    LibraryScope, LimitKind, LinkFlags, LoadAverage, LoadHeader, ManifestHeader, MapFlags,
-    MountAvailability, MountListRequest, MountRecord, NamedKeyCode, NeededLibrary, NoticeTopic,
-    OpenFlags, PeerWatchOp, PointerButtonCode, PointerInput, PortName, PowerAction,
+    HwProperty, HwResource, HwResourceKind, IpcMessageHeader, KernelMemoryStats, KeyInput,
+    LibraryCategory, LibraryScope, LimitKind, LinkFlags, LoadAverage, LoadHeader, ManifestHeader,
+    MapFlags, MountAvailability, MountListRequest, MountRecord, NamedKeyCode, NeededLibrary,
+    NoticeTopic, OpenFlags, PeerWatchOp, PointerButtonCode, PointerInput, PortName, PowerAction,
     ProcessListRequest, ProcessRecord, ProcessStartHeader, ProcessState, RandomFlags, RealpathMode,
     ResourceLimit, ResourceLimitRecord, RxePermission, SchedPriority, Segment, SelfAccountRecord,
     Severity, Signal, SignalIntakeOp, StdInfoKind, StringSlot, SysinfoQueryId,
@@ -721,6 +721,17 @@ fn hwtree_enum_macros(out: &mut String) {
         );
     }
     out.push('\n');
+
+    out.push_str("/* Property keys (uint32_t). */\n");
+    for key in HwProperty::ALL {
+        let _ = writeln!(
+            out,
+            "#define TAIRIX_HW_PROPERTY_{} ((uint32_t){}u)",
+            property_name(*key),
+            key.as_u32()
+        );
+    }
+    out.push('\n');
 }
 
 /// The C spelling of one resource kind.
@@ -744,6 +755,15 @@ fn resource_kind_name(kind: HwResourceKind) -> &'static str {
         HwResourceKind::DmaRequest => "DMA_REQUEST",
         HwResourceKind::IommuStream => "IOMMU_STREAM",
         HwResourceKind::IommuReserved => "IOMMU_RESERVED",
+        HwResourceKind::Property => "PROPERTY",
+    }
+}
+
+/// The C spelling of one property key, exhaustive for the reason
+/// [`resource_kind_name`] is.
+fn property_name(key: HwProperty) -> &'static str {
+    match key {
+        HwProperty::UsbInterface => "USB_INTERFACE",
     }
 }
 
@@ -1011,6 +1031,7 @@ fn generate_manifest() -> String {
 /// from `lib/abi`, never re-typed; only the C spelling lives here.
 fn generate_input() -> String {
     use std::fmt::Write as _;
+    use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
     let mut out = banner("Desktop pointer and keyboard input ABI (AGENTS.md sec.9, sec.10).");
     out.push_str("#ifndef TAIRIX_INPUT_H\n#define TAIRIX_INPUT_H\n\n");
     out.push_str("#include <stdint.h>\n\n");
@@ -1025,7 +1046,13 @@ fn generate_input() -> String {
     let kwl = KeyInput::WIRE_LEN;
     let _ = writeln!(out, "#define TAIRIX_POINTER_INPUT_WIRE_LEN {pwl}u");
     let _ = writeln!(out, "#define TAIRIX_KEY_INPUT_WIRE_LEN {kwl}u");
+    // The unit a `Scrolled` record's displacements are counted in.
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_SCROLL_UNITS_PER_DETENT ((int32_t){SCROLL_UNITS_PER_DETENT})"
+    );
     out.push('\n');
+    push_touch_frame(&mut out);
 
     // Each uint16_t field code, grouped by record field; `hex` selects the C
     // spelling (bitmask fields read better in hex). Only the names live here.
@@ -1092,6 +1119,56 @@ fn generate_input() -> String {
 
     out.push_str("#endif /* TAIRIX_INPUT_H */\n");
     out
+}
+
+/// The touch frame a C driver injects with `tairix_sys_touch_inject`: its
+/// magic, size and contact bound, and the codes its byte fields carry.
+fn push_touch_frame(out: &mut String) {
+    use std::fmt::Write as _;
+    use tairix_abi::touch::{
+        TouchButtons, TouchFrame, TouchSurface, CONTACT_PALM, CONTACT_TOUCHING, TOUCH_CONTACTS_MAX,
+        TOUCH_FRAME_MAGIC,
+    };
+    let _ = writeln!(
+        out,
+        "/* Touch frame (\"TCH1\"): magic, size, contact bound. */"
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_TOUCH_FRAME_MAGIC {TOUCH_FRAME_MAGIC:#x}u"
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_TOUCH_FRAME_WIRE_LEN {}u",
+        TouchFrame::WIRE_LEN
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_TOUCH_CONTACTS_MAX {TOUCH_CONTACTS_MAX}u"
+    );
+    let _ = writeln!(
+        out,
+        "/* Touch `surface` codes, button bits and contact flags (uint8_t). */"
+    );
+    for (name, value) in [
+        (
+            "TAIRIX_TOUCH_SURFACE_TOUCHPAD",
+            TouchSurface::Touchpad.code(),
+        ),
+        (
+            "TAIRIX_TOUCH_SURFACE_CLICKPAD",
+            TouchSurface::Clickpad.code(),
+        ),
+        ("TAIRIX_TOUCH_SURFACE_SCREEN", TouchSurface::Screen.code()),
+        ("TAIRIX_TOUCH_BUTTON_PRIMARY", TouchButtons::PRIMARY),
+        ("TAIRIX_TOUCH_BUTTON_SECONDARY", TouchButtons::SECONDARY),
+        ("TAIRIX_TOUCH_BUTTON_MIDDLE", TouchButtons::MIDDLE),
+        ("TAIRIX_TOUCH_CONTACT_TOUCHING", CONTACT_TOUCHING),
+        ("TAIRIX_TOUCH_CONTACT_PALM", CONTACT_PALM),
+    ] {
+        let _ = writeln!(out, "#define {name} ((uint8_t){value}u)");
+    }
+    out.push('\n');
 }
 
 /// The C spelling of each [`NamedKeyCode`] variant paired with its frozen wire
@@ -4097,6 +4174,10 @@ mod tests {
                 PointerInput::WIRE_LEN
             ),
             format!("#define TAIRIX_KEY_INPUT_WIRE_LEN {}u", KeyInput::WIRE_LEN),
+            format!(
+                "#define TAIRIX_SCROLL_UNITS_PER_DETENT ((int32_t){})",
+                tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT
+            ),
         ];
         for (name, value) in [
             ("TAIRIX_INPUT_KIND_MOVED_BY", KIND_MOVED_BY),
@@ -4134,6 +4215,40 @@ mod tests {
         }
         for (name, code) in NAMED_KEY_CODES {
             expected.push(format!("#define {name} ((uint16_t){code}u)"));
+        }
+        {
+            use tairix_abi::touch::{
+                TouchButtons, TouchFrame, TouchSurface, CONTACT_PALM, CONTACT_TOUCHING,
+                TOUCH_CONTACTS_MAX, TOUCH_FRAME_MAGIC,
+            };
+            expected.push(format!(
+                "#define TAIRIX_TOUCH_FRAME_MAGIC {TOUCH_FRAME_MAGIC:#x}u"
+            ));
+            expected.push(format!(
+                "#define TAIRIX_TOUCH_FRAME_WIRE_LEN {}u",
+                TouchFrame::WIRE_LEN
+            ));
+            expected.push(format!(
+                "#define TAIRIX_TOUCH_CONTACTS_MAX {TOUCH_CONTACTS_MAX}u"
+            ));
+            for (name, value) in [
+                (
+                    "TAIRIX_TOUCH_SURFACE_TOUCHPAD",
+                    TouchSurface::Touchpad.code(),
+                ),
+                (
+                    "TAIRIX_TOUCH_SURFACE_CLICKPAD",
+                    TouchSurface::Clickpad.code(),
+                ),
+                ("TAIRIX_TOUCH_SURFACE_SCREEN", TouchSurface::Screen.code()),
+                ("TAIRIX_TOUCH_BUTTON_PRIMARY", TouchButtons::PRIMARY),
+                ("TAIRIX_TOUCH_BUTTON_SECONDARY", TouchButtons::SECONDARY),
+                ("TAIRIX_TOUCH_BUTTON_MIDDLE", TouchButtons::MIDDLE),
+                ("TAIRIX_TOUCH_CONTACT_TOUCHING", CONTACT_TOUCHING),
+                ("TAIRIX_TOUCH_CONTACT_PALM", CONTACT_PALM),
+            ] {
+                expected.push(format!("#define {name} ((uint8_t){value}u)"));
+            }
         }
         for line in &expected {
             assert!(h.contains(line), "missing `{line}` in:\n{h}");

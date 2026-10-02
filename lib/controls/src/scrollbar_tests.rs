@@ -12,7 +12,7 @@ use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
 
-use tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT;
+use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
 
 use crate::damage::sink;
 use crate::scroll::{ScrollModel, ScrollOrientation, ScrollRange, WHEEL_STEP};

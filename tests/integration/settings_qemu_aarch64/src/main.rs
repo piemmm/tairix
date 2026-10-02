@@ -66,9 +66,11 @@ mod kernel {
     use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
     use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
+    use tairix_itest_witness::field_str;
+    use tairix_itest_witness::names_bundle;
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
-    use tairix_log::{Event, FieldValue, Sink};
+    use tairix_log::{Event, Sink};
     use tairix_test_settings_qemu_aarch64::{
         is_desktop_document, APPEARANCE_CHANGES, RENAME_OP, SETTINGS_APP_NAME,
     };
@@ -115,7 +117,13 @@ mod kernel {
         /// Latch the launch witness from an `APP_LOADED` record naming the
         /// settings bundle.
         fn note_bundle_loaded(&self, event: &Event<'_>) {
-            if str_field(event, "bundle").is_some_and(is_settings_bundle) {
+            if field_str(event, "bundle").is_some_and(|bundle| {
+                names_bundle(
+                    bundle,
+                    tairix_abi::SYSTEM_APPLICATION_STORE,
+                    SETTINGS_APP_NAME,
+                )
+            }) {
                 self.launched.store(true, Ordering::Release);
             }
         }
@@ -134,12 +142,12 @@ mod kernel {
             let mut endpoint_hex = [0u8; 16];
             let expected =
                 format_hex_u64(tairix_abi::window_ipc::WINDOW_ENDPOINT, &mut endpoint_hex);
-            if str_field(event, "endpoint") != Some(expected) {
+            if field_str(event, "endpoint") != Some(expected) {
                 return;
             }
             // An unparsable length stays zero, matching no reply length and
             // latching nothing (fail closed).
-            let reply_len = str_field(event, "len")
+            let reply_len = field_str(event, "len")
                 .and_then(tairix_util::count::parse_decimal)
                 .and_then(|len| usize::try_from(len).ok())
                 .unwrap_or_default();
@@ -158,8 +166,8 @@ mod kernel {
             if !self.window_opened.load(Ordering::Acquire) {
                 return;
             }
-            if str_field(event, "op") == Some(RENAME_OP)
-                && str_field(event, "to").is_some_and(is_desktop_document)
+            if field_str(event, "op") == Some(RENAME_OP)
+                && field_str(event, "to").is_some_and(is_desktop_document)
             {
                 self.committed.fetch_add(1, Ordering::AcqRel);
             }
@@ -190,25 +198,6 @@ mod kernel {
                 qemu_exit::exit_success();
             }
         }
-    }
-
-    /// The string value `event` carries under `key`, if it carries one.
-    fn str_field<'e>(event: &Event<'e>, key: &str) -> Option<&'e str> {
-        event.fields.iter().find_map(|field| match field.value {
-            FieldValue::Str(value) if field.key == key => Some(value),
-            _ => None,
-        })
-    }
-
-    /// Whether `bundle` is the settings bundle in the system application
-    /// store, composed from the shared `lib/abi` spellings rather than written
-    /// out as a path.
-    fn is_settings_bundle(bundle: &str) -> bool {
-        bundle
-            .strip_prefix(tairix_abi::SYSTEM_APPLICATION_STORE)
-            .and_then(|rest| rest.strip_prefix('/'))
-            .and_then(|name| name.strip_suffix(tairix_abi::BUNDLE_SUFFIX))
-            .is_some_and(|name| name == SETTINGS_APP_NAME)
     }
 
     /// The audit observer the boot pipeline is handed.

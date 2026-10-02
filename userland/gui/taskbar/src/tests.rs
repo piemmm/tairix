@@ -4,13 +4,14 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
 use tairix_abi::switchboard_ipc::{
     CommandSection, Permille, TrayPressure, TrayPressureCount, TrayPressureKind, TraySummary,
     TrayTask, TrayTaskName,
 };
 use tairix_abi::window_ipc::{
     AppBarClick, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuReason,
-    AppMenuRole, AppMenuRow, AppMenuShortcut, APP_MENU_MAX_ROWS, SCROLL_UNITS_PER_DETENT,
+    AppMenuRole, AppMenuRow, AppMenuShortcut, APP_MENU_MAX_ROWS,
 };
 use tairix_abi::{BundleId, Errno, ProcId};
 use tairix_controls::damage::Repaint;

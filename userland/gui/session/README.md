@@ -516,14 +516,14 @@ input capability and fails closed on a malformed record (`AGENTS.md` §5.4 /
 
 ## Seat-backed input channels
 
-`SeatInputChannel` (the `seat` module) is the kernel backing for both the
-`PointerInputChannel` and `KeyInputChannel` seams above: it drains each
+`SeatInputChannel` (the `seat` module) is the kernel backing for the
+`PointerInputChannel`, `TouchInputChannel` and `KeyInputChannel` seams above:
+it drains each
 fixed-width input record from the per-seat, owner-gated channel the kernel
 seat registry routed the desktop's input to (`plans/DISPLAY.md`;
 `docs/src/desktop/seat.md`). The records arrive through an injected
-`SeatEventReader` seam — the seat-addressed `pointer_read` / `keyboard_read`
-syscalls (`tairix_rt::pointer_read` / `tairix_rt::keyboard_read`) on a
-running system, an in-memory queue in tests (`AGENTS.md` §7) — so the crate
+`SeatEventReader` seam — the seat-addressed `pointer_read` / `touch_read` /
+`keyboard_read` syscalls on a running system, an in-memory queue in tests (`AGENTS.md` §7) — so the crate
 holds no seat lease of its own and stays host-testable (`AGENTS.md` §17.4).
 
 The security property is kernel-side: every drain is gated on
@@ -720,9 +720,10 @@ the real seams end to end:
   the display endpoint** (never a raw, recyclable PID), configure, then
   present by frame index through `RemoteDisplay` — no frame bytes ever
   cross the IPC.
-- The `DesktopShell` is driven from the two live seat readers (the
-  seat-addressed `pointer_read` / `keyboard_read` behind the
-  `SeatEventReader` seam), with the queried mode as the pointer's screen
+- The `DesktopShell` is driven from the three live seat readers (the
+  seat-addressed `pointer_read` / `touch_read` / `keyboard_read` behind the
+  `SeatEventReader` seam, touch frames through the seat's gesture recogniser,
+  `lib/touch`), with the queried mode as the pointer's screen
   rectangle and the compositor's background taken from the active theme's
   desktop colour.
 - The session **parks on a `SeatInput` wait-set member** between events —

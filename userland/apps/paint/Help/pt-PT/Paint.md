@@ -79,6 +79,8 @@ alterações por guardar pergunta primeiro.
 * `S`, `P`, `B`, `A`, `E`, `F`, `I`, `L`, `R`, `O` — as ferramentas, por ordem
 * `X` — trocar as cores principal e secundária
 * `+` / `-` — ampliar ou reduzir; `1` — tamanho real; `Ctrl+0` — ajustar
+* `Ctrl` + roda — ampliar ou reduzir em torno do ponteiro
+* Beliscar com dois dedos — ampliar ou reduzir de forma contínua; num ecrã tátil a imagem acompanha os dedos
 * `G` — mostrar ou ocultar a grelha entre píxeis
 * `Page Up` / `Page Down` — o sprite anterior ou seguinte
 * teclas de seta — mover uma seleção flutuante um píxel; com `Shift`, dez

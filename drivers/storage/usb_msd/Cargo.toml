@@ -24,6 +24,11 @@ workspace = true
 
 [dependencies]
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The URB transport (`UrbClient`, `UrbLink`), the configuration descriptor
+# walk the descriptor reader runs, and the per-URB bulk chunk ceiling
+# (`device::BULK_BUF_LEN`): the seam this class driver reaches its
+# host-controller driver over, without naming the controller or the bus.
+tairix-usb = { path = "../../../lib/usb", version = "=0.0.0" }
 
 # Everything the freestanding program links beyond the `lib` is pulled in only
 # for the bare-metal targets the binary is actually built for; on the host the
@@ -31,11 +36,6 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 [target.'cfg(target_os = "none")'.dependencies]
 # The capability-set type the rt-backed `DriverHost` is built over.
 tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
-# The bus-agnostic URB transport client (`UrbCall`, `UrbClient`): the seam this
-# class driver submits control and bulk URBs to its host-controller driver
-# over, without naming the controller or the bus. Also the one definition of
-# the per-URB bulk chunk ceiling (`device::BULK_BUF_LEN`).
-tairix-usb = { path = "../../../lib/usb", version = "=0.0.0" }
 # The user-space driver runtime: turns the kernel-issued device-resource grants
 # into the `DriverHost` the bring-up consumes.
 tairix-drvrt = { path = "../../../lib/drvrt", version = "=0.0.0" }

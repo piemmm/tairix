@@ -56,9 +56,10 @@ mod kernel {
     use core::sync::atomic::{AtomicBool, Ordering};
 
     use tairix_arch_aarch64::{handle_panic_via_serial, qemu_exit, SerialSink, SERIAL_SINK};
+    use tairix_itest_witness::field_str;
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel::aarch64::boot as boot_aarch64;
-    use tairix_log::{Event, FieldValue, Sink};
+    use tairix_log::{Event, Sink};
     use tairix_test_wintersun_client_qemu_aarch64::{is_bundle, GAME_APP_NAME, THEN_COMMAND};
     use tairix_util::fmt::format_hex_u64;
 
@@ -106,7 +107,7 @@ mod kernel {
         /// once the game's window exists, so an earlier `true` cannot pass
         /// for it.
         fn note_bundle_loaded(&self, event: &Event<'_>) {
-            let Some(bundle) = str_field(event, "bundle") else {
+            let Some(bundle) = field_str(event, "bundle") else {
                 return;
             };
             let suffix = tairix_abi::BUNDLE_SUFFIX;
@@ -143,12 +144,12 @@ mod kernel {
             let mut endpoint_hex = [0u8; 16];
             let expected =
                 format_hex_u64(tairix_abi::window_ipc::WINDOW_ENDPOINT, &mut endpoint_hex);
-            if str_field(event, "endpoint") != Some(expected) {
+            if field_str(event, "endpoint") != Some(expected) {
                 return;
             }
             // An unparsable length stays zero, matching no reply length and
             // latching nothing (fail closed).
-            let reply_len = str_field(event, "len")
+            let reply_len = field_str(event, "len")
                 .and_then(tairix_util::count::parse_decimal)
                 .and_then(|len| usize::try_from(len).ok())
                 .unwrap_or_default();
@@ -175,14 +176,6 @@ mod kernel {
                 qemu_exit::exit_success();
             }
         }
-    }
-
-    /// The string value `event` carries under `key`, if it carries one.
-    fn str_field<'e>(event: &Event<'e>, key: &str) -> Option<&'e str> {
-        event.fields.iter().find_map(|field| match field.value {
-            FieldValue::Str(value) if field.key == key => Some(value),
-            _ => None,
-        })
     }
 
     /// The audit observer the boot pipeline is handed.

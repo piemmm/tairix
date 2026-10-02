@@ -109,8 +109,8 @@ mod program {
     use tairix_users::DEFAULT_SHELL;
     use tairix_window::app::{self, Wake, WindowPane};
     use tairix_window::{
-        damage_in, key_input_event, pointer_input_events, pointer_point, Desktop, EventError,
-        EventMailbox, WindowClient, WindowEvents, WindowTransport,
+        damage_in, key_input_event, pointer_input_events, pointer_point, scroll_input_events,
+        Desktop, EventError, EventMailbox, WindowClient, WindowEvents, WindowTransport,
     };
 
     /// The wait-set token of the settings worker's wake pipe: readable exactly
@@ -2141,11 +2141,11 @@ mod program {
                     }
                 }
                 // The wheel over the open sheet scrolls its body.
-                WindowEvent::Scrolled { dx, dy, .. } if for_popup => {
+                WindowEvent::Scrolled { x, y, dx, dy, .. } if for_popup => {
                     let Some(held) = open.overlay.as_mut() else {
                         continue;
                     };
-                    let input = [InputEvent::PointerScrolled { dx, dy }];
+                    let input = scroll_input_events(pointer_point(x, y), dx, dy);
                     let routing = route_overlay_pointer(held, publication, input, scale, theme);
                     if let Some(outcome) =
                         overlay_concluded(routing, held, window, &mut redrawn, &mut edited)
@@ -2305,7 +2305,8 @@ mod program {
                 | WindowEvent::FilePicked { .. }
                 | WindowEvent::PickCancelled { .. }
                 | WindowEvent::DragEnded { .. }
-                | WindowEvent::PreviewRendered { .. } => {}
+                | WindowEvent::PreviewRendered { .. }
+                | WindowEvent::Pinch { .. } => {}
             }
         }
     }

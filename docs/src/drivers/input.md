@@ -29,9 +29,8 @@ maps to `DriverError::BufferTooSmall`.
 | Driver        | Crate                            | Hardware                         | Status                          |
 |---------------|----------------------------------|----------------------------------|---------------------------------|
 | ps2           | `tairix-drv-input-ps2`           | Intel 8042 keyboard controller   | host-side tests + QEMU vertical |
-| usb_kbd       | `tairix-drv-input-usb-kbd`       | USB HID boot keyboard (URB transport class driver) | host-side tests; live path is Pi 4 metal acceptance |
-| usb_mouse     | `tairix-drv-input-usb-mouse`     | USB HID boot mouse (URB transport class driver)    | host-side tests; live path is Pi 4 metal acceptance |
-| virtio_input  | `tairix-drv-input-virtio-input`  | virtio-input (keyboard / pointer) | host-side tests + QEMU vertical |
+| usb_hid       | `tairix-drv-input-usb-hid`       | Every USB HID interface: keyboards, mice, touch pads, touch screens (URB transport class driver) | host-side tests; live path is metal acceptance |
+| virtio_input  | `tairix-drv-input-virtio-input`  | virtio-input (keyboard / pointer / touch) | host-side tests + QEMU verticals |
 
 ### `tairix-drv-input-ps2`
 
@@ -99,14 +98,15 @@ device logic and the keyboard console producer described below live in the
 shared by the in-kernel `-M virt` verticals and the user-space input-driver
 process (`tairix-drv-input-virtio-kbd`, below) without a
 `drivers/*`→`drivers/*` edge (`AGENTS.md` §17.4 / §2.2 — the virtio analogue of
-`lib/hid` ↔ `drivers/input/usb_kbd`).
+`lib/hid` ↔ `drivers/input/usb_hid`).
 
 The virtio-input logic implements `Input` over the bus-agnostic virtio
 transport from `lib/virtio`, so one source compiles against both the PCI
 and MMIO transports (the queue protocol lives once, `AGENTS.md` §2.2).
 It is the paravirtualised input device every QEMU machine type can
 present (`virtio-keyboard-device` / `virtio-mouse-device` /
-`virtio-tablet-device`) and the input class real virtio hardware
+`virtio-tablet-device` / `virtio-multitouch-device`) and the input class real
+virtio hardware
 exposes — the `virt`-board analogue of the x86 PS/2 keyboard.
 
 It consumes the device-to-driver **event queue** (queue 0). The wire
@@ -114,10 +114,17 @@ record is `struct virtio_input_event { __le16 type; __le16 code;
 __le32 value; }` (virtio 1.1 §5.8.6) in the Linux `evdev` namespaces,
 which `poll` maps onto the platform-neutral `InputEvent`: `EV_KEY` →
 `Key` (the evdev keycode, `value` 1 press / 0 release), `EV_REL` `REL_X`
-/ `REL_Y` → `Pointer`, and a wheel → `Scroll` in either encoding a device
-uses: `REL_WHEEL` motion, negated because `evdev` counts it away from the user
-while the shared axis counts downward, or the `BTN_GEAR_DOWN`/`BTN_GEAR_UP`
-presses QEMU's HID pointers send, one detent each. `EV_SYN` frame
+/ `REL_Y` → `Pointer`, and both wheels → `Scroll` in scroll units. Which
+code each wheel axis is read from is the device's own answer, queried once at
+open from its `EV_REL` bitmap in config space: a device offering
+`REL_WHEEL_HI_RES` or `REL_HWHEEL_HI_RES` is read from that fine code alone
+and its detent twin dropped, and one that does not, or states no bitmap, is
+read from `REL_WHEEL`/`REL_HWHEEL` at 120 units a detent. The vertical wheel
+is negated because `evdev` counts it away from the user while the shared axis
+counts toward the end; the horizontal one already counts toward it. The
+`BTN_GEAR_DOWN`/`BTN_GEAR_UP` presses QEMU's HID pointers send are one detent
+each. QEMU emulates no horizontal wheel on this device (it drops one
+host-side), so that decode is proven by host tests. `EV_SYN` frame
 separators and any unmodelled `type`/`code` are consumed but surface no
 event, so the driver never fabricates a bogus one (`AGENTS.md` §2.9).
 
@@ -167,6 +174,13 @@ xtask test --qemu`) drives the same driver and the same shared
 `input` row of the QEMU matrix on x86_64 (PS/2), aarch64, and riscv64
 (`AGENTS.md` §2.2).
 
+The touch path is exercised by `tests/integration/touch_qemu_aarch64`: the
+runner attaches a `virtio-multitouch-device` as the board's only pointing
+device and taps it over QEMU's QMP control monitor, and the guest passes once
+the two taps — the program library's button, then the terminal's row — have
+launched the terminal, with the kernel's witness that a touch frame was
+delivered (`plans/POINTING.md` PO9).
+
 #### Console-input producer
 
 `lib/virtio_input`'s `VirtioKeyboardConsole` is the keyboard producer half: it
@@ -188,7 +202,7 @@ produces no record rather than guessing (`AGENTS.md` §2.9).
 `drivers/input/virtio_kbd` (`tairix-drv-input-virtio-kbd`, `src/main.rs`) is the
 autoloaded **user-space** virtio-input keyboard driver process — the "drivers in
 user space" steady state (`AGENTS.md` §4) on the hardware QEMU `-M virt`
-presents (the metal Pi 4 keyboard is the USB `tairix-drv-input-usb-kbd`). It is
+presents (a metal USB keyboard is served by `tairix-drv-input-usb-hid`). It is
 a freestanding pure-Rust `tairix-rt` program depending only on `lib/*`
 (`lib/virtio`, `lib/virtio_input`, `lib/drvrt`, `lib/rt`, `lib/caps`, `lib/abi`)
 so the §17.4 layering holds. `main` builds `RtDriverHost::from_grants_query`
@@ -197,13 +211,16 @@ over its kernel-issued grants (coherency `None` — coherent DMA, platform-neutr
 `tairix_abi::driver::sole_register_window` over `RtDriverHost::resources()` (the
 one definition shared with the USB keyboard driver, §2.2 / §2.16), maps it
 through `mmio_map`, builds the bus-agnostic `MmioTransport`, brings the device up
-with `VirtioInput::open_armed`, and pumps `poll`, offering each decoded event to
-the shared pointer mapping first (`PointerInput::from_device_event` — axis
-deltas, `BTN_*` edges, and scroll ticks → `pointer_inject`) and every other event to
-`VirtioKeyboardConsole::feed` → `key_inject`; one driver instance is spawned
-per discovered virtio-input node (keyboard and mouse alike — the bind table
-cannot tell them apart), and each instance's device decides which producer
-ever yields a record. The pump is interrupt-driven: `open_armed` runs
+with `VirtioInput::open_armed`, and pumps `poll_reports`: a touch surface's
+frames go to `touch_inject`, and each other event is offered to the shared
+pointer mapping first (`PointerInput::from_device_event` — axis deltas, `BTN_*`
+edges, and scroll ticks → `pointer_inject`) and then to
+`VirtioKeyboardConsole::feed` → `key_inject`. One driver instance is spawned
+per discovered virtio-input node (keyboard, mouse and touchscreen alike — the
+bind table cannot tell them apart), and each instance's device decides which
+producer ever yields a record. A touch device that faults is told to the seat
+as a frame with every contact lifted before the driver exits, so nothing it
+held stays held. The pump is interrupt-driven: `open_armed` runs
 `RtDriverHost::bind_irq` on the granted device line as its *arm* step, strictly
 after the eventq is live (`DRIVER_OK`, buffers posted, device kicked), so the
 audited `irq_bind` syscall is a truthful "keyboard ready" witness — binding any
@@ -224,65 +241,32 @@ failure exits with a reserved fail-closed code (`80`/`81`/`82`) and a hard
 device fault exits `83` rather than spinning on a broken device. It is a
 separate crate from the §8
 `tairix-drv-input-virtio-input` identity so it can link `tairix-rt` without
-pulling it into the kernel-linked driver shell (`AGENTS.md` §2.2 — the `usb_kbd`
-analogue).
+pulling it into the kernel-linked driver shell (`AGENTS.md` §2.2).
 
-### The autoloaded driver binary (`tairix-drv-input-usb-kbd`)
+### The USB HID class driver (`tairix-drv-input-usb-hid`)
 
-The keyboard driver *process* is a **separate crate**,
-`drivers/input/usb_kbd` (`tairix-drv-input-usb-kbd`, `src/main.rs`): the
-`devmgr`-autoloaded **user-space** keyboard **class driver**, installed as a
-signed `/System/Drivers/` bundle (`AGENTS.md` §18, `plans/USB.md` §1.2) — the
-"drivers in user space" steady state (`AGENTS.md` §4). It binds the
-USB-interface node the host-controller driver (`drivers/bus/usb/xhci`)
-publishes for a HID boot-keyboard interface — never the controller node — and
-holds **no** controller register grant and **no** DMA grant: its matched
-node's only resources are the per-interface URB call endpoint and the shared
-report buffer (`AGENTS.md` §5.4 — least privilege). It is a pure-Rust
-`tairix-rt` program (`AGENTS.md` §1 / §16.4) whose HID boot-report decode
-lives in the shared [`lib/hid`](../lib/hid.md) crate, so the userland runtime
-never enters the kernel's dependency graph, and depends only on `lib/*`
-crates so the §17.4 layering holds. `main` builds
-`tairix_drvrt::RtDriverHost::from_grants_query` over its kernel-issued grants,
-takes the endpoint id and maps the shared buffer from them, wraps the
-`lib/usb` transport client in a `ReportSource` (`UrbReportSource`: each
-`next_report` submits an interrupt-IN URB and reads the completed report out
-of the shared buffer), and then pumps the keyboard forever with
-`tairix_hid::pump_once`, injecting each produced key record into the seat's
-input routing through the `key_inject` syscall. Each pump is a blocking URB `ipc_call` the
-host-controller driver answers only when the controller's completion
-interrupt delivers a report, so the driver parks in the kernel between
-keystrokes — never a busy poll (`AGENTS.md` §2.23) — and repeated pump errors
-exit fail-closed after a bounded budget, leaving the console without a
-keyboard rather than wedged (`AGENTS.md` §2.9). A device disconnect retracts
-the interface node, `devmgr` unloads this driver, and a re-plug autoloads a
-fresh instance onto a fresh node, whose shared buffer is new. This bundle is installed into the
-image `/System/Drivers/` store and autoloaded by `devmgr` against the
-discovered HID interface node; QEMU models no Pi USB, so the live autoload +
-keystroke is the metal acceptance item (`plans/PI.md` §0.4).
+`drivers/input/usb_hid` is the `devmgr`-autoloaded user-space class driver for
+every HID interface a host-controller driver publishes, whatever its sub-class
+or protocol (`plans/HID.md` H5). Its node grants it the interface's URB
+endpoint, its shared buffer and its interface number, and nothing else: no
+register, DMA or interrupt (`CAP_INPUT_INJECT`, `CAP_SHM`,
+`CAP_IPC_ENDPOINT`, `CAP_LOG_EMIT`). The host controller refuses any control
+request of its that reaches past its own interface.
 
-### The autoloaded driver binary (`tairix-drv-input-usb-mouse`)
-
-`drivers/input/usb_mouse` (`tairix-drv-input-usb-mouse`, `src/main.rs`) is the
-USB HID boot-**mouse** sibling of the keyboard class driver: the same signed
-`/System/Drivers/` bundle shape, the same least-privilege capability set
-(`CAP_INPUT_INJECT`, `CAP_SHM`, `CAP_IPC_ENDPOINT`, `CAP_LOG_EMIT` — no MMIO,
-DMA, or IRQ), and the same blocking URB transport pump. Its `BIND_KEYS` match
-the HID boot-mouse interface key (`usb(0, 0, 0x03_01_02)`), so `devmgr`
-autoloads it against the mouse interface node the host-controller driver
-emits — a keyboard and a mouse plugged in together are each served by their
-own class driver over their own per-interface transport (the engine's
-concurrent-device table; see the `lib/usb`
-`bring_up_serves_a_keyboard_and_a_mouse_behind_the_hub_together` regression).
-Each report is decoded through `tairix_hid::BootMouse` (button edges diffed
-against the previous report, X/Y deltas, and the wheel negated onto the shared
-downward axis), and every decoded event is
-translated by the one shared device→seat mapping
-`PointerInput::from_device_event` — the same mapping the virtio pointer path
-uses, so the two can never diverge — and injected through `pointer_inject`.
-Motion, button edges, and scroll ticks all inject now that the desktop
-scrollbar consumes scroll; only an event outside the pointer vocabulary
-maps to nothing and is never fabricated (`AGENTS.md` §2.9).
-Disconnect/reload and the fail-closed error
-budget behave exactly as the keyboard driver's; the live report path is the
-Pi 4 metal acceptance item.
+At bind it reads its interface from the configuration descriptor and the
+report descriptor its HID descriptor states, parses it with
+[`lib/hid`](../lib/hid.md), sets report protocol (reading it back from a
+boot-subclass device, which may ignore the request), sets the idle rate to
+report on change, and configures the device's features: a digitizer's input
+mode and switches, a touch pad's contact limit and pad type, a wheel's
+resolution multiplier. A descriptor that does not parse falls back to the boot
+layout on a boot keyboard or boot mouse, and refuses any other interface with
+its reason logged; the descriptor is logged in hex at bind. Every keyboard,
+mouse, touch pad and touch screen application on the interface is then served:
+each report is a blocking interrupt-IN URB the host controller answers when
+the device reports, so the driver parks between reports, and each record goes
+to the boot seat through `key_inject`, `pointer_inject` or `touch_inject`. An
+interface that goes, or faults four times running, is let go of first — every
+key, button and contact it held released — and the driver exits; a re-plug
+autoloads a fresh instance on a fresh node. The live report path is a metal
+acceptance item.

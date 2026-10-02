@@ -82,6 +82,8 @@ nach.
 * `S`, `P`, `B`, `A`, `E`, `F`, `I`, `L`, `R`, `O` — die Werkzeuge der Reihe nach
 * `X` — Primär- und Sekundärfarbe tauschen
 * `+` / `-` — vergrößern oder verkleinern; `1` — Originalgröße; `Ctrl+0` — einpassen
+* `Ctrl` + Mausrad — um den Zeiger herum vergrößern oder verkleinern
+* Zwei Finger spreizen oder zusammenführen — stufenlos vergrößern oder verkleinern; auf einem Touchscreen folgt das Bild den Fingern
 * `G` — das Raster zwischen den Pixeln ein- oder ausblenden
 * `Page Up` / `Page Down` — das vorige oder nächste Sprite
 * Pfeiltasten — eine schwebende Auswahl um ein Pixel verschieben; mit `Shift` um zehn

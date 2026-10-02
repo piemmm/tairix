@@ -56,6 +56,7 @@ mod program {
     use tairix_abi::session_ipc::SESSION_ENDPOINT;
     use tairix_abi::sysinfo::{SysinfoQueryId, SystemIdentity};
     use tairix_abi::time::{Time64, WallTimeState};
+    use tairix_abi::touch::TouchFrame;
     use tairix_abi::DriverError;
     use tairix_abi::{Errno, WaitSetOp, WaitSourceKind};
     use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay, SwitchedOff};
@@ -312,6 +313,44 @@ mod program {
         drained
     }
 
+    /// Drain the seat's touch channel through the screen's recogniser and
+    /// present the union of everything it changed, once; then act on any touch
+    /// whose deadline has passed, every queued frame having been read.
+    fn drain_touch<D: Display, T: SessionTransport>(
+        screen: &mut LoginScreen<T>,
+        display: &mut D,
+        mode: &DisplayMode,
+    ) -> Drained {
+        let mut wire = [0u8; TouchFrame::WIRE_LEN];
+        let mut gestures = Vec::new();
+        let mut pending = Present::Nothing;
+        let drained = 'drain: loop {
+            let read = tairix_rt::touch_read(SEAT_PRIMARY, &mut wire);
+            if read == 0 {
+                screen.expire_touch(tairix_rt::clock_get(), &mut gestures);
+            } else if usize::try_from(read).ok() != Some(TouchFrame::WIRE_LEN) {
+                break Drained::Lost;
+            } else if let Ok(frame) = TouchFrame::from_bytes(&wire) {
+                screen.feed_touch(&frame, &mut gestures);
+            }
+            for gesture in gestures.drain(..) {
+                let step = screen.on_gesture(gesture, tairix_rt::clock_get());
+                pending = pending.merged(step.present, mode);
+                if let Some(answer) = step.answer {
+                    audit(answer.verdict);
+                }
+                if step.verified {
+                    break 'drain Drained::Verified;
+                }
+            }
+            if read == 0 {
+                break Drained::Empty;
+            }
+        };
+        show(display, screen.frame(), pending);
+        drained
+    }
+
     /// Drain the seat's keyboard channel into the screen and present the
     /// union of everything it changed, once.
     fn drain_keyboard<D: Display, T: SessionTransport>(
@@ -492,7 +531,10 @@ mod program {
         let mut told_unwakeable = false;
         loop {
             let drained = match drain_keyboard(screen, display, mode) {
-                Drained::Empty => drain_pointer(screen, display, mode),
+                Drained::Empty => match drain_pointer(screen, display, mode) {
+                    Drained::Empty => drain_touch(screen, display, mode),
+                    ended => ended,
+                },
                 ended => ended,
             };
             match drained {
@@ -589,6 +631,7 @@ mod program {
             };
             if drain_keyboard(screen, display, mode) == Drained::Lost
                 || drain_pointer(screen, display, mode) == Drained::Lost
+                || drain_touch(screen, display, mode) == Drained::Lost
             {
                 return;
             }

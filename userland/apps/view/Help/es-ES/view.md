@@ -51,6 +51,8 @@ transparente se lea como transparente y no como el color que hay detrás.
 
 * `+` — ampliar al siguiente paso
 * `-` — reducir al paso anterior
+* `Ctrl` + rueda — acercar o alejar en torno al puntero
+* Pellizcar con dos dedos — acercar o alejar con suavidad; en una pantalla táctil la imagen sigue a los dedos
 * `0` — ajustar toda la imagen a la ventana
 * `1` — tamaño real, un píxel de imagen por píxel de pantalla
 * `2` — ajustar el ancho de la imagen

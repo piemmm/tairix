@@ -35,12 +35,11 @@
 //!
 //! This is **not** a duplicate of [`crate::driver::input::InputEvent`]. That type is the *device-level* contract an input
 //! driver reports across the [`Input`](crate::driver::input::Input) driver
-//! trait: single-axis pointer *deltas*, scroll ticks, and platform keycodes,
+//! trait: single-axis pointer *deltas*, scroll in scroll units, and platform keycodes,
 //! one event per axis or edge. [`PointerInput`] is the *seat-channel* record
 //! an input-driver process injects (`pointer_inject`): button keycodes are
 //! resolved to the closed button set, and a scroll wheel becomes a
-//! [`Scrolled`](PointerInput::Scrolled) tick record now that the desktop
-//! scrollbar consumes it. [`PointerInput::from_device_event`] is the one
+//! [`Scrolled`](PointerInput::Scrolled) record in scroll units. [`PointerInput::from_device_event`] is the one
 //! spelling of that mapping, shared by every pointer-input driver.
 //!
 //! # Wire layout
@@ -54,11 +53,11 @@
 //! |      6 |    2 | `kind`     | [`KIND_MOVED_BY`] / [`KIND_PRESSED`] / [`KIND_RELEASED`] / [`KIND_SCROLLED`] |
 //! |      8 |    2 | `button`   | [`BUTTON_NONE`] for motion/scroll, else a button code |
 //! |     10 |    2 | `reserved` | must be zero                             |
-//! |     12 |    4 | `dx`       | signed x displacement / scroll ticks     |
-//! |     16 |    4 | `dy`       | signed y displacement / scroll ticks     |
+//! |     12 |    4 | `dx`       | signed x displacement / scroll units     |
+//! |     16 |    4 | `dy`       | signed y displacement / scroll units     |
 //!
 //! The displacement fields carry the reported motion for a
-//! [`MovedBy`](PointerInput::MovedBy) record, the signed wheel ticks for a
+//! [`MovedBy`](PointerInput::MovedBy) record, the signed scroll units for a
 //! [`Scrolled`](PointerInput::Scrolled) record, and must be zero for a press
 //! or release (a real pointing device reports motion separately from clicks,
 //! and the seat owner applies a button at the position its accumulated motion
@@ -82,7 +81,7 @@ pub const KIND_MOVED_BY: u16 = 0;
 pub const KIND_PRESSED: u16 = 1;
 /// `kind` code for a pointer-button release.
 pub const KIND_RELEASED: u16 = 2;
-/// `kind` code for a scroll-wheel tick.
+/// `kind` code for a scroll-wheel turn.
 pub const KIND_SCROLLED: u16 = 3;
 
 /// `button` code carried by a [`MovedBy`](PointerInput::MovedBy) or
@@ -155,15 +154,16 @@ pub enum PointerInput {
     Pressed(PointerButtonCode),
     /// A pointer button came up at the current pointer position.
     Released(PointerButtonCode),
-    /// The scroll wheel turned by a relative number of ticks, in the
-    /// device's detent units (positive x toward the logical end, positive y
-    /// downward — the `evdev` orientation). A scroll acts at the current
-    /// pointer position, exactly as a button does; the seat owner routes it
-    /// to the viewport under that position.
+    /// The scroll wheel turned, in scroll units
+    /// ([`SCROLL_UNITS_PER_DETENT`](crate::driver::input::SCROLL_UNITS_PER_DETENT)
+    /// to a detent; positive x toward the logical end, positive y downward —
+    /// the `evdev` orientation). A scroll acts at the current pointer
+    /// position, exactly as a button does; the seat owner routes it to the
+    /// viewport under that position.
     Scrolled {
-        /// Signed horizontal scroll ticks.
+        /// Signed horizontal scroll, in scroll units.
         dx: i32,
-        /// Signed vertical scroll ticks.
+        /// Signed vertical scroll, in scroll units.
         dy: i32,
     },
 }
@@ -269,8 +269,8 @@ impl PointerInput {
     ///   [`POINTER_BUTTON_CODE_BASE`] button codes becomes a
     ///   [`Pressed`](Self::Pressed) / [`Released`](Self::Released) of the
     ///   resolved button;
-    /// * a [`Scroll`](InputEventKind::Scroll) axis tick becomes a
-    ///   single-axis [`Scrolled`](Self::Scrolled);
+    /// * a [`Scroll`](InputEventKind::Scroll) axis turn becomes a
+    ///   single-axis [`Scrolled`](Self::Scrolled) in the same units;
     /// * everything else — keyboard keys (a keyboard producer's job), an
     ///   unknown axis, or a non-edge button value (a repeat) — produces no
     ///   record rather than a guessed one (fail closed, never fabricate
@@ -909,6 +909,7 @@ mod tests {
     };
     use crate::driver::input::{
         InputEvent, InputEventKind, AXIS_X, AXIS_Y, POINTER_BUTTON_CODE_BASE,
+        SCROLL_UNITS_PER_DETENT,
     };
     use crate::le::read_u16;
     use crate::{Errno, ABI_VERSION_CURRENT};
@@ -1012,8 +1013,8 @@ mod tests {
     }
 
     #[test]
-    fn scroll_round_trips_with_signed_ticks() {
-        let event = PointerInput::Scrolled { dx: -3, dy: 5 };
+    fn scroll_round_trips_with_signed_units() {
+        let event = PointerInput::Scrolled { dx: -15, dy: 240 };
         let decoded = PointerInput::from_bytes(&event.to_le_bytes()).expect("valid record");
         assert_eq!(decoded, event);
     }
@@ -1079,28 +1080,29 @@ mod tests {
         }
     }
 
-    /// One device scroll event per axis maps onto a single-axis tick record.
+    /// One device scroll event per axis maps onto a single-axis record in the
+    /// same units: no layer rounds a fine wheel's fraction of a detent away.
     #[test]
-    fn device_scroll_ticks_map_to_single_axis_scrolls() {
+    fn device_scroll_maps_to_single_axis_scrolls_in_the_same_units() {
         let x = InputEvent {
             kind: InputEventKind::Scroll,
             reserved0: 0,
             code: AXIS_X,
-            value: 2,
+            value: 2 * SCROLL_UNITS_PER_DETENT,
         };
         let y = InputEvent {
             kind: InputEventKind::Scroll,
             reserved0: 0,
             code: AXIS_Y,
-            value: -1,
+            value: -15,
         };
         assert_eq!(
             PointerInput::from_device_event(&x),
-            Some(PointerInput::Scrolled { dx: 2, dy: 0 })
+            Some(PointerInput::Scrolled { dx: 240, dy: 0 })
         );
         assert_eq!(
             PointerInput::from_device_event(&y),
-            Some(PointerInput::Scrolled { dx: 0, dy: -1 })
+            Some(PointerInput::Scrolled { dx: 0, dy: -15 })
         );
     }
 

@@ -22,7 +22,7 @@ use tairix_abi::usb_urb::{
 };
 use tairix_abi::{DriverError, Errno, HwDeviceClass, HwMatchKey, HwNode, HwResource};
 use tairix_usb::device::{DeviceIdentity, HubEvent, SerialNumber};
-use tairix_usb::transport::UrbEngine;
+use tairix_usb::transport::{UrbEngine, UrbScope};
 
 /// The id the mock binds transport slot 0's endpoint at; slot `n` is
 /// `ENDPOINT_BASE + n`.
@@ -98,7 +98,18 @@ impl UrbEngine for Engine<'_> {
         Err(DriverError::NotFound)
     }
 
-    fn interrupt_in(&mut self, data: &mut [u8]) -> Result<Option<usize>, DriverError> {
+    fn scope(&self) -> Option<UrbScope> {
+        Some(UrbScope {
+            interface: 0,
+            endpoints: u32::MAX << 2,
+        })
+    }
+
+    fn interrupt_in(
+        &mut self,
+        _request: usize,
+        data: &mut [u8],
+    ) -> Result<Option<usize>, DriverError> {
         self.0.interrupt_calls += 1;
         if let Some(err) = self.0.fault.take() {
             return Err(err);

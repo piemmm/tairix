@@ -491,7 +491,7 @@ mod grid {
     use alloc::vec::Vec;
     use core::cell::{Cell, RefCell};
 
-    use tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT;
+    use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
     use tairix_abi::{
         AppInfoHeader, Errno, Time64, APPINFO_MAGIC, BUNDLE_ID_MAX, BUNDLE_NAME_MAX,
         BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX, SYSCALL_TABLE_HASH_LEN,

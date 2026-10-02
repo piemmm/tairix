@@ -1734,12 +1734,8 @@ const PLATFORM_IMAGE_DRIVER_STORE: &[(&[&[u8]], DriverBundleBuilder)] = &[
         image_drivers::build_xhci_bundle,
     ),
     (
-        image_drivers::USB_KBD_STORE_PATH,
-        image_drivers::build_usb_kbd_bundle,
-    ),
-    (
-        image_drivers::USB_MOUSE_STORE_PATH,
-        image_drivers::build_usb_mouse_bundle,
+        image_drivers::USB_HID_STORE_PATH,
+        image_drivers::build_usb_hid_bundle,
     ),
     (
         image_drivers::VIRTIO_KBD_STORE_PATH,

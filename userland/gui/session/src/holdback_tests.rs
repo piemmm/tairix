@@ -66,8 +66,11 @@ fn typed(window_id: u64) -> WindowEvent {
 fn scrolled(window_id: u64, dy: i32) -> WindowEvent {
     WindowEvent::Scrolled {
         window_id,
+        x: 4,
+        y: 9,
         dx: 0,
         dy,
+        modifiers: Modifiers::default(),
     }
 }
 
@@ -369,6 +372,72 @@ fn a_run_of_samples_collapses_and_a_run_of_ticks_sums() {
             scrolled(WINDOW, 3),
             scrolled(WINDOW, -1),
             moved(WINDOW, 4),
+        ]
+    );
+}
+
+/// A run of wheel turns sums at the newest place, but a modifier let go
+/// mid-run ends it: a Ctrl-wheel zoom and the plain scroll after it are two
+/// gestures, and summing them would zoom by turns made without Ctrl.
+#[test]
+fn a_run_of_wheel_turns_ends_where_the_modifiers_change() {
+    let ctrl = Modifiers {
+        ctrl: true,
+        ..Modifiers::default()
+    };
+    let turned = |dy: i32, y: u32, modifiers: Modifiers| WindowEvent::Scrolled {
+        window_id: WINDOW,
+        x: 4,
+        y,
+        dx: 0,
+        dy,
+        modifiers,
+    };
+    let mut held = HoldBack::new();
+    let _ = hold(&mut held, turned(120, 1, ctrl));
+    let _ = hold(&mut held, turned(120, 2, ctrl));
+    let _ = hold(&mut held, turned(120, 3, Modifiers::default()));
+    assert_eq!(
+        drain_events(&mut held),
+        vec![turned(240, 2, ctrl), turned(120, 3, Modifiers::default())]
+    );
+}
+
+/// A pinch's updates fold to the newest, its scale being relative to where it
+/// began; its beginning and end are owed, and a modifier change ends a run.
+#[test]
+fn a_run_of_pinch_updates_folds_to_the_newest_between_its_edges() {
+    use tairix_abi::touch::{PinchPhase, PINCH_SCALE_ONE};
+    let alt = Modifiers {
+        alt: true,
+        ..Modifiers::default()
+    };
+    let step = |phase, scale, modifiers| WindowEvent::Pinch {
+        window_id: WINDOW,
+        x: scale % 100,
+        y: 4,
+        phase,
+        scale,
+        modifiers,
+    };
+    let none = Modifiers::default();
+    let mut held = HoldBack::new();
+    for event in [
+        step(PinchPhase::Begin, PINCH_SCALE_ONE, none),
+        step(PinchPhase::Update, PINCH_SCALE_ONE + 1, none),
+        step(PinchPhase::Update, PINCH_SCALE_ONE + 2, none),
+        step(PinchPhase::Update, PINCH_SCALE_ONE + 3, alt),
+        step(PinchPhase::End, PINCH_SCALE_ONE + 3, alt),
+    ] {
+        let _ = hold(&mut held, event);
+    }
+    assert_eq!(
+        drain_events(&mut held),
+        vec![
+            step(PinchPhase::Begin, PINCH_SCALE_ONE, none),
+            step(PinchPhase::Update, PINCH_SCALE_ONE + 2, none),
+            step(PinchPhase::Update, PINCH_SCALE_ONE + 3, alt),
+            step(PinchPhase::End, PINCH_SCALE_ONE + 3, alt),
         ]
     );
 }

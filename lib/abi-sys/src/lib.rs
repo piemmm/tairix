@@ -131,6 +131,8 @@ const NUM_DISPLAY_RELEASE: u64 = SyscallNumber::DISPLAY_RELEASE.as_u16() as u64;
 const NUM_KEYBOARD_READ: u64 = SyscallNumber::KEYBOARD_READ.as_u16() as u64;
 const NUM_POINTER_INJECT: u64 = SyscallNumber::POINTER_INJECT.as_u16() as u64;
 const NUM_POINTER_READ: u64 = SyscallNumber::POINTER_READ.as_u16() as u64;
+const NUM_TOUCH_INJECT: u64 = SyscallNumber::TOUCH_INJECT.as_u16() as u64;
+const NUM_TOUCH_READ: u64 = SyscallNumber::TOUCH_READ.as_u16() as u64;
 const NUM_SEAT_SWITCH: u64 = SyscallNumber::SEAT_SWITCH.as_u16() as u64;
 const NUM_SEAT_REVOKE: u64 = SyscallNumber::SEAT_REVOKE.as_u16() as u64;
 const NUM_MMIO_MAP: u64 = SyscallNumber::MMIO_MAP.as_u16() as u64;
@@ -863,8 +865,8 @@ pub extern "C" fn sys_terminal_purge(fd: u32) -> i32 {
     }
 }
 
-/// `key_inject`: inject one decoded keyboard key edge at `buf` (a
-/// `tairix_key_input_t` record of `len` bytes) for seat `seat` into the kernel
+/// `key_inject`: inject one decoded keyboard key edge at `buf` (a key record
+/// of `len` bytes, `TAIRIX_KEY_INPUT_WIRE_LEN`) for seat `seat` into the kernel
 /// input-focus arbiter (`SyscallNumber::KEY_INJECT`, `plans/PI.md`
 /// P11 — input follows the surface owner). Returns the number of bytes
 /// consumed, or a `TAIRIX_E_*` code reinterpreted into the result.
@@ -978,8 +980,8 @@ pub extern "C" fn sys_seat_revoke(seat_id: u64) -> i32 {
 }
 
 /// `keyboard_read`: read one decoded keyboard event from seat `seat`'s
-/// keyboard channel into `buf` (a buffer of `len` bytes, at least one
-/// `tairix_key_input_t` record) (`SyscallNumber::KEYBOARD_READ`, `plans/PI.md` P11). Returns the number of bytes written — one
+/// keyboard channel into `buf` (a buffer of `len` bytes, at least
+/// `TAIRIX_KEY_INPUT_WIRE_LEN`) (`SyscallNumber::KEYBOARD_READ`, `plans/PI.md` P11). Returns the number of bytes written — one
 /// record, or `0` when the channel is momentarily drained — or a `TAIRIX_E_*`
 /// code reinterpreted into the result.
 ///
@@ -999,8 +1001,8 @@ pub extern "C" fn sys_keyboard_read(seat: u64, buf: *mut c_void, len: usize) -> 
     unsafe { raw_syscall(NUM_KEYBOARD_READ, [seat, ptr_arg(buf), len as u64, 0, 0, 0]) }
 }
 
-/// `pointer_inject`: inject one decoded pointer event at `buf` (a
-/// `tairix_pointer_input_t` record of `len` bytes) for seat `seat` into the
+/// `pointer_inject`: inject one decoded pointer event at `buf` (a pointer
+/// record of `len` bytes, `TAIRIX_POINTER_INPUT_WIRE_LEN`) for seat `seat` into the
 /// kernel seat registry (`SyscallNumber::POINTER_INJECT`, `plans/PI.md`
 /// P11 — the pointer analogue of [`sys_key_inject`]). Returns the number
 /// of bytes consumed, or a `TAIRIX_E_*` code reinterpreted into the result.
@@ -1030,8 +1032,8 @@ pub extern "C" fn sys_pointer_inject(seat: u64, buf: *mut c_void, len: usize) ->
 }
 
 /// `pointer_read`: read one decoded pointer event from seat `seat`'s
-/// pointer channel into `buf` (a buffer of `len` bytes, at least one
-/// `tairix_pointer_input_t` record) (`SyscallNumber::POINTER_READ`,
+/// pointer channel into `buf` (a buffer of `len` bytes, at least
+/// `TAIRIX_POINTER_INPUT_WIRE_LEN`) (`SyscallNumber::POINTER_READ`,
 /// `plans/PI.md` P11 — the pointer analogue of [`sys_keyboard_read`]).
 /// Returns the number of bytes written — one record, or `0` when the
 /// channel is momentarily drained — or a `TAIRIX_E_*` code reinterpreted into
@@ -1052,6 +1054,39 @@ pub extern "C" fn sys_pointer_read(seat: u64, buf: *mut c_void, len: usize) -> u
     // the seat id, and the `(buf, len)` pair against the caller's address
     // space before writing it.
     unsafe { raw_syscall(NUM_POINTER_READ, [seat, ptr_arg(buf), len as u64, 0, 0, 0]) }
+}
+
+/// `touch_inject`: inject the one touch frame of `len` bytes
+/// (`TAIRIX_TOUCH_FRAME_WIRE_LEN`) at `buf` into seat `seat`
+/// (`SyscallNumber::TOUCH_INJECT`). Returns the
+/// bytes consumed or a `TAIRIX_E_*` code reinterpreted into the result.
+///
+/// Gated kernel-side on `TAIRIX_CAP_INPUT_INJECT`; the kernel validates the
+/// frame and stamps it with the injecting task and its arrival over whatever
+/// the record states.
+#[must_use]
+#[export_name = "tairix_sys_touch_inject"]
+pub extern "C" fn sys_touch_inject(seat: u64, buf: *mut c_void, len: usize) -> u64 {
+    // SAFETY: see `sys_ipc_send`. The kernel validates the capability, the
+    // seat id, and the `(buf, len)` pair against the caller's address space
+    // before reading it.
+    unsafe { raw_syscall(NUM_TOUCH_INJECT, [seat, ptr_arg(buf), len as u64, 0, 0, 0]) }
+}
+
+/// `touch_read`: read one touch frame from seat `seat`'s touch channel into
+/// `buf` (`len` bytes, at least `TAIRIX_TOUCH_FRAME_WIRE_LEN`)
+/// (`SyscallNumber::TOUCH_READ`). Returns the bytes written — one frame, or
+/// `0` when the channel is momentarily drained — or a `TAIRIX_E_*` code.
+///
+/// Gated kernel-side on `TAIRIX_CAP_INPUT_READ` and owner-gated against the
+/// seat's live lease, as `tairix_sys_pointer_read` is.
+#[must_use]
+#[export_name = "tairix_sys_touch_read"]
+pub extern "C" fn sys_touch_read(seat: u64, buf: *mut c_void, len: usize) -> u64 {
+    // SAFETY: see `sys_ipc_send`. The kernel validates the capability, the
+    // seat id, and the `(buf, len)` pair against the caller's address space
+    // before writing it.
+    unsafe { raw_syscall(NUM_TOUCH_READ, [seat, ptr_arg(buf), len as u64, 0, 0, 0]) }
 }
 
 /// `resource_grants`: enumerate the device-resource grants the kernel minted
@@ -3554,6 +3589,8 @@ mod tests {
         (NUM_FD_REDEEM, "fd_redeem", 1),
         (NUM_FD_REDEEM_FROM, "fd_redeem_from", 3),
         (NUM_SHM_MAP_FROM, "shm_map_from", 4),
+        (NUM_TOUCH_INJECT, "touch_inject", 3),
+        (NUM_TOUCH_READ, "touch_read", 3),
         (NUM_MEM_PIN, "mem_pin", 0),
         (NUM_MEM_UNPIN, "mem_unpin", 0),
         (NUM_SIGNAL_INTAKE, "signal_intake", 1),
@@ -4081,6 +4118,23 @@ mod tests {
         assert_eq!(args[1], ptr as usize as u64);
         assert_eq!(args[2], len as u64);
         assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn touch_inject_and_read_marshal_seat_pointer_and_len() {
+        let mut buf = [0u8; 112];
+        let ptr = buf.as_mut_ptr().cast::<c_void>();
+        let len = buf.len();
+        let (number, args) = capture(len as u64, || {
+            assert_eq!(sys_touch_inject(2, ptr, len), len as u64);
+        });
+        assert_eq!(number, NUM_TOUCH_INJECT);
+        assert_eq!(args, [2, ptr as usize as u64, len as u64, 0, 0, 0]);
+        let (number, args) = capture(len as u64, || {
+            assert_eq!(sys_touch_read(2, ptr, len), len as u64);
+        });
+        assert_eq!(number, NUM_TOUCH_READ);
+        assert_eq!(args, [2, ptr as usize as u64, len as u64, 0, 0, 0]);
     }
 
     #[test]

@@ -1,11 +1,13 @@
 //! Where the picture sits in its window: how far it is magnified, the shape
 //! of its pixels, and how far it is scrolled.
 //!
-//! One picture pixel spans `num × aspect / den` screen pixels on each axis,
-//! so a sprite whose pixels are twice as tall as wide is shown so. A picture
-//! smaller than the canvas is centred in it; a larger one scrolls, in screen
-//! pixels.
+//! The magnification is continuous, so a pinch zooms smoothly; the ladder of
+//! [`ZOOMS`] is what the stepping commands move along. One picture pixel spans
+//! `zoom × aspect` screen pixels on each axis, so a sprite whose pixels are
+//! twice as tall as wide is shown so. A picture smaller than the canvas is
+//! centred in it; a larger one scrolls, in screen pixels.
 
+use tairix_abi::touch::PINCH_SCALE_ONE;
 use tairix_geometry::{Point, Rect};
 
 use crate::shape::{Bounds, FX};
@@ -30,11 +32,43 @@ pub const ZOOMS: [(u32, u32); 16] = [
     (64, 1),
 ];
 
-/// The magnification a rung of [`ZOOMS`] shows at, in percent of actual
-/// size.
-#[must_use]
-pub const fn percent_of((num, den): (u32, u32)) -> u32 {
-    num * 100 / den
+/// A magnification, in 4096ths of actual size: fine enough that a pinch
+/// zooms smoothly, and every rung of [`ZOOMS`] a whole number of them.
+#[derive(Copy, Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct Zoom(u32);
+
+impl Zoom {
+    const UNIT: u32 = 4096;
+
+    /// The least magnification offered.
+    pub const LEAST: Self = Self::of(ZOOMS[0]);
+
+    /// The most magnification offered.
+    pub const MOST: Self = Self::of(ZOOMS[ZOOMS.len() - 1]);
+
+    /// The magnification a rung of [`ZOOMS`] shows at.
+    #[must_use]
+    pub const fn of((num, den): (u32, u32)) -> Self {
+        Self(num * Self::UNIT / den)
+    }
+
+    /// This magnification times a pinch's `scale`, in 16.16 fixed point,
+    /// held to the ladder's ends.
+    #[must_use]
+    pub fn scaled(self, scale: u32) -> Self {
+        let zoom = u64::from(self.0) * u64::from(scale) / u64::from(PINCH_SCALE_ONE);
+        Self(
+            u32::try_from(zoom)
+                .unwrap_or(u32::MAX)
+                .clamp(Self::LEAST.0, Self::MOST.0),
+        )
+    }
+
+    /// In percent of actual size.
+    #[must_use]
+    pub const fn percent(self) -> u32 {
+        self.0 * 100 / Self::UNIT
+    }
 }
 
 /// The rung of [`ZOOMS`] showing a picture pixel as a screen pixel.
@@ -47,7 +81,7 @@ pub const GRID_FROM: u64 = 8;
 /// How the picture is shown.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Viewport {
-    zoom: usize,
+    zoom: Zoom,
     aspect: (u32, u32),
     scroll: (u64, u64),
 }
@@ -58,22 +92,49 @@ impl Viewport {
     #[must_use]
     pub const fn new(aspect: (u32, u32)) -> Self {
         Self {
-            zoom: ACTUAL,
+            zoom: Zoom::of(ZOOMS[ACTUAL]),
             aspect,
             scroll: (0, 0),
         }
     }
 
-    /// The rung of [`ZOOMS`] in use.
+    /// The magnification in use.
     #[must_use]
-    pub const fn zoom(&self) -> usize {
+    pub const fn zoom(&self) -> Zoom {
         self.zoom
+    }
+
+    /// The rung of [`ZOOMS`] the magnification is exactly at, if it is at
+    /// one.
+    #[must_use]
+    pub fn rung(&self) -> Option<usize> {
+        ZOOMS.iter().position(|&rung| Zoom::of(rung) == self.zoom)
+    }
+
+    /// The rung `steps` rungs above the magnification in use, or below it
+    /// for a negative count: from between two rungs, the first step lands on
+    /// the nearer one in its direction.
+    #[must_use]
+    pub fn rung_beside(&self, steps: i64) -> usize {
+        let last = ZOOMS.len() - 1;
+        let further = usize::try_from(steps.unsigned_abs().saturating_sub(1)).unwrap_or(last);
+        if steps >= 0 {
+            ZOOMS
+                .iter()
+                .position(|&rung| Zoom::of(rung) > self.zoom)
+                .map_or(last, |above| above.saturating_add(further).min(last))
+        } else {
+            ZOOMS
+                .iter()
+                .rposition(|&rung| Zoom::of(rung) < self.zoom)
+                .map_or(0, |below| below.saturating_sub(further))
+        }
     }
 
     /// The magnification, in percent of actual size.
     #[must_use]
     pub const fn percent(&self) -> u32 {
-        percent_of(ZOOMS[self.zoom])
+        self.zoom.percent()
     }
 
     /// How far the picture is scrolled, in screen pixels.
@@ -86,11 +147,10 @@ impl Viewport {
     /// the shared denominator last.
     #[must_use]
     pub const fn span(&self) -> (u64, u64, u64) {
-        let (num, den) = ZOOMS[self.zoom];
         (
-            num as u64 * self.aspect.0 as u64,
-            num as u64 * self.aspect.1 as u64,
-            den as u64,
+            self.zoom.0 as u64 * self.aspect.0 as u64,
+            self.zoom.0 as u64 * self.aspect.1 as u64,
+            Zoom::UNIT as u64,
         )
     }
 
@@ -219,16 +279,39 @@ impl Viewport {
         moved
     }
 
+    /// Scroll by `(dx, dy)` screen pixels, kept to where the picture still
+    /// fills the canvas; answers whether anything moved.
+    pub fn scroll_by(&mut self, dx: i64, dy: i64, picture: (u32, u32), area: Rect) -> bool {
+        let shifted = |at: u64, by: i64| at.saturating_add_signed(by);
+        self.scroll_to(
+            shifted(self.scroll.0, dx),
+            shifted(self.scroll.1, dy),
+            picture,
+            area,
+        )
+    }
+
     /// Keep the scroll within the picture's extent at a canvas of `area`.
     pub fn settle(&mut self, picture: (u32, u32), area: Rect) -> bool {
         let (x, y) = self.scroll;
         self.scroll_to(x, y, picture, area)
     }
 
-    /// Magnify to rung `zoom`, the picture point under `anchor` staying
-    /// under it; answers whether the rung changed.
-    pub fn zoom_to(&mut self, zoom: usize, anchor: Point, picture: (u32, u32), area: Rect) -> bool {
-        let zoom = zoom.min(ZOOMS.len() - 1);
+    /// Magnify to rung `rung` of [`ZOOMS`], the picture point under `anchor`
+    /// staying under it; answers whether the magnification changed.
+    pub fn zoom_to(&mut self, rung: usize, anchor: Point, picture: (u32, u32), area: Rect) -> bool {
+        self.magnify(
+            Zoom::of(ZOOMS[rung.min(ZOOMS.len() - 1)]),
+            anchor,
+            picture,
+            area,
+        )
+    }
+
+    /// Magnify to `zoom`, the picture point under `anchor` staying under it;
+    /// answers whether the magnification changed.
+    pub fn magnify(&mut self, zoom: Zoom, anchor: Point, picture: (u32, u32), area: Rect) -> bool {
+        let zoom = zoom.clamp(Zoom::LEAST, Zoom::MOST);
         if zoom == self.zoom {
             return false;
         }
@@ -257,8 +340,8 @@ impl Viewport {
         let mut probe = *self;
         (0..=ACTUAL)
             .rev()
-            .find(|&zoom| {
-                probe.zoom = zoom;
+            .find(|&rung| {
+                probe.zoom = Zoom::of(ZOOMS[rung]);
                 let (width, height) = probe.extent(picture);
                 width <= u64::from(area.width) && height <= u64::from(area.height)
             })

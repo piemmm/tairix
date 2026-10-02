@@ -246,7 +246,7 @@ fn the_rail_hit_test_inverts_the_layout_exactly_at_the_row_boundaries() {
 /// window's end is reached by scrolling rather than dropped.
 #[test]
 fn a_rail_longer_than_its_window_scrolls_every_row_into_reach() {
-    use tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT;
+    use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
     use tairix_geometry::Point;
 
     let theme = Theme::dark();
@@ -1975,7 +1975,7 @@ fn the_view_mode_defaults_to_list_and_toggles_preserving_selection() {
 }
 
 /// One wheel detent, in the seat's scroll units.
-const DETENT: i32 = tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT;
+const DETENT: i32 = tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
 
 /// Turn the wheel over `browser`'s listing by `(0, dy)` scroll units at
 /// [`Scale::ONE`], answering whether it moved and what it reported.

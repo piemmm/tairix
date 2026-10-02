@@ -177,6 +177,8 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 | 131 | `call_peer_node` | `IpcEndpoint`, `Handle` (ticket), `user_ptr` (node out), `len` | `u64` (bytes) | —            | no      |
 | 132 | `fd_redeem_from` | `Handle` (grant), `*const ProcId grantor`, `usize len` | `u64` (fd) | —                 | yes     |
 | 133 | `shm_map_from` | `Handle` (grant), `*const ProcId grantor`, `usize len`, `user_ptr` (len out) | `u64` (base) | `CAP_SHM` | yes |
+| 134 | `touch_inject` | `u64 seat`, `user_ptr` (frame), `len`   | `u64` (bytes) | `CAP_INPUT_INJECT` | no |
+| 135 | `touch_read`   | `u64 seat`, `user_ptr` (buf), `len`     | `u64` (bytes) | `CAP_INPUT_READ` | no    |
 
 (Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
 `waitset_create`/`waitset_ctl`/`waitset_wait` — and 76–77 — `file_map`/
@@ -365,6 +367,20 @@ at most one each). Wrappers: `tairix_rt::pointer_inject` /
 `tairix_rt::pointer_read`; C stubs `tairix_sys_pointer_inject` /
 `tairix_sys_pointer_read`.
 
+`touch_inject` (no. 134) and `touch_read` (no. 135) are the touch pair, gated
+and routed as the pointer pair is, carrying one fixed-width `TouchFrame`
+(`lib/abi/src/touch.rs`) per call: every contact on one touch surface in one
+scan ([Input events](../abi/input.md)). The kernel validates the frame and
+stamps it with the injecting process and its monotonic arrival over whatever
+the driver wrote, so the seat's recogniser can follow each surface by its true
+injector and time a tap by when its frames arrived. A held seat queues the
+frame on its bounded touch channel (the oldest dropped when full); an unowned
+seat discards it. Both staging copies are wiped on every exit, as a key's is: a
+touchscreen's contacts can spell what was typed on an on-screen keyboard. The
+first delivered frame emits `INPUT_DELIVERED` with `kind=touch`. Wrappers:
+`tairix_rt::touch_inject` / `tairix_rt::touch_read`; C stubs
+`tairix_sys_touch_inject` / `tairix_sys_touch_read`.
+
 `resource_open` (no. 67) is the resource-reference analogue of `fs_open`
 (`plans/ALIAS.md`, `plans/SHELL.md` P5). A resource reference
 (`sys:random`, `sys:null`, …) names a typed *non-filesystem* resource — there
@@ -449,9 +465,9 @@ state. The matrix is exhaustive — anything not listed below is ungated:
 | `CAP_SANDBOX_SPAWN`| `spawn` (checked in-handler: canonical parser-sandbox blocks only) |
 | `CAP_CONSOLE_READ` | `stream_read` (console-backed descriptors only, checked in-handler), `stream_input_mode`, `console_foreground`, `terminal_purge` (checked in-handler, in addition to the dispatcher's `CAP_CONSOLE_WRITE`) |
 | `CAP_USERS_READ`   | `users_db_read`, `users_db_wait` |
-| `CAP_INPUT_INJECT` | `key_inject`, `pointer_inject` |
+| `CAP_INPUT_INJECT` | `key_inject`, `pointer_inject`, `touch_inject` |
 | `CAP_DISPLAY`      | `display_acquire`, `display_release` |
-| `CAP_INPUT_READ`   | `keyboard_read`, `pointer_read` |
+| `CAP_INPUT_READ`   | `keyboard_read`, `pointer_read`, `touch_read` |
 | `CAP_SHM`          | `shm_create`, `shm_map`, `shm_map_from`, `shm_grant`, `shm_grant_peer`, and `shm_create_dma` (checked in-handler, in addition to the dispatcher's `CAP_MEM_DMA`) |
 | `CAP_IPC_ENDPOINT` | `call_grant` (the dispatch gate); also the per-endpoint gate a grant-restricted endpoint's *senders* must hold, enforced in `ipc_call`/`call_post` alongside the per-endpoint grant |
 | `CAP_MMIO_MAP`     | `mmio_map`                 |
@@ -1247,8 +1263,9 @@ thread.
 The wait-set (`waitset_ctl`, no. 44) additionally accepts a `SeatInput`
 member (`plans/DISPLAY.md` D7a): `id` names a seat whose **live lease the
 caller holds** (owner-checked at add, oracle-free `NotFound` otherwise),
-and the member is ready when the seat's keyboard or pointer channel holds
-a record — *and* when the caller loses the lease (release, revoke, seat
+and the member is ready when the seat's keyboard, pointer or touch channel
+holds a record — so an owner drains all three on every wake — *and* when the
+caller loses the lease (release, revoke, seat
 hot-removal), so a desktop session parked on its input observes the loss
 instead of parking forever. The wake rides the seat registry's inject and
 revoke paths; only sets that contain a `SeatInput` member join the seat

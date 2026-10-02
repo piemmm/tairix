@@ -52,6 +52,8 @@ transparente se leia como transparente e não como a cor que está atrás.
 
 * `+` — ampliar para o passo seguinte
 * `-` — reduzir para o passo anterior
+* `Ctrl` + roda — ampliar ou reduzir em torno do ponteiro
+* Beliscar com dois dedos — ampliar ou reduzir de forma contínua; num ecrã tátil a imagem acompanha os dedos
 * `0` — ajustar toda a imagem à janela
 * `1` — tamanho real, um píxel de imagem por píxel de ecrã
 * `2` — ajustar a largura da imagem

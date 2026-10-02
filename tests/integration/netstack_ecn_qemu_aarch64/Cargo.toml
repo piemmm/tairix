@@ -31,6 +31,8 @@ tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0
 tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
 tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+# The audit-record reading every guest sink shares.
+tairix-itest-witness = { path = "../witness", version = "=0.0.0" }
 # The fixture's pure library, for the one `COMMAND` definition the PASS keying
 # matches `comm` against. `default-features = false`: the fixture's `program`
 # feature (its own `Run` binary's userland runtime) must never link into this

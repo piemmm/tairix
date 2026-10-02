@@ -688,6 +688,7 @@ tairix/
 │   ├── terrain/         # Grid terrain: drainage, erosion, least-cost routing.
 │   ├── theme/           # Shared desktop theme definition (dark/light).
 │   ├── timesync/        # Clock-setting policy: when to sync, what provenance.
+│   ├── touch/           # Seat touch gesture recogniser: frames to pointer, scroll, pinch.
 │   ├── tty/             # Shared tty line discipline (echo/ONLCR/^C).
 │   ├── tz/              # Civil time zones: compiled IANA rule store reader.
 │   ├── usb/             # Bus-agnostic xHCI USB host-controller protocol.
@@ -1585,6 +1586,7 @@ You are not exempt from any rule above. In addition:
     | The graphical terminal's shell channel: pseudo-terminal (pty), the shared tty line discipline (echo/cook/ONLCR/^C), `pty_create`, shell environment inheritance | `plans/PTY.md` |
     | Userland I/O library layer | `plans/IO.md` |
     | Display, seats, input routing, graphical session | `plans/DISPLAY.md`; `plans/GUI-CONTROLS-DESIGN.md` (GUI controls) |
+    | Pointing input: the one scroll unit, horizontal and high-resolution wheels, what a scroll tells the window it lands on, touch contacts, the seat's gesture recogniser, and pinch | `plans/POINTING.md` |
     | Reaching a logged-in state: the boot-time text-vs-graphical decision (`continue text\|gui`), the graphical login screen (greeter), the login service's session broker, and macOS-style fast user switching between concurrent desktop sessions | `plans/NEW-DESKTOP-LOGIN.md` |
     | Icon artwork: the raster/vector/glyph asset tiers, the icon vocabulary, the content-type registry that picks an icon, build-time asset discovery, and the sandboxed decode cache every surface draws through | `plans/ICONS.md` |
     | Vector assets: the SVG decoder (`lib/svg`) — the path/shape grammar, curve flattening, strokes, transforms, the style cascade, gradients, its fixed input bounds, and its deliberate non-goals | `plans/SVG.md` |
@@ -1622,6 +1624,11 @@ You are not exempt from any rule above. In addition:
     | CPU frequency scaling: the in-kernel governor and its idle-bracket utilisation, the launch boost, the `cpufreq_bind`/`cpufreq_wait` mechanism seam, the boot-time clock floor, and the live-clock estimator's idle exclusion | `plans/CPUFREQ.md` |
     | Raspberry Pi bring-up | `plans/PI.md` |
     | USB stack and hot-removal | `plans/USB.md` |
+    | HID devices on any transport: the report-descriptor model, the keyboard, mouse, touchpad and touchscreen decoders, the device engine, and the USB and I2C HID class drivers | `plans/HID.md` |
+    | Links between hardware-tree nodes: a device wired to another driver's service (an I2C target, a GPIO interrupt line), supplier resolution and bind ordering, cross-subtree authority, device-tree interrupt parents, device facts | `plans/SUPPLIERS.md` |
+    | GPIO controllers and the line interrupts they serve (`gpioirq-v1`), the BCM2835-family and Intel PCH drivers | `plans/GPIO.md` |
+    | I2C: the shared-memory transfer protocol, target channels, the BSC and DesignWare/LPSS controllers, HID over I2C | `plans/I2C.md` |
+    | ACPI's namespace: the namespace node, region access, the AML interpreter bus driver, device publication from `_CRS`/`_DSM`/`_PRT`, power-off and events | `plans/ACPI.md` |
     | Networking: the IPv4/IPv6 stack, sockets, transports, multicast, NIC drivers, offloads | `plans/NETWORK.md` |
     | Dynamic address configuration: the DHCPv4 client (RFC 2131/2132) engine and its stack integration | `plans/DHCP.md` |
     | The interactive network terminal client: the `telnet` command, its Network Virtual Terminal option negotiation, and the terminal relay | `plans/TELNET.md` |
@@ -2512,6 +2519,14 @@ HAL (§17.2), and the headless guarantee (§17.3).
   `kernel/arch/<target>/`. The rest of the kernel and all of userland
   see only the normalised tree; target-conditional code elsewhere is a
   defect (§17.2, enforced by `cargo xtask cfg-check`).
+- **The one exception is ACPI's AML.** The namespace's bytecode is
+  untrusted firmware input, so it is interpreted outside the kernel by the
+  ACPI bus driver (`drivers/bus/acpi`), bound to the namespace node the
+  x86_64 port publishes with read-only table grants and kernel-checked
+  region access; it publishes the devices the namespace describes as any
+  bus driver publishes its children (`plans/ACPI.md`). The static tables
+  the port boots from (RSDP, XSDT, MADT, MCFG, DMAR, FADT) stay in
+  `kernel/arch/x86_64/`.
 
 ### 18.3 Matching and autoload
 

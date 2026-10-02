@@ -78,6 +78,28 @@ impl Default for PointerSpeed {
     }
 }
 
+/// How a touchpad behaves.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct TouchpadSettings {
+    /// A tap clicks.
+    pub tap: bool,
+    /// Two fingers move the content, as on a touchscreen, rather than the
+    /// view.
+    pub natural_scroll: bool,
+    /// How far a finger moves the pointer.
+    pub speed: PointerSpeed,
+}
+
+impl Default for TouchpadSettings {
+    fn default() -> Self {
+        Self {
+            tap: true,
+            natural_scroll: true,
+            speed: PointerSpeed::NORMAL,
+        }
+    }
+}
+
 /// How often a held key repeats once it has been held for the repeat delay.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum RepeatRate {

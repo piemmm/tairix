@@ -95,6 +95,9 @@ use tairix_abi::sysinfo::{
     SYSINFO_REPLY_STATUS_LEN,
 };
 use tairix_abi::time::{Duration64, Time64};
+use tairix_abi::touch::{
+    Contact, ContactKind, TouchButtons, TouchExtent, TouchFrame, TouchSurface, TOUCH_CONTACTS_MAX,
+};
 use tairix_abi::users_admin::{
     decode_group_list, decode_user_list, UsersAdminRequest, USERS_ADMIN_MAX_REQUEST,
 };
@@ -1067,16 +1070,7 @@ fn exercise(bytes: &[u8]) {
             .expect("round-trip of an accepted duration must succeed");
         assert_eq!(duration, redecoded);
     }
-    if let Ok(event) = PointerInput::from_bytes(bytes) {
-        let redecoded = PointerInput::from_bytes(&event.to_le_bytes())
-            .expect("round-trip of an accepted pointer event must succeed");
-        assert_eq!(event, redecoded);
-    }
-    if let Ok(event) = KeyInput::from_bytes(bytes) {
-        let redecoded = KeyInput::from_bytes(&event.to_le_bytes())
-            .expect("round-trip of an accepted key event must succeed");
-        assert_eq!(event, redecoded);
-    }
+    exercise_input(bytes);
     exercise_rlimit(bytes);
     if let Ok(name) = PortName::from_bytes(bytes) {
         let redecoded = PortName::from_bytes(&name.to_le_bytes())
@@ -1248,6 +1242,27 @@ fn exercise_blkio(bytes: &[u8]) {
     // status carries the geometry, every other status carries an error.
     let outcome = tairix_abi::blkio::decode_outcome(bytes);
     assert_eq!(outcome.status.data_valid(), outcome.data().is_ok());
+}
+
+/// The seat's input records: an accepted pointer record, key record or touch
+/// frame re-encodes to itself, and a frame carries at most ten contacts.
+fn exercise_input(bytes: &[u8]) {
+    if let Ok(event) = PointerInput::from_bytes(bytes) {
+        let redecoded = PointerInput::from_bytes(&event.to_le_bytes())
+            .expect("round-trip of an accepted pointer event must succeed");
+        assert_eq!(event, redecoded);
+    }
+    if let Ok(event) = KeyInput::from_bytes(bytes) {
+        let redecoded = KeyInput::from_bytes(&event.to_le_bytes())
+            .expect("round-trip of an accepted key event must succeed");
+        assert_eq!(event, redecoded);
+    }
+    if let Ok(frame) = TouchFrame::from_bytes(bytes) {
+        assert!(frame.contacts().len() <= TOUCH_CONTACTS_MAX);
+        let redecoded = TouchFrame::from_bytes(&frame.to_le_bytes())
+            .expect("round-trip of an accepted touch frame must succeed");
+        assert_eq!(frame, redecoded);
+    }
 }
 
 /// Drive the resource-limit decoder on `bytes`.
@@ -1634,6 +1649,62 @@ fn structured_reply_inputs_with_corrupted_fields_never_panic() {
             frame[byte] ^= 1 << bit;
             exercise(&frame);
             frame[byte] ^= 1 << bit;
+        }
+    }
+}
+
+/// Every touch frame shape, seeded and bit-flipped a byte at a time: a
+/// random input never lands the magic, so the field validation — surface,
+/// buttons, count, each contact's flags and the zeroed slots past it — is
+/// reached only from a seed.
+#[test]
+fn structured_touch_frames_with_corrupted_fields_never_panic() {
+    let mut full = TouchFrame::new(
+        u16::MAX,
+        TouchSurface::Clickpad,
+        TouchButtons::from_bits(TouchButtons::PRIMARY | TouchButtons::MIDDLE).expect("defined"),
+        TouchExtent {
+            width: 1_000,
+            height: 650,
+        },
+    );
+    for id in 0..u16::try_from(TOUCH_CONTACTS_MAX).expect("ten") {
+        let contact = Contact::finger(id * 7, id * 6_000, u16::MAX - id);
+        let contact = match id % 3 {
+            0 => contact.lifted(),
+            1 => Contact {
+                kind: ContactKind::Palm,
+                ..contact
+            },
+            _ => contact,
+        };
+        full.push(contact).expect("room for ten");
+    }
+    let mut one = TouchFrame::new(
+        0,
+        TouchSurface::Screen,
+        TouchButtons::NONE,
+        TouchExtent::default(),
+    );
+    one.push(Contact::finger(1, 2, 3)).expect("room for one");
+    let empty = TouchFrame::new(
+        3,
+        TouchSurface::Touchpad,
+        TouchButtons::NONE,
+        TouchExtent::default(),
+    );
+    for seed in [full, one, empty] {
+        let mut base = seed.stamped(u64::MAX, 1).to_le_bytes().to_vec();
+        base.push(0);
+        let len = TouchFrame::WIRE_LEN;
+        for byte in 0..len {
+            for bit in 0..8u32 {
+                base[byte] ^= 1 << bit;
+                exercise(&base[..len]);
+                exercise(&base[..len - 1]);
+                exercise(&base[..=len]);
+                base[byte] ^= 1 << bit;
+            }
         }
     }
 }

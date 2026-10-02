@@ -70,7 +70,7 @@ use crate::catalog;
 use crate::idle::{DisplayOffAfter, IdleAfter};
 use crate::input::{
     parse_decimal, parse_millis, render_millis, PointerSpeed, PrimaryButton, RepeatRate,
-    REPEAT_DELAY_DEFAULT, REPEAT_DELAY_MAX, REPEAT_DELAY_MIN,
+    TouchpadSettings, REPEAT_DELAY_DEFAULT, REPEAT_DELAY_MAX, REPEAT_DELAY_MIN,
 };
 use crate::notify::NotifyPolicy;
 use crate::saver::{
@@ -592,6 +592,13 @@ pub enum SettingsKey {
     /// `pointer.speed` — how far the pointer moves for a movement of the
     /// mouse.
     PointerSpeed,
+    /// `touchpad.tap` — whether a tap on a touchpad clicks.
+    TouchpadTap,
+    /// `touchpad.natural_scroll` — whether two fingers on a touchpad move the
+    /// content rather than the view.
+    TouchpadNatural,
+    /// `touchpad.speed` — how far a touchpad finger moves the pointer.
+    TouchpadSpeed,
     /// `key.repeat_delay_ms` — how long a key is held before it repeats.
     RepeatDelay,
     /// `key.repeat_rate` — how often a held key repeats.
@@ -650,7 +657,7 @@ pub enum SettingsKey {
 
 impl SettingsKey {
     /// Every registry key, in the canonical listing (and render) order.
-    pub const ALL: [Self; 42] = [
+    pub const ALL: [Self; 45] = [
         Self::Wallpaper,
         Self::Fit,
         Self::Backdrop,
@@ -672,6 +679,9 @@ impl SettingsKey {
         Self::PointerPrimary,
         Self::DoubleClick,
         Self::PointerSpeed,
+        Self::TouchpadTap,
+        Self::TouchpadNatural,
+        Self::TouchpadSpeed,
         Self::RepeatDelay,
         Self::RepeatRate,
         Self::ScreensaverAfter,
@@ -730,6 +740,14 @@ impl SettingsKey {
     /// application's Mouse pane edits.
     pub const POINTER: [Self; 3] = [Self::PointerPrimary, Self::DoubleClick, Self::PointerSpeed];
 
+    /// The keys deciding how a touchpad behaves: what the Settings
+    /// application's Touchpad pane edits.
+    pub const TOUCHPAD: [Self; 3] = [
+        Self::TouchpadTap,
+        Self::TouchpadNatural,
+        Self::TouchpadSpeed,
+    ];
+
     /// The keys deciding how a held key repeats: what the Settings
     /// application's Keyboard pane edits.
     pub const KEYBOARD: [Self; 2] = [Self::RepeatDelay, Self::RepeatRate];
@@ -787,6 +805,9 @@ impl SettingsKey {
             Self::PointerPrimary => "pointer.primary",
             Self::DoubleClick => "pointer.double_click_ms",
             Self::PointerSpeed => "pointer.speed",
+            Self::TouchpadTap => "touchpad.tap",
+            Self::TouchpadNatural => "touchpad.natural_scroll",
+            Self::TouchpadSpeed => "touchpad.speed",
             Self::RepeatDelay => "key.repeat_delay_ms",
             Self::RepeatRate => "key.repeat_rate",
             Self::ScreensaverAfter => "screensaver.after_min",
@@ -916,6 +937,8 @@ pub struct DesktopSettings {
     pub double_click: Duration64,
     /// How far the pointer moves for a movement of the mouse.
     pub pointer_speed: PointerSpeed,
+    /// How a touchpad behaves.
+    pub touchpad: TouchpadSettings,
     /// How long a key is held before it repeats.
     pub repeat_delay: Duration64,
     /// How often a held key repeats.
@@ -955,6 +978,7 @@ impl Default for DesktopSettings {
             primary_button: PrimaryButton::default(),
             double_click: DOUBLE_CLICK_DEFAULT,
             pointer_speed: PointerSpeed::default(),
+            touchpad: TouchpadSettings::default(),
             repeat_delay: REPEAT_DELAY_DEFAULT,
             repeat_rate: RepeatRate::default(),
             screensaver_after: IdleAfter::Minutes(10),
@@ -1079,12 +1103,10 @@ fn set_field(settings: &mut DesktopSettings, key: SettingsKey, value: &str) -> b
             &mut settings.double_click,
             parse_millis(value, DOUBLE_CLICK_MIN, DOUBLE_CLICK_MAX),
         ),
-        SettingsKey::PointerSpeed => put(
-            &mut settings.pointer_speed,
-            parse_decimal(value)
-                .and_then(|percent| u16::try_from(percent).ok())
-                .and_then(PointerSpeed::from_percent),
-        ),
+        SettingsKey::PointerSpeed => put(&mut settings.pointer_speed, parse_speed(value)),
+        SettingsKey::TouchpadTap => put_bool(&mut settings.touchpad.tap, value),
+        SettingsKey::TouchpadNatural => put_bool(&mut settings.touchpad.natural_scroll, value),
+        SettingsKey::TouchpadSpeed => put(&mut settings.touchpad.speed, parse_speed(value)),
         SettingsKey::RepeatDelay => put(
             &mut settings.repeat_delay,
             parse_millis(value, REPEAT_DELAY_MIN, REPEAT_DELAY_MAX),
@@ -1130,6 +1152,13 @@ fn set_field(settings: &mut DesktopSettings, key: SettingsKey, value: &str) -> b
 
 /// Store the switch `value` spells in `field`, answering whether it spelled
 /// one.
+/// A speed spelled as a bare decimal percentage, within the speeds offered.
+fn parse_speed(value: &str) -> Option<PointerSpeed> {
+    parse_decimal(value)
+        .and_then(|percent| u16::try_from(percent).ok())
+        .and_then(PointerSpeed::from_percent)
+}
+
 fn put_bool(field: &mut bool, value: &str) -> bool {
     put(field, tairix_appconf::as_bool(value).ok())
 }
@@ -1184,6 +1213,11 @@ fn field_value(settings: &DesktopSettings, key: SettingsKey) -> String {
         SettingsKey::PointerPrimary => settings.primary_button.as_str().to_string(),
         SettingsKey::DoubleClick => render_millis(settings.double_click),
         SettingsKey::PointerSpeed => format!("{}", settings.pointer_speed.percent()),
+        SettingsKey::TouchpadTap => tairix_appconf::bool_text(settings.touchpad.tap).to_string(),
+        SettingsKey::TouchpadNatural => {
+            tairix_appconf::bool_text(settings.touchpad.natural_scroll).to_string()
+        }
+        SettingsKey::TouchpadSpeed => format!("{}", settings.touchpad.speed.percent()),
         SettingsKey::RepeatDelay => render_millis(settings.repeat_delay),
         SettingsKey::RepeatRate => settings.repeat_rate.render_value(),
         SettingsKey::ScreensaverAfter => settings.screensaver_after.render_value(),

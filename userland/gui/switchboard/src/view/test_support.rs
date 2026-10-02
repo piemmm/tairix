@@ -4,8 +4,8 @@
 //! section's tests, so no section carries its own copy of the fixture the
 //! others already use.
 
+use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
 use tairix_abi::sysinfo::{CpuCoreClass, VolumeHealth};
-use tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT;
 use tairix_abi::{ProcId, PROC_ID_LEN};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};

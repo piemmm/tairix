@@ -511,6 +511,7 @@ impl TaskbarInput {
             } => self.release_primary(now_ns),
             InputEvent::PointerMoved { .. }
             | InputEvent::PointerReleased { .. }
+            | InputEvent::Pinch { .. }
             | InputEvent::KeyPressed { .. }
             | InputEvent::KeyReleased { .. }
             | InputEvent::ModifiersChanged { .. } => TaskbarResponse::Ignored,

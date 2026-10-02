@@ -246,10 +246,12 @@ test.
   "always verify; measure when a TPM is present, and record its absence". This
   is a security-policy choice for the user, made before B3 lands.
 
-## 5. Next stage: Surface Go 2 (not started)
+## 5. Next stage: Surface Go 2
 
-Out of scope until F8 is done. What the tree already shows the physical
-machine needs beyond this plan; the exact parts are confirmed by S0.
+Out of scope until F8 is done, except S4 and S6: the touchpad and touchscreen
+work (`plans/POINTING.md` PO12–PO13) builds them now. What the tree already
+shows the physical machine needs beyond this plan; the exact parts are
+confirmed by S0.
 
 | Id | Item | Status |
 |---|---|---|
@@ -257,5 +259,6 @@ machine needs beyond this plan; the exact parts are confirmed by S0.
 | S1 | Secure Boot: sign the loader for the machine's key database, or document the disable step (a decision for the user) | planned |
 | S2 | xHCI bound by its PCI class over the PCI tree (today `drivers/bus/usb/xhci` binds only the node the Pi's VL805 bridge emits) | planned |
 | S3 | A driver for the machine's internal storage (no NVMe, AHCI or SDHCI driver exists in `drivers/storage`) | planned |
-| S4 | An ACPI namespace (AML) reader: power-off (`plans/ARCHSUPPORT.md` A7), the power button, battery, the i8042 (`PNP0303`), and ACPI-enumerated I2C/HID devices | planned |
+| S4 | The ACPI namespace: the AML bus driver, power-off, the power button, the i8042 (`PNP0303`), and ACPI-enumerated I2C/HID devices (`plans/ACPI.md`); the battery | planned |
 | S5 | Real-silicon hardening and robustness: `plans/ARCHSUPPORT.md` A8 (KPTI, speculation barriers), `plans/OPEN-DEFECTS.md` D85 (spurious LAPIC interrupt), D3 (hard-lockup watchdog) | planned |
+| S6 | Every PCI function the ECAM walk finds published into the hardware tree with its BAR, interrupt and DMA-stream grants, bus mastering left to the bound driver (`plans/IOMMU.md` IOM7, IOM9) | planned |

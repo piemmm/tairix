@@ -510,7 +510,7 @@ mod tests {
 
     #[test]
     fn a_detent_moves_its_step_on_each_axis() {
-        let detent = tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT;
+        let detent = tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
         let mut viewport = both_bars();
         assert!(viewport.wheel(0, 3 * detent, 16));
         assert_eq!(viewport.vertical().unwrap().offset(), 48);
@@ -546,7 +546,11 @@ mod tests {
         assert!(only_v
             .track_and_geometry(BOUNDS, ScrollOrientation::Horizontal)
             .is_none());
-        assert!(!only_v.wheel(5 * tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT, 0, 16)); // no horizontal bar, no change
+        assert!(!only_v.wheel(
+            5 * tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT,
+            0,
+            16
+        )); // no horizontal bar, no change
         assert!(!only_v.page(ScrollOrientation::Horizontal, true));
     }
 

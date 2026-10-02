@@ -14,7 +14,7 @@ is `pub(crate)` per `AGENTS.md` §8.
 | `drivers/bus/pcie_brcm`  | Pi 4 (BCM2711 RC)     | User-space bus-driver crate (link bring-up engine + `Run` bin; host-proven); metal pending |
 | `drivers/bus/mmio`       | aarch64 / riscv64     | Shipped  |
 | `drivers/bus/virtio`     | cross-arch            | Stage 4.D |
-| `drivers/bus/usb/xhci`   | generic xHCI host (Pi 4 VL805) | P10 protocol layers + HID enumeration (host-proven) |
+| `drivers/bus/usb/xhci`   | generic xHCI host (Pi 4 VL805) | P10 protocol layers + enumeration (host-proven) |
 | `drivers/bus/usb/vl805`  | Pi 4 (VL805 device)   | User-space bus-driver crate: firmware-reload policy + `Run` bin (reload firmware → emit `usb,xhci` node B; host-proven); metal pending |
 
 ## Capability model
@@ -307,9 +307,10 @@ link (`open_discovered`), assigns the VL805 BAR, and publishes the VL805 PCI
 function through `hw_emit_node` (carrying the BAR + DMA grants); the `vl805`
 device driver binds that, reloads the controller firmware over the VideoCore
 mailbox, and publishes the controller as a `usb,xhci` node forwarding those
-grants; and the `usb_kbd` driver binds *that*, maps the BAR, carves DMA,
-brings the controller up (`usb::wiring`), enumerates the boot keyboard, and
-pumps decoded key edges into the input-focus arbiter through `key_inject`.
+grants; the xHCI host-controller driver binds *that*, maps the BAR, carves
+DMA, brings the controller up, enumerates the attached devices, and publishes
+one node per interface; and the `usb_hid` class driver binds each HID
+interface node and injects its records into the seat.
 Each driver receives only the grants its matched node requested (`AGENTS.md`
 §18.3), reached through its rt-backed `DriverHost`. The engines are
 host-tested up to the controller hand-off, where the inert mock register
@@ -436,7 +437,7 @@ examined, so a poll reads 16 bytes rather than the whole segment out of
 non-cacheable DMA memory; on a device streaming reports that difference
 dominates the driver's steady-state CPU cost.
 
-### Device enumeration and the HID report path
+### Device enumeration and the interrupt report path
 
 `device` is the multi-device enumeration engine. All device-shared
 bytes live in a growable bank of DMA chunks behind the crate's
@@ -511,81 +512,21 @@ that does not complete has EP0 taken back before its error returns (Reset
 Endpoint for a halt, Stop Endpoint for a timeout, then Set TR Dequeue onto a
 rebuilt ring).
 
-The interrupt-IN endpoint is configured (Configure Endpoint), and each
-HID interface is put in the protocol it needs. A **mouse** honours
-`SET_IDLE(indefinite)` — reporting only on change and NAKing otherwise —
-**only in report protocol**: an on-metal mouse ignored `SET_IDLE` in boot
-protocol and streamed a duplicate report every polling interval, storming
-the controller and pegging a core while idle. So a mouse interface reads its
-Report Descriptor (`GET_DESCRIPTOR(Report)`) and, when it parses, runs in
-**report protocol** (`SET_PROTOCOL(report)` + `SET_IDLE`); each
-report-protocol report is normalised back into the fixed boot layout the
-class driver reads (the shared `tairix_hid` parser + normaliser), so the
-class driver and the URB ABI are unchanged. A **keyboard** is driven in
-**boot protocol** (`SET_PROTOCOL(boot)` + `SET_IDLE`) and its Report
-Descriptor is not read: it reports only on a key-state change and so never
-causes that idle storm, and the fixed 8-byte boot report avoids a
-report-descriptor parse a composite keyboard's multiple Report IDs (or an
-NKRO layout) can misread. That was the metal "keyboard registers no
-keypresses" defect — put in report protocol, a composite keyboard streamed
-its native report under a Report ID the parser had not pinned to (it pinned
-the first keyboard collection's ID, but the device reported under a later
-one), so normalisation dropped every keypress. Boot protocol makes the
-device emit the report the boot decoder is built for. A device the parser
-cannot handle also falls back to boot protocol, so it is never left
-unconfigured.
+Every interface with an interrupt-IN endpoint or a bulk pair is configured
+(Configure Endpoint) and served, whatever its class; the engine sends no class
+request. A HID interface's protocol, idle rate, report descriptor and features
+are its class driver's (`drivers/input/usb_hid`, `plans/HID.md`), sent over its
+own URB transport inside its interface's `UrbScope`.
 
-The interrupt-IN transfer lands in a `CAPTURE_LEN`-byte buffer, not the
-8-byte boot `REPORT_LEN`, so a report-protocol mouse report longer than
-eight bytes is captured in full rather than clipped; normalisation is
-fail-soft, keeping the fields that did arrive. The transfer is *armed* to
-the endpoint's own `wMaxPacketSize`, never the full capture buffer: a
-full/low-speed HID endpoint behind the high-speed hub's transaction
-translator faults with a Split Transaction Error when a transfer exceeds the
-per-interval budget the TT scheduled, retracting the interface.
+The interrupt-IN endpoint is armed only once the class driver's first report
+request names the longest report it expects: to that, or to one service
+interval's payload if that is longer, and no further. A full/low-speed
+endpoint behind the high-speed hub's transaction translator faults with a
+Split Transaction Error when a transfer outruns the interval budget the TT
+scheduled, retracting the interface — the metal keyboard behind the Pi 4 hub.
+Each report is delivered as the device sent it.
 
-Because that live report path is invisible under QEMU (which models no Pi
-USB), the engine latches the per-interface enumeration decision the HCD logs
-once, so a metal boot shows *how* each device's reports are read — a keyboard
-as boot-protocol, a mouse as report-protocol — without guessing.
-`UsbDevice::hid_enum_diag` records report vs boot protocol, the declared
-report-descriptor length, the parsed field layout when in report protocol
-(`tairix_hid::ReportMapSummary`: kind, report ID, and every located field's
-bit offset, width, and element count — a mouse's buttons, X, Y, and wheel, or a
-keyboard's modifiers and key array), `wMaxPacketSize`, and the armed capture
-length — logged
-at node publish (`usb-hcd: HID interface report protocol` /
-`… boot-protocol fallback`, event id 4150). It carries no report payload, so
-no keystroke ever reaches the log.
-
-The descriptor that decision was derived from is logged beside it
-(`usb-hcd: HID interface report descriptor`, the same event id, 64 bytes of hex
-per record with the byte offset each starts at). A map is only as right as its
-input: an interface whose descriptor declares Report IDs the parser did not pin
-to reads its sibling collections' reports as its own, and the located layout
-alone cannot show that — only the bytes can. `GET_DESCRIPTOR(Report)` is
-therefore issued for every HID interface, a keyboard's included, even though a
-keyboard runs boot protocol whatever its descriptor says. A Report Descriptor
-is a device capability blob, not report data, so this too carries no keystroke
-or pointer movement.
-
-Because `SET_PROTOCOL` is optional, the protocol actually in force is read
-back with `GET_PROTOCOL` rather than assumed. A device that accepts the request
-and stays in report protocol still sends Report-ID-prefixed reports, and
-boot-decoding those reads each leading ID byte as the boot modifier byte —
-fabricating held modifiers and key usages out of a sibling collection's
-traffic. So a served interface's reports are read one of three ways: as the
-boot layout, rewritten through the parsed map (which demuxes its own Report ID
-from its siblings'), or **refused** when the device is in report protocol and
-its descriptor yields no map. A refused interface delivers nothing and logs at
-`Warn`: a silent interface is honest, fabricated input is not.
-
-These class requests are optional (a device that STALLs
-one keeps its current mode; a STALLed `GET_DESCRIPTOR(Report)` simply
-selects the boot fallback, and a STALLed `GET_PROTOCOL` is taken as the boot
-protocol that was asked for). The endpoint is not
-primed during enumeration: `next_report` arms one transfer only when the
-class driver has submitted a URB and is waiting for that report. A hub
+The endpoint is not primed during enumeration. A hub
 reports interface class `0x09`, not HID, and is served as a hub alone: no
 interface its configuration claims gets a device entry, which would alias the
 region its hub entry holds. Its interrupt status-change endpoint is captured
@@ -613,10 +554,8 @@ port, §8.9) and — for a full/low-speed device behind the high-speed hub
 — the **transaction-translator** Hub Slot ID and Port Number (§6.2.2),
 so the controller splits its transactions through the hub's TT. The
 post-Address sequence (descriptors → Configure Endpoint →
-`SET_CONFIGURATION` → per HID interface `GET_DESCRIPTOR(Report)` → report
-protocol or the boot fallback + `SET_IDLE(indefinite)` →
-ready for request-driven report
-arming) is the shared `finish_enumeration`, identical to a root-port device —
+`SET_CONFIGURATION` → ready for request-driven report arming) is the shared
+`finish_enumeration`, identical to a root-port device —
 only the topology in the slot context differs. A failed attach restores
 the hub as the active control context and releases the claimed slot, so
 one port's broken device never costs the other ports their service. The
@@ -671,8 +610,8 @@ metal symptom where the keyboard enumerated but typing produced nothing
 (xHCI §6.2.2).
 
 The interrupt-IN endpoint context also carries a non-zero **Max ESIT
-Payload** (`ep_ctx_dwords`, §6.2.3.8 dword 4 bits 16:31 = the max packet
-size for a boot HID endpoint). The xHCI periodic scheduler reserves no
+Payload** (`ep_ctx_dwords`, §6.2.3.8 dword 4 bits 16:31: the bytes one
+service interval moves, `PeriodicShape::payload`). The xHCI periodic scheduler reserves no
 bus bandwidth for a periodic endpoint whose Max ESIT Payload is zero
 (§4.14.2), so the controller would service it never — fatal precisely
 for a full/low-speed interrupt endpoint behind the hub's TT, where the
@@ -692,19 +631,17 @@ interrupt-IN endpoint and takes its Device Context Index
 `interrupt_interval` encodes the endpoint-context Interval from the
 descriptor's `bInterval` and the device speed (high/SuperSpeed
 `bInterval − 1`; full/low-speed frames → the `fls(bInterval × 8) − 1`
-microframe exponent, clamped 3..=10, xHCI Table 6-12). A **mouse**
-interface's Interval is then raised to at least `pointer_min_interval`
-(derived from `POINTER_MAX_REPORT_HZ` = 100) so an aggressive 1000 Hz
-mouse is polled no faster than ~100 Hz — otherwise it woke the HCD and
-its class driver a thousand times a second while moving; the cap only
-lowers a fast rate, and a keyboard is never touched. Hard-coding the
+microframe exponent, clamped 3..=10, xHCI Table 6-12); its Max Burst Size
+and Max ESIT Payload come from the high-speed transaction bits of
+`wMaxPacketSize` or the `SuperSpeed` endpoint companion. Every endpoint is
+polled at its own interval. Hard-coding the
 endpoint as endpoint 1 (DCI 3) left the controller polling — and the
 doorbell ringing — the wrong endpoint for a keyboard whose interrupt-IN
 endpoint sat elsewhere, so it scheduled the real endpoint never: the
 keyboard was addressed (`4128`) with the hub marked and a non-zero Max
 ESIT Payload, yet typing produced nothing and the poll loop spun with
-zero events. A HID interface that reports no interrupt-IN endpoint is a
-forged/corrupt descriptor and fails closed (`BadMagic`, §2.9).
+zero events. An interface with no interrupt-IN endpoint and no bulk pair is
+not served.
 
 Control transfers carry the SETUP payload as immediate data, set
 Interrupt-on-Short-Packet on the IN data stage, and watch only the
@@ -717,22 +654,15 @@ before any other context is activated. A timed-out transfer stays armed, so a
 device that answers one late writes only its own region, never the data of
 another device's or a hub's transfer (a port status it could otherwise spoof).
 
-`UsbDevice` implements the `tairix_abi::driver::input::ReportSource`
-seam (hoisted into `lib/abi` because its consumer,
-`drivers/input/usb_kbd` (and its mouse sibling), is a sibling driver and drivers depend only
-on `lib/*`, `AGENTS.md` §17.4): when no interrupt-IN transfer is in flight,
-`next_report` arms exactly one TRB for the class-driver URB currently waiting
-and rings the endpoint doorbell, returning `None` so the HCD holds the IPC
-ticket. When the controller event arrives, the next `next_report` consumes
-that event, validates the controller's claim end to end (slot, endpoint ID,
-completion code, TRB address inside the interrupt ring, residual within the
-TRB length — §5.4), copies the report out of the slot's buffer, and retires
-the transfer. The crate's tests prove the whole chain against the
-register-level mock plus an in-memory ring model sharing the same
-buffer — including a `BootKeyboard` polling decoded key events over
-the mock controller — plus the fail-closed paths (forged residual,
-stalled class request, empty port, double enumeration, undersized or
-misaligned DMA region).
+`UsbDevice::next_report` serves a class driver's interrupt-IN URB: its first
+request fixes the length the endpoint is armed to, and nothing is armed
+before it. Each completion's claim is validated end to end (slot, endpoint
+ID, completion code, TRB address inside the interrupt ring, residual within
+the armed length — §5.4) and the report queued as the device sent it; the
+oldest queued report is delivered, or the URB is held until one arrives. The
+crate's tests prove the chain against the register-level mock plus an
+in-memory ring model, and the fail-closed paths (forged residual, empty port,
+double enumeration, undersized or misaligned DMA region).
 
 ### Controller recovery keeps the devices that come back
 
@@ -1203,19 +1133,19 @@ interface-less reply). A composite device — a wireless keyboard+mouse
 receiver carrying a boot-keyboard *and* a boot-mouse interface — gets one
 device-table entry and one emitted node **per served interface**, the
 siblings sharing the device's slot and EP0. The discovered
-`bConfigurationValue` and each `bInterfaceNumber` drive
-`SET_CONFIGURATION` and the per-interface HID protocol setup
-(`GET_DESCRIPTOR(Report)` → report protocol + `SET_IDLE(indefinite)`, or
-the boot-protocol fallback) —
-neither is assumed to be `1` / `0` any more — and the 24-bit interface class
+`bConfigurationValue` and each `bInterfaceNumber` drive `SET_CONFIGURATION`
+and the interface node's `HwProperty::UsbInterface` — neither is assumed to
+be `1` / `0` any more — and the 24-bit interface class
 `(bInterfaceClass << 16) | (bInterfaceSubClass << 8) | bInterfaceProtocol`
 (an HID boot keyboard is `0x03_01_01`, a boot mouse `0x03_01_02`) is
 captured for emission. `UsbDevice::describe_device(parent_id, node_id)`
 then returns an `HwNode` of class `Input`, parented at the controller's
 node, carrying one `HwMatchKey::usb` of the device's `vid:pid` and that
 captured interface class — never a fabricated one (`AGENTS.md` §18.5) —
-so the `usb_kbd`/`usb_mouse` class-wildcard `BIND_KEYS` resolve
-against it exactly as `devmgr` will. The node's `HwNode::address` is
+so the class-wildcard `BIND_KEYS` of `usb_hid` and `usb_msd` resolve
+against it exactly as `devmgr` will. The node also states the interface's
+number (`HwProperty::UsbInterface`), the `wIndex` its class driver's requests
+must name. The node's `HwNode::address` is
 the device's bus position (its root port above its Route String), which a
 controller reset keeps, so the sibling interface nodes of one
 composite device carry the same non-zero address and an inventory

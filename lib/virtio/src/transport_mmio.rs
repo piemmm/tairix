@@ -273,6 +273,12 @@ impl Transport for MmioTransport {
         }
     }
 
+    fn write_config(&mut self, offset: usize, data: &[u8]) {
+        for (i, &b) in data.iter().enumerate() {
+            let _ = self.window.write_u8(regs::CONFIG + offset + i, b);
+        }
+    }
+
     fn ack_interrupt(&mut self) {
         // Read which bits the device raised and write exactly those back
         // to `InterruptACK`, de-asserting the device's interrupt line
@@ -491,6 +497,14 @@ mod tests {
         let mut over = [0xCDu8; 4];
         t.read_config(6, &mut over);
         assert_eq!(over, [7, 8, 0, 0]);
+    }
+
+    #[test]
+    fn write_config_writes_the_config_window_and_drops_bytes_past_it() {
+        let dev = FakeMmioDevice::new(regs::CONFIG + 4);
+        let mut t = dev.transport();
+        t.write_config(1, &[0x11, 0x22, 0x33, 0x44]);
+        assert_eq!(dev.dev().read_u32(regs::CONFIG).unwrap(), 0x3322_1100);
     }
 
     #[test]
