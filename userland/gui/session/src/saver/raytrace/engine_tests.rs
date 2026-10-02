@@ -1,8 +1,8 @@
 //! Host tests of a reveal's work: a scene prepared over slices before any
 //! pixel, its progress told as it goes, traced coarse to fine exactly as each
 //! pixel traces alone at the tracer's best however slowly, the pace each
-//! slice keeps, the next scene and the same one again, and each whole picture
-//! handed over to be kept once.
+//! slice keeps, the next scene, and each whole picture handed over to be kept
+//! once.
 
 use alloc::vec::Vec;
 
@@ -11,7 +11,7 @@ use tairix_raytrace::{Quality, Reveal, Setting, Tracer};
 
 use super::{draw_setting, pace, Engine, Stage, Traced, MIN_BATCH, QUALITY, SLICE_NS};
 use crate::saver::raytrace::album::Unkept;
-use crate::saver::raytrace::crew::{Request, Status, TraceDesk, Turn};
+use crate::saver::raytrace::crew::{Status, TraceDesk, Turn};
 
 const SIZE: (u32, u32) = (48, 27);
 const MS: u64 = 1_000_000;
@@ -281,48 +281,21 @@ fn the_next_scene_is_set_elsewhere_and_revealed_from_its_start() {
     let _ = run_until(&mut engine, tracing);
     let _ = run_until(&mut engine, whole);
     let first = engine.plan.setting;
-    engine.apply(Request::Next);
+    engine.next();
     assert_ne!(engine.plan.setting, first);
     assert!(matches!(engine.stage, Stage::Composing));
     let _ = run_until(&mut engine, tracing);
     assert_eq!(engine.shown, 0);
 }
 
-/// The same scene again is the same picture: mid-reveal it starts over from
-/// the scene it holds, and once the scene is let go it is composed afresh
-/// from its plan.
+/// A slice ordered through the desk begins the scene the loop asked for
+/// before it traces.
 #[test]
-fn the_same_scene_again_is_the_same_picture() {
-    let mut engine = Engine::new(SIZE, 19).expect("an engine");
-    let _ = run_until(&mut engine, tracing);
-    let mut clock = ticking(MS);
-    let mut partial = Vec::new();
-    for _ in 0..4 {
-        let _ = engine.step(&tairix_parallel::SERIAL, &mut partial, &mut clock);
-    }
-    assert!(engine.shown > 0 && tracing(&engine));
-    engine.apply(Request::Again);
-    assert_eq!(engine.shown, 0);
-    let whole_picture = run_until(&mut engine, whole);
-    assert_eq!(
-        partial,
-        whole_picture[..partial.len()],
-        "the start again is the start it had"
-    );
-    engine.apply(Request::Again);
-    assert!(matches!(engine.stage, Stage::Composing));
-    let _ = run_until(&mut engine, tracing);
-    assert_eq!(run_until(&mut engine, whole), whole_picture);
-}
-
-/// A slice ordered through the desk takes up what the loop asked before it
-/// traces.
-#[test]
-fn an_order_takes_up_the_loops_request_before_its_slice() {
+fn an_order_begins_the_scene_asked_for_before_its_slice() {
     let mut engine = Engine::new(SIZE, 29).expect("an engine");
     let first = engine.plan.setting;
     let mut desk = TraceDesk::new();
-    desk.request(Request::Next);
+    desk.next();
     let Turn::Trace(order) = desk.turn() else {
         panic!("a slice");
     };
@@ -338,9 +311,9 @@ fn an_order_takes_up_the_loops_request_before_its_slice() {
     assert!(matches!(engine.stage, Stage::Preparing(_)));
 }
 
-/// An engine keeping pictures hands each whole one over once, as traced:
-/// the same scene traced again keeps nothing more, and the next scene's is
-/// kept in its turn. One not keeping them hands nothing over.
+/// An engine keeping pictures hands each whole one over once, as traced,
+/// however long it is stepped after, and the next scene's is kept in its
+/// turn. One not keeping them hands nothing over.
 #[test]
 fn a_whole_picture_is_handed_over_once_as_traced() {
     let mut engine = Engine::new(SIZE, 31).expect("an engine");
@@ -356,17 +329,15 @@ fn a_whole_picture_is_handed_over_once_as_traced() {
     assert_eq!(kept.seed, engine.plan.seed);
     assert_eq!(kept.size, SIZE);
     assert_eq!(kept.pixels, painted(&steps));
+    let mut clock = ticking(MS);
+    let mut after = Vec::new();
+    for _ in 0..3 {
+        let _ = engine.step(&tairix_parallel::SERIAL, &mut after, &mut clock);
+    }
+    assert!(after.is_empty(), "a whole scene traces nothing more");
     assert!(engine.take_finished().is_none(), "handed over once");
 
-    engine.apply(Request::Again);
-    let _ = run_until(&mut engine, tracing);
-    let _ = run_until(&mut engine, whole);
-    assert!(
-        engine.take_finished().is_none(),
-        "the same scene is not kept twice"
-    );
-
-    engine.apply(Request::Next);
+    engine.next();
     let _ = run_until(&mut engine, tracing);
     let _ = run_until(&mut engine, whole);
     let next = engine
@@ -379,24 +350,6 @@ fn a_whole_picture_is_handed_over_once_as_traced() {
     let _ = run_until(&mut plain, tracing);
     let _ = run_until(&mut plain, whole);
     assert!(plain.take_finished().is_none());
-}
-
-/// A reveal started over mid-trace still keeps the whole picture once it is
-/// whole, every pixel as the second tracing left it.
-#[test]
-fn a_picture_started_over_is_kept_once_it_is_whole() {
-    let mut engine = Engine::new(SIZE, 37).expect("an engine");
-    engine.keep_pictures();
-    let _ = run_until(&mut engine, tracing);
-    let mut clock = ticking(MS);
-    let mut partial = Vec::new();
-    for _ in 0..3 {
-        let _ = engine.step(&tairix_parallel::SERIAL, &mut partial, &mut clock);
-    }
-    engine.apply(Request::Again);
-    let steps = run_until(&mut engine, whole);
-    let kept = engine.take_finished().expect("handed over").expect("held");
-    assert_eq!(kept.pixels, painted(&steps));
 }
 
 /// A picture the heap would not hold a copy of is reported, not kept.

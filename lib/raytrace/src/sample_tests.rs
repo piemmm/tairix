@@ -39,24 +39,6 @@ fn index(step: Step, width: u32) -> usize {
     (step.y * width + step.x) as usize
 }
 
-/// The pixels of the cells `step`'s grid has `step` as a corner of, clipped
-/// to a `width` by `height` picture: what painting the step may change.
-fn cells_of(step: Step, (width, height): (u32, u32)) -> Vec<(u32, u32)> {
-    let side = step.side;
-    let (column, row) = (step.x / side, step.y / side);
-    let mut pixels = Vec::new();
-    for cell_row in row.saturating_sub(1)..=row {
-        for cell_column in column.saturating_sub(1)..=column {
-            for y in cell_row * side..((cell_row + 1) * side).min(height) {
-                for x in cell_column * side..((cell_column + 1) * side).min(width) {
-                    pixels.push((x, y));
-                }
-            }
-        }
-    }
-    pixels
-}
-
 /// Which of `cells × cells` strata of the unit square a point is in.
 fn stratum((u, v): (f64, f64), cells: u32) -> usize {
     let side = f64::from(cells);
@@ -377,32 +359,6 @@ fn every_pass_halves_the_grid_and_ends_with_it_whole() {
             }
             assert_eq!(side, 1, "{size:?}: the last pass traces single pixels");
             assert!(traced.iter().all(|pixel| *pixel));
-        }
-    }
-}
-
-/// Within the cells a step is a corner of, the only pixels already traced
-/// are cells' top-left corners, whose own trace a bilinear repaint gives back
-/// exactly: painting a step never changes a pixel an earlier one traced.
-#[test]
-fn a_step_changes_no_pixel_but_a_cell_corner_an_earlier_one_traced() {
-    for size in SIZES {
-        for key in KEYS {
-            let order = Reveal::new(size, key).expect("a picture");
-            let width = size.0;
-            let mut traced = vec![false; (size.0 * size.1) as usize];
-            for step in steps(&order) {
-                for (x, y) in cells_of(step, size) {
-                    if traced[(y * width + x) as usize] {
-                        assert_eq!(
-                            (x % step.side, y % step.side),
-                            (0, 0),
-                            "{size:?}: {step:?} reaches ({x}, {y}), traced inside a cell"
-                        );
-                    }
-                }
-                traced[index(step, width)] = true;
-            }
         }
     }
 }

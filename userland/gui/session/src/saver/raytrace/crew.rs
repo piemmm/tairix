@@ -50,16 +50,6 @@ impl Status {
     }
 }
 
-/// What the serve loop asks of a reveal.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum Request {
-    /// A scene in another setting.
-    Next,
-    /// The current scene again from its first step: the window let the
-    /// picture go.
-    Again,
-}
-
 /// The threads a reveal may be traced on, away from the serve loop.
 pub trait TraceHost {
     /// Trace `engine`'s reveals on threads of their own as `options` ask: one
@@ -96,8 +86,8 @@ pub trait TraceLink {
     /// traced, and answer where the reveal stands.
     fn collect(&self, into: &mut Vec<Traced>) -> Status;
 
-    /// Ask for `request`, dropping everything traced before it.
-    fn request(&self, request: Request);
+    /// Ask for a scene in another setting, dropping everything traced before.
+    fn next(&self);
 }
 
 /// The embedder's lock around a reveal's [`TraceDesk`], and the condition
@@ -192,10 +182,10 @@ impl<L: DeskLock> TraceLink for DeskLink<L> {
         status
     }
 
-    fn request(&self, request: Request) {
+    fn next(&self) {
         let waiting = {
             let mut held = self.0.lock();
-            held.request(request);
+            held.next();
             held.waiting
         };
         if waiting {
@@ -226,12 +216,14 @@ pub(super) enum Turn {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(super) struct Order {
     generation: u32,
-    request: Option<Request>,
+    /// Whether it begins the scene the loop asked for.
+    next: bool,
 }
 
 impl Order {
-    /// Take up what the loop asked, if anything, then trace one slice of
-    /// `engine` across `runner` into `out`, answering where the reveal stands.
+    /// Begin the scene the loop asked for, if it asked, then trace one slice
+    /// of `engine` across `runner` into `out`, answering where the reveal
+    /// stands.
     pub(super) fn carry_out(
         self,
         engine: &mut Engine,
@@ -239,8 +231,8 @@ impl Order {
         out: &mut Vec<Traced>,
         clock: &mut dyn FnMut() -> u64,
     ) -> Status {
-        if let Some(request) = self.request {
-            engine.apply(request);
+        if self.next {
+            engine.next();
         }
         engine.step(runner, out, clock)
     }
@@ -257,9 +249,11 @@ pub struct TraceDesk {
     /// How many slices `ready` holds.
     slices: u64,
     status: Status,
-    /// Bumped by every request, so a slice traced before it is recognised.
+    /// Bumped by every ask, so a slice traced before it is recognised.
     generation: u32,
-    asked: Option<Request>,
+    /// Whether the loop has asked for another scene the thread has not yet
+    /// begun.
+    asked: bool,
     /// Whether the thread's last turn was to wait, and so whether the loop
     /// owes it a signal when it collects or asks.
     waiting: bool,
@@ -282,28 +276,28 @@ impl TraceDesk {
             slices: 0,
             status: Status::Preparing(0),
             generation: 0,
-            asked: None,
+            asked: false,
             waiting: false,
             leaving: false,
         }
     }
 
-    /// The tracing thread's next move: trace whatever the loop asked for,
+    /// The tracing thread's next move: begin the scene the loop asked for,
     /// wait while the scene is done or the loop is behind, else trace on.
     pub(super) fn turn(&mut self) -> Turn {
         let turn = if self.leaving {
             Turn::Leave
-        } else if let Some(request) = self.asked.take() {
+        } else if core::mem::take(&mut self.asked) {
             Turn::Trace(Order {
                 generation: self.generation,
-                request: Some(request),
+                next: true,
             })
         } else if !self.status.is_working() || self.slices >= QUEUED_SLICES {
             Turn::Wait
         } else {
             Turn::Trace(Order {
                 generation: self.generation,
-                request: None,
+                next: false,
             })
         };
         self.waiting = turn == Turn::Wait;
@@ -335,22 +329,15 @@ impl TraceDesk {
         self.status
     }
 
-    /// Ask for `request`, dropping everything traced before it. A scene asked
-    /// for is already one from its start, so of two requests the tracing
-    /// thread has not yet taken, `Next` stands.
-    pub(super) fn request(&mut self, request: Request) {
-        self.asked = Some(match (self.asked, request) {
-            (Some(Request::Next), _) | (_, Request::Next) => Request::Next,
-            (_, Request::Again) => Request::Again,
-        });
+    /// Ask for a scene in another setting, dropping everything traced before.
+    /// Two asks the tracing thread has not yet taken are one: each begins a
+    /// scene from its start.
+    pub(super) fn next(&mut self) {
+        self.asked = true;
         self.generation = self.generation.wrapping_add(1);
         self.ready.clear();
         self.slices = 0;
-        // A scene asked for is prepared afresh; the same one again goes on
-        // standing where it stood until the thread reports its restart.
-        if request == Request::Next || !self.status.is_working() {
-            self.status = Status::Preparing(0);
-        }
+        self.status = Status::Preparing(0);
     }
 }
 

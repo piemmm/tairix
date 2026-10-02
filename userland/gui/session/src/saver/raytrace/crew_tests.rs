@@ -1,7 +1,7 @@
 //! Host tests of the desk between a reveal's tracing thread and the serve
-//! loop: what the thread is told to do, what reaches the loop, what a request
-//! drops, when the thread is owed a signal, and the whole protocol between a
-//! real tracing thread and a loop.
+//! loop: what the thread is told to do, what reaches the loop, what asking
+//! for the next scene drops, when the thread is owed a signal, and the whole
+//! protocol between a real tracing thread and a loop.
 
 extern crate std;
 
@@ -12,8 +12,8 @@ use tairix_raster::Pixel;
 use tairix_raytrace::Step;
 
 use super::{
-    run_tracing_thread, DeskLink, DeskLock, Keeper, Order, Request, Status, TraceDesk, TraceLink,
-    Turn, QUEUED_SLICES,
+    run_tracing_thread, DeskLink, DeskLock, Keeper, Order, Status, TraceDesk, TraceLink, Turn,
+    QUEUED_SLICES,
 };
 use crate::saver::raytrace::album::{Picture, Unkept};
 use crate::saver::raytrace::engine::{Engine, Traced};
@@ -43,7 +43,7 @@ fn a_fresh_desk_asks_for_a_slice_and_has_nothing_to_collect() {
     let mut desk = TraceDesk::new();
     assert!(matches!(
         desk.turn(),
-        Turn::Trace(Order { request: None, .. })
+        Turn::Trace(Order { next: false, .. })
     ));
     let mut into = Vec::new();
     assert_eq!(desk.collect(&mut into), Status::Preparing(0));
@@ -103,14 +103,8 @@ fn a_finished_or_failed_reveal_waits_until_the_loop_asks() {
         let mut into = Vec::new();
         assert_eq!(desk.collect(&mut into), end);
         assert_eq!(desk.turn(), Turn::Wait, "collecting asks for nothing");
-        desk.request(Request::Next);
-        assert!(matches!(
-            desk.turn(),
-            Turn::Trace(Order {
-                request: Some(Request::Next),
-                ..
-            })
-        ));
+        desk.next();
+        assert!(matches!(desk.turn(), Turn::Trace(Order { next: true, .. })));
         assert_eq!(
             desk.collect(&mut into),
             Status::Preparing(0),
@@ -119,63 +113,42 @@ fn a_finished_or_failed_reveal_waits_until_the_loop_asks() {
     }
 }
 
-/// A request drops what was traced before it, and a slice the thread was
-/// tracing when the loop asked is dropped when it is laid down.
+/// Asking for the next scene drops what was traced before it — a slice the
+/// thread was tracing when the loop asked is dropped when it is laid down —
+/// and the next scene stands as one being prepared, wherever the last stood.
 #[test]
-fn a_request_drops_everything_traced_before_it() {
+fn asking_for_the_next_scene_drops_everything_traced_before_it() {
     let mut desk = TraceDesk::new();
     let before = slice(&mut desk);
     desk.deposit(before, &[step(0)], Status::Tracing(300));
     let in_flight = slice(&mut desk);
-    desk.request(Request::Again);
+    desk.next();
     desk.deposit(in_flight, &[step(1)], Status::Whole);
     let mut into = Vec::new();
-    assert_eq!(
-        desk.collect(&mut into),
-        Status::Tracing(300),
-        "the same scene stands where it stood until the thread restarts it"
-    );
+    assert_eq!(desk.collect(&mut into), Status::Preparing(0));
     assert!(into.is_empty(), "{:?}", columns(&into));
     let asked = slice(&mut desk);
-    assert_eq!(asked.request, Some(Request::Again));
+    assert!(asked.next);
     desk.deposit(asked, &[step(2)], Status::Tracing(1));
     assert_eq!(desk.collect(&mut into), Status::Tracing(1));
     assert_eq!(columns(&into), [2]);
 }
 
-/// A scene asked for begins as one being prepared, wherever the last stood.
+/// Each ask begins a scene from its start, so two the thread has not yet
+/// taken are one.
 #[test]
-fn the_next_scene_asked_for_is_being_prepared() {
+fn two_asks_not_yet_taken_are_one() {
     let mut desk = TraceDesk::new();
-    let order = slice(&mut desk);
-    desk.deposit(order, &[], Status::Tracing(700));
-    desk.request(Request::Next);
-    let mut into = Vec::new();
-    assert_eq!(desk.collect(&mut into), Status::Preparing(0));
-}
-
-/// A scene asked for is one from its start already, so `Next` stands over
-/// `Again` whichever came first; two of the same are one.
-#[test]
-fn of_two_requests_not_yet_taken_next_stands() {
-    for (first, second, standing) in [
-        (Request::Next, Request::Again, Request::Next),
-        (Request::Again, Request::Next, Request::Next),
-        (Request::Again, Request::Again, Request::Again),
-        (Request::Next, Request::Next, Request::Next),
-    ] {
-        let mut desk = TraceDesk::new();
-        desk.request(first);
-        desk.request(second);
-        assert_eq!(slice(&mut desk).request, Some(standing));
-        assert_eq!(slice(&mut desk).request, None, "taken once");
-    }
+    desk.next();
+    desk.next();
+    assert!(slice(&mut desk).next);
+    assert!(!slice(&mut desk).next, "taken once");
 }
 
 #[test]
 fn a_departed_loop_sends_the_thread_away_whatever_is_pending() {
     let mut desk = TraceDesk::new();
-    desk.request(Request::Next);
+    desk.next();
     desk.leaving = true;
     assert_eq!(desk.turn(), Turn::Leave);
     assert!(!desk.waiting);
@@ -192,7 +165,7 @@ fn only_a_waiting_thread_is_owed_a_signal() {
     assert!(!desk.waiting, "tracing, not waiting");
     assert_eq!(desk.turn(), Turn::Wait);
     assert!(desk.waiting);
-    desk.request(Request::Next);
+    desk.next();
     assert!(desk.waiting, "still parked until it turns again");
     let _ = slice(&mut desk);
     assert!(!desk.waiting);
@@ -254,7 +227,7 @@ fn traced_alone(seed: u64, scenes: usize) -> Vec<Vec<Pixel>> {
         let mut picture = alloc::vec![Pixel::TRANSPARENT; (SIZE.0 * SIZE.1) as usize];
         paint(&steps, &mut picture);
         pictures.push(picture);
-        engine.apply(Request::Next);
+        engine.next();
     }
     pictures
 }
@@ -297,7 +270,7 @@ fn a_tracing_thread_and_a_loop_pass_whole_reveals_through_the_desk() {
             }
         }
         pictures.push(picture);
-        link.request(Request::Next);
+        link.next();
     }
     drop(link);
     thread
@@ -348,11 +321,6 @@ fn a_tracing_thread_hands_each_whole_picture_to_its_keeper_once() {
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
     paint(&drawn, &mut picture);
-    // Asking again for the same scene keeps nothing more.
-    link.request(Request::Again);
-    while link.collect(&mut drawn).is_working() {
-        std::thread::sleep(std::time::Duration::from_millis(1));
-    }
     drop(link);
     thread
         .join()

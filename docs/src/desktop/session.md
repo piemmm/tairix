@@ -1737,19 +1737,20 @@ shows, each scene drawn as the user's `screensaver.*` options set it
   at least eight points across the shorter side, so the whole screen shows
   after a few hundred pixels at most, and each later pass halves the grid's
   spacing, tracing only the points no earlier pass reached, down to single
-  pixels. Each traced point is painted with the cells of its grid it is a
-  corner of, blended bilinearly from their corners as they stand in the
-  window's buffer — untraced points of the first pass counting as black — so
-  the picture is soft while it is coarse, never blocky, and every pixel shows
-  its own trace once the reveal is whole. Each pixel is traced once at the
-  tracer's best quality however long the reveal takes, and within a pass the
-  order is scattered, so the whole picture sharpens at once. A readout in its
-  own small window above the picture says *Generating scene... N%* while the
-  scene is prepared and *Rendering... N%* while it is traced, mid-grey in the
-  lower right, redrawn only when the percentage changes and taken down once
-  the picture is whole. It is held a minute, faded out over three seconds,
-  and followed by a scene set elsewhere; under reduced motion it is cut to
-  black.
+  pixels. The picture shown is a cubic B-spline over the current pass's grid,
+  drawn from every pixel traced so far: a soft blur while the grid is coarse,
+  with no point standing out as a peak or a cross, coming into focus pass by
+  pass. A new point's detail fades in as the points about it are traced,
+  rather than appearing at the point, and no pass jumps where the last left
+  off; every pixel shows its own trace once the reveal is whole. Each pixel is
+  traced once at the tracer's best quality however long the reveal takes, and
+  within a pass the order is scattered, so the whole picture sharpens at once.
+  A readout in its own small window above the picture says *Generating
+  scene... N%* while the scene is prepared and *Rendering... N%* while it is
+  traced, mid-grey in the lower right, redrawn only when the percentage
+  changes and taken down once the picture is whole. It is held a minute,
+  faded out over three seconds, and followed by a scene set elsewhere; under
+  reduced motion it is cut to black.
   The tracing runs on a thread of its own (`screensaver.raytrace.cpu`): under
   `idle`, the default, that thread alone, one core's worth; under
   `performance`, a worker beside it for every other core. The serve loop only
@@ -1765,15 +1766,14 @@ shows, each scene drawn as the user's `screensaver.*` options set it
   `Documents/Pictures/Raytracing/` under the account's home, making the
   folders it needs, naming it for the setting and the moment it was finished
   (its scene's seed when the clock is not set), and taking the next number
-  rather than writing over any picture already there; a scene traced again is
-  not kept twice, and a picture that cannot be kept says why on `stderr`.
-  With no thread granted nothing is kept, since nothing off the loop could
-  write it. Once whole the scene is let go: the picture on screen lives in the
-  window's buffer alone, and a buffer the compositor lets go starts the
-  reveal again from the same scene. A scene the heap will not give, or a
-  buffer it will not give the picture, leaves the screen black a minute
-  before another is tried, rather than retrying it every frame with the
-  threads tracing steps nothing can show.
+  rather than writing over any picture already there, and a picture that
+  cannot be kept says why on `stderr`. With no thread granted nothing is
+  kept, since nothing off the loop could write it. Once whole the scene is
+  let go. The painter keeps every traced pixel, so a buffer the compositor
+  lets go is painted afresh from them and nothing is traced again. A scene the
+  heap will not give, or a buffer it will not give the picture, leaves the
+  screen black a minute before another is tried, rather than retrying it
+  every frame with the threads tracing steps nothing can show.
 - **Retro games** (`saver::retro_games`): a flight over a glowing grid towards
   a banded sun setting between two wireframe mountain ranges. The sky, the
   sun's glow and the ranges are painted once — the ranges scattered afresh
@@ -1852,8 +1852,8 @@ The animated scenes draw every other desktop frame (`SceneClock::FRAME_NS`, the
 one idle-scene clock in `tairix_theme::motion`), each
 frame repainting only what changed through `Compositor::repaint_window` — the
 footprints the stars left and reached, the cells whose look moved, the block
-where it was and is, the blocks the ray tracer traced (or the box they span,
-once a frame brings more than a few hundred), the retro games' floor, its
+where it was and is, the cells about the points the ray tracer traced (marked
+as whole tiles, at most 128 rectangles), the retro games' floor, its
 sun's bands and the boxes its craft reached and reach — and each parks the
 loop to its next frame and no sooner. A late
 wake moves the scene at most a few frames, never all at once.

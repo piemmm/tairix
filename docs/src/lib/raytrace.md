@@ -214,9 +214,8 @@ largest power of two leaving at least eight points across the shorter side
 each later pass the three points in four the grid of twice its spacing did not
 hold, down to single pixels. A `Step` names its pixel and its pass's spacing.
 The grid twice as coarse is whole when a pass begins, so every point of a
-pass's grid is either traced or lies between traced points, and within a cell
-of a pass's grid only its top-left corner can already be traced. Within a
-pass the steps follow a keyed bijection on the pass's range, so the whole
+pass's grid is either traced or lies between traced points. Within a pass the
+steps follow a keyed bijection on the pass's range, so the whole
 picture sharpens at once, and a step is found from its index alone.
 
 ## Progress

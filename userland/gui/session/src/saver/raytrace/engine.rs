@@ -18,7 +18,7 @@ use tairix_theme::Timeline;
 use tairix_util::fallible;
 
 use super::album::{Picture, Unkept};
-use super::crew::{Request, Status};
+use super::crew::Status;
 
 /// How much work a slice may be: half of one desktop frame, so a serve loop
 /// tracing slices itself still answers input and every client within the
@@ -113,11 +113,9 @@ enum Album {
     /// Pictures are not kept.
     Off,
     /// The plan's picture is to be kept: its pixels as traced so far, or
-    /// `None` until tracing begins, or when the heap would not hold them.
+    /// `None` until tracing begins, once it is handed over, or when the heap
+    /// would not hold them.
     Filling(Option<Vec<Pixel>>),
-    /// The plan's picture is whole and handed over, so tracing it again —
-    /// the window having let its buffer go — keeps nothing more.
-    Kept,
 }
 
 /// The reveals of one screen, one scene after another.
@@ -171,26 +169,16 @@ impl Engine {
         self.finished.take()
     }
 
-    /// Take up `request`: another scene, or the current one again from its
-    /// first step, recomposed from its plan if it has already been let go.
-    pub(super) fn apply(&mut self, request: Request) {
-        match request {
-            Request::Next => {
-                self.plan = Plan::draw(&mut self.dice, Some(self.plan.setting));
-                if let Some(reveal) = Reveal::new(self.size, self.plan.order) {
-                    self.reveal = reveal;
-                }
-                if !matches!(self.album, Album::Off) {
-                    self.album = Album::Filling(None);
-                }
-                self.compose();
-            }
-            Request::Again => match self.stage {
-                Stage::Tracing(_) => self.restart_trace(),
-                Stage::Whole | Stage::Failed => self.compose(),
-                Stage::Composing | Stage::Preparing(_) => {}
-            },
+    /// Begin a scene in another setting, composed from its start.
+    pub(super) fn next(&mut self) {
+        self.plan = Plan::draw(&mut self.dice, Some(self.plan.setting));
+        if let Some(reveal) = Reveal::new(self.size, self.plan.order) {
+            self.reveal = reveal;
         }
+        if !matches!(self.album, Album::Off) {
+            self.album = Album::Filling(None);
+        }
+        self.compose();
     }
 
     /// Do one slice, appending what it traces to `out`, and answer where the
@@ -225,7 +213,7 @@ impl Engine {
 
     /// Begin the reveal from its first step, readying the copy of the picture
     /// if one is kept.
-    fn restart_trace(&mut self) {
+    fn begin_trace(&mut self) {
         self.shown = 0;
         self.batch = MIN_BATCH;
         if let Album::Filling(pixels @ None) = &mut self.album {
@@ -247,7 +235,7 @@ impl Engine {
             Some(false) => Stage::Preparing(draft),
             Some(true) => match draft.finish() {
                 Some(scene) => {
-                    self.restart_trace();
+                    self.begin_trace();
                     Stage::Tracing(scene)
                 }
                 None => Stage::Failed,
@@ -340,10 +328,10 @@ impl Engine {
 
     /// Hand the whole picture over to be kept, or why it cannot be.
     fn finish_album(&mut self) {
-        let Album::Filling(pixels) = core::mem::replace(&mut self.album, Album::Kept) else {
+        let Album::Filling(pixels) = &mut self.album else {
             return;
         };
-        self.finished = Some(match pixels {
+        self.finished = Some(match pixels.take() {
             Some(pixels) => Ok(Picture {
                 setting: self.plan.setting,
                 seed: self.plan.seed,

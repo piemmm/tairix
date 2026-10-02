@@ -15,7 +15,7 @@ countryside layout), `plans/FIX-DESKTOP.md` (no I/O on the serve loop) and
 
 | ID | Item | Status |
 |---|---|---|
-| RT1 | Smooth reveal: each traced point refines a bilinear picture over the reveal's grids instead of filling a flat block; the finished picture is every pixel's own trace | done |
+| RT1 | Smooth reveal: a cubic B-spline over the reveal's grids, a blur coming into focus with no point a peak or a cross; each frame repaints and marks only what its steps change; the finished picture is every pixel's own trace | done |
 | RT2 | Progress readout: *Generating scene... N%* while a scene is prepared, then *Rendering... N%*, small and mid-grey in the lower right, gone once the picture is whole | done |
 | RT3 | Saving finished pictures: `screensaver.raytrace.save` keeps each whole picture as a PNG in the user's `Documents/Pictures/Raytracing/`, with no limit on how many | done |
 | RT4 | Highest quality, always: no sample governor; a reconstruction filter and sampling rounds that leave no jagged or noisy edge | done |
@@ -86,20 +86,31 @@ These bind every item, done or planned.
 spacing halves pass by pass that no coarser pass reached, each point once. A
 `Step` names its pixel and its pass's spacing.
 
-The picture shown is a bilinear blend over the finest grid with a traced
-point, every untraced point of that grid standing at the value the grid twice
-as coarse gives it (whole, since passes run in order). A step changes only the
-four cells of its grid it is a corner of, so the painter
-(`saver::raytrace::preview`) writes the point, then repaints those cells from
-their corners as they stand in the window's buffer. In the first pass an
-untraced corner counts as black, so the picture grows out of black in soft
-patches rather than squares. A cell holds a grid point only at its top-left
-corner, where the blend is that point's own value, so a finer pass never
-alters a traced pixel and the finished picture is every pixel's own trace. A
-frame's steps are painted pass by pass, each cell once, from corners read
-after the pass's own pixels are written, across the compositor's pool; a
-painter refused the room to lay its cells out paints step by step to the same
-picture.
+The picture shown (`saver::raytrace::preview`) is a uniform cubic B-spline
+over the grid the current pass traces, its controls drawn from every pixel
+traced so far, which the painter keeps. The basis is smooth through its
+second derivative, so a coarse grid reads as a soft blur, with no point a
+peak or a cross, and the picture comes into focus as the passes halve the
+spacing. A pass's grid begins as the coarser grid refined (Lane and
+Riesenfeld), which is the same surface, so no pass jumps. A point's control
+then moves from that refinement to its own trace by its settled share — the
+traced share of the pass's points about it, itself among them — so detail
+fades in as samples gather rather than at each new point; the first pass
+refines nothing, so the picture fades in from black. In the last pass each
+pixel settles onto its own trace by the same share, so the finished picture
+is every pixel's own trace. The grid mirrors across its first column and row;
+past its last, the first grid repeats its edge and every later grid keeps the
+two columns and rows refinement carries down, so the edges agree with
+refining too.
+
+A step changes the picture only within three of its pass's spacings of its
+point. A frame repaints the cells those reaches cover, each once, across the
+compositor's pool, and marks a cover of 16-pixel tiles, their side doubled
+until they make at most 128 rectangles: a compositor merges each rectangle
+against the rest, so a scattered frame's own rectangles would cost more than
+whole tiles, and the box it spans is the screen. A buffer the compositor lets
+go is painted afresh from what the painter keeps, and nothing is traced
+again.
 
 ## RT2 — Progress readout
 
@@ -124,8 +135,7 @@ refused, or the screensaver goes.
 `screensaver.raytrace.save` (`true`/`false`, off by default) is a *Save
 pictures* row on the screensaver pane. The option travels to the tracing host
 at launch; an engine told to keep pictures copies each traced pixel into a
-picture of its own as it traces, so a compositor that lets the window's buffer
-go loses nothing.
+picture of its own as it traces, on the thread that will write it.
 
 Once the picture is whole and laid down for the loop, the tracing thread —
 never the serve loop — encodes it with `lib/image`'s PNG encoder (the smallest
@@ -135,8 +145,7 @@ exact colour type, 8-bit RGB for an opaque picture) and writes it into
 created exclusively and never through a link, named for the setting and the
 UTC moment it was finished (its scene's seed when the clock is not set), with
 a numbered suffix if that name is taken, so nothing is overwritten and no
-count is enforced; a write cut short is removed. A scene traced again — its
-window having let its buffer go — is not kept twice. A refusal — no home, no
+count is enforced; a write cut short is removed. A refusal — no home, no
 space, a picture the heap would not copy — is stated on `stderr` and never
 stops the screensaver. With no tracing thread granted there is nowhere off the
 loop to write from, so nothing is kept and the launch says so.

@@ -230,10 +230,6 @@ const MAX_PASSES: usize = u32::BITS as usize;
 
 /// One step of a [`Reveal`]: the pixel it traces, a point of the grid its pass
 /// traces, and that grid's spacing.
-///
-/// Until finer passes reach them, the pixels about the point show what the
-/// grid's points say there: the step changes the cells of its grid it is a
-/// corner of, and no pixel a step has traced.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Step {
     /// The traced pixel's column.

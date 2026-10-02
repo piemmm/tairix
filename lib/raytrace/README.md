@@ -78,8 +78,8 @@ alone; a walk taken an object at a time handing over what an unpaused one
 visits; four boxes crossed in lanes bit for bit as each alone, and a grid's
 blocks crossed four at a time reaching what one block at a time reaches,
 never descending into one with no surface; an object whose box is not
-finite tested by every ray; and the reveal order — every pass's grid whole before the next begins, and a
-step changing no pixel already traced but a cell's own corner; the Gaussian
+finite tested by every ray; and the reveal order — every pass's grid whole
+before the next begins; the Gaussian
 filter's offsets distributed as their truncated Gaussian; a draft's progress
 climbing steadily to its whole only once the scene is ready; water's waves
 holding their slope variance whether they tilt the normal or roughen it,

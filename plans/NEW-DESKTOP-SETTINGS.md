@@ -1536,10 +1536,10 @@ What it guarantees (its scenes, sampling and reveal are `plans/RAYTRACE.md`'s):
   `lib/raytrace::Reveal`'s order: a first pass of every point of a grid at
   least eight points to the shorter side, each later pass halving the grid's
   spacing, every pixel traced once at the tracer's best and each pass
-  scattered over the picture. Each traced point repaints the cells of its grid
-  it is a corner of by bilinear blending, so the picture is soft while coarse
-  and exact once whole. It is held a minute, faded over three seconds (cut
-  under reduced motion), and replaced.
+  scattered over the picture. The picture shown is a cubic B-spline over the
+  current pass's grid, a blur coming into focus and exact once whole, and a
+  frame repaints and marks only what its steps change. It is held a minute,
+  faded over three seconds (cut under reduced motion), and replaced.
 - **Told as it goes.** A readout window above the picture reads *Generating
   scene... N%* from `Draft::progress` while the scene is prepared, then
   *Rendering... N%* while it is traced, mid-grey in the lower right, and goes
@@ -1549,7 +1549,8 @@ What it guarantees (its scenes, sampling and reveal are `plans/RAYTRACE.md`'s):
   worker beside it for every other core. The embedder grants the threads
   through the `TraceHost` seam; the loop collects and paints once a frame
   through the host-tested `TraceDesk`, which drops whatever was traced before
-  a request and holds the thread once two of the loop's frames are waiting.
+  the next scene is asked for and holds the thread once two of the loop's
+  frames are waiting.
   The threads leave when the screensaver comes down, the loop waiting on none
   of them. With no thread granted the loop traces a slice a frame itself — on
   its own thread alone under `idle`.
@@ -1561,35 +1562,38 @@ What it guarantees (its scenes, sampling and reveal are `plans/RAYTRACE.md`'s):
   `Keeper` seam — named for its setting and when it was finished, never
   written over another, once per scene, and nothing kept with no tracing
   thread granted; a refusal says why on `stderr`.
-- **Nothing kept that the screen holds.** Once whole, the scene is let go; a
-  window buffer the compositor releases starts the same scene again —
-  recomposed from its seed if it was already let go — and a scene, or a
-  buffer for its picture, that the heap refuses rests the screen black a
-  minute before the next is tried, rather than being retried every frame.
+- **A lost buffer repainted, never retraced.** Once whole, the scene is let
+  go. The painter keeps every traced pixel, so a window buffer the compositor
+  releases is painted afresh from them; a scene, or a buffer for its picture,
+  that the heap refuses rests the screen black a minute before the next is
+  tried, rather than being retried every frame.
 - Its group on the pane holds its processor use, *Idle time* or
   *Performance*, and *Save pictures*, above *Test*.
 
 Tests: the order visiting every pixel once, its first pass tracing its whole
-grid, each pass halving the last and ending whole, no step changing a traced
-pixel but a cell's own corner, each pass scattered; the painter ending on
-every pixel's own trace however the steps arrive, a finished pass blended
-bilinearly, a lone first point glowing out of black, and painting step by
-step matching the laid-out cells; the reveal tracing each pixel exactly as
-tracing it alone at the best quality does, however slowly; preparation over
-slices tracing nothing and telling its progress, tracing telling its share;
-the pace, bounded per phase; a slice split across every worker matching the
-order traced alone; the next scene set elsewhere and the same scene again the
-same picture; each whole picture handed over once, not again for the same
-scene, and an unheld one reported; the desk's slices reaching the loop in
-order, its hold on a loop behind, its request dropping what came before,
-`Next` standing over `Again`, the signal owed only to a waiting thread, and a
-real thread handing its keeper each picture once; the album's folder chain,
-names, numbered suffixes, the file decoding to the picture, and its refusals;
-the readout's words, place and teardown; the hold, fade and next scene, the
-cut under reduced motion, the rest after a refusal, a lost buffer asking for
-the scene again over black, a frame repainting only its cells, the options a
-crew is launched with, and on the loop `idle` keeping to its own thread while
-`performance` uses the pool.
+grid, each pass halving the last and ending whole, each pass scattered; the
+painter ending on every pixel's own trace however the steps arrive and across
+any cores, every frame changing only what it marks, a bounded cover of whole
+tiles, a
+scattered frame marking little of the screen, a lone point blurring without a
+crease, a new point settling in as its neighbours are traced, a pass beginning
+where the last ended, a buffer let go painted afresh, stray steps changing
+nothing, and a reset starting over from black; the reveal tracing each pixel
+exactly as tracing it alone at the best quality does, however slowly;
+preparation over slices tracing nothing and telling its progress, tracing
+telling its share; the pace, bounded per phase; a slice split across every
+worker matching the order traced alone; the next scene set elsewhere; each
+whole picture handed over once however long the engine runs on, and an
+unheld one reported; the desk's slices reaching the loop in order, its hold on
+a loop behind, asking for the next scene dropping what came before, two asks
+being one, the signal owed only to a waiting thread, and a real thread
+handing its keeper each picture once; the album's folder chain, names,
+numbered suffixes, the file decoding to the picture, and its refusals; the
+readout's words, place and teardown; the hold, fade and next scene, the cut
+under reduced motion, the rest after a refusal or with nowhere to paint, a
+lost buffer painted afresh without tracing again, a frame marking only the
+tiles about its steps, the options a crew is launched with, and on the loop
+`idle` keeping to its own thread while `performance` uses the pool.
 
 ### DS22 — The retro games screensaver
 

@@ -8,10 +8,9 @@
 //! core under the idle setting, every core under performance, and whole
 //! pictures are kept there when asked. The serve loop only paints what they
 //! have finished, once a frame; where no thread is granted, it traces a slice
-//! a frame itself and keeps nothing. On screen the picture lives in the
-//! window's buffer alone, and a buffer the compositor lets go starts the
-//! reveal again. Under reduced motion the picture is cut to black rather than
-//! faded.
+//! a frame itself and keeps nothing. The painter keeps every traced pixel, so
+//! a buffer the compositor lets go is painted afresh rather than traced again.
+//! Under reduced motion the picture is cut to black rather than faded.
 
 mod album;
 mod crew;
@@ -21,8 +20,7 @@ mod readout;
 
 pub use album::{keep, Picture, PictureFiles, Unkept, FOLDERS};
 pub use crew::{
-    run_tracing_thread, DeskLink, DeskLock, Keeper, Request, Status, TraceDesk, TraceHost,
-    TraceLink,
+    run_tracing_thread, DeskLink, DeskLock, Keeper, Status, TraceDesk, TraceHost, TraceLink,
 };
 pub use engine::{Engine, Traced};
 
@@ -100,10 +98,11 @@ impl Feed {
         }
     }
 
-    fn request(&mut self, request: Request) {
+    /// Ask for a scene set elsewhere, dropping what was traced of this one.
+    fn next(&mut self) {
         match self {
-            Self::Crew(link) => link.request(request),
-            Self::Inline { engine, .. } => engine.apply(request),
+            Self::Crew(link) => link.next(),
+            Self::Inline { engine, .. } => engine.next(),
         }
     }
 }
@@ -208,7 +207,7 @@ impl Raytrace {
 
     /// Ask for a scene set elsewhere, to reveal from `now_ns`.
     fn next(&mut self, now_ns: u64) -> Phase {
-        self.feed.request(Request::Next);
+        self.feed.next();
         self.preview.reset();
         self.due_ns = now_ns;
         Phase::Revealing
@@ -223,13 +222,7 @@ impl Raytrace {
         compositor: &mut Compositor,
         clock: &mut dyn FnMut() -> u64,
     ) -> Phase {
-        // A buffer the compositor no longer keeps holds none of the picture,
-        // so the picture starts again rather than being kept twice over.
         let kept = compositor.keeps_content(wm, self.size);
-        if !kept {
-            self.feed.request(Request::Again);
-            self.preview.reset();
-        }
         let status = self
             .feed
             .collect(&mut self.drawn, compositor.job_runner(), clock);
@@ -269,26 +262,21 @@ impl Raytrace {
         Phase::Resting { until_ns }
     }
 
-    /// Paint the frame's steps over the picture — over black, in a buffer the
-    /// compositor let go — marking the cells they change, or the box they
-    /// span once they are many; `false` when the heap would not give the
-    /// picture a buffer.
+    /// Paint what the frame's steps change, marking it — the whole picture,
+    /// painted afresh, in a buffer the compositor let go; `false` when the
+    /// heap would not give the picture a buffer.
     fn paint(&mut self, wm: WindowId, compositor: &mut Compositor, kept: bool) -> bool {
         if kept && self.drawn.is_empty() {
             return true;
         }
         self.damage.clear();
-        self.preview.plan(&self.drawn, &mut self.damage);
-        let runner = compositor.job_runner();
-        let (drawn, preview) = (&self.drawn, &mut self.preview);
-        let painted = compositor.repaint_window(wm, self.size, &self.damage, |surface, _| {
-            if !kept {
-                surface.fill(Color::rgb(0, 0, 0));
-            }
-            preview.paint(surface, drawn, runner);
-        });
+        self.preview.take(&self.drawn, kept, &mut self.damage);
         self.drawn.clear();
-        painted
+        let runner = compositor.job_runner();
+        let preview = &mut self.preview;
+        compositor.repaint_window(wm, self.size, &self.damage, |surface, _| {
+            preview.paint(surface, runner);
+        })
     }
 
     /// Dim the picture, now carrying `strength`, toward black as `fade` has

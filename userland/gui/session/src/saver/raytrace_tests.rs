@@ -1,7 +1,7 @@
 //! Host tests of the ray-traced screensaver as the serve loop runs it: what a
-//! frame paints and repaints, the readout over it, the hold, the fade, the
-//! rest and the next scene, a lost buffer, the options a reveal is launched
-//! with, and a whole reveal ending as a reveal traced alone ends.
+//! frame paints and marks, the readout over it, the hold, the fade, the rest
+//! and the next scene, a lost buffer painted afresh, the options a reveal is
+//! launched with, and a whole reveal ending as a reveal traced alone ends.
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
@@ -16,9 +16,7 @@ use tairix_theme::Theme;
 use tairix_wallpaper::{CpuUse, RaytraceOptions};
 use tairix_wm::{Color, Compositor, Point, Scale, Surface, WindowId};
 
-use super::{
-    Engine, Phase, Raytrace, Request, Status, TraceHost, TraceLink, Traced, FADE_MS, HOLD_NS,
-};
+use super::{Engine, Phase, Raytrace, Status, TraceHost, TraceLink, Traced, FADE_MS, HOLD_NS};
 use crate::saver::seed_from;
 use crate::tests::compositor;
 use tairix_theme::motion::SceneClock;
@@ -95,12 +93,12 @@ fn idle() -> RaytraceOptions {
     RaytraceOptions::default()
 }
 
-/// What a scripted crew hands the loop, frame by frame, and what the loop
-/// asked of it.
+/// What a scripted crew hands the loop, frame by frame, and how many times
+/// the loop asked it for the next scene.
 #[derive(Default)]
 struct Script {
     frames: VecDeque<(Vec<Traced>, Status)>,
-    asked: Vec<Request>,
+    asked: usize,
     launched: Option<RaytraceOptions>,
 }
 
@@ -140,8 +138,8 @@ impl TraceLink for ScriptedLink {
         }
     }
 
-    fn request(&self, request: Request) {
-        self.0.borrow_mut().asked.push(request);
+    fn next(&self) {
+        self.0.borrow_mut().asked += 1;
     }
 }
 
@@ -181,17 +179,14 @@ fn a_whole_picture_is_held_then_faded_then_the_next_scene_asked_for() {
         dimmed < lit * 3 / 4 && dimmed > lit / 4,
         "{dimmed} of {lit} half way"
     );
-    assert!(
-        script.borrow().asked.is_empty(),
-        "nothing asked while fading"
-    );
+    assert_eq!(script.borrow().asked, 0, "nothing asked while fading");
     while matches!(saver.phase, Phase::Fading { .. }) {
         saver.advance(now, wm, &mut comp, &mut clock);
         now = saver.due_ns().max(now + SceneClock::FRAME_NS);
     }
     assert_eq!(brightness(&comp, wm), 0, "faded to black");
     assert!(matches!(saver.phase, Phase::Revealing));
-    assert_eq!(script.borrow().asked, [Request::Next]);
+    assert_eq!(script.borrow().asked, 1);
 }
 
 #[test]
@@ -206,7 +201,7 @@ fn under_reduced_motion_the_picture_is_cut_to_black() {
     saver.advance(HOLD_NS, wm, &mut comp, &mut clock);
     assert_eq!(brightness(&comp, wm), 0);
     assert!(matches!(saver.phase, Phase::Revealing));
-    assert_eq!(script.borrow().asked, [Request::Next]);
+    assert_eq!(script.borrow().asked, 1);
 }
 
 /// A scene the heap refused leaves the screen black a minute, asking for
@@ -222,118 +217,110 @@ fn a_refused_scene_rests_the_screen_then_asks_for_the_next() {
     assert!(matches!(saver.phase, Phase::Resting { .. }));
     assert_eq!(saver.due_ns(), HOLD_NS);
     saver.advance(HOLD_NS / 2, wm, &mut comp, &mut clock);
-    assert!(script.borrow().asked.is_empty());
+    assert_eq!(script.borrow().asked, 0);
     saver.advance(HOLD_NS, wm, &mut comp, &mut clock);
     assert!(matches!(saver.phase, Phase::Revealing));
-    assert_eq!(script.borrow().asked, [Request::Next]);
+    assert_eq!(script.borrow().asked, 1);
 }
 
-/// A picture the heap will not give a buffer rests the saver as a refused
-/// scene does, asking nothing more meanwhile, rather than restarting the
-/// reveal and retrying the allocation every frame.
+/// A picture with nowhere to be painted — its window gone, as a buffer the
+/// heap refused leaves it — rests the saver as a refused scene does, asking
+/// nothing meanwhile.
 #[test]
-fn a_buffer_the_heap_refuses_rests_the_saver_rather_than_restarting_it() {
-    // Past the raster's surface bound, the fresh buffer is refused exactly as
-    // an exhausted heap refuses it.
-    const REFUSED: (u32, u32) = (8192, 8193);
+fn a_picture_with_nowhere_to_paint_rests_the_saver() {
     let mut comp = compositor();
     let wm = canvas(&mut comp, Color::rgb(0, 0, 0));
-    let script = Script::shared([(alloc::vec![lit(0, 0, 8)], Status::Tracing(0))]);
-    let host = Scripted(Rc::clone(&script));
-    let mut saver = launched(REFUSED, false, idle(), Some(&host)).expect("a reveal");
+    let _ = comp.remove(wm);
+    let script = Script::shared([(alloc::vec![lit(0, 0, 2)], Status::Tracing(0))]);
+    let mut saver = scripted(&script, false);
     let mut clock = ticking(MS);
     saver.advance(0, wm, &mut comp, &mut clock);
     assert!(matches!(saver.phase, Phase::Resting { .. }));
     assert_eq!(saver.due_ns(), HOLD_NS);
     saver.advance(SceneClock::FRAME_NS, wm, &mut comp, &mut clock);
-    assert_eq!(
-        script.borrow().asked,
-        [Request::Again],
-        "nothing restarts while it rests"
-    );
+    assert_eq!(script.borrow().asked, 0, "nothing is asked while it rests");
     saver.advance(HOLD_NS, wm, &mut comp, &mut clock);
-    assert_eq!(script.borrow().asked, [Request::Again, Request::Next]);
+    assert_eq!(script.borrow().asked, 1);
 }
 
-/// A window whose buffer the compositor let go shows none of the picture, so
-/// the loop asks for the scene again and paints what comes over black rather
-/// than keeping a copy.
+/// A buffer the compositor let go is painted afresh from what the painter
+/// kept — the picture a kept buffer shows — and nothing is traced again.
 #[test]
-fn a_lost_buffer_asks_for_the_scene_again_over_black() {
+fn a_lost_buffer_is_painted_afresh_without_tracing_again() {
+    let frames = || {
+        [
+            (alloc::vec![lit(0, 0, 2)], Status::Tracing(0)),
+            (alloc::vec![lit(8, 8, 2)], Status::Tracing(0)),
+        ]
+    };
+    let mut kept_comp = compositor();
+    let kept_wm = canvas(&mut kept_comp, Color::rgb(0, 0, 0));
+    let mut kept = scripted(&Script::shared(frames()), false);
     let mut comp = compositor();
     let wm = canvas(&mut comp, Color::rgb(0, 0, 0));
-    let script = Script::shared([
-        (alloc::vec![lit(0, 0, 2)], Status::Tracing(0)),
-        (alloc::vec![lit(8, 8, 2)], Status::Tracing(0)),
-    ]);
+    let script = Script::shared(frames());
     let mut saver = scripted(&script, false);
     let mut clock = ticking(MS);
-    saver.advance(0, wm, &mut comp, &mut clock);
-    assert!(script.borrow().asked.is_empty());
-    let _ = comp.set_surface(wm, Surface::new(4, 4).expect("a small surface"));
-    saver.advance(SceneClock::FRAME_NS, wm, &mut comp, &mut clock);
-    assert_eq!(script.borrow().asked, [Request::Again]);
+    for now in [0, SceneClock::FRAME_NS] {
+        if now > 0 {
+            let _ = comp.set_surface(wm, Surface::new(4, 4).expect("a small surface"));
+        }
+        saver.advance(now, wm, &mut comp, &mut clock);
+        kept.advance(now, kept_wm, &mut kept_comp, &mut clock);
+    }
+    assert_eq!(script.borrow().asked, 0, "nothing is traced again");
     let picture = content(&comp, wm);
     assert_eq!((picture.width(), picture.height()), SIZE);
     assert!(picture.pixels().iter().all(|pixel| pixel.a == u8::MAX));
-    assert_eq!(picture.get(8, 8), Some(LIT));
-    assert_eq!(
-        picture.get(0, 0),
-        Some(Pixel {
-            r: 0,
-            g: 0,
-            b: 0,
-            a: u8::MAX
-        }),
-        "what the lost buffer held is gone"
+    assert_eq!(picture.pixels(), content(&kept_comp, kept_wm).pixels());
+    assert!(
+        picture.get(0, 0).is_some_and(|pixel| pixel.r > 0),
+        "the first frame's step shows again"
     );
 }
 
-/// A frame paints each step's own pixel and repaints the cells about it and
-/// nothing else while they are few, and the box they span once they are
-/// many.
+/// A frame repaints what its steps change and marks only the tiles about
+/// them: the steps' own neighbourhoods, never the box they span.
 #[test]
-fn a_frame_repaints_the_cells_its_steps_change_and_only_them() {
+fn a_frame_marks_the_tiles_about_its_steps_and_only_them() {
+    let screen = (320u32, 180u32);
     let mut comp = compositor();
-    let wm = canvas(&mut comp, Color::rgb(0, 0, 0));
-    let few: Vec<Traced> = (0..4).map(|at| lit(2 + at * 12, 10, 2)).collect();
-    let many: Vec<Traced> = (0..400)
-        .map(|at| lit(at % SIZE.0, at / SIZE.0, 1))
+    let mut surface = Surface::new(screen.0, screen.1).expect("a surface");
+    surface.fill(Color::rgb(0, 0, 0));
+    let wm = comp.add_window(Point::ORIGIN, surface);
+    // Points of the last pass, far apart.
+    let few: Vec<Traced> = [(21, 41), (101, 41), (181, 121), (261, 161)]
+        .into_iter()
+        .map(|(x, y)| lit(x, y, 1))
         .collect();
-    let script = Script::shared([
-        (few.clone(), Status::Tracing(0)),
-        (many, Status::Tracing(0)),
-    ]);
-    let mut saver = scripted(&script, false);
-    let mut clock = ticking(MS);
-    saver.advance(0, wm, &mut comp, &mut clock);
-    // Each step is a corner of four 2-pixel cells: sixteen pixels apiece.
+    let script = Script::shared([(few.clone(), Status::Tracing(0))]);
+    let mut saver =
+        launched(screen, false, idle(), Some(&Scripted(Rc::clone(&script)))).expect("a reveal");
+    saver.advance(0, wm, &mut comp, &mut ticking(MS));
     let covered: u32 = saver
         .damage
         .rects()
         .iter()
         .map(|rect| rect.width * rect.height)
         .sum();
-    assert_eq!(covered, 16 * 4, "{:?}", saver.damage.rects());
+    // A step of the last pass reaches two pixels each way, so touches at most
+    // four of the finest tiles.
+    assert!(covered <= 4 * 4 * 16 * 16, "{:?}", saver.damage.rects());
     for traced in &few {
         let at = Point::new(
             i32::try_from(traced.step.x).expect("small"),
             i32::try_from(traced.step.y).expect("small"),
         );
         assert!(saver.damage.contains(at), "{at:?} not repainted");
-        assert_eq!(
-            content(&comp, wm).get(traced.step.x, traced.step.y),
-            Some(LIT)
-        );
     }
     assert!(
-        !saver.damage.contains(Point::new(30, 20)),
+        !saver.damage.contains(Point::new(160, 100)),
+        "between them is left alone"
+    );
+    assert!(
+        !saver.damage.contains(Point::new(300, 10)),
         "far off is left alone"
     );
-    let now = saver.due_ns();
-    saver.advance(now, wm, &mut comp, &mut clock);
-    assert_eq!(saver.damage.rects().len(), 1, "past the budget, one box");
-    assert_eq!(saver.damage.rects()[0], saver.damage.bounds());
 }
 
 /// While the scene is prepared, and then traced, a readout above the picture
