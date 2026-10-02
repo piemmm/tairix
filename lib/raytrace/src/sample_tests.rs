@@ -279,6 +279,35 @@ fn every_pixel_is_traced_exactly_once() {
     }
 }
 
+/// A pass ends where the next, finer pass begins: every step up to its end
+/// shares its spacing, and the step at its end is finer.
+#[test]
+fn a_pass_ends_where_the_next_finer_grid_begins() {
+    for size in SIZES {
+        let order = Reveal::new(size, 7).expect("a picture");
+        let all = steps(&order);
+        let mut index = 0;
+        while index < order.count() {
+            let end = order.pass_end(index);
+            assert!(end > index, "{size:?}: a pass of no steps at {index}");
+            let side = all[index as usize].side;
+            assert!(
+                all[index as usize..end as usize]
+                    .iter()
+                    .all(|step| step.side == side),
+                "{size:?}: one spacing through {index}..{end}"
+            );
+            if let Some(next) = all.get(end as usize) {
+                assert!(next.side < side, "{size:?}: the next pass is finer");
+            }
+            assert_eq!(order.pass_end(end - 1), end, "{size:?}: from its last step");
+            index = end;
+        }
+        assert_eq!(order.pass_end(order.count()), order.count());
+        assert_eq!(order.pass_end(u32::MAX), order.count());
+    }
+}
+
 #[test]
 fn a_picture_with_no_pixels_or_more_than_a_count_holds_has_no_reveal() {
     assert!(Reveal::new((0, 5), 1).is_none());

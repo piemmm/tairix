@@ -5028,7 +5028,7 @@ mod program {
                     None => &tairix_parallel::SERIAL,
                 };
                 let keeper = keeper.as_mut().map(|keeper| keeper as &mut dyn Keeper);
-                run_tracing_thread(&*served, runner, &mut tairix_rt::clock_get, keeper);
+                run_tracing_thread(&*served, runner, &tairix_rt::clock_get, keeper);
             });
             match spawned {
                 Ok(thread) => {

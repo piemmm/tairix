@@ -2,11 +2,11 @@
 //! ray finds its objects through.
 //!
 //! A [`Draft`] is a scene composed but not yet traceable: the work that makes
-//! it so — its grids filled, its land shaped, its plants grown, its radiosity
-//! gathered and its exposure measured — still to do. It does that work a
-//! bounded unit at a time across whatever runner its caller holds, and
-//! [`finish`](Draft::finish) completes it. The [`Scene`] is then read-only,
-//! and shared by every core tracing it.
+//! it so — its grids filled, its land shaped, its plants grown, its caustics
+//! laid, its radiosity gathered and its exposure measured — still to do. It
+//! does that work a bounded unit at a time across whatever runner its caller
+//! holds, and [`finish`](Draft::finish) completes it. The [`Scene`] is then
+//! read-only, and shared by every core tracing it.
 
 use alloc::vec::Vec;
 
@@ -17,12 +17,13 @@ use crate::adapt::Adaptation;
 use crate::band;
 use crate::bvh::{Builder, Bvh, Cursor, Walk};
 use crate::camera::Camera;
+use crate::caustic::{Caustics, Focusing};
 use crate::compose::{Composition, Setting};
 use crate::detail::Detail;
 use crate::grass::{Canopy, Cover, Lawn};
 use crate::heightfield::Heightfield;
 use crate::light::Light;
-use crate::material::Material;
+use crate::material::{Material, Water};
 use crate::prototype::Prototype;
 use crate::radiosity::{Gathering, Radiosity};
 use crate::shade::Shades;
@@ -136,6 +137,9 @@ pub struct Draft {
     /// Whether the scene stands on a land, whose building and planting then
     /// take much of the work.
     landed: bool,
+    /// Whether its water has beams to lay; a scene with none gives the share
+    /// laying them would take to gathering.
+    watered: bool,
     /// How far the work has come, in thousandths, as last measured.
     progress: u16,
 }
@@ -144,25 +148,27 @@ pub struct Draft {
 /// scene on a land or one without at `detail`: measured over the settings on
 /// a desktop-class machine preparing across eight threads.
 const fn ends(landed: bool, detail: Detail) -> Ends {
-    let (composed, built, gathered) = match (landed, detail) {
-        (true, Detail::Simple) => (0.57, 0.577, 0.955),
-        (true, Detail::Maximum) => (0.112, 0.115, 0.991),
-        (false, Detail::Simple) => (0.096, 0.097, 0.983),
-        (false, Detail::Maximum) => (0.02, 0.021, 0.973),
+    let (composed, built, focused, gathered) = match (landed, detail) {
+        (true, Detail::Simple) => (0.559, 0.567, 0.585, 0.943),
+        (true, Detail::Maximum) => (0.102, 0.105, 0.115, 0.984),
+        (false, Detail::Simple) => (0.084, 0.084, 0.136, 0.907),
+        (false, Detail::Maximum) => (0.016, 0.016, 0.076, 0.977),
     };
     Ends {
         composed,
         built,
+        focused,
         gathered,
     }
 }
 
-/// Where a draft's composing, building and gathering end, as shares of its
-/// work; metering takes the rest.
+/// Where a draft's composing, building, focusing and gathering end, as
+/// shares of its work; metering takes the rest.
 #[derive(Copy, Clone, Debug)]
 struct Ends {
     composed: f64,
     built: f64,
+    focused: f64,
     gathered: f64,
 }
 
@@ -175,7 +181,9 @@ enum State {
     Composing(Composition),
     /// Composed, the hierarchy its rays find its objects through being built.
     Building(Building, Exposure),
-    /// Built, its radiosity records being laid down, and then exposed so.
+    /// Built, the beams its water focuses the sun through being laid.
+    Focusing(Scene, Focusing, Exposure),
+    /// Its radiosity records being laid down, and then exposed so.
     Gathering(Scene, Gathering, Exposure),
     /// Built, its exposure being measured.
     Metering(Scene, Meter),
@@ -192,6 +200,7 @@ impl Draft {
     pub fn new(setting: Setting, seed: u64, size: (u32, u32), detail: Detail) -> Option<Self> {
         Composition::new(setting, seed, size, detail).map(|composition| Self {
             landed: composition.landed(),
+            watered: true,
             state: State::Composing(composition),
             size,
             detail,
@@ -208,13 +217,17 @@ impl Draft {
 
     /// How far the work stands now, in thousandths.
     fn measure(&self) -> u16 {
-        let ends = ends(self.landed, self.detail);
+        let mut ends = ends(self.landed, self.detail);
+        if !self.watered {
+            ends.focused = ends.built;
+        }
         let within = |from: f64, to: f64, done: f64| from + (to - from) * done.clamp(0.0, 1.0);
         let done = match &self.state {
             State::Composing(composition) => within(0.0, ends.composed, composition.done()),
             State::Building(building, _) => within(ends.composed, ends.built, building.done()),
+            State::Focusing(_, focusing, _) => within(ends.built, ends.focused, focusing.done()),
             State::Gathering(_, gathering, _) => {
-                within(ends.built, ends.gathered, gathering.done())
+                within(ends.focused, ends.gathered, gathering.done())
             }
             State::Metering(_, meter) => within(ends.gathered, 1.0, meter.done()),
             State::Ready(_) => return PROGRESS_WHOLE,
@@ -247,14 +260,27 @@ impl Draft {
             }
             State::Building(mut building, exposure) => loop {
                 if building.step() {
+                    let scene = building.finish();
+                    let focus = &self.detail.densities().focus;
+                    let focusing = Focusing::new(&scene, self.size, focus)?;
+                    self.watered = focusing.watered();
+                    break State::Focusing(scene, focusing, exposure);
+                }
+                if spent() {
+                    break State::Building(building, exposure);
+                }
+            },
+            State::Focusing(mut scene, mut focusing, exposure) => loop {
+                if focusing.step(&scene, runner)? {
+                    scene.caustics = focusing.finish();
                     break State::Gathering(
-                        building.finish(),
+                        scene,
                         Gathering::new(self.size, &self.detail.densities().records)?,
                         exposure,
                     );
                 }
                 if spent() {
-                    break State::Building(building, exposure);
+                    break State::Focusing(scene, focusing, exposure);
                 }
             },
             State::Gathering(mut scene, mut gathering, exposure) => loop {
@@ -295,6 +321,7 @@ impl Draft {
             State::Ready(scene) => Some(scene),
             State::Composing(_)
             | State::Building(..)
+            | State::Focusing(..)
             | State::Gathering(..)
             | State::Metering(..)
             | State::Gone => None,
@@ -370,6 +397,11 @@ pub struct Scene {
     /// Roughly how much light falls on the scene, as a share of a clear
     /// day's: what the glow within water is scaled by.
     pub(crate) daylight: f64,
+    /// The objects that are bodies of water, which the sun's light reaches
+    /// what lies beneath them through and what stands over them off.
+    pub(crate) waters: Vec<usize>,
+    /// The light the waves on that water focus, once laid.
+    pub(crate) caustics: Caustics,
     bvh: Bvh,
     /// Objects without end, which every ray is tested against.
     unbounded: Vec<usize>,
@@ -385,6 +417,7 @@ pub(crate) struct Building {
     builder: Builder,
     unbounded: Vec<usize>,
     swards: Vec<usize>,
+    waters: Vec<usize>,
 }
 
 /// Objects' worth of a scene's hierarchy built in one step.
@@ -411,6 +444,7 @@ impl Building {
             builder,
             unbounded,
             swards,
+            waters,
         } = self;
         Scene {
             objects: parts.objects,
@@ -432,6 +466,8 @@ impl Building {
             radiosity: None,
             adaptation: None,
             daylight: parts.daylight,
+            waters,
+            caustics: Caustics::default(),
             bvh: builder.finish(),
             unbounded,
             swards,
@@ -491,15 +527,27 @@ impl Scene {
             .enumerate()
             .filter(|(_, lawn)| matches!(lawn.cover, Cover::Grass(_)));
         let swards = fallible::collected(parts.lawns.len(), grassed.map(|(index, _)| index))?;
+        let water = |object: &Object| {
+            parts
+                .materials
+                .get(object.material)
+                .and_then(Material::water)
+                .is_some()
+        };
+        let watered = (0..)
+            .zip(&parts.objects)
+            .filter(|(_, object)| water(object));
+        let waters = fallible::collected(watered.clone().count(), watered.map(|(index, _)| index))?;
         Some(Building {
             builder: Builder::new(&bounded)?,
             parts,
             unbounded,
             swards,
+            waters,
         })
     }
 
-    fn geometry(&self) -> Geometry<'_> {
+    pub(crate) fn geometry(&self) -> Geometry<'_> {
         Geometry {
             faces: &self.faces,
             fields: &self.fields,
@@ -649,6 +697,32 @@ impl Scene {
             Some(absorb) if out.is_finite() => kept * (absorb * -out).exp(),
             _ => kept,
         }
+    }
+
+    /// What object `object` is as water, if it is water.
+    pub(crate) fn water(&self, object: usize) -> Option<Water<'_>> {
+        self.materials
+            .get(self.objects.get(object)?.material)?
+            .water()
+    }
+
+    /// The body of water `ray` first meets, and how far along it: leaving it
+    /// from beneath when `from_below`, entering it from above otherwise.
+    pub(crate) fn water_toward(&self, ray: &Ray, from_below: bool) -> Option<(usize, f64)> {
+        let mut nearest: Option<(usize, f64)> = None;
+        for &index in &self.waters {
+            let Some(object) = self.objects.get(index) else {
+                continue;
+            };
+            let reach = nearest.map_or(f64::INFINITY, |(_, t)| t);
+            let Some(hit) = object.shape.intersect(ray, NEAR, reach, self.geometry()) else {
+                continue;
+            };
+            if (hit.normal.dot(ray.dir) > 0.0) == from_below {
+                nearest = Some((index, hit.t));
+            }
+        }
+        nearest
     }
 
     /// The first sun lighting the scene: which way it lies, the cosine of its

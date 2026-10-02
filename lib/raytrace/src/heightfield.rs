@@ -314,6 +314,11 @@ impl Heightfield {
         self.side
     }
 
+    /// The highest the sealed surface stands.
+    pub(crate) const fn highest(&self) -> f64 {
+        self.high
+    }
+
     /// The world x and z of vertex `(0, 0)`, and the distance between
     /// neighbours.
     pub(crate) const fn placing(&self) -> ((f64, f64), f64) {

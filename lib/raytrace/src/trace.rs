@@ -81,7 +81,7 @@ const WATER_F0: f64 = 0.02;
 const DAMP: f64 = 0.08;
 /// The most a slanting view draws a pixel's footprint out: past it, the
 /// surface is all but edge on, and the footprint as long as the view.
-const SLANTEST: f64 = 0.08;
+pub(crate) const SLANTEST: f64 = 0.08;
 
 /// How hard a tracer works at a pixel: the rounds of samples it may stop
 /// after.
@@ -164,6 +164,42 @@ struct Medium {
     absorb: Vec3,
     /// The light it scatters back toward the eye, where it is deep.
     glow: Vec3,
+    /// Its refractive index, which bends the sun's light into it.
+    ior: f64,
+}
+
+/// How wide a path's view of what it meets grows with the distance it has
+/// come: the eye's own spread, widened by every rough clear surface it has
+/// passed through or glanced off (Amanatides, "Ray Tracing with Cones", 1984).
+#[derive(Copy, Clone, Debug)]
+struct Cone {
+    /// The spread the rough surfaces added, in radians.
+    spread: f64,
+    /// The spread times the distance each was added at, which the width they
+    /// add grows from.
+    lead: f64,
+}
+
+impl Cone {
+    /// The eye's own, a pixel's angle across.
+    const PINHOLE: Self = Self {
+        spread: 0.0,
+        lead: 0.0,
+    };
+
+    /// The width of the view a pixel `pixel` radians across has `travelled`
+    /// from the eye.
+    fn width(self, pixel: f64, travelled: f64) -> f64 {
+        travelled * pixel + (self.spread * travelled - self.lead).max(0.0)
+    }
+
+    /// This cone spread `more` radians further at `travelled` from the eye.
+    fn widened(self, more: f64, travelled: f64) -> Self {
+        Self {
+            spread: self.spread + more,
+            lead: self.lead + more * travelled,
+        }
+    }
 }
 
 /// A ray's place in its path.
@@ -176,8 +212,9 @@ struct Path {
     /// The medium the ray is in; `None` for air.
     medium: Option<Medium>,
     /// How far the path had come by this ray's origin: what widens the
-    /// footprint a pattern is averaged over.
+    /// footprint a pattern is averaged over, as its cone does.
     travelled: f64,
+    cone: Cone,
     /// The one primary a dispersive surface split the path's light down to,
     /// once one has.
     channel: Option<usize>,
@@ -196,6 +233,7 @@ impl Path {
         arrival: Arrival::Seen,
         medium: None,
         travelled: 0.0,
+        cone: Cone::PINHOLE,
         channel: None,
         scattered: false,
     };
@@ -208,6 +246,7 @@ impl Path {
             arrival,
             medium,
             travelled,
+            cone: self.cone,
             channel: self.channel,
             scattered: self.scattered,
         }
@@ -225,6 +264,8 @@ struct Surface {
     smooth: Vec3,
     toward_eye: Vec3,
     travelled: f64,
+    /// How wide a patch across the view one pixel's view of the point covers.
+    width: f64,
     /// The point in the object's texture frame, and that frame's first axis
     /// in the world, which a brushed surface is brushed along.
     texture: Vec3,
@@ -443,11 +484,16 @@ impl<'a> Tracer<'a> {
         )
     }
 
+    /// The eye's ray through the centre of pixel `at`.
+    pub(crate) fn eye_ray(&self, at: (u32, u32)) -> Ray {
+        self.scene.camera.ray(self.film(at, (0.0, 0.0)), (0.0, 0.0))
+    }
+
     /// Where the eye's ray through the centre of pixel `at` first meets a
     /// diffuse surface a radiosity record may be gathered on; `None` where it
     /// meets glass, metal, a leaf or nothing.
     pub(crate) fn site(&self, at: (u32, u32)) -> Option<Site> {
-        let ray = self.scene.camera.ray(self.film(at, (0.0, 0.0)), (0.0, 0.0));
+        let ray = self.eye_ray(at);
         let (index, hit) = self.scene.closest(&ray, f64::INFINITY, Sight::Recorded)?;
         let object = self.scene.objects.get(index)?;
         let material = self
@@ -464,7 +510,7 @@ impl<'a> Tracer<'a> {
         if !diffuse {
             return None;
         }
-        let (surface, _) = self.surface(&ray, &hit, (object, material), 0.0);
+        let (surface, _) = self.surface(&ray, &hit, (object, material), (0.0, Cone::PINHOLE));
         Some(Site {
             point: surface.point,
             facing: surface.facing,
@@ -492,6 +538,7 @@ impl<'a> Tracer<'a> {
             arrival: Arrival::Seen,
             medium: None,
             travelled: site.travelled,
+            cone: Cone::PINHOLE,
             channel: None,
             scattered: true,
         };
@@ -734,7 +781,8 @@ impl<'a> Tracer<'a> {
         path: Path,
         sampler: &mut Sampler,
     ) -> Vec3 {
-        let (mut surface, outside) = self.surface(ray, &hit, (object, material), path.travelled);
+        let (mut surface, outside) =
+            self.surface(ray, &hit, (object, material), (path.travelled, path.cone));
         surface.canopy = self.scene.canopy(surface.point);
         let spot = self.spot(&surface, object, &hit);
         let pigment = || material.pigment.colour(&spot);
@@ -768,31 +816,13 @@ impl<'a> Tracer<'a> {
                 roughness,
                 dispersion,
                 foam,
-            } => {
-                if let Some(foam) = foam {
-                    if sampler.next_1d() < foam_cover(&foam, &surface) {
-                        return self.coated(
-                            &surface,
-                            FOAM,
-                            Microfacet::isotropic(0.9),
-                            path,
-                            sampler,
-                        );
-                    }
-                }
-                let medium = Medium {
-                    absorb,
-                    glow: glow * self.scene.daylight,
-                };
-                self.glass(
-                    &surface,
-                    outside,
-                    (ior, dispersion, roughness),
-                    medium,
-                    path,
-                    sampler,
-                )
-            }
+            } => self.clear(
+                (&surface, outside),
+                (ior, dispersion, roughness),
+                (absorb, glow, foam),
+                path,
+                sampler,
+            ),
             Finish::Film {
                 thickness,
                 index,
@@ -836,21 +866,45 @@ impl<'a> Tracer<'a> {
         }
     }
 
-    /// Where `ray` met `object` at `hit`, having come `travelled` before it:
-    /// the shading point on the side it came from, its normal tilted by the
-    /// material's relief, and whether it came from outside.
+    /// A clear surface bending light by its index, dispersion and roughness,
+    /// filled with a medium that absorbs and glows as its finish has it, or
+    /// the foam breaking over it where it breaks.
+    fn clear(
+        &self,
+        (surface, outside): (&Surface, bool),
+        bending: (f64, f64, f64),
+        (absorb, glow, foam): (Vec3, Vec3, Option<Foam>),
+        path: Path,
+        sampler: &mut Sampler,
+    ) -> Vec3 {
+        if let Some(foam) = foam {
+            if sampler.next_1d() < foam_cover(&foam, surface) {
+                return self.coated(surface, FOAM, Microfacet::isotropic(0.9), path, sampler);
+            }
+        }
+        let medium = Medium {
+            absorb,
+            glow: glow * self.scene.daylight,
+            ior: bending.0,
+        };
+        self.glass(surface, outside, bending, medium, path, sampler)
+    }
+
+    /// Where `ray` met `object` at `hit`, having come `travelled` before it
+    /// within `cone`: the shading point on the side it came from, its normal
+    /// tilted by the material's relief, and whether it came from outside.
     fn surface(
         &self,
         ray: &Ray,
         hit: &Hit,
         (object, material): (&Object, &Material),
-        travelled: f64,
+        (travelled, cone): (f64, Cone),
     ) -> (Surface, bool) {
         let point = ray.at(hit.t);
         let toward_eye = -ray.dir;
         let outside = hit.normal.dot(toward_eye) >= 0.0;
         let texture = object.texture.point_to_local(point);
-        let width = (travelled + hit.t) * self.pixel_angle;
+        let width = cone.width(self.pixel_angle, travelled + hit.t);
         let bump = Bump {
             p: texture,
             uv: hit.uv,
@@ -875,6 +929,7 @@ impl<'a> Tracer<'a> {
             smooth: facing_eye(hit.shading * side, toward_eye),
             toward_eye,
             travelled: travelled + hit.t,
+            width,
             texture,
             grain: object.texture.frame.x,
             uv: hit.uv,
@@ -899,7 +954,7 @@ impl<'a> Tracer<'a> {
             p: surface.texture,
             normal: object.texture.frame.to_local(surface.normal),
             height: surface.point.y,
-            width: self.footprint(surface),
+            width: Self::footprint(surface),
             mark: hit.mark,
             along: hit.along,
             uv: surface.uv,
@@ -911,13 +966,14 @@ impl<'a> Tracer<'a> {
         }
     }
 
+    /// How finely one pixel's view of `surface` resolves it.
+    fn resolution(surface: &Surface) -> f64 {
+        resolved(surface.width, surface.normal, surface.toward_eye)
+    }
+
     /// How wide a patch of `surface` one pixel's view of it covers.
-    fn footprint(&self, surface: &Surface) -> f64 {
-        along_view(
-            surface.travelled * self.pixel_angle,
-            surface.normal,
-            surface.toward_eye,
-        )
+    fn footprint(surface: &Surface) -> f64 {
+        along_view(surface.width, surface.normal, surface.toward_eye)
     }
 
     /// A shading frame about `surface`'s normal, its first axis along the
@@ -1101,6 +1157,7 @@ impl<'a> Tracer<'a> {
         let highlight = Microfacet::isotropic(HIGHLIGHT_ROUGHNESS);
         let lit_behind = lobes.translucent.max_element() > 0.0;
         let mut total = Vec3::ZERO;
+        let mut suns = 0;
         for light in &self.scene.lights {
             let point = light.object().is_none() && !matches!(light, Light::Sun { .. });
             if lobes.points_only && !point {
@@ -1109,6 +1166,21 @@ impl<'a> Tracer<'a> {
             let Some(incidence) = light.sample(surface.point, sampler.next_2d()) else {
                 continue;
             };
+            if let Light::Sun { .. } = light {
+                // The caustics are laid for the first sun, as the scene's.
+                let focused = suns == 0 && !path.scattered;
+                suns += 1;
+                if let Some(medium) = medium {
+                    if let Some(light) =
+                        self.sun_beneath(surface, lobes, (incidence, medium), focused)
+                    {
+                        total += light;
+                        continue;
+                    }
+                } else if !path.scattered {
+                    total += self.sun_glanced(surface, lobes, incidence, focused);
+                }
+            }
             let cos_light = surface.normal.dot(incidence.dir);
             let front = surface.facing.dot(incidence.dir) > 0.0 && cos_light > 0.0;
             let reflectance = if front {
@@ -1151,6 +1223,109 @@ impl<'a> Tracer<'a> {
             total += arriving * passed;
         }
         total
+    }
+
+    /// The light of the sun, sampled as `incidence`, that `lobes` diffuse at
+    /// `surface` under water of `medium`: bent through the level surface
+    /// above, less what it reflects and what the water absorbs, and focused
+    /// by the waves where `focused`; `None` where no water's surface lies
+    /// above for it to come through.
+    fn sun_beneath(
+        &self,
+        surface: &Surface,
+        lobes: &Lobes,
+        (incidence, medium): (crate::light::Incidence, Medium),
+        focused: bool,
+    ) -> Option<Vec3> {
+        let toward = incidence.dir;
+        if toward.y <= 0.0 {
+            return Some(Vec3::ZERO);
+        }
+        let up = -refract(-toward, Vec3::UP, medium.ior)?;
+        let (water, rise) = self
+            .scene
+            .water_toward(&Ray::new(surface.point, up), true)?;
+        let Some((weight, side)) = diffusely(surface, lobes, up) else {
+            return Some(Vec3::ZERO);
+        };
+        let origin = lift(surface.point, side);
+        let crossed = self.scene.transmittance(
+            &Ray::new(origin, up),
+            rise * (1.0 - 1e-6),
+            Some(medium.absorb),
+        );
+        if crossed.max_element() <= 0.0 {
+            return Some(Vec3::ZERO);
+        }
+        let met = surface.point + up * rise;
+        let above = self.sunlight_at(met, toward);
+        // The beam narrows or widens as the surface bends it.
+        let passed = (1.0 - fresnel(toward.y, medium.ior)) * toward.y / up.y.max(1e-6);
+        let focus = if focused {
+            let footprint = Self::resolution(surface);
+            self.scene
+                .caustics
+                .beneath(water, surface.point, met.y - surface.point.y, footprint)
+        } else {
+            1.0
+        };
+        Some(weight * incidence.light * (passed * focus) * crossed * above)
+    }
+
+    /// The light of the sun, sampled as `incidence`, that `lobes` diffuse at
+    /// `surface` off water below it: as much as a level surface reflects,
+    /// focused by the waves where `focused`.
+    fn sun_glanced(
+        &self,
+        surface: &Surface,
+        lobes: &Lobes,
+        incidence: crate::light::Incidence,
+        focused: bool,
+    ) -> Vec3 {
+        let toward = incidence.dir;
+        if self.scene.waters.is_empty() || toward.y <= 0.0 {
+            return Vec3::ZERO;
+        }
+        let down = Vec3::new(toward.x, -toward.y, toward.z);
+        let Some((weight, side)) = diffusely(surface, lobes, down) else {
+            return Vec3::ZERO;
+        };
+        let ray = Ray::new(lift(surface.point, side), down);
+        let Some((water, reach)) = self.scene.water_toward(&ray, false) else {
+            return Vec3::ZERO;
+        };
+        let Some(ior) = self.scene.water(water).map(|water| water.ior) else {
+            return Vec3::ZERO;
+        };
+        let between = self.scene.transmittance(&ray, reach * (1.0 - 1e-6), None);
+        if between.max_element() <= 0.0 {
+            return Vec3::ZERO;
+        }
+        let met = ray.at(reach);
+        let reflected = fresnel(toward.y, ior);
+        let focus = if focused {
+            let footprint = Self::resolution(surface);
+            self.scene
+                .caustics
+                .over(water, surface.point, surface.point.y - met.y, footprint)
+        } else {
+            1.0
+        };
+        let canopy = surface.canopy.map_or(1.0, |canopy| canopy.through(down));
+        weight
+            * incidence.light
+            * (reflected * focus * canopy)
+            * between
+            * self.sunlight_at(met, toward)
+    }
+
+    /// How much of the sun's light toward `toward` reaches `point` on a water
+    /// surface, past what stands in its way and through the air and cloud.
+    fn sunlight_at(&self, point: Vec3, toward: Vec3) -> Vec3 {
+        let origin = lift(point, Vec3::UP);
+        self.scene
+            .transmittance(&Ray::new(origin, toward), f64::INFINITY, None)
+            * self.scene.sky.sunlight(origin, toward)
     }
 
     /// What a diffuse lobe of `albedo` reflects of the light reaching
@@ -1350,14 +1525,28 @@ impl<'a> Tracer<'a> {
         let inner = if outside { Some(medium) } else { None };
         let reflect = (reflected, surface.facing, path.medium);
         let transmit = (refracted, -surface.facing, inner);
+        // The surface's facets spread what lies beyond it: a reflection twice
+        // as far as they tilt, and what is seen through it as far as tilting
+        // the facet turns the refracted ray.
+        let width = roughness * roughness;
+        let cos_i = surface.toward_eye.dot(surface.normal).clamp(0.0, 1.0);
+        let cos_t = mathf::sqrt((1.0 - (1.0 - cos_i * cos_i) / (eta * eta)).max(1e-6));
+        let spread = |more: f64| Path {
+            cone: path.cone.widened(more, surface.travelled),
+            ..path
+        };
+        let (glancing, passing) = (
+            spread(2.0 * width),
+            spread(width * (1.0 - cos_i / (eta * cos_t)).abs()),
+        );
         let mut through = if path.depth < SPLIT_DEPTH {
-            self.follow(surface, reflect, reflectance, path, sampler) * reflectance
-                + self.follow(surface, transmit, 1.0 - reflectance, path, sampler)
+            self.follow(surface, reflect, reflectance, glancing, sampler) * reflectance
+                + self.follow(surface, transmit, 1.0 - reflectance, passing, sampler)
                     * (1.0 - reflectance)
         } else if sampler.next_1d() < reflectance {
-            self.follow(surface, reflect, 1.0, path, sampler)
+            self.follow(surface, reflect, 1.0, glancing, sampler)
         } else {
-            self.follow(surface, transmit, 1.0, path, sampler)
+            self.follow(surface, transmit, 1.0, passing, sampler)
         };
         if let (true, Some(channel)) = (split_here, channel) {
             through = only(through, channel);
@@ -1518,6 +1707,22 @@ const ROOFED_AIR: (f64, f64, f64) = (8.0, 22.0, 0.12);
 /// The places along a ray its air's roofing is read at.
 const AIR_SAMPLES: u32 = 4;
 
+/// What `lobes` diffuse at `surface` of light arriving from `dir`, by its
+/// cosine, and the side light from there leaves the surface by: its face, or
+/// a thin surface's back. A lobe's highlight of light that reached it through
+/// water is the light's own image, which its reflection finds.
+fn diffusely(surface: &Surface, lobes: &Lobes, dir: Vec3) -> Option<(Vec3, Vec3)> {
+    let cos = surface.normal.dot(dir);
+    let facing = surface.facing.dot(dir);
+    if facing > 0.0 && cos > 0.0 {
+        Some((lobes.diffuse * cos, surface.facing))
+    } else if facing < 0.0 && lobes.translucent.max_element() > 0.0 {
+        Some((lobes.translucent * cos.abs(), -surface.facing))
+    } else {
+        None
+    }
+}
+
 /// What `lobe` reflects of a lamp sampled at `incidence`, weighed against
 /// finding that lamp by the lobe's own reflection.
 fn glossy(
@@ -1626,9 +1831,16 @@ fn along_view(width: f64, normal: Vec3, toward_eye: Vec3) -> f64 {
     width / normal.dot(toward_eye).abs().max(SLANTEST)
 }
 
+/// How finely a view `width` across resolves a surface facing `normal` seen
+/// along `toward_eye`: drawn out by a slanting view only by the square root of
+/// the slant, so it is resolved across the view as well as along it.
+pub(crate) fn resolved(width: f64, normal: Vec3, toward_eye: Vec3) -> f64 {
+    width / mathf::sqrt(normal.dot(toward_eye).abs().max(SLANTEST))
+}
+
 /// `point` moved off its surface along `normal`, by an amount that grows
 /// with its distance from the origin so rounding cannot put it back.
-fn lift(point: Vec3, normal: Vec3) -> Vec3 {
+pub(crate) fn lift(point: Vec3, normal: Vec3) -> Vec3 {
     let scale = point.x.abs().max(point.y.abs()).max(point.z.abs());
     point + normal * (2e-7 * (1.0 + scale))
 }

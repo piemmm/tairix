@@ -29,6 +29,10 @@ tairix-terrain = { path = "../terrain", version = "=0.0.0" }
 # The runner a scene's grids are prepared across, so a caller holding the
 # desktop's pool fills them on every core.
 tairix-parallel = { path = "../parallel", version = "=0.0.0", default-features = false }
+# The fallible hash map the caustics' survey keeps each tile it asks for in,
+# and the hash it is built over.
+tairix-collections = { path = "../collections", version = "=0.0.0" }
+tairix-hash = { path = "../hash", version = "=0.0.0" }
 
 [dev-dependencies]
 # The host test runners: `Threaded`, so the tests prove a draft's grids fill

@@ -10,7 +10,7 @@ Read first: `docs/src/lib/raytrace.md` (the tracer as built),
 `plans/WINTERSUN.md` WS25–WS31 and WS35 (the world generator that is to share
 the land generator and the countryside layout), `plans/FIX-DESKTOP.md` (no I/O
 on the serve loop) and `plans/OPEN-DEFECTS.md` D463, D465, D466, D483–D485,
-D503 and D505 (the tracer's open defects).
+D503, D505 and D514–D520 (the tracer's open defects).
 
 ## Ledger
 
@@ -23,7 +23,7 @@ D503 and D505 (the tracer's open defects).
 | RT5 | A 160 s preparation budget, every unit of preparation bounded and parallel (closes D464), spent where it measurably buys realism: radiosity records, and woods reaching twice as far | done |
 | RT6 | Wind on water without repetition: a spectrum of many wave components under gusting patches; the open sea's grid no longer tiles in view; detail finer than a pixel becomes roughness | done |
 | RT7 | The water defects: ripples aliasing far off, reflections lost at grazing angles, the open sea stopping short of the horizon, and the noise seams under every pattern (D490–D494) | done |
-| RT8 | Caustics on and under every body of water, from the light the surface itself focuses | planned |
+| RT8 | Caustics on and under every body of water, from the light the surface itself focuses: beams over the water the picture shows, every one gathered, refracted onto beds and what stands in the water and reflected onto what stands over it | done |
 | RT9 | Water's edge: reeds and bulrushes along banks, pondweed and water lilies in still water | planned |
 | RT10 | Streams close up: running water over stones worn round, slate the angular exception | planned |
 | RT11 | Deltas, beaches and eroding coasts: sand with driftwood, footprints, paw prints, shells, stones and wrack; cliffs, sandbanks, marram binding the dunes | planned |
@@ -257,12 +257,70 @@ kilometre in metre cells, no swell shorter than four of them, and past its
 
 ## RT8 — Caustics
 
-Light refracted or reflected by a water surface converges and diverges as the
-surface curves. A point beneath or beside water gathers the sun through the
-surface it lies behind, its irradiance scaled by the ratio of areas the
-surface's refraction maps between (the Jacobian of the mapping from surface
-to receiver, from the surface's second derivatives), so the bright network on
-a stream bed and the dancing light under a bridge are what the waves focus.
+Sunlight crossing water is bent by its waves' slopes, gathered where the
+surface curves one way and spread where it curves the other (`caustic.rs`).
+The surface is cut into beams (Watt, 1990): each triangle of a grid over it
+carries the sunlight crossing it, bent at its corners, to any depth or height,
+where it covers a triangle of its own. A point gathers the flux of every beam
+falling within the box the sun's disc and the waves too fine to resolve blur a
+point into, over the box's area, against what a level surface sends it. Over a
+level surface the beams tile the receiver, so every point takes exactly the
+level light; past a focus, where beams cross, every one still counts, so the
+folds are summed, never missed.
+
+- **Where.** A survey of the picture — every fourth pixel at *Simple*, every
+  second at *Maximum* — finds what the eye sees beneath water, over it, and
+  mirrored in it, and asks for the 2 m tiles of water whose beams can reach
+  each point. A tile is laid only where its waves move that light by a
+  hundredth; a point so deep or so high that no tile could resolve a wave for
+  it asks for none.
+- **How finely.** A tile holds every level from two cells a side to as many as
+  2⁹, a little under 4 mm, each level resolving only the waves six of its
+  cells long and blurring the rest as the sun's disc does. A point gathers at
+  the level its own footprint asks, blending it with the next, so the detail
+  never steps from tile to tile or with distance; coarser than a tile, it
+  takes a level surface's light. It never asks for cells so fine that more
+  than 256 beams lie in the patch of glints it gathers from: past a focus that
+  patch grows with depth, and what its cells cannot resolve the sun's disc
+  already blurs there.
+- **Room.** At most 2²¹ cells at *Simple* and 2²³ at *Maximum*; a plan past
+  its room coarsens every footprint alike. Its buffers are reserved whole and
+  written a unit at a time. The survey keeps each tile asked for once, in a
+  hash map keyed by its place; a level's rows are filled by sweeping each
+  wave's crest a step at a time (`mathf::Phasor`) wherever the waves lie level,
+  read afresh where a texture frames them off level; each pyramid's foot is
+  sealed in bands of rows across the cores, then the rungs above it.
+- **The tracer.** Sunlight beneath water comes the way the surface above bends
+  it: all but what a level surface reflects, absorbed along the bent way, and
+  scaled by the beams' factor. A surface over water facing it takes the sun
+  the water reflects, as much as a level surface's reflectance sends, scaled by
+  the reflected beams'. Either way the surface takes that light diffusely: its
+  highlight of it is the light's own image, which the surface's reflection
+  finds. A low sun's reflected glitter, whose beams swing too far along its way
+  to resolve, reflects its mean.
+- **The ray cone.** A path's footprint widens as it passes through or glances
+  off a rough clear surface (Amanatides, 1984), so what is seen through ripples
+  is filtered over what the ripples blur it to, and its caustics are gathered
+  no finer than that.
+
+Measured at 1920×1080 across 8 threads, laying a scene's caustics takes up to
+0.25 s at *Simple* and 0.95 s at *Maximum* and holds up to about 75 MB and
+330 MB, a mountain lake's the most; a unit of it takes at most about 6 ms.
+Beneath and over water the caustics add about 2.5 µs to a sample.
+
+Tests: a level surface's beams bringing every point exactly its light, across
+tile seams and beyond the laid tiles; beams before a focus and past it
+bringing what a million surface points' beams landing in the same box bring;
+the waves passing all the light they bend; the detail changing smoothly with
+the footprint; the survey laying beams only where the picture looks into
+rippled water, the same on any runner; real waves drawing a net of light on a
+bed; sunlight under water bent and absorbed along its bent way; a ceiling over
+water taking the sun the water reflects; rows of beams swept along level waves
+being those read afresh, and read afresh under waves framed off level; every
+pyramid bounding the beams beneath it however its sealing is shared; a run of
+points asking for tiles as each alone would; a point seen over no footprint
+taking a level surface's light; and a picture of the bed showing the net that
+one with nothing laid does not.
 
 ## RT9–RT12 — Water's edge and the coast
 
@@ -395,9 +453,10 @@ session weighs against the memory band (`plans/NEW-DESKTOP-SETTINGS.md`
 DS24); each profile has its own measured progress shares.
 
 Measured at 1920×1080 on a 24-thread desktop preparing across 8 threads, a
-landscape prepares at *Simple* in 1.4–3.8 s, holding at most 305 MB at its
-peak and 267 MB once prepared, and at *Maximum* in 6–33 s, at most 371 MB and
-305 MB — most of *Maximum*'s time its radiosity records. RT37's woods to the
+landscape prepares at *Simple* in 0.3–4.0 s, holding at most 324 MB at its
+peak and 323 MB once prepared, and at *Maximum* in 0.8–33 s, at most 583 MB and
+580 MB — most of *Maximum*'s time its radiosity records, and the most memory
+a mountain lake's, its caustics (RT8) beside its land. RT37's woods to the
 horizon, RT38's stones, and what later items buy are *Maximum*'s to spend the
 rest of its budget on.
 

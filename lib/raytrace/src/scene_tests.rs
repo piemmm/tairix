@@ -410,3 +410,34 @@ fn a_picture_with_no_pixels_has_no_draft() {
     assert!(Draft::new(Setting::Meadow, 1, (0, 10), Detail::Maximum).is_none());
     assert!(Draft::new(Setting::Meadow, 1, (10, 0), Detail::Maximum).is_none());
 }
+
+/// Where a draft's water has beams to lay, laying them takes its share of the
+/// readout; where it has none, gathering takes that share too, so the readout
+/// steps over no stage that does no work.
+#[test]
+fn a_draft_with_no_beams_to_lay_gives_their_share_to_gathering() {
+    for (setting, watered) in [(Setting::Studio, false), (Setting::Lagoon, true)] {
+        let mut draft = Draft::new(setting, 7, (64, 36), Detail::Simple).expect("a draft");
+        let shares = super::ends(draft.landed, draft.detail);
+        let mut gathering_from = None;
+        while !draft
+            .prepare(&tairix_parallel::SERIAL, &mut || true)
+            .expect("prepared")
+        {
+            if gathering_from.is_none() && matches!(draft.state, super::State::Gathering(..)) {
+                gathering_from = Some(f64::from(draft.progress()) / 1000.0);
+            }
+        }
+        let from = gathering_from.expect("a gathering stage");
+        assert_eq!(draft.watered, watered, "{setting:?}");
+        let expected = if watered {
+            shares.focused
+        } else {
+            shares.built
+        };
+        assert!(
+            (from - expected).abs() <= 0.002,
+            "{setting:?} gathers from {from} against {expected}"
+        );
+    }
+}

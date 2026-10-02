@@ -1,15 +1,19 @@
 //! A ray-traced reveal's work, free of threads: composing each scene, filling
-//! its grids, and tracing it coarse to fine, a slice at a time.
+//! its grids, and tracing it coarse to fine.
 //!
-//! A slice is what fits half a desktop frame at the pace the last one kept,
-//! so one engine serves both a tracing thread of its own, which runs slice
-//! after slice, and the serve loop, which runs one a frame when the machine
-//! grants no thread. Every pixel is traced at the tracer's best quality. Once
-//! whole, the scene is let go — and, where pictures are kept, the picture
-//! handed over to be kept, once for each scene. Each scene is composed at the
-//! detail asked, unless the memory band says its peak is not free.
+//! The serve loop, where the machine grants no thread, traces a slice a
+//! frame: what fits half a desktop frame at the pace the last one kept. A
+//! tracing thread of its own traces a stretch at a time instead, every core it
+//! was given taking the next untraced step as it finishes the last, so no core
+//! waits on another's costly pixel but at a pass's end; a slice holds too few
+//! pixels where a pixel costs milliseconds to keep more than one core busy.
+//! Every pixel is traced at the tracer's best quality. Once whole, the scene
+//! is let go — and, where pictures are kept, the picture handed over to be
+//! kept, once for each scene. Each scene is composed at the detail asked,
+//! unless the memory band says its peak is not free.
 
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use tairix_parallel::JobRunner;
 use tairix_raster::Pixel;
@@ -36,6 +40,18 @@ const MIN_BATCH: u32 = 1;
 /// The fewest pixels worth handing another core: one, for a pixel's samples
 /// cost far more than the hand-off.
 const GRAIN: usize = 1;
+
+/// The longest a stretch runs before its thread takes its turn again: long
+/// enough that the pixels a stretch's last cores are still tracing, which the
+/// others wait out, are a sliver of it.
+pub(super) const STRETCH_NS: u64 = 1_000_000_000;
+
+/// How many steps a stretch traces, across all its cores, between readings of
+/// the clock, which is a call into the kernel.
+const STEPS_PER_READING: u32 = 16;
+
+/// How many steps a core gathers before handing them over together.
+const HANDFUL: usize = 4;
 
 /// A reveal's progress once it is whole, in thousandths.
 const WHOLE: u16 = 1000;
@@ -66,6 +82,14 @@ impl Traced {
         },
         pixel: Pixel::TRANSPARENT,
     };
+}
+
+/// Where a stretch's cores hand what they trace, from whichever thread traced
+/// it.
+pub(super) trait Handing: Sync {
+    /// Take `steps`, the reveal then standing at `status`; whether to trace
+    /// on.
+    fn take(&self, steps: &[Traced], status: Status) -> bool;
 }
 
 /// What a scene is drawn from: its setting and seed, the key of the order it
@@ -114,10 +138,43 @@ enum Stage {
 enum Album {
     /// Pictures are not kept.
     Off,
-    /// The plan's picture is to be kept: its pixels as traced so far, or
-    /// `None` until tracing begins, once it is handed over, or when the heap
-    /// would not hold them.
-    Filling(Option<Vec<Pixel>>),
+    /// The plan's picture is to be kept: its pixels as traced so far, each a
+    /// word whichever core traced it stores, or `None` until tracing begins,
+    /// once it is handed over, or when the heap would not hold them.
+    Filling(Option<Vec<AtomicU32>>),
+}
+
+impl Album {
+    /// The picture being filled, if one is.
+    fn pixels(&self) -> Option<&[AtomicU32]> {
+        match self {
+            Self::Filling(Some(pixels)) => Some(pixels),
+            Self::Filling(None) | Self::Off => None,
+        }
+    }
+}
+
+/// Lay `pixel` at `step`'s place in `album`, a picture `width` across, if one
+/// is kept: every step is a pixel of its own, so no two cores store one word.
+fn keep(album: Option<&[AtomicU32]>, width: u32, step: Step, pixel: Pixel) {
+    let Some(word) = album.and_then(|album| {
+        let at = (step.y as usize)
+            .saturating_mul(width as usize)
+            .saturating_add(step.x as usize);
+        album.get(at)
+    }) else {
+        return;
+    };
+    word.store(
+        u32::from_le_bytes([pixel.r, pixel.g, pixel.b, pixel.a]),
+        Ordering::Relaxed,
+    );
+}
+
+/// The pixel `word` holds.
+const fn unpacked(word: u32) -> Pixel {
+    let [r, g, b, a] = word.to_le_bytes();
+    Pixel { r, g, b, a }
 }
 
 /// What the machine's memory can spare a scene: the pressure band the
@@ -264,6 +321,79 @@ impl Engine {
             Stage::Tracing(scene) => self.trace(scene, runner, out, clock),
             done @ (Stage::Whole | Stage::Failed) => done,
         };
+        self.status()
+    }
+
+    /// Whether the scene is ready and its pixels are being traced.
+    pub(super) const fn is_tracing(&self) -> bool {
+        matches!(self.stage, Stage::Tracing(_))
+    }
+
+    /// Trace a stretch of the reveal across every participant of `runner`,
+    /// each taking the next untraced step as it finishes the last and handing
+    /// what it traces to `handing` a handful at a time: to the end of the pass
+    /// under way, until `clock` reads `until`, or until `handing` answers that
+    /// the reveal is to stop. A pass's steps reach `handing` in no order, but
+    /// none before every step of the passes before it. Answers where the
+    /// reveal then stands.
+    pub(super) fn trace_stretch(
+        &mut self,
+        runner: &dyn JobRunner,
+        handing: &dyn Handing,
+        (clock, until): (&(dyn Fn() -> u64 + Sync), u64),
+    ) -> Status {
+        let stage = core::mem::replace(&mut self.stage, Stage::Failed);
+        let Stage::Tracing(scene) = stage else {
+            self.stage = stage;
+            return self.status();
+        };
+        let total = self.reveal.count();
+        let stretch = Stretch {
+            next: AtomicU32::new(self.shown),
+            traced: AtomicU32::new(self.shown),
+            over: AtomicBool::new(false),
+            end: self.reveal.pass_end(self.shown),
+            total,
+            handing,
+            clock,
+            until,
+        };
+        let tracer = Tracer::new(&scene, &self.encoder, self.size, self.plan.key);
+        let (reveal, album, width) = (&self.reveal, self.album.pixels(), self.size.0);
+        runner.run(runner.width().max(1), &|_| {
+            let mut handful = [Traced::NONE; HANDFUL];
+            let mut held = 0;
+            while let Some(index) = stretch.claim() {
+                let Some(step) = reveal.step(index) else {
+                    continue;
+                };
+                let (pixel, _) = tracer.pixel((step.x, step.y), QUALITY);
+                keep(album, width, step, pixel);
+                if let Some(slot) = handful.get_mut(held) {
+                    *slot = Traced { step, pixel };
+                    held += 1;
+                }
+                if held == HANDFUL {
+                    stretch.hand(&handful);
+                    held = 0;
+                }
+            }
+            stretch.hand(handful.get(..held).unwrap_or(&[]));
+        });
+        // Every step claimed was traced and handed over before its core
+        // looked for another.
+        self.shown = stretch.next.load(Ordering::Relaxed);
+        self.stage = if self.shown >= total {
+            self.finish_album();
+            Stage::Whole
+        } else {
+            Stage::Tracing(scene)
+        };
+        self.status()
+    }
+
+    /// Where the reveal stands.
+    fn status(&self) -> Status {
         match &self.stage {
             Stage::Composing => Status::Preparing(0),
             Stage::Preparing(draft) => Status::Preparing(draft.progress()),
@@ -305,7 +435,9 @@ impl Engine {
         self.batch = MIN_BATCH;
         if let Album::Filling(pixels @ None) = &mut self.album {
             let count = usize::try_from(u64::from(self.size.0) * u64::from(self.size.1)).ok();
-            *pixels = count.and_then(|count| fallible::filled(count, Pixel::TRANSPARENT));
+            *pixels = count.and_then(|count| {
+                fallible::collected(count, core::iter::repeat_with(|| AtomicU32::new(0)))
+            });
         }
     }
 
@@ -398,27 +530,25 @@ impl Engine {
     }
 
     /// Lay what `traced` traced into the copy of the picture, if one is kept.
-    fn copy_into_album(&mut self, traced: &[Traced]) {
-        let Album::Filling(Some(pixels)) = &mut self.album else {
-            return;
-        };
-        let width = self.size.0 as usize;
+    fn copy_into_album(&self, traced: &[Traced]) {
+        let album = self.album.pixels();
         for traced in traced {
-            let at = (traced.step.y as usize)
-                .saturating_mul(width)
-                .saturating_add(traced.step.x as usize);
-            if let Some(pixel) = pixels.get_mut(at) {
-                *pixel = traced.pixel;
-            }
+            keep(album, self.size.0, traced.step, traced.pixel);
         }
     }
 
     /// Hand the whole picture over to be kept, or why it cannot be.
     fn finish_album(&mut self) {
-        let Album::Filling(pixels) = &mut self.album else {
+        let Album::Filling(words) = &mut self.album else {
             return;
         };
-        self.finished = Some(match pixels.take() {
+        let pixels = words.take().and_then(|words| {
+            let pixels = words
+                .iter()
+                .map(|word| unpacked(word.load(Ordering::Relaxed)));
+            fallible::collected(words.len(), pixels)
+        });
+        self.finished = Some(match pixels {
             Some(pixels) => Ok(Picture {
                 setting: self.plan.setting,
                 seed: self.plan.seed,
@@ -427,6 +557,54 @@ impl Engine {
             }),
             None => Err(Unkept::Unheld(self.plan.setting)),
         });
+    }
+}
+
+/// What the cores tracing one stretch share: the next step to claim, how many
+/// are traced, whether the stretch is over, and where it ends.
+struct Stretch<'a> {
+    next: AtomicU32,
+    traced: AtomicU32,
+    over: AtomicBool,
+    /// The step the stretch's pass ends before.
+    end: u32,
+    /// How many steps the whole reveal takes.
+    total: u32,
+    handing: &'a dyn Handing,
+    clock: &'a (dyn Fn() -> u64 + Sync),
+    until: u64,
+}
+
+impl Stretch<'_> {
+    /// The next untraced step, unless the stretch is over: claimed only below
+    /// its end, so the count never passes it.
+    fn claim(&self) -> Option<u32> {
+        if self.over.load(Ordering::Relaxed) {
+            return None;
+        }
+        self.next
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+                (next < self.end).then(|| next + 1)
+            })
+            .ok()
+    }
+
+    /// Hand `steps` over, ending the stretch once `handing` answers it is to
+    /// stop or the clock reaches its end.
+    fn hand(&self, steps: &[Traced]) {
+        if steps.is_empty() {
+            return;
+        }
+        let count = u32::try_from(steps.len()).unwrap_or(u32::MAX);
+        let before = self.traced.fetch_add(count, Ordering::Relaxed);
+        let done = before.saturating_add(count);
+        let on = self
+            .handing
+            .take(steps, Status::Tracing(thousandths(done, self.total)));
+        let read = before / STEPS_PER_READING != done / STEPS_PER_READING;
+        if !on || (read && (self.clock)() >= self.until) {
+            self.over.store(true, Ordering::Relaxed);
+        }
     }
 }
 

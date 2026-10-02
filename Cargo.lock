@@ -3157,6 +3157,8 @@ dependencies = [
 name = "tairix-raytrace"
 version = "0.0.0"
 dependencies = [
+ "tairix-collections",
+ "tairix-hash",
  "tairix-parallel",
  "tairix-raster",
  "tairix-rng",

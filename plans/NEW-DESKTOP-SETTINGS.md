@@ -1549,12 +1549,15 @@ What it guarantees (its scenes, sampling and reveal are `plans/RAYTRACE.md`'s):
   once the picture is whole.
 - **Traced off the serve loop.** `screensaver.raytrace.cpu` sets the share of
   the machine: `idle` (the default) is one tracing thread, `performance` a
-  worker beside it for every other core. The embedder grants the threads
+  worker beside it for every other core, every one of them kept busy: a scene
+  is traced a pass at a time, each core taking the next untraced step as it
+  finishes the last and handing what it traced straight on, so none waits on
+  another's costly pixel but at a pass's end. The embedder grants the threads
   through the `TraceHost` seam; the loop collects and paints on the reveal's
   cadence through the host-tested `TraceDesk`, which drops whatever was traced
-  before the next scene is asked for, holds the thread once two of the loop's
-  longest waits are waiting, and has the thread wake the loop through the
-  session's worker wake as each scene is readied.
+  before the next scene is asked for, holds the thread once what it laid down
+  has waited two of the loop's longest waits, and has the thread wake the loop
+  through the session's worker wake as each scene is readied.
   The threads leave when the screensaver comes down, the loop waiting on none
   of them. With no thread granted the loop traces a slice a frame itself — on
   its own thread alone under `idle` — and paints on the same cadence.

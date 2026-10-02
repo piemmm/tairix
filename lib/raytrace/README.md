@@ -19,8 +19,9 @@ random from a seed, and a tracer that answers what one pixel of one shows.
   buys; `peak` states each one's budget for a caller weighing its memory.
 - `Draft` — a scene composed at a `Detail` but not yet traceable: its lands
   built, its woods and swards grown, its trees and deadwood grown into
-  prototypes, its grids and sky tables filled, its hierarchy built, its
-  radiosity gathered and its exposure and local adaptation metered. `prepare`
+  prototypes, its grids and sky tables filled, its hierarchy built, the beams
+  its water bends the sun's light through laid, its radiosity gathered and its
+  exposure and local adaptation metered. `prepare`
   does a bounded unit of that work at a time across any
   `tairix_parallel::JobRunner`, so a caller on an interactive loop spreads it
   over frames; `progress` says how far it has come, in thousandths; `finish`
@@ -50,11 +51,15 @@ random from a seed, and a tracer that answers what one pixel of one shows.
 - **Bounded cost.** A scene holds at most 131 072 objects at `Simple` and
   524 288 at `Maximum`, 4096 hull faces,
   256 materials, 12 lights, 12 height grids, 96 prototypes, 16 lawns and 8
-  woods; a pixel at most 128 samples, a path at most nine bounces. Every unit of
+  woods, and beams over at most 2²¹ cells of water at `Simple` and 2²³ at
+  `Maximum`; a pixel at most 128 samples, a path at most nine bounces, and a
+  point under or over water gathers about 256 beams a level at most. Every unit of
   preparation is a fixed amount of work a core, whatever the scene holds: a
   band of a grid's rows or of a shade's, a turn of a land's droplet tiles, a
   slice of a prototype's or the scene's hierarchy, a band of a wood's places
-  or a run of their ranking, a few rows of a radiosity record's hemisphere.
+  or a run of their ranking, a hundred or so of the caustics' survey points, a
+  couple of thousand of their beams or a few thousand of their pyramids'
+  nodes, a few rows of a radiosity record's hemisphere.
 
 ## Tests
 
@@ -114,8 +119,24 @@ climbing steadily to its whole only once the scene is ready; water's waves
 holding their slope variance whether they tilt the normal or roughen it,
 never repeating across the water and gusting in patches, rippled water seen
 low losing none of an even sky, and the open sea lying at its mean level past
-its reach; noise continuous across every lattice wall; and a land's eye clear
-of the ground beneath it.
+its reach; noise continuous across every lattice wall; a land's eye clear
+of the ground beneath it; the waves curving the surface as their slopes
+change; a level surface's beams bringing every point exactly its light,
+across tile seams and beyond the tiles laid, and bending and sharing the
+sun's light as Snell's and Fresnel's laws have it; beams before a focus and
+past it bringing what a million surface points' beams landing in the same box
+bring, and the waves passing all the light they bend; the detail a point
+gathers changing smoothly with its footprint; beams laid only where the
+picture looks into rippled water, the same on any runner, and drawing a net
+of light on a bed; sunlight under water bent and absorbed along its bent way;
+a ceiling over water taking the sun the water reflects; a rough clear surface
+widening the view beyond it; beams swept along a row of level waves being
+those read afresh at each point, and read afresh where a texture frames the
+waves off level; every pyramid bounding the beams beneath it however its
+sealing is shared; a run of points asking for tiles just as each alone would,
+and a tile asked for twice laid once for the most asked; a point seen over no
+footprint taking a level surface's light; and a picture of a bed under
+ripples showing the net that one with nothing laid does not.
 
 The design and the measurements behind its budgets are in
 `docs/src/lib/raytrace.md`.

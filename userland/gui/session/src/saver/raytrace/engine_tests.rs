@@ -1,8 +1,10 @@
 //! Host tests of a reveal's work: a scene prepared over slices before any
 //! pixel, its progress told as it goes, traced coarse to fine exactly as each
 //! pixel traces alone at the tracer's best however slowly, the pace each
-//! slice keeps, the next scene, and each whole picture handed over to be kept
-//! once.
+//! slice keeps, the stretches a thread of its own traces across its cores,
+//! the next scene, and each whole picture handed over to be kept once.
+
+extern crate std;
 
 use alloc::vec::Vec;
 
@@ -13,8 +15,8 @@ use tairix_raytrace::{Detail, Quality, Reveal, Setting, Tracer};
 use tairix_reclaim::pressure::{PressureBand, ReportedPressure};
 
 use super::{
-    draw_setting, pace, Detailing, Engine, Memory, Stage, Traced, MIN_BATCH, PLAIN, QUALITY,
-    SLICE_NS,
+    draw_setting, pace, Detailing, Engine, Handing, Memory, Stage, Traced, MIN_BATCH, PLAIN,
+    QUALITY, SLICE_NS, STEPS_PER_READING,
 };
 use crate::saver::raytrace::album::Unkept;
 use crate::saver::raytrace::crew::{Status, TraceDesk, Turn};
@@ -294,6 +296,151 @@ fn the_next_scene_is_set_elsewhere_and_revealed_from_its_start() {
     assert_eq!(engine.shown, 0);
 }
 
+/// A hand-over keeping every step in the order taken, answering to trace on
+/// until it has taken `limit` steps.
+struct Taking {
+    taken: std::sync::Mutex<Vec<Traced>>,
+    limit: usize,
+}
+
+impl Taking {
+    fn upto(limit: usize) -> Self {
+        Self {
+            taken: std::sync::Mutex::new(Vec::new()),
+            limit,
+        }
+    }
+
+    fn taken(&self) -> Vec<Traced> {
+        self.taken.lock().expect("an unpoisoned record").clone()
+    }
+}
+
+impl Handing for Taking {
+    fn take(&self, steps: &[Traced], _: Status) -> bool {
+        let mut taken = self.taken.lock().expect("an unpoisoned record");
+        taken.extend_from_slice(steps);
+        taken.len() < self.limit
+    }
+}
+
+/// A clock that never reaches a stretch's end.
+fn timeless() -> u64 {
+    0
+}
+
+/// Trace `engine`'s stretches across `runner` until it is whole, answering
+/// what each stretch handed over.
+fn stretched(engine: &mut Engine, runner: &dyn tairix_parallel::JobRunner) -> Vec<Vec<Traced>> {
+    let mut stretches = Vec::new();
+    while tracing(engine) {
+        let taking = Taking::upto(usize::MAX);
+        let _ = engine.trace_stretch(runner, &taking, (&timeless, u64::MAX));
+        stretches.push(taking.taken());
+    }
+    stretches
+}
+
+/// A stretch runs to the end of its pass, every core taking steps as it
+/// goes, and the stretches of a reveal show every pixel once, pass by pass,
+/// exactly as tracing it alone shows it, and keep the picture they traced.
+#[test]
+fn each_stretch_traces_its_pass_across_every_core_and_the_reveal_whole() {
+    let mut engine = Engine::new(SIZE, 17, PLAIN).expect("an engine");
+    engine.keep_pictures();
+    let _ = run_until(&mut engine, tracing);
+    let expected = traced_alone(&engine);
+    let reveal = Reveal::new(SIZE, engine.plan.order).expect("a reveal");
+    let stretches = stretched(&mut engine, &tairix_parallel::Threaded::new(4));
+    assert!(whole(&engine));
+    let mut start = 0;
+    for stretch in &stretches {
+        let end = reveal.pass_end(start);
+        let mut indices: Vec<u32> = stretch
+            .iter()
+            .map(|traced| {
+                (start..end)
+                    .find(|&index| reveal.step(index) == Some(traced.step))
+                    .expect("a step of the stretch's own pass")
+            })
+            .collect();
+        indices.sort_unstable();
+        assert_eq!(
+            indices,
+            (start..end).collect::<Vec<_>>(),
+            "the whole pass, once"
+        );
+        start = end;
+    }
+    assert_eq!(start, reveal.count());
+    let all: Vec<Traced> = stretches.concat();
+    assert_eq!(painted(&all), expected);
+    let kept = engine
+        .take_finished()
+        .expect("a picture handed over")
+        .expect("held");
+    assert_eq!(kept.pixels, expected);
+}
+
+/// However costly its pixels, each pass of a reveal is handed out once, a
+/// piece to each core, so no core waits on another's slowest pixel but at the
+/// pass's end.
+#[test]
+fn a_pass_is_handed_out_once_however_costly_its_pixels() {
+    let mut engine = Engine::new(SIZE, 37, PLAIN).expect("an engine");
+    let _ = run_until(&mut engine, tracing);
+    let reveal = Reveal::new(SIZE, engine.plan.order).expect("a reveal");
+    let mut passes = 0;
+    let mut start = 0;
+    while start < reveal.count() {
+        start = reveal.pass_end(start);
+        passes += 1;
+    }
+    let runner = tairix_parallel::Reversed::new(4);
+    let _ = stretched(&mut engine, &runner);
+    assert!(whole(&engine));
+    assert_eq!(runner.dispatches(), passes);
+    assert_eq!(runner.widest(), 4, "a piece to each core");
+}
+
+/// A stretch told to stop stops there with every step it claimed handed
+/// over, and the next takes up after them, nothing lost or traced twice.
+#[test]
+fn a_stretch_told_to_stop_leaves_nothing_lost_or_traced_twice() {
+    let mut engine = Engine::new(SIZE, 19, PLAIN).expect("an engine");
+    let _ = run_until(&mut engine, tracing);
+    let expected = traced_alone(&engine);
+    let runner = tairix_parallel::Threaded::new(4);
+    let stopping = Taking::upto(10);
+    let status = engine.trace_stretch(&runner, &stopping, (&timeless, u64::MAX));
+    let first = stopping.taken();
+    assert!(matches!(status, Status::Tracing(_)), "{status:?}");
+    assert!(first.len() >= 10, "{}", first.len());
+    assert_eq!(
+        engine.shown as usize,
+        first.len(),
+        "every claimed step is handed over"
+    );
+    let rest: Vec<Traced> = stretched(&mut engine, &runner).concat();
+    let mut all = first;
+    all.extend(rest);
+    assert_eq!(all.len(), (SIZE.0 * SIZE.1) as usize, "each step once");
+    assert_eq!(painted(&all), expected);
+}
+
+/// A stretch whose time is up stops at the next reading of the clock.
+#[test]
+fn a_stretch_ends_once_its_time_is_up() {
+    let mut engine = Engine::new(SIZE, 23, PLAIN).expect("an engine");
+    let _ = run_until(&mut engine, tracing);
+    let taking = Taking::upto(usize::MAX);
+    let late = || u64::MAX;
+    let status = engine.trace_stretch(&tairix_parallel::SERIAL, &taking, (&late, 0));
+    assert!(matches!(status, Status::Tracing(_)), "{status:?}");
+    assert_eq!(taking.taken().len(), STEPS_PER_READING as usize);
+    assert_eq!(engine.shown, STEPS_PER_READING);
+}
+
 /// A slice ordered through the desk begins the scene the loop asked for
 /// before it traces.
 #[test]
@@ -302,7 +449,7 @@ fn an_order_begins_the_scene_asked_for_before_its_slice() {
     let first = engine.plan.setting;
     let mut desk = TraceDesk::new();
     desk.next();
-    let Turn::Trace(order) = desk.turn() else {
+    let Turn::Trace(order) = desk.turn(0) else {
         panic!("a slice");
     };
     let mut traced = Vec::new();

@@ -4,10 +4,12 @@ use alloc::vec::Vec;
 
 use tairix_util::mathf;
 
+use core::f64::consts::PI;
+
 use super::{power, Quality, Tracer};
 use crate::camera::Camera;
 use crate::light::Light;
-use crate::material::{Finish, Material, Relief, Wind, COAT_F0};
+use crate::material::{fresnel, Finish, Material, Relief, Wind, COAT_F0};
 use crate::pigment::Pigment;
 use crate::sample::Sampler;
 use crate::scene::{Exposure, Object, Parts, Scene};
@@ -406,7 +408,7 @@ fn a_pattern_turns_with_its_object() {
         &ray,
         &hit,
         (&scene.objects[index], &scene.materials[0]),
-        0.0,
+        (0.0, super::Cone::PINHOLE),
     );
     let spot = tracer.spot(&surface, &scene.objects[index], &hit);
     // The world's -z face is the turned frame's +x or -x face.
@@ -804,4 +806,271 @@ fn the_meter_draws_a_bright_window_down_and_lifts_a_dark_wall_alike_to_their_edg
         lift(near),
         lift(far)
     );
+}
+
+/// Still water of index 1.333 absorbing `absorb` of every primary per metre.
+fn still_water(absorb: f64) -> Material {
+    let still = Relief::waves(
+        Wind {
+            slope_variance: 0.0,
+            lengths: (1.0, 0.03),
+            spread: 0.5,
+            gusts: (1.0, 50.0),
+        },
+        1,
+    )
+    .expect("waves");
+    Material::new(
+        Pigment::Solid(Vec3::ONE),
+        Finish::Glass {
+            ior: 1.333,
+            absorb: Vec3::splat(absorb),
+            glow: Vec3::ZERO,
+            roughness: 0.0,
+            dispersion: 0.0,
+            foam: None,
+        },
+    )
+    .with_relief(still)
+}
+
+/// A sun `elevation` radians up, toward +x, a small disc sending
+/// `irradiance` square to it.
+fn sun_at(elevation: f64, irradiance: f64) -> Light {
+    let cos_radius = 0.999_99;
+    let solid = core::f64::consts::TAU * (1.0 - cos_radius);
+    Light::Sun {
+        toward: Vec3::new(mathf::cos(elevation), mathf::sin(elevation), 0.0),
+        cos_radius,
+        radiance: Vec3::splat(irradiance / solid),
+    }
+}
+
+/// Sunlight reaching a bed beneath still water comes bent through the
+/// surface: all of it but what the surface reflects, absorbed along the
+/// steeper way the bent beam takes down, never the straight way to the sun.
+#[test]
+fn sunlight_under_water_is_bent_and_absorbed_along_its_bent_way() {
+    let (elevation, depth, absorb, albedo, irradiance) = (0.35, 0.5, 2.0, 0.5, 40.0);
+    let mut setup = Setup::new(uniform_sky(0.0));
+    setup.add(
+        Shape::Plane {
+            normal: Vec3::UP,
+            offset: -depth,
+        },
+        Material::new(Pigment::Solid(Vec3::splat(albedo)), Finish::Matte),
+        None,
+    );
+    setup.add(ground(), still_water(absorb), Some(Vec3::splat(0.98)));
+    setup.lights.push(sun_at(elevation, irradiance));
+    setup.eye = Vec3::new(0.0, 2.0, 0.0);
+    setup.target = Vec3::new(0.0, -depth, 0.0);
+    let (light, _) = shown(&setup.scene(), MIDDLE);
+    let cos_i = mathf::sin(elevation);
+    let cos_t = mathf::sqrt(1.0 - (1.0 - cos_i * cos_i) / (1.333 * 1.333));
+    let seen = |way: f64| {
+        let bed = irradiance * (1.0 - fresnel(cos_i, 1.333)) * cos_i * mathf::exp(-absorb * way);
+        (1.0 - fresnel(1.0, 1.333)) * mathf::exp(-absorb * depth) * albedo / PI * bed
+    };
+    let (bent, straight) = (filmic(seen(depth / cos_t)), filmic(seen(depth / cos_i)));
+    assert!(
+        (light.x - bent).abs() < 0.02 * bent,
+        "{light:?} against {bent}, the straight way {straight}"
+    );
+    assert!(bent > 2.0 * straight, "{bent} against {straight}");
+}
+
+/// A ceiling over still water, which the sun cannot reach, takes the light
+/// the water reflects up to it: as much as a level surface's reflectance
+/// sends at the sun's height.
+#[test]
+fn a_ceiling_over_water_takes_the_sun_the_water_reflects() {
+    let (elevation, albedo, irradiance) = (0.7, 0.6, 40.0);
+    let mut setup = Setup::new(uniform_sky(0.0));
+    // Narrow toward the sun, so the water it takes the sun from is in the
+    // sun, and long along the slanting view, which draws a pixel out.
+    setup.add(
+        Shape::Quad {
+            corner: Vec3::new(-1.0, 1.0, -8.0),
+            edge_u: Vec3::new(2.0, 0.0, 0.0),
+            edge_v: Vec3::new(0.0, 0.0, 16.0),
+        },
+        Material::new(Pigment::Solid(Vec3::splat(albedo)), Finish::Matte),
+        None,
+    );
+    setup.add(ground(), still_water(8.0), Some(Vec3::splat(0.98)));
+    setup.lights.push(sun_at(elevation, irradiance));
+    setup.eye = Vec3::new(0.0, 0.4, -4.0);
+    setup.target = Vec3::new(0.0, 1.0, 0.0);
+    let (light, _) = shown(&setup.scene(), MIDDLE);
+    let cos_i = mathf::sin(elevation);
+    let expected = filmic(albedo / PI * irradiance * fresnel(cos_i, 1.333) * cos_i);
+    assert!(
+        (light.x - expected).abs() < 0.02 * expected,
+        "{light:?} against {expected}"
+    );
+}
+
+/// A path's cone is the pinhole's until a rough clear surface spreads it,
+/// and from there it widens the view in step with the distance on.
+#[test]
+fn a_rough_clear_surface_widens_what_is_seen_beyond_it() {
+    let pixel = 1e-3;
+    assert!((super::Cone::PINHOLE.width(pixel, 7.0) - 7e-3).abs() < 1e-15);
+    let spread = super::Cone::PINHOLE.widened(0.02, 5.0);
+    assert!((spread.width(pixel, 5.0) - 5e-3).abs() < 1e-15);
+    assert!((spread.width(pixel, 6.0) - (6e-3 + 0.02)).abs() < 1e-12);
+    let twice = spread.widened(0.01, 6.0);
+    assert!((twice.width(pixel, 8.0) - (8e-3 + 0.02 * 3.0 + 0.01 * 2.0)).abs() < 1e-12);
+}
+
+/// Rippled water draws a net of the light its waves focus over the even
+/// sand beneath it, where a picture of the same water with nothing laid
+/// shows the sand even; the tone's curve takes a little off the mean of a
+/// light that varies.
+#[test]
+fn rippled_water_draws_a_net_of_light_over_even_sand() {
+    let size = (32u32, 32u32);
+    let waves = Relief::waves(
+        Wind {
+            slope_variance: 0.004,
+            lengths: (2.0, 0.03),
+            spread: 0.7,
+            gusts: (1.0, 50.0),
+        },
+        7,
+    )
+    .expect("waves");
+    let water = Material::new(
+        Pigment::Solid(Vec3::ONE),
+        Finish::Glass {
+            ior: 1.333,
+            absorb: Vec3::splat(0.05),
+            glow: Vec3::ZERO,
+            roughness: 0.0,
+            dispersion: 0.0,
+            foam: None,
+        },
+    )
+    .with_relief(waves);
+    let picture = |lay: bool| {
+        let mut setup = Setup::new(uniform_sky(0.05));
+        setup.add(
+            Shape::Plane {
+                normal: Vec3::UP,
+                offset: -0.4,
+            },
+            Material::new(Pigment::Solid(Vec3::splat(0.7)), Finish::Matte),
+            None,
+        );
+        setup.add(ground(), water.clone(), Some(Vec3::splat(0.98)));
+        setup.lights.push(sun_at(1.1, 3.0));
+        setup.eye = Vec3::new(0.0, 1.2, 0.0);
+        setup.target = Vec3::new(0.0, -0.4, 0.3);
+        let mut scene = setup.scene();
+        if lay {
+            let focus = &crate::detail::Detail::Maximum.densities().focus;
+            let mut focusing =
+                crate::caustic::Focusing::new(&scene, size, focus).expect("a focusing");
+            while !focusing
+                .step(&scene, &tairix_parallel::SERIAL)
+                .expect("a step")
+            {}
+            scene.caustics = focusing.finish();
+        }
+        let encoder = Encoder::new().expect("an encoder");
+        let tracer = Tracer::new(&scene, &encoder, size, 0x5eed);
+        let lights: Vec<f64> = (0..size.1)
+            .flat_map(|y| (0..size.0).map(move |x| (x, y)))
+            .map(|at| tracer.light(at, Quality::Good).0.luminance())
+            .collect();
+        let mean = lights.iter().sum::<f64>() / f64::from(size.0 * size.1);
+        let spread = lights
+            .iter()
+            .map(|light| (light - mean) * (light - mean))
+            .sum::<f64>()
+            / f64::from(size.0 * size.1);
+        (mean, mathf::sqrt(spread) / mean)
+    };
+    let (even, laid) = (picture(false), picture(true));
+    assert!(
+        even.1 < 0.02,
+        "the sand without caustics varies by {}",
+        even.1
+    );
+    assert!(
+        laid.1 > 0.05 && laid.1 > 4.0 * even.1,
+        "the sand under them varies by only {} against {}",
+        laid.1,
+        even.1
+    );
+    assert!(
+        (laid.0 - even.0).abs() < 0.03 * even.0,
+        "{laid:?} against {even:?}"
+    );
+}
+
+/// Beneath water a surface's highlight of the sun is the sun's own image,
+/// which its reflection finds through the surface above, so the lamp
+/// sampling that lights it directly adds none of it there: a bare metal
+/// under water takes nothing from the sun that way, where the same metal in
+/// the air takes its highlight.
+#[test]
+fn under_water_the_sun_reaches_a_highlight_only_by_its_reflection() {
+    let mut setup = Setup::new(uniform_sky(0.0));
+    let metal = Material::new(
+        Pigment::Solid(Vec3::splat(0.9)),
+        Finish::Metal { roughness: 0.3 },
+    );
+    let bed = setup.add(
+        Shape::Plane {
+            normal: Vec3::UP,
+            offset: -0.5,
+        },
+        metal.clone(),
+        None,
+    );
+    setup.add(ground(), still_water(0.1), Some(Vec3::splat(0.98)));
+    let elevation: f64 = 1.2;
+    setup.lights.push(sun_at(elevation, 10.0));
+    let scene = setup.scene();
+    let encoder = Encoder::new().expect("an encoder");
+    let tracer = Tracer::new(&scene, &encoder, SIZE, 1);
+    // Looking down the way the sun's light glances off the bed.
+    let dir = Vec3::new(mathf::cos(elevation), -mathf::sin(elevation), 0.0);
+    let ray = crate::vector::Ray::new(Vec3::new(0.0, -0.5, 0.0) - dir * 0.3, dir);
+    let (_, hit) = scene
+        .closest(&ray, f64::INFINITY, crate::scene::Sight::Bounce)
+        .expect("the bed");
+    let (surface, _) = tracer.surface(
+        &ray,
+        &hit,
+        (&scene.objects[bed], &metal),
+        (0.0, super::Cone::PINHOLE),
+    );
+    let lobes = super::Lobes {
+        diffuse: Vec3::ZERO,
+        specular: Some(super::Specular {
+            frame: Frame::around(surface.normal),
+            micro: crate::material::Microfacet::isotropic(0.3),
+            reflectance: super::Reflectance::Schlick(Vec3::splat(0.9)),
+            share: 1.0,
+        }),
+        translucent: Vec3::ZERO,
+        points_only: false,
+    };
+    let water = super::Medium {
+        absorb: Vec3::splat(0.1),
+        glow: Vec3::ZERO,
+        ior: 1.333,
+    };
+    let under = super::Path {
+        medium: Some(water),
+        ..super::Path::EYE
+    };
+    let mut sampler = Sampler::new(3, 0);
+    let in_water = tracer.direct(&surface, &lobes, under, &mut sampler);
+    let in_air = tracer.direct(&surface, &lobes, super::Path::EYE, &mut sampler);
+    assert!(in_water.max_element() == 0.0, "{in_water:?}");
+    assert!(in_air.max_element() > 0.01, "{in_air:?}");
 }

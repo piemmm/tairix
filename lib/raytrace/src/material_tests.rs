@@ -360,6 +360,80 @@ fn gusts_raise_the_waves_in_patches() {
     assert!(stepped < 0.15, "a gust's edge is abrupt: {stepped}");
 }
 
+/// Read close, the waves curve the surface as much as their slopes swing,
+/// wave by wave, says; read over a footprint coarser than all of them,
+/// they curve it not at all, and what they leave unresolved is the rest of
+/// their slope variance.
+#[test]
+fn waves_curve_the_surface_as_their_slopes_change() {
+    let Relief::Waves(waves) = Relief::waves(steady(BREEZE), 17).expect("waves") else {
+        panic!("waves");
+    };
+    // The curvature's variance read off the surface: each axis's change in
+    // slope across a small step, about as far as a hundredth of the
+    // shortest wave, either way.
+    let step = 1e-4;
+    let slope = |x: f64, z: f64| {
+        let normal = waves.tilt(Vec3::UP, Vec3::new(x, 0.0, z), 1e-6).normal;
+        (-normal.x / normal.y, -normal.z / normal.y)
+    };
+    let mut draw = draws(41);
+    let (mut squares, points) = (0.0, 4000u32);
+    for _ in 0..points {
+        let (x, z) = (300.0 * draw(), 300.0 * draw());
+        let (sx, sz) = slope(x, z);
+        let (sxx, _) = slope(x + step, z);
+        let (_, szz) = slope(x, z + step);
+        let (sxz, _) = slope(x, z + step);
+        let (dxx, dzz, dxz) = ((sxx - sx) / step, (szz - sz) / step, (sxz - sx) / step);
+        squares += dxx * dxx + dzz * dzz + 2.0 * dxz * dxz;
+    }
+    let measured = mathf::sqrt(squares / f64::from(points));
+    let reckoned = waves.curvature(1e-6);
+    assert!(
+        (measured - reckoned).abs() < 0.1 * reckoned,
+        "measured {measured} against {reckoned}"
+    );
+    assert!(
+        waves.curvature(0.02) < reckoned,
+        "a coarser look sees less curvature"
+    );
+    assert!(waves.curvature(10.0) < 1e-12, "far too coarse, none at all");
+    for footprint in [1e-6, 0.004, 0.03, 0.3, 10.0] {
+        let lent = waves.unresolved(footprint);
+        let total = waves.slope_variance();
+        assert!(
+            (0.0..=total + 1e-15).contains(&lent),
+            "{footprint}: {lent} of {total}"
+        );
+    }
+    assert!(waves.unresolved(1e-6) < 1e-15);
+    assert!((waves.unresolved(10.0) - waves.slope_variance()).abs() < 1e-15);
+}
+
+/// Swept along a row far from the origin, the waves tilt every point as
+/// reading them afresh there does, to within the rounding of the turns.
+#[test]
+fn a_sweep_along_the_waves_tilts_each_point_as_reading_it_afresh_does() {
+    let Relief::Waves(waves) = Relief::waves(BREEZE, 23).expect("waves") else {
+        panic!("waves");
+    };
+    let (start, step) = (Vec3::new(150.3, 0.4, -42.7), Vec3::new(0.0039, 0.0, 0.0011));
+    let mut sweep = Sweep::new();
+    for footprint in [0.004, 0.05, 0.6, 50.0] {
+        waves.begin(&mut sweep, start, step, footprint);
+        let mut worst = 0.0f64;
+        for index in 0..1000u32 {
+            let p = start + step * f64::from(index);
+            let swept = waves.tilted(Vec3::UP, p, &sweep);
+            let afresh = waves.tilt(Vec3::UP, p, footprint).normal;
+            worst = worst.max((swept - afresh).length());
+            sweep.advance();
+        }
+        assert!(worst < 1e-9, "{footprint}: {worst}");
+    }
+}
+
 #[test]
 fn widening_adds_the_unresolved_slope_variance_to_the_roughness() {
     assert!((widened(0.3, 0.0) - 0.3).abs() < 1e-12);

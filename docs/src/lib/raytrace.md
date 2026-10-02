@@ -192,6 +192,45 @@ above it rather than losing it. The plane and solid noise every pattern is
 drawn from is continuous across its lattice, the seed folded into each
 corner's hash.
 
+## Caustics
+
+The light water's waves bend is gathered and spread as the surface curves
+(`caustic`), beneath it onto the bed and whatever stands in the water, and
+reflected onto whatever stands over it. The surface is cut into beams (Watt,
+*Light-Water Interaction using Backward Beam Tracing*, 1990): each triangle of
+a grid over it carries the sunlight crossing it, bent by the waves at its
+corners, to any depth or height, where it covers a triangle of its own. A point
+gathers the flux of every beam falling within the box the sun's disc and the
+waves too fine to resolve blur a point into, each beam clipped to the box,
+over the box's area, against what a level surface sends it. Over a level
+surface the
+beams tile the receiver, so every point takes exactly a level surface's light,
+and the waves pass all of it on average; past a focus, where beams cross, every
+one still counts, so the folds' bright lines are summed rather than missed.
+
+Beams are laid only over the water whose light the picture shows. A survey of
+it — every fourth pixel at `Simple`, every second at `Maximum` — finds what
+the eye sees beneath water, over it and mirrored in it, and asks for the
+two-metre tiles whose beams can reach each such point; a tile is laid only
+where its waves move that light by a hundredth. A tile holds every level from
+two cells a side to as many as 2⁹, a little under 4 mm, each level resolving the
+waves six of its cells long and blurring the rest as the sun's disc does, and a
+pyramid of each level's bounds — where the surface stands and how far its beams
+drift either way — finds the beams about a point. A point gathers at the level
+its own footprint asks, blended with the next, so the detail never steps from
+tile to tile or with distance, but never at cells so fine that more than 256
+beams lie in the patch of glints it gathers from: past a focus that patch grows with
+depth and height, and what its cells cannot resolve the sun's disc blurs there
+anyway. A scene's tiles hold at most 2²¹ cells at `Simple` and 2²³ at
+`Maximum`, every footprint coarsened alike where they would not fit, and
+their buffers are reserved whole and written a unit at a time. The survey
+keeps each tile asked for once, in a hash map keyed by its place, a run of
+points asking for the same tiles asking once. Along each row of a level the
+waves' crests are swept a step at a time (`mathf::Phasor`) wherever the waves
+lie level in the world, and read afresh at each point where a texture frames
+them off level. Each level's pyramid is sealed from its foot, in bands of rows
+across every core, then the rungs above.
+
 ## Light
 
 Distributed ray tracing (Cook, Porter and Carpenter, 1984): each sample draws
@@ -210,6 +249,18 @@ the picture's height, and a square of the picture holds at most 6400; at
 square. Either way its rows are gathered a few a core at a time and it holds
 within fifteen degrees of turn. A path that has scattered off a diffuse
 surface drops the lamps' images and highlights it would otherwise find.
+
+Sunlight reaches a point beneath water the way the surface above it bends it:
+all but what a level surface reflects, absorbed along the bent way through the
+water, and scaled by the caustics. A point over water facing it takes the sun
+the water reflects, as much as a level surface's reflectance sends at the
+sun's height, scaled by the reflected beams; a low sun's glitter, whose beams
+swing too far along its way to resolve, reflects its mean. Either way a surface
+takes that light diffusely, its highlight of it being the light's own image,
+which its reflection finds. A path's footprint, which the patterns it meets
+are averaged over, widens as the path passes through or glances off a rough
+clear surface, a ray cone (Amanatides, 1984): through ripples a bed is seen,
+and its caustics gathered, no finer than the ripples blur it.
 
 The air between the eye and what it sees scatters the sun's light and the
 sky's, kept apart in the aerial table: what stands in the sun's way shadows the
@@ -272,8 +323,9 @@ never falling back and reaching a thousand only once the scene is ready. Each
 stage of the work holds a share of the whole measured over the settings at
 each detail —
 composing (on a land, the land's build, its planting, then the grids,
-prototypes and sky its look queued), the hierarchy, the radiosity records and
-the meter and its adaptation — and reports how far through itself it is. A land's build weighs
+prototypes and sky its look queued), the hierarchy, the caustics, the radiosity
+records and the meter and its adaptation — and reports how far through itself
+it is. A land's build weighs
 each of its own stages by its items (vertices filled, coarse samples worn,
 droplets run, vertices settled) times the measured cost of one, so the readout
 keeps pace with a desert's droplets as with a valley's wear.
@@ -288,21 +340,26 @@ faces, 256 materials, 12 lights, 12 height grids, 96 prototypes, 16 lawns and
 A scene may take up to 160 s to prepare on a desktop-class machine across 8
 threads and hold up to 2 GB at its peak at `Maximum`, far less at `Simple`
 (`plans/RAYTRACE.md`). Measured at 1920×1080 on a 24-thread desktop preparing
-across 8 threads, a landscape prepares at `Maximum` in 6–33 s — a meadow in
-24–30 s, a forest in 33 s, a desert in 6 s, most of each its radiosity records
-— holding at most about 370 MB at its peak (a snowy wood's, whose places are
-many) and 305 MB once prepared; at `Simple` it prepares in 1.4–3.8 s, holding
-at most 305 MB and 267 MB. Traced on one of its cores, built for the x86-64
-baseline (SSE2), a sample costs from about 2.4 µs (the checkerboard, mostly its
-clouds) to about 19 µs (a meadow, mostly its eye rays over grass) at 640×360
-and full quality: a forest about 17 µs, a valley 12, a colonnade 7; the local
-adaptation's correction costs a sample about one per cent more.
+across 8 threads, a landscape prepares at `Maximum` in 0.8–33 s — a meadow
+in 24–31 s, a forest in 33 s, a desert in 6 s, a lagoon in 0.8–1.8 s, most of
+each its radiosity records and up to half of a lagoon's its caustics — holding
+at most about 580 MB at its peak and once prepared, a mountain lake's, whose
+beams are many; at `Simple` it prepares in 0.3–4.0 s, holding at most 324 MB
+and 323 MB. Laying a scene's caustics takes up to 0.25 s at `Simple` and
+0.95 s at `Maximum`, and holds up to about 75 MB and 330 MB. Traced on one of its cores,
+built for the x86-64 baseline (SSE2), a sample costs from about 2.4 µs (the
+checkerboard, mostly its clouds) to about 19 µs (a meadow, mostly its eye rays
+over grass) at 640×360 and full quality: a forest about 17 µs, a valley 12, a
+colonnade 7; the local adaptation's correction costs a sample about one per
+cent more, and beneath or over water the caustics about 2.5 µs.
 
 Every unit of preparation is a fixed amount of work a core — a band of a
 grid's rows or of a shade's, a turn of a land's droplet tiles, a band of the
 objects' boxes or a slice of a hierarchy, a ring's places drawn or a run of
 their ranking, a few rows of a radiosity record's hemisphere, a handful of
-the meter's samples — and a wood's places are kept in runs that never move as
+the meter's samples, a hundred or so of the caustics' survey points, a couple
+of thousand of their beams or a few thousand of their pyramids' nodes — and a
+wood's places are kept in runs that never move as
 more are added, so `Draft::prepare` answers within about a frame however large
 the scene: measured, no unit takes more than about 10 ms at either detail. Under the
 screensaver's `idle` setting the preparation runs on one core and takes some

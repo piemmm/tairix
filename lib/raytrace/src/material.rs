@@ -3,9 +3,9 @@
 //! meets it by.
 
 use alloc::vec::Vec;
-use core::f64::consts::{PI, TAU};
+use core::f64::consts::{FRAC_PI_2, PI, TAU};
 
-use tairix_util::mathf;
+use tairix_util::mathf::{self, Phasor};
 
 use crate::bark::{Bark, OnLimb};
 use crate::noise::{fbm2, noise3, smoothstep};
@@ -126,11 +126,10 @@ impl Waves {
 
     /// `normal` tilted by the waves at `p`, those a stretch `footprint` long
     /// resolves; the rest's slope variance is the roughness they lend.
-    fn tilt(&self, normal: Vec3, p: Vec3, footprint: f64) -> Tilt {
+    pub(crate) fn tilt(&self, normal: Vec3, p: Vec3, footprint: f64) -> Tilt {
         let (mut slope_x, mut slope_z, mut unresolved) = (0.0, 0.0, 0.0);
-        let (blurred, resolved) = (1.5 * footprint, 3.0 * footprint);
         for (index, wave) in self.spectrum.iter().enumerate() {
-            let kept = smoothstep(blurred, resolved, wave.length);
+            let kept = kept(wave, footprint);
             if kept <= 0.0 {
                 // Every wave from here on is shorter still.
                 unresolved += self.beyond.get(index).copied().unwrap_or(0.0);
@@ -143,8 +142,120 @@ impl Waves {
         }
         let gust = self.gust(p.x, p.z);
         Tilt {
-            normal: (normal + Vec3::new(-slope_x, 0.0, -slope_z) * gust).normalized(),
+            normal: raised(normal, (slope_x, slope_z), gust),
             unresolved: unresolved * gust * gust,
+        }
+    }
+
+    /// Begin `sweep` at `start`, stepping `step` a point, over the waves a
+    /// stretch `footprint` long resolves; both in the texture's frame.
+    pub(crate) fn begin(&self, sweep: &mut Sweep, start: Vec3, step: Vec3, footprint: f64) {
+        sweep.count = 0;
+        for (wave, (crest, number)) in self
+            .spectrum
+            .iter()
+            .zip(sweep.crests.iter_mut().zip(&mut sweep.numbers))
+        {
+            let kept = kept(wave, footprint);
+            if kept <= 0.0 {
+                break;
+            }
+            // Its cosine, as the sine a quarter turn on.
+            *crest = Phasor::new(
+                wave.height * kept,
+                wave.kx * start.x + wave.kz * start.z + wave.phase + FRAC_PI_2,
+                wave.kx * step.x + wave.kz * step.z,
+            );
+            *number = (wave.kx, wave.kz);
+            sweep.count += 1;
+        }
+    }
+
+    /// `normal` tilted at `p` by the slope `sweep` stands at.
+    pub(crate) fn tilted(&self, normal: Vec3, p: Vec3, sweep: &Sweep) -> Vec3 {
+        raised(normal, sweep.slope(), self.gust(p.x, p.z))
+    }
+
+    /// The variance of the surface's slope where a gust raises every wave.
+    pub(crate) fn slope_variance(&self) -> f64 {
+        self.beyond.first().copied().unwrap_or(0.0)
+    }
+
+    /// The standard deviation of the surface's curvature, in reciprocal
+    /// metres, of the waves a stretch `footprint` long resolves, where a gust
+    /// raises them all: what focuses the light they bend.
+    pub(crate) fn curvature(&self, footprint: f64) -> f64 {
+        let variance: f64 = self
+            .spectrum
+            .iter()
+            .map(|wave| {
+                let kept = kept(wave, footprint);
+                let number2 = wave.kx * wave.kx + wave.kz * wave.kz;
+                kept * kept * wave.variance * number2
+            })
+            .sum();
+        mathf::sqrt(variance)
+    }
+
+    /// The slope variance of the waves a stretch `footprint` long does not
+    /// resolve, where a gust raises them all.
+    pub(crate) fn unresolved(&self, footprint: f64) -> f64 {
+        self.spectrum
+            .iter()
+            .map(|wave| {
+                let kept = kept(wave, footprint);
+                (1.0 - kept * kept) * wave.variance
+            })
+            .sum()
+    }
+}
+
+/// How much of `wave` a stretch `footprint` long resolves: none of a wave
+/// shorter than one and a half of it, all of one longer than three.
+fn kept(wave: &Wave, footprint: f64) -> f64 {
+    smoothstep(1.5 * footprint, 3.0 * footprint, wave.length)
+}
+
+/// `normal` tilted by a slope of the waves, `gust` of their height raised.
+fn raised(normal: Vec3, (x, z): (f64, f64), gust: f64) -> Vec3 {
+    (normal + Vec3::new(-x, 0.0, -z) * gust).normalized()
+}
+
+/// Waves read along a row of evenly spaced points: each wave's crest turned a
+/// step at a time, where reading it afresh at every point takes a series.
+#[derive(Clone, Debug)]
+pub(crate) struct Sweep {
+    crests: [Phasor; WAVES],
+    numbers: [(f64, f64); WAVES],
+    /// How many of the waves the footprint resolves, longest first.
+    count: usize,
+}
+
+impl Sweep {
+    /// A sweep over no waves, to be begun.
+    pub(crate) fn new() -> Self {
+        Self {
+            crests: [Phasor::new(0.0, 0.0, 0.0); WAVES],
+            numbers: [(0.0, 0.0); WAVES],
+            count: 0,
+        }
+    }
+
+    /// The waves' slope along x and z where the sweep stands.
+    fn slope(&self) -> (f64, f64) {
+        self.crests.iter().zip(&self.numbers).take(self.count).fold(
+            (0.0, 0.0),
+            |(x, z), (crest, &(kx, kz))| {
+                let crest = crest.value();
+                (x + crest * kx, z + crest * kz)
+            },
+        )
+    }
+
+    /// Step on to the next point.
+    pub(crate) fn advance(&mut self) {
+        for crest in self.crests.iter_mut().take(self.count) {
+            crest.advance();
         }
     }
 }
@@ -190,6 +301,14 @@ impl Relief {
     /// hold them.
     pub(crate) fn waves(wind: Wind, seed: u32) -> Option<Self> {
         Waves::new(wind, seed).map(Self::Waves)
+    }
+
+    /// The waves this relief is, if it is waves.
+    pub(crate) const fn as_waves(&self) -> Option<&Waves> {
+        match self {
+            Self::Waves(waves) => Some(waves),
+            Self::Grain { .. } | Self::Bark { .. } => None,
+        }
     }
 
     /// `normal` where `bump` says, tilted by this relief, and the slope
@@ -339,6 +458,28 @@ impl Material {
             ..self
         }
     }
+
+    /// What this material is as water, if it is water: clear, and ruffled by
+    /// waves.
+    pub(crate) fn water(&self) -> Option<Water<'_>> {
+        let Finish::Glass { ior, absorb, .. } = self.finish else {
+            return None;
+        };
+        Some(Water {
+            ior,
+            absorb,
+            waves: self.relief.as_ref()?.as_waves()?,
+        })
+    }
+}
+
+/// Water's refractive index, the share of each primary it absorbs per
+/// metre, and the waves on it.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct Water<'a> {
+    pub(crate) ior: f64,
+    pub(crate) absorb: Vec3,
+    pub(crate) waves: &'a Waves,
 }
 
 /// The reflectance at normal incidence of a coat of index 1.5.

@@ -1763,10 +1763,15 @@ shows, each scene drawn as the user's `screensaver.*` options set it
   minute rather than thirty times a second. While a scene is prepared the loop
   comes back four times a second to bring the readout up to date, and the
   thread wakes it through the session's worker wake the moment the scene is
-  ready, so its first passes are shown as they come. The thread lays down a
-  slice at a time — what fits half a desktop frame at the pace the last kept —
-  and stops once two of the loop's longest waits are waiting, so a loop that
-  stops drawing holds it back. The threads are made for each reveal and leave
+  ready, so its first passes are shown as they come. The thread prepares a
+  scene a slice at a time — what fits half a desktop frame at the pace the
+  last kept — and traces it a stretch at a time: to the end of the pass under
+  way, a second at most, every core taking the next untraced step as it
+  finishes the last and handing each few it traces straight onto the desk, so
+  no core waits on another's costly pixel but at a pass's end, and a machine
+  whose pixels take milliseconds keeps every core it gave the screensaver
+  busy. It stops once what it laid down has waited two of the loop's longest
+  waits, so a loop that stops drawing holds it back. The threads are made for each reveal and leave
   once the screensaver comes down, without the loop waiting on them. Where no
   thread is granted, the loop traces a slice a frame itself, on its own
   thread alone under `idle`, and paints on the same cadence. With `screensaver.raytrace.save` on, the engine

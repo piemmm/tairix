@@ -32,6 +32,7 @@ mod band;
 mod bark;
 mod bvh;
 mod camera;
+mod caustic;
 mod cloud;
 mod compose;
 mod course;

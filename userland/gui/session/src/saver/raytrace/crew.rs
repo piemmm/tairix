@@ -19,16 +19,13 @@ use tairix_parallel::JobRunner;
 use tairix_wallpaper::RaytraceOptions;
 
 use super::album::{Picture, Unkept};
-use super::engine::{Engine, Traced, SLICE_NS};
+use super::engine::{Engine, Handing, Traced, STRETCH_NS};
 use super::MOST_WAIT_NS;
 
-/// How many slices may wait for the serve loop before the tracing thread
-/// stops for it: two of the loop's longest waits between collections, so a
-/// loop collecting late never idles the thread.
-const QUEUED_SLICES: u64 = 2 * MOST_WAIT_NS / SLICE_NS;
-
-// A queue of none would hold the thread back from its first slice for good.
-const _: () = assert!(QUEUED_SLICES > 0);
+/// How long what the tracing thread laid down may wait for the serve loop
+/// before the thread stops for it: two of the loop's longest waits between
+/// collections, so a loop collecting late never idles the thread.
+const LATE_NS: u64 = 2 * MOST_WAIT_NS;
 
 /// Where a reveal stands.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -114,15 +111,16 @@ pub trait DeskLock {
 }
 
 /// The whole life of a thread tracing over `desk`: wait for its engine, then
-/// trace it across `runner` a slice at a time, laying each down on the desk
-/// and nudging the serve loop as each scene is readied, until the loop leaves,
+/// prepare each scene across `runner` a slice at a time and trace it a
+/// stretch at a time, every core handing each step onto the desk as it traces
+/// it, nudging the serve loop as each scene is readied, until the loop leaves,
 /// parked whenever there is nothing to trace; `clock` reads the monotonic
-/// clock, to pace the slices, and `keeper` keeps each whole picture, once it
-/// is on the desk, if the engine keeps them.
-pub fn run_tracing_thread(
-    desk: &impl DeskLock,
+/// clock, from any of the cores, and `keeper` keeps each whole picture, once
+/// it is on the desk, if the engine keeps them.
+pub fn run_tracing_thread<L: DeskLock + Sync>(
+    desk: &L,
     runner: &dyn JobRunner,
-    clock: &mut dyn FnMut() -> u64,
+    clock: &(dyn Fn() -> u64 + Sync),
     mut keeper: Option<&mut dyn Keeper>,
 ) {
     let mut engine = {
@@ -142,15 +140,22 @@ pub fn run_tracing_thread(
         let order = {
             let mut held = desk.lock();
             loop {
-                match held.turn() {
+                match held.turn(clock()) {
                     Turn::Leave => return,
                     Turn::Wait => held = desk.park(held),
                     Turn::Trace(order) => break order,
                 }
             }
         };
-        let status = order.carry_out(&mut engine, runner, &mut slice, clock);
-        let readied = desk.lock().deposit(order, &slice, status);
+        let status = if engine.is_tracing() && !order.next {
+            let handing = HandOver { desk, order };
+            let until = clock().saturating_add(STRETCH_NS);
+            engine.trace_stretch(runner, &handing, (clock, until))
+        } else {
+            order.carry_out(&mut engine, runner, &mut slice, &mut || clock())
+        };
+        let now = clock();
+        let readied = desk.lock().deposit(order, &slice, status, now);
         if readied {
             desk.nudge();
         }
@@ -216,11 +221,12 @@ pub(super) enum Turn {
     Leave,
     /// Nothing to do until the loop collects or asks.
     Wait,
-    /// Carry out this slice.
+    /// Carry out this turn's work.
     Trace(Order),
 }
 
-/// One slice of work, under what the loop last asked.
+/// One turn's work — a slice of a scene's preparation or a stretch of its
+/// tracing — under what the loop last asked.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(super) struct Order {
     generation: u32,
@@ -246,6 +252,18 @@ impl Order {
     }
 }
 
+/// A stretch's cores handing their steps onto `desk`, traced under `order`.
+struct HandOver<'a, L: DeskLock> {
+    desk: &'a L,
+    order: Order,
+}
+
+impl<L: DeskLock + Sync> Handing for HandOver<'_, L> {
+    fn take(&self, steps: &[Traced], status: Status) -> bool {
+        self.desk.lock().hand(self.order, steps, status)
+    }
+}
+
 /// What stands between a reveal's tracing thread and the serve loop: the
 /// engine on its way to the thread, what has been traced and not yet
 /// collected, where the reveal stands, and what the loop has asked since.
@@ -254,10 +272,10 @@ impl Order {
 pub struct TraceDesk {
     engine: Option<Engine>,
     ready: Vec<Traced>,
-    /// How many slices `ready` holds.
-    slices: u64,
+    /// When the oldest of what the loop has yet to collect was laid down.
+    since: Option<u64>,
     status: Status,
-    /// Bumped by every ask, so a slice traced before it is recognised.
+    /// Bumped by every ask, so work done before it is recognised.
     generation: u32,
     /// Whether the loop has asked for another scene the thread has not yet
     /// begun.
@@ -281,7 +299,7 @@ impl TraceDesk {
         Self {
             engine: None,
             ready: Vec::new(),
-            slices: 0,
+            since: None,
             status: Status::Preparing(0),
             generation: 0,
             asked: false,
@@ -290,9 +308,10 @@ impl TraceDesk {
         }
     }
 
-    /// The tracing thread's next move: begin the scene the loop asked for,
-    /// wait while the scene is done or the loop is behind, else trace on.
-    pub(super) fn turn(&mut self) -> Turn {
+    /// The tracing thread's next move at `now`: begin the scene the loop
+    /// asked for, wait while the scene is done or the loop is behind, else
+    /// trace on.
+    pub(super) fn turn(&mut self, now: u64) -> Turn {
         let turn = if self.leaving {
             Turn::Leave
         } else if core::mem::take(&mut self.asked) {
@@ -300,7 +319,7 @@ impl TraceDesk {
                 generation: self.generation,
                 next: true,
             })
-        } else if !self.status.is_working() || self.slices >= QUEUED_SLICES {
+        } else if !self.status.is_working() || self.behind(now) {
             Turn::Wait
         } else {
             Turn::Trace(Order {
@@ -312,12 +331,20 @@ impl TraceDesk {
         turn
     }
 
-    /// Lay down what `order` traced and where the reveal then stood, unless
-    /// the loop has asked for something since; memory refused for it fails
-    /// the reveal rather than leaving a hole in the picture. Answers whether
-    /// that ended the scene's preparation, which the loop is to see at once.
-    fn deposit(&mut self, order: Order, traced: &[Traced], status: Status) -> bool {
-        if order.generation != self.generation {
+    /// Whether what was laid down has waited for the loop so long, at `now`,
+    /// that the thread is to stop for it.
+    fn behind(&self, now: u64) -> bool {
+        self.since
+            .is_some_and(|since| now.saturating_sub(since) >= LATE_NS)
+    }
+
+    /// Lay down what `order` traced and where the reveal then stood at `now`,
+    /// unless the loop has asked for something since or the reveal failed;
+    /// memory refused for it fails the reveal rather than leaving a hole in
+    /// the picture. Answers whether that ended the scene's preparation, which
+    /// the loop is to see at once.
+    fn deposit(&mut self, order: Order, traced: &[Traced], status: Status, now: u64) -> bool {
+        if order.generation != self.generation || self.status == Status::Failed {
             return false;
         }
         let preparing = matches!(self.status, Status::Preparing(_));
@@ -325,10 +352,32 @@ impl TraceDesk {
             self.status = Status::Failed;
         } else {
             self.ready.extend_from_slice(traced);
-            self.slices = self.slices.saturating_add(1);
+            self.since.get_or_insert(now);
             self.status = status;
         }
         preparing && !matches!(self.status, Status::Preparing(_))
+    }
+
+    /// Lay down `steps`, traced under `order` by one of the thread's cores,
+    /// the reveal then standing at `status`; whether that core is to trace
+    /// on: not once the loop has asked for something since or gone, or the
+    /// reveal stopped working — memory refused for them fails it rather than
+    /// leaving a hole in the picture.
+    fn hand(&mut self, order: Order, steps: &[Traced], status: Status) -> bool {
+        if self.leaving || order.generation != self.generation || !self.status.is_working() {
+            return false;
+        }
+        if self.ready.try_reserve(steps.len()).is_err() {
+            self.status = Status::Failed;
+            return false;
+        }
+        self.ready.extend_from_slice(steps);
+        // Cores hand over in no order, so a count behind one already laid
+        // down can come after it.
+        if let (Status::Tracing(held), Status::Tracing(now)) = (self.status, status) {
+            self.status = Status::Tracing(held.max(now));
+        }
+        true
     }
 
     /// Move everything laid down onto the end of `into`, and answer where the
@@ -343,7 +392,7 @@ impl TraceDesk {
             self.ready.clear();
             self.status = Status::Failed;
         }
-        self.slices = 0;
+        self.since = None;
         self.status
     }
 
@@ -354,7 +403,7 @@ impl TraceDesk {
         self.asked = true;
         self.generation = self.generation.wrapping_add(1);
         self.ready.clear();
-        self.slices = 0;
+        self.since = None;
         self.status = Status::Preparing(0);
     }
 }

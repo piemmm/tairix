@@ -346,6 +346,19 @@ impl Reveal {
             side: pass.side,
         })
     }
+
+    /// The step the pass holding step `index` ends before: the next pass's
+    /// first, or the count past the last pass.
+    #[must_use]
+    pub fn pass_end(&self, index: u32) -> u32 {
+        self.passes
+            .get(..self.used)
+            .unwrap_or(&[])
+            .iter()
+            .map(|pass| pass.first)
+            .find(|&first| first > index)
+            .unwrap_or(self.count)
+    }
 }
 
 /// Grid point `step` of a `columns` by `rows` grid, counted among the points

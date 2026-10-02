@@ -156,6 +156,9 @@ pub struct Reversed {
     /// The largest number of pieces any dispatch asked for, so a test can see
     /// whether the work was split at all rather than assuming it was.
     widest: core::sync::atomic::AtomicUsize,
+    /// How many dispatches it has run, so a test can see how often the work
+    /// waited on its slowest piece.
+    dispatches: core::sync::atomic::AtomicUsize,
 }
 
 #[cfg(any(test, feature = "test-util"))]
@@ -166,6 +169,7 @@ impl Reversed {
         Self {
             width,
             widest: core::sync::atomic::AtomicUsize::new(0),
+            dispatches: core::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -173,6 +177,12 @@ impl Reversed {
     #[must_use]
     pub fn widest(&self) -> usize {
         self.widest.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// How many dispatches this runner has run.
+    #[must_use]
+    pub fn dispatches(&self) -> usize {
+        self.dispatches.load(core::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -187,6 +197,8 @@ unsafe impl JobRunner for Reversed {
     fn run(&self, count: usize, job: &(dyn Fn(usize) + Sync)) {
         self.widest
             .fetch_max(count, core::sync::atomic::Ordering::Relaxed);
+        self.dispatches
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         for index in (0..count).rev() {
             job(index);
         }
@@ -352,6 +364,19 @@ mod tests {
         for_each(&SERIAL, &mut forwards, &stamp);
         for_each(&Reversed::new(4), &mut backwards, &stamp);
         assert_eq!(forwards, backwards);
+    }
+
+    /// The scaffolding reports what it was asked to run: how many dispatches,
+    /// and the widest of them.
+    #[test]
+    fn a_reversed_runner_counts_its_dispatches_and_their_width() {
+        let runner = Reversed::new(4);
+        let mut items = [0u32; 6];
+        for_each(&runner, &mut items, &|item| *item += 1);
+        for_each(&runner, &mut items[..3], &|item| *item += 1);
+        assert_eq!(runner.dispatches(), 2);
+        assert_eq!(runner.widest(), 6);
+        assert_eq!(items, [2, 2, 2, 1, 1, 1]);
     }
 
     /// The hand-off under real concurrency: the pieces are disjoint, so
