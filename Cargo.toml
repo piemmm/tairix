@@ -552,6 +552,7 @@ members = [
     "tests/integration/vesa_display_qemu_x86_64",
     "tests/integration/autoload_input_qemu_x86_64",
     "tests/integration/dma_translation_qemu_x86_64",
+    "tests/integration/dma_fault_qemu_x86_64",
     "tests/integration/netstack_autoload_qemu_x86_64",
     "tests/integration/netstack_static_qemu_x86_64",
     "tests/integration/netstack_bond_qemu_x86_64",

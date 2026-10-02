@@ -9581,6 +9581,41 @@ static TESTS: &[QemuTest] = &[
         serial: &[],
         expect: Expect::Pass,
     },
+    // `plans/IOMMU.md` IOM6 / MI0: the live DMA-translation-fault vertical. Boots
+    // the production x86_64 pipeline on q35 behind an `intel-iommu`
+    // (`dma_translation_gates`), with one scratch-backed virtio-blk-pci function
+    // (`disk_sectors`) `iommu_platform=on`. A bin-local PID 1 seam admits a
+    // misbehaving in-kernel virtio-blk driver that carves through its node's
+    // domain, confirms a mapped read, then points a device write at an unmapped
+    // address; the VT-d unit refuses it and raises its fault-event MSI, which the
+    // per-unit fault service drains into `DmaTranslationFault`. PASS once, after
+    // the unit audited `translating`, a node-attributed write fault arrives and
+    // the driver reports its canary page untouched. No planted root is needed —
+    // root-unlock is not wired on this seam.
+    QemuTest {
+        package: "tairix-test-dma-fault-qemu-x86-64",
+        binary: "tairix-test-dma-fault-qemu-x86-64",
+        target: X86_64_TARGET,
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        ram_mib: None,
+        // A small scratch disk is the misbehaving device's backing; the runner
+        // attaches it as the one virtio-blk-pci function the gate translates.
+        disk_sectors: Some(2048),
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        crypto: false,
+        fs_disk: FsDisk::None,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        x86_64_cpu: None,
+        serial: &[],
+        expect: Expect::Pass,
+    },
     // `plans/NETWORK.md` N4e-β: the aarch64 **two-process** live-boot
     // netstack vertical.
     // `tairix-test-netstack-autoload-qemu-aarch64` boots the *production*
@@ -15966,7 +16001,10 @@ const MEMTEST_TAKEOVER_BINARIES: [&str; 3] = [
 /// The verticals that run behind a DMA translation unit (`plans/IOMMU.md`
 /// MI0). [`finish_run`] recognises them to put one in front of every PCI
 /// device, so a run passes only on DMA that crossed the unit.
-const DMA_TRANSLATION_BINARIES: [&str; 1] = ["tairix-test-dma-translation-qemu-x86-64"];
+const DMA_TRANSLATION_BINARIES: [&str; 2] = [
+    "tairix-test-dma-translation-qemu-x86-64",
+    "tairix-test-dma-fault-qemu-x86-64",
+];
 
 /// [`DMA_TRANSLATION_BINARIES`]' translation unit on `spec`, and nothing on
 /// any other run.

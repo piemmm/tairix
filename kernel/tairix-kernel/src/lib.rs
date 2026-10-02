@@ -627,7 +627,7 @@ pub use riscv64::boot::{
 #[cfg(all(freestanding, kernel_isa = "x86_64"))]
 pub use tairix_arch_x86_64::serial::{SerialSink, SERIAL_SINK};
 #[cfg(all(freestanding, kernel_isa = "x86_64"))]
-pub use x86_64::boot::{boot, BootError};
+pub use x86_64::boot::{boot, boot_with_init, BootError};
 #[cfg(all(freestanding, kernel_isa = "x86_64"))]
 pub use x86_64::panic_ctx::handle_panic_via_kernel_core;
 #[cfg(all(freestanding, kernel_isa = "x86_64"))]

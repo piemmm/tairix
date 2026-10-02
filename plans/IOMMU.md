@@ -29,10 +29,10 @@ layering), §18 (discovery and the floor), §19 (threat model), §24 and §26
 | IOM3 | `kernel/iommu/vtd`: Intel VT-d — legacy root and context tables, second-level tables at every supported depth, queued invalidation, caching mode, walk coherency, the PMEN hand-off, RMRR identity windows, fault recording and the fault event | done |
 | IOM4 | DMA through domains: the device-DMA facility; `dma_alloc`, `shm_create_dma` and the kernel floor pools map each carve into its node's domain and return a device address; `VIRTIO_F_ACCESS_PLATFORM`; device addresses named as such in the ABI | done |
 | IOM5 | Revocation instead of quarantine on translated nodes: a driver's death blocks its streams and frees every carve at once; an orderly removal frees (D241); the quarantine confined to untranslated nodes | done |
-| IOM6 | Faults: drained in thread context from each unit's interrupt, stable audit events, a per-unit budget, a storm silences the stream and marks the node `Offline` — built and host-proven against the register-level VT-d model; a QEMU vertical provoking a live fault remains (§12) | in progress |
+| IOM6 | Faults: drained in thread context from each unit's interrupt, stable audit events, a per-unit budget, a storm silences the stream and marks the node `Offline`. Host-proven against the register-level VT-d model, and a live QEMU vertical provokes one real fault delivered through the fault-event MSI, attributed to the device's node, canary untouched (§12). The storm stays host-proven — not live (§12) | done |
 | IOM7 | Default-deny from the first bus-master enable: units enabled before TAIRiX sets Bus Master Enable on any function; bus mastering follows ownership | planned |
 | IOM8 | Isolation groups: requester-ID aliasing, ACS on the upstream path, multi-function devices without ACS, shared platform stream ids; the group is the unit of domain ownership | planned |
-| IOM9 | PCI identity and extended configuration space: every function a node carrying its segment:BDF, the 0x100+ capability walk (ACS, ATS, PRI, PASID, SR-IOV), segment-aware ECAM | planned |
+| IOM9 | PCI identity and extended configuration space: every function a node carrying its segment:BDF, the 0x100+ capability walk (ACS, ATS, PRI, PASID, SR-IOV), segment-aware ECAM. Includes discriminating `PciFunction::admit`'s `VIRTIO_F_ACCESS_PLATFORM` gate to virtio functions by vendor id, so a non-virtio translated master is published with its stream rather than refused — latent until non-virtio PCI discovery exists (`plans/OPEN-DEFECTS.md`) | planned |
 | IOM10 | ATS, PRI and PASID policy: ATS off at the device and refused at the unit; untrusted external-facing ports | planned |
 | IOM11 | x86_64 interrupt remapping: VT-d IR (IRTEs, remappable MSI and IO-APIC entries, source-id validation) and x2APIC under EIM | planned |
 | IOM12 | `kernel/iommu/amdvi`: AMD-Vi — IVRS discovery, the device table, command buffer, event log, its page tables and interrupt remapping tables | planned |
@@ -431,10 +431,19 @@ whose updates are logarithmic rather than a sorted vector's linear moves.
   passes only on a key the autoloaded virtio-input driver delivered after the
   unit reported `translating` — the floor disk and the driver both reached
   memory through their domains, and the per-unit fault service is live
-  throughout. **Remaining:** a QEMU vertical that provokes a live translation
-  fault — a device handed an unmapped device address — and witnesses the
-  `DmaTranslationFault` record against its stream, proving the MSI delivery the
-  host model cannot. It needs a bespoke misbehaving-device harness and is
-  staged here rather than landed with this change.
+  throughout. `tairix-test-dma-fault-qemu-x86-64` closes the live-fault gap: on
+  the same machine a bin-local PID 1 seam admits a misbehaving in-kernel
+  virtio-blk driver that carves through its node's domain, confirms a mapped
+  read, then points a device write at an unmapped address; the unit refuses it
+  and raises its fault-event MSI, which the per-unit fault service drains into a
+  `DmaTranslationFault` attributed to the device's node, with a canary page the
+  write never reached — the MSI delivery the host model cannot exercise.
+- **The storm stays host-proven, not live.** QEMU's virtio device calls
+  `virtio_error` and breaks on the first refused DMA, and the storm threshold
+  sits above any VT-d fault ring, so a live storm would need ~512 device resets
+  per one-second window — a load-dependent, flaky mechanism the charter forbids.
+  The storm/silence/`Offline` path is proven against the register-level model
+  (IOM4–IOM6 above); the live vertical proves the single MSI-delivered fault,
+  which is MI0's exit criterion.
 - **miri** enrols `kernel/iommu/api` and every family crate with an `unsafe`
   core.

@@ -93,6 +93,16 @@ silenced stream takes an owner again at its node's next driver. A unit is
 drained at most 1024 times a window; a storm past that waits out the window,
 so a device cannot hold a CPU or the interrupt line.
 
+The live path is proven on QEMU q35 behind an `intel-iommu` by
+`tairix-test-dma-fault-qemu-x86-64`: a misbehaving in-kernel virtio-blk driver
+carves through its node's domain, confirms a mapped read, then points a device
+write at an unmapped address. The unit refuses it and raises its fault-event
+MSI, which the per-unit fault service drains into `DmaTranslationFault` against
+the device's node, with a canary page the write never reached. The budget's
+storm/silence path is proven against the register-level VT-d model, not live: a
+QEMU virtio device breaks after one refused DMA, so a 512-fault window would
+need hundreds of device resets, a load-dependent test.
+
 ## Audit
 
 | Event | Id | When |

@@ -1,0 +1,40 @@
+[package]
+name = "tairix-test-dma-fault-qemu-x86-64"
+description = "QEMU integration test (plans/IOMMU.md MI0/IOM6): boot the production x86_64 tairix-kernel pipeline on q35 behind an intel-iommu with a misbehaving in-kernel virtio-blk-PCI driver. The driver carves its rings through its node's translation domain (so a valid read confirms translation), then posts one request whose device-writable descriptor points at an unmapped device address; the VT-d unit refuses the write, records the fault, and raises its fault-event MSI, which the kernel's per-unit fault service drains into AuditEvent::DmaTranslationFault against the device's node and stream. A canary page the driver owns stays zero, proving the refused write landed nowhere — the live MSI-delivered fault path the host register model cannot exercise. PASS via QEMU isa-debug-exit once, after AuditEvent::DmaTranslationUnit outcome=translating, a write DmaTranslationFault attributed to a node arrives and the driver reports its canary clean."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Reuses the production x86_64 boot pipeline through `tairix-kernel`'s library
+# half via `boot_with_init`, swapping in a bin-local PID 1 spawn seam whose
+# pre-dispatch admits the misbehaving DMA-fault driver, and the witness audit
+# sink below. The QEMU-exit shortcut stays in this dedicated bin.
+
+[[bin]]
+name = "tairix-test-dma-fault-qemu-x86-64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
+tairix-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+tairix-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+tairix-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
+tairix-kernel-irq = { path = "../../../kernel/irq", version = "=0.0.0" }
+tairix-kernel-sec = { path = "../../../kernel/sec", version = "=0.0.0" }
+tairix-kernel-virtio = { path = "../../../kernel/virtio", version = "=0.0.0" }
+tairix-virtio = { path = "../../../lib/virtio", version = "=0.0.0" }
+tairix-drv-bus-virtio = { path = "../../../drivers/bus/virtio", version = "=0.0.0" }
+tairix-drv-storage-virtio-blk = { path = "../../../drivers/storage/virtio_blk", version = "=0.0.0" }
+tairix-pci = { path = "../../../lib/pci", version = "=0.0.0" }
+tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

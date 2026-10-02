@@ -63,7 +63,7 @@ use tairix_arch_x86_64::{percpu, preempt, smp, syscall_entry};
 use tairix_kernel_core::boot_audit_ring::{
     boot_audit_clock, BootAuditRing, BOOT_AUDIT_RING_CAPACITY,
 };
-use tairix_kernel_core::{kernel_main, BootInfo, IrqRouting};
+use tairix_kernel_core::{kernel_main, BootInfo, InitSpawn, IrqRouting};
 use tairix_kernel_irq::IrqController;
 use tairix_kernel_mem::{BootMemoryMap, MemoryRegion, PhysAddr, RegionKind};
 use tairix_kernel_sched_api::SchedulerConfig;
@@ -360,18 +360,45 @@ pub static AUDIT_SINK: TeeSink<'static, 2> = TeeSink::new([&SERIAL_SINK, &BOOT_A
 /// [`tairix_arch_x86_64::kernel_arch::halt`] (fail
 /// closed, no silent reset).
 ///
-/// # SAFETY-INVARIANT
-///
-/// `boot_info` must be the verbatim 64-bit pointer the arch
-/// crate's boot trampoline received in `%ebx`. `boot.s`
-/// SAFETY-INVARIANT 7 documents that the pointer is in the
-/// identity-mapped 0..4 GiB window.
+/// Installs the production PID 1 spawn seam; see [`boot_with_init`] to supply
+/// a different one, and for the `boot_info` SAFETY-INVARIANT.
 pub fn boot(
     boot_info: u64,
     heap: &'static tairix_kalloc::FreeListAllocator,
     log_sink: &'static (dyn Sink + Sync),
     audit_sink: &'static (dyn Sink + Sync),
     log_level: Level,
+) -> ! {
+    boot_with_init(
+        boot_info,
+        heap,
+        log_sink,
+        audit_sink,
+        log_level,
+        &X86_64_INIT_SPAWN,
+    )
+}
+
+/// Boot as [`boot`], but with a caller-chosen PID 1 spawn seam `init`.
+///
+/// [`boot`] passes the production [`X86_64_INIT_SPAWN`]; a QEMU vertical that
+/// must admit its own in-kernel service before the dispatch loop (the DMA-fault
+/// driver) passes an [`X86_64InitSpawn`](crate::x86_64::init_spawn::X86_64InitSpawn)
+/// built with its own pre-dispatch. Every other caller uses [`boot`] and is
+/// unaffected by this seam.
+///
+/// # SAFETY-INVARIANT
+///
+/// `boot_info` must be the verbatim 64-bit pointer the arch crate's boot
+/// trampoline received in `%ebx`, in the identity-mapped 0..4 GiB window
+/// (`boot.s` SAFETY-INVARIANT 7), exactly as [`boot`] requires.
+pub fn boot_with_init(
+    boot_info: u64,
+    heap: &'static tairix_kalloc::FreeListAllocator,
+    log_sink: &'static (dyn Sink + Sync),
+    audit_sink: &'static (dyn Sink + Sync),
+    log_level: Level,
+    init: &'static dyn InitSpawn,
 ) -> ! {
     // Make every kernel heap's lock interrupt-safe before anything can be
     // interrupted while holding one: install this port's per-CPU `RFLAGS.IF`
@@ -394,7 +421,7 @@ pub fn boot(
     // any interrupt is enabled or any AP started, so no shootdown can be in
     // flight while a spinning CPU still has no way to answer it.
     tairix_sync::spinwait::install_service(tairix_arch_x86_64::tlb_shootdown::serve_pending);
-    match try_boot(boot_info, heap, log_sink, audit_sink, log_level) {
+    match try_boot(boot_info, heap, log_sink, audit_sink, log_level, init) {
         Ok(boot_info) => kernel_main(boot_info),
         Err(err) => {
             log_init_failure(log_sink, err);
@@ -789,6 +816,7 @@ fn try_boot(
     log_sink: &'static (dyn Sink + Sync),
     audit_sink: &'static (dyn Sink + Sync),
     log_level: Level,
+    init: &'static dyn InitSpawn,
 ) -> Result<BootInfo<'static, BinArch>, BootError> {
     // The arch handle borrows its per-CPU bookkeeping from this
     // process-static backing; `boot` runs once, so a
@@ -873,8 +901,9 @@ fn try_boot(
     .with_spawn_identity(&crate::root_mount::LATE_IDENTITY)
     // The PID 1 (`init`) spawn seam: after `BootCompleted`, `kernel_main`
     // builds `init`'s ring-3 image and drops into it as a resumable user
-    // kthread (`plans/PI.md` X3a).
-    .with_init(&X86_64_INIT_SPAWN)
+    // kthread (`plans/PI.md` X3a). `boot` passes the production seam; a QEMU
+    // vertical may pass its own through `boot_with_init`.
+    .with_init(init)
     // The runtime `spawn` producer + embedded-program registry
     // (`plans/PI.md` X3b): the `spawn` syscall resolves a path against the
     // registry and drives the producer to build a fresh, isolated child PML4,

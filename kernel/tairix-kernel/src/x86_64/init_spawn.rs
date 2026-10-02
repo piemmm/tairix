@@ -75,12 +75,39 @@ const WINDOWS: spawn_layout::WindowBases = spawn_layout::window_bases(INIT_USER_
 /// Set once PID 1 has been spawned so a re-entry cannot re-run the path.
 static INIT_SPAWNED: AtomicBool = AtomicBool::new(false);
 
-/// The x86_64 PID 1 spawn seam installed into the
-/// [`tairix_kernel_core::BootInfo`] hand-off by `boot::try_boot`.
-pub struct X86_64InitSpawn;
+/// A pre-dispatch service the seam admits alongside PID 1, *before*
+/// `admit_init` diverges into the dispatch loop. Production wires the
+/// root-unlock kthread; a QEMU vertical can wire its own in-kernel service
+/// (e.g. the DMA-fault driver) by building the seam with
+/// [`X86_64InitSpawn::with_pre_dispatch`].
+pub type PreDispatch = fn(&'static (dyn InitSpawnCtx + Sync));
 
-/// The single, `'static` [`X86_64InitSpawn`] the boot path borrows.
-pub static X86_64_INIT_SPAWN: X86_64InitSpawn = X86_64InitSpawn;
+/// The x86_64 PID 1 spawn seam installed into the
+/// [`tairix_kernel_core::BootInfo`] hand-off by `boot::try_boot`. One PID 1
+/// build and one `admit_init`, with a pluggable [`PreDispatch`].
+pub struct X86_64InitSpawn {
+    pre_dispatch: PreDispatch,
+}
+
+/// Production pre-dispatch: admit the in-kernel root-unlock service
+/// (`plans/ARCHSUPPORT.md` A2).
+fn root_unlock_pre_dispatch(ctx: &'static (dyn InitSpawnCtx + Sync)) {
+    let _started = crate::x86_64::root_unlock::spawn_if_present(ctx);
+}
+
+/// The single, `'static` production [`X86_64InitSpawn`] the boot path borrows.
+pub static X86_64_INIT_SPAWN: X86_64InitSpawn =
+    X86_64InitSpawn::with_pre_dispatch(root_unlock_pre_dispatch);
+
+impl X86_64InitSpawn {
+    /// The seam whose pre-dispatch step runs `pre_dispatch`. The PID 1 build
+    /// and `admit_init` are the same for every seam; only the service admitted
+    /// before the dispatch loop diverges.
+    #[must_use]
+    pub const fn with_pre_dispatch(pre_dispatch: PreDispatch) -> Self {
+        Self { pre_dispatch }
+    }
+}
 
 impl InitSpawn for X86_64InitSpawn {
     fn spawn_init(&self, ctx: &'static (dyn InitSpawnCtx + Sync)) {
@@ -241,15 +268,10 @@ impl InitSpawn for X86_64InitSpawn {
 
         let physmap: Box<dyn PhysMap + Send + Sync> = Box::new(physmap);
 
-        // Start the in-kernel root-unlock service alongside PID 1
-        // (`plans/ARCHSUPPORT.md` A2). Admitted onto the boot CPU's run queue
-        // *before* `admit_init` diverges into the dispatch loop, the kthread
-        // brings up the bound virtio-blk-PCI root device over the production
-        // MSI-X interrupt path, then serves the driver store and (fail-closed
-        // on the input-less COM1 console this slice) resolves login. With no
-        // bound disk (a PC shape without a planted root) it starts nothing,
-        // opens the console-0 gate, and PID 1 runs unchanged.
-        let _unlock_started = crate::x86_64::root_unlock::spawn_if_present(ctx);
+        // Admit the seam's pre-dispatch service onto the boot CPU's run queue
+        // before `admit_init` diverges into the dispatch loop: production brings
+        // up the root-unlock kthread, a QEMU vertical its own in-kernel service.
+        (self.pre_dispatch)(ctx);
 
         // Register PID 1's caps + address space, publish it as the current
         // task, and dispatch it — `admit_init` drains the run queue until PID

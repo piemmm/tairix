@@ -4140,6 +4140,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-dma-fault-qemu-x86-64"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-arch-x86_64",
+ "tairix-caps",
+ "tairix-drv-bus-virtio",
+ "tairix-drv-storage-virtio-blk",
+ "tairix-itest-harness",
+ "tairix-kernel",
+ "tairix-kernel-core",
+ "tairix-kernel-irq",
+ "tairix-kernel-mem",
+ "tairix-kernel-sec",
+ "tairix-kernel-virtio",
+ "tairix-log",
+ "tairix-pci",
+ "tairix-virtio",
+]
+
+[[package]]
 name = "tairix-test-dma-translation-qemu-x86-64"
 version = "0.0.0"
 dependencies = [
