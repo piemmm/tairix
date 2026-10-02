@@ -16,7 +16,7 @@ use super::{
     QUEUED_SLICES,
 };
 use crate::saver::raytrace::album::{Picture, Unkept};
-use crate::saver::raytrace::engine::{Engine, Traced};
+use crate::saver::raytrace::engine::{Engine, Traced, PLAIN};
 
 /// A step of the last pass at column `x`.
 fn step(x: u32) -> Traced {
@@ -215,7 +215,7 @@ fn paint(steps: &[Traced], picture: &mut [Pixel]) {
 /// The pictures of the first `scenes` reveals of an engine seeded `seed`,
 /// traced alone on this thread.
 fn traced_alone(seed: u64, scenes: usize) -> Vec<Vec<Pixel>> {
-    let mut engine = Engine::new(SIZE, seed).expect("an engine");
+    let mut engine = Engine::new(SIZE, seed, PLAIN).expect("an engine");
     let mut clock = ticking();
     let mut pictures = Vec::new();
     for _ in 0..scenes {
@@ -252,7 +252,7 @@ fn a_tracing_thread_and_a_loop_pass_whole_reveals_through_the_desk() {
     };
     let link = DeskLink::hand_over(
         Arc::clone(&desk),
-        Engine::new(SIZE, seed).expect("an engine"),
+        Engine::new(SIZE, seed, PLAIN).expect("an engine"),
     );
     let mut pictures = Vec::new();
     let mut drawn = Vec::new();
@@ -311,7 +311,7 @@ fn a_tracing_thread_hands_each_whole_picture_to_its_keeper_once() {
             );
         })
     };
-    let mut engine = Engine::new(SIZE, seed).expect("an engine");
+    let mut engine = Engine::new(SIZE, seed, PLAIN).expect("an engine");
     engine.keep_pictures();
     let link = DeskLink::hand_over(Arc::clone(&desk), engine);
     let mut drawn = Vec::new();

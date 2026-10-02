@@ -6,13 +6,15 @@
 //! after slice, and the serve loop, which runs one a frame when the machine
 //! grants no thread. Every pixel is traced at the tracer's best quality. Once
 //! whole, the scene is let go — and, where pictures are kept, the picture
-//! handed over to be kept, once for each scene.
+//! handed over to be kept, once for each scene. Each scene is composed at the
+//! detail asked, unless the memory band says its peak is not free.
 
 use alloc::vec::Vec;
 
 use tairix_parallel::JobRunner;
 use tairix_raster::Pixel;
-use tairix_raytrace::{Draft, Encoder, Quality, Reveal, Scene, Setting, Step, Tracer};
+use tairix_raytrace::{Detail, Draft, Encoder, Quality, Reveal, Scene, Setting, Step, Tracer};
+use tairix_reclaim::pressure::{PressureGauge, PressureThresholds};
 use tairix_rng::{NonCryptoRng, RandU64};
 use tairix_theme::Timeline;
 use tairix_util::fallible;
@@ -118,6 +120,62 @@ enum Album {
     Filling(Option<Vec<Pixel>>),
 }
 
+/// What the machine's memory can spare a scene: the pressure band the
+/// kernel last reported, over the memory the machine holds.
+#[derive(Copy, Clone)]
+pub struct Memory {
+    /// The bytes of memory the machine holds.
+    pub total: u64,
+    /// Where the band is read.
+    pub gauge: &'static dyn PressureGauge,
+}
+
+impl Memory {
+    /// Whether `peak` bytes may be free now. A band deeper than normal holds
+    /// at most its exit watermark free, being left once more than that is.
+    #[must_use]
+    pub fn spares(self, peak: u64) -> bool {
+        let total = usize::try_from(self.total).unwrap_or(usize::MAX);
+        let most_free = match self.gauge.sample().depth().checked_sub(1) {
+            None => total,
+            Some(deeper) => PressureThresholds::from_total(total)
+                .exit_watermarks()
+                .get(usize::from(deeper))
+                .copied()
+                .unwrap_or(0),
+        };
+        u64::try_from(most_free).unwrap_or(u64::MAX) >= peak
+    }
+}
+
+/// How a run's scenes are set out: at the detail asked, unless the memory
+/// cannot spare its peak.
+#[derive(Copy, Clone)]
+pub struct Detailing {
+    /// The detail asked for.
+    pub asked: Detail,
+    /// What the machine's memory can spare.
+    pub memory: Memory,
+    /// Told the detail scenes are set out at whenever it changes from the
+    /// last scene's.
+    pub tell: fn(Detail),
+}
+
+/// How tests set their engines' scenes out: simply, as the default does, on a
+/// machine whose memory spares anything, telling nothing.
+#[cfg(test)]
+pub(crate) const PLAIN: Detailing = Detailing {
+    asked: Detail::Simple,
+    memory: Memory {
+        total: u64::MAX,
+        gauge: &tairix_reclaim::pressure::Unpressured,
+    },
+    tell: quiet,
+};
+
+#[cfg(test)]
+const fn quiet(_: Detail) {}
+
 /// The reveals of one screen, one scene after another.
 pub struct Engine {
     size: (u32, u32),
@@ -133,13 +191,17 @@ pub struct Engine {
     album: Album,
     /// A whole picture, or the reason it is not, for the keeper to collect.
     finished: Option<Result<Picture, Unkept>>,
+    detailing: Detailing,
+    /// The detail the last scene was composed at.
+    composed: Detail,
 }
 
 impl Engine {
-    /// The reveals of a `size` screen, their scenes drawn from `seed`; `None`
-    /// when the screen has no pixels or the heap will not hold the encoder.
+    /// The reveals of a `size` screen, their scenes drawn from `seed` and set
+    /// out as `detailing` has them; `None` when the screen has no pixels or
+    /// the heap will not hold the encoder.
     #[must_use]
-    pub fn new(size: (u32, u32), seed: u64) -> Option<Self> {
+    pub fn new(size: (u32, u32), seed: u64, detailing: Detailing) -> Option<Self> {
         let mut dice = NonCryptoRng::seed_from_u64(seed);
         let plan = Plan::draw(&mut dice, None);
         Some(Self {
@@ -153,6 +215,8 @@ impl Engine {
             batch: MIN_BATCH,
             album: Album::Off,
             finished: None,
+            detailing,
+            composed: detailing.asked,
         })
     }
 
@@ -191,8 +255,11 @@ impl Engine {
     ) -> Status {
         let stage = core::mem::replace(&mut self.stage, Stage::Failed);
         self.stage = match stage {
-            Stage::Composing => Draft::new(self.plan.setting, self.plan.seed, self.size)
-                .map_or(Stage::Failed, Stage::Preparing),
+            Stage::Composing => {
+                let detail = self.detail();
+                Draft::new(self.plan.setting, self.plan.seed, self.size, detail)
+                    .map_or(Stage::Failed, Stage::Preparing)
+            }
             Stage::Preparing(draft) => self.prepare(draft, runner, clock),
             Stage::Tracing(scene) => self.trace(scene, runner, out, clock),
             done @ (Stage::Whole | Stage::Failed) => done,
@@ -209,6 +276,26 @@ impl Engine {
     fn compose(&mut self) {
         self.stage = Stage::Composing;
         self.batch = MIN_BATCH;
+    }
+
+    /// The detail the next scene is composed at: Simple, where the memory
+    /// cannot spare the peak of the detail asked; told when it changes.
+    fn detail(&mut self) -> Detail {
+        let Detailing {
+            asked,
+            memory,
+            tell,
+        } = self.detailing;
+        let detail = if memory.spares(asked.peak()) {
+            asked
+        } else {
+            Detail::Simple
+        };
+        if detail != self.composed {
+            self.composed = detail;
+            tell(detail);
+        }
+        detail
     }
 
     /// Begin the reveal from its first step, readying the copy of the picture

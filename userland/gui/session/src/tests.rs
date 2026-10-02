@@ -8494,6 +8494,8 @@ fn monitoring(comp: &mut Compositor) -> Screensaver {
             theme: &theme,
             options: &options,
             tracers: None,
+            memory: crate::saver::raytrace::PLAIN.memory,
+            tell_detail: crate::saver::raytrace::PLAIN.tell,
         },
         comp,
         0,
@@ -10016,6 +10018,8 @@ fn a_lock_under_a_screensaver_keeps_its_place_without_restacking() {
             theme: &theme,
             options: &options,
             tracers: None,
+            memory: crate::saver::raytrace::PLAIN.memory,
+            tell_detail: crate::saver::raytrace::PLAIN.tell,
         };
         assert!(saver.start(tairix_wallpaper::ScreensaverKind::Blank, setup, comp, 0));
         saver

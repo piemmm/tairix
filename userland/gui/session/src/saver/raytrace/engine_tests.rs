@@ -6,10 +6,16 @@
 
 use alloc::vec::Vec;
 
-use tairix_raster::Pixel;
-use tairix_raytrace::{Quality, Reveal, Setting, Tracer};
+use core::sync::atomic::{AtomicU32, Ordering};
 
-use super::{draw_setting, pace, Engine, Stage, Traced, MIN_BATCH, QUALITY, SLICE_NS};
+use tairix_raster::Pixel;
+use tairix_raytrace::{Detail, Quality, Reveal, Setting, Tracer};
+use tairix_reclaim::pressure::{PressureBand, ReportedPressure};
+
+use super::{
+    draw_setting, pace, Detailing, Engine, Memory, Stage, Traced, MIN_BATCH, PLAIN, QUALITY,
+    SLICE_NS,
+};
 use crate::saver::raytrace::album::Unkept;
 use crate::saver::raytrace::crew::{Status, TraceDesk, Turn};
 
@@ -73,15 +79,15 @@ fn traced_alone(engine: &Engine) -> Vec<Pixel> {
 
 #[test]
 fn a_screen_with_no_pixels_has_no_reveal() {
-    assert!(Engine::new((0, 10), 1).is_none());
-    assert!(Engine::new((10, 0), 1).is_none());
+    assert!(Engine::new((0, 10), 1, PLAIN).is_none());
+    assert!(Engine::new((10, 0), 1, PLAIN).is_none());
 }
 
 /// A scene with grids to fill is prepared over several slices, tracing
 /// nothing meanwhile, and only then traced.
 #[test]
 fn a_scene_is_prepared_over_slices_before_any_pixel_is_traced() {
-    let mut engine = Engine::new(SIZE, 5).expect("an engine");
+    let mut engine = Engine::new(SIZE, 5, PLAIN).expect("an engine");
     engine.plan.setting = Setting::Bubbles;
     let mut clock = ticking(MS);
     let mut traced = Vec::new();
@@ -112,7 +118,7 @@ fn a_scene_is_prepared_over_slices_before_any_pixel_is_traced() {
 /// the whole only once every pixel is.
 #[test]
 fn tracing_tells_its_progress_until_the_picture_is_whole() {
-    let mut engine = Engine::new(SIZE, 21).expect("an engine");
+    let mut engine = Engine::new(SIZE, 21, PLAIN).expect("an engine");
     let _ = run_until(&mut engine, tracing);
     let mut clock = ticking(MS);
     let mut traced = Vec::new();
@@ -136,7 +142,7 @@ fn tracing_tells_its_progress_until_the_picture_is_whole() {
 /// whole every pixel shows its own trace.
 #[test]
 fn the_reveal_traces_every_pixel_as_tracing_it_alone_shows() {
-    let mut engine = Engine::new(SIZE, 11).expect("an engine");
+    let mut engine = Engine::new(SIZE, 11, PLAIN).expect("an engine");
     let _ = run_until(&mut engine, tracing);
     let expected = traced_alone(&engine);
     let order = engine.reveal.clone();
@@ -162,7 +168,7 @@ fn the_reveal_traces_every_pixel_as_tracing_it_alone_shows() {
 /// small share of the steps, and nothing else comes first.
 #[test]
 fn the_first_pass_spans_the_picture_in_a_few_steps() {
-    let mut engine = Engine::new(SIZE, 23).expect("an engine");
+    let mut engine = Engine::new(SIZE, 23, PLAIN).expect("an engine");
     let _ = run_until(&mut engine, tracing);
     let steps = run_until(&mut engine, whole);
     let coarsest = Reveal::coarsest(SIZE);
@@ -203,7 +209,7 @@ fn each_slice_does_what_fits_half_a_frame() {
 
 #[test]
 fn the_first_slice_traces_one_step_and_quick_slices_grow_the_batch() {
-    let mut engine = Engine::new(SIZE, 3).expect("an engine");
+    let mut engine = Engine::new(SIZE, 3, PLAIN).expect("an engine");
     let _ = run_until(&mut engine, tracing);
     assert_eq!(engine.batch, MIN_BATCH);
     let mut traced = Vec::new();
@@ -221,7 +227,7 @@ fn the_first_slice_traces_one_step_and_quick_slices_grow_the_batch() {
 /// quality: there is no budget a slow reveal is cut down to meet.
 #[test]
 fn a_slow_reveal_still_traces_every_pixel_at_the_best_quality() {
-    let mut slow = Engine::new(SIZE, 7).expect("an engine");
+    let mut slow = Engine::new(SIZE, 7, PLAIN).expect("an engine");
     let _ = run_until(&mut slow, tracing);
     let expected = traced_alone(&slow);
     // Each slice takes an hour of the clock.
@@ -239,7 +245,7 @@ fn a_slow_reveal_still_traces_every_pixel_at_the_best_quality() {
 /// on real threads at once.
 #[test]
 fn a_slice_splits_its_steps_across_the_workers() {
-    let mut engine = Engine::new(SIZE, 13).expect("an engine");
+    let mut engine = Engine::new(SIZE, 13, PLAIN).expect("an engine");
     let _ = run_until(&mut engine, tracing);
     let Stage::Tracing(scene) = core::mem::replace(&mut engine.stage, Stage::Composing) else {
         panic!("tracing");
@@ -277,7 +283,7 @@ fn a_new_setting_is_never_the_last_and_every_other_comes_up() {
 /// step.
 #[test]
 fn the_next_scene_is_set_elsewhere_and_revealed_from_its_start() {
-    let mut engine = Engine::new(SIZE, 17).expect("an engine");
+    let mut engine = Engine::new(SIZE, 17, PLAIN).expect("an engine");
     let _ = run_until(&mut engine, tracing);
     let _ = run_until(&mut engine, whole);
     let first = engine.plan.setting;
@@ -292,7 +298,7 @@ fn the_next_scene_is_set_elsewhere_and_revealed_from_its_start() {
 /// before it traces.
 #[test]
 fn an_order_begins_the_scene_asked_for_before_its_slice() {
-    let mut engine = Engine::new(SIZE, 29).expect("an engine");
+    let mut engine = Engine::new(SIZE, 29, PLAIN).expect("an engine");
     let first = engine.plan.setting;
     let mut desk = TraceDesk::new();
     desk.next();
@@ -316,7 +322,7 @@ fn an_order_begins_the_scene_asked_for_before_its_slice() {
 /// turn. One not keeping them hands nothing over.
 #[test]
 fn a_whole_picture_is_handed_over_once_as_traced() {
-    let mut engine = Engine::new(SIZE, 31).expect("an engine");
+    let mut engine = Engine::new(SIZE, 31, PLAIN).expect("an engine");
     engine.keep_pictures();
     let _ = run_until(&mut engine, tracing);
     assert!(engine.take_finished().is_none(), "nothing is whole yet");
@@ -346,7 +352,7 @@ fn a_whole_picture_is_handed_over_once_as_traced() {
         .expect("held");
     assert_ne!(next.setting, kept.setting);
 
-    let mut plain = Engine::new(SIZE, 31).expect("an engine");
+    let mut plain = Engine::new(SIZE, 31, PLAIN).expect("an engine");
     let _ = run_until(&mut plain, tracing);
     let _ = run_until(&mut plain, whole);
     assert!(plain.take_finished().is_none());
@@ -355,7 +361,7 @@ fn a_whole_picture_is_handed_over_once_as_traced() {
 /// A picture the heap would not hold a copy of is reported, not kept.
 #[test]
 fn a_picture_too_large_to_hold_is_reported_unheld() {
-    let mut engine = Engine::new(SIZE, 41).expect("an engine");
+    let mut engine = Engine::new(SIZE, 41, PLAIN).expect("an engine");
     engine.keep_pictures();
     let _ = run_until(&mut engine, tracing);
     // As the heap refusing it leaves it.
@@ -364,5 +370,99 @@ fn a_picture_too_large_to_hold_is_reported_unheld() {
     assert_eq!(
         engine.take_finished(),
         Some(Err(Unkept::Unheld(engine.plan.setting)))
+    );
+}
+
+const GIB: u64 = 1 << 30;
+
+#[test]
+fn a_band_spares_what_it_may_hold_free_and_never_more() {
+    static BAND: ReportedPressure = ReportedPressure::unknown();
+    let memory = Memory {
+        total: 16 * GIB,
+        gauge: &BAND,
+    };
+    let peak = Detail::Maximum.peak();
+    assert!(
+        !memory.spares(peak),
+        "a band not yet reported spares nothing"
+    );
+    for (band, spares) in [
+        (PressureBand::Normal, true),
+        // Left above a quarter free, and above 14 % free: 4 GiB and 2.24 GiB.
+        (PressureBand::Mild, true),
+        (PressureBand::Moderate, true),
+        // Left above 8 % free, and above 5 %: neither as much as 2 GiB.
+        (PressureBand::Severe, false),
+        (PressureBand::Critical, false),
+    ] {
+        BAND.report(band);
+        assert_eq!(memory.spares(peak), spares, "{band:?}");
+    }
+    BAND.report(PressureBand::Normal);
+    let small = Memory {
+        total: GIB,
+        gauge: &BAND,
+    };
+    assert!(
+        !small.spares(peak),
+        "a machine smaller than the peak never spares it"
+    );
+    assert!(small.spares(Detail::Simple.peak()));
+}
+
+#[test]
+fn each_scene_is_composed_at_the_detail_the_memory_spares_and_a_change_is_told_once() {
+    static BAND: ReportedPressure = ReportedPressure::unknown();
+    static SIMPLY: AtomicU32 = AtomicU32::new(0);
+    static FULLY: AtomicU32 = AtomicU32::new(0);
+    fn told(detail: Detail) {
+        match detail {
+            Detail::Simple => &SIMPLY,
+            Detail::Maximum => &FULLY,
+        }
+        .fetch_add(1, Ordering::Relaxed);
+    }
+    let detailing = Detailing {
+        asked: Detail::Maximum,
+        memory: Memory {
+            total: 16 * GIB,
+            gauge: &BAND,
+        },
+        tell: told,
+    };
+    let mut engine = Engine::new(SIZE, 3, detailing).expect("an engine");
+    let mut clock = ticking(MS);
+    let mut out = Vec::new();
+    let mut composed = |engine: &mut Engine, band: PressureBand| {
+        BAND.report(band);
+        engine.next();
+        let _ = engine.step(&tairix_parallel::SERIAL, &mut out, &mut clock);
+        assert!(matches!(engine.stage, Stage::Preparing(_)), "composed");
+        (
+            engine.composed,
+            SIMPLY.load(Ordering::Relaxed),
+            FULLY.load(Ordering::Relaxed),
+        )
+    };
+    assert_eq!(
+        composed(&mut engine, PressureBand::Normal),
+        (Detail::Maximum, 0, 0),
+        "as asked, telling nothing"
+    );
+    assert_eq!(
+        composed(&mut engine, PressureBand::Severe),
+        (Detail::Simple, 1, 0),
+        "plainer, and told"
+    );
+    assert_eq!(
+        composed(&mut engine, PressureBand::Critical),
+        (Detail::Simple, 1, 0),
+        "plainer still, but told only of the change"
+    );
+    assert_eq!(
+        composed(&mut engine, PressureBand::Mild),
+        (Detail::Maximum, 1, 1),
+        "as asked again, and told"
     );
 }

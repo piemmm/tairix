@@ -1026,9 +1026,7 @@ impl Lawn {
         (cell_key, (x0, z0), plane): (u32, (f64, f64), Plane),
         testers: &mut Testers<'_, N>,
     ) {
-        let standing = stand.shoots / stand.merged + unit(mix32(cell_key ^ 0x51));
-        let count = u32::try_from(mathf::round_i32(mathf::floor(standing))).unwrap_or(0);
-        let start = TAU * unit(mix32(cell_key ^ 0x51));
+        let (count, start) = rooted(stand.shoots / stand.merged, cell_key);
         let mut heading = (mathf::cos(start), mathf::sin(start));
         let fountain = 1.5 * stand.splay * stand.kind.tufted;
         let splay = 0.6 + 0.8 * stand.splay;
@@ -1760,6 +1758,15 @@ fn litter_hits<const N: usize>(
 /// The golden angle's cosine and sine: each shoot of a cell turned this far
 /// from the last spreads their headings evenly round the circle.
 const GOLDEN: (f64, f64) = (-0.737_368_878_078_319_7, 0.675_490_294_261_523_9);
+
+/// How many shoots a cell keyed `cell_key` roots of a `mean` that may be a
+/// fraction, and the heading its first takes, in radians. The two are drawn
+/// apart, lest the cells whose fraction rounds up all head one way.
+fn rooted(mean: f64, cell_key: u32) -> (u32, f64) {
+    let standing = mean + unit(mix32(cell_key ^ 0x51));
+    let count = u32::try_from(mathf::round_i32(mathf::floor(standing))).unwrap_or(0);
+    (count, TAU * unit(mix32(cell_key ^ 0x6a09_e667)))
+}
 
 /// `toward` turned by the golden angle.
 fn turn_golden((x, z): (f64, f64)) -> (f64, f64) {

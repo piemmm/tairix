@@ -83,10 +83,10 @@ pub use input::{
 pub use notify::{NotifyLevel, NotifyPolicy, PolicyFull};
 pub use saver::{
     preview_file, preview_kind, preview_path, CellSize, ClockOptions, CpuUse, LifeOptions, Pace,
-    RaytraceOptions, RetroGamesOptions, RibbonOptions, ScreensaverOptions, SlideOrder, SlideSource,
-    SlideshowOptions, StarDensity, StarfieldOptions, SystemMonitorOptions, WallpaperCategory,
-    MAX_SCREENSAVER_PREVIEW_BYTES, SCREENSAVER_PREVIEW_STORE, SLIDE_INTERVAL_DEFAULT,
-    SLIDE_INTERVAL_MAX, SLIDE_INTERVAL_MIN,
+    RaytraceOptions, RetroGamesOptions, RibbonOptions, SceneDetail, ScreensaverOptions, SlideOrder,
+    SlideSource, SlideshowOptions, StarDensity, StarfieldOptions, SystemMonitorOptions,
+    WallpaperCategory, MAX_SCREENSAVER_PREVIEW_BYTES, SCREENSAVER_PREVIEW_STORE,
+    SLIDE_INTERVAL_DEFAULT, SLIDE_INTERVAL_MAX, SLIDE_INTERVAL_MIN,
 };
 pub use settings::{
     merge, merge_within, Backdrop, CursorSize, DesktopSettings, DocumentRefusal, IconFlow,

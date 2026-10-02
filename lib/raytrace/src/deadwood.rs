@@ -9,7 +9,7 @@ use core::f64::consts::TAU;
 use tairix_rng::{NonCryptoRng, RandU64};
 use tairix_util::mathf;
 
-use crate::prototype::{single, stored, Building, Facet, Part, Prototype, Tube};
+use crate::prototype::{stored, Building, Facet, Part, Prototype, Tube};
 use crate::sample::mix32;
 use crate::vector::{Frame, Vec3};
 
@@ -24,21 +24,15 @@ const LOG_TAPER: f64 = 0.45;
 const SUNK: f64 = 0.18;
 
 /// A tube from `a` to `b`, `radii` thick at either end, `stem` along its
-/// stem there, keyed `key`.
+/// stem there, keyed `key`, its bark begun round it from its top, as a
+/// fallen trunk lies.
 fn tube(
     a: Vec3,
     b: Vec3,
     radii: (f64, f64),
     (stem, material, key): ((f64, f64), u16, u32),
 ) -> Part {
-    Part::Tube(Tube {
-        a: stored(a),
-        b: stored(b),
-        radii: [single(radii.0), single(radii.1)],
-        stem: [single(stem.0), single(stem.1)],
-        material,
-        key,
-    })
+    Part::Tube(Tube::new((a, b), (radii, stem), (material, key), Vec3::UP))
 }
 
 /// A fallen trunk `length` long and `radius` thick at its foot, lying along

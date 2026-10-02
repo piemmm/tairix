@@ -191,3 +191,34 @@ fn a_march_sees_the_same_cloud_however_its_steps_are_staggered() {
         );
     }
 }
+
+#[test]
+fn a_coarse_ray_reaches_cloud_beyond_however_many_clear_columns_it_crosses() {
+    let mut bank = built(&tairix_parallel::SERIAL);
+    // Clear the whole map but a stripe of columns at its far side, past
+    // hundreds of clear ones a low ray from the near side must cross.
+    let size = 2.0 * bank.half / real(WEATHER_SIDE - 1);
+    for (index, column) in bank.weather.iter_mut().enumerate() {
+        let x = real(index % WEATHER_SIDE) * size - bank.half;
+        if x < 8_000.0 {
+            column.cover = [0.0; 2];
+        }
+    }
+    let mut met = [0; 2];
+    for step in 0..24u32 {
+        // Rays level with the deck's middle, fanned across the stripe.
+        let origin = Vec3::new(-11_500.0, 1_700.0, f64::from(step) * 300.0 - 3600.0);
+        let dir = Vec3::new(1.0, 0.002, 0.0).normalized();
+        for (fine, met) in [true, false].into_iter().zip(&mut met) {
+            if let Some((_, _, depth)) = bank.seen(origin, dir, fine, 0.5) {
+                *met += 1;
+                assert!(depth > 19_000.0, "{fine}: {depth}");
+            }
+        }
+    }
+    // A coarse ray once spent its steps on the clear columns and met nothing.
+    assert!(
+        met.iter().all(|&met| met > 6),
+        "of 24 rays, fine and coarse meet {met:?}"
+    );
+}

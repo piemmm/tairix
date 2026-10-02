@@ -157,3 +157,31 @@ fn tables_built_across_workers_match_one_built_alone() {
         assert_eq!(alone.between(dir, 3_000.0), spread.between(dir, 3_000.0));
     }
 }
+
+#[test]
+fn the_ambient_is_the_skys_mean_over_the_hemisphere_weighed_by_its_cosine() {
+    let mut atmosphere = Atmosphere::new(air(40.0)).expect("tables fit");
+    let mut sky = |radiance: &(dyn Fn(f64) -> f64 + Sync)| {
+        fill_rows(
+            &mut atmosphere.view,
+            0..VIEW.1,
+            &tairix_parallel::SERIAL,
+            &|_, v| Vec3::splat(radiance(elevation_of(v).max(0.0))),
+        );
+        atmosphere.hemisphere().x
+    };
+    let even = sky(&|_| 3.0);
+    assert!(
+        (even - 3.0).abs() < 1e-6,
+        "an even sky is its own mean: {even}"
+    );
+    // Bright as the sine of its elevation, the sky's cosine-weighted mean is
+    // the integral of sin²e cos e over that of sin e cos e: two thirds. A
+    // texel weighed by its cosine alone gives the zenith more, about 0.72.
+    let rising = sky(&mathf::sin);
+    assert!((rising - 2.0 / 3.0).abs() < 2e-3, "{rising}");
+    // Bright toward the horizon instead, as the cosine of its elevation: two
+    // thirds again, where too little weight there gives about 0.57.
+    let falling = sky(&mathf::cos);
+    assert!((falling - 2.0 / 3.0).abs() < 2e-3, "{falling}");
+}

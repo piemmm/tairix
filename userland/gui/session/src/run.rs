@@ -116,7 +116,8 @@ mod program {
     use tairix_desktop_session::pinboard::{self, PinboardCommand};
     use tairix_desktop_session::saver::raytrace::{
         keep as keep_picture, run_tracing_thread, DeskLink, DeskLock, Engine as TraceEngine,
-        Keeper, Picture, PictureFiles, TraceDesk, TraceHost, TraceLink, Unkept,
+        Keeper, Memory as TraceMemory, Picture, PictureFiles, TraceDesk, TraceHost, TraceLink,
+        Unkept,
     };
     use tairix_desktop_session::switchuser::{SeatPresentation, SessionAuthority, SwitchUser};
     use tairix_desktop_session::windows::window_menu_placement;
@@ -166,6 +167,7 @@ mod program {
     };
     use tairix_parallel::{JobRunner, Pool};
     use tairix_procinfo::IpcTransport;
+    use tairix_raytrace::Detail;
     use tairix_rt::io::{self, Stderr, Write};
     use tairix_rt::ServedCall;
     use tairix_sandbox::imagerender::{rasterise_icon, render_wallpaper, ImageRenderService};
@@ -801,6 +803,8 @@ mod program {
             theme: shell.session().active_theme(),
             options: &asked.options,
             tracers: Some(tracers),
+            memory: tracers.memory,
+            tell_detail,
         };
         let covered = if preview {
             saver.start_preview(kind, setup, compositor, now_ns)
@@ -1831,7 +1835,17 @@ mod program {
         };
         let online = online_cpus();
         compositor.set_job_runner(composite_pool(online));
-        let tracers = RtTraceHost { online };
+        // What bounds both what one client may map here and what a ray-traced
+        // scene may hold.
+        let memory_total =
+            tairix_procinfo::memory_total_bytes(&tairix_procinfo::IpcTransport).unwrap_or(0);
+        let tracers = RtTraceHost {
+            online,
+            memory: TraceMemory {
+                total: memory_total,
+                gauge: tairix_rt::pressure::gauge(),
+            },
+        };
         let screen = Rect::new(0, 0, mode.width_px, mode.height_px);
         let Ok(mut pointer) = DeviceInputSource::new(SeatInputChannel::new(PointerReader), screen)
         else {
@@ -2340,10 +2354,7 @@ mod program {
         let mut server = WindowServer::new(
             RtShmMapper,
             self_origin.proc_id(),
-            tairix_window::client_frame_budget_bytes(
-                tairix_procinfo::memory_total_bytes(&tairix_procinfo::IpcTransport).unwrap_or(0),
-                frame_len,
-            ),
+            tairix_window::client_frame_budget_bytes(memory_total, frame_len),
         );
         let mut identity = RtWindowIdentity::new();
         let mut sink = RtEventSink::new(set);
@@ -4932,9 +4943,27 @@ mod program {
 
     /// The ray-traced screensaver's threads: a tracing thread for each reveal,
     /// and under the performance setting a worker for every other one of the
-    /// `online` cores.
+    /// `online` cores; and what the machine's memory can spare its scenes.
     struct RtTraceHost {
         online: usize,
+        memory: TraceMemory,
+    }
+
+    /// Say the detail the ray tracer's scenes are now set out at.
+    fn tell_detail(detail: Detail) {
+        match detail {
+            Detail::Simple => app::report(
+                APP_NAME,
+                format_args!(
+                    "the ray tracer sets its scenes out simply: the memory band leaves no room \
+                     for maximum detail"
+                ),
+            ),
+            Detail::Maximum => app::report(
+                APP_NAME,
+                format_args!("the ray tracer sets its scenes out at maximum detail again"),
+            ),
+        }
     }
 
     impl TraceHost for RtTraceHost {

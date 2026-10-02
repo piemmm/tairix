@@ -570,6 +570,8 @@ fn arches(
 ) -> Option<f64> {
     let along = direction(heading, FRAC_PI_2, 0.0);
     let springing = from.y + rise;
+    let end = from + along * (span * f64::from(bays));
+    stage.claim_along((from.x, from.z), (end.x, end.z), pier)?;
     for index in 0..=bays {
         let at = from + along * (span * f64::from(index));
         stage.claim((at.x, at.z), pier)?;
@@ -691,12 +693,8 @@ impl Aqueduct {
             -back * mathf::sin(self.heading) + aside * mathf::sin(across),
             -back * mathf::cos(self.heading) + aside * mathf::cos(across),
         );
-        let ground = survey
-            .height(x, z)
-            .max(survey.water(x, z).unwrap_or(f64::NEG_INFINITY));
-        let eye = Vec3::new(x, ground + dice.range(2.0, 8.0), z);
         Vantage {
-            eye,
+            eye: landscape::stand(survey, (x, z), dice.range(2.0, 8.0)),
             heading: mathf::atan2(-x, -z),
         }
     }
@@ -1137,3 +1135,7 @@ fn drum_lying(
     )?;
     Some(())
 }
+
+#[cfg(test)]
+#[path = "architecture_tests.rs"]
+mod tests;

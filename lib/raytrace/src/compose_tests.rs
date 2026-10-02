@@ -57,7 +57,7 @@ struct Built {
 
 /// Prepare a draft of `setting` under `seed` across `runner` to the end.
 fn build(setting: Setting, seed: u64, runner: Threaded) -> Scene {
-    let mut draft = Draft::new(setting, seed, SIZE).expect("the scene composes");
+    let mut draft = Draft::new(setting, seed, SIZE, Detail::Maximum).expect("the scene composes");
     while !draft
         .prepare(&runner, &mut || false)
         .expect("the scene prepares")
@@ -438,16 +438,26 @@ fn the_eye_stands_clear_of_the_ground_beneath_it() {
             continue;
         }
         let eye = scene.camera.eye();
-        let Some((_, hit)) =
-            scene.closest(&Ray::new(eye, -Vec3::UP), f64::INFINITY, Sight::Recorded)
-        else {
-            continue;
-        };
+        // A ray down from an eye buried under the ground meets nothing at all.
+        let (_, hit) = scene
+            .closest(&Ray::new(eye, -Vec3::UP), f64::INFINITY, Sight::Recorded)
+            .unwrap_or_else(|| panic!("{setting:?} {seed}: nothing lies beneath the eye"));
         assert!(
             hit.t > 0.5 && hit.normal.dot(-Vec3::UP) < 0.0,
             "{setting:?} {seed}: the eye stands {} above what is below it",
             hit.t
         );
+        // Nor does the land lie over it, which a ray up from under the ground
+        // meets.
+        if let Some((index, hit)) =
+            scene.closest(&Ray::new(eye, Vec3::UP), f64::INFINITY, Sight::Recorded)
+        {
+            assert!(
+                !matches!(scene.objects[index].shape, Shape::Land { .. }),
+                "{setting:?} {seed}: the land lies {} above the eye",
+                hit.t
+            );
+        }
     }
 }
 
@@ -492,7 +502,7 @@ fn a_druses_crystals_grow_out_of_its_rock() {
     let mut druses = 0;
     for seed in 0..64 {
         let mut dice = Dice(NonCryptoRng::seed_from_u64(seed));
-        let mut stage = Stage::new().expect("a stage");
+        let mut stage = Stage::new(Detail::Maximum.densities()).expect("a stage");
         still::crystals(&mut stage, &mut dice).expect("a still life");
         let geometry = stage.geometry();
         let rock = stage.objects.iter().find_map(|object| match object.shape {
@@ -554,7 +564,7 @@ fn an_ionic_capitals_scrolls_are_in_sight() {
             architecture::ruins,
         ] {
             let mut dice = Dice(NonCryptoRng::seed_from_u64(seed));
-            let mut stage = Stage::new().expect("a stage");
+            let mut stage = Stage::new(Detail::Maximum.densities()).expect("a stage");
             compose(&mut stage, &mut dice).expect("a building");
             scrolls += buried_scrolls(&stage, seed);
         }
@@ -704,7 +714,7 @@ fn a_canopy_grid_is_as_large_as_its_lawn_and_no_larger() {
     use crate::grass::{Cover, Seen, Weeds};
     // A side's cells, a cell's breadth, and the cells to a block of the grid.
     for (cells, cell, block) in [(100.0, 0.5, 1u32), (1344.0, 0.25, 1), (2400.0, 3.0, 2)] {
-        let mut stage = Stage::new().expect("a stage");
+        let mut stage = Stage::new(Detail::Maximum.densities()).expect("a stage");
         let span = cells * cell;
         let lawn = Lawn {
             field: 0,
@@ -817,4 +827,25 @@ fn describe_box(bounds: Aabb) -> [u64; 6] {
         bounds.max.y.to_bits(),
         bounds.max.z.to_bits(),
     ]
+}
+
+/// At the plainer detail every setting still composes and prepares: a
+/// plainer scene, never a missing one.
+#[test]
+fn every_setting_prepares_at_the_plainer_detail() {
+    std::thread::scope(|scope| {
+        for setting in Setting::ALL {
+            scope.spawn(move || {
+                let mut draft =
+                    Draft::new(setting, 5, SIZE, Detail::Simple).expect("the scene composes");
+                let runner = Threaded::new(2);
+                while !draft
+                    .prepare(&runner, &mut || false)
+                    .expect("the scene prepares")
+                {}
+                let scene = draft.finish().expect("the scene finishes");
+                assert!(scene.objects.len() <= Detail::Simple.densities().objects);
+            });
+        }
+    });
 }

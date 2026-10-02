@@ -9,6 +9,7 @@ use tairix_parallel::{Threaded, SERIAL};
 
 use super::*;
 use crate::camera::Camera;
+use crate::detail::Detail;
 use crate::light::Light;
 use crate::material::{Finish, Material};
 use crate::pigment::Pigment;
@@ -16,6 +17,9 @@ use crate::scene::{Exposure, Object, Parts};
 use crate::shape::Shape;
 use crate::sky::{Dome, Gradient, Sky};
 use crate::vector::{Pose, Ray};
+
+/// The hemisphere a record's sums are checked over: the finer detail's.
+const RECORDS: &Records = &Detail::Maximum.densities().records;
 
 /// A site at the origin facing up, far enough from the eye that the picture's
 /// bounds on a record's radius never bind.
@@ -53,7 +57,7 @@ fn panel(from: Vec3, dir: Vec3) -> Cell {
 fn cells_of(site: &Site, light: impl Fn(Vec3, Vec3) -> Cell) -> Vec<Cell> {
     const ACROSS: usize = 4;
     let frame = Frame::around(site.normal);
-    let mut cells = alloc::vec![Cell::DARK; CELLS];
+    let mut cells = alloc::vec![Cell::DARK; RECORDS.cells()];
     for (index, cell) in cells.iter_mut().enumerate() {
         let mut sum = Vec3::ZERO;
         for row in 0..ACROSS {
@@ -62,10 +66,17 @@ fn cells_of(site: &Site, light: impl Fn(Vec3, Vec3) -> Cell) -> Vec<Cell> {
                     (real(row) + 0.5) / real(ACROSS),
                     (real(column) + 0.5) / real(ACROSS),
                 );
-                sum += light(site.point, frame.to_world(direction(index, within))).light;
+                sum += light(
+                    site.point,
+                    frame.to_world(direction(RECORDS, index, within)),
+                )
+                .light;
             }
         }
-        let centre = light(site.point, frame.to_world(direction(index, (0.5, 0.5))));
+        let centre = light(
+            site.point,
+            frame.to_world(direction(RECORDS, index, (0.5, 0.5))),
+        );
         *cell = Cell {
             light: sum * (1.0 / real(ACROSS * ACROSS)),
             distance: centre.distance,
@@ -112,7 +123,9 @@ fn cache(records: Vec<Record>) -> Radiosity {
         records,
         ..Radiosity::default()
     };
-    radiosity.index().expect("the hierarchy builds");
+    let mut builder = radiosity.indexing().expect("the hierarchy builds");
+    while !builder.step(1) {}
+    radiosity.bvh = builder.finish();
     radiosity
 }
 
@@ -122,7 +135,7 @@ fn an_even_sky_leaves_a_record_its_light_and_no_slope() {
         light: Vec3::new(0.2, 0.4, 0.6),
         distance: f64::INFINITY,
     });
-    let record = Record::new(&SITE, &cells);
+    let record = Record::new(&SITE, &cells, RECORDS);
     assert!((record.light - Vec3::new(0.2, 0.4, 0.6)).length() < 1e-12);
     for gradient in record.turning.iter().chain(&record.moving) {
         assert!(gradient.length() < 1e-12, "{gradient:?}");
@@ -142,7 +155,7 @@ fn turning_toward_the_lit_half_of_the_sky_brightens_by_half_the_angle() {
         light: if dir.x > 0.0 { Vec3::ONE } else { Vec3::ZERO },
         distance: f64::INFINITY,
     });
-    let record = Record::new(&SITE, &cells);
+    let record = Record::new(&SITE, &cells, RECORDS);
     // Turning the normal toward +x turns it about +y.
     let turning = record.turning[0];
     assert!((turning.y - 0.5).abs() < 1e-9, "{turning:?}");
@@ -160,7 +173,7 @@ fn turning_toward_the_lit_half_of_the_sky_brightens_by_half_the_angle() {
 fn a_records_light_and_slopes_agree_with_the_light_integrated_directly() {
     let at = Vec3::new(0.2, 0.1, 0.0);
     let site = Site { point: at, ..SITE };
-    let record = Record::new(&site, &cells_of(&site, panel));
+    let record = Record::new(&site, &cells_of(&site, panel), RECORDS);
     let up = SITE.normal;
     let here = integrated(at, up, panel);
     assert!(
@@ -340,10 +353,11 @@ fn courtyard() -> Scene {
 /// The picture the courtyard's records are laid over.
 const PICTURE: (u32, u32) = (96, 64);
 
-fn gathered(scene: &Scene, runner: &dyn JobRunner) -> Radiosity {
-    let mut gathering = Gathering::new(PICTURE).expect("room to gather");
+fn gathered(scene: &Scene, runner: &dyn JobRunner, detail: Detail) -> Radiosity {
+    let mut gathering =
+        Gathering::new(PICTURE, &detail.densities().records).expect("room to gather");
     while !gathering.step(scene, runner).expect("room to gather") {}
-    gathering.finish().expect("room to gather")
+    gathering.finish()
 }
 
 /// However many cores share the work — so however a record's rows fall
@@ -352,17 +366,19 @@ fn gathered(scene: &Scene, runner: &dyn JobRunner) -> Radiosity {
 #[test]
 fn gathering_lays_the_same_records_on_one_thread_as_on_several() {
     let scene = courtyard();
-    let alone = gathered(&scene, &SERIAL);
-    assert!(!alone.records.is_empty());
-    let runners: [&dyn JobRunner; 2] = [&Threaded::new(3), &tairix_parallel::Reversed::new(5)];
-    for runner in runners {
-        let shared = gathered(&scene, runner);
-        assert_eq!(alone.records.len(), shared.records.len());
-        for (a, b) in alone.records.iter().zip(&shared.records) {
-            assert_eq!(a.point, b.point);
-            assert_eq!(a.light, b.light);
-            assert_eq!(a.radius.to_bits(), b.radius.to_bits());
-            assert_eq!((a.turning, a.moving), (b.turning, b.moving));
+    for detail in Detail::ALL {
+        let alone = gathered(&scene, &SERIAL, detail);
+        assert!(!alone.records.is_empty());
+        let runners: [&dyn JobRunner; 2] = [&Threaded::new(3), &tairix_parallel::Reversed::new(5)];
+        for runner in runners {
+            let shared = gathered(&scene, runner, detail);
+            assert_eq!(alone.records.len(), shared.records.len());
+            for (a, b) in alone.records.iter().zip(&shared.records) {
+                assert_eq!(a.point, b.point);
+                assert_eq!(a.light, b.light);
+                assert_eq!(a.radius.to_bits(), b.radius.to_bits());
+                assert_eq!((a.turning, a.moving), (b.turning, b.moving));
+            }
         }
     }
 }
@@ -370,7 +386,7 @@ fn gathering_lays_the_same_records_on_one_thread_as_on_several() {
 #[test]
 fn the_records_stand_for_what_every_sample_would_trace() {
     let scene = courtyard();
-    let radiosity = gathered(&scene, &Threaded::new(4));
+    let radiosity = gathered(&scene, &Threaded::new(4), Detail::Maximum);
     let encoder = Encoder::new().expect("an encoder");
     let tracer = Tracer::new(&scene, &encoder, PICTURE, 0);
     let mut compared = 0;
@@ -382,12 +398,12 @@ fn the_records_stand_for_what_every_sample_would_trace() {
             let Some(recorded) = radiosity.light(site.point, site.normal, site.normal) else {
                 continue;
             };
-            let mut cells = alloc::vec![Cell::DARK; CELLS];
+            let mut cells = alloc::vec![Cell::DARK; RECORDS.cells()];
             let mean = |seed: u32, cells: &mut [Cell]| {
-                for (row, piece) in cells.chunks_mut(COLUMNS).enumerate() {
-                    tracer.gather(&Site { seed, ..site }, row, piece);
+                for (row, piece) in cells.chunks_mut(RECORDS.columns).enumerate() {
+                    tracer.gather(&Site { seed, ..site }, (RECORDS, row), piece);
                 }
-                cells.iter().map(|cell| cell.light.x).sum::<f64>() / real(CELLS)
+                cells.iter().map(|cell| cell.light.x).sum::<f64>() / real(RECORDS.cells())
             };
             let gathered = (0..8u32).map(|seed| mean(seed, &mut cells)).sum::<f64>() / 8.0;
             assert!(

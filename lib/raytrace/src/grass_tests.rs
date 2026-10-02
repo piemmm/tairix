@@ -670,3 +670,30 @@ fn a_golden_turn_keeps_a_heading_unit_and_spreads_a_cell_evenly() {
         assert!(gap < 2.0 * TAU / 8.0, "{headings:?}");
     }
 }
+
+#[test]
+fn a_far_cell_heads_its_shoot_any_way_round_whatever_its_share_rounds_to() {
+    // A third of a shoot a cell: only the cells whose draw rounds that up
+    // root one, and they must head every way round alike.
+    let mut sectors = [0u32; 8];
+    let mut rooting = 0u32;
+    for index in 0..48_000u32 {
+        let (count, heading) = rooted(0.3, mix32(index ^ 0x00c0_ffee));
+        assert!(count <= 1, "a third of a shoot never rounds past one");
+        if count == 0 {
+            continue;
+        }
+        rooting += 1;
+        let sector = (heading / TAU * 8.0).clamp(0.0, 7.0);
+        sectors[usize::try_from(mathf::round_i32(mathf::floor(sector))).expect("a sector")] += 1;
+    }
+    let rooting = f64::from(rooting);
+    assert!((rooting / 48_000.0 - 0.3).abs() < 0.01, "{rooting}");
+    for (sector, &held) in sectors.iter().enumerate() {
+        let share = f64::from(held) / rooting;
+        assert!(
+            (share - 0.125).abs() < 0.012,
+            "sector {sector} holds {share}"
+        );
+    }
+}

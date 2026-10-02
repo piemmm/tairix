@@ -9,8 +9,8 @@ use alloc::vec::Vec;
 
 use tairix_abi::time::Duration64;
 use tairix_wallpaper::{
-    CatalogItem, CellSize, CpuUse, Pace, ScreensaverKind, ScreensaverOptions, SettingsKey,
-    SlideOrder, SlideSource, StarDensity, WallpaperCategory, SLIDE_INTERVAL_MAX,
+    CatalogItem, CellSize, CpuUse, Pace, SceneDetail, ScreensaverKind, ScreensaverOptions,
+    SettingsKey, SlideOrder, SlideSource, StarDensity, WallpaperCategory, SLIDE_INTERVAL_MAX,
     SLIDE_INTERVAL_MIN,
 };
 
@@ -59,6 +59,8 @@ pub enum SaverOption {
     RaytraceCpu,
     /// Whether the ray tracer keeps each finished picture.
     RaytraceSave,
+    /// How much each of the ray tracer's scenes sets out.
+    RaytraceDetail,
     /// How fast the retro games' flight crosses the grid.
     RetroGamesSpeed,
     /// Whether the System Monitor names the busiest tasks.
@@ -78,7 +80,9 @@ impl SaverOption {
             ScreensaverKind::Ribbon => &[Self::RibbonDate],
             ScreensaverKind::Starfield => &[Self::StarDensity, Self::StarWarp],
             ScreensaverKind::Life => &[Self::LifeCells, Self::LifeSpeed],
-            ScreensaverKind::Raytrace => &[Self::RaytraceCpu, Self::RaytraceSave],
+            ScreensaverKind::Raytrace => {
+                &[Self::RaytraceCpu, Self::RaytraceSave, Self::RaytraceDetail]
+            }
             ScreensaverKind::RetroGames => &[Self::RetroGamesSpeed],
             ScreensaverKind::SystemMonitor => &[Self::MonitorTasks],
         }
@@ -100,6 +104,7 @@ impl SaverOption {
             Self::LifeSpeed => SettingsKey::LifeSpeed,
             Self::RaytraceCpu => SettingsKey::RaytraceCpu,
             Self::RaytraceSave => SettingsKey::RaytraceSave,
+            Self::RaytraceDetail => SettingsKey::RaytraceDetail,
             Self::RetroGamesSpeed => SettingsKey::RetroGamesSpeed,
             Self::MonitorTasks => SettingsKey::MonitorTasks,
         }
@@ -120,6 +125,7 @@ impl SaverOption {
             Self::LifeSpeed | Self::RetroGamesSpeed => "Speed",
             Self::RaytraceCpu => "Processor use",
             Self::RaytraceSave => "Save pictures",
+            Self::RaytraceDetail => "Detail",
             Self::MonitorTasks => "Name the busiest tasks",
         }
     }
@@ -151,6 +157,11 @@ impl SaverOption {
             Self::RaytraceSave => {
                 "Whether each finished picture is kept as a PNG in Documents, under Pictures \
                  and then Raytracing."
+            }
+            Self::RaytraceDetail => {
+                "Simple sets each scene out plainly, in a fraction of the memory. Maximum \
+                 realism stands its woods further out and gathers its light more finely, in \
+                 many times the memory; while that is not free, scenes are set out simply."
             }
             Self::RetroGamesSpeed => "How fast the flight crosses the grid towards the sun.",
             Self::MonitorTasks => {
@@ -194,6 +205,7 @@ impl SaverOption {
             Self::LifeSpeed => pick(&Pace::ALL, options.life.speed, pace_label),
             Self::RaytraceCpu => pick(&CpuUse::ALL, options.raytrace.cpu, cpu_use_label),
             Self::RaytraceSave => pick(&SWITCH, options.raytrace.save, switch_label),
+            Self::RaytraceDetail => pick(&SceneDetail::ALL, options.raytrace.detail, detail_label),
             Self::RetroGamesSpeed => pick(&Pace::ALL, options.retro_games.speed, pace_label),
             Self::MonitorTasks => pick(&SWITCH, options.system_monitor.tasks, switch_label),
         }
@@ -238,6 +250,7 @@ impl SaverOption {
             Self::LifeSpeed => set(&Pace::ALL, index, &mut options.life.speed),
             Self::RaytraceCpu => set(&CpuUse::ALL, index, &mut options.raytrace.cpu),
             Self::RaytraceSave => set(&SWITCH, index, &mut options.raytrace.save),
+            Self::RaytraceDetail => set(&SceneDetail::ALL, index, &mut options.raytrace.detail),
             Self::RetroGamesSpeed => set(&Pace::ALL, index, &mut options.retro_games.speed),
             Self::MonitorTasks => set(&SWITCH, index, &mut options.system_monitor.tasks),
         }
@@ -326,5 +339,12 @@ const fn cpu_use_label(cpu: CpuUse) -> &'static str {
     match cpu {
         CpuUse::Idle => "Idle time",
         CpuUse::Performance => "Performance",
+    }
+}
+
+const fn detail_label(detail: SceneDetail) -> &'static str {
+    match detail {
+        SceneDetail::Simple => "Simple",
+        SceneDetail::Maximum => "Maximum realism",
     }
 }

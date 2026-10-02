@@ -313,6 +313,14 @@ impl Land {
         (level.is_finite() && level > self.height(fields, x, z)).then_some(level)
     }
 
+    /// What one stands on at `(x, z)`: the ground, or the fresh water's
+    /// surface where it lies above the ground.
+    pub(crate) fn surface(&self, fields: &[Heightfield], x: f64, z: f64) -> f64 {
+        self.water(fields, x, z)
+            .unwrap_or(f64::NEG_INFINITY)
+            .max(self.height(fields, x, z))
+    }
+
     /// Whether `(x, z)` lies under water, fresh or salt.
     pub(crate) fn wet_at(&self, fields: &[Heightfield], x: f64, z: f64) -> bool {
         let ground = self.height(fields, x, z);
@@ -349,6 +357,14 @@ pub(crate) struct Survey<'a> {
 impl Survey<'_> {
     pub(crate) fn height(&self, x: f64, z: f64) -> f64 {
         self.far.height_at(x, z)
+    }
+
+    /// What one stands on at `(x, z)`: the ground, or a lake's or a river's
+    /// surface where it lies above the ground.
+    pub(crate) fn surface(&self, x: f64, z: f64) -> f64 {
+        self.water(x, z)
+            .unwrap_or(f64::NEG_INFINITY)
+            .max(self.height(x, z))
     }
 
     pub(crate) fn lie(&self, x: f64, z: f64) -> Lie {
@@ -1740,9 +1756,7 @@ impl Build {
                 let drained = real(network.discharge[here] as usize) * cell_area;
                 let width =
                     (rivers.width * mathf::sqrt(drained / rivers.catchment)).min(MOST_RIVER_WIDTH);
-                if !fallible::reserve(&mut marks, 1) {
-                    return None;
-                }
+                marks.try_reserve(1).ok()?;
                 marks.push(Mark {
                     x,
                     z,
@@ -1788,28 +1802,7 @@ impl Build {
     /// set wandering across its level stretches, and its surface falling
     /// steadily downstream.
     fn shape_river(&self, traced: &[Mark], rivers: Rivers) -> Option<Vec<Mark>> {
-        let mut course = smoothed(traced, 3)?;
-        let seed = self.plan.seed;
-        let mut travelled = 0.0;
-        for index in 1..course.len().saturating_sub(1) {
-            let (last, here, next) = (course[index - 1], course[index], course[index + 1]);
-            travelled += mathf::hypot(here.x - last.x, here.z - last.z);
-            let (dx, dz) = (next.x - last.x, next.z - last.z);
-            let length = mathf::hypot(dx, dz).max(1e-9);
-            let fall = (last.level - next.level).max(0.0) / length;
-            // Wandering most where the valley floor is flattest.
-            let level = 1.0 - smoothstep(0.002, 0.03, fall);
-            let wavelength = 11.0 * here.width.max(2.0);
-            let sway = rivers.meander
-                * here.width
-                * level
-                * (mathf::sin(
-                    TAU * travelled / wavelength
-                        + noise2(travelled / (4.0 * wavelength), 0.3, seed),
-                ));
-            course[index].x += -dz / length * sway;
-            course[index].z += dx / length * sway;
-        }
+        let mut course = meandering(&smoothed(traced, 3)?, rivers, self.plan.seed)?;
         // The water falls, never rises, on its way down, and runs below the
         // floodplain it has cut its channel into.
         let mut surface = f64::INFINITY;
@@ -1973,9 +1966,7 @@ impl Build {
                 mark.level = deck;
                 *pin = true;
             }
-            if !fallible::reserve(&mut crossings, 1) {
-                return None;
-            }
+            crossings.try_reserve(1).ok()?;
             crossings.push(Crossing {
                 from: course[first],
                 to: course[last],
@@ -2225,7 +2216,7 @@ impl Build {
                 let river = self
                     .rivers
                     .nearest(x, z)
-                    .filter(|near| near.distance < 0.5 * near.width + step)
+                    .filter(|near| near.distance < river_reach(near.width, step))
                     .map_or(f64::NEG_INFINITY, |near| near.level);
                 let level = lake.max(river);
                 *slot = if level.is_finite() {
@@ -2237,6 +2228,15 @@ impl Build {
         });
         Some(())
     }
+}
+
+/// How far from its middle a river `width` wide wets a grid `step` apart's
+/// vertices: past its banks by a cell's diagonal, so every cell its course
+/// crosses holds water at all four corners, however narrow the river and
+/// however it slants across the grid. Water drawn past the banks lies under
+/// the ground there, unseen.
+fn river_reach(width: f64, step: f64) -> f64 {
+    0.5 * width + core::f64::consts::SQRT_2 * step
 }
 
 /// A lake stands where the ground lies this far below the surface its basin
@@ -2378,6 +2378,34 @@ fn octaves_between(longest: f64, step: f64) -> u32 {
     u32::try_from(mathf::round_i32(mathf::floor(span)))
         .unwrap_or(1)
         .clamp(1, 6)
+}
+
+/// `course` set wandering from side to side across its level stretches under
+/// `seed`: each point moved across the untouched course, by how far that
+/// course has run to it, so no move bends the next; `None` when the heap will
+/// not hold it.
+fn meandering(course: &[Mark], rivers: Rivers, seed: u32) -> Option<Vec<Mark>> {
+    let mut wandering = fallible::collected(course.len(), course.iter().copied())?;
+    let mut travelled = 0.0;
+    for (moved, run) in wandering.iter_mut().skip(1).zip(course.windows(3)) {
+        let [last, here, next] = [run[0], run[1], run[2]];
+        travelled += mathf::hypot(here.x - last.x, here.z - last.z);
+        let (dx, dz) = (next.x - last.x, next.z - last.z);
+        let length = mathf::hypot(dx, dz).max(1e-9);
+        let fall = (last.level - next.level).max(0.0) / length;
+        // Wandering most where the valley floor is flattest.
+        let level = 1.0 - smoothstep(0.002, 0.03, fall);
+        let wavelength = 11.0 * here.width.max(2.0);
+        let sway = rivers.meander
+            * here.width
+            * level
+            * mathf::sin(
+                TAU * travelled / wavelength + noise2(travelled / (4.0 * wavelength), 0.3, seed),
+            );
+        moved.x += -dz / length * sway;
+        moved.z += dx / length * sway;
+    }
+    Some(wandering)
 }
 
 /// The fan a river whose course is `course` lays where it runs out into

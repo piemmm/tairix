@@ -386,6 +386,12 @@ impl Shape {
                 let local = placed(ray, &pose, scale);
                 let mut hit = prototype.intersect(&local, near / scale, far / scale)?;
                 hit.t *= scale;
+                // A limb's bark is laid at its real size, so its girth and the
+                // way along its stem are the placed tree's, not its prototype's.
+                if hit.girth > 0.0 {
+                    hit.girth *= scale;
+                    hit.uv.0 *= scale;
+                }
                 hit.normal = pose.frame.to_world(hit.normal);
                 hit.shading = pose.frame.to_world(hit.shading);
                 hit.tangent = pose.frame.to_world(hit.tangent);

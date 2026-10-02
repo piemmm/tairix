@@ -288,8 +288,8 @@ fn a_picture_with_no_pixels_or_more_than_a_count_holds_has_no_reveal() {
 }
 
 /// The first pass traces every point of its grid, a hundred-odd pixels
-/// however large the screen, so all of the picture lies between traced points
-/// once that pass is done.
+/// however large the screen, so all of the picture lies within a spacing of a
+/// traced point once that pass is done.
 #[test]
 fn the_first_pass_traces_its_whole_grid_in_a_few_points() {
     for size in SIZES

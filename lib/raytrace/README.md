@@ -14,9 +14,13 @@ random from a seed, and a tracer that answers what one pixel of one shows.
   rotundas, ruins), sculpture in a landscape, and landscapes (meadows, a
   forest, mountains over a lake, a coast, desert, snow, a lagoon, canyons, a
   river valley).
-- `Draft` — a scene composed but not yet traceable: its lands built, its woods
-  and swards grown, its trees and deadwood grown into prototypes, its grids and
-  sky tables filled, its hierarchy built, and its radiosity gathered. `prepare`
+- `Detail` — how much a scene sets out: `Simple`, every setting plainer
+  within about 384 MiB at its peak, or `Maximum`, all the realism a 2 GiB peak
+  buys; `peak` states each one's budget for a caller weighing its memory.
+- `Draft` — a scene composed at a `Detail` but not yet traceable: its lands
+  built, its woods and swards grown, its trees and deadwood grown into
+  prototypes, its grids and sky tables filled, its hierarchy built, its
+  radiosity gathered and its exposure and local adaptation metered. `prepare`
   does a bounded unit of that work at a time across any
   `tairix_parallel::JobRunner`, so a caller on an interactive loop spreads it
   over frames; `progress` says how far it has come, in thousandths; `finish`
@@ -38,13 +42,15 @@ random from a seed, and a tracer that answers what one pixel of one shows.
 
 ## Guarantees
 
-- **Deterministic.** A setting, a seed and an aspect compose one scene; a
-  pixel's samples are hashed from its index and the scene's key.
+- **Deterministic.** A setting, a seed, a picture size and a detail compose
+  one scene, and a seed shows the same land, eye, hour and weather at either
+  detail; a pixel's samples are hashed from its index and the scene's key.
 - **Fallible allocation.** Every buffer is reserved fallibly: a heap that will
   not hold a scene answers `None`, never an abort.
-- **Bounded cost.** A scene holds at most 524 288 objects, 4096 hull faces,
+- **Bounded cost.** A scene holds at most 131 072 objects at `Simple` and
+  524 288 at `Maximum`, 4096 hull faces,
   256 materials, 12 lights, 12 height grids, 96 prototypes, 16 lawns and 8
-  woods; a pixel at most 64 samples, a path at most nine bounces. Every unit of
+  woods; a pixel at most 128 samples, a path at most nine bounces. Every unit of
   preparation is a fixed amount of work a core, whatever the scene holds: a
   band of a grid's rows or of a shade's, a turn of a land's droplet tiles, a
   slice of a prototype's or the scene's hierarchy, a band of a wood's places
@@ -68,7 +74,21 @@ walling off the view, and a forest standing thousands of trees and its fallen
 among them clear of the eye; the shade crowns cast and the sky they hide, and
 the air beneath them roofed; fallen trunks lying along the ground, thrown or
 snapped, and stumps sawn or splintered; ferns arching from the ground; the
-sampling, lights, materials and pigments; a grid of any size met at the
+sampling, lights, materials and pigments; a limb narrowing by its level's
+taper and a fork's arms carrying its narrowing on, a scaled limb met at its
+placed girth, and a bending limb's bark starting round it alike either side of
+a joint; a straight river wandering only sideways by its own length run; the
+sky's mean weighed by its cosine over the hemisphere; a far grass cell's shoot
+heading any way round; a coarse ray reaching cloud past any number of clear
+columns; a bridge's deck and a row of arches keeping trees off the strip
+beneath them, a strip claimed with no gap at its edges, a narrow slanting
+river wet in every cell it crosses, and woods with nothing beneath them still
+casting their shade; a seed showing the same place at either detail, `Simple` standing
+fewer trees nearer the eye within its room, and both details' records the same
+on any runner; local adaptation leaving a frame one exposure holds alone,
+drawing a bright window down and lifting a dark wall alike to the edge between
+them with no halo, keeping detail and letting the sun blow out, and the same
+however its measurement was divided; a grid of any size met at the
 nearest of its cells and sealed the same across any number of cores, written
 only as its rows are filled, and a canopy grid as large as its lawn and no
 larger; a shade cast in bands bit for bit the shade cast whole, and sampled

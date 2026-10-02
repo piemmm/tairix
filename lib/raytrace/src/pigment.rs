@@ -43,8 +43,8 @@ pub(crate) struct Spot {
     /// Whether the ray met the surface's front: a leaf's upper side.
     pub(crate) front: bool,
     /// What a land is like where it was met — wet, worn or built up, on a
-    /// road or a path, how much grows there — each `0.0..=1.0`; nought off
-    /// the land.
+    /// road or a path, how much grows there — each `0.0..=1.0`; off the land,
+    /// and on one carrying none of this, plain ground's.
     pub(crate) ground: [f64; 4],
     /// How much of the sky a sward's blades hide from the point, `0.0` in the
     /// open: ground under it shows the thatch at its roots.

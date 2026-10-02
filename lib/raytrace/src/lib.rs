@@ -26,6 +26,7 @@
 
 extern crate alloc;
 
+mod adapt;
 mod atmosphere;
 mod band;
 mod bark;
@@ -35,6 +36,7 @@ mod cloud;
 mod compose;
 mod course;
 mod deadwood;
+mod detail;
 mod grass;
 mod ground;
 mod heightfield;
@@ -60,6 +62,7 @@ mod tree;
 mod vector;
 
 pub use compose::Setting;
+pub use detail::Detail;
 pub use sample::{Reveal, Step};
 pub use scene::{Draft, Scene};
 pub use tone::Encoder;

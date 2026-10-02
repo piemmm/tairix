@@ -90,6 +90,9 @@ const TAPS: [f64; 4] = [0.1, 0.3, 0.7, 1.5];
 /// otherwise; and the transmittance below which what lies beyond is hidden.
 const FINE_STEPS: u32 = 320;
 const COARSE_STEPS: u32 = 32;
+/// The most clear columns a ray jumps: as many walls of the weather map as a
+/// straight line across it can cross.
+const MOST_JUMPS: usize = 2 * WEATHER_SIDE;
 const OPAQUE: f64 = 0.015;
 /// A step through a deck, as a share of its billows, seen directly and seen
 /// otherwise: fine enough that no edge shows where a step fell. Clear air
@@ -458,15 +461,21 @@ impl Cloudbank {
         let mut depth = 0.0;
         let mut weight = 0.0;
         let mut steps = 0;
+        let mut jumps = 0_usize;
         while t < leave && steps < most {
-            steps += 1;
             let point = origin + dir * t;
-            let step = within(t, steps);
+            let step = within(t, steps + 1);
             let Some(sample) = reader.density(point, fine) else {
-                // A column no deck covers: on to where the ray leaves it.
+                // A column no deck covers is crossed in one jump, which spends
+                // none of the steps the cloud beyond it is owed.
+                jumps += 1;
+                if jumps > MOST_JUMPS {
+                    break;
+                }
                 t = self.past_column(origin, dir, t).max(t + 1e-3 * step);
                 continue;
             };
+            steps += 1;
             if sample.density <= 1e-4 {
                 t += step;
                 continue;

@@ -3581,10 +3581,11 @@ fn value_of(document: &str, key: SettingsKey) -> Option<&str> {
 }
 
 /// The ray tracer's group sets how much of the machine it traces on, idle
-/// time first and chosen until told otherwise, and whether its pictures are
-/// kept, off until told otherwise, above the button that shows it.
+/// time first and chosen until told otherwise, whether its pictures are
+/// kept, off until told otherwise, and how much its scenes set out, simply
+/// until told otherwise, above the button that shows it.
 #[test]
-fn the_ray_tracer_offers_its_processor_use_its_pictures_and_its_preview() {
+fn the_ray_tracer_offers_its_processor_use_its_pictures_its_detail_and_its_preview() {
     let mut shell = screensaver_showing(DesktopSettings {
         screensaver: tairix_wallpaper::ScreensaverKind::Raytrace,
         ..DesktopSettings::default()
@@ -3595,7 +3596,7 @@ fn the_ray_tracer_offers_its_processor_use_its_pictures_and_its_preview() {
     );
     assert_eq!(
         row_labels(&shell, 1),
-        ["Processor use", "Save pictures", "Preview"]
+        ["Processor use", "Save pictures", "Detail", "Preview"]
     );
     let form = shell.form_mut_for_test().expect("a form");
     let tairix_controls::FieldControl::Combo(combo) = form.groups()[1].rows()[0].control() else {
@@ -3608,6 +3609,15 @@ fn the_ray_tracer_offers_its_processor_use_its_pictures_and_its_preview() {
     };
     assert_eq!(save.choices(), ["On", "Off"]);
     assert_eq!(save.selected(), Some(1), "pictures are not kept unasked");
+    let tairix_controls::FieldControl::Combo(detail) = form.groups()[1].rows()[2].control() else {
+        panic!("the detail is a choice");
+    };
+    assert_eq!(detail.choices(), ["Simple", "Maximum realism"]);
+    assert_eq!(
+        detail.selected(),
+        Some(0),
+        "scenes are set out simply unasked"
+    );
 }
 
 /// The System Monitor names the busiest tasks until told not to, and the row
@@ -3664,7 +3674,11 @@ fn every_screensaver_option_posts_its_own_key() {
         ),
         (
             tairix_wallpaper::ScreensaverKind::Raytrace,
-            &[SettingsKey::RaytraceCpu, SettingsKey::RaytraceSave],
+            &[
+                SettingsKey::RaytraceCpu,
+                SettingsKey::RaytraceSave,
+                SettingsKey::RaytraceDetail,
+            ],
         ),
         (
             tairix_wallpaper::ScreensaverKind::RetroGames,

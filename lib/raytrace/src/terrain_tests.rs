@@ -103,8 +103,9 @@ fn terrain_is_level_in_its_clearing_and_settles_to_its_rim() {
         tilt: (0.0, 0.0),
         clearing: Some((-0.5, 40.0)),
     };
-    // The clearing's edge wanders up to a fifth in and out, so the land lies
-    // level everywhere within four fifths of its radius, whatever the seed.
+    // The clearing's edge wanders up to 0.22 of its radius in and out, so the
+    // land lies level everywhere within three quarters of it, whatever the
+    // seed.
     for (x, z) in places(300, 40.0) {
         if mathf::hypot(x, z) < 0.75 * 40.0 {
             assert!(

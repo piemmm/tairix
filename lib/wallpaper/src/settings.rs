@@ -74,8 +74,8 @@ use crate::input::{
 };
 use crate::notify::NotifyPolicy;
 use crate::saver::{
-    CellSize, CpuUse, Pace, ScreensaverOptions, SlideOrder, SlideSource, SlideshowOptions,
-    StarDensity,
+    CellSize, CpuUse, Pace, SceneDetail, ScreensaverOptions, SlideOrder, SlideSource,
+    SlideshowOptions, StarDensity,
 };
 
 /// Maximum length, in bytes, of a wallpaper path named by the `wallpaper`
@@ -634,6 +634,9 @@ pub enum SettingsKey {
     /// `screensaver.raytrace.save` — whether the ray tracer keeps each
     /// finished picture in the user's pictures.
     RaytraceSave,
+    /// `screensaver.raytrace.detail` — how much each of the ray tracer's
+    /// scenes sets out.
+    RaytraceDetail,
     /// `screensaver.retro_games.speed` — how fast the retro games' flight
     /// crosses the grid.
     RetroGamesSpeed,
@@ -647,7 +650,7 @@ pub enum SettingsKey {
 
 impl SettingsKey {
     /// Every registry key, in the canonical listing (and render) order.
-    pub const ALL: [Self; 41] = [
+    pub const ALL: [Self; 42] = [
         Self::Wallpaper,
         Self::Fit,
         Self::Backdrop,
@@ -686,6 +689,7 @@ impl SettingsKey {
         Self::LifeSpeed,
         Self::RaytraceCpu,
         Self::RaytraceSave,
+        Self::RaytraceDetail,
         Self::RetroGamesSpeed,
         Self::MonitorTasks,
         Self::LockAfter,
@@ -733,7 +737,7 @@ impl SettingsKey {
     /// The keys deciding what the screen does once the desktop is idle — and
     /// every scene's own options: what the Settings application's
     /// Screensaver pane edits, and what a screensaver preview names.
-    pub const SCREENSAVER: [Self; 17] = [
+    pub const SCREENSAVER: [Self; 18] = [
         Self::ScreensaverAfter,
         Self::ScreensaverKind,
         Self::DisplayOffAfter,
@@ -749,6 +753,7 @@ impl SettingsKey {
         Self::LifeSpeed,
         Self::RaytraceCpu,
         Self::RaytraceSave,
+        Self::RaytraceDetail,
         Self::RetroGamesSpeed,
         Self::MonitorTasks,
     ];
@@ -799,6 +804,7 @@ impl SettingsKey {
             Self::LifeSpeed => "screensaver.life.speed",
             Self::RaytraceCpu => "screensaver.raytrace.cpu",
             Self::RaytraceSave => "screensaver.raytrace.save",
+            Self::RaytraceDetail => "screensaver.raytrace.detail",
             Self::RetroGamesSpeed => "screensaver.retro_games.speed",
             Self::MonitorTasks => "screensaver.system_monitor.tasks",
             Self::LockAfter => "lock.after_min",
@@ -1113,6 +1119,9 @@ fn set_field(settings: &mut DesktopSettings, key: SettingsKey, value: &str) -> b
         SettingsKey::LifeSpeed => put(&mut saver.life.speed, Pace::from_value(value)),
         SettingsKey::RaytraceCpu => put(&mut saver.raytrace.cpu, CpuUse::from_value(value)),
         SettingsKey::RaytraceSave => put_bool(&mut saver.raytrace.save, value),
+        SettingsKey::RaytraceDetail => {
+            put(&mut saver.raytrace.detail, SceneDetail::from_value(value))
+        }
         SettingsKey::RetroGamesSpeed => put(&mut saver.retro_games.speed, Pace::from_value(value)),
         SettingsKey::MonitorTasks => put_bool(&mut saver.system_monitor.tasks, value),
         SettingsKey::LockAfter => put(&mut settings.lock_after, IdleAfter::from_value(value)),
@@ -1192,6 +1201,7 @@ fn field_value(settings: &DesktopSettings, key: SettingsKey) -> String {
         SettingsKey::LifeSpeed => saver.life.speed.as_str().to_string(),
         SettingsKey::RaytraceCpu => saver.raytrace.cpu.as_str().to_string(),
         SettingsKey::RaytraceSave => tairix_appconf::bool_text(saver.raytrace.save).to_string(),
+        SettingsKey::RaytraceDetail => saver.raytrace.detail.as_str().to_string(),
         SettingsKey::RetroGamesSpeed => saver.retro_games.speed.as_str().to_string(),
         SettingsKey::MonitorTasks => {
             tairix_appconf::bool_text(saver.system_monitor.tasks).to_string()

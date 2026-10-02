@@ -624,6 +624,7 @@ const SCREENSAVER_SETTINGS: &[&str] = &[
     SaverOption::LifeSpeed.label(),
     SaverOption::RaytraceCpu.label(),
     SaverOption::RaytraceSave.label(),
+    SaverOption::RaytraceDetail.label(),
     SaverOption::RetroGamesSpeed.label(),
     SaverOption::MonitorTasks.label(),
     Action::PreviewScreensaver.label(),

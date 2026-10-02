@@ -7,6 +7,7 @@ use alloc::vec::Vec;
 use super::{Draft, Exposure, Object, Parts, Scene, Sight};
 use crate::camera::Camera;
 use crate::compose::Setting;
+use crate::detail::Detail;
 use crate::material::{Finish, Material};
 use crate::pigment::Pigment;
 use crate::sample::{mix32, unit};
@@ -97,7 +98,8 @@ fn crowd() -> Vec<Object> {
 /// share a step, and meets every ray as one built at once does.
 #[test]
 fn a_large_scenes_hierarchy_builds_a_step_at_a_time_and_meets_rays_as_one_built_whole() {
-    let mut building = Scene::building(parts(crowd())).expect("a building");
+    let mut building =
+        Scene::building(parts(crowd()), &tairix_parallel::Threaded::new(3)).expect("a building");
     let mut steps = 1;
     while !building.step() {
         steps += 1;
@@ -263,6 +265,13 @@ fn fingerprint(scene: &Scene) -> Vec<u64> {
     }
     marks.push(scene.exposure.to_bits());
     marks.push(scene.prototypes.len() as u64);
+    if let Some(adaptation) = &scene.adaptation {
+        for step in 0..60u32 {
+            let film = (unit(mix32(step)), unit(mix32(step ^ 0x77)));
+            let luminance = 0.01 * f64::from(1 + step % 12) * f64::from(1 + step);
+            marks.push(adaptation.factor(film, luminance).to_bits());
+        }
+    }
     marks
 }
 
@@ -271,7 +280,7 @@ fn fingerprint(scene: &Scene) -> Vec<u64> {
 /// lawns they come to are crossed together.
 #[test]
 fn a_packet_of_eye_rays_finds_what_each_finds_alone() {
-    let scene = Draft::new(Setting::Meadow, 3, SIZE)
+    let scene = Draft::new(Setting::Meadow, 3, SIZE, Detail::Maximum)
         .expect("a draft")
         .finish()
         .expect("a scene");
@@ -315,7 +324,7 @@ fn a_packet_of_eye_rays_finds_what_each_finds_alone() {
 /// finishes.
 #[test]
 fn a_draft_prepared_a_unit_at_a_time_finishes_the_scene_prepared_at_once() {
-    let mut stepped = Draft::new(Setting::Meadow, 3, SIZE).expect("a draft");
+    let mut stepped = Draft::new(Setting::Meadow, 3, SIZE, Detail::Maximum).expect("a draft");
     let mut calls = 0;
     while !stepped
         .prepare(&tairix_parallel::SERIAL, &mut || true)
@@ -325,7 +334,7 @@ fn a_draft_prepared_a_unit_at_a_time_finishes_the_scene_prepared_at_once() {
     }
     assert!(calls > 20, "a meadow's work takes {calls} units");
     let stepped = stepped.finish().expect("a scene");
-    let at_once = Draft::new(Setting::Meadow, 3, SIZE)
+    let at_once = Draft::new(Setting::Meadow, 3, SIZE, Detail::Maximum)
         .expect("a draft")
         .finish()
         .expect("a scene");
@@ -337,23 +346,30 @@ fn a_draft_prepared_a_unit_at_a_time_finishes_the_scene_prepared_at_once() {
 #[test]
 fn a_draft_prepared_across_workers_matches_one_prepared_alone() {
     let pool = tairix_parallel::Threaded::new(3);
-    let mut spread = Draft::new(Setting::Coast, 11, SIZE).expect("a draft");
+    let mut spread = Draft::new(Setting::Coast, 11, SIZE, Detail::Maximum).expect("a draft");
     while !spread.prepare(&pool, &mut || false).expect("prepared") {}
     let spread = spread.finish().expect("a scene");
-    let alone = Draft::new(Setting::Coast, 11, SIZE)
+    let alone = Draft::new(Setting::Coast, 11, SIZE, Detail::Maximum)
         .expect("a draft")
         .finish()
         .expect("a scene");
+    assert!(
+        alone.adaptation.is_some(),
+        "a coast's sky lies past what one exposure holds"
+    );
     assert_eq!(fingerprint(&spread), fingerprint(&alone));
 }
 
 /// A draft's progress never falls back, climbs through the work rather than
 /// leaping to its end, and reaches its whole only once the scene is ready:
-/// on a land, and for a still life with no land at all.
+/// on a land, and for a still life with no land at all, at either detail.
 #[test]
 fn a_drafts_progress_climbs_steadily_to_its_whole_once_ready() {
-    for setting in [Setting::Meadow, Setting::Studio] {
-        let mut draft = Draft::new(setting, 7, SIZE).expect("a draft");
+    for (setting, detail) in [Setting::Meadow, Setting::Studio]
+        .into_iter()
+        .flat_map(|setting| Detail::ALL.map(|detail| (setting, detail)))
+    {
+        let mut draft = Draft::new(setting, 7, SIZE, detail).expect("a draft");
         assert_eq!(draft.progress(), 0);
         let mut seen = vec![0u16];
         while !draft
@@ -363,9 +379,12 @@ fn a_drafts_progress_climbs_steadily_to_its_whole_once_ready() {
             let progress = draft.progress();
             assert!(
                 progress >= *seen.last().expect("one"),
-                "{setting:?}: fell back"
+                "{setting:?} {detail:?}: fell back"
             );
-            assert!(progress < 1000, "{setting:?}: whole before it is ready");
+            assert!(
+                progress < 1000,
+                "{setting:?} {detail:?}: whole before it is ready"
+            );
             if progress != *seen.last().expect("one") {
                 seen.push(progress);
             }
@@ -377,14 +396,17 @@ fn a_drafts_progress_climbs_steadily_to_its_whole_once_ready() {
             .chain([1000 - seen.last().copied().unwrap_or(0)])
             .max()
             .unwrap_or(1000);
-        assert!(seen.len() > 10, "{setting:?}: {seen:?}");
-        assert!(largest <= 300, "{setting:?} leapt {largest}: {seen:?}");
+        assert!(seen.len() > 10, "{setting:?} {detail:?}: {seen:?}");
+        assert!(
+            largest <= 300,
+            "{setting:?} {detail:?} leapt {largest}: {seen:?}"
+        );
     }
 }
 
 /// A picture of no pixels has no scene.
 #[test]
 fn a_picture_with_no_pixels_has_no_draft() {
-    assert!(Draft::new(Setting::Meadow, 1, (0, 10)).is_none());
-    assert!(Draft::new(Setting::Meadow, 1, (10, 0)).is_none());
+    assert!(Draft::new(Setting::Meadow, 1, (0, 10), Detail::Maximum).is_none());
+    assert!(Draft::new(Setting::Meadow, 1, (10, 0), Detail::Maximum).is_none());
 }

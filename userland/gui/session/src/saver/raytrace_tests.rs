@@ -13,10 +13,12 @@ use tairix_parallel::Reversed;
 use tairix_raster::Pixel;
 use tairix_raytrace::{Reveal, Step};
 use tairix_theme::Theme;
-use tairix_wallpaper::{CpuUse, RaytraceOptions};
+use tairix_wallpaper::{CpuUse, RaytraceOptions, SceneDetail};
 use tairix_wm::{Color, Compositor, Point, Scale, Surface, WindowId};
 
-use super::{Engine, Phase, Raytrace, Status, TraceHost, TraceLink, Traced, FADE_MS, HOLD_NS};
+use super::{
+    Engine, Phase, Raytrace, Status, TraceHost, TraceLink, Traced, FADE_MS, HOLD_NS, PLAIN,
+};
 use crate::saver::seed_from;
 use crate::tests::compositor;
 use tairix_theme::motion::SceneClock;
@@ -86,7 +88,13 @@ fn launched(
     options: RaytraceOptions,
     host: Option<&dyn TraceHost>,
 ) -> Option<Raytrace> {
-    Raytrace::new(size, (calm, 0), options, host, (&Theme::dark(), Scale::ONE))
+    Raytrace::new(
+        size,
+        (calm, 0),
+        (options, PLAIN.memory, PLAIN.tell),
+        host,
+        (&Theme::dark(), Scale::ONE),
+    )
 }
 
 fn idle() -> RaytraceOptions {
@@ -445,17 +453,20 @@ fn a_frame_with_nothing_traced_repaints_nothing() {
     assert_eq!(saver.due_ns(), 2 * SceneClock::FRAME_NS);
 }
 
-/// The options the user chose — the share of the machine, and whether
-/// pictures are kept — are what the crew is launched with.
+/// The options the user chose — the share of the machine, whether pictures
+/// are kept, and how much each scene sets out — are what the crew is
+/// launched with.
 #[test]
 fn a_crew_is_launched_with_the_options_asked_for() {
     for cpu in CpuUse::ALL {
         for save in [false, true] {
-            let options = RaytraceOptions { cpu, save };
-            let script = Script::shared([]);
-            let _saver = launched(SIZE, false, options, Some(&Scripted(Rc::clone(&script))))
-                .expect("a reveal");
-            assert_eq!(script.borrow().launched, Some(options));
+            for detail in SceneDetail::ALL {
+                let options = RaytraceOptions { cpu, save, detail };
+                let script = Script::shared([]);
+                let _saver = launched(SIZE, false, options, Some(&Scripted(Rc::clone(&script))))
+                    .expect("a reveal");
+                assert_eq!(script.borrow().launched, Some(options));
+            }
         }
     }
 }
@@ -489,7 +500,7 @@ fn a_reveal_on_the_loop_ends_as_the_reveal_traced_alone() {
     let mut saver = launched(SIZE, false, idle(), None).expect("a reveal");
     reveal_whole(&mut saver, wm, &mut comp);
 
-    let mut alone = Engine::new(SIZE, seed_from(0)).expect("an engine");
+    let mut alone = Engine::new(SIZE, seed_from(0), PLAIN).expect("an engine");
     let mut clock = ticking(MS);
     let mut steps = Vec::new();
     while alone
@@ -516,7 +527,10 @@ fn on_the_loop_idle_keeps_to_one_core_and_performance_uses_the_pool() {
         let mut comp = compositor();
         comp.set_job_runner(pool);
         let wm = canvas(&mut comp, Color::rgb(0, 0, 0));
-        let options = RaytraceOptions { cpu, save: false };
+        let options = RaytraceOptions {
+            cpu,
+            ..RaytraceOptions::default()
+        };
         let mut saver = launched(SIZE, false, options, None).expect("a reveal");
         let mut clock = ticking(MS);
         let mut now = 0;

@@ -28,6 +28,53 @@ pub(crate) struct Tube {
     pub(crate) stem: [f32; 2],
     pub(crate) material: u16,
     pub(crate) key: u32,
+    /// How far round it, in radians, its bark's angle starts from where the
+    /// world alone would start it: toward the side its stem carries along
+    /// it, so a bending stem's segments agree on it.
+    turn: f32,
+}
+
+impl Tube {
+    /// A limb from `a` to `b`, `radii` thick at either end and `stem`
+    /// metres along its stem there, in `material` and keyed `key`, its bark
+    /// begun round it toward `side`.
+    pub(crate) fn new(
+        (a, b): (Vec3, Vec3),
+        (radii, stem): ((f64, f64), (f64, f64)),
+        (material, key): (u16, u32),
+        side: Vec3,
+    ) -> Self {
+        let (a, b) = (stored(a), stored(b));
+        let (first, second) = round((point(b) - point(a)).normalized());
+        let (x, y) = (side.dot(first), side.dot(second));
+        let turn = if x * x + y * y > 1e-12 {
+            mathf::atan2(y, x)
+        } else {
+            0.0
+        };
+        Self {
+            a,
+            b,
+            radii: [single(radii.0), single(radii.1)],
+            stem: [single(stem.0), single(stem.1)],
+            material,
+            key,
+            turn: single(turn),
+        }
+    }
+}
+
+/// The two directions about a limb running along the unit `axis` its angle
+/// is measured between, fixed by the world alone: what a limb's own `turn` is
+/// reckoned from.
+fn round(axis: Vec3) -> (Vec3, Vec3) {
+    let reference = if axis.x.abs() < 0.9 {
+        Vec3::new(1.0, 0.0, 0.0)
+    } else {
+        Vec3::new(0.0, 0.0, 1.0)
+    };
+    let first = (reference - axis * reference.dot(axis)).normalized();
+    (first, axis.cross(first))
 }
 
 /// A leaf: the part of the plane through `base` facing `normal` that its
@@ -381,16 +428,8 @@ fn meet_tube(tube: &Tube, ray: &Ray, (near, far): (f64, f64)) -> Option<Hit> {
 /// coordinates are the distance along the stem and the distance round it.
 fn limb_hit(t: f64, normal: Vec3, (stem, along): (f64, f64), tube: &Tube) -> Hit {
     let axis = (point(tube.b) - point(tube.a)).normalized();
-    // Round the limb from a side the world fixes, so a stem's segments agree
-    // on where its bark's pattern starts.
-    let reference = if axis.x.abs() < 0.9 {
-        Vec3::new(1.0, 0.0, 0.0)
-    } else {
-        Vec3::new(0.0, 0.0, 1.0)
-    };
-    let first = (reference - axis * reference.dot(axis)).normalized();
-    let second = axis.cross(first);
-    let angle = mathf::atan2(normal.dot(second), normal.dot(first));
+    let (first, second) = round(axis);
+    let angle = mathf::atan2(normal.dot(second), normal.dot(first)) - f64::from(tube.turn);
     let radius =
         f64::from(tube.radii[0]) + (f64::from(tube.radii[1]) - f64::from(tube.radii[0])) * along;
     Hit {

@@ -10,8 +10,8 @@ use crate::input::{PointerSpeed, PrimaryButton, RepeatRate};
 use crate::notify::NotifyLevel;
 use crate::saver::{
     CellSize, ClockOptions, CpuUse, LifeOptions, Pace, RaytraceOptions, RetroGamesOptions,
-    RibbonOptions, ScreensaverOptions, SlideOrder, SlideSource, SlideshowOptions, StarDensity,
-    StarfieldOptions, SystemMonitorOptions, WallpaperCategory, SLIDE_INTERVAL_DEFAULT,
+    RibbonOptions, SceneDetail, ScreensaverOptions, SlideOrder, SlideSource, SlideshowOptions,
+    StarDensity, StarfieldOptions, SystemMonitorOptions, WallpaperCategory, SLIDE_INTERVAL_DEFAULT,
 };
 use tairix_abi::desktop::ScreensaverKind;
 use tairix_abi::time::Duration64;
@@ -171,6 +171,7 @@ fn the_render_is_canonical_and_round_trips() {
          screensaver.life.speed = fast\n\
          screensaver.raytrace.cpu = performance\n\
          screensaver.raytrace.save = true\n\
+         screensaver.raytrace.detail = maximum\n\
          screensaver.retro_games.speed = slow\n\
          screensaver.system_monitor.tasks = false\n\
          lock.after_min = 15\n"
@@ -216,6 +217,7 @@ fn retuned_scenes() -> ScreensaverOptions {
         raytrace: RaytraceOptions {
             cpu: CpuUse::Performance,
             save: true,
+            detail: SceneDetail::Maximum,
         },
         retro_games: RetroGamesOptions { speed: Pace::Slow },
         system_monitor: SystemMonitorOptions { tasks: false },
@@ -949,6 +951,11 @@ fn the_screensaver_options_default_to_each_scene_as_it_draws_unasked() {
         !options.raytrace.save,
         "nothing is written to the user's pictures unasked"
     );
+    assert_eq!(
+        options.raytrace.detail,
+        SceneDetail::Simple,
+        "a scene is set out plainly unless more is asked"
+    );
     assert_eq!(options.retro_games.speed, Pace::Normal);
 }
 
@@ -962,6 +969,7 @@ fn every_screensaver_option_reads_what_it_spells_and_refuses_the_rest() {
          screensaver.life.cells = small\n\
          screensaver.raytrace.cpu = performance\n\
          screensaver.raytrace.save = on\n\
+         screensaver.raytrace.detail = maximum\n\
          screensaver.retro_games.speed = fast\n",
     )
     .expect("a well-formed document");
@@ -977,6 +985,7 @@ fn every_screensaver_option_reads_what_it_spells_and_refuses_the_rest() {
     assert_eq!(options.life.cells, CellSize::Small);
     assert_eq!(options.raytrace.cpu, CpuUse::Performance);
     assert!(options.raytrace.save);
+    assert_eq!(options.raytrace.detail, SceneDetail::Maximum);
     assert_eq!(options.retro_games.speed, Pace::Fast);
     assert_eq!(
         options.life.speed,
@@ -1022,6 +1031,14 @@ fn every_screensaver_option_reads_what_it_spells_and_refuses_the_rest() {
         ("screensaver.raytrace.cpu = turbo", SettingsKey::RaytraceCpu),
         ("screensaver.raytrace.cpu = Idle", SettingsKey::RaytraceCpu),
         ("screensaver.raytrace.save = yes", SettingsKey::RaytraceSave),
+        (
+            "screensaver.raytrace.detail = fine",
+            SettingsKey::RaytraceDetail,
+        ),
+        (
+            "screensaver.raytrace.detail = Maximum",
+            SettingsKey::RaytraceDetail,
+        ),
         (
             "screensaver.retro_games.speed = warp",
             SettingsKey::RetroGamesSpeed,

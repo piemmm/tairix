@@ -167,6 +167,7 @@ fn bole(radius: f64, length: f64, forked: bool) -> Stem {
         travelled: 0.0,
         forked,
         crown: 0.5,
+        from: 0.0,
     }
 }
 
@@ -289,5 +290,45 @@ fn a_bare_bole_carries_the_stubs_of_its_dead_branches() {
             stubs >= 3,
             "{seed}: {stubs} stubs up the bare bole below {crown}"
         );
+    }
+}
+
+#[test]
+fn a_limb_narrows_by_its_levels_taper_and_a_forks_arm_carries_its_stems_on() {
+    let limb = Stem {
+        level: 1,
+        crown: 1.0,
+        ..bole(0.05, 3.0, false)
+    };
+    let level = Level {
+        taper: 0.6,
+        form: 0.8,
+        ..TRUNK
+    };
+    // A limb holds no bole and no crown apart: its tip is what its level's
+    // taper and form leave of its girth, not a twentyfifth of it.
+    let tip = radius_at(limb, &level, 1.0, 0.0);
+    let wanted = 0.05 * mathf::exp(0.8 * mathf::ln(0.4));
+    assert!((tip - wanted).abs() < 1e-12, "{tip} against {wanted}");
+    // A trunk forked a third of the way up its bole: what grows on is its
+    // own narrowing carried on, at whatever girth the fork leaves it.
+    let (radius, length) = (0.4, 20.0);
+    let trunk = bole(radius, length, false);
+    let forked_at = 0.3;
+    let rest = Stem {
+        length: length * (1.0 - forked_at),
+        radius: radius_at(trunk, &TRUNK, forked_at, 0.0),
+        forked: true,
+        from: forked_at,
+        ..trunk
+    };
+    for step in 0..=20u32 {
+        let s = f64::from(step) / 20.0;
+        let whole = forked_at + s * (1.0 - forked_at);
+        let (arm, stem) = (
+            radius_at(rest, &TRUNK, s, 0.6),
+            radius_at(trunk, &TRUNK, whole, 0.0),
+        );
+        assert!((arm - stem).abs() < 1e-12, "{s}: {arm} against {stem}");
     }
 }

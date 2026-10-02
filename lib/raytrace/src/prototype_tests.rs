@@ -8,14 +8,12 @@ use crate::shape::{Geometry, Shape};
 use crate::vector::{Frame, Pose};
 
 fn tube(a: Vec3, b: Vec3, radii: (f64, f64)) -> Part {
-    Part::Tube(Tube {
-        a: stored(a),
-        b: stored(b),
-        radii: [single(radii.0), single(radii.1)],
-        stem: [0.0, single((b - a).length())],
-        material: 3,
-        key: 9,
-    })
+    Part::Tube(Tube::new(
+        (a, b),
+        (radii, (0.0, (b - a).length())),
+        (3, 9),
+        Vec3::new(1.0, 0.0, 0.0),
+    ))
 }
 
 #[test]
@@ -167,4 +165,64 @@ fn a_placed_prototype_is_met_where_its_placing_puts_it() {
         !placed.occludes(&ray, 1e-9, 9.0, geometry),
         "not before its reach"
     );
+}
+
+#[test]
+fn a_scaled_limb_is_met_at_its_placed_girth_and_its_placed_way_along_its_stem() {
+    let prototypes =
+        vec![
+            Prototype::new(vec![tube(Vec3::ZERO, Vec3::UP, (0.1, 0.1))], vec![], vec![])
+                .expect("a post"),
+        ];
+    let geometry = Geometry {
+        faces: &[],
+        fields: &[],
+        prototypes: &prototypes,
+        lawns: &[],
+    };
+    let placed = |scale: f64| Shape::Instance {
+        prototype: 0,
+        pose: Pose::new(Vec3::new(10.0, 0.0, 0.0), Frame::WORLD),
+        scale,
+        key: 0,
+    };
+    for scale in [0.5, 1.0, 3.0] {
+        // Half way up the post as it stands, whatever its scale.
+        let ray = Ray::new(Vec3::new(0.0, 0.5 * scale, 0.0), Vec3::new(1.0, 0.0, 0.0));
+        let hit = placed(scale)
+            .intersect(&ray, 1e-9, f64::INFINITY, geometry)
+            .expect("met");
+        assert!(
+            (hit.girth - 0.1 * scale).abs() < 1e-6,
+            "{scale}: {}",
+            hit.girth
+        );
+        assert!(
+            (hit.uv.0 - 0.5 * scale).abs() < 1e-6,
+            "{scale}: {}",
+            hit.uv.0
+        );
+    }
+}
+
+#[test]
+fn a_bending_limbs_bark_starts_round_it_alike_either_side_of_a_joint() {
+    // Two segments of one limb, either side of where the world's own start
+    // for the angle round a limb changes axis, both begun from the side
+    // their stem carries: square to the plane they bend in.
+    let side = Vec3::new(0.0, 0.0, 1.0);
+    let joint = Vec3::new(0.88, mathf::sqrt(1.0 - 0.88 * 0.88), 0.0);
+    let beyond = joint + Vec3::new(0.92, mathf::sqrt(1.0 - 0.92 * 0.92), 0.0);
+    let segments = [(Vec3::ZERO, joint), (joint, beyond)]
+        .map(|(a, b)| Tube::new((a, b), ((0.1, 0.1), (0.0, 1.0)), (0, 0), side));
+    let middle = ((beyond - joint).normalized() + joint.normalized()).normalized();
+    let across = side.cross(middle);
+    for step in 0..12u32 {
+        let around = f64::from(step) * core::f64::consts::TAU / 12.0;
+        let normal = side * mathf::cos(around) + across * mathf::sin(around);
+        let [first, second] = segments.map(|tube| limb_hit(1.0, normal, (1.0, 0.5), &tube).uv.1);
+        let apart = (first - second).abs();
+        let apart = apart.min(core::f64::consts::TAU - apart);
+        assert!(apart < 0.03, "{step}: {first} against {second}");
+    }
 }

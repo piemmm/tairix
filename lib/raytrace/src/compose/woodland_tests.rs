@@ -5,7 +5,8 @@ use alloc::vec::Vec;
 use tairix_parallel::Threaded;
 
 use super::*;
-use crate::compose::{Composition, Progress, Recipe, Setting};
+use crate::compose::{Composition, Job, Progress, Recipe, Setting, Stage};
+use crate::detail::Detail;
 use crate::shape::Shape;
 
 const EYE: Vantage = Vantage {
@@ -256,7 +257,12 @@ fn a_wood_keeps_out_of_its_clearing_off_the_road_and_within_its_heights() {
 /// A composition of `setting` under `seed` for a picture `size`, its jobs run
 /// until its woods stand and it is seen.
 fn planted(setting: Setting, seed: u64, size: (u32, u32)) -> Composition {
-    let mut composition = Composition::new(setting, seed, size).expect("composes");
+    planted_at(setting, seed, size, Detail::Maximum)
+}
+
+/// `planted`, at `detail`.
+fn planted_at(setting: Setting, seed: u64, size: (u32, u32), detail: Detail) -> Composition {
+    let mut composition = Composition::new(setting, seed, size, detail).expect("composes");
     let runner = Threaded::new(8);
     while composition.seen.is_none() {
         let job = composition
@@ -390,4 +396,224 @@ fn a_ranking_takes_its_places_tallest_first_as_one_sort_would() {
             assert_eq!(taken, expected, "{count} places");
         }
     }
+}
+
+/// The trees a composition stands: where each trunk stands.
+fn trunks(composition: &Composition) -> Vec<Vec3> {
+    let stage = &composition.stage;
+    stage
+        .objects
+        .iter()
+        .filter_map(|object| match object.shape {
+            Shape::Instance {
+                prototype, pose, ..
+            } if matches!(
+                stage.recipes.get(prototype as usize),
+                Some(Recipe::Tree { .. })
+            ) =>
+            {
+                Some(pose.at)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_seed_shows_the_same_place_at_either_detail() {
+    let mut laid = 0;
+    for (setting, seed) in [
+        (Setting::Meadow, 2),
+        (Setting::Forest, 1),
+        (Setting::Winter, 3),
+        (Setting::Valley, 1),
+    ] {
+        let [simple, maximum] =
+            Detail::ALL.map(|detail| planted_at(setting, seed, (320, 180), detail));
+        // The land, every grid of it the ground or its water lies on.
+        let lands = |composition: &Composition| -> Vec<u32> {
+            composition
+                .stage
+                .objects
+                .iter()
+                .filter_map(|object| match object.shape {
+                    Shape::Land { field } => Some(field),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(lands(&simple), lands(&maximum), "{setting:?}");
+        for field in lands(&simple) {
+            let at = |composition: &Composition| {
+                composition.stage.fields[field as usize].heights().to_vec()
+            };
+            assert!(at(&simple) == at(&maximum), "{setting:?}: grid {field}");
+        }
+        // The eye, and the hour and weather it is seen under.
+        let ([simple_look, maximum_look], [simple_camera, maximum_camera]) = (
+            [&simple, &maximum].map(|composition| &composition.seen.as_ref().expect("seen").0),
+            [&simple, &maximum].map(|composition| &composition.seen.as_ref().expect("seen").1),
+        );
+        for film in [(0.0, 0.0), (-0.9, 0.7), (0.6, -0.8)] {
+            let (a, b) = (
+                simple_camera.ray(film, (0.0, 0.0)),
+                maximum_camera.ray(film, (0.0, 0.0)),
+            );
+            assert_eq!((a.origin, a.dir), (b.origin, b.dir), "{setting:?}");
+        }
+        let suns = |stage: &Stage| -> Vec<Vec3> {
+            stage
+                .lights
+                .iter()
+                .filter_map(|light| match *light {
+                    crate::light::Light::Sun { toward, .. } => Some(toward),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(suns(&simple.stage), suns(&maximum.stage), "{setting:?}");
+        assert_eq!(simple_look.exposure, maximum_look.exposure, "{setting:?}");
+        assert_eq!(
+            simple_look.sky.bank.is_some(),
+            maximum_look.sky.bank.is_some(),
+            "{setting:?}"
+        );
+        assert_eq!(
+            simple_look.sky.stars.to_bits(),
+            maximum_look.sky.stars.to_bits(),
+            "{setting:?}"
+        );
+        // The sward, laid in patches and keyed apart from whatever the woods
+        // above it drew.
+        let swards = |composition: &Composition| -> Vec<(u32, u32)> {
+            composition
+                .stage
+                .lawns
+                .iter()
+                .map(|lawn| (lawn.sward, lawn.seed))
+                .collect()
+        };
+        assert_eq!(swards(&simple), swards(&maximum), "{setting:?}");
+        laid += swards(&simple).len();
+    }
+    assert!(laid > 0, "a sward was laid to compare");
+}
+
+#[test]
+fn a_simple_wood_stands_fewer_trees_nearer_the_eye_and_keeps_to_its_room() {
+    let [simple, maximum] =
+        Detail::ALL.map(|detail| planted_at(Setting::Meadow, 2, (640, 360), detail));
+    let reach = |composition: &Composition| {
+        let eye = composition.seen.as_ref().expect("seen").1.eye();
+        trunks(composition)
+            .iter()
+            .map(|at| mathf::hypot(at.x - eye.x, at.z - eye.z))
+            .fold(0.0, f64::max)
+    };
+    let (few, many) = (trunks(&simple).len(), trunks(&maximum).len());
+    assert!(few > 2000, "still a wood: {few}");
+    assert!(few <= 20_000, "within its cap: {few}");
+    assert!(many > 2 * few, "{many} against {few}");
+    assert!(
+        reach(&simple) < reach(&maximum),
+        "{} against {}",
+        reach(&simple),
+        reach(&maximum)
+    );
+    assert!(simple.stage.objects.len() <= Detail::Simple.densities().objects);
+}
+
+#[test]
+fn a_strip_claimed_along_a_line_leaves_no_gap_at_its_edges() {
+    let mut stage = Stage::new(Detail::Simple.densities()).expect("a stage");
+    stage
+        .claim_along((-10.0, 3.0), (14.0, -4.0), 2.5)
+        .expect("claimed");
+    let (along, across) = ((24.0, -7.0), (7.0, 24.0));
+    let unit = |(x, z): (f64, f64)| {
+        let length = mathf::hypot(x, z);
+        (x / length, z / length)
+    };
+    let (along, across) = (unit(along), unit(across));
+    let length = mathf::hypot(24.0, -7.0);
+    for step in 0..=200u32 {
+        let t = f64::from(step) / 200.0 * length;
+        for side in [-2.45, -1.2, 0.0, 1.2, 2.45] {
+            let at = (
+                -10.0 + along.0 * t + across.0 * side,
+                3.0 + along.1 * t + across.1 * side,
+            );
+            assert!(!stage.clear(at, 0.0), "uncovered at {at:?}");
+        }
+    }
+    assert!(stage.clear((-10.0 + across.0 * 6.0, 3.0 + across.1 * 6.0), 0.0));
+}
+
+/// A bridge's deck: its ends, and the road's width across it.
+type Deck = ((f64, f64), (f64, f64), f64);
+
+#[test]
+fn no_tree_stands_on_a_bridges_deck() {
+    let mut crossed = 0;
+    for seed in 0..6 {
+        let mut composition =
+            Composition::new(Setting::Valley, seed, (320, 180), Detail::Maximum).expect("composes");
+        let runner = Threaded::new(8);
+        let mut decks: Vec<Deck> = Vec::new();
+        while composition.seen.is_none() {
+            let job = composition
+                .jobs
+                .pop_front()
+                .expect("work remains until the scene is seen");
+            if let Job::Plant(planting) = &job {
+                let road = planting.land.road.map_or(0.0, |road| road.width);
+                decks = planting
+                    .land
+                    .crossings
+                    .iter()
+                    .map(|deck| ((deck.from.x, deck.from.z), (deck.to.x, deck.to.z), road))
+                    .collect();
+            }
+            if let Progress::Again(unfinished) = composition.run(job, &runner).expect("runs") {
+                composition.jobs.push_front(unfinished);
+            }
+        }
+        crossed += decks.len();
+        for trunk in trunks(&composition) {
+            for &((x0, z0), (x1, z1), width) in &decks {
+                let (dx, dz) = (x1 - x0, z1 - z0);
+                let t = (((trunk.x - x0) * dx + (trunk.z - z0) * dz) / (dx * dx + dz * dz))
+                    .clamp(0.0, 1.0);
+                let apart = mathf::hypot(trunk.x - (x0 + dx * t), trunk.z - (z0 + dz * t));
+                assert!(
+                    apart > 0.5 * width,
+                    "seed {seed}: a trunk {apart} off a deck's road"
+                );
+            }
+        }
+    }
+    assert!(crossed > 0, "some valley's road crosses its river");
+}
+
+#[test]
+fn a_wood_with_nothing_growing_beneath_it_still_roofs_the_air_and_strews_its_floor() {
+    // A colonnade stands on paving among woods with no sward under them.
+    let composition = planted_at(Setting::Colonnade, 0, (160, 90), Detail::Simple);
+    let stage = &composition.stage;
+    assert!(
+        stage.sward.is_none() && stage.lawns.is_empty(),
+        "no sward to lay"
+    );
+    assert!(!stage.canopies.is_empty(), "woods stand");
+    let shades = stage.shades.as_ref().expect("the woods' shade is cast");
+    let roofed = stage
+        .canopies
+        .iter()
+        .filter(|&&((x, z), _)| shades.at(x, z).1 > 0.0)
+        .count();
+    assert!(roofed > 0, "the ground beneath the crowns lies roofed");
+    let floored = stage.materials.iter().any(|material| {
+        matches!(&material.pigment, crate::pigment::Pigment::Ground(ground) if ground.floor.is_some())
+    });
+    assert!(floored, "and strewn with what the crowns shed");
 }

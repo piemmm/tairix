@@ -125,14 +125,6 @@ pub(crate) enum Walk {
 }
 
 impl Bvh {
-    /// The hierarchy over `bounds`, one per item, or `None` when the heap will
-    /// not hold it.
-    pub(crate) fn build(bounds: &[(u32, Aabb)]) -> Option<Self> {
-        let mut builder = Builder::new(bounds)?;
-        builder.step(usize::MAX);
-        Some(builder.finish())
-    }
-
     /// Visit every object whose box `ray` crosses nearer than the reach,
     /// nearer boxes first; `visit(object, reach)` tests one and answers how
     /// the walk goes on.

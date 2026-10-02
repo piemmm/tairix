@@ -172,10 +172,13 @@ pub(crate) struct Stem {
     travelled: f64,
     /// Whether it has forked already.
     forked: bool,
-    /// The share of its length below its crown, which it climbs holding its
-    /// girth before it narrows to its tip, giving its girth to its limbs;
-    /// nought for a limb, and for the arms a fork leaves inside the crown.
+    /// The share of its whole stem below its crown: up to there it narrows
+    /// by its level's taper and form, then straight to its tip as it gives
+    /// its girth to its limbs. A limb's is the whole of it.
     crown: f64,
+    /// The share of its whole stem below its own base: nought but for a
+    /// fork's arms, which carry on its narrowing from where it forked.
+    from: f64,
 }
 
 /// Heights up a tree's trunk, in its radii, at which its foot is cut, so
@@ -408,6 +411,7 @@ impl Grower {
                 travelled: 0.0,
                 forked: false,
                 crown: species.base,
+                from: 0.0,
             });
         }
         Some(queue)
@@ -436,36 +440,36 @@ impl Grower {
             let (spur, run) = ((knee - from).length(), (tip - knee).length());
             let key = self.next_key();
             for (a, b, radii, stem) in [
-                (from, knee, [thick, 0.92 * thick], [0.0, spur]),
-                (knee, tip, [0.92 * thick, 0.25 * thick], [spur, spur + run]),
+                (from, knee, (thick, 0.92 * thick), (0.0, spur)),
+                (knee, tip, (0.92 * thick, 0.25 * thick), (spur, spur + run)),
             ] {
-                self.push(Part::Tube(Tube {
-                    a: stored(a),
-                    b: stored(b),
-                    radii: radii.map(single),
-                    stem: stem.map(single),
-                    material: self.stock.bark,
-                    key,
-                }))?;
+                // Both runs bend in the upright plane through `out`, which
+                // `side` stands square to.
+                self.push(Part::Tube(Tube::new(
+                    (a, b),
+                    (radii, stem),
+                    (self.stock.bark, key),
+                    side,
+                )))?;
             }
         }
         Some(())
     }
 
-    /// A tree's trunk's first segment, from `base` along the unit `up`, cut
+    /// A tree's trunk's first segment, from `base` up `frame`'s `y`, cut
     /// short where its flare swells so the swell is drawn as it curves;
     /// `travelled` metres along the tree's path at its foot.
     fn foot(
         &mut self,
         stem: Stem,
         level: &Level,
-        (base, up): (Vec3, Vec3),
+        (base, frame): (Vec3, Frame),
         travelled: f64,
         key: u32,
     ) -> Option<()> {
         let segment = stem.length / f64::from(level.segments.max(1));
         let flare = self.species.flare;
-        let radius = |rise: f64| single(radius_at(stem, level, rise / stem.length, flare));
+        let radius = |rise: f64| radius_at(stem, level, rise / stem.length, flare);
         let cuts = FOOT.map(|share| share * stem.radius);
         let mut last = 0.0;
         for rise in cuts
@@ -473,14 +477,15 @@ impl Grower {
             .filter(|&rise| rise < segment)
             .chain([segment])
         {
-            self.push(Part::Tube(Tube {
-                a: stored(base + up * last),
-                b: stored(base + up * rise),
-                radii: [radius(last), radius(rise)],
-                stem: [single(travelled + last), single(travelled + rise)],
-                material: self.stock.bark,
-                key,
-            }))?;
+            self.push(Part::Tube(Tube::new(
+                (base + frame.y * last, base + frame.y * rise),
+                (
+                    (radius(last), radius(rise)),
+                    (travelled + last, travelled + rise),
+                ),
+                (self.stock.bark, key),
+                frame.x,
+            )))?;
             last = rise;
         }
         Some(())
@@ -529,17 +534,15 @@ impl Grower {
             let reach = 0.5 * bole + length;
             let tip = thick * self.range((0.4, 0.8));
             let key = self.next_key();
-            self.push(Part::Tube(Tube {
-                a: stored(start),
-                b: stored(start + dir * reach),
-                radii: [single(thick), single(tip)],
-                stem: [
-                    single(travelled + inside),
-                    single(travelled + inside + reach),
-                ],
-                material: self.stock.bark,
-                key,
-            }))?;
+            self.push(Part::Tube(Tube::new(
+                (start, start + dir * reach),
+                (
+                    (thick, tip),
+                    (travelled + inside, travelled + inside + reach),
+                ),
+                (self.stock.bark, key),
+                frame.y,
+            )))?;
         }
         Some(())
     }
@@ -596,16 +599,14 @@ impl Grower {
             let end = at + frame.y * stride;
             let key = self.next_key();
             if rooted && segment == 0 {
-                self.foot(stem, &level, (at, frame.y), travelled, key)?;
+                self.foot(stem, &level, (at, frame), travelled, key)?;
             } else {
-                self.push(Part::Tube(Tube {
-                    a: stored(at),
-                    b: stored(end),
-                    radii: [single(r0), single(r1)],
-                    stem: [single(travelled), single(travelled + stride)],
-                    material: self.stock.bark,
-                    key,
-                }))?;
+                self.push(Part::Tube(Tube::new(
+                    (at, end),
+                    ((r0, r1), (travelled, travelled + stride)),
+                    (self.stock.bark, key),
+                    frame.x,
+                )))?;
             }
             if rooted {
                 self.stubs(stem, &level, (at, end, frame), (s0, s1, travelled), height)?;
@@ -640,7 +641,8 @@ impl Grower {
                     radius: r1,
                     travelled: travelled + stride,
                     forked: true,
-                    crown: 0.0,
+                    crown: stem.crown,
+                    from: stem.from + s1 * (1.0 - stem.from),
                 };
                 return self.fork(rest, level.fork.1, height, next);
             }
@@ -737,7 +739,8 @@ impl Grower {
             radius,
             travelled: 0.0,
             forked: false,
-            crown: 0.0,
+            crown: 1.0,
+            from: 0.0,
         })
     }
 
@@ -812,16 +815,20 @@ impl Grower {
 
 /// The radius `s` of the way along `stem`, grown at `level`: narrowing up
 /// its bole by the level's taper, along its form, then within its crown
-/// straight to its tip; and about the foot of a tree's trunk swelling by
-/// `flare` toward the ground.
+/// straight to its tip, a fork's arm carrying on from where its stem forked;
+/// and about the foot of a tree's trunk swelling by `flare` toward the
+/// ground.
 fn radius_at(stem: Stem, level: &Level, s: f64, flare: f64) -> f64 {
     let bole = |s: f64| mathf::exp(level.form * mathf::ln((1.0 - level.taper * s).max(0.05)));
-    let narrowed = if s <= stem.crown {
-        bole(s)
-    } else {
-        bole(stem.crown) * ((1.0 - s) / (1.0 - stem.crown).max(1e-6)).max(0.04)
+    let narrowed = |s: f64| {
+        if s <= stem.crown {
+            bole(s)
+        } else {
+            bole(stem.crown) * ((1.0 - s) / (1.0 - stem.crown).max(1e-6)).max(0.04)
+        }
     };
-    let tapered = stem.radius * narrowed;
+    let whole = stem.from + s * (1.0 - stem.from);
+    let tapered = stem.radius * narrowed(whole) / narrowed(stem.from);
     if stem.level == 0 && !stem.forked && flare > 0.0 {
         let up = s * stem.length / (FLARE_REACH * stem.radius).max(1e-6);
         tapered * (1.0 + flare * mathf::exp(-up))
@@ -847,22 +854,21 @@ pub(crate) fn saguaro(height: f64, stock: Stock, seed: u64) -> Option<Building> 
     parts.try_reserve(64).ok()?;
     let girth = height * (0.045 + 0.02 * dice.next_f64());
     let mut key = crate::sample::mix32(u32::try_from(seed >> 32).unwrap_or(0));
-    let limb = |parts: &mut Vec<Part>, from: Vec3, to: Vec3, radii: (f64, f64), key: u32| {
-        parts.push(Part::Tube(Tube {
-            a: stored(from),
-            b: stored(to),
-            radii: [single(radii.0), single(radii.1)],
-            stem: [0.0, single((to - from).length())],
-            material: stock.bark,
-            key,
-        }));
+    // Its ribs run on round an arm's elbow when both of its runs are begun
+    // from the side square to the upright plane they bend in.
+    let limb = |parts: &mut Vec<Part>, (from, to): (Vec3, Vec3), radii: (f64, f64), (key, side)| {
+        parts.push(Part::Tube(Tube::new(
+            (from, to),
+            (radii, (0.0, (to - from).length())),
+            (stock.bark, key),
+            side,
+        )));
     };
     limb(
         &mut parts,
-        Vec3::new(0.0, -0.3, 0.0),
-        Vec3::UP * (height - girth),
+        (Vec3::new(0.0, -0.3, 0.0), Vec3::UP * (height - girth)),
         (girth, 0.92 * girth),
-        key,
+        (key, Vec3::new(1.0, 0.0, 0.0)),
     );
     let arms = dice.next_u32() % 4;
     for arm in 0..arms {
@@ -874,13 +880,13 @@ pub(crate) fn saguaro(height: f64, stock: Stock, seed: u64) -> Option<Building> 
         let reach = out * (0.35 + 0.3 * dice.next_f64()) * height * 0.2;
         let elbow = joint + reach + Vec3::UP * (0.15 * height * 0.2);
         let rise = Vec3::UP * (height * (0.15 + 0.22 * dice.next_f64()));
-        limb(&mut parts, joint, elbow, (thick, thick), key);
+        let side = Vec3::new(-out.z, 0.0, out.x);
+        limb(&mut parts, (joint, elbow), (thick, thick), (key, side));
         limb(
             &mut parts,
-            elbow,
-            elbow + rise,
+            (elbow, elbow + rise),
             (thick, 0.9 * thick),
-            mix_key(key),
+            (mix_key(key), side),
         );
     }
     Prototype::building(parts, Vec::new(), Vec::new())
@@ -916,20 +922,20 @@ pub(crate) fn palm(height: f64, stock: Stock, fronds: u16, seed: u64) -> Option<
         let end = at + dir * (height / f64::from(segments));
         key = crate::sample::mix32(key ^ segment);
         parts.try_reserve(1).ok()?;
-        parts.push(Part::Tube(Tube {
-            a: stored(at),
-            b: stored(end),
-            radii: [
-                single(radius * (1.35 - 0.4 * s)),
-                single(radius * (1.35 - 0.4 * s - 0.4 / f64::from(segments))),
-            ],
-            stem: [
-                single(s * height),
-                single((s + 1.0 / f64::from(segments)) * height),
-            ],
-            material: stock.bark,
-            key,
-        }));
+        // The trunk bends in the upright plane through `side`, square to which
+        // its bark is begun.
+        parts.push(Part::Tube(Tube::new(
+            (at, end),
+            (
+                (
+                    radius * (1.35 - 0.4 * s),
+                    radius * (1.35 - 0.4 * s - 0.4 / f64::from(segments)),
+                ),
+                (s * height, (s + 1.0 / f64::from(segments)) * height),
+            ),
+            (stock.bark, key),
+            Vec3::UP.cross(side),
+        )));
         at = end;
     }
     let crown = at;
@@ -989,17 +995,18 @@ fn grow_frond(
         let next = point + heading * (shape.length / f64::from(steps));
         key = crate::sample::mix32(key ^ step);
         parts.try_reserve(1 + 2 * LEAFLETS as usize).ok()?;
-        parts.push(Part::Tube(Tube {
-            a: stored(point),
-            b: stored(next),
-            radii: [
-                single(shape.rachis * (1.0 - 0.8 * s)),
-                single(shape.rachis * (1.0 - 0.8 * (s + 0.1))),
-            ],
-            stem: [0.0, 0.0],
-            material: stock.bark,
-            key,
-        }));
+        parts.push(Part::Tube(Tube::new(
+            (point, next),
+            (
+                (
+                    shape.rachis * (1.0 - 0.8 * s),
+                    shape.rachis * (1.0 - 0.8 * (s + 0.1)),
+                ),
+                (0.0, 0.0),
+            ),
+            (stock.bark, key),
+            Vec3::UP.cross(out),
+        )));
         if s >= shape.bare {
             // Leaflets either side of the rachis, hanging from it, shorter
             // toward its tip.

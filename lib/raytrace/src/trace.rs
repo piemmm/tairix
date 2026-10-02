@@ -28,8 +28,10 @@ use tairix_parallel::JobRunner;
 use tairix_raster::Pixel;
 use tairix_util::{fallible, mathf};
 
+use crate::adapt::{self, Adaptation, Sample};
 use crate::atmosphere::Lit;
 use crate::band;
+use crate::detail::Records;
 use crate::grass::Canopy;
 use crate::ground::Moisture;
 use crate::heightfield::PLAIN;
@@ -45,7 +47,7 @@ use crate::sample::{cosine_hemisphere, disc, filter_offset, mix32, unit, Sampler
 use crate::scene::{Glare, Object, Scene, Sight};
 use crate::shape::{Hit, Shape};
 use crate::tone::{display, Encoder};
-use crate::vector::{share, Frame, Ray, Vec3, PACKET};
+use crate::vector::{real, share, Frame, Ray, Vec3, PACKET};
 
 /// The deepest a path is followed.
 const MAX_DEPTH: u32 = 9;
@@ -348,6 +350,35 @@ impl<'a> Tracer<'a> {
         }
     }
 
+    /// Adaptation sample `index` of a film measured over `points` across and
+    /// down: one of four drawn two by two within its point, its light as the
+    /// lens exposes it, glare and all, in stops from the exposed `key`.
+    fn adapting(&self, index: usize, points: (usize, usize), key: f64) -> Sample {
+        let (point, stratum) = (index / ADAPT_SAMPLES, index % ADAPT_SAMPLES);
+        let (column, row) = (point % points.0.max(1), point / points.0.max(1));
+        let draw = u32::try_from(index).unwrap_or(u32::MAX);
+        let mut sampler = Sampler::new(mix32(draw ^ 0x2c9b_7f01), 0);
+        let (u, v) = sampler.next_2d();
+        let across = (real(column) + f64::midpoint(real(stratum % 2), u)) / real(points.0.max(1));
+        let down = (real(row) + f64::midpoint(real(stratum / 2), v)) / real(points.1.max(1));
+        let ray = self
+            .scene
+            .camera
+            .ray((2.0 * across - 1.0, 1.0 - 2.0 * down), (0.0, 0.0));
+        let light = (self.radiance(&ray, Path::EYE, &mut sampler) + self.glare(ray.dir))
+            * self.scene.exposure;
+        let luminance = light.luminance();
+        Sample {
+            across,
+            down,
+            stops: if luminance.is_finite() {
+                adapt::stops(luminance, key)
+            } else {
+                0.0
+            },
+        }
+    }
+
     /// What pixel `at` shows as display-linear light, and how many samples it
     /// took.
     fn light(&self, (x, y): (u32, u32), quality: Quality) -> (Vec3, u32) {
@@ -363,18 +394,23 @@ impl<'a> Tracer<'a> {
                     Sampler::new(seed, taken + u32::try_from(lane).unwrap_or(u32::MAX))
                 });
                 let mut rays = [Ray::new(Vec3::ZERO, Vec3::ZERO); PACKET];
-                for (ray, sampler) in rays.iter_mut().zip(&mut samplers) {
+                let mut films = [(0.0, 0.0); PACKET];
+                for ((ray, film), sampler) in rays.iter_mut().zip(&mut films).zip(&mut samplers) {
                     let (u, v) = sampler.next_2d();
                     let offset = (filter_offset(u), filter_offset(v));
                     let lens = disc(sampler.next_2d());
-                    *ray = self.scene.camera.ray(self.film((x, y), offset), lens);
+                    *film = self.film((x, y), offset);
+                    *ray = self.scene.camera.ray(*film, lens);
                 }
                 let mut found = [None; PACKET];
                 self.scene
                     .closest_of(&rays, f64::INFINITY, Sight::Eye, &mut found);
-                for ((ray, sampler), found) in rays.iter().zip(&mut samplers).zip(found) {
+                for (((ray, film), sampler), found) in
+                    rays.iter().zip(films).zip(&mut samplers).zip(found)
+                {
                     let (light, _) = self.arrived(ray, Path::EYE, sampler, found);
-                    tally.add(display((light + self.glare(ray.dir)) * self.scene.exposure));
+                    let exposed = (light + self.glare(ray.dir)) * self.scene.exposure;
+                    tally.add(display(self.adapted(exposed, film)));
                 }
                 taken += PACKET_SAMPLES;
             }
@@ -383,6 +419,18 @@ impl<'a> Tracer<'a> {
             }
         }
         (tally.mean(), taken)
+    }
+
+    /// `exposed` light, a sample at `film` shows, corrected by the scene's
+    /// local adaptation where it has one.
+    fn adapted(&self, exposed: Vec3, (x, y): (f64, f64)) -> Vec3 {
+        match &self.scene.adaptation {
+            Some(adaptation) => {
+                let at = (f64::midpoint(x, 1.0), f64::midpoint(1.0, -y));
+                exposed * adaptation.factor(at, exposed.luminance())
+            }
+            None => exposed,
+        }
     }
 
     /// Where on the film the point `offset` from the centre of pixel `(x, y)`
@@ -427,9 +475,15 @@ impl<'a> Tracer<'a> {
         })
     }
 
-    /// Fill `cells`, row `row` of a radiosity record's hemisphere, with what
-    /// its rays bring back to `site`, each followed as a path of its own.
-    pub(crate) fn gather(&self, site: &Site, row: usize, cells: &mut [Cell]) {
+    /// Fill `cells`, row `row` of a radiosity record's hemisphere cut as
+    /// `records` has it, with what its rays bring back to `site`, each
+    /// followed as a path of its own.
+    pub(crate) fn gather(
+        &self,
+        site: &Site,
+        (records, row): (&Records, usize),
+        cells: &mut [Cell],
+    ) {
         let frame = Frame::around(site.normal);
         let origin = lift(site.point, site.facing);
         let path = Path {
@@ -441,10 +495,14 @@ impl<'a> Tracer<'a> {
             channel: None,
             scattered: true,
         };
-        let first = u32::try_from(row * radiosity::COLUMNS).unwrap_or(u32::MAX);
-        for (index, cell) in (first..).zip(cells.iter_mut().take(radiosity::COLUMNS)) {
+        let first = u32::try_from(row * records.columns).unwrap_or(u32::MAX);
+        for (index, cell) in (first..).zip(cells.iter_mut().take(records.columns)) {
             let mut sampler = Sampler::new(site.seed, index);
-            let dir = frame.to_world(radiosity::direction(index as usize, sampler.next_2d()));
+            let dir = frame.to_world(radiosity::direction(
+                records,
+                index as usize,
+                sampler.next_2d(),
+            ));
             *cell = if dir.dot(site.facing) > 0.0 {
                 let (light, distance) = self.arriving(&Ray::new(origin, dir), path, &mut sampler);
                 if light.is_finite() {
@@ -800,7 +858,7 @@ impl<'a> Tracer<'a> {
             girth: hit.girth,
             instance: object.shape.instance(),
             width,
-            stretch: width / hit.shading.dot(toward_eye).abs().max(SLANTEST),
+            stretch: along_view(width, hit.shading, toward_eye),
         };
         let tilt = material.relief.as_ref().map_or(
             Tilt {
@@ -855,8 +913,11 @@ impl<'a> Tracer<'a> {
 
     /// How wide a patch of `surface` one pixel's view of it covers.
     fn footprint(&self, surface: &Surface) -> f64 {
-        let slant = surface.normal.dot(surface.toward_eye).abs().max(SLANTEST);
-        surface.travelled * self.pixel_angle / slant
+        along_view(
+            surface.travelled * self.pixel_angle,
+            surface.normal,
+            surface.toward_eye,
+        )
     }
 
     /// A shading frame about `surface`'s normal, its first axis along the
@@ -1272,10 +1333,10 @@ impl<'a> Tracer<'a> {
             Some(_) => fresnel(surface.toward_eye.dot(micro), eta),
             None => 1.0,
         };
-        // A facet tilted further than the view's own slant would send its
-        // reflection under the surface, where it meets the surface again and
-        // goes on up: mirrored back above it rather than lost, so water seen
-        // low keeps the brightness its reflectance owes.
+        // A facet tilted toward the eye by more than half the view's slant
+        // sends its reflection under the surface, where it meets the surface
+        // again and goes on up: mirrored back above it rather than lost, so
+        // water seen low keeps the brightness its reflectance owes.
         let bounced = incident.reflect(micro);
         let below = surface.facing.dot(bounced);
         let reflected = Some(if below > 0.0 {
@@ -1558,6 +1619,13 @@ fn facing_eye(normal: Vec3, toward_eye: Vec3) -> Vec3 {
     }
 }
 
+/// How long a stretch of a surface facing `normal` a view `width` across
+/// covers along the view `toward_eye`: drawn out the more the view slants,
+/// but no further than `SLANTEST` lets it.
+fn along_view(width: f64, normal: Vec3, toward_eye: Vec3) -> f64 {
+    width / normal.dot(toward_eye).abs().max(SLANTEST)
+}
+
 /// `point` moved off its surface along `normal`, by an amount that grows
 /// with its distance from the origin so rounding cannot put it back.
 fn lift(point: Vec3, normal: Vec3) -> Vec3 {
@@ -1581,7 +1649,7 @@ const METER_ROWS: u32 = 32;
 /// how bright the scene is.
 const METER_TRIM: usize = 50;
 /// Film points one core measures in a unit of work.
-const METER_UNIT: u32 = 16;
+const METER_UNIT: u32 = 8;
 /// Rays toward the sun its glare is judged by.
 const GLARE_RAYS: u32 = 16;
 
@@ -1594,36 +1662,110 @@ const BLOWN_SHARE: usize = 5;
 const NEAR_WHITE: f64 = 2.5;
 const MOST_PULL: f64 = 4.0;
 
-/// The measurement a scene's exposure is set from: its luminance at points
-/// spread over the picture.
+/// About how many film points the local adaptation is measured over: some
+/// 128 by 72 in a widescreen picture, at the picture's own shape; fewer in a
+/// picture of fewer than sixteen pixels a point. Each point takes four
+/// samples, two by two within it.
+const ADAPT_POINTS: usize = 9216;
+const ADAPT_PIXELS: u64 = 16;
+const ADAPT_SAMPLES: usize = 4;
+/// Adaptation samples one core measures in a unit of work.
+const ADAPT_UNIT: usize = 16;
+
+/// The measurement a scene's exposure is set from — its luminance at points
+/// spread over the picture — and then the local adaptation it is corrected
+/// by, measured once the exposure and the glare are known.
 #[derive(Debug)]
 pub(crate) struct Meter {
     key: f64,
     logs: Vec<f64>,
     next: u32,
     encoder: Encoder,
+    /// The picture the scene is traced for.
+    size: (u32, u32),
+    /// The film points the adaptation is measured over, across and down.
+    points: (usize, usize),
+    /// The adaptation's samples, once the exposure is set; and how many of
+    /// them are measured.
+    samples: Vec<Sample>,
+    measured: usize,
 }
 
 impl Meter {
-    /// A measurement toward `key`; `None` when the heap will not hold it.
-    pub(crate) fn new(key: f64) -> Option<Self> {
+    /// A measurement toward `key` for a picture of `size`; `None` when the
+    /// heap will not hold it.
+    pub(crate) fn new(key: f64, size: (u32, u32)) -> Option<Self> {
         let count = METER_COLUMNS * METER_ROWS;
         Some(Self {
             key,
             logs: fallible::filled(count as usize, 0.0)?,
             next: 0,
             encoder: Encoder::new()?,
+            size,
+            points: adapt_points(size),
+            samples: Vec::new(),
+            measured: 0,
         })
     }
 
-    /// Measure the next unit of points of `scene` across `runner`; whether
-    /// every point is measured.
-    /// The share of the metering points traced so far.
+    /// The share of the measurement made so far, by the samples traced.
     pub(crate) fn done(&self) -> f64 {
-        share(self.next as usize, self.logs.len())
+        let adapting = self.points.0 * self.points.1 * ADAPT_SAMPLES;
+        share(
+            self.next as usize + self.measured,
+            self.logs.len() + adapting,
+        )
     }
 
-    pub(crate) fn step(&mut self, scene: &Scene, runner: &dyn JobRunner) -> bool {
+    /// Measure the next unit of points of `scene` across `runner`, setting
+    /// its exposure and glare once they are measured, and then its local
+    /// adaptation; whether all is measured, or `None` when the heap will not
+    /// hold the adaptation.
+    pub(crate) fn step(&mut self, scene: &mut Scene, runner: &dyn JobRunner) -> Option<bool> {
+        let total = METER_COLUMNS * METER_ROWS;
+        if self.next < total {
+            self.expose(scene, runner);
+            if self.next >= total {
+                self.logs.sort_unstable_by(f64::total_cmp);
+                scene.exposure = exposure_of(&self.logs, self.key);
+                scene.glare = sun_in_view(scene);
+                let count = self.points.0 * self.points.1 * ADAPT_SAMPLES;
+                let blank = crate::adapt::Sample {
+                    across: 0.0,
+                    down: 0.0,
+                    stops: 0.0,
+                };
+                self.samples = fallible::filled(count, blank)?;
+            }
+            return Some(false);
+        }
+        let width = runner.width().max(1);
+        let (first, points, key) = (self.measured, self.points, self.key);
+        let end = first
+            .saturating_add(ADAPT_UNIT * width)
+            .min(self.samples.len());
+        let tracer = Tracer::new(scene, &self.encoder, self.size, 0);
+        if let Some(slots) = self.samples.get_mut(first..end) {
+            band::for_each(runner, slots, (0, ADAPT_UNIT), &|piece, out| {
+                let start = first.saturating_add(piece.saturating_mul(ADAPT_UNIT));
+                for (index, slot) in (start..).zip(out.iter_mut()) {
+                    *slot = tracer.adapting(index, points, key);
+                }
+            });
+        }
+        self.measured = end;
+        if end < self.samples.len() {
+            return Some(false);
+        }
+        let adaptation = Adaptation::measured(&self.samples, key, points)?;
+        scene.adaptation = adaptation.corrects().then_some(adaptation);
+        self.samples = Vec::new();
+        Some(true)
+    }
+
+    /// Measure the next unit of the exposure's points of `scene` across
+    /// `runner`.
+    fn expose(&mut self, scene: &Scene, runner: &dyn JobRunner) {
         let total = METER_COLUMNS * METER_ROWS;
         let first = self.next;
         let end = first
@@ -1632,7 +1774,7 @@ impl Meter {
         let tracer = Tracer::new(scene, &self.encoder, (METER_COLUMNS * 8, METER_ROWS * 8), 0);
         let Some(slots) = self.logs.get_mut(first as usize..end as usize) else {
             self.next = total;
-            return true;
+            return;
         };
         band::for_each(runner, slots, (0, METER_UNIT as usize), &|piece, out| {
             let start = u32::try_from(piece).map_or(u32::MAX, |piece| {
@@ -1643,16 +1785,23 @@ impl Meter {
             }
         });
         self.next = end;
-        self.next >= total
     }
+}
 
-    /// Set `scene`'s exposure from the measurement, and the sun's glare from
-    /// how much of it the eye sees.
-    pub(crate) fn settle(&mut self, scene: &mut Scene) {
-        self.logs.sort_unstable_by(f64::total_cmp);
-        scene.exposure = exposure_of(&self.logs, self.key);
-        scene.glare = sun_in_view(scene);
-    }
+/// The film points a picture of `size` measures its adaptation over, across
+/// and down: about `ADAPT_POINTS` at the picture's own shape.
+fn adapt_points((width, height): (u32, u32)) -> (usize, usize) {
+    let pixels = u64::from(width) * u64::from(height);
+    let wanted = usize::try_from(pixels / ADAPT_PIXELS)
+        .unwrap_or(ADAPT_POINTS)
+        .clamp(1, ADAPT_POINTS);
+    let aspect = f64::from(width.max(1)) / f64::from(height.max(1));
+    let count = |value: f64| usize::try_from(mathf::round_i32(value).max(1)).unwrap_or(1);
+    let across = count(mathf::sqrt(crate::vector::real(wanted) * aspect));
+    (
+        across,
+        count(crate::vector::real(wanted) / crate::vector::real(across)),
+    )
 }
 
 /// The exposure a scene's metered luminances call for, `logs` their

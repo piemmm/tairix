@@ -22,16 +22,19 @@ pub use album::{keep, Picture, PictureFiles, Unkept, FOLDERS};
 pub use crew::{
     run_tracing_thread, DeskLink, DeskLock, Keeper, Status, TraceDesk, TraceHost, TraceLink,
 };
-pub use engine::{Engine, Traced};
+#[cfg(test)]
+pub(crate) use engine::PLAIN;
+pub use engine::{Detailing, Engine, Memory, Traced};
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use tairix_parallel::JobRunner;
 use tairix_raster::DitherRow;
+use tairix_raytrace::Detail;
 use tairix_theme::{Fade, Theme};
 use tairix_util::fallible;
-use tairix_wallpaper::{CpuUse, RaytraceOptions};
+use tairix_wallpaper::{CpuUse, RaytraceOptions, SceneDetail};
 use tairix_wm::{Color, Compositor, Rect, Region, Scale, WindowId};
 
 use super::seed_from;
@@ -125,17 +128,28 @@ pub(super) struct Raytrace {
 impl Raytrace {
     /// A reveal for a `size` screen beginning at `now_ns`, `calm` under
     /// reduced motion, traced as `options` ask — on threads `host` grants
-    /// where it grants any — its readout in `theme`'s type at `scale`. `None`
-    /// when the screen has no pixels or the heap will not hold the reveal.
+    /// where it grants any, each scene at the detail `memory` can spare,
+    /// `tell` told when that changes — its readout in `theme`'s type at
+    /// `scale`. `None` when the screen has no pixels or the heap will not
+    /// hold the reveal.
     pub(super) fn new(
         size: (u32, u32),
         (calm, now_ns): (bool, u64),
-        options: RaytraceOptions,
+        (options, memory, tell): (RaytraceOptions, Memory, fn(Detail)),
         host: Option<&dyn TraceHost>,
         (theme, scale): (&Theme, Scale),
     ) -> Option<Self> {
         let preview = Preview::new(size)?;
-        let engine = Engine::new(size, seed_from(now_ns))?;
+        let asked = match options.detail {
+            SceneDetail::Simple => Detail::Simple,
+            SceneDetail::Maximum => Detail::Maximum,
+        };
+        let detailing = Detailing {
+            asked,
+            memory,
+            tell,
+        };
+        let engine = Engine::new(size, seed_from(now_ns), detailing)?;
         let feed = match host {
             Some(host) => match host.launch(engine, options) {
                 Ok(link) => Feed::Crew(link),

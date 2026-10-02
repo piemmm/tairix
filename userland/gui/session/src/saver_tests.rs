@@ -112,6 +112,8 @@ impl Fixture {
             theme: &self.theme,
             options: &self.options,
             tracers: None,
+            memory: crate::saver::raytrace::PLAIN.memory,
+            tell_detail: crate::saver::raytrace::PLAIN.tell,
         }
     }
 }

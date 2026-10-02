@@ -304,11 +304,14 @@ impl Atmosphere {
             if elevation <= 0.0 {
                 continue;
             }
+            // The cosine toward the zenith, times the solid angle of a texel:
+            // a ring shrinks with the cosine of its elevation, and rows packed
+            // as the square of the elevation span `2v - 1` of it apiece.
+            let texel = mathf::sin(elevation) * mathf::cos(elevation) * (2.0 * v - 1.0);
             for column in 0..VIEW.0 {
                 let u = centre(column, VIEW.0);
-                let cos = mathf::sin(elevation);
-                total += self.view.at((u, v)) * cos;
-                weight += cos;
+                total += self.view.at((u, v)) * texel;
+                weight += texel;
             }
         }
         if weight > 0.0 {

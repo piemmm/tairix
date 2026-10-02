@@ -7,10 +7,20 @@ forbids `unsafe`.
 
 ## Scenes
 
-A `Draft::new(setting, seed, size)` composes a scene in one of the nineteen
-`Setting`s. Within a setting everything is drawn from the seed: which pieces,
-where, in what, lit from where, at what hour and under what weather, and seen
-from where — and every draw is bounded so the scene is lit and framed to read.
+A `Draft::new(setting, seed, size, detail)` composes a scene in one of the
+nineteen `Setting`s. Within a setting everything is drawn from the seed: which
+pieces, where, in what, lit from where, at what hour and under what weather,
+and seen from where — and every draw is bounded so the scene is lit and framed
+to read.
+
+A `Detail` sets how much a scene sets out, and nothing else: one table of
+densities (`detail`) that composing and gathering read — how many objects a
+scene holds, how many trees each wood may stand and so how far it is sown, and
+how a radiosity record is gathered and laid. `Simple` is every setting
+plainer; `Maximum` spends the whole budget. The land, the eye, the hour and the
+weather are drawn before any wood grows, and each wood and the sward draw from
+streams of their own keyed from one draw, so however many draws one wood
+takes, a seed shows the same place at either detail.
 
 - **Still lifes** stand on a plane: a checkerboard of spheres, gems, rings and
   stacks under the open sky; a studio's plinth under softboxes, high or low
@@ -42,7 +52,10 @@ a finer grid about the eye refine it, droplets running over each for the rills
 and fans no coarser pass makes, a turn of the land's tiles at a time across the
 runner. Each vertex carries what the land is like
 there — wet, worn or built up, on a road or a path, how much grows — which its
-shading, its sward and its woods read. Grass is laid over it in lawns of
+shading, its sward and its woods read. The rivers' and lakes' surface is a grid
+of its own, wet a cell's diagonal past a river's banks, so a river however
+narrow and however it slants across the grid keeps its water in every cell its
+course crosses; what lies past the banks lies under the ground, unseen. Grass is laid over it in lawns of
 coarser cells the further they lie, merging leaves finer than a pixel and
 fading into the ground's own colour far off.
 
@@ -68,7 +81,10 @@ land stands, a bounded step at a time.
   one's by their crowns' reaches together, times the wood's closure there, a
   much shorter tree standing under a taller one's crown more readily than
   beside a peer's, and a stand draws two in five of its trees overtopped or
-  suppressed. No tree stands in the way of the view close ahead of the eye.
+  suppressed. No tree stands in the way of the view close ahead of the eye,
+  nor where a piece claims the ground: a bridge's deck and a row of arches
+  claim the whole strip beneath them, so nothing grows through a deck or in
+  an arcade's bays.
 - **Grown as they stood.** A kind grows four trees at heights from past its
   youngest to its tallest, and a place stands the one nearest the height it
   wants, scaled from three quarters of its own size to a third larger. A tree grown close among
@@ -85,7 +101,7 @@ land stands, a bounded step at a time.
   stand among the living.
 
 Each crown's reach is recorded, and once the woods stand their **shade** is
-cast over the land (`shade`): how far under a crown a place lies, and how much
+cast over the land (`shade`), whether or not a sward is laid beneath them: how far under a crown a place lies, and how much
 of the sky the crowns about it hide — the mean cover of the ground within a
 dozen metres, twice box-filtered. It is cast a band of rows a core: the crowns
 sorted into the bands their trunks stand in, each band covered from the crowns
@@ -187,10 +203,12 @@ eye; films interfere by the Airy sum; leaves and blades are lit through from
 behind. The light diffuse surfaces gather from one another and the sky is
 radiosity from an irradiance cache (Ward, Rubinstein and Clear, 1988) with its
 gradients (Ward and Heckbert, 1992), laid over the picture coarse to fine
-before its first pixel is traced: a record gathers 1024 rays, sixteen rows of
-equal cosine by sixty-four of azimuth, a row of them a core at a time; holds
-down to a 480th of the picture's height and within fifteen degrees of turn;
-and a square of the picture holds at most 6400; a path that has scattered off a diffuse
+before its first pixel is traced. At `Maximum` a record gathers 1024 rays,
+sixteen rows of equal cosine by sixty-four of azimuth, holds down to a 480th of
+the picture's height, and a square of the picture holds at most 6400; at
+`Simple`, 256 rays, eight rows by thirty-two, down to a 240th, and 1600 to a
+square. Either way its rows are gathered a few a core at a time and it holds
+within fifteen degrees of turn. A path that has scattered off a diffuse
 surface drops the lamps' images and highlights it would otherwise find.
 
 The air between the eye and what it sees scatters the sun's light and the
@@ -215,6 +233,23 @@ takes the frame's trimmed log mean to its key, then pulls down by up to two
 stops where more than a twentieth of the frame would blow out: the sun and
 its glints may, a sky or sunlit bark may not.
 
+What one exposure cannot hold is then compressed locally, gently, as a
+photographer would (`adapt`). Once the exposure and the glare are set, the
+meter traces about 9216 more film points at the picture's shape (128 by 72 on
+a widescreen picture), four samples apiece, into a bilateral grid over the
+film and log luminance (Chen, Paris and Durand, 2007): cells eight points a
+side and a stop deep, twelve stops either side of the key, blurred 1 4 6 4 1
+along each axis, so each holds the mean log luminance of the like-lit ground
+about it — Durand and Dorsey's base layer (2002). Each eye sample reads the
+grid at its own film position and exposed luminance before the filmic curve,
+so a pixel still traces the same on any core in any order. Within a stop and a
+half of the key nothing changes; beyond, the correction eases in to half the
+excess and settles toward two stops down for a highlight and one up for a
+shadow. A window and the dark room about it lie in different layers, so
+neither haloes the other; texture keeps its contrast; the sun still blows out.
+A scene none of whose bases lie that far from its key keeps no grid, and is
+traced exactly as without one.
+
 ## Reveal order
 
 `Reveal::new((width, height), key)` orders a picture's pixels coarse to fine,
@@ -225,7 +260,8 @@ largest power of two leaving at least eight points across the shorter side
 each later pass the three points in four the grid of twice its spacing did not
 hold, down to single pixels. A `Step` names its pixel and its pass's spacing.
 The grid twice as coarse is whole when a pass begins, so every point of a
-pass's grid is either traced or lies between traced points. Within a pass the
+pass's grid lies within one of its spacings, each way, of a traced point.
+Within a pass the
 steps follow a keyed bijection on the pass's range, so the whole
 picture sharpens at once, and a step is found from its index alone.
 
@@ -233,36 +269,41 @@ picture sharpens at once, and a step is found from its index alone.
 
 `Draft::progress` answers how far a draft's work has come in thousandths,
 never falling back and reaching a thousand only once the scene is ready. Each
-stage of the work holds a share of the whole measured over the settings —
+stage of the work holds a share of the whole measured over the settings at
+each detail —
 composing (on a land, the land's build, its planting, then the grids,
 prototypes and sky its look queued), the hierarchy, the radiosity records and
-the meter — and reports how far through itself it is. A land's build weighs
+the meter and its adaptation — and reports how far through itself it is. A land's build weighs
 each of its own stages by its items (vertices filled, coarse samples worn,
 droplets run, vertices settled) times the measured cost of one, so the readout
 keeps pace with a desert's droplets as with a valley's wear.
 
 ## Budgets
 
-A scene holds at most 524 288 objects (a forest's trees, understory and
-deadwood among them, each 320 bytes), 4096 hull faces, 256 materials, 12
-lights, 12 height grids, 96 prototypes, 16 lawns and 8 woods, and a path at
-most nine bounces.
+A scene holds at most 131 072 objects at `Simple` and 524 288 at `Maximum` (a
+forest's trees, understory and deadwood among them, each 320 bytes), 4096 hull
+faces, 256 materials, 12 lights, 12 height grids, 96 prototypes, 16 lawns and
+8 woods, and a path at most nine bounces.
 
 A scene may take up to 160 s to prepare on a desktop-class machine across 8
-threads and hold up to 2 GB at its peak (`plans/RAYTRACE.md`). Measured at 1920×1080 on
-a 24-thread desktop preparing across 8 threads, a landscape prepares in 6–30 s:
-a meadow standing 120 000 trees out to some 3 km in 30 s, a forest some
-160 000 over the whole of its land in 28 s, a desert in 6 s, four-fifths or
-more of each its radiosity records. None holds more than about 360 MB at its peak (a
-snowy wood's, whose places are many) or 310 MB once prepared, and no unit of
-the work takes more than about 6 ms. Traced on one of its cores, built for the
-x86-64 baseline (SSE2), a sample costs from about 2.4 µs (the checkerboard,
-mostly its clouds) to about 19 µs (a meadow, mostly its eye rays over grass)
-at 640×360 and full quality: a forest about 17 µs, a valley 12, a colonnade
-7. Every unit of preparation is a fixed amount of work a core — a band of a
-grid's rows or of a shade's, a turn of a land's droplet tiles, a slice of a
-hierarchy, a band of a wood's places or a run of their ranking, a few rows of
-a radiosity record's hemisphere — so `Draft::prepare` answers within a frame's
-slice however large the scene. Under the screensaver's
-`idle` setting the preparation runs on one core and takes some eight times as
-long.
+threads and hold up to 2 GB at its peak at `Maximum`, far less at `Simple`
+(`plans/RAYTRACE.md`). Measured at 1920×1080 on a 24-thread desktop preparing
+across 8 threads, a landscape prepares at `Maximum` in 6–33 s — a meadow in
+24–30 s, a forest in 33 s, a desert in 6 s, most of each its radiosity records
+— holding at most about 370 MB at its peak (a snowy wood's, whose places are
+many) and 305 MB once prepared; at `Simple` it prepares in 1.4–3.8 s, holding
+at most 305 MB and 267 MB. Traced on one of its cores, built for the x86-64
+baseline (SSE2), a sample costs from about 2.4 µs (the checkerboard, mostly its
+clouds) to about 19 µs (a meadow, mostly its eye rays over grass) at 640×360
+and full quality: a forest about 17 µs, a valley 12, a colonnade 7; the local
+adaptation's correction costs a sample about one per cent more.
+
+Every unit of preparation is a fixed amount of work a core — a band of a
+grid's rows or of a shade's, a turn of a land's droplet tiles, a band of the
+objects' boxes or a slice of a hierarchy, a ring's places drawn or a run of
+their ranking, a few rows of a radiosity record's hemisphere, a handful of
+the meter's samples — and a wood's places are kept in runs that never move as
+more are added, so `Draft::prepare` answers within about a frame however large
+the scene: measured, no unit takes more than about 10 ms at either detail. Under the
+screensaver's `idle` setting the preparation runs on one core and takes some
+eight times as long.

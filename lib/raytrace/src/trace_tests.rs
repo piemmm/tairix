@@ -693,3 +693,115 @@ fn the_meter_holds_a_bright_sky_below_white_but_lets_the_sun_blow_out() {
         "the sun alone"
     );
 }
+
+/// Metered, a frame of one level keeps no adaptation, and so is traced as
+/// though there were none; while a dark wall filling half a frame beside a
+/// window of light far brighter is lifted, and the window drawn down, each
+/// alike right up to the edge between them.
+#[test]
+fn the_meter_draws_a_bright_window_down_and_lifts_a_dark_wall_alike_to_their_edge() {
+    const PICTURE: (u32, u32) = (64, 36);
+    let metered = |mut scene: Scene| {
+        let mut meter = super::Meter::new(0.17, PICTURE).expect("a meter");
+        while !meter
+            .step(&mut scene, &tairix_parallel::SERIAL)
+            .expect("room to measure")
+        {}
+        scene
+    };
+    let mut even = Setup::new(uniform_sky(1.0));
+    even.add(
+        ground(),
+        Material::new(Pigment::Solid(Vec3::splat(0.5)), Finish::Matte),
+        None,
+    );
+    even.eye = Vec3::new(0.0, 2.0, -5.0);
+    assert!(
+        metered(even.scene()).adaptation.is_none(),
+        "one exposure holds an evenly lit frame"
+    );
+
+    // A wall under a dim sky across one half of the view, and a window as
+    // bright as a sunlit sky across the other, side by side square to it.
+    let mut setup = Setup::new(uniform_sky(0.2));
+    let half = |corner: Vec3, finish: Finish, pigment: f64| {
+        (
+            Shape::Quad {
+                corner,
+                edge_u: Vec3::new(0.0, 60.0, 0.0),
+                edge_v: Vec3::new(30.0, 0.0, 0.0),
+            },
+            Material::new(Pigment::Solid(Vec3::splat(pigment)), finish),
+        )
+    };
+    for (shape, material) in [
+        half(Vec3::new(-30.0, -30.0, 10.0), Finish::Matte, 0.5),
+        half(
+            Vec3::new(0.0, -30.0, 10.0),
+            Finish::Glow {
+                radiance: Vec3::splat(40.0),
+            },
+            0.0,
+        ),
+    ] {
+        setup.add(shape, material, None);
+    }
+    setup.eye = Vec3::ZERO;
+    setup.target = Vec3::new(0.0, 0.0, 1.0);
+    let mut scene = metered(setup.scene());
+    assert!(
+        scene.adaptation.is_some(),
+        "the window lies far past the wall"
+    );
+    let encoder = Encoder::new().expect("an encoder");
+    let row = |scene: &Scene| -> Vec<f64> {
+        let tracer = Tracer::new(scene, &encoder, PICTURE, 7);
+        (0..PICTURE.0)
+            .map(|x| tracer.light((x, PICTURE.1 / 2), Quality::Draft).0.y)
+            .collect()
+    };
+    let adapted = row(&scene);
+    scene.adaptation = None;
+    let plain = row(&scene);
+    // The edge: where the plain row leaps from wall to window.
+    let edge = (1..plain.len())
+        .max_by(|&a, &b| {
+            let leap = |at: usize| (plain[at] - plain[at - 1]).abs();
+            leap(a).total_cmp(&leap(b))
+        })
+        .expect("a row");
+    let window_left = plain[0] > plain[plain.len() - 1];
+    let lift = |x: usize| adapted[x] / plain[x];
+    let mut sides = (0, 0);
+    for x in (0..plain.len()).filter(|&x| x + 3 < edge || x > edge + 2) {
+        if (x < edge) == window_left {
+            sides.1 += 1;
+            assert!(adapted[x] < plain[x], "the window drawn down at {x}");
+            assert!(adapted[x] < 0.97, "and no longer white: {}", adapted[x]);
+        } else {
+            sides.0 += 1;
+            // At most a stop of light, which the filmic curve's toe shows
+            // as rather more.
+            assert!(
+                lift(x) > 1.4 && lift(x) < 2.6,
+                "the wall lifted at {x}: {}",
+                lift(x)
+            );
+            assert!(adapted[x] < 0.02, "and still dark: {}", adapted[x]);
+        }
+    }
+    assert!(sides.0 > 20 && sides.1 > 20, "{sides:?}");
+    // Hard by the edge the wall is lifted as far from it is, no halo of the
+    // window's darkening reaching onto it.
+    let (near, far) = if window_left {
+        (edge + 3, plain.len() - 1)
+    } else {
+        (edge - 4, 0)
+    };
+    assert!(
+        (lift(near) / lift(far) - 1.0).abs() < 0.03,
+        "{} near the edge against {} far from it",
+        lift(near),
+        lift(far)
+    );
+}

@@ -2,7 +2,7 @@
 
 use alloc::vec::Vec;
 
-use super::{Bvh, Walk, MAX_DEPTH};
+use super::{Builder, Bvh, Walk, MAX_DEPTH};
 use crate::sample::{mix32, unit};
 use crate::shape::{reciprocal, Aabb, Geometry, Shape};
 use crate::vector::{Ray, Vec3};
@@ -14,6 +14,13 @@ const NOTHING: Geometry<'static> = Geometry {
     prototypes: &[],
     lawns: &[],
 };
+
+/// The hierarchy over `bounds`, built a slice at a time as a scene's is.
+fn built(bounds: &[(u32, Aabb)]) -> Bvh {
+    let mut builder = Builder::new(bounds).expect("room to build");
+    while !builder.step(64) {}
+    builder.finish()
+}
 
 struct Draws(u32);
 
@@ -101,7 +108,7 @@ fn brute_force(shapes: &[Shape], ray: &Ray) -> Option<(usize, f64)> {
 fn the_hierarchy_finds_the_same_nearest_object_as_testing_every_one() {
     for (count, seed) in [(1u32, 1u32), (2, 2), (7, 3), (60, 4), (300, 5)] {
         let shapes = spheres(count, 4.0, seed);
-        let bvh = Bvh::build(&boxes(&shapes)).expect("built");
+        let bvh = built(&boxes(&shapes));
         for ray in rays(500, 4.0, seed ^ 0xabc) {
             let (found, _) = closest(&bvh, &shapes, &ray);
             let expected = brute_force(&shapes, &ray);
@@ -122,7 +129,7 @@ fn the_hierarchy_finds_the_same_nearest_object_as_testing_every_one() {
 #[test]
 fn a_walk_that_is_told_to_stop_stops() {
     let shapes = spheres(100, 3.0, 9);
-    let bvh = Bvh::build(&boxes(&shapes)).expect("built");
+    let bvh = built(&boxes(&shapes));
     for ray in rays(200, 3.0, 10) {
         let mut visits = 0;
         bvh.walk(&ray, f64::INFINITY, |_, _| {
@@ -139,7 +146,7 @@ fn a_walk_that_is_told_to_stop_stops() {
 #[test]
 fn a_ray_through_many_objects_tests_few_of_them() {
     let shapes = spheres(400, 6.0, 11);
-    let bvh = Bvh::build(&boxes(&shapes)).expect("built");
+    let bvh = built(&boxes(&shapes));
     let probes = rays(1000, 6.0, 12);
     let tested: u32 = probes.iter().map(|ray| closest(&bvh, &shapes, ray).1).sum();
     let mean = f64::from(tested) / 1000.0;
@@ -151,7 +158,7 @@ fn a_ray_through_many_objects_tests_few_of_them() {
 
 #[test]
 fn an_empty_hierarchy_has_nothing_to_visit() {
-    let bvh = Bvh::build(&[]).expect("built");
+    let bvh = built(&[]);
     let mut visits = 0;
     bvh.walk(&rays(1, 1.0, 1)[0], f64::INFINITY, |_, reach| {
         visits += 1;
@@ -170,7 +177,7 @@ fn coincident_objects_are_all_held_and_the_tree_stays_shallow() {
             radius: 0.5,
         })
         .collect();
-    let bvh = Bvh::build(&boxes(&shapes)).expect("built");
+    let bvh = built(&boxes(&shapes));
     assert_eq!(bvh.order.len(), 500);
     let mut held: Vec<u32> = bvh.order.clone();
     held.sort_unstable();
@@ -257,7 +264,7 @@ fn walk_unpaused(bvh: &Bvh, ray: &Ray, reach: f64, mut visit: impl FnMut(u32, f6
 #[test]
 fn a_cursor_hands_over_what_an_unpaused_walk_visits() {
     let shapes = spheres(3000, 8.0, 7);
-    let bvh = Bvh::build(&boxes(&shapes)).expect("a hierarchy");
+    let bvh = built(&boxes(&shapes));
     let mut visited = 0;
     for shortening in [true, false] {
         for (index, ray) in rays(2000, 8.0, 11).iter().enumerate() {

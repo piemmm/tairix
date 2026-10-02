@@ -29,6 +29,7 @@ use tairix_util::mathf;
 
 use crate::camera::Camera;
 use crate::deadwood::{log, stump, Top};
+use crate::detail::{Densities, Detail};
 use crate::grass::{Lawn, Tops};
 use crate::heightfield::Heightfield;
 use crate::land::{Build, Land};
@@ -37,6 +38,7 @@ use crate::material::{Finish, Foam, Material, Relief};
 use crate::pigment::Pigment;
 use crate::prototype::{Building, Prototype, BUILD_UNIT};
 use crate::rock::{rock, Habit};
+use crate::sample::mix64;
 use crate::scene::{Exposure, Fog, Grid, Object, Parts};
 use crate::shade::{Crown, Shades};
 use crate::shape::{Aabb, Face, Geometry, Shape};
@@ -438,14 +440,20 @@ struct Landing {
 }
 
 impl Composition {
-    /// A scene set in `setting` under `seed`, for a picture of `size`; `None`
-    /// when the heap will not hold it or the picture has no pixels.
-    pub(crate) fn new(setting: Setting, seed: u64, size: (u32, u32)) -> Option<Self> {
+    /// A scene set in `setting` under `seed`, for a picture of `size`, at
+    /// `detail`; `None` when the heap will not hold it or the picture has no
+    /// pixels.
+    pub(crate) fn new(
+        setting: Setting,
+        seed: u64,
+        size: (u32, u32),
+        detail: Detail,
+    ) -> Option<Self> {
         if size.0 == 0 || size.1 == 0 {
             return None;
         }
         let mut dice = Dice(NonCryptoRng::seed_from_u64(seed));
-        let mut stage = Stage::new()?;
+        let mut stage = Stage::new(detail.densities())?;
         stage.pixel = MIDDLING_FOV / f64::from(size.1);
         let composed = compose(setting, &mut stage, &mut dice)?;
         let mut jobs = VecDeque::new();
@@ -591,11 +599,10 @@ impl Composition {
             }
             Job::Land(landing) => self.land(landing, runner)?,
             Job::Plant(mut planting) => {
-                if planting.growing.step(
-                    &mut self.stage,
-                    &mut self.dice,
-                    (&planting.land, runner),
-                )? {
+                if planting
+                    .growing
+                    .step(&mut self.stage, (&planting.land, runner))?
+                {
                     self.settle(planting.look)?;
                     Progress::Done
                 } else {
@@ -633,11 +640,10 @@ impl Composition {
             let survey = landing.build.survey(&self.stage.fields)?;
             let (vantage, siting) = landing.scheme.site(&mut self.dice, &survey)?;
             landing.vantage = vantage.map(|vantage| {
-                let (x, z) = (vantage.eye.x, vantage.eye.z);
-                let under = survey
-                    .height(x, z)
-                    .max(survey.water(x, z).unwrap_or(f64::NEG_INFINITY));
-                (vantage, vantage.eye.y - under)
+                (
+                    vantage,
+                    vantage.eye.y - survey.surface(vantage.eye.x, vantage.eye.z),
+                )
             });
             landing
                 .build
@@ -651,17 +657,13 @@ impl Composition {
         // really there, rather than ending up beneath it.
         let fields = &self.stage.fields;
         let vantage = landing.vantage.map(|(mut vantage, rise)| {
-            let (x, z) = (vantage.eye.x, vantage.eye.z);
-            let under = land
-                .height(fields, x, z)
-                .max(land.water(fields, x, z).unwrap_or(f64::NEG_INFINITY));
-            vantage.eye.y = under + rise;
+            vantage.eye.y = land.surface(fields, vantage.eye.x, vantage.eye.z) + rise;
             vantage
         });
         let look = landing
             .scheme
             .finish(&mut self.stage, &mut self.dice, &mut land, vantage)?;
-        if let Some(growing) = Growing::from(&mut self.stage) {
+        if let Some(growing) = Growing::from(&mut self.stage, &mut self.dice) {
             return Some(Progress::Again(Job::Plant(Planting {
                 land,
                 growing,
@@ -755,6 +757,14 @@ impl Dice {
         self.0.next_u64()
     }
 
+    /// The draws of the `index`th of the streams keyed from `seed`.
+    fn keyed(seed: u64, index: usize) -> Self {
+        let index = u64::try_from(index).unwrap_or(u64::MAX);
+        Self(NonCryptoRng::seed_from_u64(mix64(
+            seed ^ mix64(index.wrapping_add(1)),
+        )))
+    }
+
     /// Either way round.
     fn sign(&mut self) -> f64 {
         if self.chance(0.5) {
@@ -830,6 +840,8 @@ struct Stage {
     /// About the angle a pixel spans, the picture seen through a middling
     /// lens: how small a piece may be and still be seen.
     pixel: f64,
+    /// How much the scene sets out.
+    densities: &'static Densities,
 }
 
 /// About how tall a picture a landscape is seen through, in radians.
@@ -840,8 +852,8 @@ const MIDDLING_FOV: f64 = 1.0;
 const CANOPY_SIDE: usize = 2048;
 
 /// The most of each a stage holds: bounds on what one scene may cost, not
-/// capacities a larger machine would want more of.
-const MAX_OBJECTS: usize = 1 << 19;
+/// capacities a larger machine would want more of. Its objects are its
+/// detail's to bound.
 const MAX_FACES: usize = 4096;
 const MAX_FIELDS: usize = 12;
 const MAX_MATERIALS: usize = 256;
@@ -860,7 +872,7 @@ const BUBBLE_SHADOW: f64 = 0.85;
 const GLASS_SHADOW: f64 = 0.62;
 
 impl Stage {
-    fn new() -> Option<Self> {
+    fn new(densities: &'static Densities) -> Option<Self> {
         let mut stage = Self {
             objects: Vec::new(),
             faces: Vec::new(),
@@ -878,6 +890,7 @@ impl Stage {
             shades: None,
             subject: Aabb::EMPTY,
             pixel: MIDDLING_FOV / 1080.0,
+            densities,
         };
         let reserved = stage.objects.try_reserve(256).is_ok()
             && stage.faces.try_reserve(256).is_ok()
@@ -922,7 +935,7 @@ impl Stage {
         }
         push(
             &mut self.objects,
-            MAX_OBJECTS,
+            self.densities.objects,
             Object {
                 shape,
                 material,
@@ -1140,12 +1153,26 @@ impl Stage {
 
     /// How many more objects the stage will hold.
     const fn room(&self) -> usize {
-        MAX_OBJECTS.saturating_sub(self.objects.len())
+        self.densities.objects.saturating_sub(self.objects.len())
     }
 
     /// Mark `at` taken by a piece `radius` across placed there by hand.
     fn claim(&mut self, at: (f64, f64), radius: f64) -> Option<()> {
         self.footprints.claim(at, radius)
+    }
+
+    /// Mark taken the strip `half` either side of the line from `from` to
+    /// `to`, as circles close enough along it to leave no gap at its edges:
+    /// what a bridge's deck or a row of arches keeps clear beneath it.
+    fn claim_along(&mut self, from: (f64, f64), to: (f64, f64), half: f64) -> Option<()> {
+        let (dx, dz) = (to.0 - from.0, to.1 - from.1);
+        let steps = mathf::ceil(mathf::hypot(dx, dz) / half.max(1e-3)).max(1.0);
+        let radius = mathf::hypot(half, 0.5 * mathf::hypot(dx, dz) / steps);
+        for step in 0..=u32::try_from(mathf::round_i32(steps)).ok()? {
+            let t = f64::from(step) / steps;
+            self.claim((from.0 + dx * t, from.1 + dz * t), radius)?;
+        }
+        Some(())
     }
 
     /// The camera `view` places, for a picture `aspect` times as wide as it

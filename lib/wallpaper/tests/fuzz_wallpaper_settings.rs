@@ -205,6 +205,11 @@ const KEYS: &[(&str, &[&str], &[&str])] = &[
         &["yes"],
     ),
     (
+        "screensaver.raytrace.detail",
+        &["simple", "maximum"],
+        &["fine", "Maximum"],
+    ),
+    (
         "screensaver.retro_games.speed",
         &["slow", "normal", "fast"],
         &["warp"],

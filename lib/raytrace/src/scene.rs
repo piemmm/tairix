@@ -13,9 +13,12 @@ use alloc::vec::Vec;
 use tairix_parallel::JobRunner;
 use tairix_util::{fallible, mathf};
 
+use crate::adapt::Adaptation;
+use crate::band;
 use crate::bvh::{Builder, Bvh, Cursor, Walk};
 use crate::camera::Camera;
 use crate::compose::{Composition, Setting};
+use crate::detail::Detail;
 use crate::grass::{Canopy, Cover, Lawn};
 use crate::heightfield::Heightfield;
 use crate::light::Light;
@@ -129,6 +132,7 @@ pub struct Draft {
     state: State,
     /// The picture the scene is drawn for.
     size: (u32, u32),
+    detail: Detail,
     /// Whether the scene stands on a land, whose building and planting then
     /// take much of the work.
     landed: bool,
@@ -137,18 +141,21 @@ pub struct Draft {
 }
 
 /// Where each stage of a draft's work ends, as a share of the whole, for a
-/// scene on a land and for one without: measured over the settings on a
-/// desktop-class machine preparing across eight threads.
-const LANDED_ENDS: Ends = Ends {
-    composed: 0.11,
-    built: 0.113,
-    gathered: 0.999,
-};
-const UNLANDED_ENDS: Ends = Ends {
-    composed: 0.03,
-    built: 0.032,
-    gathered: 0.996,
-};
+/// scene on a land or one without at `detail`: measured over the settings on
+/// a desktop-class machine preparing across eight threads.
+const fn ends(landed: bool, detail: Detail) -> Ends {
+    let (composed, built, gathered) = match (landed, detail) {
+        (true, Detail::Simple) => (0.57, 0.577, 0.955),
+        (true, Detail::Maximum) => (0.112, 0.115, 0.991),
+        (false, Detail::Simple) => (0.096, 0.097, 0.983),
+        (false, Detail::Maximum) => (0.02, 0.021, 0.973),
+    };
+    Ends {
+        composed,
+        built,
+        gathered,
+    }
+}
 
 /// Where a draft's composing, building and gathering end, as shares of its
 /// work; metering takes the rest.
@@ -178,14 +185,16 @@ enum State {
 }
 
 impl Draft {
-    /// A scene set in `setting` under `seed`, for a picture of `size`; `None`
-    /// when the heap will not hold it or the picture has no pixels.
+    /// A scene set in `setting` under `seed`, for a picture of `size`, at
+    /// `detail`; `None` when the heap will not hold it or the picture has no
+    /// pixels.
     #[must_use]
-    pub fn new(setting: Setting, seed: u64, size: (u32, u32)) -> Option<Self> {
-        Composition::new(setting, seed, size).map(|composition| Self {
+    pub fn new(setting: Setting, seed: u64, size: (u32, u32), detail: Detail) -> Option<Self> {
+        Composition::new(setting, seed, size, detail).map(|composition| Self {
             landed: composition.landed(),
             state: State::Composing(composition),
             size,
+            detail,
             progress: 0,
         })
     }
@@ -199,11 +208,7 @@ impl Draft {
 
     /// How far the work stands now, in thousandths.
     fn measure(&self) -> u16 {
-        let ends = if self.landed {
-            LANDED_ENDS
-        } else {
-            UNLANDED_ENDS
-        };
+        let ends = ends(self.landed, self.detail);
         let within = |from: f64, to: f64, done: f64| from + (to - from) * done.clamp(0.0, 1.0);
         let done = match &self.state {
             State::Composing(composition) => within(0.0, ends.composed, composition.done()),
@@ -235,7 +240,7 @@ impl Draft {
                 if composition.advance(runner, spent)? {
                     let parts = composition.finish()?;
                     let exposure = parts.exposure;
-                    State::Building(Scene::building(parts)?, exposure)
+                    State::Building(Scene::building(parts, runner)?, exposure)
                 } else {
                     State::Composing(composition)
                 }
@@ -244,7 +249,7 @@ impl Draft {
                 if building.step() {
                     break State::Gathering(
                         building.finish(),
-                        Gathering::new(self.size)?,
+                        Gathering::new(self.size, &self.detail.densities().records)?,
                         exposure,
                     );
                 }
@@ -254,10 +259,12 @@ impl Draft {
             },
             State::Gathering(mut scene, mut gathering, exposure) => loop {
                 if gathering.step(&scene, runner)? {
-                    scene.radiosity = Some(gathering.finish()?);
+                    scene.radiosity = Some(gathering.finish());
                     break match exposure {
                         Exposure::Fixed(_) => State::Ready(scene),
-                        Exposure::Metered { key } => State::Metering(scene, Meter::new(key)?),
+                        Exposure::Metered { key } => {
+                            State::Metering(scene, Meter::new(key, self.size)?)
+                        }
                     };
                 }
                 if spent() {
@@ -265,8 +272,7 @@ impl Draft {
                 }
             },
             State::Metering(mut scene, mut meter) => loop {
-                if meter.step(&scene, runner) {
-                    meter.settle(&mut scene);
+                if meter.step(&mut scene, runner)? {
                     break State::Ready(scene);
                 }
                 if spent() {
@@ -358,6 +364,9 @@ pub struct Scene {
     /// The light the scene's diffuse surfaces gather from one another and
     /// the sky, once laid down.
     pub(crate) radiosity: Option<Radiosity>,
+    /// The range one exposure cannot hold, compressed sample by sample, once
+    /// measured; `None` where the exposure holds the whole scene.
+    pub(crate) adaptation: Option<Adaptation>,
     /// Roughly how much light falls on the scene, as a share of a clear
     /// day's: what the glow within water is scaled by.
     pub(crate) daylight: f64,
@@ -421,6 +430,7 @@ impl Building {
             },
             glare: None,
             radiosity: None,
+            adaptation: None,
             daylight: parts.daylight,
             bvh: builder.finish(),
             unbounded,
@@ -434,21 +444,19 @@ impl Scene {
     /// scene out; `None` when the heap will not hold it.
     #[cfg(test)]
     pub(crate) fn new(parts: Parts) -> Option<Self> {
-        let mut building = Self::building(parts)?;
+        let mut building = Self::building(parts, &tairix_parallel::SERIAL)?;
         while !building.step() {}
         Some(building.finish())
     }
 
-    /// The scene of `parts`, its hierarchy to build step by step; `None` when
-    /// the heap will not hold it.
-    pub(crate) fn building(parts: Parts) -> Option<Building> {
-        let mut bounded = Vec::new();
+    /// The scene of `parts`, its objects' boxes found across `runner` and its
+    /// hierarchy to build step by step; `None` when the heap will not hold
+    /// it.
+    pub(crate) fn building(parts: Parts, runner: &dyn JobRunner) -> Option<Building> {
+        let count = parts.objects.len();
+        u32::try_from(count).ok()?;
+        let mut bounded = fallible::filled(count, (0u32, Aabb::EMPTY))?;
         let mut unbounded = Vec::new();
-        if !(fallible::reserve(&mut bounded, parts.objects.len())
-            && fallible::reserve(&mut unbounded, parts.objects.len()))
-        {
-            return None;
-        }
         let geometry = Geometry {
             faces: &parts.faces,
             fields: &parts.fields,
@@ -456,13 +464,27 @@ impl Scene {
             lawns: &parts.lawns,
         };
         // An object whose box is not finite is tested by every ray rather
-        // than trusted to the slab test, which a non-finite box defeats.
-        for (index, object) in parts.objects.iter().enumerate() {
-            match object.shape.bounds(geometry).filter(Aabb::is_finite) {
-                Some(bounds) => bounded.push((u32::try_from(index).ok()?, bounds)),
-                None => unbounded.push(index),
+        // than trusted to the slab test, which a non-finite box defeats: it
+        // keeps the empty box here until it is set apart.
+        band::for_each(runner, &mut bounded, (0, BUILD_UNIT), &|piece, out| {
+            let first = piece * BUILD_UNIT;
+            for ((index, slot), object) in (first..)
+                .zip(out.iter_mut())
+                .zip(parts.objects.iter().skip(first))
+            {
+                let bounds = object.shape.bounds(geometry).filter(Aabb::is_finite);
+                *slot = (
+                    u32::try_from(index).unwrap_or(u32::MAX),
+                    bounds.unwrap_or(Aabb::EMPTY),
+                );
             }
+        });
+        let endless = bounded.iter().filter(|(_, bounds)| !bounds.is_finite());
+        if !fallible::reserve(&mut unbounded, endless.clone().count()) {
+            return None;
         }
+        unbounded.extend(endless.map(|&(index, _)| index as usize));
+        bounded.retain(|(_, bounds)| bounds.is_finite());
         let grassed = parts
             .lawns
             .iter()

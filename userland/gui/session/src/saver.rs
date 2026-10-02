@@ -34,6 +34,7 @@ use tairix_abi::switchboard_ipc::MachineReport;
 use tairix_abi::time::WallClockReading;
 use tairix_abi::DriverError;
 use tairix_display::{DisplaySleep, SwitchedOff};
+use tairix_raytrace::Detail;
 use tairix_theme::Theme;
 use tairix_wallpaper::{ScreensaverKind, ScreensaverOptions};
 use tairix_window::WallpaperName;
@@ -45,7 +46,7 @@ pub use clock::SaverIdentity;
 
 use clock::ClockFace;
 use life::Life;
-use raytrace::{Raytrace, TraceHost};
+use raytrace::{Memory, Raytrace, TraceHost};
 use retro_games::RetroGames;
 use ribbon::Ribbon;
 use slides::Slides;
@@ -80,6 +81,11 @@ pub struct SaverSetup<'a> {
     /// The threads the ray tracer may trace on; with none, it traces on the
     /// serve loop.
     pub tracers: Option<&'a dyn TraceHost>,
+    /// What the machine's memory can spare a ray-traced scene.
+    pub memory: Memory,
+    /// Told the detail the ray tracer's scenes are set out at, whenever the
+    /// memory changes it from the last scene's.
+    pub tell_detail: fn(Detail),
 }
 
 /// What a screensaver draws, and what it needs to keep drawing.
@@ -270,7 +276,7 @@ impl Screensaver {
             ScreensaverKind::Raytrace => Raytrace::new(
                 size,
                 (calm, now_ns),
-                options.raytrace,
+                (options.raytrace, setup.memory, setup.tell_detail),
                 setup.tracers,
                 (setup.theme, scale),
             )

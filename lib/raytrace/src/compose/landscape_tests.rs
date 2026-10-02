@@ -5,6 +5,7 @@ use tairix_rng::NonCryptoRng;
 
 use super::*;
 use crate::compose::{Composed, Stage};
+use crate::detail::Detail;
 
 /// The landing `plan` composes under `seed`, its far land built and waiting
 /// to be sited, and the stage it is set out on.
@@ -13,7 +14,7 @@ fn surveyed(
     seed: u64,
 ) -> (Stage, Landing, Dice) {
     let mut dice = Dice(NonCryptoRng::seed_from_u64(seed));
-    let mut stage = Stage::new().expect("a stage");
+    let mut stage = Stage::new(Detail::Maximum.densities()).expect("a stage");
     let Some(Composed::Landed(mut landing)) = plan(&mut stage, &mut dice) else {
         panic!("a landscape stands on a land");
     };
@@ -101,7 +102,7 @@ fn a_frozen_pond_lies_level_in_its_hollow() {
 #[test]
 fn a_backdrops_clearing_stays_level_once_its_land_is_built() {
     let mut dice = Dice(NonCryptoRng::seed_from_u64(2));
-    let mut stage = Stage::new().expect("a stage");
+    let mut stage = Stage::new(Detail::Maximum.densities()).expect("a stage");
     let backdrop = backdrop(
         &mut stage,
         &mut dice,

@@ -113,6 +113,7 @@ that key's own closed vocabulary:
 | `screensaver.life.speed` | `slow` \| `normal` \| `fast`              | `normal`                                      |
 | `screensaver.raytrace.cpu` | `idle` \| `performance`                 | `idle`                                        |
 | `screensaver.raytrace.save` | `true` \| `false`                      | `false`                                       |
+| `screensaver.raytrace.detail` | `simple` \| `maximum`               | `simple`                                      |
 | `screensaver.retro_games.speed` | `slow` \| `normal` \| `fast`       | `normal`                                      |
 | `screensaver.system_monitor.tasks` | `true` \| `false`               | `true`                                        |
 | `lock.after_min` | `never`, or whole minutes, `1..=1440`           | `15`                                          |
@@ -341,13 +342,15 @@ every source pixel at 1:1 and so needs the native size.
   `DocumentRefusal` — the strict reading's reasons.
 - `saver::{ScreensaverOptions, SlideshowOptions, SlideSource, SlideOrder,
   ClockOptions, RibbonOptions, StarfieldOptions, StarDensity, LifeOptions,
-  CellSize, RaytraceOptions, CpuUse, RetroGamesOptions, SystemMonitorOptions,
-  Pace, WallpaperCategory}`
+  CellSize, RaytraceOptions, CpuUse, SceneDetail, RetroGamesOptions,
+  SystemMonitorOptions, Pace, WallpaperCategory}`
   — every screensaver's options; `Pace` is the one speed ladder a moving
   scene is set at, each scene holding what its own pace means (`percent`),
   and `CpuUse` how much of the machine the ray tracer traces on — one core
   (`Idle`, the default) or every core (`Performance`) — beside whether it
-  keeps each finished picture (`RaytraceOptions::save`, off by default);
+  keeps each finished picture (`RaytraceOptions::save`, off by default) and
+  how much each of its scenes sets out (`SceneDetail`: `Simple`, the
+  default, or `Maximum`);
   `SystemMonitorOptions::tasks` whether the System Monitor names the busiest
   tasks, which anyone who can see the screen can read, the lock included;
   `SCREENSAVER_PREVIEW_STORE`, `preview_file`, `preview_path`,

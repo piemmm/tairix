@@ -412,6 +412,38 @@ impl CpuUse {
     }
 }
 
+/// How much the ray tracer's scenes set out.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum SceneDetail {
+    /// Every scene, plainer, in a fraction of the memory.
+    #[default]
+    Simple,
+    /// All the realism the tracer's budget buys, where the memory is free.
+    Maximum,
+}
+
+impl SceneDetail {
+    /// Both, the lighter first.
+    pub const ALL: [Self; 2] = [Self::Simple, Self::Maximum];
+
+    /// The canonical value spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Simple => "simple",
+            Self::Maximum => "maximum",
+        }
+    }
+
+    /// Decode a value spelling; `None` for anything outside the closed set.
+    #[must_use]
+    pub fn from_value(value: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|detail| detail.as_str() == value)
+    }
+}
+
 /// The ray tracer's options.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct RaytraceOptions {
@@ -420,6 +452,8 @@ pub struct RaytraceOptions {
     /// Whether each finished picture is kept, as a PNG in the user's
     /// `Documents/Pictures/Raytracing/`.
     pub save: bool,
+    /// How much each scene sets out.
+    pub detail: SceneDetail,
 }
 
 /// The retro games' options.
@@ -471,8 +505,8 @@ mod tests {
     use tairix_abi::time::Duration64;
 
     use super::{
-        preview_file, preview_kind, preview_path, CellSize, CpuUse, Pace, SlideOrder, SlideSource,
-        SlideshowOptions, StarDensity, WallpaperCategory, SCREENSAVER_PREVIEW_STORE,
+        preview_file, preview_kind, preview_path, CellSize, CpuUse, Pace, SceneDetail, SlideOrder,
+        SlideSource, SlideshowOptions, StarDensity, WallpaperCategory, SCREENSAVER_PREVIEW_STORE,
     };
 
     #[test]
@@ -550,9 +584,13 @@ mod tests {
         for cpu in CpuUse::ALL {
             assert_eq!(CpuUse::from_value(cpu.as_str()), Some(cpu));
         }
+        for detail in SceneDetail::ALL {
+            assert_eq!(SceneDetail::from_value(detail.as_str()), Some(detail));
+        }
         assert_eq!(SlideOrder::from_value("random"), None);
         assert_eq!(StarDensity::from_value("Normal"), None);
         assert_eq!(CpuUse::from_value("Performance"), None);
+        assert_eq!(SceneDetail::from_value("Maximum"), None);
     }
 
     #[test]

@@ -248,9 +248,9 @@ pub struct Step {
 /// side, so a few hundred pixels at most span the whole picture — down to
 /// single pixels, each pass tracing only the three points in four the grid
 /// of twice its spacing does not hold. That coarser grid is whole when a pass
-/// begins, so every point of a pass's grid is either traced or lies between
-/// traced points. Within a pass the steps follow a keyed bijection, so the
-/// whole picture sharpens at once rather than a band of it.
+/// begins, so every point of a pass's grid lies within one of its spacings,
+/// each way, of a traced point. Within a pass the steps follow a keyed
+/// bijection, so the whole picture sharpens at once rather than a band of it.
 #[derive(Clone, Debug)]
 pub struct Reveal {
     count: u32,

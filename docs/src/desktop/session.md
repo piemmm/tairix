@@ -1768,8 +1768,13 @@ shows, each scene drawn as the user's `screensaver.*` options set it
   (its scene's seed when the clock is not set), and taking the next number
   rather than writing over any picture already there, and a picture that
   cannot be kept says why on `stderr`. With no thread granted nothing is
-  kept, since nothing off the loop could write it. Once whole the scene is
-  let go. The painter keeps every traced pixel, so a buffer the compositor
+  kept, since nothing off the loop could write it. Each scene is composed at
+  `screensaver.raytrace.detail` (`simple`, the default, or `maximum`), read
+  from the memory the machine holds and the pressure band last reported: a
+  band other than normal holds at most its exit watermark free, so where that
+  is less than `Detail::peak` of the detail asked the scene is composed at
+  Simple instead, and each change from the last scene's detail is said once on
+  `stderr`. Once whole the scene is let go. The painter keeps every traced pixel, so a buffer the compositor
   lets go is painted afresh from them and nothing is traced again. A scene the
   heap will not give, or a buffer it will not give the picture, leaves the
   screen black a minute before another is tried, rather than retrying it

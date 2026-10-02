@@ -331,7 +331,7 @@ fn waves_never_repeat_across_the_water() {
             worst = worst.max(correlation.abs());
         }
     }
-    assert!(worst < 0.3, "the water repeats itself: {worst}");
+    assert!(worst < 0.25, "the water repeats itself: {worst}");
 }
 
 /// Gusts raise the waves in patches and lulls lay them down: across the

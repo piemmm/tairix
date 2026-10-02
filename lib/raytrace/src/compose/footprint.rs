@@ -74,9 +74,7 @@ impl Footprints {
     pub(super) fn claim(&mut self, at: (f64, f64), radius: f64) -> Option<()> {
         let radius = radius.max(0.0);
         let id = u32::try_from(self.circles.len()).ok()?;
-        if !fallible::reserve(&mut self.circles, 1) {
-            return None;
-        }
+        self.circles.try_reserve(1).ok()?;
         self.circles.push((at.0, at.1, radius));
         match &mut self.index {
             Some(index) => index.link(id, at, radius),
@@ -136,16 +134,12 @@ impl Index {
     fn link(&mut self, id: u32, at: (f64, f64), radius: f64) -> Option<()> {
         let ((columns, rows), past) = self.span(at, radius);
         if past {
-            if !fallible::reserve(&mut self.beyond, 1) {
-                return None;
-            }
+            self.beyond.try_reserve(1).ok()?;
             self.beyond.push(id);
             return Some(());
         }
         let cells = (columns.1 - columns.0 + 1) * (rows.1 - rows.0 + 1);
-        if !fallible::reserve(&mut self.links, cells) {
-            return None;
-        }
+        self.links.try_reserve(cells).ok()?;
         for row in rows.0..=rows.1 {
             for column in columns.0..=columns.1 {
                 let head = self.heads.get_mut(row * self.side + column)?;

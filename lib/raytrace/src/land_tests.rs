@@ -226,3 +226,80 @@ fn a_lane_carries_its_road_or_its_path_and_the_road_wins() {
         "the road over a path"
     );
 }
+
+#[test]
+fn a_straight_level_river_wanders_only_sideways_by_its_own_length_run() {
+    let rivers = Rivers {
+        catchment: 1.0e5,
+        width: 4.0,
+        meander: 1.0,
+    };
+    let course: Vec<Mark> = (0..64)
+        .map(|index| Mark {
+            x: 4.0 * real(index),
+            z: 10.0,
+            level: 2.0,
+            width: 4.0,
+            depth: 1.0,
+        })
+        .collect();
+    let seed = 0x5eed;
+    let wandering = meandering(&course, rivers, seed).expect("a course");
+    assert_eq!(wandering.len(), course.len());
+    let (first, last) = (wandering[0], wandering[course.len() - 1]);
+    assert_eq!((first.x, first.z), (0.0, 10.0), "the ends stay put");
+    assert_eq!((last.x, last.z), (252.0, 10.0), "the ends stay put");
+    let wavelength = 11.0 * 4.0;
+    let mut swayed = 0.0_f64;
+    for (index, (moved, at)) in wandering.iter().zip(&course).enumerate().skip(1).take(62) {
+        assert_eq!(
+            moved.x.to_bits(),
+            at.x.to_bits(),
+            "a course along x moves across it alone"
+        );
+        // Measured along the course as it lay, not as earlier points left it.
+        let travelled = 4.0 * real(index);
+        let sway = 4.0
+            * mathf::sin(
+                TAU * travelled / wavelength + noise2(travelled / (4.0 * wavelength), 0.3, seed),
+            );
+        assert!(
+            (moved.z - (10.0 + sway)).abs() < 1e-9,
+            "{index}: {} against {sway}",
+            moved.z - 10.0
+        );
+        swayed = swayed.max(sway.abs());
+    }
+    assert!(
+        swayed > 3.0,
+        "it wanders as far as its width either way: {swayed}"
+    );
+}
+
+#[test]
+fn a_narrow_slanting_river_wets_every_corner_of_every_cell_it_crosses() {
+    // A river a quarter of a cell wide, slanting across the grid at many
+    // angles: each cell its course passes through keeps all four corners wet.
+    let (step, width) = (4.0, 1.0);
+    for turn in 0..24 {
+        let angle = f64::from(turn) * 0.13 + 0.05;
+        let (dx, dz) = (mathf::cos(angle), mathf::sin(angle));
+        let apart = |(x, z): (f64, f64)| (x * dz - z * dx).abs();
+        for along in 0..400 {
+            let t = f64::from(along) * 0.1 - 20.0;
+            let (x, z) = (dx * t + 0.37, dz * t - 0.21);
+            let (column, row) = (mathf::floor(x / step), mathf::floor(z / step));
+            for corner in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
+                let at = (
+                    (column + corner.0) * step - 0.37,
+                    (row + corner.1) * step + 0.21,
+                );
+                assert!(
+                    apart(at) < river_reach(width, step),
+                    "{angle}: a corner {} off the river's middle",
+                    apart(at)
+                );
+            }
+        }
+    }
+}
