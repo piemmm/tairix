@@ -2,12 +2,13 @@
 //! thread through, the desk between it and the serve loop, and both ends of
 //! the protocol over that desk — the thread's loop and the serve loop's link.
 //!
-//! The embedder supplies only its lock, its condition variable and the thread
-//! itself ([`DeskLock`]); everything they carry out is here. The serve loop
-//! collects on its own frame rather than being woken: it is an animation, so
-//! a wake could only bring it to wait for that frame anyway. What the thread
-//! lays down is bounded, so a loop that stops drawing holds the thread back
-//! rather than letting what it traced pile up.
+//! The embedder supplies only its lock, its condition variable, the wake into
+//! its serve loop and the thread itself ([`DeskLock`]); everything they carry
+//! out is here. The serve loop collects on its own cadence, seconds apart once
+//! only fine detail is left, and is woken only as a scene is readied, so the
+//! scene's first passes are shown as they come. What the thread lays down is
+//! bounded, so a loop that stops drawing holds the thread back rather than
+//! letting what it traced pile up.
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
@@ -19,12 +20,12 @@ use tairix_wallpaper::RaytraceOptions;
 
 use super::album::{Picture, Unkept};
 use super::engine::{Engine, Traced, SLICE_NS};
-use tairix_theme::motion::SceneClock;
+use super::MOST_WAIT_NS;
 
 /// How many slices may wait for the serve loop before the tracing thread
-/// stops for it: two of the loop's frames' worth, so a frame it spends
-/// elsewhere never idles the thread.
-const QUEUED_SLICES: u64 = 2 * SceneClock::FRAME_NS / SLICE_NS;
+/// stops for it: two of the loop's longest waits between collections, so a
+/// loop collecting late never idles the thread.
+const QUEUED_SLICES: u64 = 2 * MOST_WAIT_NS / SLICE_NS;
 
 // A queue of none would hold the thread back from its first slice for good.
 const _: () = assert!(QUEUED_SLICES > 0);
@@ -82,16 +83,16 @@ pub trait Keeper {
 /// The serve loop's end of a reveal traced on other threads. Dropping it
 /// sends them away.
 pub trait TraceLink {
-    /// Move every step traced since the last call into `into`, in the order
-    /// traced, and answer where the reveal stands.
+    /// Move every step traced since the last call onto the end of `into`, in
+    /// the order traced, and answer where the reveal stands.
     fn collect(&self, into: &mut Vec<Traced>) -> Status;
 
     /// Ask for a scene in another setting, dropping everything traced before.
     fn next(&self);
 }
 
-/// The embedder's lock around a reveal's [`TraceDesk`], and the condition
-/// variable its tracing thread parks on.
+/// The embedder's lock around a reveal's [`TraceDesk`], the condition
+/// variable its tracing thread parks on, and the wake into its serve loop.
 pub trait DeskLock {
     /// Proof the desk is held; dropping it releases the desk.
     type Guard<'a>: DerefMut<Target = TraceDesk>
@@ -107,13 +108,17 @@ pub trait DeskLock {
 
     /// Wake the tracing thread, if it is parked.
     fn signal(&self);
+
+    /// Wake the serve loop, from the tracing thread, to collect at once.
+    fn nudge(&self);
 }
 
 /// The whole life of a thread tracing over `desk`: wait for its engine, then
-/// trace it across `runner` a slice at a time, laying each down on the desk,
-/// until the serve loop leaves, parked whenever there is nothing to trace;
-/// `clock` reads the monotonic clock, to pace the slices, and `keeper` keeps
-/// each whole picture, once it is on the desk, if the engine keeps them.
+/// trace it across `runner` a slice at a time, laying each down on the desk
+/// and nudging the serve loop as each scene is readied, until the loop leaves,
+/// parked whenever there is nothing to trace; `clock` reads the monotonic
+/// clock, to pace the slices, and `keeper` keeps each whole picture, once it
+/// is on the desk, if the engine keeps them.
 pub fn run_tracing_thread(
     desk: &impl DeskLock,
     runner: &dyn JobRunner,
@@ -145,7 +150,10 @@ pub fn run_tracing_thread(
             }
         };
         let status = order.carry_out(&mut engine, runner, &mut slice, clock);
-        desk.lock().deposit(order, &slice, status);
+        let readied = desk.lock().deposit(order, &slice, status);
+        if readied {
+            desk.nudge();
+        }
         slice.clear();
         if let Some(finished) = engine.take_finished() {
             if let Some(keeper) = keeper.as_mut() {
@@ -306,25 +314,35 @@ impl TraceDesk {
 
     /// Lay down what `order` traced and where the reveal then stood, unless
     /// the loop has asked for something since; memory refused for it fails
-    /// the reveal rather than leaving a hole in the picture.
-    fn deposit(&mut self, order: Order, traced: &[Traced], status: Status) {
+    /// the reveal rather than leaving a hole in the picture. Answers whether
+    /// that ended the scene's preparation, which the loop is to see at once.
+    fn deposit(&mut self, order: Order, traced: &[Traced], status: Status) -> bool {
         if order.generation != self.generation {
-            return;
+            return false;
         }
+        let preparing = matches!(self.status, Status::Preparing(_));
         if self.ready.try_reserve(traced.len()).is_err() {
             self.status = Status::Failed;
-            return;
+        } else {
+            self.ready.extend_from_slice(traced);
+            self.slices = self.slices.saturating_add(1);
+            self.status = status;
         }
-        self.ready.extend_from_slice(traced);
-        self.slices = self.slices.saturating_add(1);
-        self.status = status;
+        preparing && !matches!(self.status, Status::Preparing(_))
     }
 
-    /// Move everything laid down into `into`, and answer where the reveal
-    /// stands.
+    /// Move everything laid down onto the end of `into`, and answer where the
+    /// reveal stands; memory refused for it fails the reveal rather than
+    /// leaving a hole in the picture.
     fn collect(&mut self, into: &mut Vec<Traced>) -> Status {
-        into.clear();
-        core::mem::swap(&mut self.ready, into);
+        if into.is_empty() {
+            core::mem::swap(&mut self.ready, into);
+        } else if into.try_reserve(self.ready.len()).is_ok() {
+            into.append(&mut self.ready);
+        } else {
+            self.ready.clear();
+            self.status = Status::Failed;
+        }
         self.slices = 0;
         self.status
     }

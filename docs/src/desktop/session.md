@@ -1754,13 +1754,22 @@ shows, each scene drawn as the user's `screensaver.*` options set it
   The tracing runs on a thread of its own (`screensaver.raytrace.cpu`): under
   `idle`, the default, that thread alone, one core's worth; under
   `performance`, a worker beside it for every other core. The serve loop only
-  collects and paints what has been traced, each frame; the thread lays down
-  a slice at a time — what fits half a desktop frame at the pace the last
-  kept — and stops once two of the loop's frames are waiting, so a loop that
+  collects and paints what has been traced, and the paints come further apart
+  as the picture fills in: a scene frame apart while the coarse passes form it,
+  then in proportion to the share shown, so each pass, four times as long as
+  the one before, is shown in about as many paints — 1.5 s apart as the 2 px
+  pass begins, and never more than 3 s. Fine detail changes too little between
+  paints for a quicker cadence to show, and the loop is woken a few times a
+  minute rather than thirty times a second. While a scene is prepared the loop
+  comes back four times a second to bring the readout up to date, and the
+  thread wakes it through the session's worker wake the moment the scene is
+  ready, so its first passes are shown as they come. The thread lays down a
+  slice at a time — what fits half a desktop frame at the pace the last kept —
+  and stops once two of the loop's longest waits are waiting, so a loop that
   stops drawing holds it back. The threads are made for each reveal and leave
   once the screensaver comes down, without the loop waiting on them. Where no
   thread is granted, the loop traces a slice a frame itself, on its own
-  thread alone under `idle`. With `screensaver.raytrace.save` on, the engine
+  thread alone under `idle`, and paints on the same cadence. With `screensaver.raytrace.save` on, the engine
   keeps a copy of each picture as it traces it, and once the picture is whole
   and on screen the tracing thread writes it as a PNG into
   `Documents/Pictures/Raytracing/` under the account's home, making the
@@ -1857,8 +1866,9 @@ The animated scenes draw every other desktop frame (`SceneClock::FRAME_NS`, the
 one idle-scene clock in `tairix_theme::motion`), each
 frame repainting only what changed through `Compositor::repaint_window` — the
 footprints the stars left and reached, the cells whose look moved, the block
-where it was and is, the cells about the points the ray tracer traced (marked
-as whole tiles, at most 128 rectangles), the retro games' floor, its
+where it was and is, the cells about the points the ray tracer traced since
+its last paint (marked as whole tiles, at most 128 rectangles, its paints
+coming on the reveal's own cadence above), the retro games' floor, its
 sun's bands and the boxes its craft reached and reach — and each parks the
 loop to its next frame and no sooner. A late
 wake moves the scene at most a few frames, never all at once.

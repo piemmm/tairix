@@ -1,12 +1,13 @@
 //! Host tests of the desk between a reveal's tracing thread and the serve
 //! loop: what the thread is told to do, what reaches the loop, what asking
-//! for the next scene drops, when the thread is owed a signal, and the whole
-//! protocol between a real tracing thread and a loop.
+//! for the next scene drops, when the thread is owed a signal and the loop a
+//! wake, and the whole protocol between a real tracing thread and a loop.
 
 extern crate std;
 
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use tairix_raster::Pixel;
 use tairix_raytrace::Step;
@@ -51,8 +52,8 @@ fn a_fresh_desk_asks_for_a_slice_and_has_nothing_to_collect() {
 }
 
 /// Slices reach the loop whole and in the order traced, with where the
-/// reveal stood after the last of them, and the loop's own buffer goes back
-/// to the desk to be filled again.
+/// reveal stood after the last of them, and the loop's own empty buffer goes
+/// back to the desk to be filled again.
 #[test]
 fn what_is_laid_down_reaches_the_loop_in_order_with_its_status() {
     let mut desk = TraceDesk::new();
@@ -61,16 +62,34 @@ fn what_is_laid_down_reaches_the_loop_in_order_with_its_status() {
     let second = slice(&mut desk);
     desk.deposit(second, &[step(2)], Status::Whole);
     let mut into = Vec::with_capacity(64);
-    into.push(step(9));
     assert_eq!(desk.collect(&mut into), Status::Whole);
-    assert_eq!(columns(&into), [0, 1, 2], "a stale step is never collected");
+    assert_eq!(columns(&into), [0, 1, 2]);
+    assert!(
+        desk.ready.capacity() >= 64,
+        "the loop's buffer is the desk's now"
+    );
     let mut again = Vec::new();
     assert_eq!(desk.collect(&mut again), Status::Whole);
     assert!(again.is_empty(), "nothing is collected twice");
 }
 
-/// Once the loop is two of its frames behind, the thread waits rather than
-/// piling up what it traced; a collection lets it go on.
+/// Steps the loop has collected and not yet painted stay ahead of those it
+/// collects next, so a collection between paints leaves no hole.
+#[test]
+fn a_collection_keeps_what_the_loop_has_not_yet_painted() {
+    let mut desk = TraceDesk::new();
+    let first = slice(&mut desk);
+    desk.deposit(first, &[step(0)], Status::Tracing(1));
+    let mut into = Vec::new();
+    assert_eq!(desk.collect(&mut into), Status::Tracing(1));
+    let second = slice(&mut desk);
+    desk.deposit(second, &[step(1), step(2)], Status::Tracing(2));
+    assert_eq!(desk.collect(&mut into), Status::Tracing(2));
+    assert_eq!(columns(&into), [0, 1, 2]);
+}
+
+/// Once the loop is two of its longest waits behind, the thread waits rather
+/// than piling up what it traced; a collection lets it go on.
 #[test]
 fn the_thread_waits_while_the_loop_is_behind_and_goes_on_once_it_collects() {
     let mut desk = TraceDesk::new();
@@ -154,6 +173,30 @@ fn a_departed_loop_sends_the_thread_away_whatever_is_pending() {
     assert!(!desk.waiting);
 }
 
+/// The loop is to be woken as each scene's preparation ends, refused or
+/// readied, and at no other deposit: not while a scene is prepared or traced,
+/// nor for a slice the loop no longer wants.
+#[test]
+fn the_loop_is_woken_as_each_scene_is_readied_and_only_then() {
+    let mut desk = TraceDesk::new();
+    let order = slice(&mut desk);
+    assert!(!desk.deposit(order, &[], Status::Preparing(400)));
+    let order = slice(&mut desk);
+    assert!(desk.deposit(order, &[], Status::Tracing(0)), "readied");
+    let order = slice(&mut desk);
+    assert!(!desk.deposit(order, &[step(0)], Status::Tracing(1)));
+    let in_flight = slice(&mut desk);
+    desk.next();
+    assert!(
+        !desk.deposit(in_flight, &[], Status::Tracing(2)),
+        "a slice of the scene before"
+    );
+    let asked = slice(&mut desk);
+    assert!(!desk.deposit(asked, &[], Status::Preparing(10)));
+    let order = slice(&mut desk);
+    assert!(desk.deposit(order, &[], Status::Failed), "refused");
+}
+
 /// A thread tracing needs no signal to see what the loop did; one waiting
 /// does, and is marked as waiting only while it is.
 #[test]
@@ -172,10 +215,21 @@ fn only_a_waiting_thread_is_owed_a_signal() {
 }
 
 /// A desk behind the host's own lock and condition variable, as the
-/// embedder's is behind the runtime's.
+/// embedder's is behind the runtime's, counting the loop's wakes.
 struct HostDesk {
     desk: std::sync::Mutex<TraceDesk>,
     turn: std::sync::Condvar,
+    nudges: AtomicUsize,
+}
+
+impl HostDesk {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            desk: std::sync::Mutex::new(TraceDesk::new()),
+            turn: std::sync::Condvar::new(),
+            nudges: AtomicUsize::new(0),
+        })
+    }
 }
 
 impl DeskLock for HostDesk {
@@ -191,6 +245,10 @@ impl DeskLock for HostDesk {
 
     fn signal(&self) {
         self.turn.notify_one();
+    }
+
+    fn nudge(&self) {
+        self.nudges.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -235,15 +293,12 @@ fn traced_alone(seed: u64, scenes: usize) -> Vec<Vec<Pixel>> {
 /// A real tracing thread on the production loop and a loop collecting on its
 /// own time pass whole reveals through the desk — the thread held back while
 /// the loop is behind, stopped at each whole scene until the next is asked
-/// for — every step arriving once and in order, and the thread leaves once the
-/// link is dropped.
+/// for, the loop woken once as each is readied — every step arriving once and
+/// in order, and the thread leaves once the link is dropped.
 #[test]
 fn a_tracing_thread_and_a_loop_pass_whole_reveals_through_the_desk() {
     let seed = 41;
-    let desk = Arc::new(HostDesk {
-        desk: std::sync::Mutex::new(TraceDesk::new()),
-        turn: std::sync::Condvar::new(),
-    });
+    let desk = HostDesk::new();
     let thread = {
         let served = Arc::clone(&desk);
         std::thread::spawn(move || {
@@ -256,11 +311,12 @@ fn a_tracing_thread_and_a_loop_pass_whole_reveals_through_the_desk() {
     );
     let mut pictures = Vec::new();
     let mut drawn = Vec::new();
-    for _ in 0..2 {
+    for scene in 1..=2 {
         let mut picture = alloc::vec![Pixel::TRANSPARENT; (SIZE.0 * SIZE.1) as usize];
         loop {
             let status = link.collect(&mut drawn);
             paint(&drawn, &mut picture);
+            drawn.clear();
             match status {
                 Status::Preparing(_) | Status::Tracing(_) => {
                     std::thread::sleep(std::time::Duration::from_millis(1));
@@ -269,6 +325,11 @@ fn a_tracing_thread_and_a_loop_pass_whole_reveals_through_the_desk() {
                 Status::Failed => panic!("the heap refused a scene"),
             }
         }
+        assert_eq!(
+            desk.nudges.load(Ordering::SeqCst),
+            scene,
+            "one wake a scene"
+        );
         pictures.push(picture);
         link.next();
     }
@@ -294,10 +355,7 @@ impl Keeper for Recording {
 #[test]
 fn a_tracing_thread_hands_each_whole_picture_to_its_keeper_once() {
     let seed = 43;
-    let desk = Arc::new(HostDesk {
-        desk: std::sync::Mutex::new(TraceDesk::new()),
-        turn: std::sync::Condvar::new(),
-    });
+    let desk = HostDesk::new();
     let kept = Arc::new(std::sync::Mutex::new(Vec::new()));
     let thread = {
         let served = Arc::clone(&desk);
@@ -318,6 +376,7 @@ fn a_tracing_thread_hands_each_whole_picture_to_its_keeper_once() {
     let mut picture = alloc::vec![Pixel::TRANSPARENT; (SIZE.0 * SIZE.1) as usize];
     while link.collect(&mut drawn).is_working() {
         paint(&drawn, &mut picture);
+        drawn.clear();
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
     paint(&drawn, &mut picture);

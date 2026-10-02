@@ -1539,8 +1539,10 @@ What it guarantees (its scenes, sampling and reveal are `plans/RAYTRACE.md`'s):
   spacing, every pixel traced once at the tracer's best and each pass
   scattered over the picture. The picture shown is a cubic B-spline over the
   current pass's grid, a blur coming into focus and exact once whole, and a
-  frame repaints and marks only what its steps change. It is held a minute,
-  faded over three seconds (cut under reduced motion), and replaced.
+  paint repaints and marks only what its steps change. Paints come a scene
+  frame apart while the coarse passes form the picture, then further apart
+  with the share shown, at most 3 s (`plans/RAYTRACE.md` RT1). It is held a
+  minute, faded over three seconds (cut under reduced motion), and replaced.
 - **Told as it goes.** A readout window above the picture reads *Generating
   scene... N%* from `Draft::progress` while the scene is prepared, then
   *Rendering... N%* while it is traced, mid-grey in the lower right, and goes
@@ -1548,13 +1550,14 @@ What it guarantees (its scenes, sampling and reveal are `plans/RAYTRACE.md`'s):
 - **Traced off the serve loop.** `screensaver.raytrace.cpu` sets the share of
   the machine: `idle` (the default) is one tracing thread, `performance` a
   worker beside it for every other core. The embedder grants the threads
-  through the `TraceHost` seam; the loop collects and paints once a frame
-  through the host-tested `TraceDesk`, which drops whatever was traced before
-  the next scene is asked for and holds the thread once two of the loop's
-  frames are waiting.
+  through the `TraceHost` seam; the loop collects and paints on the reveal's
+  cadence through the host-tested `TraceDesk`, which drops whatever was traced
+  before the next scene is asked for, holds the thread once two of the loop's
+  longest waits are waiting, and has the thread wake the loop through the
+  session's worker wake as each scene is readied.
   The threads leave when the screensaver comes down, the loop waiting on none
   of them. With no thread granted the loop traces a slice a frame itself — on
-  its own thread alone under `idle`.
+  its own thread alone under `idle` — and paints on the same cadence.
 - **Paced.** A slice is what fits half a desktop frame at the last slice's
   pace, grown at most twofold.
 - **Kept when asked.** `screensaver.raytrace.save` (off by default) has the
@@ -1574,7 +1577,7 @@ What it guarantees (its scenes, sampling and reveal are `plans/RAYTRACE.md`'s):
 Tests: the order visiting every pixel once, its first pass tracing its whole
 grid, each pass halving the last and ending whole, each pass scattered; the
 painter ending on every pixel's own trace however the steps arrive and across
-any cores, every frame changing only what it marks, a bounded cover of whole
+any cores, every paint changing only what it marks, a bounded cover of whole
 tiles, a
 scattered frame marking little of the screen, a lone point blurring without a
 crease, a new point settling in as its neighbours are traced, a pass beginning
@@ -1585,15 +1588,20 @@ preparation over slices tracing nothing and telling its progress, tracing
 telling its share; the pace, bounded per phase; a slice split across every
 worker matching the order traced alone; the next scene set elsewhere; each
 whole picture handed over once however long the engine runs on, and an
-unheld one reported; the desk's slices reaching the loop in order, its hold on
-a loop behind, asking for the next scene dropping what came before, two asks
-being one, the signal owed only to a waiting thread, and a real thread
-handing its keeper each picture once; the album's folder chain, names,
+unheld one reported; the desk's slices reaching the loop in order after what
+it has not yet painted, its hold on a loop behind, asking for the next scene
+dropping what came before, two asks being one, the signal owed only to a
+waiting thread, the loop woken once as each scene is readied, and a real
+thread handing its keeper each picture once; the album's folder chain, names,
 numbered suffixes, the file decoding to the picture, and its refusals; the
 readout's words, place and teardown; the hold, fade and next scene, the cut
 under reduced motion, the rest after a refusal or with nowhere to paint, a
-lost buffer painted afresh without tracing again, a frame marking only the
-tiles about its steps, the options a crew is launched with, and on the loop
+lost buffer painted afresh without tracing again, a paint marking only the
+tiles about its steps, the paints' wait growing with the share shown from a
+scene frame to at most 3 s over a steadily traced reveal, a readied scene
+shown from its first steps, steps collected early painted with the next, a
+refused scene leaving nothing to the next, the options a crew is launched
+with, and on the loop a slice traced each frame and painted on the cadence,
 `idle` keeping to its own thread while `performance` uses the pool.
 
 ### DS22 — The retro games screensaver

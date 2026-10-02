@@ -7,9 +7,11 @@
 //! The tracing runs on threads of its own where the embedder grants them: one
 //! core under the idle setting, every core under performance, and whole
 //! pictures are kept there when asked. The serve loop only paints what they
-//! have finished, once a frame; where no thread is granted, it traces a slice
-//! a frame itself and keeps nothing. The painter keeps every traced pixel, so
-//! a buffer the compositor lets go is painted afresh rather than traced again.
+//! have finished: a frame apart while the picture forms, then further apart as
+//! only finer detail is left to show. Where no thread is granted, it traces a
+//! slice a frame itself and keeps nothing. The painter keeps every traced
+//! pixel, so a buffer the compositor lets go is painted afresh rather than
+//! traced again.
 //! Under reduced motion the picture is cut to black rather than faded.
 
 mod album;
@@ -53,9 +55,28 @@ const FADE_MS: u16 = 3_000;
 /// next to nothing, so a hand-off must carry many.
 const FADE_GRAIN: usize = 16_384;
 
+/// The finest grid traced whole before a reveal's fine detail begins: the
+/// 2 px pass follows it.
+const DETAIL_GRID: u32 = 4;
+
+/// How long apart a reveal's paints come as its fine detail begins: too
+/// little changes between them for a quicker cadence to show.
+const DETAIL_WAIT_NS: u64 = 1_500_000_000;
+
+/// The longest a reveal goes between paints, so a picture still sharpening
+/// never looks stalled.
+const MOST_WAIT_NS: u64 = 3_000_000_000;
+
+// Clamping to the cadence's bounds cannot panic, and its anchor lies within.
+const _: () = assert!(SceneClock::FRAME_NS <= DETAIL_WAIT_NS && DETAIL_WAIT_NS <= MOST_WAIT_NS);
+
+/// How long apart the readout is brought up to date while a scene is prepared
+/// on a thread of its own, which wakes the loop the moment the scene is ready.
+const READOUT_WAIT_NS: u64 = 250_000_000;
+
 /// Where the saver stands.
 enum Phase {
-    /// The scene being traced, and painted as it arrives.
+    /// The scene being prepared and traced, painted as each paint comes due.
     Revealing,
     /// The picture is whole, and held until `until_ns`.
     Holding { until_ns: u64 },
@@ -80,9 +101,9 @@ enum Feed {
 }
 
 impl Feed {
-    /// Move what has been traced since the last frame into `into`, tracing a
-    /// slice first on the loop's own feed, across `wide` only under
-    /// performance.
+    /// Move what has been traced since the last collection onto the end of
+    /// `into`, tracing a slice first on the loop's own feed, across `wide` only
+    /// under performance.
     fn collect(
         &mut self,
         into: &mut Vec<Traced>,
@@ -108,6 +129,16 @@ impl Feed {
             Self::Inline { engine, .. } => engine.next(),
         }
     }
+
+    /// When the loop is to come back to a reveal that wants it back at
+    /// `wanted_ns`: on the loop's own feed a scene frame later at the latest,
+    /// to trace the next slice.
+    fn due(&self, now_ns: u64, wanted_ns: u64) -> u64 {
+        match self {
+            Self::Crew(_) => wanted_ns,
+            Self::Inline { .. } => wanted_ns.min(now_ns.saturating_add(SceneClock::FRAME_NS)),
+        }
+    }
 }
 
 /// The ray-traced screensaver.
@@ -115,7 +146,8 @@ pub(super) struct Raytrace {
     size: (u32, u32),
     phase: Phase,
     feed: Feed,
-    /// A frame's traced steps, kept for its buffer from frame to frame.
+    /// The steps collected and not yet painted, the buffer kept from paint to
+    /// paint.
     drawn: Vec<Traced>,
     /// Where they go, kept likewise.
     damage: Region,
@@ -123,6 +155,12 @@ pub(super) struct Raytrace {
     readout: Readout,
     calm: bool,
     due_ns: u64,
+    /// How many steps come before the fine detail: every point of the
+    /// `DETAIL_GRID` grid.
+    detail_from: u64,
+    /// How many steps of the scene under way have been painted.
+    shown: u64,
+    paint_due_ns: u64,
 }
 
 impl Raytrace {
@@ -173,6 +211,10 @@ impl Raytrace {
             readout: Readout::new(theme, scale, size),
             calm,
             due_ns: now_ns,
+            detail_from: u64::from(size.0.div_ceil(DETAIL_GRID))
+                * u64::from(size.1.div_ceil(DETAIL_GRID)),
+            shown: 0,
+            paint_due_ns: now_ns,
         })
     }
 
@@ -184,6 +226,15 @@ impl Raytrace {
     /// When the next frame is due.
     pub(super) const fn due_ns(&self) -> u64 {
         self.due_ns
+    }
+
+    /// Come back at `now_ns` rather than when next due, if revealing: the wake
+    /// a tracing thread gives on readying a scene, whose first passes are
+    /// shown as they come.
+    pub(super) fn landed(&mut self, now_ns: u64) {
+        if matches!(self.phase, Phase::Revealing) {
+            self.due_ns = self.due_ns.min(now_ns);
+        }
     }
 
     /// Carry the saver on to `now_ns`, if a frame is due; `clock` reads the
@@ -223,12 +274,15 @@ impl Raytrace {
     fn next(&mut self, now_ns: u64) -> Phase {
         self.feed.next();
         self.preview.reset();
+        self.drawn.clear();
+        self.shown = 0;
+        self.paint_due_ns = now_ns;
         self.due_ns = now_ns;
         Phase::Revealing
     }
 
-    /// Put what has been traced since the last frame on screen: the phase
-    /// that follows.
+    /// Collect what has been traced, and put it on screen if a paint is due:
+    /// the phase that follows.
     fn reveal(
         &mut self,
         now_ns: u64,
@@ -240,21 +294,28 @@ impl Raytrace {
         let status = self
             .feed
             .collect(&mut self.drawn, compositor.job_runner(), clock);
-        // A picture the heap will not give a buffer is refused like a scene:
-        // restarting it every frame would retry the allocation with it, and
-        // keep the tracing threads busy on steps nothing can show.
-        if !self.paint(wm, compositor, kept) {
-            return self.rest(now_ns, compositor);
+        // A buffer to lay afresh and a picture's last steps cannot wait.
+        if !kept || status == Status::Whole || now_ns >= self.paint_due_ns {
+            // A picture the heap will not give a buffer is refused like a
+            // scene: restarting it every frame would retry the allocation
+            // with it, and keep the tracing threads busy on steps nothing can
+            // show.
+            if !self.paint(wm, compositor, kept) {
+                return self.rest(now_ns, compositor);
+            }
+            self.paint_due_ns = now_ns.saturating_add(paint_wait(self.shown, self.detail_from));
         }
         match status {
             Status::Preparing(done) => {
                 self.readout.show(compositor, wm, Doing::Generating, done);
-                self.due_ns = now_ns.saturating_add(SceneClock::FRAME_NS);
+                self.due_ns = self
+                    .feed
+                    .due(now_ns, now_ns.saturating_add(READOUT_WAIT_NS));
                 Phase::Revealing
             }
             Status::Tracing(done) => {
                 self.readout.show(compositor, wm, Doing::Rendering, done);
-                self.due_ns = now_ns.saturating_add(SceneClock::FRAME_NS);
+                self.due_ns = self.feed.due(now_ns, self.paint_due_ns);
                 Phase::Revealing
             }
             Status::Whole => {
@@ -276,15 +337,17 @@ impl Raytrace {
         Phase::Resting { until_ns }
     }
 
-    /// Paint what the frame's steps change, marking it — the whole picture,
-    /// painted afresh, in a buffer the compositor let go; `false` when the
-    /// heap would not give the picture a buffer.
+    /// Paint what the steps collected since the last paint change, marking it
+    /// — the whole picture, painted afresh, in a buffer the compositor let go;
+    /// `false` when the heap would not give the picture a buffer.
     fn paint(&mut self, wm: WindowId, compositor: &mut Compositor, kept: bool) -> bool {
         if kept && self.drawn.is_empty() {
             return true;
         }
         self.damage.clear();
         self.preview.take(&self.drawn, kept, &mut self.damage);
+        let painted = u64::try_from(self.drawn.len()).unwrap_or(u64::MAX);
+        self.shown = self.shown.saturating_add(painted);
         self.drawn.clear();
         let runner = compositor.job_runner();
         let preview = &mut self.preview;
@@ -320,6 +383,18 @@ impl Raytrace {
             strength: target.min(strength),
         }
     }
+}
+
+/// The wait after a paint leaving `shown` steps of a reveal on screen,
+/// `detail_from` coming before its fine detail: in proportion to the steps
+/// shown, so each pass, four times as long as the one before, is shown in about
+/// as many paints — a scene frame at least, `DETAIL_WAIT_NS` as the fine detail
+/// begins, and `MOST_WAIT_NS` at most.
+fn paint_wait(shown: u64, detail_from: u64) -> u64 {
+    let wait = u128::from(shown) * u128::from(DETAIL_WAIT_NS) / u128::from(detail_from.max(1));
+    u64::try_from(wait).map_or(MOST_WAIT_NS, |wait| {
+        wait.clamp(SceneClock::FRAME_NS, MOST_WAIT_NS)
+    })
 }
 
 /// Scale the whole of window `wm`'s picture by `share` of 255, dithered, the

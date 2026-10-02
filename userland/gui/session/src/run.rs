@@ -1839,13 +1839,6 @@ mod program {
         // scene may hold.
         let memory_total =
             tairix_procinfo::memory_total_bytes(&tairix_procinfo::IpcTransport).unwrap_or(0);
-        let tracers = RtTraceHost {
-            online,
-            memory: TraceMemory {
-                total: memory_total,
-                gauge: tairix_rt::pressure::gauge(),
-            },
-        };
         let screen = Rect::new(0, 0, mode.width_px, mode.height_px);
         let Ok(mut pointer) = DeviceInputSource::new(SeatInputChannel::new(PointerReader), screen)
         else {
@@ -1892,6 +1885,14 @@ mod program {
             alloc::sync::Arc::new(Publisher::new(alloc::sync::Arc::clone(&worker_wake)));
         let catalogs = alloc::sync::Arc::new(Catalogs::new(alloc::sync::Arc::clone(&worker_wake)));
         let files = alloc::sync::Arc::new(Files::new(alloc::sync::Arc::clone(&worker_wake)));
+        let tracers = RtTraceHost {
+            online,
+            memory: TraceMemory {
+                total: memory_total,
+                gauge: tairix_rt::pressure::gauge(),
+            },
+            wake: alloc::sync::Arc::clone(&worker_wake),
+        };
         // One worker per kind of work, spawned only where there is a wake to
         // deliver through. Each handle is held for the session's life; the
         // worker's own `Arc` keeps its desk alive either way.
@@ -3076,6 +3077,7 @@ mod program {
                 // chance to adopt what arrived. Each is a no-op unless it was the
                 // one waiting, so one wake serves whichever it was.
                 worker_wake.drain();
+                saver.trace_landed(tairix_rt::clock_get());
                 let settings_landed = collect_publish(
                     &publisher,
                     &mut pinboard,
@@ -4943,10 +4945,12 @@ mod program {
 
     /// The ray-traced screensaver's threads: a tracing thread for each reveal,
     /// and under the performance setting a worker for every other one of the
-    /// `online` cores; and what the machine's memory can spare its scenes.
+    /// `online` cores; what the machine's memory can spare its scenes; and the
+    /// session's worker wake, which each tracing thread nudges the loop by.
     struct RtTraceHost {
         online: usize,
         memory: TraceMemory,
+        wake: alloc::sync::Arc<tairix_rt::sync::WorkerWake>,
     }
 
     /// Say the detail the ray tracer's scenes are now set out at.
@@ -4975,6 +4979,7 @@ mod program {
             let desk = alloc::sync::Arc::new(RtTraceDesk {
                 desk: tairix_rt::sync::Mutex::new(TraceDesk::new()),
                 turn: tairix_rt::sync::Condvar::new(),
+                wake: alloc::sync::Arc::clone(&self.wake),
             });
             let served = alloc::sync::Arc::clone(&desk);
             let online = self.online;
@@ -5086,10 +5091,11 @@ mod program {
 
     /// A reveal's [`TraceDesk`] behind the runtime's futex mutex, with the
     /// condition variable its tracing thread parks on when there is nothing
-    /// to trace (never a spin).
+    /// to trace (never a spin), and the session's worker wake.
     struct RtTraceDesk {
         desk: tairix_rt::sync::Mutex<TraceDesk>,
         turn: tairix_rt::sync::Condvar,
+        wake: alloc::sync::Arc<tairix_rt::sync::WorkerWake>,
     }
 
     impl DeskLock for RtTraceDesk {
@@ -5105,6 +5111,10 @@ mod program {
 
         fn signal(&self) {
             self.turn.notify_one();
+        }
+
+        fn nudge(&self) {
+            self.wake.nudge();
         }
     }
 

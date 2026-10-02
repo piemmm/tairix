@@ -305,6 +305,27 @@ fn an_animated_screensaver_asks_for_its_next_frame() {
     }
 }
 
+/// A ray tracer's thread readying a scene brings a revealing ray tracer back
+/// at once, and no other screensaver forward.
+#[test]
+fn a_tracing_thread_readying_a_scene_brings_the_ray_tracer_back_at_once() {
+    let woken = SceneClock::FRAME_NS / 4;
+    for kind in [ScreensaverKind::Raytrace, ScreensaverKind::Starfield] {
+        let mut comp = compositor();
+        let mut saver = Screensaver::new();
+        start(&mut saver, kind, &mut comp, 0);
+        saver.advance(0, &mut comp, &mut || None, &mut || 0);
+        let before = saver.park_deadline_ns(woken, u64::MAX);
+        assert!(before > 0, "{kind:?}");
+        saver.trace_landed(woken);
+        let after = saver.park_deadline_ns(woken, u64::MAX);
+        match kind {
+            ScreensaverKind::Raytrace => assert_eq!(after, 0, "due at once"),
+            _ => assert_eq!(after, before, "{kind:?}"),
+        }
+    }
+}
+
 /// The retro games are painted whole as they go up, so their first frame is
 /// already drawn and the next is asked for a saver frame later; under reduced
 /// motion they ask for none.

@@ -488,6 +488,19 @@ impl Screensaver {
         slides.take_due(now_ns)
     }
 
+    /// The session's workers woke the loop at `now_ns`, as a ray tracer's
+    /// thread does on readying a scene: a ray tracer up and revealing comes
+    /// back at once, to show the scene's first passes as they come.
+    pub fn trace_landed(&mut self, now_ns: u64) {
+        if let Some(Shown {
+            scene: Scene::Raytrace(tracer),
+            ..
+        }) = self.shown.as_mut()
+        {
+            tracer.landed(now_ns);
+        }
+    }
+
     /// Show a prepared slide, if a slideshow is still up and awake to show
     /// it.
     pub fn show_slide(&mut self, frame: Surface, compositor: &mut Compositor) {
