@@ -21,8 +21,8 @@ tairix-rng = { path = "../rng", version = "=0.0.0" }
 # The premultiplied pixel a traced pixel becomes, and the desktop's ordered
 # dither it is encoded through.
 tairix-raster = { path = "../raster", version = "=0.0.0" }
-# The sRGB transfer colours are authored in and pixels are encoded to.
-tairix-theme = { path = "../theme", version = "=0.0.0" }
+# The sRGB transfer a scene's colours and a traced radiance are encoded through.
+tairix-colour = { path = "../colour", version = "=0.0.0" }
 # Water's work on a land: drainage, incision, creep and slumping, droplet
 # erosion, and the router a road finds its way by.
 tairix-terrain = { path = "../terrain", version = "=0.0.0" }

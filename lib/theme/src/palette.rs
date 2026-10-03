@@ -9,8 +9,8 @@
 
 use tairix_abi::sysinfo::VolumeHealth;
 
-use crate::color::Rgba;
 use crate::syntax::{SyntaxPalette, SyntaxRole};
+use tairix_colour::Rgba;
 
 /// The semantic colours every theme provides.
 ///

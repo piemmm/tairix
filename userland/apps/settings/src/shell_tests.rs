@@ -3988,7 +3988,7 @@ fn choosing_a_backdrop_colour_repaints_no_picture_in_it() {
     assert!(document.contains("backdrop = 000000"), "{document}");
     let swatch = tairix_controls::PictureItem::swatch(
         crate::NONE_LABEL,
-        tairix_controls::Swatch::Fixed(tairix_theme::Rgba::rgb(0, 0, 0)),
+        tairix_controls::Swatch::Fixed(tairix_colour::Rgba::rgb(0, 0, 0)),
     );
     assert_eq!(chooser(&shell).item(0), Some(&swatch));
     let tile = shell

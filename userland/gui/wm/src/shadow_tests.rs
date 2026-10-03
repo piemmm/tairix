@@ -9,7 +9,8 @@ use crate::corner::Corners;
 use crate::geometry::{Rect, Scale};
 use crate::surface::Surface;
 use crate::window::{Window, WindowId, WindowShape};
-use tairix_theme::{Rgba, Theme};
+use tairix_colour::Rgba;
+use tairix_theme::Theme;
 
 fn kit() -> ShadowKit {
     ShadowKit::new(Scale::ONE, &Theme::dark())

@@ -7,11 +7,12 @@
 use alloc::vec::Vec;
 
 use tairix_abi::sysinfo::CpuCoreClass;
+use tairix_colour::Rgba;
 use tairix_controls::PressureKind;
 use tairix_geometry::{Rect, Scale};
 use tairix_icon::NoArtwork;
 use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::{Rgba, Theme};
+use tairix_theme::Theme;
 
 use super::{
     cell_width, compile, grid_columns, render, BlockBody, CoreCell, ItemBody, PaneBlock, PaneHero,

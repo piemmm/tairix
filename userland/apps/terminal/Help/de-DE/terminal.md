@@ -58,8 +58,11 @@ Erscheinungsbild des Desktops folgt), *Midnight*, *Phosphor*, *Amber*,
 *Ember*, *Contrast*, *Paper* und *Custom*. Die Wahl von *Custom*
 verwendet die unter der Auswahl bearbeiteten Farben: ein Raster der
 zwanzig Farben, aus denen ein Bildschirm gezeichnet wird — Hintergrund,
-Vordergrund, Cursor, Cursortext und die sechzehn ANSI-Farben — mit
-Schiebereglern für Rot, Grün und Blau für die jeweils ausgewählte Farbe.
+Vordergrund, Cursor, Cursortext und die sechzehn ANSI-Farben — und ein
+Farbwähler für die jeweils ausgewählte Farbe. Der Farbwähler stellt sie
+über Farbton, Sättigung und Hellwert, über Rot, Grün und Blau oder über
+ihre hexadezimale Schreibweise ein und zeigt daneben die Farbe, die das
+Feld bei der Auswahl hatte; ein Klick darauf stellt sie wieder her.
 
 **Effekte** legt fest, wie der Bildschirm gezeichnet wird.
 

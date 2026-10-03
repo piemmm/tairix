@@ -225,8 +225,8 @@ rectangle the control was hit-tested and drawn in: switching a tab replaces
 every row of the body and re-clamps the bar beside it, so both bands are the
 scope; a value written back into a control is also spelled out in the label
 next to it, so the whole row is; a scroll moves every row, so the body is; and
-a mark of the host's own — keyboard focus, the scheme dot, the channels the
-selected colour well points the sliders at — costs the elements it moves
+a mark of the host's own — keyboard focus, the scheme dot, the colour picker
+the selected colour well points at another well — costs the elements it moves
 between. A host that scopes its paint to its controls' reports alone leaves the
 tab it came from on screen (`plans/GUI-TERMINAL.md` §9).
 
@@ -2403,8 +2403,14 @@ than the rectangle the control that caused it reports.
 
 *Settings…* opens a modal sheet built from the shared Reactive
 Alloy controls: an **Appearance** tab (the scheme chooser, the text-size
-slider, and the custom scheme's twenty colour wells with red/green/blue
-sliders) and an **Effects** tab (one slider per effect). Every edit clamps
+slider, and the custom scheme's twenty colour wells with the shared colour
+picker editing the selected one, which shows the well's colour as it was when
+it was selected beside it) and an **Effects** tab (one slider per effect). The
+picker walks its own parts on Tab before the sheet moves on, takes Escape back
+from a drag or typing before the sheet is dismissed, and settles a field it
+leaves; a drag or a typed spelling is live, and only its settle is written.
+Editing the custom scheme while another is in force repaints no terminal,
+since nothing it shows has changed. Every edit clamps
 through `Profile::clamp`, re-derives the colours and the face, reshapes the
 grid — the pty window size follows, so the shell re-lays-out — and writes the
 document.

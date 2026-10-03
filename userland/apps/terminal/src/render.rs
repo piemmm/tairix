@@ -412,7 +412,7 @@ fn draw_cursor(
         y,
         metrics.width,
         metrics.height,
-        painted.scheme.cursor.opaque(),
+        Color::from(painted.scheme.cursor),
     );
     let ch = grid.cell(col, row).map_or(' ', |cell| cell.ch);
     // The cursor over a wide glyph's continuation cell shows covered space.
@@ -423,7 +423,7 @@ fn draw_cursor(
         x,
         y,
         ch,
-        painted.scheme.cursor_text.opaque(),
+        Color::from(painted.scheme.cursor_text),
     );
 }
 

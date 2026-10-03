@@ -38,10 +38,16 @@ yn eu copïo, yn eu hailenwi, yn eu dileu ac yn eu haildrefnu.
 Mae'r botwm cynradd (chwith) yn peintio â'r lliw cynradd a'r botwm canol
 â'r lliw eilaidd; mae dal Alt yn codi lliw yn lle hynny. Yr offer yw dewis,
 pensil, brwsh, chwistrell, rhwbiwr, llenwi, codwr lliw, llinell, petryal
-ac elips; mae'r panel wrth ymyl y llun yn dal y ddau liw, palet y llun neu
-liwiau'r bwrdd gwaith, a gosodiadau'r offeryn sy'n cael ei ddefnyddio. Mae
-clicio ar ffynnon liw yn golygu'r lliw hwnnw; mae clicio dwbl ar liw yn y
-palet yn golygu'r palet. Mae dal Shift yn tynnu sgwâr, cylch neu linell ar
+ac elips; mae'r panel wrth ymyl y llun yn dal palet y llun neu liwiau'r
+bwrdd gwaith a gosodiadau'r offeryn sy'n cael ei ddefnyddio. Mae'r doc
+lliw ar y dde yn dal y lliwiau cynradd ac eilaidd a dewisydd lliw ar gyfer
+pa un bynnag ohonynt a ddewisir: cliciwch liw i'w ddewis, yna gosodwch ef
+yn ôl arlliw, dirlawnder a gwerth, yn ôl coch, gwyrdd a glas, yn ôl ei
+sillafiad hecsadegol ac, os oes tryloywder yn y llun, yn ôl ei
+anhryloywder. Mae'r lliw oedd ganddo yn sefyll wrth ei ymyl, ac mae clic
+yn ei adfer. Mewn llun sydd â phalet, cofnodion y palet yw'r lliwiau, felly
+mae'r dewisydd yn golygu'r palet, ac mae pob golygiad yn un newid i'w
+ddadwneud. Mae dal Shift yn tynnu sgwâr, cylch neu linell ar
 luosrif o 45 gradd.
 
 Gyda'r offeryn dewis, llusgwch i nodi rhan o'r llun, yna llusgwch y dewis
@@ -78,6 +84,7 @@ neu adael gyda newidiadau heb eu cadw yn gofyn yn gyntaf.
 * `Ctrl+I` — gwrthdroi'r lliwiau
 * `S`, `P`, `B`, `A`, `E`, `F`, `I`, `L`, `R`, `O` — yr offer, yn eu trefn
 * `X` — cyfnewid y lliwiau cynradd ac eilaidd
+* `Tab` — i'r doc lliw a thrwy ei rannau; `Escape` — yn ôl i'r llun
 * `+` / `-` — chwyddo i mewn neu allan; `1` — maint go iawn; `Ctrl+0` — ffitio
 * `Ctrl` + olwyn — chwyddo i mewn neu allan o amgylch y pwyntydd
 * Pinsio â dau fys — chwyddo'n llyfn; ar sgrin gyffwrdd mae'r llun yn dilyn y bysedd

@@ -9,10 +9,11 @@
 //! recomputed only when the owner steps it, which is what keeps painting a
 //! pure function of already-computed state that reads no clock.
 
+use tairix_colour::Rgba;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Rect, Scale};
 use tairix_raster::{div255, Surface};
-use tairix_theme::{Fade, Rgba, TextRole, Theme, Timeline};
+use tairix_theme::{Fade, TextRole, Theme, Timeline};
 
 /// Horizontal reach of the rejection shake, in logical pixels at the
 /// reference density.

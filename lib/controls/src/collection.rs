@@ -28,12 +28,13 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_colour::Rgba;
 use tairix_font::{BitmapFont, TextShadow};
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::{IconKind, IconPicture};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{div255, round_rect_coverage, BlurScratch, Color, Surface};
-use tairix_theme::{Rgba, SurfaceGround, TextRole, Theme};
+use tairix_theme::{SurfaceGround, TextRole, Theme};
 
 use crate::button::{Button, ButtonAction};
 use crate::damage;

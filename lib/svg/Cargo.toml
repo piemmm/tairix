@@ -14,6 +14,9 @@ publish.workspace = true
 # vector forms in `lib/cursor` / `lib/icon`, which rasterise through
 # `lib/raster`'s single polygon path.
 tairix-raster = { path = "../raster", version = "=0.0.0" }
+# The hex digits a `#rgb` literal is spelled in and the HSL conversion `hsl()`
+# resolves through: the one notation and colour model the tree shares.
+tairix-colour = { path = "../colour", version = "=0.0.0" }
 
 # The shared C-locale number scanner (`cnum`) SVG's own number grammar is
 # spelled on, and the bounded `no_std` float maths (`mathf`) curve flattening,

@@ -138,7 +138,7 @@ Four decisions shape everything else:
 |---|---|
 | `xml` | The element tree: nesting, self-closing tags, CDATA/PI/doctype, entity decoding, namespace-prefix resolution, character data, depth and element bounds |
 | `number` | SVG's number grammar: separator-free runs, arc flags, CSS absolute units, percentages, opacity |
-| `color` | CSS colour syntax: hex (3/4/6/8), `rgb()`/`rgba()`/`hsl()`/`hsla()` in both spellings, the named-colour table, `currentColor`, `none` |
+| `color` | CSS colour syntax: hex (3/4/6/8), `rgb()`/`rgba()`/`hsl()`/`hsla()` in both spellings, the named-colour table, `currentColor`, `none`; the hex digits and the HSL conversion are `lib/colour`'s |
 | `css` | The document's own `<style>` sheets: the selector subset, specificity, `!important`, and the declarations one element matches |
 | `geom` | `SubPath`, `StrokeStyle`, caps/joins, the object bounding box, the marker-vertex currency (`Vertex`, `Vertices`), and carrying either into another coordinate space |
 | `pathdata` | The whole `d` grammar and curve/arc flattening to a tolerance |

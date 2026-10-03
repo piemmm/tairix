@@ -173,7 +173,7 @@ fn each_image_editing_glyph_is_its_own_mark() {
         IconKind::ToolSpray,
         IconKind::ToolEraser,
         IconKind::ToolFill,
-        IconKind::ToolPicker,
+        IconKind::ToolEyedropper,
         IconKind::ToolLine,
         IconKind::ToolRectangle,
         IconKind::ToolEllipse,

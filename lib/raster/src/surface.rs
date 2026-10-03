@@ -27,6 +27,7 @@ use core::slice;
 
 use alloc::vec::Vec;
 
+use tairix_colour::{Hue, Rgb};
 use tairix_reclaim::CachedBytes;
 use tairix_util::{fallible, mathf};
 
@@ -918,9 +919,7 @@ impl Surface {
     /// is a single pass over the pixels.
     #[must_use]
     pub fn dominant_color(&self) -> Option<Color> {
-        /// Degrees of hue one bucket spans.
-        const BUCKET_DEGREES: u32 = 30;
-        /// Twelve of those cover the wheel.
+        /// Twelfths of the wheel, each a hue's bucket.
         const BUCKETS: usize = 12;
         /// Below this mean chroma over the visible pixels there is no hue to
         /// lend, only a grey the caller is better off not washing with.
@@ -947,14 +946,12 @@ impl Surface {
             let chroma = u32::from(max.saturating_sub(min));
             let vote = u64::from(color.a) * u64::from(chroma);
             chroma_total += vote;
-            if chroma == 0 {
+            let Some(hue) = Hue::of(Rgb::new(color.r, color.g, color.b)) else {
                 continue;
-            }
-            // Clamped rather than trusted: the index is then in range by
-            // construction, whatever rounding the sextant arithmetic lands on.
-            let bucket = usize::try_from(hue_degrees(color, max, chroma) / BUCKET_DEGREES)
-                .unwrap_or(0)
-                .min(BUCKETS - 1);
+            };
+            let twelfths =
+                u64::from(hue.steps()) * u64::try_from(BUCKETS).unwrap_or(1) / u64::from(Hue::TURN);
+            let bucket = usize::try_from(twelfths).unwrap_or(0).min(BUCKETS - 1);
             weight[bucket] += vote;
             sums[bucket][0] += vote * u64::from(color.r);
             sums[bucket][1] += vote * u64::from(color.g);
@@ -2584,37 +2581,6 @@ fn wash_span(span: &mut [Pixel], first: u32, row: u32, source: Color) {
     dither_tiles(span, DitherRow::at(row), first, |dst, bias| {
         *dst = source.over_biased(*dst, bias);
     });
-}
-
-/// The hue of `color` in degrees `0..360`, given its already-computed channel
-/// `max` and non-zero `chroma`.
-///
-/// The standard sextant formula, kept unsigned: which channel is the maximum
-/// picks the pair of primaries the hue lies between, and their difference
-/// places it within that sixty-degree run. A zero `chroma` has no hue and is
-/// the caller's to reject before asking.
-fn hue_degrees(color: Color, max: u8, chroma: u32) -> u32 {
-    let (r, g, b) = (u32::from(color.r), u32::from(color.g), u32::from(color.b));
-    // How far into a sextant the larger of two primaries carries the hue.
-    let run = |from: u32, to: u32| from.saturating_sub(to) * 60 / chroma;
-    let hue = if max == color.r {
-        if g >= b {
-            run(g, b)
-        } else {
-            360 - run(b, g)
-        }
-    } else if max == color.g {
-        if b >= r {
-            120 + run(b, r)
-        } else {
-            120 - run(r, b)
-        }
-    } else if r >= g {
-        240 + run(r, g)
-    } else {
-        240 - run(g, r)
-    };
-    hue % 360
 }
 
 /// `from` at `step` zero and `to` at `step` `last`, interpolated per channel

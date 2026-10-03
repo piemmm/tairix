@@ -38,6 +38,8 @@ tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
 # The single shared theme definition, so this window's colours, metrics and
 # type ladder are the desktop's.
 tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
+# The colour value a backdrop swatch and the theme's roles are authored in.
+tairix-colour = { path = "../../../lib/colour", version = "=0.0.0" }
 # Shared text rasterisation: the face each statement and label is drawn with.
 tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
 # Shared software rasterisation (`Surface`): the same premultiplied-alpha

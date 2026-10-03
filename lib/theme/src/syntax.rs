@@ -4,7 +4,7 @@
 //! and every painter draws from, so a format and a theme meet in one place:
 //! adding a language adds no colour, and adding a theme adds no code.
 
-use crate::color::Rgba;
+use tairix_colour::Rgba;
 
 /// What a span of a document is, as far as colouring it goes.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]

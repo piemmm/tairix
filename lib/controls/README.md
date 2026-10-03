@@ -106,7 +106,21 @@ indeterminate segment that freezes under reduced motion, complete/failed). The
 caret/selection `TextEditor` with clipped horizontal scroll, emitting a typed
 `TextAction`; read-only, disabled, and denied render distinctly. Its credential
 member is the **masked entry** `SecretField`, described below; a `SearchField`
-has no masked mode, since a query is not a credential.
+has no masked mode, since a query is not a credential. The **number field**
+(`number`) is a `TextField` holding an integer between two bounds: live while
+its digits spell a number in range, invalid while they do not, stepped by keys
+and a focused field's wheel, and settled by a step, Enter, or its owner's
+commit as the focus leaves.
+
+The **colour controls** are `SwatchGrid` (`swatch_grid`), a grid of wells with
+a primary mark on at most one and an optional secondary one, and `ColourPicker`
+(`colour_picker`): one colour by its hue, saturation and value plane, a hue
+strip, an opacity strip where it has one, a swatch beside the earlier colour a
+press takes back, a hex field and H/S/V/R/G/B/A number fields — beside the plane
+in wide bounds and beneath it in narrow ones, giving up its fields before its
+plane when short. It holds `lib/colour`'s exact coordinates, so grey and black
+keep the hue and saturation shown, and it reports `PickerOutcome::Edited` live
+and `PickerOutcome::Settled` once, as a slider does.
 
 The **command surfaces** are the menu, toolbar, tab strip, and combo box:
 

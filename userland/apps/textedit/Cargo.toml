@@ -40,6 +40,8 @@ tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
 tairix-syntax = { path = "../../../lib/syntax", version = "=0.0.0" }
 # The syntax roles a span names.
 tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
+# The colour value the theme's palette roles are authored in.
+tairix-colour = { path = "../../../lib/colour", version = "=0.0.0" }
 # The one width rule a monospace grid measures characters by.
 tairix-vt = { path = "../../../lib/vt", version = "=0.0.0" }
 # The word-at-a-time line-feed scans the document's line index is built on,

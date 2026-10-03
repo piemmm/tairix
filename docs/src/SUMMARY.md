@@ -61,6 +61,7 @@
   - [`tairix-bootload`](./lib/bootload.md)
   - [`tairix-caps`](./lib/caps.md)
   - [`tairix-collections`](./lib/collections.md)
+  - [`tairix-colour`](./lib/colour.md)
   - [`tairix-complete`](./lib/complete.md)
   - [`tairix-compress`](./lib/compress.md)
   - [`tairix-conout`](./lib/conout.md)

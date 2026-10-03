@@ -11,7 +11,8 @@
 //! # Layout
 //!
 //! The body of each tab is an ordered list of rows (a scheme choice, the text
-//! size, the custom-scheme swatch grid, a channel slider, an effect slider),
+//! size, the custom-scheme swatch grid, the colour picker editing its selected
+//! well, an effect slider),
 //! laid out top to bottom at the theme's control height and gap through
 //! [`Scale`], unscrolled, from the body's own top. The body shows them through
 //! a pixel-scrolled [`ScrollView`], so a row the body's edge crosses is drawn
@@ -22,11 +23,12 @@
 //! # Keyboard model
 //!
 //! Tab/Shift-Tab moves focus between rows (including the tab strip itself,
-//! the scrollbar, and the footer buttons); the keys a focused control's own
-//! `on_key` understands — arrows, Space/Enter, Page Up/Down, Home/End — drive
-//! that control. A key on a row scrolls the body the least that shows it, so
+//! the scrollbar, and the footer buttons), walking the colour picker's own
+//! parts on the way; the keys a focused control's own `on_key` understands —
+//! arrows, Space/Enter, Page Up/Down, Home/End — drive that control. A key on a row scrolls the body the least that shows it, so
 //! every setting stays reachable from the keyboard however small the window
-//! is. Escape and the *Done* button dismiss the sheet; a primary press outside
+//! is. Escape and the *Done* button dismiss the sheet, once the picker has
+//! no drag or typing of its own for Escape to take back; a primary press outside
 //! the panel also dismisses it, since the sheet is modal and nothing outside
 //! it is reachable while it is open. The wheel scrolls the body under the
 //! pointer and moves no focus.
@@ -42,10 +44,11 @@ use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{TextRole, Theme};
 
+use tairix_colour::Rgba;
 use tairix_controls::{
-    damage, Button, ButtonAction, ButtonContent, ControlRole, Panel, Radio, ScrollBar, ScrollModel,
-    ScrollOrientation, ScrollRange, ScrollView, SelectorAction, Slider, SliderAction, Tab, Tabs,
-    TabsAction,
+    damage, Button, ButtonAction, ButtonContent, ColourPicker, ControlRole, Panel, PickerOutcome,
+    Radio, ScrollBar, ScrollModel, ScrollOrientation, ScrollRange, ScrollView, SelectorAction,
+    Slider, SliderAction, Tab, Tabs, TabsAction,
 };
 
 use crate::effects::{EffectKey, FULL};
@@ -60,16 +63,14 @@ const APPEARANCE_TAB: usize = 0;
 /// The tab that edits the screen effects.
 const EFFECTS_TAB: usize = 1;
 
-/// The label a channel slider carries, in [`Settings::channel_sliders`] order.
-const CHANNEL_LABELS: [&str; 3] = ["Red", "Green", "Blue"];
-
 /// The logical width of a slider row's leading label column.
 const LABEL_WIDTH_PX: u32 = 150;
 
 /// The logical gap between a slider row's label and its slider.
 const LABEL_GAP_PX: u32 = 8;
 
-/// The logical gap between the custom-editor caption and its swatch grid.
+/// The logical gap between a caption and the swatch grid or colour picker
+/// beneath it.
 const CAPTION_GAP_PX: u32 = 4;
 
 /// The largest logical width the sheet's panel grows to; a viewport smaller
@@ -94,9 +95,8 @@ enum Focus {
     TextSize,
     /// The custom-scheme swatch grid.
     Swatches,
-    /// A colour channel of the selected swatch well: `0` red, `1` green,
-    /// `2` blue.
-    Channel(usize),
+    /// The colour picker editing the selected swatch well.
+    Picker,
     /// An effect slider, indexed as [`EffectKey::ALL`].
     Effect(usize),
     /// The body scrollbar.
@@ -145,7 +145,7 @@ pub struct Settings {
     scheme_radios: Vec<Radio>,
     text_size: Slider,
     swatches: SwatchGrid,
-    channel_sliders: [Slider; 3],
+    picker: ColourPicker,
     effect_sliders: [Slider; EffectKey::COUNT],
     restore: Button,
     done: Button,
@@ -154,6 +154,9 @@ pub struct Settings {
     /// The last pointer position, tracked from [`InputEvent::PointerMoved`]
     /// since a press/release event carries no position of its own.
     last_pointer: Point,
+    /// The picker settled a colour as the keyboard left it: a field it held
+    /// was committed. The round this happened in concludes `Settled`.
+    owed_settle: bool,
 }
 
 /// The theme, scale and face one interaction with the sheet is resolved
@@ -282,6 +285,8 @@ impl Settings {
         .with_steps(font_size_step_permille(), font_size_step_permille() * 4);
 
         let swatches = swatch::grid_for(&profile.custom);
+        let mut picker = ColourPicker::new(profile.custom.background.opaque());
+        picker.set_earlier(Some(profile.custom.background.opaque()));
 
         let effect_sliders = EffectKey::ALL.map(|key| effect_slider(key, key.of(profile.effects)));
 
@@ -292,11 +297,7 @@ impl Settings {
             scheme_radios,
             text_size,
             swatches,
-            channel_sliders: [
-                Slider::new(0).with_steps(10, 100),
-                Slider::new(0).with_steps(10, 100),
-                Slider::new(0).with_steps(10, 100),
-            ],
+            picker,
             effect_sliders,
             restore: Button::new(
                 ButtonContent::Label("Restore defaults".to_string()),
@@ -315,8 +316,8 @@ impl Settings {
             ),
             focus: Focus::Tabs,
             last_pointer: Point::ORIGIN,
+            owed_settle: false,
         };
-        sheet.sync_channel_sliders();
         sheet.sync_focus(
             &Layout::nowhere(),
             Style::new(Scale::ONE, &Theme::dark()),
@@ -390,7 +391,7 @@ impl Settings {
         if self.body_shown() != shown {
             outcome = merged(outcome, self.follow_pointer(viewport, style, damage));
         }
-        match outcome {
+        match self.settle_owed(outcome) {
             SheetOutcome::Changed if damage.is_empty() => SheetOutcome::Ignored,
             settled => settled,
         }
@@ -548,20 +549,56 @@ impl Settings {
         let layout = self
             .layout(viewport, style.scale, style.theme, style.font)
             .unwrap_or_else(Layout::nowhere);
-        if key == Key::Named(NamedKey::Escape) {
-            return SheetOutcome::Dismissed;
-        }
-        let outcome = if key == Key::Named(NamedKey::Tab) {
-            self.focus_on(self.next_focus(!modifiers.shift), &layout, style, damage);
-            SheetOutcome::Changed
+        let escape = key == Key::Named(NamedKey::Escape);
+        let tab = key == Key::Named(NamedKey::Tab);
+        // The picker walks its own parts and takes Escape back from a drag or
+        // typing first; what it hands on is the sheet's.
+        let picked = if self.focus == Focus::Picker && (escape || tab) {
+            let area = picker_area(&layout, style);
+            let acted = layout.in_body(damage, |drew| {
+                self.picker
+                    .on_key(key, modifiers, area, (style.scale, style.theme), drew)
+            });
+            (acted != PickerOutcome::Ignored).then(|| self.picked(acted, &layout, style, damage))
         } else {
-            self.dispatch_key(key, &layout, style, damage)
+            None
         };
+        let outcome = match picked {
+            Some(outcome) => outcome,
+            None if escape => return SheetOutcome::Dismissed,
+            None if tab => {
+                let forward = !modifiers.shift;
+                let next = self.next_focus(forward);
+                if next == Focus::Picker {
+                    let area = picker_area(&layout, style);
+                    self.picker
+                        .enter_focus(forward, area, style.scale, style.theme);
+                }
+                self.focus_on(next, &layout, style, damage);
+                SheetOutcome::Changed
+            }
+            None => self.dispatch_key(key, modifiers, &layout, style, damage),
+        };
+        let outcome = self.settle_owed(outcome);
         self.reveal_focus(&layout, damage);
         if self.body_shown() != shown {
             return merged(outcome, self.follow_pointer(viewport, style, damage));
         }
         outcome
+    }
+
+    /// `outcome`, settled where the picker settled a colour as the keyboard
+    /// left it this round.
+    fn settle_owed(&mut self, outcome: SheetOutcome) -> SheetOutcome {
+        if !core::mem::take(&mut self.owed_settle) {
+            return outcome;
+        }
+        match outcome {
+            SheetOutcome::Ignored | SheetOutcome::Changed | SheetOutcome::Edited => {
+                SheetOutcome::Settled
+            }
+            concluded => concluded,
+        }
     }
 
     /// Scroll the body the least that shows the row keyboard focus is on,
@@ -643,16 +680,6 @@ fn bounded_from_permille(permille: u16, min: u16, max: u16) -> u16 {
     u16::try_from(value).unwrap_or(max).min(max)
 }
 
-/// An 8-bit channel mapped onto permille, for a channel slider.
-fn permille_from_channel(value: u8) -> u16 {
-    permille_from_bounded(u16::from(value), 0, 255)
-}
-
-/// The inverse of [`permille_from_channel`].
-fn channel_from_permille(permille: u16) -> u8 {
-    u8::try_from(bounded_from_permille(permille, 0, 255)).unwrap_or(u8::MAX)
-}
-
 /// A permille value as a whole percentage, rounded to nearest.
 fn permille_as_percent(permille: u16) -> u32 {
     (u32::from(permille) + 5) / 10
@@ -689,9 +716,7 @@ impl Settings {
             }
             rows.push(Focus::TextSize);
             rows.push(Focus::Swatches);
-            for index in 0..self.channel_sliders.len() {
-                rows.push(Focus::Channel(index));
-            }
+            rows.push(Focus::Picker);
         }
         rows
     }
@@ -731,6 +756,16 @@ impl Settings {
     /// per-control writes in [`sync_focus`](Self::sync_focus) need none of
     /// their own.
     fn focus_on(&mut self, next: Focus, layout: &Layout, style: Style<'_>, damage: &mut Region) {
+        if self.focus == Focus::Picker && next != Focus::Picker {
+            let area = picker_area(layout, style);
+            let left = layout.in_body(damage, |drew| {
+                self.picker.blur(area, style.scale, style.theme, drew)
+            });
+            if let PickerOutcome::Settled(colour) = left {
+                self.set_well_colour(colour, layout, style, damage);
+                self.owed_settle = true;
+            }
+        }
         damage::move_mark(
             Some(self.focus),
             Some(next),
@@ -754,9 +789,8 @@ impl Settings {
             radio.set_focused(self.focus == Focus::Scheme(index));
         }
         self.text_size.set_focused(self.focus == Focus::TextSize);
-        for (index, slider) in self.channel_sliders.iter_mut().enumerate() {
-            slider.set_focused(self.focus == Focus::Channel(index));
-        }
+        self.swatches.set_focused(self.focus == Focus::Swatches);
+        self.picker.set_focused(self.focus == Focus::Picker);
         for (index, slider) in self.effect_sliders.iter_mut().enumerate() {
             slider.set_focused(self.focus == Focus::Effect(index));
         }
@@ -792,16 +826,6 @@ impl Settings {
         self.focus_on(Focus::Tabs, layout, style, damage);
     }
 
-    /// Copy the currently selected swatch well's channels into the three
-    /// channel sliders, so they always show the well they edit.
-    fn sync_channel_sliders(&mut self) {
-        let color = swatch::colour(&self.swatches, self.swatches.selected()).unwrap_or_default();
-        let channels = [color.r, color.g, color.b];
-        for (slider, channel) in self.channel_sliders.iter_mut().zip(channels) {
-            slider.set_value(permille_from_channel(channel));
-        }
-    }
-
     /// Mark exactly the radio matching the profile's current scheme as
     /// selected, reporting each dot that actually changed.
     fn sync_scheme_radios(&mut self, layout: &Layout, damage: &mut Region) {
@@ -815,26 +839,41 @@ impl Settings {
         }
     }
 
-    /// Show the newly selected well's channels in the three channel sliders,
-    /// reporting the rows they are drawn in.
+    /// Show the newly selected well in the picker, its colour as it was
+    /// beside the colour it becomes, reporting the picker's row.
     fn adopt_selected_well(&mut self, layout: &Layout, damage: &mut Region) {
-        self.sync_channel_sliders();
-        for index in 0..self.channel_sliders.len() {
-            damage.add(layout.rect_of(Focus::Channel(index)));
-        }
+        let colour = self.selected_colour();
+        self.picker.set_colour(colour);
+        self.picker.set_earlier(Some(colour));
+        damage.add(layout.rect_of(Focus::Picker));
     }
 
-    /// The height a `row` needs at `scale` under `theme`.
-    fn row_height(&self, row: Focus, scale: Scale, theme: &Theme, font: BitmapFont) -> u32 {
+    /// The selected well's colour, as the picker shows it.
+    fn selected_colour(&self) -> Rgba {
+        self.swatches
+            .selected()
+            .and_then(|well| swatch::colour(&self.swatches, well))
+            .unwrap_or_default()
+            .opaque()
+    }
+
+    /// The height a `row` needs across `width` at `scale` under `theme`.
+    fn row_height(
+        &self,
+        row: Focus,
+        width: u32,
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+    ) -> u32 {
+        let captioned = |content: u32| {
+            let caption = font.glyph_height().max(1);
+            let gap = scale.scale_length(CAPTION_GAP_PX).max(1);
+            content.saturating_add(caption).saturating_add(gap)
+        };
         match row {
-            Focus::Swatches => {
-                let caption = font.glyph_height().max(1);
-                let gap = scale.scale_length(CAPTION_GAP_PX).max(1);
-                self.swatches
-                    .preferred_height(scale, theme)
-                    .saturating_add(caption)
-                    .saturating_add(gap)
-            }
+            Focus::Swatches => captioned(self.swatches.preferred_height(scale, theme)),
+            Focus::Picker => captioned(self.picker.measured_height(width, scale, theme)),
             _ => scale.scale_length(theme.metrics().control_height).max(1),
         }
     }
@@ -853,7 +892,7 @@ impl Settings {
         self.content_rows()
             .into_iter()
             .map(|row| {
-                let height = self.row_height(row, scale, theme, font);
+                let height = self.row_height(row, body.width, scale, theme, font);
                 let rect = Rect::new(body.left(), y, body.width, height);
                 y = y.saturating_add(to_i32(height)).saturating_add(gap);
                 (row, rect)
@@ -1021,23 +1060,11 @@ impl Settings {
                 self.text_size.render(surface, control, scale, theme);
             }
             Focus::Swatches => self.render_swatches(surface, rect, scale, theme, font),
-            Focus::Channel(index) => {
-                let Some(slider) = self.channel_sliders.get(index) else {
-                    return;
-                };
-                let Some(&label_text) = CHANNEL_LABELS.get(index) else {
-                    return;
-                };
-                let value = self.channel_value(index);
-                let (label, control) = split_row(rect, scale);
-                draw_row_label(
-                    surface,
-                    label,
-                    theme,
-                    font,
-                    &format!("{label_text} {value}"),
-                );
-                slider.render(surface, control, scale, theme);
+            Focus::Picker => {
+                let (caption, picker) = swatch_caption_split(rect, scale, font);
+                let well = self.swatches.selected().map_or("", swatch::name);
+                draw_row_label(surface, caption, theme, font, well);
+                self.picker.render(surface, picker, scale, theme);
             }
             Focus::Effect(index) => {
                 let Some(slider) = self.effect_sliders.get(index) else {
@@ -1141,19 +1168,19 @@ impl Settings {
                 outcome
             }
             Focus::Swatches => self.route_swatches_pointer(event, rect, layout, style, damage),
-            Focus::Channel(index) => {
-                let Some(slider) = self.channel_sliders.get_mut(index) else {
-                    return SheetOutcome::Ignored;
-                };
+            Focus::Picker => {
+                let (_, area) = swatch_caption_split(rect, style.scale, style.font);
                 let acted = layout.in_body(damage, |drew| {
-                    slider.on_pointer(event, control, style.scale, style.theme, drew)
+                    self.picker
+                        .on_pointer(event, area, style.scale, style.theme, drew)
                 });
-                let Some((permille, outcome)) = acted.map(slid) else {
+                if acted == PickerOutcome::Ignored {
                     return SheetOutcome::Ignored;
-                };
-                self.focus_on(row, layout, style, damage);
-                self.set_channel_permille(index, permille, layout, damage);
-                outcome
+                }
+                if is_primary_press(event) {
+                    self.focus_on(row, layout, style, damage);
+                }
+                self.picked(acted, layout, style, damage)
             }
             Focus::Effect(index) => {
                 let Some(slider) = self.effect_sliders.get_mut(index) else {
@@ -1184,6 +1211,17 @@ impl Settings {
         damage: &mut Region,
     ) -> SheetOutcome {
         let (_, grid_rect) = swatch_caption_split(rect, style.scale, style.font);
+        // The picker settles on the well it edits before the release can move
+        // the mark to another.
+        let pressed_well = is_primary_press(event)
+            && self.swatches.state().is_actionable()
+            && layout
+                .view
+                .to_content(self.last_pointer)
+                .is_some_and(|at| self.swatches.well_at(grid_rect, at).is_some());
+        if pressed_well {
+            self.focus_on(Focus::Swatches, layout, style, damage);
+        }
         match layout.in_body(damage, |drew| {
             self.swatches
                 .on_pointer(event, grid_rect, SwatchMark::Primary, drew)
@@ -1193,6 +1231,7 @@ impl Settings {
                 self.adopt_selected_well(layout, damage);
                 SheetOutcome::Changed
             }
+            None if pressed_well => SheetOutcome::Changed,
             None => SheetOutcome::Ignored,
         }
     }
@@ -1229,6 +1268,7 @@ impl Settings {
     fn dispatch_key(
         &mut self,
         key: Key,
+        modifiers: Modifiers,
         layout: &Layout,
         style: Style<'_>,
         damage: &mut Region,
@@ -1281,17 +1321,14 @@ impl Settings {
                     None => SheetOutcome::Changed,
                 }
             }
-            Focus::Channel(index) => match self
-                .channel_sliders
-                .get_mut(index)
-                .and_then(|s| layout.in_body(damage, |drew| s.on_key(key, slider, drew)))
-            {
-                Some(SliderAction::SetValue { permille } | SliderAction::Settled { permille }) => {
-                    self.set_channel_permille(index, permille, layout, damage);
-                    SheetOutcome::Settled
-                }
-                None => SheetOutcome::Changed,
-            },
+            Focus::Picker => {
+                let area = picker_area(layout, style);
+                let acted = layout.in_body(damage, |drew| {
+                    self.picker
+                        .on_key(key, modifiers, area, (style.scale, style.theme), drew)
+                });
+                self.picked(acted, layout, style, damage)
+            }
             Focus::Effect(index) => match self
                 .effect_sliders
                 .get_mut(index)
@@ -1357,45 +1394,47 @@ impl Settings {
         damage.add(row);
     }
 
-    /// Commit a channel request for the selected well, apply it onto the
-    /// custom scheme, and reflect the (never-clamped, channels have no
-    /// tighter bound than their own type) value back into the slider.
-    ///
-    /// The well itself is repainted in the new colour, so the swatch row is in
-    /// scope alongside the channel's own.
-    fn set_channel_permille(
+    /// What the picker's outcome concludes for the sheet: a colour edited
+    /// live or settled lands on the selected well.
+    fn picked(
         &mut self,
-        channel: usize,
-        permille: u16,
+        acted: PickerOutcome,
         layout: &Layout,
+        style: Style<'_>,
         damage: &mut Region,
-    ) {
-        let selected = self.swatches.selected();
-        let mut color = swatch::colour(&self.swatches, selected).unwrap_or_default();
-        let value = channel_from_permille(permille);
-        match channel {
-            0 => color.r = value,
-            1 => color.g = value,
-            2 => color.b = value,
-            _ => return,
+    ) -> SheetOutcome {
+        match acted {
+            PickerOutcome::Edited(colour) => {
+                self.set_well_colour(colour, layout, style, damage);
+                SheetOutcome::Edited
+            }
+            PickerOutcome::Settled(colour) => {
+                self.set_well_colour(colour, layout, style, damage);
+                SheetOutcome::Settled
+            }
+            PickerOutcome::Taken | PickerOutcome::Ignored => SheetOutcome::Changed,
         }
-        self.swatches.set_colour(selected, color.opaque());
-        swatch::apply(&self.swatches, &mut self.profile.custom);
-        self.profile.clamp();
-        if let Some(slider) = self.channel_sliders.get_mut(channel) {
-            slider.set_value(permille_from_channel(value));
-        }
-        damage.add(layout.rect_of(Focus::Channel(channel)));
-        damage.add(layout.rect_of(Focus::Swatches));
     }
 
-    /// The current channel value (`0..=255`) of the selected well.
-    fn channel_value(&self, channel: usize) -> u8 {
-        let color = swatch::colour(&self.swatches, self.swatches.selected()).unwrap_or_default();
-        match channel {
-            0 => color.r,
-            1 => color.g,
-            _ => color.b,
+    /// Give the selected well `colour` and write it onto the custom scheme,
+    /// reporting the well.
+    fn set_well_colour(
+        &mut self,
+        colour: Rgba,
+        layout: &Layout,
+        style: Style<'_>,
+        damage: &mut Region,
+    ) {
+        let Some(well) = self.swatches.selected() else {
+            return;
+        };
+        self.swatches.set_colour(well, Color::from(colour));
+        swatch::apply(&self.swatches, &mut self.profile.custom);
+        self.profile.clamp();
+        let row = layout.laid_out(Focus::Swatches).unwrap_or(Rect::EMPTY);
+        let (_, grid) = swatch_caption_split(row, style.scale, style.font);
+        if let Some(cell) = self.swatches.cell_rect(grid, well) {
+            layout.in_body(damage, |drew| drew.add(cell));
         }
     }
 
@@ -1457,12 +1496,13 @@ impl Settings {
         // The editor's caption says whether the custom scheme is the one in
         // force, so a scheme change alone reaches that row too.
         if was.custom != now.custom || was.scheme != now.scheme {
-            let well = self.swatches.selected();
-            let edited = self.swatches.colour(well);
+            let edited = self.selected_colour();
             swatch::adopt(&mut self.swatches, &now.custom);
             damage.add(layout.rect_of(Focus::Swatches));
-            if self.swatches.colour(well) != edited {
-                self.adopt_selected_well(&layout, damage);
+            let adopted = self.selected_colour();
+            if adopted != edited {
+                self.picker.set_colour(adopted);
+                damage.add(layout.rect_of(Focus::Picker));
             }
         }
         for (index, key) in EffectKey::ALL.into_iter().enumerate() {
@@ -1550,6 +1590,13 @@ fn swatch_caption_split(rect: Rect, scale: Scale, font: BitmapFont) -> (Rect, Re
     let grid_y = rect.top() + to_i32(caption_h) + to_i32(gap);
     let grid_h = rect.height.saturating_sub(caption_h).saturating_sub(gap);
     (caption, Rect::new(rect.left(), grid_y, rect.width, grid_h))
+}
+
+/// Where the picker is drawn and hit in the rows' own layout: beneath its
+/// caption.
+fn picker_area(layout: &Layout, style: Style<'_>) -> Rect {
+    let row = layout.laid_out(Focus::Picker).unwrap_or(Rect::EMPTY);
+    swatch_caption_split(row, style.scale, style.font).1
 }
 
 /// Draw one line of `text` vertically centred in `rect`.

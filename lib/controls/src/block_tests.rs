@@ -5,10 +5,11 @@
 //! role and colour, which title form draws the hairline rule, and that a title
 //! too long for its block says it was cut.
 
+use tairix_colour::Rgba;
 use tairix_font::BitmapFont;
 use tairix_geometry::{to_i32, Rect, Scale};
 use tairix_raster::{Color, Surface};
-use tairix_theme::{Rgba, TextRole, Theme};
+use tairix_theme::{TextRole, Theme};
 
 use crate::block::{bare_title, content_inset, plate, plate_margin, title};
 

@@ -19,12 +19,14 @@ fn the_bands_tile_the_window_without_overlapping() {
     let needs = PanelNeeds {
         swatches: 40,
         settings: 90,
+        picker: 300,
     };
     let layout = Layout::for_window(900, 640, theme, Scale::ONE, faces(), needs);
     let window = layout.window();
     for band in [
         layout.toolbar(),
         layout.panel(),
+        layout.dock(),
         layout.canvas(),
         layout.vertical_bar(),
         layout.horizontal_bar(),
@@ -33,17 +35,37 @@ fn the_bands_tile_the_window_without_overlapping() {
         assert!(!band.is_empty());
         assert_eq!(band.intersection(&window), band, "inside the window");
     }
-    assert!(layout.canvas().intersection(&layout.panel()).is_empty());
-    assert!(layout.canvas().intersection(&layout.toolbar()).is_empty());
-    assert!(layout.canvas().intersection(&layout.status()).is_empty());
+    for chrome in [
+        layout.panel(),
+        layout.dock(),
+        layout.toolbar(),
+        layout.status(),
+    ] {
+        assert!(layout.canvas().intersection(&chrome).is_empty());
+    }
+    assert!(layout.panel().intersection(&layout.dock()).is_empty());
     assert_eq!(layout.swatches().height, 40);
     assert_eq!(layout.settings().height, 90);
-    assert!(layout.swatches().top() > layout.wells().bottom());
+    assert_eq!(layout.picker().height, 300);
+    assert_eq!(layout.wells().intersection(&layout.dock()), layout.wells());
+    assert!(
+        layout.picker().top() > layout.wells().bottom(),
+        "the picker under the wells"
+    );
+    assert_eq!(
+        layout.picker().intersection(&layout.dock()),
+        layout.picker()
+    );
     assert_eq!(
         layout.primary_well().intersection(&layout.wells()),
         layout.primary_well()
     );
     assert_eq!(layout.canvas().right(), layout.vertical_bar().left());
+    assert_eq!(
+        layout.vertical_bar().right(),
+        layout.dock().left(),
+        "the dock on the right"
+    );
 }
 
 #[test]
@@ -74,6 +96,7 @@ fn a_panel_asking_for_more_than_there_is_is_cut_to_the_panel() {
     let needs = PanelNeeds {
         swatches: 10_000,
         settings: 10_000,
+        picker: 10_000,
     };
     let layout = Layout::for_window(900, 640, theme, Scale::ONE, faces(), needs);
     assert!(layout.swatches().bottom() <= layout.panel().bottom());

@@ -34,11 +34,16 @@ renames, deletes and reorders sprites.
 
 The primary (left) button paints with the primary colour and the middle
 button with the secondary colour; holding Alt picks a colour instead. The
-tools are select, pencil, brush, spray, eraser, fill, colour picker, line,
-rectangle and ellipse; the panel beside the picture holds the two colours,
-the picture's palette or the desktop colours, and the settings of the tool
-in use. Clicking a colour well edits that colour; double-clicking a palette
-colour edits the palette. Holding Shift draws a square, a circle or a line
+tools are select, pencil, brush, spray, eraser, fill, eyedropper, line,
+rectangle and ellipse; the panel beside the picture holds the picture's
+palette or the desktop colours and the settings of the tool in use. The
+colour dock on the right holds the primary and secondary colours and a
+colour picker for whichever of them is chosen: click a colour to choose
+it, then set it by hue, saturation and value, by red, green and blue, by
+its hexadecimal spelling and, where the picture holds transparency, by its
+opacity. The colour it had stands beside it, and a click takes it back. On
+a picture with a palette the colours are its entries, so the picker edits
+the palette, and each edit is one change to undo. Holding Shift draws a square, a circle or a line
 at a multiple of 45 degrees.
 
 With the select tool, drag to mark out part of the picture, then drag the
@@ -73,6 +78,7 @@ first.
 * `Ctrl+I` — invert the colours
 * `S`, `P`, `B`, `A`, `E`, `F`, `I`, `L`, `R`, `O` — the tools, in order
 * `X` — swap the primary and secondary colours
+* `Tab` — into the colour dock and through its parts; `Escape` — back to the picture
 * `+` / `-` — zoom in or out; `1` — actual size; `Ctrl+0` — fit
 * `Ctrl` + wheel — zoom in or out about the pointer
 * Pinch with two fingers — zoom smoothly; on a touchscreen the picture follows the fingers

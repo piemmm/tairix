@@ -2,8 +2,9 @@
 
 extern crate std;
 
+use tairix_colour::legibility::contrast_hundredths;
+use tairix_colour::Rgb;
 use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::legibility::contrast_hundredths;
 
 use super::BadgeHue;
 use crate::artwork::{builtin_picture, glyph_mask, IconPicture};
@@ -171,7 +172,7 @@ fn every_symbol_stands_clear_of_its_plate() {
             top.g.midpoint(bottom.g),
             top.b.midpoint(bottom.b),
         );
-        let ratio = contrast_hundredths([255, 255, 255], [mid.r, mid.g, mid.b]);
+        let ratio = contrast_hundredths(Rgb::WHITE, Rgb::new(mid.r, mid.g, mid.b));
         assert!(
             ratio >= 300,
             "{hue:?}: white on {mid:?} is only {ratio}/100:1"

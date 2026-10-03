@@ -4,9 +4,9 @@
 
 use alloc::vec::Vec;
 
+use tairix_colour::linear_to_srgb;
 use tairix_raster::DitherRow;
 use tairix_raster::Pixel;
-use tairix_theme::color::linear_to_srgb;
 use tairix_util::{fallible, mathf};
 
 use crate::vector::Vec3;

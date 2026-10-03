@@ -8,12 +8,13 @@ use alloc::string::String;
 use core::fmt::Write as _;
 use core::ops::ControlFlow;
 
+use tairix_colour::Rgba;
 use tairix_controls::{blend_area, fill_area, withheld};
 use tairix_font::BitmapFont;
 use tairix_geometry::{to_i32, Rect, Scale};
 use tairix_raster::{Color, Surface};
 use tairix_syntax::{Severity, Span};
-use tairix_theme::{Palette, Rgba, SyntaxRole, Theme};
+use tairix_theme::{Palette, SyntaxRole, Theme};
 
 use crate::document::Document;
 use crate::editor::Mode;

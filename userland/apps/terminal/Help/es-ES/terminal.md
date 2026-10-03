@@ -55,8 +55,10 @@ texto y edita el esquema propio del usuario. Los esquemas incluidos son
 *Custom*. Elegir *Custom* utiliza los colores editados debajo del
 selector: una cuadrícula de los veinte colores de los que se dibuja una
 pantalla —el fondo, el primer plano, el cursor, el texto del cursor y
-los dieciséis colores ANSI— con controles deslizantes de rojo, verde y
-azul para el que esté seleccionado.
+los dieciséis colores ANSI— y un selector de color para el que esté
+seleccionado. El selector lo ajusta por tono, saturación y valor, por
+rojo, verde y azul, o por su notación hexadecimal, y muestra a su lado el
+color que tenía la casilla al seleccionarla, que un clic recupera.
 
 **Efectos** establece cómo se dibuja la pantalla.
 

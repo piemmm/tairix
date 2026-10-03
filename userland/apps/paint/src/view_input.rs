@@ -6,24 +6,27 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_abi::window_ipc::{AppMenu, AppMenuItemId};
+use tairix_colour::Rgba;
 use tairix_controls::{
-    wheel_steps, Dialog, DialogAction, FieldGroupAction, FieldRow, Keystroke, SaveChanges,
-    ScrollAction, SwatchAction, SwatchMark, ToolActivation, ToolbarOutcome,
+    wheel_steps, Dialog, DialogAction, FieldGroupAction, FieldRow, Keystroke, PickerOutcome,
+    SaveChanges, ScrollAction, SwatchAction, SwatchMark, ToolActivation, ToolbarOutcome,
 };
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_image::{SpriteMode, SpriteName, SpritePalette};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PinchPhase, PointerButton};
+use tairix_raster::Color;
 use tairix_rng::RandU64;
 use tairix_theme::Theme;
 use tairix_window::menu::{MenuBuilder, Plate};
 
 use super::{
-    Action, Clip, Compute, Computed, Gesture, MenuKind, Modal, NewPicture, Outcome, Own, Pending,
-    Request, Settles, Then, View, APP_TITLE, GO_TO_ENTRY, RENAME_ENTRY, SPRITE_SIZE,
+    Action, Clip, Compute, Computed, Gesture, MenuKind, Modal, NewPicture, Outcome, Own,
+    PaletteEdit, Pending, Request, Settles, Then, View, APP_TITLE, GO_TO_ENTRY, RENAME_ENTRY,
+    SPRITE_SIZE,
 };
 use crate::canvas::{Canvas, Kind, OutOfMemory, Sample};
 use crate::colour::Ink;
-use crate::dialog::{Answer, Form, Purpose, Well};
+use crate::dialog::{Answer, Form, Purpose};
 use crate::document::{free_name, Entry, Picture, SpriteInfo, NAME_REFUSAL, SPRITE_STEM};
 use crate::history::{Applied, Damage, Unapplied};
 use crate::layout::Layout;
@@ -43,11 +46,10 @@ const CLEARING: &str = "clear that";
 const KEPT_UNCHANGED: &str = "This sprite cannot be edited; it is kept, and saved back unchanged";
 
 impl View {
-    /// Feed one pointer event, at monotonic time `now_ns`.
+    /// Feed one pointer event.
     pub fn on_pointer(
         &mut self,
         event: &InputEvent,
-        now_ns: u64,
         layout: &Layout,
         scale: Scale,
         theme: &Theme,
@@ -73,6 +75,15 @@ impl View {
         if let Some(outcome) = self.modal_pointer(event, layout, scale, theme, damage) {
             return outcome;
         }
+        if self.picker.is_dragging() {
+            return self
+                .dock_pointer(event, layout, scale, theme, damage)
+                .unwrap_or_else(Outcome::none);
+        }
+        let pressed = matches!(event, InputEvent::PointerPressed { .. });
+        if pressed && !layout.dock().contains(self.pointer) {
+            self.release_dock(layout, scale, theme, damage);
+        }
         if let InputEvent::PointerPressed {
             button: PointerButton::Secondary,
         } = event
@@ -81,6 +92,7 @@ impl View {
                 // The menu takes the pointer, so the release that would have
                 // ended the drag never comes here.
                 self.end_gesture(layout, damage);
+                self.release_dock(layout, scale, theme, damage);
                 return Outcome::asking(Request::Menu {
                     kind: MenuKind::Window,
                     anchor: Rect::new(self.pointer.x, self.pointer.y, 0, 0),
@@ -95,8 +107,7 @@ impl View {
             return Outcome::none();
         }
         if self.gesture.is_none() {
-            if let Some(outcome) = self.chrome_pointer(event, now_ns, layout, scale, theme, damage)
-            {
+            if let Some(outcome) = self.chrome_pointer(event, layout, scale, theme, damage) {
                 return outcome;
             }
         }
@@ -148,7 +159,6 @@ impl View {
     fn chrome_pointer(
         &mut self,
         event: &InputEvent,
-        now_ns: u64,
         layout: &Layout,
         scale: Scale,
         theme: &Theme,
@@ -164,7 +174,10 @@ impl View {
             ToolbarOutcome::Activated(_) | ToolbarOutcome::Redraw => return Some(Outcome::none()),
             ToolbarOutcome::Idle => {}
         }
-        if let Some(outcome) = self.panel_pointer(event, now_ns, layout, scale, theme, damage) {
+        if let Some(outcome) = self.dock_pointer(event, layout, scale, theme, damage) {
+            return Some(outcome);
+        }
+        if let Some(outcome) = self.panel_pointer(event, layout, scale, theme, damage) {
             return Some(outcome);
         }
         if let Some(ScrollAction::ScrollTo { offset }) =
@@ -196,11 +209,10 @@ impl View {
         None
     }
 
-    /// The pointer on the panel: the wells, the palette and the settings.
+    /// The pointer on the panel: the palette and the settings.
     fn panel_pointer(
         &mut self,
         event: &InputEvent,
-        now_ns: u64,
         layout: &Layout,
         scale: Scale,
         theme: &Theme,
@@ -225,37 +237,16 @@ impl View {
         if listing {
             return Some(Outcome::none());
         }
-        let pressed =
-            |button| matches!(event, InputEvent::PointerPressed { button: b } if *b == button);
-        if pressed(PointerButton::Primary) || pressed(PointerButton::Middle) {
-            if layout.primary_well().contains(self.pointer) {
-                return Some(self.edit_colour(Well::Primary, layout, damage));
+        let middle = matches!(
+            event,
+            InputEvent::PointerPressed {
+                button: PointerButton::Middle
             }
-            if layout.secondary_well().contains(self.pointer) {
-                return Some(self.edit_colour(Well::Secondary, layout, damage));
-            }
-        }
-        if pressed(PointerButton::Middle) {
+        );
+        if middle {
             if let Some(index) = self.swatches.well_at(layout.swatches(), self.pointer) {
                 self.choose_well(SwatchMark::Secondary, index, layout, damage);
                 return Some(Outcome::none());
-            }
-        }
-        if pressed(PointerButton::Primary) {
-            if let Some(index) = self.swatches.well_at(layout.swatches(), self.pointer) {
-                let subject = index as u64;
-                let run = self.clicks.register(
-                    now_ns,
-                    subject,
-                    PointerButton::Primary,
-                    self.double_click,
-                    2,
-                );
-                if run == 2 {
-                    if let Some(Ink::Index(entry)) = self.wells.get(index).copied() {
-                        return Some(self.edit_colour(Well::Entry(entry), layout, damage));
-                    }
-                }
             }
         }
         match self
@@ -294,9 +285,229 @@ impl View {
             SwatchMark::Primary => self.primary = ink,
             SwatchMark::Secondary => self.secondary = ink,
         }
+        self.inks_changed(layout, damage);
+    }
+
+    /// The inks changed from outside the dock: show them in the wells, the
+    /// palette's marks and the picker.
+    fn inks_changed(&mut self, layout: &Layout, damage: &mut Region) {
         self.mark_wells();
+        self.sync_picker();
         damage.add(layout.wells());
         damage.add(layout.swatches());
+        damage.add(layout.picker());
+    }
+
+    /// The pointer on the colour dock: a press on a well makes it the one the
+    /// picker edits, and the picker takes the rest. `None` where the event is
+    /// none of the dock's.
+    fn dock_pointer(
+        &mut self,
+        event: &InputEvent,
+        layout: &Layout,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> Option<Outcome> {
+        let pressed = matches!(event, InputEvent::PointerPressed { .. });
+        if pressed && !self.picker.is_dragging() {
+            for (well, mark) in [
+                (layout.primary_well(), SwatchMark::Primary),
+                (layout.secondary_well(), SwatchMark::Secondary),
+            ] {
+                if well.contains(self.pointer) {
+                    self.edit_well(mark, layout, scale, theme, damage);
+                    return Some(Outcome::none());
+                }
+            }
+        }
+        let outcome = self
+            .picker
+            .on_pointer(event, layout.picker(), scale, theme, damage);
+        if pressed && outcome != PickerOutcome::Ignored && !self.picker.state().focus.focused {
+            self.picker.set_focused(true);
+            damage.add(layout.picker());
+        }
+        match outcome {
+            PickerOutcome::Ignored => {
+                (pressed && layout.dock().contains(self.pointer)).then(Outcome::none)
+            }
+            outcome => Some(self.picked(outcome, layout, damage)),
+        }
+    }
+
+    /// Make `mark`'s ink the one the dock edits, finishing what the picker
+    /// held for the other.
+    fn edit_well(
+        &mut self,
+        mark: SwatchMark,
+        layout: &Layout,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) {
+        if mark == self.editing {
+            return;
+        }
+        self.commit_dock(layout, scale, theme, damage);
+        self.editing = mark;
+        self.sync_picker();
+        damage.add(layout.wells());
+        damage.add(layout.picker());
+    }
+
+    /// Settle what the picker holds — a drag, a field's typing — keeping its
+    /// keyboard focus: done before anything else touches the inks or the
+    /// picture.
+    pub(super) fn commit_dock(
+        &mut self,
+        layout: &Layout,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) {
+        let dragged = self.picker.finish_drag();
+        self.picked(dragged, layout, damage);
+        let committed = self.picker.commit(layout.picker(), scale, theme, damage);
+        self.picked(committed, layout, damage);
+    }
+
+    /// Settle the picker and take the keyboard from it, as a press elsewhere
+    /// in the window or a menu does.
+    pub(super) fn release_dock(
+        &mut self,
+        layout: &Layout,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) {
+        self.commit_dock(layout, scale, theme, damage);
+        if self.picker.state().focus.focused {
+            let blurred = self.picker.blur(layout.picker(), scale, theme, damage);
+            self.picked(blurred, layout, damage);
+        }
+    }
+
+    /// What the picker concluded, landed on the ink it edits: a colour
+    /// picture's ink takes the colour, and a palette picture's ink names an
+    /// entry, which takes it live and is recorded once it settles.
+    fn picked(&mut self, outcome: PickerOutcome, layout: &Layout, damage: &mut Region) -> Outcome {
+        let (colour, settled) = match outcome {
+            PickerOutcome::Edited(colour) => (colour, false),
+            PickerOutcome::Settled(colour) => (colour, true),
+            PickerOutcome::Taken | PickerOutcome::Ignored => return Outcome::none(),
+        };
+        let ink = self.ink(self.editing == SwatchMark::Secondary);
+        match (self.kind(), ink) {
+            (Kind::Rgba, _) => {
+                let ink = Ink::of_colour(colour.to_array());
+                match self.editing {
+                    SwatchMark::Primary => self.primary = ink,
+                    SwatchMark::Secondary => self.secondary = ink,
+                }
+                self.mark_wells();
+                damage.add(layout.wells());
+                damage.add(layout.swatches());
+            }
+            (Kind::Indexed { .. }, Ink::Index(entry)) => {
+                self.edit_entry(entry, colour, settled, layout, damage);
+            }
+            (Kind::Indexed { .. }, _) => {}
+        }
+        Outcome::none()
+    }
+
+    /// Give palette entry `entry` the colour `colour` live, the palette it
+    /// had kept aside so that settling records the change as one step.
+    fn edit_entry(
+        &mut self,
+        entry: u8,
+        colour: Rgba,
+        settled: bool,
+        layout: &Layout,
+        damage: &mut Region,
+    ) {
+        if self
+            .palette_edit
+            .as_ref()
+            .is_some_and(|edit| edit.entry != entry)
+        {
+            self.settle_entry_edit(layout, damage);
+        }
+        if self.palette_edit.is_none() && !self.begin_entry_edit(entry, layout, damage) {
+            self.sync_picker();
+            damage.add(layout.picker());
+            return;
+        }
+        // A sprite's palette holds colours; its transparency is its mask.
+        let sprite = self
+            .document
+            .picture()
+            .is_some_and(|picture| picture.sprite.is_some());
+        let colour = if sprite {
+            colour.with_alpha(u8::MAX)
+        } else {
+            colour
+        };
+        if let Some(canvas) = self.document.canvas_mut() {
+            canvas.set_palette_entry(entry, colour.to_array());
+        }
+        if let Some(well) = self.wells.iter().position(|&ink| ink == Ink::Index(entry)) {
+            self.swatches.set_colour(well, Color::from(colour));
+            if let Some(cell) = self.swatches.cell_rect(layout.swatches(), well) {
+                damage.add(cell);
+            }
+        }
+        damage.add(layout.canvas());
+        damage.add(layout.wells());
+        if settled {
+            self.settle_entry_edit(layout, damage);
+        }
+    }
+
+    /// Keep the palette as it stands aside and the room to record its change,
+    /// before an entry is edited live; `false`, saying why, where it may not
+    /// be.
+    fn begin_entry_edit(&mut self, entry: u8, layout: &Layout, damage: &mut Region) -> bool {
+        if !self.editable(layout, damage) {
+            return false;
+        }
+        let length = self.kind().palette().map_or(0, <[_]>::len);
+        let mut before = Vec::new();
+        if before.try_reserve_exact(length).is_err() || self.document.reserve().is_err() {
+            self.state(
+                "There is not enough memory to change the palette",
+                layout,
+                damage,
+            );
+            return false;
+        }
+        let Some(palette) = self.kind().palette() else {
+            return false;
+        };
+        before.extend_from_slice(palette);
+        self.palette_edit = Some(PaletteEdit { entry, before });
+        true
+    }
+
+    /// End a live entry edit: the palette it began from is put back and the
+    /// edited one made the picture's as one step, or nothing recorded where
+    /// it came back to where it began.
+    fn settle_entry_edit(&mut self, layout: &Layout, damage: &mut Region) {
+        let Some(PaletteEdit { before, .. }) = self.palette_edit.take() else {
+            return;
+        };
+        let Some(edited) = self
+            .document
+            .canvas_mut()
+            .and_then(|canvas| canvas.swap_palette(before))
+        else {
+            return;
+        };
+        if self.kind().palette() == Some(edited.as_slice()) {
+            return;
+        }
+        self.change_palette(edited, layout, damage);
     }
 
     fn wheel(
@@ -500,7 +711,7 @@ impl View {
             return Outcome::none();
         }
         let at = self.at(layout);
-        if self.modifiers.alt || self.tool == Tool::Picker {
+        if self.modifiers.alt || self.tool == Tool::Eyedropper {
             self.pick(at, secondary, layout, damage);
             return Outcome::none();
         }
@@ -556,9 +767,7 @@ impl View {
         } else {
             self.primary = ink;
         }
-        self.mark_wells();
-        damage.add(layout.wells());
-        damage.add(layout.swatches());
+        self.inks_changed(layout, damage);
     }
 
     fn begin_stroke(&mut self, at: Fx, secondary: bool, layout: &Layout, damage: &mut Region) {
@@ -849,6 +1058,8 @@ impl View {
             settles,
             what,
         });
+        self.sync_picker();
+        damage.add(layout.picker());
         self.state("Working\u{2026}", layout, damage);
         Outcome::asking(Request::Own(Own::Compute { job, work }))
     }
@@ -864,6 +1075,8 @@ impl View {
         let Some(pending) = self.pending.take_if(|pending| pending.job == job) else {
             return Outcome::none();
         };
+        self.sync_picker();
+        damage.add(layout.picker());
         self.end_gesture(layout, damage);
         self.message = None;
         damage.add(layout.message());
@@ -1298,11 +1511,6 @@ impl View {
                 self.document.set_jpeg_quality(form.quality_answer());
                 Outcome::none()
             }
-            Purpose::Colour { well, .. } => {
-                let colour = form.colour_answer();
-                self.set_colour(well, colour, layout, damage);
-                Outcome::none()
-            }
         }
     }
 
@@ -1316,42 +1524,6 @@ impl View {
             (Ink::Index(index), _) => Sample::Index(index, u8::MAX),
             (Ink::Colour(colour), _) => Sample::Rgba(colour),
         }
-    }
-
-    /// Set `well` to `colour`: an ink, or a palette entry, which is a change
-    /// to the picture.
-    fn set_colour(&mut self, well: Well, colour: [u8; 4], layout: &Layout, damage: &mut Region) {
-        let kind = self.kind();
-        let entry = match (well, &kind) {
-            (Well::Entry(index), _) => Some(index),
-            (Well::Primary | Well::Secondary, Kind::Indexed { .. }) => {
-                match self.ink(well == Well::Secondary) {
-                    Ink::Index(index) => Some(index),
-                    _ => None,
-                }
-            }
-            (_, Kind::Rgba) => None,
-        };
-        if let (Some(index), Some(palette)) = (entry, kind.palette()) {
-            let mut palette = palette.to_vec();
-            if let Some(slot) = palette.get_mut(usize::from(index)) {
-                *slot = colour;
-                self.change_palette(palette, layout, damage);
-            }
-            return;
-        }
-        let ink = if colour[3] == 0 {
-            Ink::Clear
-        } else {
-            Ink::Colour(colour)
-        };
-        match well {
-            Well::Secondary => self.secondary = ink,
-            _ => self.primary = ink,
-        }
-        self.mark_wells();
-        damage.add(layout.wells());
-        damage.add(layout.swatches());
     }
 
     /// Give the palette picture showing `palette`, as one step, its sprite
@@ -1394,38 +1566,6 @@ impl View {
         self.end_gesture(layout, damage);
         self.modal = Some(Modal::Form(Box::new(form)));
         damage.add(layout.window());
-    }
-
-    /// Open the colour form for `well`.
-    fn edit_colour(&mut self, well: Well, layout: &Layout, damage: &mut Region) -> Outcome {
-        let kind = self.kind();
-        let colour = match well {
-            Well::Primary => self.primary.shown(kind),
-            Well::Secondary => self.secondary.shown(kind),
-            Well::Entry(index) => Ink::Index(index).shown(kind),
-        };
-        let editing_entry = matches!(well, Well::Entry(_))
-            || (kind.palette().is_some()
-                && matches!(self.ink(well == Well::Secondary), Ink::Index(_)));
-        if kind.palette().is_some() && !editing_entry {
-            self.state(
-                "Choose a colour from the palette, or edit a palette colour",
-                layout,
-                damage,
-            );
-            return Outcome::none();
-        }
-        // A palette entry is translucent only in a picture that is not a
-        // sprite: a sprite's palette is colours, its mask the transparency.
-        let alpha = if editing_entry {
-            self.document
-                .picture()
-                .is_some_and(|picture| picture.sprite.is_none())
-        } else {
-            *kind == Kind::Rgba
-        };
-        self.ask(Form::colour(well, colour, alpha), layout, damage);
-        Outcome::none()
     }
 
     /// Ask a worker for `transform` of the picture showing.
@@ -1550,10 +1690,56 @@ impl View {
                 None => Outcome::none(),
             };
         }
+        if let Some(outcome) = self.dock_key(stroke, layout, scale, theme, damage) {
+            return outcome;
+        }
         match shortcut(stroke.key, stroke.modifiers) {
-            Some(action) => self.act(action, layout, damage),
+            Some(action) => {
+                self.commit_dock(layout, scale, theme, damage);
+                self.act(action, layout, damage)
+            }
             None => self.plain_key(stroke.key, layout, damage),
         }
+    }
+
+    /// A key for the colour dock: the picker takes every key it has a use
+    /// for while it has the keyboard, and gives it back past its last part or
+    /// on an Escape it has nothing to take back for; Tab gives it the
+    /// keyboard from the picture. `None` where the key is the window's.
+    fn dock_key(
+        &mut self,
+        stroke: Keystroke,
+        layout: &Layout,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> Option<Outcome> {
+        let tab = stroke.key == Key::Named(NamedKey::Tab);
+        if !self.picker.state().focus.focused && !self.picker.is_dragging() {
+            if tab {
+                let forward = !stroke.modifiers.shift;
+                self.picker
+                    .enter_focus(forward, layout.picker(), scale, theme);
+                damage.add(layout.picker());
+                return Some(Outcome::none());
+            }
+            return None;
+        }
+        let outcome = self.picker.on_key(
+            stroke.key,
+            stroke.modifiers,
+            layout.picker(),
+            (scale, theme),
+            damage,
+        );
+        if outcome != PickerOutcome::Ignored {
+            return Some(self.picked(outcome, layout, damage));
+        }
+        if tab || stroke.key == Key::Named(NamedKey::Escape) {
+            self.release_dock(layout, scale, theme, damage);
+            return Some(Outcome::none());
+        }
+        None
     }
 
     /// A key no shortcut claims: turn a drag or a selection down, nudge a
@@ -1757,13 +1943,19 @@ impl View {
                     damage,
                 );
             }
-            Action::EditPrimary => return self.edit_colour(Well::Primary, layout, damage),
-            Action::EditSecondary => return self.edit_colour(Well::Secondary, layout, damage),
+            Action::EditPrimary | Action::EditSecondary => {
+                self.editing = if action == Action::EditPrimary {
+                    SwatchMark::Primary
+                } else {
+                    SwatchMark::Secondary
+                };
+                self.sync_picker();
+                self.picker.set_focused(true);
+                damage.add(layout.dock());
+            }
             Action::SwapColours => {
                 core::mem::swap(&mut self.primary, &mut self.secondary);
-                self.mark_wells();
-                damage.add(layout.wells());
-                damage.add(layout.swatches());
+                self.inks_changed(layout, damage);
             }
             Action::PreviousSprite => {
                 let current = self.document.current();
@@ -2086,14 +2278,14 @@ impl View {
         if let Some(colours) = menu.submenu("Colours", Plate::Root) {
             menu.item(
                 Action::EditPrimary,
-                "Edit primary\u{2026}",
+                "Edit primary colour",
                 "",
                 picture,
                 colours,
             );
             menu.item(
                 Action::EditSecondary,
-                "Edit secondary\u{2026}",
+                "Edit secondary colour",
                 "",
                 picture,
                 colours,

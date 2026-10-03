@@ -10,8 +10,8 @@ Quit.
 A picture is edited at the depth it is stored in: a 1, 2, 4 or 8-bit palette,
 or 32-bit colour with alpha. A toolbar strip runs across the top — the tools,
 then the view's own commands (zoom in and out, fit, actual size, grid) — with
-the panel down the left, the canvas and its bars beside it and the status band
-along the bottom. The window shows the picture at any zoom from 1/16 to 64,
+the panel down the left, the colour dock down the right, the canvas and its
+bars between them and the status band along the bottom. The window shows the picture at any zoom from 1/16 to 64,
 kept in 4096ths of actual size (`viewport::Zoom`), every rung of the ladder
 (`viewport::ZOOMS`) exactly. Ctrl and the wheel step it a rung for each
 detent's worth of turn, a fine wheel's fractions adding up, anchored so the
@@ -22,12 +22,12 @@ follows their centre, both measured from where it began, so it accumulates no
 rounding, and a cancelled pinch puts the view back. The picture is drawn as
 tall or wide as the sprite's pixels are, over a
 checkerboard where it is clear, with a grid between pixels once one spans
-`GRID_FROM` screen pixels. Beside it the panel holds the primary and secondary
-colours, the picture's palette — the desktop's sixteen colours for a
-truecolour picture — and the settings of the tool in use; the status band says
-where the pointer is, what was last said, which sprite shows, and the zoom.
+`GRID_FROM` screen pixels. The panel holds the picture's palette — the
+desktop's sixteen colours for a truecolour picture — and the settings of the
+tool in use; the status band says where the pointer is, what was last said,
+which sprite shows, and the zoom.
 
-The tools are select, pencil, brush, spray, eraser, fill, colour picker, line,
+The tools are select, pencil, brush, spray, eraser, fill, eyedropper, line,
 rectangle and ellipse. The primary button paints the primary colour and the
 middle button the secondary; Alt picks a colour instead. A drag belongs to the
 button that began it, and is finished by anything that takes the pointer or
@@ -48,6 +48,41 @@ The window has no menu bar. A secondary press anywhere opens its menu — Cut,
 Copy, Paste, Select all and Deselect, then File, Edit, Image, Colours,
 Sprites, View and Tools, each a submenu — drawn by the desktop like every
 application's ([menus](menus.md)).
+
+## The colour dock
+
+The dock holds the primary and secondary colours, the secondary behind, and the
+shared colour picker ([controls](../lib/controls.md)) editing whichever of the
+two was last chosen; its caption names it, and on a palette picture which entry
+it is. A palette swatch, the eyedropper, the swap key and the Colours menu all
+set an ink from outside the picker, which then shows the ink's colour with the
+same colour beside it as the earlier one a press takes back. The picker carries
+opacity on a picture that holds it — truecolour, or a palette picture that is
+not a sprite — and is opaque on a sprite, whose transparency is its mask.
+
+On a truecolour picture an ink is a colour, and the picker changes it as it
+moves; nothing in the picture changes, so nothing is recorded. A colour with
+no alpha at all is the clear ink, since laid over the picture it would change
+nothing. A conversion that lands while the picker is dragged ends the drag: the
+ink it was choosing has become an entry, and the drag does not carry on as an
+edit of the palette. On a palette
+picture an ink is an entry, so the picker edits the palette: the entry takes
+each colour live, the canvas and the palette showing it, and the palette it had
+is kept aside until the interaction settles, when the change is recorded as one
+step — a drag is one step however long it runs, a drag abandoned with Escape is
+none, and a drag that ends where it began records nothing. The room for that
+step is reserved before the first colour lands, so a settled edit is always
+recordable, and memory refused is said in the window instead. A palette
+picture's dock is withheld while a worker has the picture, and so is the dock
+for the mask's clear ink, which is the mask and no colour.
+
+Tab takes the keyboard from the picture into the dock and walks its parts; past
+the last part, or on an Escape with nothing for the picker to take back, the
+keyboard returns to the picture. While a field has the keyboard it takes every
+key it can use, so a letter typed there is never a tool's shortcut; a chord it
+has no use for — Ctrl+S, Ctrl+Z — is the window's, and the dock settles what
+it holds first. A press anywhere else in the window, or the window's menu,
+settles the dock and takes the keyboard back.
 
 ## Formats
 

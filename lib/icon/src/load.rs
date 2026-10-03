@@ -110,7 +110,7 @@ pub const ICON_KINDS: [IconKind; 91] = [
     IconKind::ToolSpray,
     IconKind::ToolEraser,
     IconKind::ToolFill,
-    IconKind::ToolPicker,
+    IconKind::ToolEyedropper,
     IconKind::ToolLine,
     IconKind::ToolRectangle,
     IconKind::ToolEllipse,

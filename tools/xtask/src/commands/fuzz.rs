@@ -325,6 +325,12 @@ pub const TARGETS: &[Target] = &[
             "page-zero accelerated candidates vs the portable reference (zeroes exactly the region, touches nothing past it)",
     },
     Target {
+        package: "tairix-colour",
+        test: "fuzz_colour",
+        description:
+            "colour notation and coordinates (hex spellings from SVG assets and settings documents, HSV/HSL totality)",
+    },
+    Target {
         package: "tairix-svg",
         test: "fuzz_svg",
         description: "SVG asset decode (untrusted /System/Graphics image bytes)",

@@ -1280,7 +1280,7 @@ impl DesktopShell {
     fn backdrop_colour(&self, backdrop: Backdrop) -> Color {
         match backdrop {
             Backdrop::Theme => self.desktop_background(),
-            Backdrop::Colour(colour) => Color::rgb(colour.r, colour.g, colour.b),
+            Backdrop::Colour(colour) => Color::from(colour),
         }
     }
 

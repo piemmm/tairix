@@ -15,13 +15,12 @@ use tairix_controls::{
     Toggle,
 };
 use tairix_geometry::{Rect, Region, Scale};
-use tairix_image::{IndexDepth, Rgba8, SpriteName};
+use tairix_image::{IndexDepth, SpriteName};
 use tairix_input::{InputEvent, Key, NamedKey};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
 
 use crate::canvas::{admissible, MAX_PIXELS, MAX_SIDE};
-use crate::colour::{parse_hex, write_hex};
 use crate::document::{NewPicture, NAME_REFUSAL};
 use crate::transform::{Anchor, PaletteChoice};
 
@@ -67,17 +66,6 @@ const PALETTES: [(PaletteChoice, &str); 2] = [
     ),
 ];
 
-/// Which colour a colour form edits.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum Well {
-    /// The primary colour.
-    Primary,
-    /// The secondary colour.
-    Secondary,
-    /// Entry `n` of the palette.
-    Entry(u8),
-}
-
 /// What a form asks for.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Purpose {
@@ -93,13 +81,6 @@ pub enum Purpose {
     Convert,
     /// The JPEG quality to save at.
     Quality,
-    /// A colour, for `well`; `alpha` when it may be translucent.
-    Colour {
-        /// Which colour.
-        well: Well,
-        /// Whether its opacity may be set.
-        alpha: bool,
-    },
 }
 
 /// How a form was answered.
@@ -141,31 +122,6 @@ fn choice_row(label: &str, choices: &[&str], selected: usize) -> FieldRow {
 fn toggle_row(label: &str, on: bool) -> FieldRow {
     FieldRow::new(label, FieldControl::Toggle(Toggle::new(label, on)))
 }
-
-fn channel_row(label: &str, value: u8) -> FieldRow {
-    FieldRow::new(
-        channel_label(label, value),
-        FieldControl::Slider(
-            Slider::new(channel_permille(value))
-                .with_stops(256)
-                .with_steps(4, 63),
-        ),
-    )
-}
-
-fn channel_label(label: &str, value: u8) -> String {
-    alloc::format!("{label}: {value}")
-}
-
-fn channel_permille(value: u8) -> u16 {
-    u16::try_from(u32::from(value) * 1000 / 255).unwrap_or(1000)
-}
-
-fn channel_of(permille: u16) -> u8 {
-    u8::try_from((u32::from(permille.min(1000)) * 255 + 500) / 1000).unwrap_or(u8::MAX)
-}
-
-const CHANNELS: [&str; 4] = ["Red", "Green", "Blue", "Opacity"];
 
 impl Form {
     fn new(purpose: Purpose, title: &str, confirm: &str, rows: Vec<FieldRow>) -> Self {
@@ -289,34 +245,6 @@ impl Form {
         )
     }
 
-    /// The form editing `colour`, the colour of `well`.
-    #[must_use]
-    pub fn colour(well: Well, colour: Rgba8, alpha: bool) -> Self {
-        let title = match well {
-            Well::Primary => String::from("Primary colour"),
-            Well::Secondary => String::from("Secondary colour"),
-            Well::Entry(index) => alloc::format!("Palette colour {index}"),
-        };
-        let channels = if alpha { 4 } else { 3 };
-        let mut rows: Vec<FieldRow> = CHANNELS
-            .iter()
-            .zip(colour)
-            .take(channels)
-            .map(|(label, value)| channel_row(label, value))
-            .collect();
-        let mut hex = String::new();
-        write_hex(
-            if alpha {
-                colour
-            } else {
-                [colour[0], colour[1], colour[2], 255]
-            },
-            &mut hex,
-        );
-        rows.push(text_row("Hex", &hex, 9));
-        Self::new(Purpose::Colour { well, alpha }, &title, "Set", rows)
-    }
-
     /// What the form asks for.
     #[must_use]
     pub const fn purpose(&self) -> Purpose {
@@ -422,7 +350,6 @@ impl Form {
             return Some(Answer::Cancelled);
         }
         match self.purpose {
-            Purpose::Colour { alpha, .. } => self.follow_colour(acted, alpha),
             Purpose::Scale => self.follow_proportions(acted),
             Purpose::Quality => {
                 if let FieldAction::SetValue { permille } | FieldAction::Settled { permille } =
@@ -445,38 +372,6 @@ impl Form {
             *row = FieldRow::new(label, row.control().clone());
         }
         self.group.adopt_focus(focus);
-    }
-
-    fn follow_colour(&mut self, acted: &FieldGroupAction, alpha: bool) {
-        let channels = if alpha { 4 } else { 3 };
-        match &acted.action {
-            FieldAction::SetValue { permille } | FieldAction::Settled { permille }
-                if acted.row < channels =>
-            {
-                let value = channel_of(*permille);
-                self.relabel(acted.row, channel_label(CHANNELS[acted.row], value));
-                let mut hex = String::new();
-                write_hex(self.colour_value(), &mut hex);
-                self.set_text(channels, &hex);
-            }
-            FieldAction::Text(TextAction::Edited) if acted.row == channels => {
-                let Some(colour) = parse_hex(self.text(channels)) else {
-                    return;
-                };
-                for (index, value) in colour.into_iter().enumerate().take(channels) {
-                    if let Some(FieldControl::Slider(slider)) = self
-                        .group
-                        .rows_mut()
-                        .get_mut(index)
-                        .map(FieldRow::control_mut)
-                    {
-                        slider.set_value(channel_permille(value));
-                    }
-                    self.relabel(index, channel_label(CHANNELS[index], value));
-                }
-            }
-            _ => {}
-        }
     }
 
     fn follow_proportions(&mut self, acted: &FieldGroupAction) {
@@ -619,26 +514,6 @@ impl Form {
     #[must_use]
     pub fn quality_answer(&self) -> u8 {
         quality_of(self.permille(0))
-    }
-
-    /// The colour chosen; a hex spelling typed into the form has already
-    /// moved the sliders to it.
-    #[must_use]
-    pub fn colour_answer(&self) -> Rgba8 {
-        self.colour_value()
-    }
-
-    fn colour_value(&self) -> Rgba8 {
-        let alpha = matches!(self.purpose, Purpose::Colour { alpha: true, .. });
-        let mut colour = [255u8; 4];
-        for (index, channel) in colour
-            .iter_mut()
-            .enumerate()
-            .take(if alpha { 4 } else { 3 })
-        {
-            *channel = channel_of(self.permille(index));
-        }
-        colour
     }
 }
 

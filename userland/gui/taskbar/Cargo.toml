@@ -63,6 +63,8 @@ tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 # The bar renderer's host tests draw text, so they inject the shared solid
 # test transport via the `test-util` feature (never a running `fontd`).
 [dev-dependencies]
+# The colour value the tests name a theme role's expected pixels in.
+tairix-colour = { path = "../../../lib/colour", version = "=0.0.0" }
 tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["test-util"] }
 # The controls' shared test fixtures, among them the check that a painted
 # surface keeps inside its own rounded silhouette.

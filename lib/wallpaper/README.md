@@ -68,8 +68,9 @@ A colour is written **bare** — `112233`, never `#112233`. That is now a
 *registry* rule rather than a grammar one: the format engine quotes a value
 carrying a `#` and round-trips it perfectly well, so the crate keeps one
 spelling of a colour because two would be two ways for consumers to
-disagree about whether they mean the same backdrop. [`Rgb::from_hex`] reads
-bare digits and [`Rgb::to_hex`] writes them. A wallpaper *path* carrying a
+disagree about whether they mean the same backdrop. The colour is
+`lib/colour`'s opaque `Rgb`: `Rgb::from_hex` reads the six bare digits and
+`Rgb::hex` writes them. A wallpaper *path* carrying a
 `#` is accepted, because the path grammar is now the only thing judging it.
 
 ## Two readings, deliberately different

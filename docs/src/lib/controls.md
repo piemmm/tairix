@@ -50,13 +50,15 @@ under the floor and are unchanged.
 | `block` | the titled block a monitoring surface lays its readings out in: `plate`, `title`, `bare_title`, `titled_content`, `content_rect` |
 | `record` | `FactList`, `Timeline` |
 | `text` | `TextField`, `TextArea`, `SearchField` |
+| `number` | `NumberField`: an integer between two bounds, live as digits spell a number in range and invalid while they do not, stepped by Up/Down, Page Up/Down and a focused field's wheel, settled by a step, Enter or the owner's commit as the focus leaves |
+| `colour_picker` | `ColourPicker`: one colour by its hue, saturation and value plane and hue strip, an opacity strip where it has one, a swatch beside the earlier colour a press takes back, a hex field and H/S/V/R/G/B/A number fields, laid beside the plane in wide bounds and beneath it in narrow ones |
 | `menu`, `toolbar`, `tabs`, `combo` | `Menu`/`MenuItem`, `ChainModel`, `plate_rect`, `Toolbar`, `Tab`/`Tabs`, `ComboBox` |
 | `disclosure` | `DisclosureSet`, which sections of a list are showing their pages, and `tree_step`, what Right and Left do there |
 | `nav`, `rail` | `Breadcrumb`, `ActionRail` |
 | `collection` | `ListRow`, `TableRow`, `TableCell`, `TableHeader`, `Card`, `Panel` |
 | `form`, `stack` | `FieldRow`, `FieldGroup`, `FlagSet`, and the plate column groups stack down |
 | `picture` | `PictureChoice`, `PictureSection`, `PictureItem`, `Swatch`, `Aspect` |
-| `swatch_grid` | `SwatchGrid`: a grid of colour wells, one primary and an optional secondary mark, chosen by pointer or arrows, a translucent well shown over a checker; each mark is black or white by the well's colour as it shows over the surface |
+| `swatch_grid` | `SwatchGrid`: a grid of colour wells, a primary mark on at most one and an optional secondary one, chosen by pointer or by arrows while it has the keyboard, a translucent well shown over a checker; each mark is black or white by the well's colour as it shows over the surface, focus rings the marked well in its margin, and a disabled grid is veiled and a denied one carries the authority bead |
 | `checker` | `Checker`: the one checkerboard transparency is shown over, in the theme's surface and that colour lifted, square side scaled |
 | `credential` | `CredentialSheet` |
 | `scroll`, `scrollbar` | the geometry engine and the one `ScrollBar` over it |
@@ -71,6 +73,32 @@ while the pointer is still down and `SliderAction::Settled` when the drag ends
 setting written, a document published, another process told — belongs on the
 settle alone. Acting on every value change means acting once per pointer-motion
 sample, which is how a slider ends up wired to a disk write.
+
+### Choosing a colour
+
+The colour picker holds its colour as hue, saturation and value (`lib/colour`),
+so a colour dragged to grey or black — or set to one by its owner — keeps the
+hue and saturation it showed, and comes back when its value does. Every part
+reports what it changes: a marker moving on the plane costs the marker's old
+and new places and the readouts, a new hue the plane and the strip. A drag, a
+typed digit and a typed hex spelling are live (`PickerOutcome::Edited`); the
+release, a key step, Enter, a field the keyboard leaves and the earlier colour
+taken back settle (`PickerOutcome::Settled`), and a drag that moved anything
+settles even where it ended up where it began, so an owner applying live edits
+always hears where they stopped. Escape abandons a drag where it began, or takes
+back what a field was typed since the last settle, and is otherwise the
+owner's.
+
+Its fields read the way a person types: the hex field takes the `#` or not,
+spaces round it, and any of CSS's four digit forms — an alpha form only where
+the picker edits opacity — and shows a spelling it cannot read as invalid
+without moving the colour. A field takes every key but Tab and the chords it
+has no use for, so a letter typed into it never reaches an owner's shortcut
+while Ctrl+S still does. Tab walks the parts and answers `Ignored` past either
+end; an owner moving the keyboard away calls `blur`, and one about to act on
+the colour itself calls `commit`, so typing is never lost. A denied picker
+carries one authority bead and its fields go quiet rather than each marking the
+denial again.
 
 A slider's knob is the theme's `slider_knob` across, centred on the groove in
 whatever row it is seated, and its travel stops short of either end by the

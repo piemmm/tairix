@@ -37,6 +37,8 @@ tairix-theme = { path = "../theme", version = "=0.0.0" }
 # so this crate defines the closed *registry* over that format and no
 # grammar of its own (plans/APPDATA.md §1.3, §3.11).
 tairix-appconf = { path = "../appconf", version = "=0.0.0" }
+# The opaque colour a backdrop is, and its bare `rrggbb` spelling.
+tairix-colour = { path = "../colour", version = "=0.0.0" }
 
 # Only the apply client's own round trip: a surface asking the session to
 # adopt a document makes one `ipc_call`, and the rest of the crate stays the

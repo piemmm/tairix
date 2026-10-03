@@ -55,8 +55,10 @@ bureau), *Midnight*, *Phosphor*, *Amber*, *Ember*, *Contrast*, *Paper*
 et *Custom*. Choisir *Custom* utilise les couleurs modifiées sous le
 sélecteur : une grille des vingt couleurs dont un écran est composé — le
 fond, le premier plan, le curseur, le texte du curseur et les seize
-couleurs ANSI — avec des curseurs rouge, vert et bleu pour celle qui est
-sélectionnée.
+couleurs ANSI — et un sélecteur de couleur pour celle qui est
+sélectionnée. Le sélecteur la règle par teinte, saturation et valeur, par
+rouge, vert et bleu, ou par sa notation hexadécimale, et montre à côté la
+couleur qu'avait la case au moment de la sélection, qu'un clic rétablit.
 
 **Effets** définit la manière dont l'écran est dessiné.
 

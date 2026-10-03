@@ -42,12 +42,13 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_colour::Rgba;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::{IconArtwork, IconKind, IconRequest};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
-use tairix_theme::{Rgba, TextRole, Theme};
+use tairix_theme::{TextRole, Theme};
 
 use crate::chart::Chart;
 use crate::damage;

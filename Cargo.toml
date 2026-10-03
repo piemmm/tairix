@@ -50,6 +50,7 @@ members = [
     "lib/caps",
     "lib/cmdres",
     "lib/collections",
+    "lib/colour",
     "lib/complete",
     "lib/compress",
     "lib/conout",

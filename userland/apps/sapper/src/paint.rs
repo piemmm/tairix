@@ -16,11 +16,12 @@
 //! and fading off. That is why a suppressed animation needs no second code
 //! path — with no motion the lid is simply already gone.
 
+use tairix_colour::Rgba;
 use tairix_controls::{blend_area, fill_area};
 use tairix_font::BitmapFont;
 use tairix_geometry::{to_i32, Rect, Scale};
 use tairix_raster::{Color, Surface, SUBPIXEL};
-use tairix_theme::{Appearance, Rgba, Theme};
+use tairix_theme::{Appearance, Theme};
 
 use crate::anim::{CellMotion, Motion, WaveKind};
 use crate::board::{Board, Coord, Cover, Phase};

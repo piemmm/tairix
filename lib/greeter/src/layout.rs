@@ -13,11 +13,11 @@
 //! inside it, which is what lets [`crate::panel_rect`] answer where the
 //! prompt is without measuring a font.
 
+use tairix_colour::Rgba;
 use tairix_controls::{paint_run, run_width};
 use tairix_font::{BitmapFont, TextShadow};
 use tairix_geometry::{Rect, Scale};
 use tairix_raster::{Color, Surface};
-use tairix_theme::Rgba;
 
 /// Gap from the top and sides of the screen to the chrome's two lines, and
 /// between them.

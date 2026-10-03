@@ -16,72 +16,10 @@
 //! a user may author one [`Custom`](Scheme::Custom) scheme of their own that
 //! is persisted with the rest of their profile.
 
+use tairix_colour::Rgb;
 use tairix_raster::Color;
 use tairix_theme::Theme;
 use tairix_vt::{Attributes, BasicColor, Color as VtColor};
-
-/// One 24-bit colour of a scheme, as the profile document spells it.
-///
-/// A bare `rrggbb` triple: the profile grammar cuts a line at its first `#`,
-/// so a colour never carries one.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
-pub struct Rgb {
-    /// Red channel.
-    pub r: u8,
-    /// Green channel.
-    pub g: u8,
-    /// Blue channel.
-    pub b: u8,
-}
-
-impl Rgb {
-    /// The colour with these channels.
-    #[must_use]
-    pub const fn new(r: u8, g: u8, b: u8) -> Self {
-        Self { r, g, b }
-    }
-
-    /// Decode the canonical bare `rrggbb` spelling (case-insensitive hex, no
-    /// leading `#`); `None` for anything else.
-    #[must_use]
-    pub fn from_hex(text: &str) -> Option<Self> {
-        if text.len() != 6 || !text.is_ascii() {
-            return None;
-        }
-        let r = u8::from_str_radix(text.get(0..2)?, 16).ok()?;
-        let g = u8::from_str_radix(text.get(2..4)?, 16).ok()?;
-        let b = u8::from_str_radix(text.get(4..6)?, 16).ok()?;
-        Some(Self { r, g, b })
-    }
-
-    /// Write the canonical lowercase bare `rrggbb` spelling
-    /// [`from_hex`](Self::from_hex) reads back into `out`.
-    pub fn write_hex(self, out: &mut alloc::string::String) {
-        use core::fmt::Write as _;
-        let _ = write!(out, "{:02x}{:02x}{:02x}", self.r, self.g, self.b);
-    }
-
-    /// This colour as an opaque raster [`Color`].
-    #[must_use]
-    pub const fn opaque(self) -> Color {
-        Color::rgb(self.r, self.g, self.b)
-    }
-
-    /// This colour at `alpha`.
-    #[must_use]
-    pub const fn with_alpha(self, alpha: u8) -> Color {
-        Color::rgba(self.r, self.g, self.b, alpha)
-    }
-}
-
-impl From<tairix_theme::Rgba> for Rgb {
-    /// A theme colour's visible channels. The theme's own alpha is dropped:
-    /// a terminal's translucency is the profile's to decide, not the
-    /// palette's.
-    fn from(value: tairix_theme::Rgba) -> Self {
-        Self::new(value.r, value.g, value.b)
-    }
-}
 
 /// The number of ANSI colours a scheme carries: the eight normal colours and
 /// their eight bright counterparts.
@@ -145,10 +83,10 @@ impl ColorScheme {
     pub fn from_theme(theme: &Theme) -> Self {
         let palette = theme.palette();
         Self {
-            background: palette.document.into(),
-            foreground: palette.on_surface.into(),
-            cursor: palette.accent.into(),
-            cursor_text: palette.on_accent.into(),
+            background: palette.document.without_alpha(),
+            foreground: palette.on_surface.without_alpha(),
+            cursor: palette.accent.without_alpha(),
+            cursor_text: palette.on_accent.without_alpha(),
             ansi: XTERM_ANSI,
         }
     }
@@ -457,8 +395,8 @@ impl Painted {
 
     /// The default background, at the translucency in force.
     #[must_use]
-    pub const fn background(&self) -> Color {
-        self.scheme.background.with_alpha(self.background_alpha)
+    pub fn background(&self) -> Color {
+        Color::from(self.scheme.background.with_alpha(self.background_alpha))
     }
 
     /// Resolve a cell's [`Attributes`] into its foreground and background,
@@ -472,7 +410,7 @@ impl Painted {
         let fg = self.resolve_color(
             attrs.foreground,
             attrs.bold,
-            self.scheme.foreground.opaque(),
+            Color::from(self.scheme.foreground),
         );
         let bg = match attrs.background {
             VtColor::Default => self.background(),
@@ -496,7 +434,7 @@ impl Painted {
             VtColor::Default => default,
             VtColor::Basic(basic) => {
                 let basic = if bold { brighten(basic) } else { basic };
-                self.scheme.ansi(basic.index()).opaque()
+                Color::from(self.scheme.ansi(basic.index()))
             }
             VtColor::Indexed(index) => self.indexed(index),
             VtColor::Rgb(r, g, b) => Color::rgb(r, g, b),
@@ -508,7 +446,7 @@ impl Painted {
     /// 24-step greyscale ramp.
     fn indexed(&self, index: u8) -> Color {
         if index < 16 {
-            return self.scheme.ansi(index).opaque();
+            return Color::from(self.scheme.ansi(index));
         }
         if index < 232 {
             let offset = u32::from(index - 16);

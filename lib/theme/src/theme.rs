@@ -15,8 +15,8 @@ use crate::motion::{Contrast, Density, Motion, MotionTheme};
 use crate::palette::Palette;
 use crate::syntax::SyntaxPalette;
 use crate::typography::{FamilyKey, Fonts};
-use crate::Rgba;
 use tairix_abi::desktop::DesktopInfo;
+use tairix_colour::Rgba;
 
 /// A stable identifier for a theme.
 ///

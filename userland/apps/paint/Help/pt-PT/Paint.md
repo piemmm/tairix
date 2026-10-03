@@ -37,10 +37,15 @@ nome, apaga e reordena sprites.
 O botão principal (esquerdo) pinta com a cor principal e o botão do meio
 com a cor secundária; mantendo Alt premido, recolhe-se antes uma cor. As
 ferramentas são seleção, lápis, pincel, aerógrafo, borracha, preenchimento,
-conta-gotas, linha, retângulo e elipse; o painel ao lado da imagem contém as
-duas cores, a paleta da imagem ou as cores do ambiente de trabalho, e as
-definições da ferramenta em uso. Clicar num poço de cor edita essa cor;
-fazer duplo clique numa cor da paleta edita a paleta. Mantendo Shift
+conta-gotas, linha, retângulo e elipse; o painel ao lado da imagem contém a
+paleta da imagem ou as cores do ambiente de trabalho e as definições da
+ferramenta em uso. O painel de cor à direita contém as cores principal e
+secundária e um seletor de cor para a que for escolhida: clique numa cor
+para a escolher e defina-a por matiz, saturação e valor, por vermelho,
+verde e azul, pela sua escrita hexadecimal e, onde a imagem admite
+transparência, pela sua opacidade. Ao lado fica a cor que tinha, e um
+clique repõe-na. Numa imagem com paleta as cores são as suas entradas, pelo
+que o seletor edita a paleta, e cada edição é uma alteração a anular. Mantendo Shift
 premido desenha-se um quadrado, um círculo ou uma linha em múltiplos de 45
 graus.
 
@@ -78,6 +83,7 @@ alterações por guardar pergunta primeiro.
 * `Ctrl+I` — inverter as cores
 * `S`, `P`, `B`, `A`, `E`, `F`, `I`, `L`, `R`, `O` — as ferramentas, por ordem
 * `X` — trocar as cores principal e secundária
+* `Tab` — para o painel de cor e pelas suas partes; `Escape` — de volta à imagem
 * `+` / `-` — ampliar ou reduzir; `1` — tamanho real; `Ctrl+0` — ajustar
 * `Ctrl` + roda — ampliar ou reduzir em torno do ponteiro
 * Beliscar com dois dedos — ampliar ou reduzir de forma contínua; num ecrã tátil a imagem acompanha os dedos

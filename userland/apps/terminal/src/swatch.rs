@@ -7,10 +7,11 @@
 
 use alloc::vec::Vec;
 
+use tairix_colour::Rgb;
 use tairix_controls::SwatchGrid;
 use tairix_raster::Color;
 
-use crate::scheme::{ColorScheme, Rgb, ANSI_COLORS};
+use crate::scheme::{ColorScheme, ANSI_COLORS};
 
 /// The wells a full scheme lays out: the four screen roles plus the sixteen
 /// ANSI colours.
@@ -18,6 +19,36 @@ pub const WELL_COUNT: usize = ANSI_COLORS + 4;
 
 /// Wells per row.
 pub const COLUMNS: usize = 5;
+
+/// What each well colours, in the documented order.
+const NAMES: [&str; WELL_COUNT] = [
+    "Background",
+    "Foreground",
+    "Cursor",
+    "Cursor text",
+    "Black",
+    "Red",
+    "Green",
+    "Yellow",
+    "Blue",
+    "Magenta",
+    "Cyan",
+    "White",
+    "Bright black",
+    "Bright red",
+    "Bright green",
+    "Bright yellow",
+    "Bright blue",
+    "Bright magenta",
+    "Bright cyan",
+    "Bright white",
+];
+
+/// What well `index` colours, or nothing past the last well.
+#[must_use]
+pub fn name(index: usize) -> &'static str {
+    NAMES.get(index).copied().unwrap_or("")
+}
 
 /// The grid over `scheme`'s twenty colours, with the background selected.
 #[must_use]
@@ -65,7 +96,7 @@ fn wells(scheme: &ColorScheme) -> Vec<Color> {
     ]
     .into_iter()
     .chain(scheme.ansi)
-    .map(Rgb::opaque)
+    .map(Color::from)
     .collect()
 }
 

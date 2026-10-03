@@ -442,6 +442,19 @@ impl Canvas {
         Some(core::mem::replace(held, palette))
     }
 
+    /// Give palette entry `index` the colour `colour`, in place; `false`,
+    /// changing nothing, for a canvas of another kind or an entry it lacks.
+    pub fn set_palette_entry(&mut self, index: u8, colour: Rgba8) -> bool {
+        let Kind::Indexed { palette, .. } = &mut self.kind else {
+            return false;
+        };
+        let Some(entry) = palette.get_mut(usize::from(index)) else {
+            return false;
+        };
+        *entry = colour;
+        true
+    }
+
     /// How many tiles there are.
     #[must_use]
     pub fn tile_count(&self) -> usize {

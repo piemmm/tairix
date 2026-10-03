@@ -29,12 +29,14 @@
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::fmt::Write as _;
 
 use tairix_abi::Errno;
 use tairix_appdata::Settings;
+use tairix_colour::Rgb;
 
 use crate::effects::{Effects, FULL, MIN_OPACITY};
-use crate::scheme::{ColorScheme, Rgb, Scheme, ANSI_COLORS};
+use crate::scheme::{ColorScheme, Scheme, ANSI_COLORS};
 
 /// The smallest text size the profile may name, in logical pixels.
 ///
@@ -492,9 +494,7 @@ fn field_value(profile: &Profile, key: ProfileKey) -> String {
 
 /// One colour in the canonical bare `rrggbb` spelling.
 fn hex(color: Rgb) -> String {
-    let mut text = String::new();
-    color.write_hex(&mut text);
-    text
+    color.hex().to_string()
 }
 
 /// Decode a decimal `value` bounded to `min..=max`; `None` for a
@@ -529,7 +529,7 @@ fn render_ansi(ansi: &[Rgb; ANSI_COLORS]) -> String {
         if index > 0 {
             text.push(' ');
         }
-        color.write_hex(&mut text);
+        let _ = write!(text, "{}", color.hex());
     }
     text
 }
@@ -568,8 +568,10 @@ impl Invalidation {
         if was.font_size_px != now.font_size_px {
             stale |= Self::METRICS;
         }
+        // The custom colours paint nothing while another scheme is in force.
+        let custom_shows = now.scheme == Scheme::Custom;
         if was.scheme != now.scheme
-            || was.custom != now.custom
+            || (custom_shows && was.custom != now.custom)
             || was.effects.opacity != now.effects.opacity
         {
             stale |= Self::PAINTED;

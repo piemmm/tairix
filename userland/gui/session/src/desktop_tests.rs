@@ -15,6 +15,7 @@ use tairix_abi::{Errno, Time64};
 use tairix_browse::{
     AppAssociation, DirectorySource, Entry, EntryKind, GridView, LinkTarget, Listing,
 };
+use tairix_colour::Rgb;
 use tairix_controls::{ActivityState, MenuMark};
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::NoArtwork;
@@ -22,7 +23,7 @@ use tairix_proglib::{BundlePath, Catalog, DisplayName, EntryId, LibraryCategory,
 use tairix_raster::Surface;
 use tairix_theme::{CursorSetId, Theme};
 use tairix_wallpaper::{
-    Backdrop, CursorSize, DesktopSettings, IconFlow, IconSort, Rgb, WallpaperChoice,
+    Backdrop, CursorSize, DesktopSettings, IconFlow, IconSort, WallpaperChoice,
 };
 use tairix_wm::{Key, NamedKey};
 

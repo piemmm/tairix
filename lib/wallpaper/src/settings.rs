@@ -63,6 +63,7 @@ use tairix_abi::desktop::{
 };
 use tairix_abi::time::Duration64;
 use tairix_appconf::{ConfError, Document, Lookup};
+use tairix_colour::Rgb;
 use tairix_geometry::Scale;
 use tairix_theme::CursorSetId;
 
@@ -261,69 +262,14 @@ impl WallpaperFit {
     }
 }
 
-/// A straight-alpha-free RGB colour: the backdrop shown behind, or in place
-/// of, the wallpaper.
-///
-/// This is deliberately **not** `tairix_theme::Rgba`: a backdrop colour is
-/// always fully opaque — there is nothing further behind the desktop
-/// backdrop to blend with — so carrying `Rgba`'s alpha channel would admit
-/// a value this field can never mean (a translucent desktop backdrop) and a
-/// render/parse round trip would have to invent an alpha to fill in on
-/// read. Keeping the settings model to exactly the channels this field can
-/// hold keeps the type total.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct Rgb {
-    /// Red channel.
-    pub r: u8,
-    /// Green channel.
-    pub g: u8,
-    /// Blue channel.
-    pub b: u8,
-}
-
-impl Rgb {
-    /// Construct a colour from its channels.
-    #[must_use]
-    pub const fn new(r: u8, g: u8, b: u8) -> Self {
-        Self { r, g, b }
-    }
-
-    /// Decode the canonical bare `rrggbb` spelling (case-insensitive hex
-    /// digits, no leading `#`); `None` for anything else.
-    ///
-    /// A colour has exactly one spelling in this crate, and it carries no
-    /// `#`. That is a registry rule rather than a grammar one — the document
-    /// engine would quote a `#rrggbb` value and carry it perfectly well — and
-    /// it is kept because two spellings of one colour are two ways for
-    /// consumers to disagree about whether they mean the same backdrop. A
-    /// `#`-prefixed value is refused here, not accepted on one path and lost
-    /// on another.
-    #[must_use]
-    pub fn from_hex(text: &str) -> Option<Self> {
-        if text.len() != 6 || !text.is_ascii() {
-            return None;
-        }
-        let r = u8::from_str_radix(&text[0..2], 16).ok()?;
-        let g = u8::from_str_radix(&text[2..4], 16).ok()?;
-        let b = u8::from_str_radix(&text[4..6], 16).ok()?;
-        Some(Self { r, g, b })
-    }
-
-    /// Render the canonical lowercase bare `rrggbb` spelling [`Self::from_hex`]
-    /// reads back.
-    #[must_use]
-    pub fn to_hex(self) -> String {
-        format!("{:02x}{:02x}{:02x}", self.r, self.g, self.b)
-    }
-}
-
 /// The flat colour shown wherever the wallpaper does not reach, and the
 /// whole backdrop when [`WallpaperChoice::None`] is set.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Backdrop {
     /// The desktop theme's own backdrop colour.
     Theme,
-    /// A user-chosen flat colour.
+    /// A user-chosen flat colour, opaque by its type: nothing lies behind
+    /// the backdrop to show through it.
     Colour(Rgb),
 }
 
@@ -342,7 +288,7 @@ impl Backdrop {
     fn render_value(self) -> String {
         match self {
             Self::Theme => Self::THEME_VALUE.to_string(),
-            Self::Colour(rgb) => rgb.to_hex(),
+            Self::Colour(rgb) => rgb.hex().to_string(),
         }
     }
 }

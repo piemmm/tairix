@@ -19,6 +19,8 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # scrollbars, the sliders and toggles, the palette's swatch grid, and the
 # dialogs.
 tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
+# The colour the dock's picker edits and the hex the status band spells it in.
+tairix-colour = { path = "../../../lib/colour", version = "=0.0.0" }
 # Shared text rasterisation: the status band and the tool panel.
 tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
 # The shared integer screen geometry the layout and every hit-test use.

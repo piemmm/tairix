@@ -11,12 +11,13 @@
 
 use core::cell::Cell;
 
+use tairix_colour::Rgba;
 use tairix_font::{BitmapFont, TextShadow, ELLIPSIS};
 use tairix_geometry::{Rect, Region, Scale};
 use tairix_icon::{builtin_picture, IconKind, IconPicture};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Ring, Surface};
-use tairix_theme::{Contrast, Palette, Rgba, SignalRole, SurfaceGround, TextRole, Theme};
+use tairix_theme::{Contrast, Palette, SignalRole, SurfaceGround, TextRole, Theme};
 
 pub(crate) use tairix_geometry::to_i32;
 

@@ -57,8 +57,10 @@ dark or light appearance), *Midnight*, *Phosphor*, *Amber*, *Ember*,
 *Contrast*, *Paper*, and *Custom*. Choosing *Custom* uses the colours
 edited below the chooser: a grid of the twenty colours a screen is drawn
 from — the background, foreground, cursor, cursor text, and the sixteen
-ANSI colours — with red, green, and blue sliders for whichever one is
-selected.
+ANSI colours — and a colour picker for whichever one is selected. The
+picker sets it by hue, saturation and value, by red, green and blue, or by
+its hexadecimal spelling, and shows beside it the colour the well had when
+it was selected, which a click takes back.
 
 **Effects** sets how the screen is drawn. A new terminal opens at 80%
 opacity with the backdrop blurred at half strength and every other

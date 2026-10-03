@@ -16,8 +16,9 @@ use tairix_theme::Theme;
 use super::SheetScreen;
 use crate::effects::{Effects, FULL};
 use crate::profile::Profile;
-use crate::scheme::{Rgb, Scheme};
+use crate::scheme::Scheme;
 use crate::settings::{preferred_extent, Settings};
+use tairix_colour::Rgb;
 
 const SCALE: Scale = Scale::ONE;
 
@@ -180,8 +181,18 @@ fn reports_cover_the_gesture(
     label: &str,
     gesture: impl Fn(&mut Settings, Rect, &Theme, &mut Region),
 ) {
+    reports_cover_the_gesture_after(|_, _, _| {}, label, gesture);
+}
+
+/// [`reports_cover_the_gesture`], on a sheet `setup` has first moved.
+fn reports_cover_the_gesture_after(
+    setup: impl Fn(&mut Settings, Rect, &Theme),
+    label: &str,
+    gesture: impl Fn(&mut Settings, Rect, &Theme, &mut Region),
+) {
     let theme = theme();
     let (mut scoped, mut sheet, viewport) = opened();
+    setup(&mut sheet, viewport, &theme);
     assert_eq!(scoped.paint(&sheet, viewport, SCALE, &theme), viewport);
 
     gesture(&mut sheet, viewport, &theme, scoped.sink());
@@ -349,6 +360,93 @@ fn every_press_the_sheet_claims_repaints_what_it_changed() {
                         },
                         InputEvent::PointerMoved {
                             to: Point::new(at.x + drag, at.y + drag),
+                        },
+                        InputEvent::PointerReleased {
+                            button: PointerButton::Primary,
+                        },
+                    ] {
+                        sheet.on_pointer(&event, viewport, SCALE, theme, damage);
+                    }
+                },
+            );
+        }
+    }
+}
+
+/// The lattice again over the body scrolled to its end, where the swatch grid
+/// and the colour picker editing its well are on screen: a drag across the
+/// plane, a strip or a field must report everything it moved.
+#[test]
+fn every_press_on_the_colour_editor_repaints_what_it_changed() {
+    const STEP: u32 = 12;
+    let to_the_end = |sheet: &mut Settings, viewport: Rect, theme: &Theme| {
+        let centre = Point::new(
+            viewport.left() + i32::try_from(viewport.width / 2).unwrap_or(0),
+            viewport.top() + i32::try_from(viewport.height / 2).unwrap_or(0),
+        );
+        let mut damage = damage::sink();
+        sheet.on_pointer(
+            &InputEvent::PointerMoved { to: centre },
+            viewport,
+            SCALE,
+            theme,
+            &mut damage,
+        );
+        let far = InputEvent::PointerScrolled {
+            dx: 0,
+            dy: SCROLL_UNITS_PER_DETENT * 100,
+        };
+        sheet.on_pointer(&far, viewport, SCALE, theme, &mut damage);
+    };
+    let (_, _, viewport) = opened();
+    let edits_the_scheme = (0..viewport.height / STEP).any(|down| {
+        let theme = theme();
+        let (_, mut sheet, _) = opened();
+        to_the_end(&mut sheet, viewport, &theme);
+        let before = sheet.profile().custom;
+        let at = Point::new(
+            viewport.left() + 40,
+            viewport.top() + i32::try_from(down * STEP).unwrap_or(0),
+        );
+        let mut damage = damage::sink();
+        sheet.on_pointer(
+            &InputEvent::PointerMoved { to: at },
+            viewport,
+            SCALE,
+            &theme,
+            &mut damage,
+        );
+        let press = InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        };
+        sheet.on_pointer(&press, viewport, SCALE, &theme, &mut damage);
+        sheet.profile().custom != before
+    });
+    assert!(
+        edits_the_scheme,
+        "the picker is on screen for the lattice to reach"
+    );
+    for down in 0..viewport.height / STEP {
+        for across in 0..viewport.width / STEP {
+            let (Ok(x), Ok(y)) = (i32::try_from(across * STEP), i32::try_from(down * STEP)) else {
+                continue;
+            };
+            let at = Point::new(viewport.left() + x, viewport.top() + y);
+            let drag = i32::try_from(STEP * 2).unwrap_or(0);
+            reports_cover_the_gesture_after(
+                to_the_end,
+                &alloc::format!("press at {at:?} on the scrolled body"),
+                |sheet, viewport, theme, damage| {
+                    for event in [
+                        InputEvent::PointerMoved { to: at },
+                        InputEvent::PointerPressed {
+                            button: PointerButton::Primary,
+                        },
+                        InputEvent::PointerMoved {
+                            to: Point::new(at.x + drag, at.y - drag),
+                        },
+                        InputEvent::PointerMoved {
+                            to: Point::new(at.x - drag, at.y + drag),
                         },
                         InputEvent::PointerReleased {
                             button: PointerButton::Primary,

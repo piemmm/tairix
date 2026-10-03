@@ -122,7 +122,9 @@ policy or a later shipped default applies instead of a frozen snapshot. A key
 no layer sets reads as its documented default, and a stored value the registry
 refuses costs only itself and is named to the caller, which reports it.
 Colours are bare `rrggbb`, never `#rrggbb`, because the format's comment marker
-would cut the line at the `#`.
+would cut the line at the `#`; the colour and its six digits are
+`lib/colour`'s opaque `Rgb`. A change to the custom colours makes a terminal's
+picture stale only while the custom scheme is the one in force.
 
 ## Screen effects (`effects`)
 

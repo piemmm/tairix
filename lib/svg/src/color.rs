@@ -10,13 +10,16 @@
 //!
 //! Assets are untrusted, so every entry point is total: no input panics, and
 //! anything outside the grammar is [`SvgError::InvalidColor`] rather than a
-//! guessed colour.
+//! guessed colour. The CSS grammar is this module's; the hex digits and the
+//! HSL conversion are `lib/colour`'s, the one notation and colour model every
+//! other colour in the tree uses.
 
 use core::cmp::Ordering;
 use core::f64::consts::PI;
 
+use tairix_colour::{parse_hex, Fraction, Hsl, Hue};
 use tairix_raster::Color;
-use tairix_util::mathf::{clamp, floor, fmax, fmin, round};
+use tairix_util::mathf::{clamp, round};
 
 use crate::error::SvgError;
 use crate::number::{opacity_to_alpha, parse_number, parse_opacity};
@@ -51,7 +54,9 @@ pub enum ColorSpec {
 pub fn parse_color(text: &str) -> Result<ColorSpec, SvgError> {
     let text = text.trim();
     if let Some(hex) = text.strip_prefix('#') {
-        return parse_hex(hex).map(ColorSpec::Value);
+        return parse_hex(hex)
+            .map(|(colour, _)| ColorSpec::Value(Color::from(colour)))
+            .ok_or(SvgError::InvalidColor);
     }
     if let Some((name, arguments)) = text.split_once('(') {
         let body = arguments
@@ -98,67 +103,6 @@ pub fn parse_fill(fill: &str, opacity: Option<&str>) -> Result<Option<Color>, Sv
         return Ok(None);
     }
     Ok(Some(Color::rgba(base.r, base.g, base.b, alpha)))
-}
-
-/// Parse a `#rgb`, `#rgba`, `#rrggbb`, or `#rrggbbaa` literal.
-fn parse_hex(hex: &str) -> Result<Color, SvgError> {
-    match hex.len() {
-        3 => Ok(Color::rgb(
-            nibble_pair(hex, 0)?,
-            nibble_pair(hex, 1)?,
-            nibble_pair(hex, 2)?,
-        )),
-        4 => Ok(Color::rgba(
-            nibble_pair(hex, 0)?,
-            nibble_pair(hex, 1)?,
-            nibble_pair(hex, 2)?,
-            nibble_pair(hex, 3)?,
-        )),
-        6 => Ok(Color::rgb(
-            byte_pair(hex, 0)?,
-            byte_pair(hex, 1)?,
-            byte_pair(hex, 2)?,
-        )),
-        8 => Ok(Color::rgba(
-            byte_pair(hex, 0)?,
-            byte_pair(hex, 1)?,
-            byte_pair(hex, 2)?,
-            byte_pair(hex, 3)?,
-        )),
-        _ => Err(SvgError::InvalidColor),
-    }
-}
-
-/// Expand the `nth` single hex nibble of a `#rgb`/`#rgba` literal to a byte
-/// (`f` → `0xff`), matching the CSS shorthand rule.
-fn nibble_pair(hex: &str, nth: usize) -> Result<u8, SvgError> {
-    let digit = hex
-        .as_bytes()
-        .get(nth)
-        .copied()
-        .ok_or(SvgError::InvalidColor)?;
-    Ok(hex_digit(digit)? * 17)
-}
-
-/// Parse the `nth` byte (two hex digits) of a `#rrggbb`/`#rrggbbaa` literal.
-fn byte_pair(hex: &str, nth: usize) -> Result<u8, SvgError> {
-    let bytes = hex.as_bytes();
-    let hi = bytes.get(nth * 2).copied().ok_or(SvgError::InvalidColor)?;
-    let lo = bytes
-        .get(nth * 2 + 1)
-        .copied()
-        .ok_or(SvgError::InvalidColor)?;
-    Ok(hex_digit(hi)? * 16 + hex_digit(lo)?)
-}
-
-/// Map one ASCII hex digit to its `0..=15` value.
-fn hex_digit(byte: u8) -> Result<u8, SvgError> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        b'A'..=b'F' => Ok(byte - b'A' + 10),
-        _ => Err(SvgError::InvalidColor),
-    }
 }
 
 /// Resolve one colour function from its name and its argument list (the text
@@ -240,11 +184,12 @@ impl<'a> Arguments<'a> {
 
     /// Resolve `hsl()` / `hsla()` arguments.
     fn hsl(&self) -> Result<Color, SvgError> {
-        let hue = parse_hue(self.channels[0])?;
-        let saturation = clamp(parse_percentage(self.channels[1])? / 100.0, 0.0, 1.0);
-        let lightness = clamp(parse_percentage(self.channels[2])? / 100.0, 0.0, 1.0);
-        let alpha = self.to_alpha()?;
-        Ok(hsl_to_rgb(hue, saturation, lightness, alpha))
+        let hsl = Hsl::new(
+            Hue::from_degrees_f64(parse_hue(self.channels[0])?),
+            Fraction::from_f64(parse_percentage(self.channels[1])? / 100.0),
+            Fraction::from_f64(parse_percentage(self.channels[2])? / 100.0),
+        );
+        Ok(Color::from(hsl.to_rgb().with_alpha(self.to_alpha()?)))
     }
 
     /// The alpha argument as an 8-bit value, defaulting to fully opaque.
@@ -303,28 +248,6 @@ fn strip_unit<'a>(text: &'a str, unit: &str) -> Option<&'a str> {
     text.get(split..)?
         .eq_ignore_ascii_case(unit)
         .then_some(value)
-}
-
-/// Convert CSS HSL to RGB.
-///
-/// The reference conversion from CSS Color 4: one helper sampled at three
-/// points around the hue circle, which needs no per-sector branching.
-fn hsl_to_rgb(hue: f64, saturation: f64, lightness: f64, alpha: u8) -> Color {
-    let reach = saturation * fmin(lightness, 1.0 - lightness);
-    let channel = |n: f64| {
-        let k = wrap(n + hue / 30.0, 12.0);
-        let sector = fmax(-1.0, fmin(fmin(k - 3.0, 9.0 - k), 1.0));
-        to_byte((lightness - reach * sector) * 255.0)
-    };
-    Color::rgba(channel(0.0), channel(8.0), channel(4.0), alpha)
-}
-
-/// `value` reduced into `0..period`, so a hue wraps rather than failing.
-///
-/// Spelled with [`floor`] rather than `%`, which on `f64` would call out to
-/// an external `fmod`.
-fn wrap(value: f64, period: f64) -> f64 {
-    value - floor(value / period) * period
 }
 
 /// Round a channel to the nearest `0..=255` byte, clamping as CSS does.

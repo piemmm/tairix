@@ -133,14 +133,12 @@ The ground rides on the theme rather than on each control, so everything drawn
 with one theme agrees and no control can be forgotten and left an opaque patch;
 `lib/controls` is where a background becomes the chrome alpha for its layer.
 
-The crate owns no rendering or compositing arithmetic — that lives in the
-shared rasteriser `lib/raster`. A consumer converts a theme `Rgba` into the
-shared render colour at the edge (`lib/raster` provides `From<Rgba> for
+The crate owns no colour arithmetic of its own. The colour its roles are
+authored in, `Rgba`, is `lib/colour`'s, with the sRGB transfer, the WCAG
+legibility measure and the HSV/HSL coordinates beside it; rendering and
+compositing are the shared rasteriser's (`lib/raster` provides `From<Rgba> for
 tairix_raster::Color`), so the colour algebra is never duplicated
-(`AGENTS.md` §2.2). What a channel's value means as light is the colour
-space's own definition, so the sRGB transfer each way lives beside the token,
-in `color::{srgb_to_linear, linear_to_srgb}`: the one pair the legibility
-measure and the ray tracer's authored colours and encoded pixels share.
+(`AGENTS.md` §2.2).
 
 `ThemeRegistry` owns the available themes and the active selection. It always
 holds the two built-ins (so there is always an active theme), switches with
@@ -166,17 +164,17 @@ switched simply passes it to `set_appearance`.
 Sibling userland crates may not depend on one another (`AGENTS.md` §17.4), so
 the one definition the GUI crates and apps all read belongs in `lib/*`,
 exactly as `lib/procinfo` is the shared home for the System Information
-client helpers. The crate sits at the bottom of the §17.4 layering: its only
-dependency is `lib/abi`, for the two vocabularies a theme shares with an ABI
-surface (`FontWeight`, which the font service rasterises at, and
-`Appearance`, which the window channel reports) — imported rather than
-restated so the values cannot drift. It depends on no kernel, driver, or
+client helpers. The crate sits at the bottom of the §17.4 layering: it depends
+on `lib/colour` for the colour its roles are authored in, and on `lib/abi` for
+the two vocabularies a theme shares with an ABI surface (`FontWeight`, which
+the font service rasterises at, and `Appearance`, which the window channel
+reports) — imported rather than restated so the values cannot drift. It depends on no kernel, driver, or
 userland crate.
 
 ## Stability tier
 
 `experimental` — the surface is the Stage 7 desktop theming seam, consumed
 first by `userland/gui/wm` and, in later increments, by the taskbar and the
-default apps. It is `no_std` (with `alloc`) and depends only on `lib/abi`. No
+default apps. It is `no_std` (with `alloc`). No
 `unsafe`, and no `unwrap`/`expect`/`panic!` in production paths (`AGENTS.md`
 §2.9).

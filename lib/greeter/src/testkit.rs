@@ -7,10 +7,11 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_colour::Rgba;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
-use tairix_theme::{Rgba, Theme};
+use tairix_theme::Theme;
 
 use crate::surface::{AuthSurface, Backdrop, Chrome, EventContext, Outcome, Verdict, Verifier};
 

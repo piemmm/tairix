@@ -40,10 +40,16 @@ Le bouton principal (gauche) peint avec la couleur principale et le bouton
 du milieu avec la couleur secondaire ; en maintenant Alt, on prélève une
 couleur à la place. Les outils sont : sélection, crayon, pinceau,
 aérographe, gomme, remplissage, pipette, ligne, rectangle et ellipse ; le
-panneau à côté de l'image contient les deux couleurs, la palette de l'image
-ou les couleurs du bureau, et les réglages de l'outil en cours. Cliquer sur
-un puits de couleur modifie cette couleur ; double-cliquer sur une couleur
-de la palette modifie la palette. Maintenir Maj trace un carré, un cercle
+panneau à côté de l'image contient la palette de l'image ou les couleurs du
+bureau et les réglages de l'outil en cours. Le volet des couleurs à droite
+contient les couleurs principale et secondaire et un sélecteur de couleur
+pour celle des deux qui est choisie : cliquer sur une couleur la choisit,
+puis on la règle par teinte, saturation et valeur, par rouge, vert et bleu,
+par sa notation hexadécimale et, si l'image admet la transparence, par son
+opacité. La couleur qu'elle avait reste à côté, et un clic la rétablit.
+Dans une image à palette, les couleurs en sont les entrées : le sélecteur
+modifie donc la palette, et chaque modification est un changement à
+annuler d'un coup. Maintenir Maj trace un carré, un cercle
 ou une ligne à un multiple de 45 degrés.
 
 Avec l'outil de sélection, faites glisser pour délimiter une partie de
@@ -82,6 +88,7 @@ enregistrées demande d'abord confirmation.
 * `Ctrl+I` — inverser les couleurs
 * `S`, `P`, `B`, `A`, `E`, `F`, `I`, `L`, `R`, `O` — les outils, dans l'ordre
 * `X` — échanger les couleurs principale et secondaire
+* `Tab` — dans le volet des couleurs et à travers ses parties ; `Escape` — retour à l'image
 * `+` / `-` — zoomer ou dézoomer ; `1` — taille réelle ; `Ctrl+0` — ajuster
 * `Ctrl` + molette — agrandir ou réduire autour du pointeur
 * Pincer à deux doigts — agrandir ou réduire en continu ; sur un écran tactile, l'image suit les doigts

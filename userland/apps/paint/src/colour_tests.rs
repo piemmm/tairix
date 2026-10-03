@@ -1,10 +1,9 @@
-use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_image::IndexDepth;
 
-use super::{nearest, parse_hex, write_hex, Ink, Nearest, WHITE};
+use super::{nearest, Ink, Nearest, WHITE};
 use crate::canvas::{Kind, Sample};
 
 fn indexed(palette: Vec<[u8; 4]>, masked: bool) -> Kind {
@@ -69,20 +68,6 @@ fn duplicate_entries_are_answered_by_the_lowest_index() {
 }
 
 #[test]
-fn hex_round_trips_and_refuses_what_is_not_a_colour() {
-    let mut out = String::new();
-    write_hex([0x12, 0xab, 0xef, 255], &mut out);
-    assert_eq!(out, "#12ABEF");
-    write_hex([1, 2, 3, 4], &mut out);
-    assert_eq!(out, "#12ABEF#01020304", "written after what it held");
-    assert_eq!(parse_hex("#12abef"), Some([0x12, 0xab, 0xef, 255]));
-    assert_eq!(parse_hex(" 01020304 "), Some([1, 2, 3, 4]));
-    for bad in ["", "#12345", "#1234567", "#12345g", "#ÿÿÿ", "#123456789"] {
-        assert_eq!(parse_hex(bad), None, "{bad}");
-    }
-}
-
-#[test]
 fn an_ink_moves_to_the_nearest_a_palette_can_put_down() {
     let palette = vec![[0, 0, 0, 255], [250, 250, 250, 255], [200, 0, 0, 255]];
     let masked = indexed(palette.clone(), true);
@@ -125,6 +110,15 @@ fn a_picked_pixel_is_the_ink_that_would_put_it_back() {
         Ink::of_sample(Sample::Rgba([1, 2, 3, 9]), &Kind::Rgba),
         Ink::Colour([1, 2, 3, 9])
     );
+}
+
+/// A colour with no alpha laid over would change nothing, so the ink for it
+/// clears; any alpha at all is a colour.
+#[test]
+fn a_colour_with_no_alpha_is_the_clear_ink() {
+    assert_eq!(Ink::of_colour([9, 8, 7, 0]), Ink::Clear);
+    assert_eq!(Ink::of_colour([9, 8, 7, 1]), Ink::Colour([9, 8, 7, 1]));
+    assert_eq!(Ink::of_colour([0, 0, 0, 255]), Ink::Colour([0, 0, 0, 255]));
 }
 
 /// An ink naming a palette entry still names it once that entry's colour is

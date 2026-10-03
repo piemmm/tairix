@@ -1,6 +1,6 @@
 //! Host tests of the filmic curve and the sRGB encoding.
 
-use tairix_theme::color::linear_to_srgb as srgb;
+use tairix_colour::linear_to_srgb as srgb;
 use tairix_util::mathf;
 
 use super::super::vector::Vec3;

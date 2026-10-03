@@ -14,6 +14,7 @@ use tairix_abi::window_ipc::{
     AppMenuRole, AppMenuRow, AppMenuShortcut, APP_MENU_MAX_ROWS,
 };
 use tairix_abi::{BundleId, Errno, ProcId};
+use tairix_colour::Rgba;
 use tairix_controls::damage::Repaint;
 use tairix_controls::testkit::beyond_round_rect;
 use tairix_controls::{
@@ -29,7 +30,7 @@ use tairix_icon::{
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton, PointerFocus};
 use tairix_proglib::{BundlePath, Catalog, DisplayName, EntryId, LibraryCategory, LibraryEntry};
 use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::{Appearance, Contrast, Rgba, SignalRole, TextRole, Theme, ThemeId};
+use tairix_theme::{Appearance, Contrast, SignalRole, TextRole, Theme, ThemeId};
 
 use tairix_hash::BuildFastHash;
 use tairix_log::{Event, Sink};
@@ -4534,7 +4535,7 @@ fn anchor_points_back_at_the_library_button() {
 // ---- rendering ------------------------------------------------------
 
 /// The premultiplied pixel a theme palette role paints as.
-fn role(color: tairix_theme::Rgba) -> Pixel {
+fn role(color: tairix_colour::Rgba) -> Pixel {
     Color::from(color).premultiply()
 }
 
@@ -4615,7 +4616,7 @@ fn region_has_role_ink(
     surface: &Surface,
     frame: Rect,
     region: Rect,
-    want: tairix_theme::Rgba,
+    want: tairix_colour::Rgba,
     background: Pixel,
 ) -> bool {
     let fg = role(want);

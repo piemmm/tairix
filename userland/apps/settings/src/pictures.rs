@@ -24,7 +24,7 @@ use tairix_controls::{
 use tairix_geometry::{Rect, Scale};
 use tairix_icon::IconKind;
 use tairix_raster::Surface;
-use tairix_theme::{Rgba, Theme};
+use tairix_theme::Theme;
 use tairix_wallpaper::{
     Backdrop, CatalogItem, DesktopSettings, ScreensaverKind, SettingsKey, WallpaperChoice,
     WallpaperPath,
@@ -143,7 +143,7 @@ impl Chooser {
 pub(crate) const fn backdrop_swatch(backdrop: Backdrop) -> Swatch {
     match backdrop {
         Backdrop::Theme => Swatch::Desktop,
-        Backdrop::Colour(rgb) => Swatch::Fixed(Rgba::rgb(rgb.r, rgb.g, rgb.b)),
+        Backdrop::Colour(rgb) => Swatch::Fixed(rgb.opaque()),
     }
 }
 

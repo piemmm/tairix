@@ -7,7 +7,8 @@ use tairix_appdata::fake::FakeService;
 use tairix_appdata::Settings;
 
 use crate::effects::{Effects, FULL, MIN_OPACITY};
-use crate::scheme::{Rgb, Scheme, ANSI_COLORS};
+use crate::scheme::{Scheme, ANSI_COLORS};
+use tairix_colour::Rgb;
 
 use super::{
     field_value, Invalidation, Profile, ProfileKey, ProfileKeys, DEFAULT_FONT_SIZE_PX,
@@ -567,6 +568,25 @@ fn a_scheme_change_stales_only_the_colours() {
     let changed = Invalidation::between(&was, &now);
     assert!(changed.painted());
     assert!(!changed.metrics());
+}
+
+/// Editing the custom colours repaints a terminal only while they are the ones
+/// it shows: under another scheme the windows are unchanged.
+#[test]
+fn custom_colours_stale_the_paint_only_while_the_custom_scheme_is_in_force() {
+    let mut was = Profile {
+        scheme: Scheme::Midnight,
+        ..Profile::default()
+    };
+    let mut now = was;
+    now.custom.background = Rgb::new(0x12, 0x34, 0x56);
+    assert!(
+        !Invalidation::between(&was, &now).any(),
+        "nothing shown moved"
+    );
+    was.scheme = Scheme::Custom;
+    now.scheme = Scheme::Custom;
+    assert!(Invalidation::between(&was, &now).painted());
 }
 
 /// An unchanged profile stales nothing, so a re-delivered sample costs no work.

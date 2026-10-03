@@ -262,7 +262,7 @@ README requires this file to name them:
 | `fmt` | `kernel/sec`, `kernel/ipc` |
 | `hexdump` | `fstree`, TextEdit |
 | `lanes` | `lib/collections`, TextEdit |
-| `mathf` | `lib/audio`, `lib/cursor`, `lib/fontface`, `lib/raster`, `lib/raytrace`, `lib/ribbon`, `lib/svg`, `lib/terrain`, `lib/theme`, `cinder`, WinterSun, the desktop session's screensavers |
+| `mathf` | `lib/audio`, `lib/colour`, `lib/cursor`, `lib/fontface`, `lib/raster`, `lib/raytrace`, `lib/ribbon`, `lib/svg`, `lib/terrain`, `cinder`, WinterSun, the desktop session's screensavers |
 | `retry` | `userland/system/timed`, `userland/system/init` |
 | `utf8` | `lib/syntax`, `wc`, TextEdit |
 | `secret` | `lib/rt`'s elevation client, `elsh`'s `elevate`, `login`'s elevation broker, `lib/controls`' masked field |
@@ -479,7 +479,8 @@ kernel checks on every present. Windows are served over `WINDOW_ENDPOINT` with
 server-side decorations, and input arrives seat-routed (`pointer_read` and
 `keyboard_read` under the live lease), never over a named port. Each shared
 desktop library holds one path: `lib/raster` (the only rasterise, blend and
-resample path), `lib/theme`, `lib/geometry` (the one logical-to-physical
+resample path), `lib/colour` (the sRGB colour, its HSV and HSL coordinates
+and its hex notation), `lib/theme`, `lib/geometry` (the one logical-to-physical
 `Scale`), `lib/reclaim`, `lib/font` (a thin client of the sandboxed `fontd`,
 `plans/FONT-SERVICE.md`), `lib/fontface`, `lib/cursor`, `lib/icon`, `lib/svg`,
 `lib/input`, `lib/controls` (`plans/GUI-CONTROLS-DESIGN.md`), `lib/syntax`
@@ -892,6 +893,9 @@ plan's own text is corrected when it is next touched, or sooner.
 Why each `AGENTS.md` rule was added or changed, newest first; the rule itself
 lives in the charter.
 
+- **2026-10-02 — §3: `lib/colour`.** The sRGB colour, its HSV and HSL
+  coordinates and its hex notation were each re-derived by the theme,
+  `lib/raster`, `lib/svg`, the settings documents, the terminal and Paint.
 - **2026-10-02 — §18.2: AML runs in the ACPI bus driver, not the kernel.**
   AML is untrusted firmware bytecode, so it is interpreted in a sandboxed bus
   driver holding only its table and region grants; the static tables the port

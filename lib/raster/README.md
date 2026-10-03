@@ -376,9 +376,10 @@ This crate owns:
   only supplies the rendered value the cache holds.
 
 There is exactly one definition of the colour algebra here, so it is never
-duplicated into a sibling crate (`AGENTS.md` §2.2). A theme `Rgba` token meets
-that algebra at a single edge — `From<Rgba> for Color` — which is why this
-crate depends on `lib/theme`: the conversion is owned in one place rather than
+duplicated into a sibling crate (`AGENTS.md` §2.2). A colour value — a theme's
+`Rgba`, or an opaque `Rgb` — meets that algebra at a single edge,
+`From<Rgba> for Color` and `From<Rgb> for Color`, which is why this crate
+depends on `lib/colour`: the conversion is owned in one place rather than
 re-implemented by each consumer.
 
 Every fill and `blit` writes a row at a time: the destination row's starting
@@ -635,7 +636,8 @@ deterministic work counters instead.
 
 Sibling userland GUI crates may not depend on one another (`AGENTS.md` §17.4),
 so the rasteriser they both use belongs in `lib/*`. It depends only on
-`lib/theme` (for the `From<Rgba>` edge), `lib/reclaim` (for the `CachedBytes`
+`lib/colour` (for the `From<Rgba>` edge and the hue `dominant_color` buckets
+by), `lib/reclaim` (for the `CachedBytes`
 trait `Surface` implements) and `lib/util` (for the bounded `no_std`
 trigonometry and square root `Affine` and a radial gradient need), and is
 depended on by the GUI crates, never the reverse — `Layer::Lib` in the §17.4

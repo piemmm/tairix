@@ -10,7 +10,10 @@ use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
 use crate::damage;
+use crate::paint::authority_rgba;
+use crate::state::{AuthorityState, ControlState};
 use crate::swatch_grid::{SwatchAction, SwatchGrid, SwatchMark};
+use crate::testkit::{has_pixel, premul};
 
 const W: u32 = 400;
 const H: u32 = 200;
@@ -64,7 +67,7 @@ fn click(grid: &mut SwatchGrid, index: usize, mark: SwatchMark) -> Option<Swatch
 #[test]
 fn a_new_grid_selects_its_first_well_and_shows_no_secondary_mark() {
     let grid = grid();
-    assert_eq!((grid.selected(), grid.secondary()), (0, None));
+    assert_eq!((grid.selected(), grid.secondary()), (Some(0), None));
     assert_eq!((grid.len(), grid.columns(), grid.rows()), (COUNT, 5, 4));
 }
 
@@ -105,7 +108,7 @@ fn a_press_and_release_over_one_well_moves_the_mark_it_names() {
             index: 9
         })
     );
-    assert_eq!((grid.selected(), grid.secondary()), (4, Some(9)));
+    assert_eq!((grid.selected(), grid.secondary()), (Some(4), Some(9)));
 }
 
 #[test]
@@ -140,7 +143,7 @@ fn a_release_over_another_well_or_none_moves_nothing() {
         grid.on_pointer(&RELEASE, bounds(), SwatchMark::Primary, &mut damage::sink()),
         None
     );
-    assert_eq!(grid.selected(), 0);
+    assert_eq!(grid.selected(), Some(0));
 }
 
 #[test]
@@ -185,6 +188,7 @@ fn moving_a_mark_reports_the_two_wells_it_moves_between_and_nothing_else() {
 #[test]
 fn arrow_keys_move_the_primary_mark_and_wrap() {
     let mut grid = grid();
+    grid.set_focused(true);
     let key = |grid: &mut SwatchGrid, named| match grid.on_key(
         Key::Named(named),
         bounds(),
@@ -209,7 +213,7 @@ fn arrow_keys_move_the_primary_mark_and_wrap() {
 #[test]
 fn adopting_colours_keeps_the_marks_and_a_press_that_still_name_wells() {
     let mut grid = grid();
-    grid.adopt_selected(7);
+    grid.adopt_selected(Some(7));
     grid.adopt_secondary(Some(19));
     let point = centre(&grid, 4);
     grid.on_pointer(
@@ -220,7 +224,7 @@ fn adopting_colours_keeps_the_marks_and_a_press_that_still_name_wells() {
     );
     grid.on_pointer(&PRESS, bounds(), SwatchMark::Primary, &mut damage::sink());
     grid.adopt_colours(5, colours(COUNT));
-    assert_eq!((grid.selected(), grid.secondary()), (7, Some(19)));
+    assert_eq!((grid.selected(), grid.secondary()), (Some(7), Some(19)));
     assert_eq!(
         grid.on_pointer(&RELEASE, bounds(), SwatchMark::Primary, &mut damage::sink()),
         Some(SwatchAction::Selected {
@@ -229,15 +233,15 @@ fn adopting_colours_keeps_the_marks_and_a_press_that_still_name_wells() {
         })
     );
     grid.adopt_colours(4, colours(8));
-    assert_eq!((grid.selected(), grid.secondary()), (4, None));
+    assert_eq!((grid.selected(), grid.secondary()), (Some(4), None));
 }
 
 #[test]
-fn an_out_of_range_mark_is_ignored() {
+fn an_out_of_range_mark_marks_nothing() {
     let mut grid = grid();
-    grid.adopt_selected(COUNT);
+    grid.adopt_selected(Some(COUNT));
     grid.adopt_secondary(Some(COUNT));
-    assert_eq!((grid.selected(), grid.secondary()), (0, None));
+    assert_eq!((grid.selected(), grid.secondary()), (None, None));
 }
 
 #[test]
@@ -250,7 +254,7 @@ fn each_mark_repaints_a_visible_shape() {
     };
     let mut grid = grid();
     let plain = render(&grid);
-    grid.adopt_selected(3);
+    grid.adopt_selected(Some(3));
     let moved = render(&grid);
     assert_ne!(plain.pixels(), moved.pixels());
     grid.adopt_secondary(Some(8));
@@ -262,7 +266,7 @@ fn each_mark_repaints_a_visible_shape() {
 fn a_transparent_well_shows_a_checker_rather_than_a_flat_colour() {
     let theme = Theme::dark();
     let mut grid = SwatchGrid::new(2, alloc::vec![Color::rgba(0, 0, 0, 0), Color::rgb(9, 9, 9)]);
-    grid.adopt_selected(1);
+    grid.adopt_selected(Some(1));
     let mut surface = Surface::new(100, 50).expect("surface");
     let bounds = Rect::new(0, 0, 100, 50);
     grid.render(&mut surface, bounds, Scale::ONE, &theme);
@@ -292,6 +296,7 @@ fn renders_without_faulting_at_a_tiny_size_or_with_no_wells() {
     let mut tiny = Surface::new(6, 5).expect("surface");
     SwatchGrid::new(16, colours(256)).render(&mut tiny, Rect::new(0, 0, 6, 5), Scale::ONE, &theme);
     let mut empty = SwatchGrid::new(4, Vec::new());
+    empty.set_focused(true);
     empty.render(&mut tiny, Rect::new(0, 0, 6, 5), Scale::ONE, &theme);
     assert_eq!(
         empty.on_key(Key::Named(NamedKey::Right), bounds(), &mut damage::sink()),
@@ -326,6 +331,7 @@ fn the_primary_mark_sits_at_the_wells_centre() {
 #[test]
 fn a_keyed_move_reports_both_wells() {
     let mut grid = grid();
+    grid.set_focused(true);
     let mut damage = damage::sink();
     assert!(matches!(
         grid.on_key(Key::Named(NamedKey::Right), bounds(), &mut damage),
@@ -413,7 +419,8 @@ fn the_mark_reads_over_the_colour_as_it_shows() {
 #[test]
 fn up_and_down_keep_to_the_column_over_a_short_last_row() {
     let key = |grid: &mut SwatchGrid, from: usize, named| {
-        grid.adopt_selected(from);
+        grid.set_focused(true);
+        grid.adopt_selected(Some(from));
         match grid.on_key(Key::Named(named), bounds(), &mut damage::sink()) {
             Some(SwatchAction::Selected { index, .. }) => index,
             None => usize::MAX,
@@ -470,4 +477,160 @@ fn a_single_row_as_wide_as_any_extent_is_hit_tested() {
     assert_eq!(row.well_at(vast, Point::new(i32::MIN, 0)), Some(0));
     let column = SwatchGrid::new(1, colours(1));
     assert_eq!(column.well_at(vast, Point::new(0, i32::MAX - 1)), Some(0));
+}
+
+#[test]
+fn an_unfocused_grid_takes_no_keys() {
+    let mut grid = grid();
+    let mut damage = damage::sink();
+    assert_eq!(
+        grid.on_key(Key::Named(NamedKey::Right), bounds(), &mut damage),
+        None
+    );
+    assert_eq!(grid.selected(), Some(0));
+    assert!(damage.is_empty());
+}
+
+#[test]
+fn a_grid_that_is_not_actionable_takes_no_input() {
+    for state in [
+        ControlState::disabled(),
+        ControlState::idle().with_authority(AuthorityState::Denied),
+    ] {
+        let mut grid = grid();
+        grid.set_state(state);
+        grid.set_focused(true);
+        assert_eq!(click(&mut grid, 6, SwatchMark::Primary), None, "{state:?}");
+        assert_eq!(
+            grid.on_key(Key::Named(NamedKey::Right), bounds(), &mut damage::sink()),
+            None
+        );
+        assert_eq!(grid.selected(), Some(0));
+    }
+}
+
+#[test]
+fn a_disabled_grid_is_veiled_and_a_denied_one_carries_the_authority_bead() {
+    let theme = Theme::dark();
+    let render = |state: ControlState| {
+        let mut grid = grid();
+        grid.set_state(state);
+        let mut surface = Surface::new(W, H).expect("surface");
+        grid.render(&mut surface, bounds(), Scale::ONE, &theme);
+        surface
+    };
+    let plain = render(ControlState::idle());
+    let disabled = render(ControlState::disabled());
+    let denied = render(ControlState::idle().with_authority(AuthorityState::Denied));
+    assert_ne!(plain.pixels(), disabled.pixels(), "the veil shows");
+    let bead = premul(authority_rgba(theme.palette(), AuthorityState::Denied));
+    assert!(has_pixel(&denied, bead), "the lock bead shows");
+    assert!(!has_pixel(&plain, bead));
+}
+
+#[test]
+fn focus_rings_the_marked_well_outside_the_well_itself() {
+    let theme = Theme::dark();
+    let mut grid = grid();
+    grid.adopt_selected(Some(7));
+    let render = |grid: &SwatchGrid| {
+        let mut surface = Surface::new(W, H).expect("surface");
+        grid.render(&mut surface, bounds(), Scale::ONE, &theme);
+        surface
+    };
+    let resting = render(&grid);
+    grid.set_focused(true);
+    let focused = render(&grid);
+    let cell = grid.cell_rect(bounds(), 7).expect("a well");
+    let margin = Scale::ONE.scale_length(theme.metrics().control_gap) / 2;
+    let well = cell.inset(margin);
+    let mut changed = 0;
+    for y in 0..H {
+        for x in 0..W {
+            if resting.get(x, y) != focused.get(x, y) {
+                let at = Point::new(
+                    i32::try_from(x).expect("fits"),
+                    i32::try_from(y).expect("fits"),
+                );
+                assert!(cell.contains(at), "({x}, {y}) is outside the marked cell");
+                assert!(
+                    !well.contains(at),
+                    "({x}, {y}) covers the well and its mark"
+                );
+                changed += 1;
+            }
+        }
+    }
+    assert!(changed > 0, "focus draws a ring");
+}
+
+#[test]
+fn with_no_well_marked_the_first_key_marks_an_end() {
+    let mut grid = grid();
+    grid.set_focused(true);
+    grid.adopt_selected(None);
+    let mut damage = damage::sink();
+    assert_eq!(
+        grid.on_key(Key::Named(NamedKey::Right), bounds(), &mut damage),
+        Some(SwatchAction::Selected {
+            mark: SwatchMark::Primary,
+            index: 0
+        })
+    );
+    assert!(
+        damage.bounds().contains(centre(&grid, 0)),
+        "the new mark repaints"
+    );
+    grid.adopt_selected(None);
+    assert_eq!(
+        grid.on_key(Key::Named(NamedKey::Left), bounds(), &mut damage::sink()),
+        Some(SwatchAction::Selected {
+            mark: SwatchMark::Primary,
+            index: COUNT - 1
+        })
+    );
+}
+
+#[test]
+fn an_unmarked_grid_draws_no_primary_mark() {
+    let theme = Theme::dark();
+    let render = |grid: &SwatchGrid| {
+        let mut surface = Surface::new(W, H).expect("surface");
+        grid.render(&mut surface, bounds(), Scale::ONE, &theme);
+        surface
+    };
+    let mut grid = grid();
+    let marked = render(&grid);
+    grid.adopt_selected(None);
+    let unmarked = render(&grid);
+    let rim = premul(theme.palette().rim_active);
+    assert!(has_pixel(&marked, rim));
+    assert!(
+        !has_pixel(&unmarked, rim),
+        "no well carries the mark's ring"
+    );
+}
+
+/// The pointer and the press latch are hit-testing bookkeeping: grids that
+/// differ only there compare equal and draw the same pixels.
+#[test]
+fn the_pointer_and_the_latch_are_not_drawn() {
+    let theme = Theme::dark();
+    let mut pressed = grid();
+    let point = centre(&pressed, 3);
+    pressed.on_pointer(
+        &moved(point),
+        bounds(),
+        SwatchMark::Primary,
+        &mut damage::sink(),
+    );
+    pressed.on_pointer(&PRESS, bounds(), SwatchMark::Primary, &mut damage::sink());
+    let resting = grid();
+    assert_eq!(pressed, resting);
+    let render = |grid: &SwatchGrid| {
+        let mut surface = Surface::new(W, H).expect("surface");
+        grid.render(&mut surface, bounds(), Scale::ONE, &theme);
+        surface
+    };
+    assert_eq!(render(&pressed).pixels(), render(&resting).pixels());
 }

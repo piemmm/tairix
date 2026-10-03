@@ -400,9 +400,9 @@ through `Palette::syntax(role)`; `Plain` is the body text colour, so plain
 text never looks coloured. The tests hold every role at 4.5:1 or better on the
 document surface in both appearances, every role distinct from the others it
 sits beside, and every role retuned by a theme switch. The ratio is WCAG 2.1's,
-measured by `legibility::contrast_hundredths` — the one measure, behind the
-host-only `test-util` feature, that other crates' tests hold their colours to
-as well.
+measured by `tairix_colour::legibility::contrast_hundredths` — the one
+measure, behind `lib/colour`'s host-only `test-util` feature, that other
+crates' tests hold their colours to as well.
 
 ## Typography
 
@@ -469,15 +469,15 @@ synthetic stroke, which leaves its advance alone.
 
 ## No duplicated colour algebra
 
-A theme `Rgba` is a straight-alpha colour token with no compositing
-arithmetic. The premultiplied-alpha blending lives in the shared rasteriser
-`lib/raster` (re-exported by the window manager and used by the taskbar). The
-two meet at exactly one edge — `lib/raster`'s `From<Rgba> for Color`
-conversion — so the colour algebra is never copied into the theme crate, nor
-re-implemented per consumer (`AGENTS.md` §2.2). The sRGB transfer the token's
-channels are encoded in is the colour space's definition rather than
-compositing, so it is the theme's: `color::srgb_to_linear` and its inverse
-`linear_to_srgb`, which the legibility measure and `lib/raytrace` share.
+A theme authors its colours as `lib/colour`'s `Rgba`, a straight-alpha colour
+token with no compositing arithmetic. The premultiplied-alpha blending lives in
+the shared rasteriser `lib/raster` (re-exported by the window manager and used
+by the taskbar). The two meet at exactly one edge — `lib/raster`'s
+`From<Rgba> for Color` conversion — so the colour algebra is never copied into
+the theme crate, nor re-implemented per consumer (`AGENTS.md` §2.2). What is
+the colour space's own rather than compositing — the sRGB transfer, the HSV
+and HSL coordinates, the hex notation and the legibility measure — is
+`lib/colour`'s (`docs/src/lib/colour.md`).
 Likewise a window or the taskbar derives its corner style from a theme radius
 through the compositor's single rounded-corner path with `Corners::from_radius`
 (radius `0` is the square opt-out), never a second rounding implementation.

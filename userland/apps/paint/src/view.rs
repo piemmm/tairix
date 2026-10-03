@@ -11,16 +11,16 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use tairix_abi::time::Duration64;
 use tairix_abi::window_ipc::{AppMenu, AppMenuItemId, CursorShape, SaveEndings};
 use tairix_browse::vfs::write_document_title;
+use tairix_colour::Rgba;
 use tairix_controls::{
-    FieldGroup, Keystroke, ScrollAction, ScrollBar, ScrollModel, ScrollOrientation, ScrollRange,
-    SwatchGrid, Toolbar, REPEAT_DELAY_NS, REPEAT_INTERVAL_NS,
+    ColourPicker, FieldGroup, Keystroke, ScrollAction, ScrollBar, ScrollModel, ScrollOrientation,
+    ScrollRange, SwatchGrid, SwatchMark, Toolbar, REPEAT_DELAY_NS, REPEAT_INTERVAL_NS,
 };
 use tairix_geometry::{Point, Rect, Region, Scale};
-use tairix_image::{desktop_palette, IndexDepth};
-use tairix_input::{ClickRun, InputEvent, Modifiers, PointerButton};
+use tairix_image::{desktop_palette, IndexDepth, Rgba8};
+use tairix_input::{InputEvent, Modifiers, PointerButton};
 use tairix_raster::Color;
 use tairix_reclaim::PressureBand;
 use tairix_rng::NonCryptoRng;
@@ -29,7 +29,7 @@ use tairix_window::docapp::DocumentView;
 use tairix_window::document::{Access, SavedDocument};
 
 use crate::canvas::{Canvas, CanvasError, Kind, OutOfMemory, Tile};
-use crate::colour::{Ink, WHITE};
+use crate::colour::{Ink, BLACK, WHITE};
 use crate::dialog::Form;
 use crate::document::{Document, NewPicture, Picture, Snapshot};
 use crate::fill;
@@ -532,6 +532,14 @@ struct Pending {
     what: &'static str,
 }
 
+/// A palette entry being edited live from the colour dock: the palette it
+/// had before, which settling records the change against as one step.
+#[derive(Debug)]
+pub(crate) struct PaletteEdit {
+    pub(crate) entry: u8,
+    pub(crate) before: Vec<Rgba8>,
+}
+
 /// One painter window's state.
 #[derive(Debug)]
 pub struct View {
@@ -550,6 +558,10 @@ pub struct View {
     wells: Vec<Ink>,
     swatches: SwatchGrid,
     settings: FieldGroup,
+    /// The colour dock's picker, editing the ink `editing` names.
+    picker: ColourPicker,
+    editing: SwatchMark,
+    palette_edit: Option<PaletteEdit>,
     vertical: ScrollBar,
     horizontal: ScrollBar,
     gesture: Option<Gesture>,
@@ -572,8 +584,6 @@ pub struct View {
     spray: NonCryptoRng,
     spray_due: Option<u64>,
     repeat_due: Option<u64>,
-    clicks: ClickRun,
-    double_click: Duration64,
     /// The picture pixel under the pointer, which the status band states.
     hover: Option<(u32, u32)>,
 }
@@ -717,7 +727,7 @@ impl DocumentView for View {
                 self.on_key(stroke, layout, scale, theme, damage)
             }
             InputEvent::KeyReleased { .. } => Outcome::none(),
-            _ => self.on_pointer(input, now_ns, layout, scale, theme, damage),
+            _ => self.on_pointer(input, layout, scale, theme, damage),
         }
     }
 
@@ -739,9 +749,9 @@ impl DocumentView for View {
 
 impl View {
     /// A window on `document`, called `name`, which it may write as `access`
-    /// says; presses pair under `double_click`.
+    /// says.
     #[must_use]
-    pub fn new(document: Document, name: String, access: Access, double_click: Duration64) -> Self {
+    pub fn new(document: Document, name: String, access: Access) -> Self {
         let flat = || ScrollModel::new(ScrollRange::new(0, 0, 0), 1, 1);
         let kind = picture_kind(&document);
         let tool = Tool::Brush;
@@ -755,13 +765,16 @@ impl View {
             viewport: Viewport::new(aspect),
             tool,
             options,
-            primary: Ink::Colour([0, 0, 0, 255]),
+            primary: Ink::Colour(BLACK),
             secondary: Ink::Colour(WHITE),
             inks_for: Kind::Rgba,
             toolbar: strip(tool),
             wells: Vec::new(),
             swatches: SwatchGrid::new(8, Vec::new()),
             settings: options.panel(tool, smooth),
+            picker: ColourPicker::new(Rgba::from_array(BLACK)),
+            editing: SwatchMark::Primary,
+            palette_edit: None,
             vertical: ScrollBar::new(ScrollOrientation::Vertical, flat()),
             horizontal: ScrollBar::new(ScrollOrientation::Horizontal, flat()),
             gesture: None,
@@ -780,10 +793,9 @@ impl View {
             spray: NonCryptoRng::seed_from_u64(0x5eed_5eed),
             spray_due: None,
             repeat_due: None,
-            clicks: ClickRun::new(),
-            double_click,
             hover: None,
         };
+        view.picker.set_earlier(Some(Rgba::from_array(BLACK)));
         view.adopt_kind();
         view
     }
@@ -901,6 +913,12 @@ impl View {
         self.pending.is_some()
     }
 
+    /// The colour dock's picker, and which ink it edits.
+    #[must_use]
+    pub(crate) const fn dock(&self) -> (&ColourPicker, SwatchMark) {
+        (&self.picker, self.editing)
+    }
+
     /// The controls, for the painter.
     #[must_use]
     pub(crate) const fn controls(
@@ -948,9 +966,11 @@ impl View {
             let column = self.settings.slot_column(inner, scale, theme);
             self.settings.measured_height(inner, column, scale, theme)
         };
+        let dock = Layout::dock_inner_width(theme, scale);
         let needs = PanelNeeds {
             swatches: self.swatches.height_for_width(inner),
             settings,
+            picker: self.picker.measured_height(dock, scale, theme),
         };
         Layout::for_window(width, height, theme, scale, faces, needs)
     }
@@ -1020,9 +1040,15 @@ impl View {
     fn adopt_kind(&mut self) {
         let kind = self.kind().clone();
         if kind != self.inks_for {
+            let edited = self.ink(self.editing == SwatchMark::Secondary);
             self.primary = self.primary.adapted(&self.inks_for, &kind);
             self.secondary = self.secondary.adapted(&self.inks_for, &kind);
             self.inks_for = kind.clone();
+            if self.ink(self.editing == SwatchMark::Secondary) != edited {
+                // Carried on, a drag in the dock would edit the ink this one
+                // became: a palette entry, where it was choosing a colour.
+                self.picker.finish_drag();
+            }
         }
         self.wells = match &kind {
             Kind::Indexed {
@@ -1050,6 +1076,7 @@ impl View {
         };
         self.swatches.adopt_colours(columns, colours);
         self.mark_wells();
+        self.sync_picker();
         self.settings = self.options.panel(self.tool, kind.sample_bytes() == 4);
         let aspect = self
             .document
@@ -1058,13 +1085,48 @@ impl View {
         self.viewport.set_aspect(aspect);
     }
 
-    /// Put the grid's marks on the wells the inks are.
+    /// Put the grid's marks on the wells the inks are, and on none for an
+    /// ink the palette does not hold.
     fn mark_wells(&mut self) {
         let at = |ink: Ink| self.wells.iter().position(|&well| well == ink);
-        if let Some(index) = at(self.primary) {
-            self.swatches.adopt_selected(index);
-        }
+        self.swatches.adopt_selected(at(self.primary));
         self.swatches.adopt_secondary(at(self.secondary));
+    }
+
+    /// Bring the dock's picker into line with the ink it edits: its colour,
+    /// with the colour it had as the earlier one when the ink changed from
+    /// outside the picker; its opacity; and whether it may edit at all.
+    ///
+    /// A palette picture's ink is an entry, so editing it edits the palette,
+    /// which the picture holds no edits for while a worker has it; and clear
+    /// is the mask rather than a colour.
+    pub(crate) fn sync_picker(&mut self) {
+        let ink = self.ink(self.editing == SwatchMark::Secondary);
+        let kind = picture_kind(&self.document);
+        let truecolour = matches!(kind, Kind::Rgba);
+        let colour = Rgba::from_array(ink.shown(kind));
+        let picture = self.document.picture();
+        let opacity = truecolour || picture.is_some_and(|picture| picture.sprite.is_none());
+        let editable = truecolour
+            || matches!(ink, Ink::Index(_)) && self.pending.is_none() && picture.is_some();
+        if opacity != self.picker.has_opacity() {
+            self.picker.set_opacity(opacity);
+        }
+        // A colour with no alpha is the clear ink, which shows as nothing.
+        let showing = if truecolour {
+            Ink::of_colour(self.picker.colour().to_array()) == ink
+        } else {
+            self.picker.colour() == colour
+        };
+        if !showing && self.palette_edit.is_none() {
+            self.picker.set_colour(colour);
+            self.picker.set_earlier(Some(colour));
+        }
+        let mut state = self.picker.state();
+        state.enabled = editable;
+        if state != self.picker.state() {
+            self.picker.set_state(state);
+        }
     }
 
     fn smooth(&self, kind: &Kind) -> bool {

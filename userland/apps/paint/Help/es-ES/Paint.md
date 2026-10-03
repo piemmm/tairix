@@ -38,10 +38,15 @@ El botón principal (izquierdo) pinta con el color principal y el botón
 central con el color secundario; manteniendo Alt se toma un color en su
 lugar. Las herramientas son selección, lápiz, pincel, aerógrafo, goma,
 relleno, cuentagotas, línea, rectángulo y elipse; el panel junto a la
-imagen contiene los dos colores, la paleta de la imagen o los colores del
-escritorio, y los ajustes de la herramienta en uso. Pulsar un pozo de color
-edita ese color; hacer doble clic en un color de la paleta edita la
-paleta. Manteniendo Mayús se dibuja un cuadrado, un círculo o una línea en
+imagen contiene la paleta de la imagen o los colores del escritorio y los
+ajustes de la herramienta en uso. El panel de color de la derecha contiene
+los colores principal y secundario y un selector de color para el que se
+elija: pulse un color para elegirlo y ajústelo por tono, saturación y
+valor, por rojo, verde y azul, por su notación hexadecimal y, donde la
+imagen admite transparencia, por su opacidad. A su lado queda el color que
+tenía, y un clic lo recupera. En una imagen con paleta los colores son sus
+entradas, así que el selector edita la paleta, y cada edición es un cambio
+que se puede deshacer. Manteniendo Mayús se dibuja un cuadrado, un círculo o una línea en
 múltiplos de 45 grados.
 
 Con la herramienta de selección, arrastre para marcar parte de la imagen y
@@ -77,6 +82,7 @@ Cerrar una ventana o salir con cambios sin guardar pregunta primero.
 * `Ctrl+I` — invertir los colores
 * `S`, `P`, `B`, `A`, `E`, `F`, `I`, `L`, `R`, `O` — las herramientas, en orden
 * `X` — intercambiar los colores principal y secundario
+* `Tab` — al panel de color y por sus partes; `Escape` — de vuelta a la imagen
 * `+` / `-` — acercar o alejar; `1` — tamaño real; `Ctrl+0` — ajustar
 * `Ctrl` + rueda — acercar o alejar en torno al puntero
 * Pellizcar con dos dedos — acercar o alejar con suavidad; en una pantalla táctil la imagen sigue a los dedos

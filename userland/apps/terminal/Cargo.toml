@@ -25,6 +25,8 @@ tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
 # The single shared theme definition: the terminal takes its colours from
 # the active theme so it stays consistent with the window manager and taskbar.
 tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
+# The opaque colour a scheme is made of and its bare `rrggbb` spelling.
+tairix-colour = { path = "../../../lib/colour", version = "=0.0.0" }
 # Shared software rasteriser (`Color`/`Surface`) — the same premultiplied-alpha
 # primitives the window manager paints with, lifted to `lib/*` so the app
 # renders its screen into a `Surface` without duplicating the colour algebra.

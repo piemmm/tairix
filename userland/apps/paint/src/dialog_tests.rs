@@ -4,7 +4,7 @@ use tairix_image::IndexDepth;
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_theme::ThemeRegistry;
 
-use super::{Answer, Form, Well};
+use super::{Answer, Form};
 use crate::transform::{Anchor, PaletteChoice};
 
 const WINDOW: Rect = Rect::new(0, 0, 900, 640);
@@ -121,26 +121,6 @@ fn a_canvas_starts_centred_and_a_conversion_to_the_depth_it_has() {
         convert.convert_answer(),
         (Some(IndexDepth::Eight), PaletteChoice::Optimised, true)
     );
-}
-
-#[test]
-fn a_colour_typed_in_hex_moves_the_sliders() {
-    let mut form = Form::colour(Well::Primary, [1, 2, 3, 255], false);
-    assert_eq!(form.colour_answer(), [1, 2, 3, 255]);
-    let registry = ThemeRegistry::with_builtins();
-    let mut damage = Region::new();
-    for _ in 0..3 {
-        form.on_key(
-            key(NamedKey::Tab),
-            WINDOW,
-            Scale::ONE,
-            registry.active(),
-            &mut damage,
-        );
-    }
-    clear_field(&mut form, 7);
-    typed(&mut form, "#FF8000");
-    assert_eq!(form.colour_answer(), [255, 128, 0, 255]);
 }
 
 #[test]

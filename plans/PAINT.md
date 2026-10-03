@@ -16,8 +16,8 @@ its address space and everything that grows with the picture off its loop.
 | PT6 | The `Run` binary: the decode worker and the painter's own work over the host | done |
 | PT7 | The bundle: manifest, icon, Help in every required locale, docs, registration | done |
 | PT8 | Zoom by the wheel and by pinch, anchored on the pointer, continuous between the ladder's rungs (`plans/POINTING.md` PO4, PO7) | done |
-| PT9 | Colour: one colour-model home (HSV, HSL, hex notation) every copy in the tree moves onto; a `lib/controls` colour picker; Paint's colour dock; Terminal's scheme editor moved onto the picker | planned |
-| PT10 | The window: a vertical tool box, the tool-controls bar of the tool in use, number fields, the palette strip, the colour dock and the status band | planned |
+| PT9 | Colour: one colour-model home (HSV, HSL, hex notation) every copy in the tree moves onto; a `lib/controls` colour picker; Paint's colour dock; Terminal's scheme editor moved onto the picker | done |
+| PT10 | The window: a vertical tool box, the tool-controls bar of the tool in use with its values in `NumberField`s, the palette strip and the status band, around the colour dock | planned |
 | PT11 | File types: TIFF, BMP and GIF encoders and lossless reading of what they hold; New chooses a format; the Save As sheet holds the format and that format's options alone | planned |
 | PT12 | The engine: `lib/raster` row coverage, exact and centre-sampled (D476); soft selection masks with rectangle, ellipse, lasso, polygon and magic-wand selection, combining modes and feathering; the dab brush engine (size, hardness, opacity, flow, spacing, antialias) with an antialiased airbrush; fills, gradients, clone, text, shapes, crop, hand and zoom | planned |
 | PT13 | Adjustments and filters, previewed live | planned |
@@ -107,6 +107,34 @@ without touching the file.
   name itself, else the least number free after it, read in one pass over the
   names held.
 
+## Colour
+
+- **One home**: `lib/colour` is the tree's sRGB colour — `Rgb` and `Rgba`, the
+  transfer, `Hsv` and `Hsl` in fixed point exact enough that every 8-bit colour
+  comes back through each, and hex notation (`parse_hex`, `Hex`). The theme,
+  `lib/raster`, an SVG asset's `#rgb` and `hsl()`, the wallpaper and terminal
+  settings and Paint convert and spell colours through it alone. The copies
+  this item did not absorb are `plans/OPEN-DEFECTS.md` D568–D576.
+- **The picker**: `lib/controls::ColourPicker` — a saturation and value plane,
+  hue and alpha strips, the earlier colour, a hex field and seven
+  `NumberField`s. It answers `Edited` per sample and `Settled` once an
+  interaction ends, so what is durable is done at the settle; a field claims
+  every key but Tab and the owner's chords, so typing reaches no shortcut.
+- **The dock** on the window's right edge holds the two wells and the picker,
+  editing the well chosen by a press or by *Edit primary/secondary colour*. A
+  colour picture's ink takes the colour live and records nothing; a colour
+  with no alpha is the clear ink (`Ink::of_colour`). A palette picture's ink
+  names an entry: the session reserves the history's room and copies the
+  palette once, each sample sets the entry in place with no allocation, and
+  the settle lands the whole interaction as one step — none where the palette
+  came back as it was. Anything else that takes input settles the dock first;
+  a drag whose ink becomes another under it — a conversion landing — ends
+  there. The picker is withheld from a palette edit while a worker has the
+  picture and from the clear ink, which is the mask rather than a colour; a
+  sprite's entries offer no alpha.
+- **The eyedropper** is the tool that takes a colour from the picture, so
+  "picker" names one thing.
+
 ## The loop
 
 Paint runs in `tairix_window::docapp`'s host, which owns its windows, saves,
@@ -131,4 +159,6 @@ the loop adopts only what had landed when it began.
 - Every allocation that grows with the picture is fallible; a refusal is
   stated in the window, never an abort.
 - A kept sprite is written back exactly as it was read.
+- A colour edited in the dock writes nothing until it settles, and lands as
+  one step.
 - Closing a window or quitting with unsaved changes asks first.

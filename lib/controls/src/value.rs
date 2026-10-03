@@ -20,11 +20,12 @@
 use alloc::format;
 use alloc::string::String;
 
+use tairix_colour::Rgba;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Ring, RingInk, Surface};
-use tairix_theme::{Rgba, TextRole, Theme};
+use tairix_theme::{TextRole, Theme};
 
 use crate::damage;
 use crate::paint::{

@@ -1,8 +1,8 @@
 use alloc::string::String;
 use alloc::vec;
+use alloc::vec::Vec;
 use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
 
-use tairix_abi::time::Duration64;
 use tairix_abi::window_ipc::{AppMenuItemId, AppMenuRowView};
 use tairix_controls::{FieldLayout, Keystroke};
 use tairix_font::BitmapFont;
@@ -43,12 +43,7 @@ struct Window {
 impl Window {
     fn new(document: Document) -> Self {
         let registry = ThemeRegistry::with_builtins();
-        let view = View::new(
-            document,
-            String::from("picture.png"),
-            Access::Writable,
-            Duration64::from_millis(500),
-        );
+        let view = View::new(document, String::from("picture.png"), Access::Writable);
         let layout = view.layout(
             WINDOW.0,
             WINDOW.1,
@@ -88,14 +83,9 @@ impl Window {
     fn pointer(&mut self, event: InputEvent) -> Outcome {
         self.now += 10_000_000;
         let theme = self.registry.active();
-        let outcome = self.view.on_pointer(
-            &event,
-            self.now,
-            &self.layout,
-            Scale::ONE,
-            theme,
-            &mut Region::new(),
-        );
+        let outcome =
+            self.view
+                .on_pointer(&event, &self.layout, Scale::ONE, theme, &mut Region::new());
         self.apply(&outcome);
         outcome
     }
@@ -185,6 +175,23 @@ impl Window {
             .computed(job, answer, &self.layout, &mut Region::new());
         self.apply(&outcome);
         outcome
+    }
+
+    /// A point `(across, down)` pixels into the colour dock's picker, whose
+    /// plane fills its top-left corner.
+    fn dock_point(&self, (across, down): (i32, i32)) -> Point {
+        let picker = self.layout.picker();
+        Point::new(picker.left() + across, picker.top() + down)
+    }
+
+    /// The palette the picture showing holds.
+    fn palette(&self) -> Vec<[u8; 4]> {
+        self.view
+            .document()
+            .picture()
+            .and_then(|picture| picture.canvas.kind().palette())
+            .expect("a palette picture")
+            .to_vec()
     }
 
     /// Mark out picture pixels `from` to `to` with the select tool and drag
@@ -403,7 +410,7 @@ fn escape_mid_drag_keeps_nothing_the_drag_did() {
 fn a_picked_colour_becomes_the_primary() {
     let canvas = Canvas::new(10, 10, Kind::Rgba, Sample::Rgba([12, 34, 56, 255])).expect("fits");
     let mut window = Window::new(Document::new(Picture::plain(canvas)));
-    window.act(Action::Tool(Tool::Picker));
+    window.act(Action::Tool(Tool::Eyedropper));
     let at = window.screen_of((3, 3));
     window.move_to(at);
     window.press(PointerButton::Primary);
@@ -743,7 +750,6 @@ fn zooming_with_the_wheel_keeps_the_pixel_under_the_pointer() {
     for step in 1..=3 {
         window.view.on_pointer(
             &InputEvent::ModifiersChanged { modifiers: ctrl() },
-            0,
             &window.layout,
             Scale::ONE,
             window.registry.active(),
@@ -775,7 +781,6 @@ fn a_fine_ctrl_wheel_zooms_a_rung_per_detent_turned() {
     window.move_to(window.screen_of((30, 40)));
     window.view.on_pointer(
         &InputEvent::ModifiersChanged { modifiers: ctrl() },
-        0,
         &window.layout,
         Scale::ONE,
         window.registry.active(),
@@ -1108,7 +1113,6 @@ fn a_modifier_change_mid_shape_repaints_the_preview() {
     };
     let _ = window.view.on_pointer(
         &InputEvent::ModifiersChanged { modifiers: shift },
-        window.now,
         &window.layout,
         Scale::ONE,
         theme,
@@ -1230,34 +1234,293 @@ fn a_press_on_a_list_over_the_canvas_draws_nothing() {
     );
 }
 
-/// Editing the palette entry an ink names offers its opacity where the
-/// palette can hold one — a picture that is not a sprite — and not on a
-/// sprite, whose palette is colours alone.
+/// The dock offers a palette entry's opacity where the palette can hold one —
+/// a picture that is not a sprite — and not on a sprite, whose palette is
+/// colours alone.
 #[test]
-fn a_palette_entry_is_edited_with_its_opacity_where_it_can_have_one() {
-    use crate::dialog::Purpose;
+fn the_dock_offers_a_palette_entrys_opacity_where_it_can_have_one() {
     let kind = Kind::Indexed {
         depth: IndexDepth::Two,
         palette: vec![[0, 0, 0, 255], [255, 255, 255, 128]],
         masked: false,
     };
     let canvas = Canvas::new(4, 4, kind, Sample::Index(1, 255)).expect("fits");
-    let mut window = Window::new(Document::new(Picture::plain(canvas)));
-    window.act(Action::EditPrimary);
-    let offered = |window: &Window| match &window.view.modal {
-        Some(super::Modal::Form(form)) => match form.purpose() {
-            Purpose::Colour { alpha, .. } => alpha,
-            other => panic!("a colour form, not {other:?}"),
-        },
-        _ => panic!("a form"),
-    };
-    assert!(offered(&window), "a plain picture's entry has an opacity");
+    let window = Window::new(Document::new(Picture::plain(canvas)));
+    assert!(
+        window.view.picker.has_opacity(),
+        "a plain picture's entry has an opacity"
+    );
     let Entry::Picture(picture) = sprite("icon", 9) else {
         panic!("a picture");
     };
-    let mut sprite = Window::new(Document::new(picture));
-    sprite.act(Action::EditPrimary);
-    assert!(!offered(&sprite), "a sprite's entry is a colour alone");
+    let sprite = Window::new(Document::new(picture));
+    assert!(
+        !sprite.view.picker.has_opacity(),
+        "a sprite's entry is a colour alone"
+    );
+}
+
+/// A palette picture whose primary ink is entry 0 of four colours.
+fn four_colours() -> Window {
+    let kind = Kind::Indexed {
+        depth: IndexDepth::Two,
+        palette: vec![
+            [0, 0, 0, 255],
+            [255, 255, 255, 255],
+            [255, 0, 0, 255],
+            [0, 0, 255, 255],
+        ],
+        masked: true,
+    };
+    let canvas = Canvas::new(4, 4, kind, Sample::Index(0, 255)).expect("fits");
+    let window = Window::new(Document::new(Picture::plain(canvas)));
+    assert_eq!(window.view.inks().0, Ink::Index(0));
+    window
+}
+
+#[test]
+fn the_dock_edits_a_colour_pictures_ink_live_and_records_nothing() {
+    let mut window = Window::white(16, 16);
+    let before = window.view.inks().0;
+    window.move_to(window.dock_point((4, 4)));
+    window.press(PointerButton::Primary);
+    let pressed = window.view.inks().0;
+    assert_ne!(pressed, before, "the ink follows the press at once");
+    window.move_to(window.dock_point((40, 30)));
+    assert_ne!(window.view.inks().0, pressed, "and the drag");
+    window.release(PointerButton::Primary);
+    assert!(
+        !SavedDocument::is_modified(&window.view),
+        "an ink is not the picture"
+    );
+    assert_eq!(window.view.document().history_depth(), 0);
+}
+
+#[test]
+fn a_palette_entry_dragged_in_the_dock_changes_live_and_is_one_step() {
+    let mut window = four_colours();
+    window.move_to(window.dock_point((4, 4)));
+    window.press(PointerButton::Primary);
+    let live = window.palette()[0];
+    assert_ne!(live, [0, 0, 0, 255], "the entry takes the colour at once");
+    assert_eq!(
+        window.view.document().history_depth(),
+        0,
+        "nothing is recorded mid-drag"
+    );
+    window.move_to(window.dock_point((30, 30)));
+    window.release(PointerButton::Primary);
+    let edited = window.palette()[0];
+    assert_ne!(edited, live);
+    assert_eq!(
+        window.view.document().history_depth(),
+        1,
+        "the drag is one step"
+    );
+    assert_eq!(
+        &window.palette()[1..],
+        &[[255; 4], [255, 0, 0, 255], [0, 0, 255, 255]]
+    );
+    window.act(Action::Undo);
+    assert_eq!(
+        window.palette()[0],
+        [0, 0, 0, 255],
+        "undo puts the entry back"
+    );
+    window.act(Action::Redo);
+    assert_eq!(window.palette()[0], edited);
+}
+
+#[test]
+fn escape_turns_a_dock_drag_down_and_records_nothing() {
+    let mut window = four_colours();
+    window.move_to(window.dock_point((4, 4)));
+    window.press(PointerButton::Primary);
+    assert_ne!(window.palette()[0], [0, 0, 0, 255]);
+    window.key(Key::Named(NamedKey::Escape), plain());
+    assert_eq!(window.palette()[0], [0, 0, 0, 255], "the entry is back");
+    window.release(PointerButton::Primary);
+    assert_eq!(window.view.document().history_depth(), 0);
+    assert!(!SavedDocument::is_modified(&window.view));
+}
+
+#[test]
+fn the_dock_takes_no_palette_edit_while_a_worker_has_the_picture() {
+    let mut window = four_colours();
+    window.act(Action::Tool(Tool::Fill));
+    window.move_to(window.screen_of((1, 1)));
+    let outcome = window.press(PointerButton::Primary);
+    assert!(window.view.busy());
+    assert!(!window.view.picker.state().enabled, "the dock is withheld");
+    window.move_to(window.dock_point((4, 4)));
+    window.press(PointerButton::Primary);
+    window.release(PointerButton::Primary);
+    assert_eq!(window.palette()[0], [0, 0, 0, 255]);
+    window.run_worker(outcome);
+    assert!(
+        window.view.picker.state().enabled,
+        "and given back once it lands"
+    );
+}
+
+#[test]
+fn a_clear_ink_on_a_masked_palette_picture_is_the_mask_not_a_colour() {
+    let mut window = four_colours();
+    let clear = window
+        .view
+        .wells
+        .iter()
+        .position(|&ink| ink == Ink::Clear)
+        .expect("a mask well");
+    let cell = window
+        .view
+        .swatches
+        .cell_rect(window.layout.swatches(), clear)
+        .expect("a well");
+    window.move_to(cell.center());
+    window.press(PointerButton::Primary);
+    window.release(PointerButton::Primary);
+    assert_eq!(window.view.inks().0, Ink::Clear);
+    assert!(
+        !window.view.picker.state().enabled,
+        "the dock edits colours"
+    );
+}
+
+#[test]
+fn a_press_on_the_secondary_well_makes_the_dock_edit_it() {
+    let mut window = Window::white(16, 16);
+    let secondary = window.layout.secondary_well();
+    let corner = Point::new(secondary.right() - 2, secondary.bottom() - 2);
+    window.move_to(corner);
+    window.press(PointerButton::Primary);
+    window.release(PointerButton::Primary);
+    assert_eq!(window.view.dock().1, tairix_controls::SwatchMark::Secondary);
+    let white = tairix_colour::Rgba::rgb(255, 255, 255);
+    assert_eq!(
+        window.view.picker.colour(),
+        white,
+        "the secondary ink is white"
+    );
+    window.move_to(window.dock_point((40, 40)));
+    window.press(PointerButton::Primary);
+    window.release(PointerButton::Primary);
+    assert_ne!(
+        window.view.inks().1,
+        Ink::Colour([255; 4]),
+        "the secondary took the edit"
+    );
+    assert_eq!(
+        window.view.inks().0,
+        Ink::Colour([0, 0, 0, 255]),
+        "the primary did not"
+    );
+}
+
+#[test]
+fn the_palettes_mark_leaves_a_well_the_ink_no_longer_is() {
+    let mut window = Window::white(16, 16);
+    assert!(
+        window.view.swatches.selected().is_some(),
+        "black is a desktop colour"
+    );
+    window.move_to(window.dock_point((30, 30)));
+    window.press(PointerButton::Primary);
+    window.release(PointerButton::Primary);
+    assert_eq!(
+        window.view.swatches.selected(),
+        None,
+        "no well holds the edited ink"
+    );
+}
+
+#[test]
+fn tab_takes_the_keyboard_into_the_dock_and_typing_there_is_not_a_shortcut() {
+    let mut window = Window::white(16, 16);
+    let tool = window.view.tool();
+    window.key(Key::Named(NamedKey::Tab), plain());
+    assert!(window.view.picker.state().focus.focused);
+    for _ in 0..4 {
+        window.key(Key::Named(NamedKey::Tab), plain());
+    }
+    window.key(Key::Char('a'), ctrl());
+    for letter in "#ff0".chars() {
+        window.key(Key::Char(letter), plain());
+    }
+    assert_eq!(window.view.tool(), tool, "letters went into the hex field");
+    assert_eq!(
+        window.view.inks().0,
+        Ink::Colour([255, 255, 0, 255]),
+        "and were live"
+    );
+    window.key(Key::Named(NamedKey::Enter), plain());
+    window.key(Key::Named(NamedKey::Escape), plain());
+    assert!(
+        !window.view.picker.state().focus.focused,
+        "Escape gives the keyboard back"
+    );
+    window.key(Key::Char('e'), plain());
+    assert_eq!(
+        window.view.tool(),
+        Tool::Eraser,
+        "the shortcut is the window's again"
+    );
+}
+
+/// A colour typed down to no alpha is the clear ink, and a worker landing
+/// meanwhile leaves the picker holding the colour that was typed.
+#[test]
+fn a_worker_landing_leaves_a_colour_typed_to_no_alpha_as_typed() {
+    let mut window = Window::white(16, 16);
+    window.act(Action::Tool(Tool::Fill));
+    window.move_to(window.screen_of((1, 1)));
+    let fill = window.press(PointerButton::Primary);
+    window.release(PointerButton::Primary);
+    assert!(window.view.busy());
+    for _ in 0..5 {
+        window.key(Key::Named(NamedKey::Tab), plain());
+    }
+    window.key(Key::Char('a'), ctrl());
+    for letter in "#ff000000".chars() {
+        window.key(Key::Char(letter), plain());
+    }
+    assert_eq!(window.view.inks().0, Ink::Clear);
+    let earlier = window.view.picker.earlier();
+    window.run_worker(fill);
+    assert_eq!(
+        window.view.picker.colour(),
+        tairix_colour::Rgba::new(255, 0, 0, 0)
+    );
+    assert_eq!(window.view.picker.earlier(), earlier);
+}
+
+/// A drag choosing a colour ink ends where a conversion to a palette lands
+/// under it, rather than carry on as an edit of the entry the ink became.
+#[test]
+fn a_dock_drag_ends_where_a_conversion_turns_its_ink_into_an_entry() {
+    let mut window = Window::white(16, 16);
+    let form = crate::dialog::Form::convert(Some(IndexDepth::Eight));
+    window.view.modal = Some(super::Modal::Form(alloc::boxed::Box::new(form)));
+    let convert = window.key(Key::Named(NamedKey::Enter), plain());
+    assert!(window.view.busy());
+    window.move_to(window.dock_point((4, 4)));
+    window.press(PointerButton::Primary);
+    assert!(
+        window.view.picker.is_dragging(),
+        "a colour ink is the dock's meanwhile"
+    );
+    window.run_worker(convert);
+    let converted = window.palette();
+    assert_eq!(window.view.document().history_depth(), 1);
+    assert!(!window.view.picker.is_dragging());
+    window.move_to(window.dock_point((40, 30)));
+    window.release(PointerButton::Primary);
+    assert_eq!(window.palette(), converted, "no entry took the drag");
+    assert_eq!(
+        window.view.document().history_depth(),
+        1,
+        "the conversion alone"
+    );
 }
 
 /// The pixel the status band states follows the picture when it moves under

@@ -462,12 +462,11 @@ mod program {
                 .retain_waiting(|job| job.as_ref().is_none_or(|job| job.stamp.window() != window));
         }
 
-        fn untitled(host: &Host<Self>) -> Result<View, String> {
+        fn untitled(_host: &Host<Self>) -> Result<View, String> {
             let canvas = NewPicture::DEFAULT
                 .canvas()
                 .map_err(|err| alloc::format!("{err}"))?;
-            Ok(view_of(
-                host,
+            Ok(View::new(
                 Document::new(Picture::plain(canvas)),
                 String::from(UNTITLED),
                 Access::Untitled,
@@ -476,11 +475,10 @@ mod program {
 
         /// A single clear pixel stands in until the document lands, so
         /// nothing is shown that the file might be taken to hold.
-        fn placeholder(host: &Host<Self>, name: &str, access: Access) -> Result<View, String> {
+        fn placeholder(_host: &Host<Self>, name: &str, access: Access) -> Result<View, String> {
             let canvas = Canvas::new(1, 1, Kind::Rgba, Sample::Rgba([0; 4]))
                 .map_err(|_| String::from("there is not enough memory"))?;
-            Ok(view_of(
-                host,
+            Ok(View::new(
                 Document::new(Picture::plain(canvas)),
                 String::from(name),
                 access,
@@ -596,12 +594,6 @@ mod program {
         }
     }
 
-    /// A view of `document`, called `name`, pairing clicks at the desktop's
-    /// interval.
-    fn view_of(host: &Host<Paint>, document: Document, name: String, access: Access) -> View {
-        View::new(document, name, access, host.desktop.info().double_click())
-    }
-
     /// The toolbar's glyph cache, budgeted from a window's frame and
     /// registered with the process's cache report.
     fn icon_cache(desktop: &Desktop) -> ArtworkCache {
@@ -675,7 +667,7 @@ mod program {
         } else {
             Access::ReadOnly
         };
-        let mut view = view_of(host, document, load.name, access);
+        let mut view = View::new(document, load.name, access);
         if let Some(refusal) = refusal.filter(|_| writable) {
             view.say(alloc::format!("{refusal}: Save asks where to save it"));
         }
@@ -691,8 +683,7 @@ mod program {
                 let pristine = window.pristine();
                 match picture.canvas() {
                     Ok(canvas) => {
-                        let view = view_of(
-                            host,
+                        let view = View::new(
                             Document::new(Picture::plain(canvas)),
                             String::from(UNTITLED),
                             Access::Untitled,

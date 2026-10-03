@@ -1,49 +1,11 @@
 //! Unit tests for the terminal's colour schemes.
 
-use alloc::string::String;
-
+use tairix_colour::Rgb;
+use tairix_raster::Color;
 use tairix_theme::Theme;
 use tairix_vt::{Attributes, BasicColor, Color as VtColor};
 
-use super::{ColorScheme, Painted, Rgb, Scheme, ANSI_COLORS};
-
-// --- Rgb::from_hex / write_hex --------------------------------------------
-
-#[test]
-fn from_hex_accepts_lowercase_and_uppercase_six_digit_hex() {
-    assert_eq!(Rgb::from_hex("00ff80"), Some(Rgb::new(0x00, 0xff, 0x80)));
-    assert_eq!(Rgb::from_hex("00FF80"), Some(Rgb::new(0x00, 0xff, 0x80)));
-    assert_eq!(Rgb::from_hex("AaBbCc"), Some(Rgb::new(0xaa, 0xbb, 0xcc)));
-}
-
-#[test]
-fn from_hex_rejects_malformed_input() {
-    // Wrong length, either shorter or longer.
-    assert_eq!(Rgb::from_hex("fff"), None);
-    assert_eq!(Rgb::from_hex("0011223"), None);
-    assert_eq!(Rgb::from_hex(""), None);
-    // Non-hex digits.
-    assert_eq!(Rgb::from_hex("zzzzzz"), None);
-    assert_eq!(Rgb::from_hex("00gg00"), None);
-    // A leading `#` is not the canonical bare spelling.
-    assert_eq!(Rgb::from_hex("#00ff80"), None);
-    // Non-ASCII of the right byte length must still be refused.
-    assert_eq!(Rgb::from_hex("00ff8é"), None);
-}
-
-#[test]
-fn write_hex_round_trips_from_hex() {
-    for color in [
-        Rgb::new(0, 0, 0),
-        Rgb::new(255, 255, 255),
-        Rgb::new(0x12, 0x34, 0x56),
-        Rgb::new(0xab, 0xcd, 0xef),
-    ] {
-        let mut text = String::new();
-        color.write_hex(&mut text);
-        assert_eq!(Rgb::from_hex(&text), Some(color));
-    }
-}
+use super::{ColorScheme, Painted, Scheme, ANSI_COLORS};
 
 // --- Scheme::from_name / name / label -------------------------------------
 
@@ -108,11 +70,17 @@ fn resolve_system_takes_the_theme_page_and_accent_colors() {
         let custom = ColorScheme::from_theme(&Theme::light());
         let painted = Painted::resolve(Scheme::System, &custom, &theme, 255);
         let palette = theme.palette();
-        assert_eq!(painted.scheme.background, Rgb::from(palette.document));
-        assert_ne!(painted.scheme.background, Rgb::from(palette.surface));
-        assert_eq!(painted.scheme.foreground, Rgb::from(palette.on_surface));
-        assert_eq!(painted.scheme.cursor, Rgb::from(palette.accent));
-        assert_eq!(painted.scheme.cursor_text, Rgb::from(palette.on_accent));
+        assert_eq!(painted.scheme.background, palette.document.without_alpha());
+        assert_ne!(painted.scheme.background, palette.surface.without_alpha());
+        assert_eq!(
+            painted.scheme.foreground,
+            palette.on_surface.without_alpha()
+        );
+        assert_eq!(painted.scheme.cursor, palette.accent.without_alpha());
+        assert_eq!(
+            painted.scheme.cursor_text,
+            palette.on_accent.without_alpha()
+        );
     }
 }
 
@@ -158,10 +126,10 @@ fn painted(background_alpha: u8) -> Painted {
 fn default_attributes_take_the_scheme_foreground_and_background() {
     let p = painted(200);
     let (fg, bg) = p.cell_colors(Attributes::PLAIN);
-    assert_eq!(fg, p.scheme.foreground.opaque());
+    assert_eq!(fg, Color::from(p.scheme.foreground));
     // The default background carries the translucent alpha in force, while
     // the foreground text stays fully opaque.
-    assert_eq!(bg, p.scheme.background.with_alpha(200));
+    assert_eq!(bg, Color::from(p.scheme.background.with_alpha(200)));
     assert_eq!(fg.a, 255);
     assert_eq!(bg.a, 200);
 }
@@ -174,7 +142,7 @@ fn an_explicit_basic_color_maps_to_its_ansi_slot() {
         ..Attributes::PLAIN
     };
     let (fg, _bg) = p.cell_colors(attrs);
-    assert_eq!(fg, p.scheme.ansi(BasicColor::Green.index()).opaque());
+    assert_eq!(fg, Color::from(p.scheme.ansi(BasicColor::Green.index())));
 }
 
 #[test]
@@ -186,7 +154,10 @@ fn bold_brightens_a_non_bright_basic_color() {
         ..Attributes::PLAIN
     };
     let (fg, _bg) = p.cell_colors(attrs);
-    assert_eq!(fg, p.scheme.ansi(BasicColor::BrightRed.index()).opaque());
+    assert_eq!(
+        fg,
+        Color::from(p.scheme.ansi(BasicColor::BrightRed.index()))
+    );
 }
 
 #[test]
@@ -198,7 +169,10 @@ fn bold_leaves_an_already_bright_basic_color_unchanged() {
         ..Attributes::PLAIN
     };
     let (fg, _bg) = p.cell_colors(attrs);
-    assert_eq!(fg, p.scheme.ansi(BasicColor::BrightGreen.index()).opaque());
+    assert_eq!(
+        fg,
+        Color::from(p.scheme.ansi(BasicColor::BrightGreen.index()))
+    );
 }
 
 #[test]
@@ -210,7 +184,7 @@ fn indexed_below_sixteen_uses_the_schemes_own_slot() {
             ..Attributes::PLAIN
         };
         let (fg, _bg) = p.cell_colors(attrs);
-        assert_eq!(fg, p.scheme.ansi(index).opaque());
+        assert_eq!(fg, Color::from(p.scheme.ansi(index)));
     }
 }
 
@@ -303,8 +277,8 @@ fn reverse_swaps_the_pair_and_forces_both_opaque() {
 fn every_builtin_scheme_has_visibly_distinct_foreground_and_background() {
     for scheme in Scheme::BUILTINS.into_iter().chain([Scheme::Paper]) {
         let palette = scheme.palette().expect("builtin has a palette");
-        let fg_luma = i32::from(palette.foreground.opaque().luma());
-        let bg_luma = i32::from(palette.background.opaque().luma());
+        let fg_luma = i32::from(Color::from(palette.foreground).luma());
+        let bg_luma = i32::from(Color::from(palette.background).luma());
         assert!(
             (fg_luma - bg_luma).abs() > 60,
             "{scheme:?} text is too close in luminance to its background"

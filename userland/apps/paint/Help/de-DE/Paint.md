@@ -39,10 +39,16 @@ Die primäre (linke) Taste malt mit der Primärfarbe und die mittlere Taste
 mit der Sekundärfarbe; mit gedrückter Alt-Taste wird stattdessen eine Farbe
 aufgenommen. Die Werkzeuge sind Auswahl, Stift, Pinsel, Sprühdose,
 Radierer, Füllen, Farbpipette, Linie, Rechteck und Ellipse; das Feld neben
-dem Bild enthält die beiden Farben, die Palette des Bildes oder die
-Desktop-Farben und die Einstellungen des gewählten Werkzeugs. Ein Klick auf
-ein Farbfeld bearbeitet diese Farbe; ein Doppelklick auf eine Palettenfarbe
-bearbeitet die Palette. Mit gedrückter Umschalttaste entsteht ein Quadrat,
+dem Bild enthält die Palette des Bildes oder die Desktop-Farben und die
+Einstellungen des gewählten Werkzeugs. Das Farbdock rechts enthält Primär-
+und Sekundärfarbe und einen Farbwähler für die gewählte der beiden: ein
+Klick auf eine Farbe wählt sie, dann wird sie über Farbton, Sättigung und
+Hellwert, über Rot, Grün und Blau, über ihre hexadezimale Schreibweise und,
+wo das Bild Transparenz hält, über ihre Deckkraft eingestellt. Daneben
+steht die Farbe, die sie hatte, und ein Klick stellt sie wieder her. In
+einem Bild mit Palette sind die Farben ihre Einträge, der Farbwähler
+bearbeitet also die Palette, und jede Bearbeitung ist ein Schritt, der sich
+rückgängig machen lässt. Mit gedrückter Umschalttaste entsteht ein Quadrat,
 ein Kreis oder eine Linie im Vielfachen von 45 Grad.
 
 Mit dem Auswahlwerkzeug zieht man einen Teil des Bildes auf und verschiebt
@@ -81,6 +87,7 @@ nach.
 * `Ctrl+I` — die Farben umkehren
 * `S`, `P`, `B`, `A`, `E`, `F`, `I`, `L`, `R`, `O` — die Werkzeuge der Reihe nach
 * `X` — Primär- und Sekundärfarbe tauschen
+* `Tab` — ins Farbdock und durch seine Teile; `Escape` — zurück zum Bild
 * `+` / `-` — vergrößern oder verkleinern; `1` — Originalgröße; `Ctrl+0` — einpassen
 * `Ctrl` + Mausrad — um den Zeiger herum vergrößern oder verkleinern
 * Zwei Finger spreizen oder zusammenführen — stufenlos vergrößern oder verkleinern; auf einem Touchscreen folgt das Bild den Fingern

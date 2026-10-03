@@ -12,13 +12,14 @@
 //! and Escape-cancel, non-overlap with scrollbars), and the neutral scroll
 //! corner, across dark/light/high-contrast and scale.
 
+use tairix_colour::Rgba;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::IconKind;
 use tairix_icon::IconPicture;
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{round_rect_coverage, Color, Pixel, Surface};
-use tairix_theme::{Rgba, TextRole, Theme};
+use tairix_theme::{TextRole, Theme};
 
 use crate::damage::sink;
 use crate::state::{

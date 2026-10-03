@@ -38,10 +38,16 @@ Il pulsante principale (sinistro) dipinge con il colore principale e il
 pulsante centrale con il colore secondario; tenendo premuto Alt si preleva
 invece un colore. Gli strumenti sono selezione, matita, pennello,
 aerografo, gomma, riempimento, contagocce, linea, rettangolo ed ellisse; il
-pannello accanto all'immagine contiene i due colori, la tavolozza
-dell'immagine o i colori del desktop, e le impostazioni dello strumento in
-uso. Fare clic su un pozzetto di colore modifica quel colore; fare doppio
-clic su un colore della tavolozza modifica la tavolozza. Tenendo premuto
+pannello accanto all'immagine contiene la tavolozza dell'immagine o i
+colori del desktop e le impostazioni dello strumento in uso. Il pannello
+dei colori a destra contiene i colori principale e secondario e un
+selettore di colore per quello dei due scelto: un clic su un colore lo
+sceglie, poi lo si imposta per tonalità, saturazione e valore, per rosso,
+verde e blu, con la sua scrittura esadecimale e, dove l'immagine ammette la
+trasparenza, con la sua opacità. Accanto resta il colore che aveva, e un
+clic lo ripristina. In un'immagine con tavolozza i colori ne sono le voci,
+quindi il selettore modifica la tavolozza, e ogni modifica è un passo da
+annullare. Tenendo premuto
 Maiusc si disegna un quadrato, un cerchio o una linea a multipli di 45
 gradi.
 
@@ -80,6 +86,7 @@ conferma.
 * `Ctrl+I` — invertire i colori
 * `S`, `P`, `B`, `A`, `E`, `F`, `I`, `L`, `R`, `O` — gli strumenti, in ordine
 * `X` — scambiare i colori principale e secondario
+* `Tab` — nel pannello dei colori e tra le sue parti; `Escape` — di nuovo all'immagine
 * `+` / `-` — ingrandire o ridurre; `1` — dimensione reale; `Ctrl+0` — adattare
 * `Ctrl` + rotella — ingrandire o ridurre attorno al puntatore
 * Pizzicare con due dita — ingrandire o ridurre in modo continuo; su uno schermo tattile l'immagine segue le dita

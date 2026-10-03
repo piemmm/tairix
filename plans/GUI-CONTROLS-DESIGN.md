@@ -40,7 +40,8 @@ Switchboard is the flagship example because it exposes live task, job, recovery,
 Every control and every piece of window furniture named in this specification —
 buttons (Button, IconButton, SplitButton), boolean selectors (Toggle, Checkbox,
 Radio), value controls (Slider, Progress, Chart), text entry (TextField, SearchField,
-TextArea), choice entry (ComboBox), navigation and command surfaces (Menu, MenuItem,
+TextArea, NumberField), choice entry (ComboBox, PictureChoice, SwatchGrid,
+ColourPicker), navigation and command surfaces (Menu, MenuItem,
 Toolbar, Tabs, Breadcrumb, ActionRail), collection controls (ListRow, TableRow,
 TableCell, TableHeader, Card, Panel, MetricTile, StatusPill), record lists
 (FactList, Timeline), decision surfaces
@@ -2162,6 +2163,80 @@ imagine what each looks like.
   rectangle and the walk over every picture (`for_each_item_rect`) are one
   layout, so an owner deciding which pictures to render ahead and which to let
   go asks the same geometry the paint uses, once.
+
+### 11.44 SwatchGrid
+
+A `SwatchGrid` is a palette: wells of flat colour sharing their bounds evenly,
+row by row — a picture's palette, a terminal scheme's sixteen.
+
+- **Two marks, each optional.** A primary mark and, where the owner tracks one
+  beside it, a secondary; each reads by shape as well as colour, since a well's
+  own colour cannot be relied on for contrast. A colour no well holds marks no
+  well rather than the nearest. A translucent well shows over a checker.
+- **The owner holds the colours and the choice.** It adopts both without a
+  report; a release on the well the press began on moves the mark the owner
+  routed the press to, and reports only the two wells that changed.
+- **States as every control.** A disabled grid is veiled and takes nothing, a
+  denied or recovering one wears its bead, and the focus ring sits in the gap
+  round the primary mark — on the first well while none is marked.
+- **The keyboard walks wells.** Left and Right step a well, Up and Down a row in
+  its column, wrapping; with nothing marked, Right and Down mark the first and
+  Left and Up the last.
+
+### 11.45 NumberField
+
+A `NumberField` is a whole number between two bounds, typed or stepped: a
+`TextField` (§11.8) with the text family's plate, caret, selection and
+validation.
+
+- **Typing takes effect while it spells a number in range,** so what the value
+  drives follows the digits; anything else shows as invalid and moves nothing.
+  It takes only what can be part of a number — digits, and a minus sign where
+  the bounds reach below zero — and a paste holding anything else is refused
+  whole.
+- **Live and settled are distinct.** A digit is `Edited`; a step, Enter, Escape
+  taking typing back, and the focus leaving are each a whole interaction and
+  `Settled`, so typing `255` is three edits and one settle, and durable work
+  happens once (`AGENTS.md` §28).
+- **Steps.** Up and Down step a line, Page Up and Page Down a page, the wheel a
+  line a detent while the field has the keyboard. A commit holds a number past
+  a bound to it and replaces text that spells none with the value last held.
+- **Tab is the owner's,** so a field seated in a larger control passes the
+  focus on.
+
+### 11.46 ColourPicker
+
+A `ColourPicker` edits one colour: a saturation and value plane, a hue strip,
+an alpha strip where the owner edits opacity, the earlier colour, a hex field,
+and `NumberField`s for hue, saturation, value, red, green, blue and alpha. The
+coordinates are `lib/colour`'s, exact for every 8-bit colour.
+
+- **One colour, several views of it.** Every part shows the same colour and a
+  change in one reaches the others in the same event. A grey's hue and black's
+  saturation, which the colour does not hold, are kept from what the picker
+  showed, so dragging through black and back finds the hue it left.
+- **Live and settled are distinct.** A drag sample and a valid keystroke in a
+  field answer `Edited`; a step, a drag's end and a field's commit answer
+  `Settled` where the colour moved — even back to where it began, so an owner
+  applying live edits hears where they stopped — and `Taken` where it never
+  did. Escape abandons a drag, putting back the colour it began from, or takes
+  back typing. The owner does durable work at the settle alone.
+- **The earlier colour is the way back.** The owner shows what the colour was
+  before the user began on it; a click on it, or Enter or Space while it has
+  the keyboard, takes it back.
+- **The keyboard walks parts.** Tab and Shift+Tab move between the parts shown
+  and answer `Ignored` past either end, so the owner carries the focus on. The
+  arrows step the plane's saturation and value or a strip, Shift ten times as
+  far, Home and End an end. A field claims every key but Tab and the owner's
+  chords, so typing reaches no shortcut while Ctrl+S still saves; Ctrl+A
+  selects the field's text.
+- **It fits the room it is given.** Side by side where the width holds the
+  plane, the strips and the fields; stacked otherwise, dropping the fields'
+  grid and then the hex row before the plane. One layout serves paint, hit
+  testing and the damage a change reports, and its lengths are measured once
+  per scale and face.
+- **One bead.** The picker's fields take its enablement and authority, and the
+  picker alone wears the authority bead.
 
 ---
 

@@ -5,11 +5,12 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use tairix_colour::Rgba;
 use tairix_font::TextShadow;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{Key, NamedKey};
 use tairix_raster::{Color, Pixel};
-use tairix_theme::{Rgba, Theme};
+use tairix_theme::Theme;
 
 use crate::layout::Prompt;
 use crate::surface::{chrome_damage, text_shadow, AuthSurface, Backdrop};

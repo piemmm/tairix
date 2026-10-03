@@ -2,19 +2,23 @@
 //! hit-test agrees on.
 //!
 //! ```text
-//! +------------------------------------------------------------+
-//! | [tools ....................] | [zoom] [grid]               |
-//! +-----------+------------------------------------------+-----+
-//! | [#][#]    |                                          |  ^  |
-//! | palette   |              the picture                 |  |  |
-//! | tool      |                                          |     |
-//! | settings  |                                          |     |
-//! +-----------+------------------------------------------+-----+
-//! |           |==========================================|     |
-//! +------------------------------------------------------------+
-//! | 640 × 480, 256 colours  (12, 34) #FF00AA   sprite  100%     |
-//! +------------------------------------------------------------+
+//! +----------------------------------------------------------------------+
+//! | [tools ....................] | [zoom] [grid]                         |
+//! +-----------+--------------------------------------+---+--------------+
+//! | palette   |                                      | ^ | [#][#] which |
+//! | tool      |            the picture               | | | [plane  ]|H||
+//! | settings  |                                      |   | [#] #ff00aa  |
+//! |           |                                      |   | H S V  R G B |
+//! +-----------+--------------------------------------+---+              |
+//! |           |======================================|   |              |
+//! +----------------------------------------------------------------------+
+//! | 640 × 480, 256 colours  (12, 34) #ff00aa   sprite  100%               |
+//! +----------------------------------------------------------------------+
 //! ```
+//!
+//! The panel down the left holds the palette and the tool's settings; the
+//! colour dock down the right holds the two colour wells and the picker
+//! editing the one chosen.
 //!
 //! Every extent comes from the theme's metrics at the desktop scale and the
 //! face's own measures. Bands are claimed from the edges inward, so however
@@ -41,6 +45,10 @@ pub const WINDOW_SIZE: (u32, u32) = (900, 640);
 /// full palette, each large enough to hit.
 const PANEL_WIDTH: u32 = 200;
 
+/// The colour dock's width, in logical pixels: room for the picker with its
+/// fields stacked beneath its plane.
+const DOCK_WIDTH: u32 = 232;
+
 /// The current-colour wells' band, in logical pixels.
 const WELLS_HEIGHT: u32 = 52;
 
@@ -54,14 +62,17 @@ pub struct Faces {
     pub status: BitmapFont,
 }
 
-/// How much of the panel its content needs, measured for the panel's inner
-/// width ([`Layout::panel_inner_width`]).
+/// How much of the panel and the dock their content needs, measured for
+/// their inner widths ([`Layout::panel_inner_width`],
+/// [`Layout::dock_inner_width`]).
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct PanelNeeds {
     /// The palette grid's height.
     pub swatches: u32,
     /// The tool settings' height.
     pub settings: u32,
+    /// The colour picker's height.
+    pub picker: u32,
 }
 
 /// The window's resolved geometry.
@@ -71,9 +82,11 @@ pub struct Layout {
     toolbar: Rect,
     tools: Rect,
     panel: Rect,
-    wells: Rect,
     swatches: Rect,
     settings: Rect,
+    dock: Rect,
+    wells: Rect,
+    picker: Rect,
     canvas: Rect,
     vertical_bar: Rect,
     horizontal_bar: Rect,
@@ -86,8 +99,8 @@ pub struct Layout {
 }
 
 impl Layout {
-    /// The geometry of a `width`×`height` client area whose panel holds
-    /// what `needs` states.
+    /// The geometry of a `width`×`height` client area whose panel and dock
+    /// hold what `needs` states.
     #[must_use]
     pub fn for_window(
         width: u32,
@@ -108,7 +121,9 @@ impl Layout {
         let (position, message, sprite, zoom) = status_slots(status, faces.status, gap);
         let panel_width = scale.scale_length(PANEL_WIDTH).min(rest.width / 2);
         let panel = rest.take_left(panel_width);
-        let (wells, swatches, settings) = panel_slots(panel, gap, scale, needs);
+        let (swatches, settings) = panel_slots(panel, gap, needs);
+        let dock = rest.take_right(scale.scale_length(DOCK_WIDTH).min(rest.width / 2));
+        let (wells, picker) = dock_slots(dock, gap, scale, needs);
         let under = rest.take_bottom(bar);
         let vertical_bar = rest.take_right(bar);
         let corner = if under.is_empty() || vertical_bar.is_empty() {
@@ -127,9 +142,11 @@ impl Layout {
             toolbar: toolbar_band,
             tools,
             panel,
-            wells,
             swatches,
             settings,
+            dock,
+            wells,
+            picker,
             canvas: rest,
             vertical_bar,
             horizontal_bar,
@@ -150,6 +167,14 @@ impl Layout {
             .saturating_sub(gap(theme, scale) * 2)
     }
 
+    /// The width the dock's content is laid out across.
+    #[must_use]
+    pub fn dock_inner_width(theme: &Theme, scale: Scale) -> u32 {
+        scale
+            .scale_length(DOCK_WIDTH)
+            .saturating_sub(gap(theme, scale) * 2)
+    }
+
     /// The smallest client area worth laying out: the bands around a canvas
     /// of a few dozen pixels, the toolbar able to show at least one tool.
     #[must_use]
@@ -157,8 +182,9 @@ impl Layout {
         let gap = gap(theme, scale);
         let bar = scale.scale_length(theme.metrics().scrollbar_breadth).max(1);
         let canvas = scale.scale_length(MIN_CANVAS);
-        let width = (scale.scale_length(PANEL_WIDTH) + canvas + bar)
-            .max(toolbar.min_width(scale, theme) + gap * 2);
+        let width =
+            (scale.scale_length(PANEL_WIDTH) + canvas + bar + scale.scale_length(DOCK_WIDTH))
+                .max(toolbar.min_width(scale, theme) + gap * 2);
         let height = strip_height(theme, scale)
             + gap * 2
             + status_height(faces, gap)
@@ -191,10 +217,22 @@ impl Layout {
         self.panel
     }
 
-    /// The current-colour wells.
+    /// The colour dock on the canvas's other side.
+    #[must_use]
+    pub const fn dock(&self) -> Rect {
+        self.dock
+    }
+
+    /// The current-colour wells, atop the dock.
     #[must_use]
     pub const fn wells(&self) -> Rect {
         self.wells
+    }
+
+    /// The colour picker, beneath the wells.
+    #[must_use]
+    pub const fn picker(&self) -> Rect {
+        self.picker
     }
 
     /// The primary colour's well, overlapping the secondary's.
@@ -218,7 +256,7 @@ impl Layout {
         .intersection(&self.wells)
     }
 
-    /// Where the primary colour is spelled out.
+    /// Where the colour being edited is named.
     #[must_use]
     pub fn well_caption(&self) -> Rect {
         let side = self.well_side();
@@ -317,15 +355,24 @@ fn status_height(faces: Faces, gap: u32) -> u32 {
     faces.status.line_height().max(1) + gap * 2
 }
 
-/// The panel's wells, palette and settings, top to bottom, a gap between.
-fn panel_slots(panel: Rect, gap: u32, scale: Scale, needs: PanelNeeds) -> (Rect, Rect, Rect) {
+/// The panel's palette and settings, top to bottom, a gap between.
+fn panel_slots(panel: Rect, gap: u32, needs: PanelNeeds) -> (Rect, Rect) {
     let mut rest = panel.inset(gap);
-    let wells = rest.take_top(scale.scale_length(WELLS_HEIGHT));
-    let _ = rest.take_top(gap);
     let swatches = rest.take_top(needs.swatches);
     let _ = rest.take_top(gap);
     let settings = rest.take_top(needs.settings);
-    (wells, swatches, settings)
+    (swatches, settings)
+}
+
+/// The dock's wells and picker, top to bottom, a gap between: a dock too
+/// short for the whole picker gives it what is left, which it lays out by
+/// giving up its fields before its plane.
+fn dock_slots(dock: Rect, gap: u32, scale: Scale, needs: PanelNeeds) -> (Rect, Rect) {
+    let mut rest = dock.inset(gap);
+    let wells = rest.take_top(scale.scale_length(WELLS_HEIGHT));
+    let _ = rest.take_top(gap);
+    let picker = rest.take_top(needs.picker);
+    (wells, picker)
 }
 
 /// The status band's position slot, message slot, sprite slot and zoom

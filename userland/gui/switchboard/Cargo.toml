@@ -103,6 +103,8 @@ tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0", features =
 # fixtures, so the screen's tests assert against the identical heavy-contrast
 # theme every control's own suite uses rather than a private copy.
 [dev-dependencies]
+# The colour value the tests name a theme role's expected pixels in.
+tairix-colour = { path = "../../../lib/colour", version = "=0.0.0" }
 tairix-controls = { path = "../../../lib/controls", version = "=0.0.0", features = [
     "test-support",
 ] }

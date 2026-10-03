@@ -14,17 +14,18 @@ use alloc::vec::Vec;
 
 use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
-use tairix_raster::{Color, Surface, SUBPIXEL};
+use tairix_raster::{Color, Ring, RingInk, Surface, SUBPIXEL};
 use tairix_theme::Theme;
 
 use crate::checker::Checker;
 use crate::damage;
-use crate::paint::{inset, plate_border};
+use crate::paint::{inset, paint_bead, plate_border, resolve_bead, surface_rect, withheld};
+use crate::state::{ControlDisposition, ControlState, RenderInvariant};
 
 /// Which of a grid's two marks an interaction moves.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum SwatchMark {
-    /// The selection every grid carries.
+    /// The selection a grid carries.
     Primary,
     /// A second choice an owner may track beside it, such as a background
     /// colour beside a foreground one.
@@ -44,17 +45,20 @@ pub enum SwatchAction {
 }
 
 /// A grid of colour wells.
+///
+/// Equal grids draw the same pixels: the pointer and the press latch are
+/// hit-testing bookkeeping no render path reads.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SwatchGrid {
     colours: Vec<Color>,
     columns: usize,
-    primary: usize,
+    primary: Option<usize>,
     secondary: Option<usize>,
-    /// The last pointer position: hit-testing input, never a drawn property.
-    pointer: Point,
+    state: ControlState,
+    pointer: RenderInvariant<Point>,
     /// The well a primary press armed, and the mark it will move if the
     /// release lands over the same well.
-    armed: Option<(usize, SwatchMark)>,
+    armed: RenderInvariant<Option<(usize, SwatchMark)>>,
 }
 
 impl SwatchGrid {
@@ -62,13 +66,15 @@ impl SwatchGrid {
     /// no secondary mark.
     #[must_use]
     pub fn new(columns: usize, colours: Vec<Color>) -> Self {
+        let primary = (!colours.is_empty()).then_some(0);
         Self {
             colours,
             columns: columns.max(1),
-            primary: 0,
+            primary,
             secondary: None,
-            pointer: Point::ORIGIN,
-            armed: None,
+            state: ControlState::idle(),
+            pointer: RenderInvariant::new(Point::ORIGIN),
+            armed: RenderInvariant::new(None),
         }
     }
 
@@ -117,14 +123,14 @@ impl SwatchGrid {
         self.colours = colours;
         self.columns = columns.max(1);
         let len = self.colours.len();
-        self.primary = self.primary.min(len.saturating_sub(1));
+        self.primary = self.primary.filter(|&index| index < len);
         self.secondary = self.secondary.filter(|&index| index < len);
-        self.armed = self.armed.filter(|&(index, _)| index < len);
+        *self.armed = self.armed.filter(|&(index, _)| index < len);
     }
 
-    /// The well the primary mark is on.
+    /// The well the primary mark is on, if any is marked.
     #[must_use]
-    pub const fn selected(&self) -> usize {
+    pub const fn selected(&self) -> Option<usize> {
         self.primary
     }
 
@@ -134,19 +140,33 @@ impl SwatchGrid {
         self.secondary
     }
 
-    /// Put the primary mark on well `index` without reporting, for an owner
-    /// rebuilding the grid and repainting it whole; an out-of-range index is
-    /// ignored.
-    pub fn adopt_selected(&mut self, index: usize) {
-        if index < self.colours.len() {
-            self.primary = index;
-        }
+    /// Put the primary mark on well `index`, or on none, without reporting,
+    /// for an owner whose choice is no longer one of the wells; an
+    /// out-of-range index marks none.
+    pub fn adopt_selected(&mut self, index: Option<usize>) {
+        self.primary = index.filter(|&index| index < self.colours.len());
     }
 
     /// Show the secondary mark on well `index`, or not at all, without
     /// reporting; an out-of-range index hides it.
     pub fn adopt_secondary(&mut self, index: Option<usize>) {
         self.secondary = index.filter(|&index| index < self.colours.len());
+    }
+
+    /// The grid's composed state.
+    #[must_use]
+    pub const fn state(&self) -> ControlState {
+        self.state
+    }
+
+    /// Replace the grid's composed state; the owner reports the repaint.
+    pub fn set_state(&mut self, state: ControlState) {
+        self.state = state;
+    }
+
+    /// Set the grid's keyboard focus; the owner reports the repaint.
+    pub fn set_focused(&mut self, focused: bool) {
+        self.state.focus.focused = focused;
     }
 
     /// The height the grid needs with each well the theme's control height:
@@ -200,11 +220,35 @@ impl SwatchGrid {
         (index < self.colours.len()).then_some(index)
     }
 
+    /// The well the keyboard acts on: the primary mark's, or the first.
+    fn cursor(&self) -> Option<usize> {
+        self.primary.or((!self.colours.is_empty()).then_some(0))
+    }
+
     /// Paint the grid into `surface` at `bounds`.
     pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        if withheld(surface, bounds) {
+            return;
+        }
+        let focus = self.state.focus.focused.then(|| self.cursor()).flatten();
         for index in 0..self.colours.len() {
-            if let Some(cell) = self.cell_rect(bounds, index) {
-                self.paint_well(surface, index, cell, scale, theme);
+            let Some((x, y, w, h)) = self.cell_rect(bounds, index).and_then(surface_rect) else {
+                continue;
+            };
+            if surface.admits(x, y, w, h) {
+                self.paint_well(
+                    surface,
+                    index,
+                    (x, y, w, h),
+                    focus == Some(index),
+                    (scale, theme),
+                );
+            }
+        }
+        if let Some((colour, shape)) = resolve_bead(theme, self.state) {
+            if let Some((x, y, w, _)) = surface_rect(bounds) {
+                let size = scale.scale_length(theme.metrics().bead_size).max(3).min(w);
+                paint_bead(surface, x + w - size, y, size, colour, shape);
             }
         }
     }
@@ -213,17 +257,13 @@ impl SwatchGrid {
         &self,
         surface: &mut Surface,
         index: usize,
-        cell: Rect,
-        scale: Scale,
-        theme: &Theme,
+        (cx, cy, cw, ch): (u32, u32, u32, u32),
+        focused: bool,
+        (scale, theme): (Scale, &Theme),
     ) {
-        let Some((cx, cy)) = cell.surface_origin() else {
-            return;
-        };
-        let margin = (well_gap(scale, theme) / 2)
-            .min(cell.width / 8)
-            .min(cell.height / 8);
-        let Some((x, y, w, h)) = inset(cx, cy, cell.width, cell.height, margin) else {
+        let palette = theme.palette();
+        let margin = (well_gap(scale, theme) / 2).min(cw / 8).min(ch / 8);
+        let Some((x, y, w, h)) = inset(cx, cy, cw, ch, margin) else {
             return;
         };
         let Some(colour) = self.colours.get(index).copied() else {
@@ -238,21 +278,11 @@ impl SwatchGrid {
             .min(h / 4);
         surface.fill_round_rect(x, y, w, h, radius, colour);
         let border = plate_border(theme, scale).min(w / 4).min(h / 4).max(1);
-        outline(
-            surface,
-            (x, y, w, h),
-            border,
-            Color::from(theme.palette().rim),
-        );
+        outline(surface, (x, y, w, h), border, Color::from(palette.rim));
         let contrast = contrast_for(colour, theme);
-        if index == self.primary {
+        if self.primary == Some(index) {
             let ring = border.saturating_mul(2).min(w / 3).min(h / 3).max(1);
-            outline(
-                surface,
-                (x, y, w, h),
-                ring,
-                Color::from(theme.palette().rim_active),
-            );
+            outline(surface, (x, y, w, h), ring, Color::from(palette.rim_active));
             paint_diamond(surface, (x, y, w, h), contrast);
         }
         if self.secondary == Some(index) {
@@ -261,10 +291,25 @@ impl SwatchGrid {
                 outline(surface, square, border, contrast);
             }
         }
+        if self.state.disposition() == ControlDisposition::DisabledByState {
+            let veil = Color::from(palette.surface.with_alpha(128));
+            surface.fill_round_rect(x, y, w, h, radius, veil);
+        }
+        // In the margin round the well, so it never covers the mark inside it.
+        if focused && margin > 0 {
+            surface.wash_ring(
+                cx,
+                cy,
+                cw,
+                ch,
+                Ring::uniform(radius.saturating_add(margin), border.min(margin)),
+                RingInk::Solid(Color::from(palette.rim_active)),
+            );
+        }
     }
 
     /// Feed a pointer event: a primary press and release over the same well
-    /// moves `mark` onto it.
+    /// moves `mark` onto it. A grid that is not actionable takes nothing.
     ///
     /// The press latch and the pointer position are hit-testing bookkeeping
     /// and draw nothing, so only a mark that moves reports.
@@ -276,14 +321,18 @@ impl SwatchGrid {
         damage: &mut Region,
     ) -> Option<SwatchAction> {
         if let InputEvent::PointerMoved { to } = event {
-            self.pointer = *to;
+            *self.pointer = *to;
         }
-        let over = self.well_at(bounds, self.pointer);
+        if !self.state.is_actionable() {
+            *self.armed = None;
+            return None;
+        }
+        let over = self.well_at(bounds, *self.pointer);
         match event {
             InputEvent::PointerPressed {
                 button: PointerButton::Primary,
             } => {
-                self.armed = over.map(|index| (index, mark));
+                *self.armed = over.map(|index| (index, mark));
                 None
             }
             InputEvent::PointerReleased {
@@ -298,26 +347,28 @@ impl SwatchGrid {
         }
     }
 
-    /// Feed a key: Left and Right move the primary mark one well, wrapping
-    /// from the last well to the first; Up and Down move it one row within
-    /// its column, wrapping to the column's other end, which a short last row
-    /// may not reach.
+    /// Feed a key to a focused, actionable grid: Left and Right move the
+    /// primary mark one well, wrapping from the last well to the first; Up
+    /// and Down move it one row within its column, wrapping to the column's
+    /// other end, which a short last row may not reach. With no well marked,
+    /// Right and Down mark the first and Left and Up the last.
     pub fn on_key(&mut self, key: Key, bounds: Rect, damage: &mut Region) -> Option<SwatchAction> {
         let len = self.colours.len();
-        if len == 0 {
+        if len == 0 || !self.state.focus.focused || !self.state.is_actionable() {
             return None;
         }
         let columns = self.columns.max(1);
-        let column = self.primary % columns;
-        let next = match key {
-            Key::Named(NamedKey::Right) => (self.primary + 1) % len,
-            Key::Named(NamedKey::Left) => (self.primary + len - 1) % len,
-            Key::Named(NamedKey::Down) => match self.primary + columns {
+        let next = match (key, self.primary) {
+            (Key::Named(NamedKey::Right | NamedKey::Down), None) => 0,
+            (Key::Named(NamedKey::Left | NamedKey::Up), None) => len - 1,
+            (Key::Named(NamedKey::Right), Some(at)) => (at + 1) % len,
+            (Key::Named(NamedKey::Left), Some(at)) => (at + len - 1) % len,
+            (Key::Named(NamedKey::Down), Some(at)) => match at + columns {
                 below if below < len => below,
-                _ => column,
+                _ => at % columns,
             },
-            Key::Named(NamedKey::Up) => self.primary.checked_sub(columns).unwrap_or_else(|| {
-                let bottom = (len - 1) / columns * columns + column;
+            (Key::Named(NamedKey::Up), Some(at)) => at.checked_sub(columns).unwrap_or_else(|| {
+                let bottom = (len - 1) / columns * columns + at % columns;
                 if bottom < len {
                     bottom
                 } else {
@@ -331,7 +382,9 @@ impl SwatchGrid {
 
     /// Move `mark` onto well `index`, reporting the well it left and the one
     /// it arrives on. A re-selection is still a completed interaction, so the
-    /// action is always answered; only the report is conditional.
+    /// action is always answered; only the report is conditional. A focused
+    /// grid's focus ring follows the primary mark, so the first well, which
+    /// carries the ring while none is marked, reports too.
     fn select(
         &mut self,
         mark: SwatchMark,
@@ -340,7 +393,7 @@ impl SwatchGrid {
         damage: &mut Region,
     ) -> SwatchAction {
         let from = match mark {
-            SwatchMark::Primary => Some(self.primary),
+            SwatchMark::Primary => self.primary.or(self.cursor()),
             SwatchMark::Secondary => self.secondary,
         };
         damage::move_mark(
@@ -349,8 +402,13 @@ impl SwatchGrid {
             |well| self.cell_rect(bounds, well),
             damage,
         );
+        if mark == SwatchMark::Primary && self.primary.is_none() {
+            if let Some(rect) = self.cell_rect(bounds, index) {
+                damage.add(rect);
+            }
+        }
         match mark {
-            SwatchMark::Primary => self.primary = index,
+            SwatchMark::Primary => self.primary = Some(index),
             SwatchMark::Secondary => self.secondary = Some(index),
         }
         SwatchAction::Selected { mark, index }

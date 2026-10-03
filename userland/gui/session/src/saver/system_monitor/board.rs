@@ -21,6 +21,7 @@ use tairix_abi::switchboard_ipc::{
     MachineNetwork, MachineScope, MachineStorage, MachineTasks, Permille,
 };
 use tairix_abi::sysinfo::{LoadAverage, VolumeHealth};
+use tairix_colour::Rgba;
 use tairix_controls::{
     blend_area, block, paint_run, run_width, Chart, CompositionBar, CompositionSegment, MeterValue,
     MetricInstrument, MetricLayout, MetricTile, PressureKind, PressureState, ProgressValue,
@@ -32,7 +33,7 @@ use tairix_procinfo::display::{
     byte_parts, format_bytes, format_duration, format_rate, percent, whole_percent,
 };
 use tairix_procinfo::{format_load, memory_composition, volume_health_name, MemoryPart};
-use tairix_theme::{Rgba, SignalRole, TextRole, Theme};
+use tairix_theme::{SignalRole, TextRole, Theme};
 use tairix_wm::{Color, Rect, Scale, Surface};
 
 use super::verdict::Verdict;

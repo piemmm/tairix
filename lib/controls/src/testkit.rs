@@ -9,11 +9,12 @@
 //! these controls exercises the same two axes and must reach for this one
 //! fixture rather than growing its own copy.
 
+use tairix_colour::Rgba;
 use tairix_font::BitmapFont;
 use tairix_geometry::Scale;
 use tairix_input::{Key, Modifiers};
 use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::{Contrast, Fonts, Rgba, TextRole, Theme};
+use tairix_theme::{Contrast, Fonts, TextRole, Theme};
 
 use crate::text::Keystroke;
 

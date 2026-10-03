@@ -24,7 +24,7 @@ pub enum Tool {
     /// Fill the area joined to a pixel.
     Fill,
     /// Take a pixel's colour.
-    Picker,
+    Eyedropper,
     /// Draw a straight line.
     Line,
     /// Draw a rectangle.
@@ -42,7 +42,7 @@ impl Tool {
         Self::Spray,
         Self::Eraser,
         Self::Fill,
-        Self::Picker,
+        Self::Eyedropper,
         Self::Line,
         Self::Rectangle,
         Self::Ellipse,
@@ -58,7 +58,7 @@ impl Tool {
             Self::Spray => IconKind::ToolSpray,
             Self::Eraser => IconKind::ToolEraser,
             Self::Fill => IconKind::ToolFill,
-            Self::Picker => IconKind::ToolPicker,
+            Self::Eyedropper => IconKind::ToolEyedropper,
             Self::Line => IconKind::ToolLine,
             Self::Rectangle => IconKind::ToolRectangle,
             Self::Ellipse => IconKind::ToolEllipse,
@@ -75,7 +75,7 @@ impl Tool {
             Self::Spray => "Spray (A)",
             Self::Eraser => "Eraser (E)",
             Self::Fill => "Fill (F)",
-            Self::Picker => "Colour picker (I)",
+            Self::Eyedropper => "Eyedropper (I)",
             Self::Line => "Line (L)",
             Self::Rectangle => "Rectangle (R)",
             Self::Ellipse => "Ellipse (O)",
@@ -92,7 +92,7 @@ impl Tool {
             Self::Spray => "Spray",
             Self::Eraser => "Eraser",
             Self::Fill => "Fill",
-            Self::Picker => "Colour picker",
+            Self::Eyedropper => "Eyedropper",
             Self::Line => "Line",
             Self::Rectangle => "Rectangle",
             Self::Ellipse => "Ellipse",
@@ -109,7 +109,7 @@ impl Tool {
             'a' => Self::Spray,
             'e' => Self::Eraser,
             'f' => Self::Fill,
-            'i' => Self::Picker,
+            'i' => Self::Eyedropper,
             'l' => Self::Line,
             'r' => Self::Rectangle,
             'o' => Self::Ellipse,
@@ -127,7 +127,7 @@ impl Tool {
     /// The settings the tool's panel offers.
     const fn settings(self) -> &'static [Setting] {
         match self {
-            Self::Select | Self::Pencil | Self::Picker => &[],
+            Self::Select | Self::Pencil | Self::Eyedropper => &[],
             Self::Brush | Self::Eraser | Self::Line => &[Setting::Size, Setting::Smooth],
             Self::Spray => &[Setting::Size, Setting::Flow],
             Self::Fill => &[Setting::Tolerance],

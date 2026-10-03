@@ -1,0 +1,27 @@
+[package]
+name = "tairix-colour"
+description = "TAIRiX sRGB colour: the 8-bit opaque and straight-alpha colour value, the sRGB transfer, the HSV and HSL coordinates, and the hexadecimal notation every colour field, settings document and SVG asset spells colours in."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# `legibility`, the WCAG contrast measure tests hold colours to. Host tests
+# only: it links `std`, so no shipping build can enable it.
+test-util = []
+
+[dependencies]
+# TAIRiX's own libm, for the exponent of the sRGB transfer and the floor that
+# wraps a CSS angle onto the colour circle.
+tairix-util = { path = "../util", version = "=0.0.0" }
+
+[dev-dependencies]
+# The seeded, budgeted stream the fuzz harness draws hex spellings and
+# coordinates from.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

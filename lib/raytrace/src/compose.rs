@@ -22,9 +22,9 @@ use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::f64::consts::{FRAC_PI_2, TAU};
 
+use tairix_colour::srgb_to_linear;
 use tairix_parallel::JobRunner;
 use tairix_rng::{NonCryptoRng, RandU64};
-use tairix_theme::color::srgb_to_linear;
 use tairix_util::mathf;
 
 use crate::camera::Camera;

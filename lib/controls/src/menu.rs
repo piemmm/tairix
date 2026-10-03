@@ -23,12 +23,13 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::window_ipc::{AppMenu, AppMenuItemId, AppMenuMark, AppMenuRole, AppMenuRowView};
+use tairix_colour::Rgba;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::{glyph_mask, IconKind, IconPicture};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, RingInk, Surface};
-use tairix_theme::{Palette, Rgba, TextRole, Theme};
+use tairix_theme::{Palette, TextRole, Theme};
 
 use crate::damage;
 use crate::paint::{

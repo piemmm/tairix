@@ -10,6 +10,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use tairix_colour::Rgba;
 use tairix_controls::{
     ActivityState, Aspect, AuthorityState, Button, ButtonContent, Card, Checkbox, ComboBox,
     ControlRole, ControlState, Dialog, FieldControl, FieldGroup, FieldRow, FlagSet, HelpTip,
@@ -19,7 +20,6 @@ use tairix_controls::{
     TextField, Toggle, Toolbar, Tooltip, ValidationState, WindowControl, WindowControlKind,
 };
 use tairix_icon::IconKind;
-use tairix_theme::Rgba;
 
 use crate::gallery::{DemoItem, GalleryTab};
 use crate::sidebar::SidebarDemo;

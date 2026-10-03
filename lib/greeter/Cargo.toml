@@ -20,6 +20,8 @@ tairix-geometry = { path = "../geometry", version = "=0.0.0" }
 # The shared design tokens: every colour, metric, and text size the surface
 # draws is resolved from the active theme, never hard-coded.
 tairix-theme = { path = "../theme", version = "=0.0.0" }
+# The colour a backdrop and a fade are authored in.
+tairix-colour = { path = "../colour", version = "=0.0.0" }
 # The single premultiplied-alpha rasteriser the frame is painted into.
 tairix-raster = { path = "../raster", version = "=0.0.0" }
 # The panel and the masked text field. The bead rendering that leaks no

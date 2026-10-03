@@ -12,12 +12,13 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_colour::Rgba;
 use tairix_font::BitmapFont;
 use tairix_geometry::{GridFill, GridRun, Point, Rect, Region, Scale};
 use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Ring, RingInk, Surface};
-use tairix_theme::{Rgba, TextRole, Theme};
+use tairix_theme::{TextRole, Theme};
 
 use crate::paint::{
     foreground, heavy_contrast, paint_bead, paint_icon_slot, paint_run, plate_border,

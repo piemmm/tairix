@@ -19,6 +19,8 @@ tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # theme out to the rest of the desktop. `lib/theme` is the one definition the
 # window manager, taskbar, and apps all read.
 tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
+# The colour value the theme's palette roles are authored in.
+tairix-colour = { path = "../../../lib/colour", version = "=0.0.0" }
 # The taskbar model: the session owns it so it can re-theme the bar in
 # place on a runtime switch and hand its program-library popup the resolved
 # catalog the bar cannot read itself. Composing two GUI crates is the

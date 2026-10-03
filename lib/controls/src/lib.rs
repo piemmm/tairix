@@ -280,6 +280,19 @@
 //! [`FieldGroup`] seats one beneath its rows, so a settings pane reaches it
 //! with the same keyboard walk, pointer routing and reveal as a row.
 //!
+//! The [`number`] module is the number field — [`NumberField`]: an integer
+//! between two bounds, typed live where the digits spell a number in range,
+//! stepped by keys and a focused field's wheel, and settled by a step, Enter,
+//! or its owner's commit as the focus leaves.
+//!
+//! The [`swatch_grid`] module is [`SwatchGrid`], the grid of colour wells a
+//! scheme editor and an image editor's palette are, and the
+//! [`colour_picker`] module is [`ColourPicker`], one colour edited by its
+//! hue, saturation and value plane, its hue and opacity strips, its hex
+//! notation and its number fields, over `lib/colour`'s exact coordinates. It
+//! reports [`PickerOutcome::Edited`] live and [`PickerOutcome::Settled`] once
+//! an interaction ends, as a slider does.
+//!
 //! The [`stack`] module is the plate column those groups are stacked down: the
 //! one placement, measurement and reveal every surface that stacks plates
 //! reads, so none carries its own copy of the gaps between them.
@@ -300,6 +313,7 @@ pub mod button;
 pub mod chart;
 pub mod checker;
 pub mod collection;
+pub mod colour_picker;
 pub mod combo;
 pub mod credential;
 pub mod damage;
@@ -309,6 +323,7 @@ pub mod form;
 pub mod menu;
 pub mod metric;
 pub mod nav;
+pub mod number;
 mod paint;
 pub mod picture;
 pub mod rail;
@@ -335,6 +350,7 @@ pub use collection::{
     Card, CardAction, CellAlign, HeaderAction, HeaderColumn, IconTile, ListRow, Panel, PanelAction,
     PanelEdge, RowAction, SortOrder, TableCell, TableHeader, TableRow,
 };
+pub use colour_picker::{ColourPicker, PickerOutcome};
 pub use combo::{ComboAction, ComboBox};
 pub use credential::{
     CredentialAction, CredentialSheet, CREDENTIAL_HEIGHT, CREDENTIAL_NOT_STARTED_REASON,
@@ -354,6 +370,7 @@ pub use metric::{
     MetricTile, StatusPill, MAX_COMPOSITION_SEGMENTS,
 };
 pub use nav::{Breadcrumb, BreadcrumbAction, Crumb};
+pub use number::{NumberAction, NumberField};
 pub use paint::{
     blend_area, fill_area, ground_fill, inset, paint_framed_surface_plate, paint_icon_slot,
     paint_run, paint_surface_plate, paint_titled_surface_plate, plate_border, run_width, withheld,
@@ -413,6 +430,8 @@ mod menu_tests;
 mod metric_tests;
 #[cfg(test)]
 mod nav_tests;
+#[cfg(test)]
+mod number_tests;
 #[cfg(test)]
 mod paint_tests;
 #[cfg(test)]

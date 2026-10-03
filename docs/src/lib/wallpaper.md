@@ -181,9 +181,9 @@ rather than costing the reader every other key in their document.
 A colour is written as **bare** hex digits — `112233`, never `#112233`. The
 document's own comment grammar cuts a line at the first `#`, so a
 `#`-prefixed colour would be truncated away before any colour parser saw it.
-There is therefore exactly one spelling of a colour in the crate:
-`Rgb::from_hex` reads bare digits and `Rgb::to_hex` writes them, so a
-consumer cannot pick a spelling the document cannot hold.
+There is therefore exactly one spelling of a colour in the document:
+`lib/colour`'s `Rgb::from_hex` reads exactly six bare digits and `Rgb::hex`
+writes them, so a consumer cannot pick a spelling the document cannot hold.
 
 `render` always emits **every** key in `SettingsKey::ALL` order, including a
 key still at its default, so the document a user opens always shows the whole
@@ -330,7 +330,7 @@ every source pixel at 1:1 and so needs the native size.
 - `WallpaperChoice::{None, Image}`, `WallpaperPath::{new, as_str}`,
   `WallpaperPathError::{TooLong, Malformed}` — the validated wallpaper value.
 - `WallpaperFit::{Fill, Fit, Stretch, Centre, Tile}`,
-  `Backdrop::{Theme, Colour}`, `Rgb::{new, from_hex, to_hex}`,
+  `Backdrop::{Theme, Colour}` over `tairix_colour::Rgb`,
   `IconFlow::{Leading, Trailing}`, `IconSort::{Name, Kind, Size, Date}`,
   `CursorSize::{Normal, Large, Larger, Largest, percent, side}` — the
   closed value vocabularies.

@@ -526,21 +526,24 @@ pub(crate) fn mix(from: Pixel, to: Pixel, weight: u8, bias: u32) -> Pixel {
     }
 }
 
-impl From<tairix_theme::Rgba> for Color {
-    /// Adopt a theme colour token as a straight-alpha rasteriser colour.
-    ///
-    /// The theme owns the authored colour *data*; the rasteriser owns the
-    /// premultiplied-alpha arithmetic. This is the one edge where the two
-    /// meet, so the colour algebra is never duplicated into the theme
-    /// crate. The channel layout is identical, so the
-    /// conversion is a field move.
-    fn from(rgba: tairix_theme::Rgba) -> Self {
+impl From<tairix_colour::Rgba> for Color {
+    /// A colour value as a straight-alpha rasteriser colour: the one edge
+    /// where an authored colour meets the compositing algebra. The channel
+    /// layout is identical, so the conversion is a field move.
+    fn from(rgba: tairix_colour::Rgba) -> Self {
         Self {
             r: rgba.r,
             g: rgba.g,
             b: rgba.b,
             a: rgba.a,
         }
+    }
+}
+
+impl From<tairix_colour::Rgb> for Color {
+    /// An opaque colour value as an opaque rasteriser colour.
+    fn from(rgb: tairix_colour::Rgb) -> Self {
+        Self::rgb(rgb.r, rgb.g, rgb.b)
     }
 }
 

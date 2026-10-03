@@ -404,7 +404,7 @@ fn one_walk_lays_every_picture_where_each_is_asked_for() {
 /// drawn in.
 #[test]
 fn a_swatch_draws_its_colour_and_takes_no_picture() {
-    let teal = tairix_theme::Rgba::rgb(0x10, 0x80, 0x80);
+    let teal = tairix_colour::Rgba::rgb(0x10, 0x80, 0x80);
     let mut choice = PictureChoice::new(
         Aspect::WIDESCREEN,
         vec![PictureSection::untitled(vec![

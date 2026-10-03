@@ -44,7 +44,7 @@ fn the_strip_is_the_tools_then_the_commands() {
 #[test]
 fn a_panel_offers_the_settings_its_tool_uses_and_adopts_their_values() {
     let mut options = Options::default();
-    assert!(options.panel(Tool::Picker, true).is_empty());
+    assert!(options.panel(Tool::Eyedropper, true).is_empty());
     let panel = options.panel(Tool::Ellipse, true);
     assert_eq!(panel.len(), 3);
     let label = options.adopt(Tool::Ellipse, 0, &FieldAction::Settled { permille: 1000 });

@@ -3883,7 +3883,7 @@ fn shadowless(base: &Theme) -> Theme {
 ///
 /// `local` is the pixel's position in its window's own coordinates, which is
 /// where the furniture is painted and so where its dither is read.
-fn bevelled(under: tairix_theme::Rgba, wash: tairix_theme::Rgba, local: (u32, u32)) -> [u8; 4] {
+fn bevelled(under: tairix_colour::Rgba, wash: tairix_colour::Rgba, local: (u32, u32)) -> [u8; 4] {
     let (x, y) = local;
     let mut surface =
         Surface::filled(x + 1, y + 1, Color::from(under).premultiply()).expect("surface");

@@ -1,12 +1,13 @@
 //! WCAG 2.1 contrast: the measure a test holds a colour pair to when it
 //! claims the pair is legible.
 
-use crate::color::srgb_to_linear;
+use crate::rgb::Rgb;
+use crate::srgb::srgb_to_linear;
 
-/// The contrast ratio of two opaque sRGB colours: 21 for black on white, 1
-/// for a colour on itself, whichever order the pair is given in.
+/// The contrast ratio of two opaque colours: 21 for black on white, 1 for a
+/// colour on itself, whichever order the pair is given in.
 #[must_use]
-pub fn contrast_ratio(a: [u8; 3], b: [u8; 3]) -> f64 {
+pub fn contrast_ratio(a: Rgb, b: Rgb) -> f64 {
     let (la, lb) = (relative_luminance(a), relative_luminance(b));
     let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
     (hi + 0.05) / (lo + 0.05)
@@ -16,7 +17,7 @@ pub fn contrast_ratio(a: [u8; 3], b: [u8; 3]) -> f64 {
 /// threshold never passes it: 2100 for black on white, 100 for a colour on
 /// itself.
 #[must_use]
-pub fn contrast_hundredths(a: [u8; 3], b: [u8; 3]) -> u32 {
+pub fn contrast_hundredths(a: Rgb, b: Rgb) -> u32 {
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
@@ -26,35 +27,37 @@ pub fn contrast_hundredths(a: [u8; 3], b: [u8; 3]) -> u32 {
     ratio
 }
 
-/// The relative luminance of an sRGB colour: 0 for black, 1 for white.
+/// The relative luminance of a colour: 0 for black, 1 for white.
 #[must_use]
-pub fn relative_luminance([r, g, b]: [u8; 3]) -> f64 {
+pub fn relative_luminance(colour: Rgb) -> f64 {
     let linear = |value: u8| srgb_to_linear(f64::from(value) / 255.0);
-    0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+    0.2126 * linear(colour.r) + 0.7152 * linear(colour.g) + 0.0722 * linear(colour.b)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{contrast_hundredths, relative_luminance};
+    use crate::rgb::Rgb;
 
     #[test]
     fn the_ratio_meets_the_reference_points() {
-        assert_eq!(contrast_hundredths([0, 0, 0], [255, 255, 255]), 2100);
+        assert_eq!(contrast_hundredths(Rgb::BLACK, Rgb::WHITE), 2100);
         assert_eq!(
-            contrast_hundredths([0x77, 0x77, 0x77], [255, 255, 255]),
+            contrast_hundredths(Rgb::new(0x77, 0x77, 0x77), Rgb::WHITE),
             447
         );
-        assert_eq!(contrast_hundredths([9, 90, 200], [9, 90, 200]), 100);
+        let blue = Rgb::new(9, 90, 200);
+        assert_eq!(contrast_hundredths(blue, blue), 100);
         assert_eq!(
-            contrast_hundredths([255, 255, 255], [0, 0, 0]),
-            contrast_hundredths([0, 0, 0], [255, 255, 255]),
+            contrast_hundredths(Rgb::WHITE, Rgb::BLACK),
+            contrast_hundredths(Rgb::BLACK, Rgb::WHITE),
             "the order of the pair does not matter"
         );
     }
 
     #[test]
     fn luminance_runs_from_black_to_white() {
-        assert!(relative_luminance([0, 0, 0]).abs() < 1e-12);
-        assert!((relative_luminance([255, 255, 255]) - 1.0).abs() < 1e-12);
+        assert!(relative_luminance(Rgb::BLACK).abs() < 1e-12);
+        assert!((relative_luminance(Rgb::WHITE) - 1.0).abs() < 1e-12);
     }
 }

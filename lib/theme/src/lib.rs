@@ -6,14 +6,11 @@
 //! theme switchable at runtime, and where "adding a theme is data, not new
 //! code". This crate is that definition.
 //!
-//! It is pure *data*: a [`Theme`] is a table of [`Rgba`] colour roles
-//! ([`Palette`]), geometric [`Metrics`] (the corner radii the compositor's
-//! single rounded-corner path consumes), [`Fonts`], and a
-//! [`CursorSet`]. None of the rendering or compositing arithmetic lives
-//! here — that is the shared rasteriser's job (`lib/raster`) — so nothing
-//! is duplicated. A consumer converts a theme [`Rgba`]
-//! into the shared render colour at the edge (`From<Rgba> for
-//! tairix_raster::Color`).
+//! It is pure *data*: a [`Theme`] is a table of `tairix_colour::Rgba` colour
+//! roles ([`Palette`]), geometric [`Metrics`] (the corner radii the
+//! compositor's single rounded-corner path consumes), [`Fonts`], and a
+//! [`CursorSet`]. The colour itself is `lib/colour`'s and the rendering and
+//! compositing arithmetic `lib/raster`'s, so nothing is duplicated.
 //!
 //! # Where it sits
 //!
@@ -49,13 +46,8 @@
 #![deny(missing_docs)]
 
 extern crate alloc;
-#[cfg(any(test, feature = "test-util"))]
-extern crate std;
 
-pub mod color;
 pub mod cursor;
-#[cfg(any(test, feature = "test-util"))]
-pub mod legibility;
 pub mod metrics;
 pub mod motion;
 pub mod palette;
@@ -67,7 +59,6 @@ pub mod typography;
 #[cfg(test)]
 mod tests;
 
-pub use color::Rgba;
 pub use cursor::{CursorKind, CursorSet, CursorSetId, CURSOR_KINDS};
 pub use metrics::Metrics;
 pub use motion::{Contrast, Density, Fade, Motion, MotionInteraction, MotionTheme, Timeline};

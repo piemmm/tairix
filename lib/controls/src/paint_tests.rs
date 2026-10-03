@@ -14,26 +14,30 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_colour::Rgba;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::{IconKind, NoArtwork};
 use tairix_input::{InputEvent, PointerButton};
 use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::{Appearance, Rgba, SignalRole, Theme};
+use tairix_theme::{Appearance, SignalRole, Theme};
 
 use crate::button::{Button, ButtonContent, IconButton, SplitButton};
 use crate::chart::Chart;
 use crate::collection::{
     Card, HeaderColumn, IconTile, ListRow, Panel, TableCell, TableHeader, TableRow,
 };
+use crate::colour_picker::ColourPicker;
 use crate::combo::ComboBox;
 use crate::decision::{Dialog, HelpTip, Tooltip};
 use crate::menu::{Menu, MenuItem};
 use crate::metric::{CompositionBar, CompositionSegment, MetricTile, StatusPill};
 use crate::nav::{Breadcrumb, Crumb};
+use crate::number::NumberField;
 use crate::paint::{
     blend_area, fill_area, grab_after, ground_fill, paint_icon_slot, paint_surface_plate,
     plate_corner, resolve_frame, route_pointer, ChromeLayer, FrameColors, FULL_COLOUR,
 };
+use crate::picture::{Aspect, PictureChoice, PictureItem, PictureSection, Swatch};
 use crate::rail::ActionRail;
 use crate::record::{Fact, FactList, Timeline, TimelineEvent};
 use crate::scroll::{ScrollModel, ScrollOrientation, ScrollRange};
@@ -45,6 +49,7 @@ use crate::state::{
     PressureKind, SelectionState, ValidationState, WindowActivationState, WindowControlKind,
     WindowFurnitureState, WindowSizeState,
 };
+use crate::swatch_grid::SwatchGrid;
 use crate::tabs::{Tab, Tabs};
 use crate::testkit::high_contrast;
 use crate::text::{SearchField, TextField};
@@ -952,6 +957,14 @@ const BAND: Rect = Rect {
     height: 32,
 };
 
+/// The bounds a colour picker is contracted to be given: wide and tall
+/// enough to lay out every part beside its plane.
+const PICKER: Rect = Rect {
+    origin: Point { x: 24, y: 20 },
+    width: 420,
+    height: 176,
+};
+
 /// Every drawn family, as the one call each makes to paint itself into
 /// [`SEAT`].
 ///
@@ -1118,6 +1131,32 @@ const EVERY_FAMILY: &[Family] = &[
     }),
     ("Progress", SEAT, |sf, b, s, th| {
         Progress::new().render(sf, b, s, th);
+    }),
+    ("NumberField", SEAT, |sf, b, s, th| {
+        let mut field = NumberField::new(42, 0, 255);
+        field.set_focused(true);
+        field.render(sf, b, s, th);
+    }),
+    ("ColourPicker", PICKER, |sf, b, s, th| {
+        let mut picker = ColourPicker::new(Rgba::new(0x33, 0x66, 0x99, 0x80)).with_opacity(true);
+        picker.set_earlier(Some(Rgba::rgb(200, 30, 30)));
+        picker.set_focused(true);
+        picker.render(sf, b, s, th);
+    }),
+    ("SwatchGrid", SEAT, |sf, b, s, th| {
+        let wells = alloc::vec![Color::rgb(200, 40, 40), Color::rgba(40, 200, 40, 128)];
+        let mut grid = SwatchGrid::new(2, wells);
+        grid.set_focused(true);
+        grid.render(sf, b, s, th);
+    }),
+    ("PictureChoice", SEAT, |sf, b, s, th| {
+        let swatches = alloc::vec![
+            PictureItem::swatch("Ink", Swatch::Fixed(Rgba::rgb(20, 20, 20))),
+            PictureItem::swatch("Paper", Swatch::Desktop),
+        ];
+        let aspect = Aspect::new(4, 3).expect("an aspect");
+        PictureChoice::new(aspect, alloc::vec![PictureSection::new("Ground", swatches)])
+            .render(sf, b, s, th);
     }),
     ("WindowControl", SEAT, |sf, b, s, th| {
         WindowControl::new(WindowControlKind::Close).render(sf, b, s, th, BandCorner::Square);

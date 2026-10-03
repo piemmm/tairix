@@ -53,8 +53,11 @@ yn golygu cynllun y defnyddiwr ei hun. Y cynlluniau a gludir yw *System*
 *Phosphor*, *Amber*, *Ember*, *Contrast*, *Paper*, a *Custom*. Mae dewis
 *Custom* yn defnyddio'r lliwiau a olygwyd o dan y dewisydd: grid o'r
 ugain lliw y tynnir sgrin ohonynt — y cefndir, y blaendir, y cyrchwr,
-testun y cyrchwr, a'r un ar bymtheg o liwiau ANSI — gyda llithryddion
-coch, gwyrdd a glas ar gyfer pa un bynnag sydd wedi'i ddewis.
+testun y cyrchwr, a'r un ar bymtheg o liwiau ANSI — a dewisydd lliw ar
+gyfer pa un bynnag sydd wedi'i ddewis. Mae'r dewisydd yn gosod y lliw yn
+ôl ei arlliw, ei ddirlawnder a'i werth, yn ôl coch, gwyrdd a glas, neu yn
+ôl ei sillafiad hecsadegol, ac yn dangos wrth ei ymyl y lliw oedd yn y
+blwch pan gafodd ei ddewis, y mae clic yn ei adfer.
 
 **Effeithiau** sy'n gosod sut mae'r sgrin yn cael ei thynnu.
 

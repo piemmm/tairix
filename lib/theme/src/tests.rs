@@ -5,24 +5,17 @@ use alloc::string::String;
 use tairix_abi::desktop::CURSOR_SET_NAME_MAX;
 use tairix_abi::sysinfo::VolumeHealth;
 
-use crate::legibility::contrast_hundredths;
+use tairix_colour::legibility::contrast_hundredths;
+use tairix_colour::Rgba;
+
 use crate::motion::{ease_out, smoothstep, MotionInteraction};
 use crate::theme::{CHROME_ALPHA, CHROME_PLATE_ALPHA, SELECTION_ALPHA};
 use crate::{
     lifted, Accessibility, Appearance, Contrast, CursorKind, CursorSet, CursorSetId, Density, Fade,
-    FamilyKey, FontWeight, Fonts, Metrics, Motion, MotionTheme, Palette, Rgba, SignalRole,
-    SurfaceGround, SyntaxPalette, SyntaxRole, TextRole, Theme, ThemeError, ThemeId, ThemeRegistry,
-    Timeline, CURSOR_KINDS, TEXT_WEIGHT_LIFT,
+    FamilyKey, FontWeight, Fonts, Metrics, Motion, MotionTheme, Palette, SignalRole, SurfaceGround,
+    SyntaxPalette, SyntaxRole, TextRole, Theme, ThemeError, ThemeId, ThemeRegistry, Timeline,
+    CURSOR_KINDS, TEXT_WEIGHT_LIFT,
 };
-
-#[test]
-fn rgba_constructors_and_accessors() {
-    assert_eq!(Rgba::rgb(1, 2, 3), Rgba::new(1, 2, 3, 255));
-    assert!(Rgba::rgb(1, 2, 3).is_opaque());
-    assert!(!Rgba::TRANSPARENT.is_opaque());
-    assert_eq!(Rgba::rgb(1, 2, 3).with_alpha(0).a, 0);
-    assert_eq!(Rgba::new(9, 8, 7, 6).to_array(), [9, 8, 7, 6]);
-}
 
 #[test]
 fn builtins_have_their_reserved_ids_and_appearance() {
@@ -1659,10 +1652,7 @@ fn every_syntax_role_is_legible_on_the_document_in_both_themes() {
         for role in SyntaxRole::ALL {
             let colour = p.syntax(role);
             assert!(colour.is_opaque(), "{}: {role:?} is opaque", theme.name());
-            let ratio = contrast_hundredths(
-                [colour.r, colour.g, colour.b],
-                [p.document.r, p.document.g, p.document.b],
-            );
+            let ratio = contrast_hundredths(colour.without_alpha(), p.document.without_alpha());
             assert!(
                 ratio >= 450,
                 "{}: {role:?} reaches {ratio}/100 against the document, under 4.5:1",

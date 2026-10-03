@@ -1,6 +1,5 @@
 use alloc::string::String;
 
-use tairix_abi::time::Duration64;
 use tairix_controls::Checker;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Region, Scale};
@@ -31,7 +30,6 @@ fn window(canvas: Canvas) -> (View, Layout, ThemeRegistry) {
         Document::new(Picture::plain(canvas)),
         String::from("p.png"),
         Access::Writable,
-        Duration64::from_millis(500),
     );
     let theme = registry.active();
     let layout = view.layout(WINDOW.0, WINDOW.1, theme, Scale::ONE, faces(theme));
@@ -235,7 +233,7 @@ fn a_shape_being_dragged_is_drawn_as_it_will_be_put_down() {
     };
     let (from, to) = (point((5, 5)), point((40, 30)));
     let feed = |view: &mut View, event: InputEvent| {
-        view.on_pointer(&event, 0, &layout, Scale::ONE, theme, &mut Region::new());
+        view.on_pointer(&event, &layout, Scale::ONE, theme, &mut Region::new());
     };
     feed(&mut view, InputEvent::PointerMoved { to: from });
     feed(

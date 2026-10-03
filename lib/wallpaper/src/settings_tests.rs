@@ -732,27 +732,20 @@ fn a_wallpaper_path_carrying_a_hash_survives_the_round_trip() {
 }
 
 #[test]
-fn rgb_hex_round_trips() {
-    let rgb = Rgb::new(0x0a, 0xbc, 0xde);
-    assert_eq!(rgb.to_hex(), "0abcde");
-    assert_eq!(Rgb::from_hex("0abcde"), Some(rgb));
-    assert_eq!(Rgb::from_hex("0ABCDE"), Some(rgb));
-}
-
-#[test]
-fn rgb_hex_rejects_malformed_text() {
-    assert_eq!(Rgb::from_hex("theme"), None);
-    assert_eq!(Rgb::from_hex("abc"), None);
-    assert_eq!(Rgb::from_hex("gggggg"), None);
-    assert_eq!(Rgb::from_hex(""), None);
-    assert_eq!(Rgb::from_hex("1122334"), None);
-    // The one spelling carries no `#`, so the `#`-prefixed wording the
-    // document grammar could never hold is refused rather than accepted on
-    // a second path.
-    assert_eq!(Rgb::from_hex("#11223"), None);
-    assert_eq!(Rgb::from_hex("#112233"), None);
-    // A multi-byte character must not be sliced mid-scalar.
-    assert_eq!(Rgb::from_hex("11223\u{e9}"), None);
+fn a_backdrop_spelled_any_other_way_than_six_digits_is_refused() {
+    for spelled in ["abc", "1122334", "gggggg", "+f+f+f", "11223\u{e9}"] {
+        assert_eq!(
+            read(&alloc::format!("backdrop = {spelled}\n")),
+            Err(DocumentRefusal::InvalidValue(SettingsKey::Backdrop)),
+            "{spelled:?}"
+        );
+    }
+    let settings = read("backdrop = 0ABCDE\n").expect("either case of digit");
+    assert_eq!(
+        settings.backdrop,
+        Backdrop::Colour(Rgb::new(0x0a, 0xbc, 0xde))
+    );
+    assert!(rendered(&settings).contains("backdrop = 0abcde\n"));
 }
 
 #[test]

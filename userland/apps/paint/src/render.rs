@@ -11,7 +11,8 @@ use alloc::vec::Vec;
 use core::fmt::Write as _;
 use core::ops::Range;
 
-use tairix_controls::{blend_area, fill_area, withheld, Checker};
+use tairix_colour::Rgba;
+use tairix_controls::{blend_area, fill_area, paint_run, withheld, Checker, SwatchMark};
 use tairix_font::BitmapFont;
 use tairix_geometry::{to_i32, Rect, Scale};
 use tairix_icon::IconArtwork;
@@ -21,7 +22,7 @@ use tairix_theme::Theme;
 use tairix_util::fallible;
 
 use crate::canvas::{Canvas, Kind, Sample};
-use crate::colour::write_hex;
+use crate::colour::Ink;
 use crate::document::Entry;
 use crate::layout::{Faces, Layout};
 use crate::shape::Bounds;
@@ -56,9 +57,13 @@ pub fn render_into(
         fill_area(surface, layout.toolbar(), chrome);
         toolbar.render(surface, layout.tools(), scale, theme, artwork);
     }
+    if !withheld(surface, layout.dock()) {
+        fill_area(surface, layout.dock(), chrome);
+        wells(surface, view, layout, theme, scale, faces.status);
+        view.dock().0.render(surface, layout.picker(), scale, theme);
+    }
     if !withheld(surface, layout.panel()) {
         fill_area(surface, layout.panel(), chrome);
-        wells(surface, view, layout, theme, scale, faces.status);
         swatches.render(surface, layout.swatches(), scale, theme);
         if !settings.is_empty() {
             let placed = settings.layout(layout.settings(), layout.window(), scale, theme);
@@ -94,8 +99,8 @@ pub fn render_into(
     }
 }
 
-/// The two colour wells, the secondary behind the primary, and the primary
-/// colour spelled out beside them.
+/// The two colour wells, the secondary behind the primary, the one the
+/// picker edits rimmed in the accent, and beside them which one that is.
 fn wells(
     surface: &mut Surface,
     view: &View,
@@ -109,16 +114,22 @@ fn wells(
         .picture()
         .map_or(&Kind::Rgba, |picture| picture.canvas.kind());
     let (primary, secondary) = view.inks();
-    let border = Color::from(theme.palette().on_surface_muted);
-    for (rect, ink) in [
-        (layout.secondary_well(), secondary),
-        (layout.primary_well(), primary),
+    let editing = view.dock().1;
+    let palette = theme.palette();
+    for (rect, ink, mark) in [
+        (layout.secondary_well(), secondary, SwatchMark::Secondary),
+        (layout.primary_well(), primary, SwatchMark::Primary),
     ] {
         let Some((left, top)) = rect.surface_origin() else {
             continue;
         };
-        surface.fill_rect(left, top, rect.width, rect.height, border);
-        let inner = rect.inset(scale.scale_length(1).max(1));
+        let (border, rim) = if mark == editing {
+            (palette.rim_active, scale.scale_length(2).max(2))
+        } else {
+            (palette.on_surface_muted, scale.scale_length(1).max(1))
+        };
+        surface.fill_rect(left, top, rect.width, rect.height, Color::from(border));
+        let inner = rect.inset(rim);
         if let Some((inner_left, inner_top)) = inner.surface_origin() {
             Checker::new(theme, scale).paint(
                 surface,
@@ -140,19 +151,41 @@ fn wells(
     }
     let caption = layout.well_caption();
     let mut text = String::new();
-    write_hex(primary.shown(kind), &mut text);
-    if let crate::colour::Ink::Index(index) = primary {
-        let _ = write!(text, "  [{index}]");
-    }
-    let y = font.centred_top(caption.top(), caption.height);
-    let fitted = font.truncate_to_width(&text, caption.width);
-    font.draw_text(
-        surface,
-        caption.left(),
-        y,
-        fitted,
-        Color::from(theme.palette().on_surface),
+    write_editing(
+        &mut text,
+        editing,
+        if editing == SwatchMark::Primary {
+            primary
+        } else {
+            secondary
+        },
     );
+    let y = font.centred_top(caption.top(), caption.height);
+    let run = font.elide_to_width(&text, caption.width);
+    paint_run(
+        surface,
+        font,
+        run,
+        (caption.left(), y),
+        Color::from(palette.on_surface),
+        None,
+    );
+}
+
+/// What the dock's caption says: which ink the picker edits, and on a
+/// palette picture which entry that is.
+pub fn write_editing(out: &mut String, editing: SwatchMark, ink: Ink) {
+    out.push_str(match editing {
+        SwatchMark::Primary => "Primary",
+        SwatchMark::Secondary => "Secondary",
+    });
+    match ink {
+        Ink::Index(entry) => {
+            let _ = write!(out, ", entry {entry}");
+        }
+        Ink::Clear => out.push_str(", clear"),
+        Ink::Colour(_) => {}
+    }
 }
 
 /// The canvas: the picture over the checkerboard where it is clear, the grid,
@@ -698,7 +731,7 @@ fn status(surface: &mut Surface, view: &View, layout: &Layout, theme: &Theme, fo
 pub fn write_position(out: &mut String, (x, y): (u32, u32), colour: Option<Rgba8>) {
     let _ = write!(out, "({x}, {y}) ");
     if let Some(colour) = colour {
-        write_hex(colour, out);
+        let _ = write!(out, "{}", Rgba::from_array(colour).hex().hashed());
     }
 }
 

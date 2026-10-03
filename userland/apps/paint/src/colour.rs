@@ -1,8 +1,6 @@
 //! What a tool puts down, and finding the palette entry nearest a colour.
 
-use alloc::string::String;
 use alloc::vec::Vec;
-use core::fmt::Write as _;
 
 use tairix_image::Rgba8;
 
@@ -77,8 +75,18 @@ impl Ink {
         match sample {
             Sample::Index(_, 0) if kind.masked() => Self::Clear,
             Sample::Index(index, _) => Self::Index(index),
-            Sample::Rgba([_, _, _, 0]) => Self::Clear,
-            Sample::Rgba(colour) => Self::Colour(colour),
+            Sample::Rgba(colour) => Self::of_colour(colour),
+        }
+    }
+
+    /// The ink laying `colour` on a colour picture: clear where it has no
+    /// alpha, since a colour laid over with none leaves the pixel as it was.
+    #[must_use]
+    pub const fn of_colour(colour: Rgba8) -> Self {
+        if colour[3] == 0 {
+            Self::Clear
+        } else {
+            Self::Colour(colour)
         }
     }
 }
@@ -193,30 +201,6 @@ impl Nearest {
         self.last = Some((colour, index));
         index
     }
-}
-
-/// `colour` as `#RRGGBB`, or `#RRGGBBAA` when it is not opaque, after what
-/// `out` holds.
-pub fn write_hex(colour: Rgba8, out: &mut String) {
-    let [r, g, b, a] = colour;
-    let _ = write!(out, "#{r:02X}{g:02X}{b:02X}");
-    if a != 255 {
-        let _ = write!(out, "{a:02X}");
-    }
-}
-
-/// The colour `text` spells as `#RRGGBB` or `#RRGGBBAA`, the `#` optional
-/// and case ignored; `None` for anything else.
-#[must_use]
-pub fn parse_hex(text: &str) -> Option<Rgba8> {
-    let digits = text.trim();
-    let digits = digits.strip_prefix('#').unwrap_or(digits);
-    if !(digits.len() == 6 || digits.len() == 8) || !digits.is_ascii() {
-        return None;
-    }
-    let byte = |at: usize| u8::from_str_radix(digits.get(at..at + 2)?, 16).ok();
-    let alpha = if digits.len() == 8 { byte(6)? } else { 255 };
-    Some([byte(0)?, byte(2)?, byte(4)?, alpha])
 }
 
 #[cfg(test)]

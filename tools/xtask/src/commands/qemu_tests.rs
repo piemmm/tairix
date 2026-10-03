@@ -13604,7 +13604,7 @@ fn settings_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
 const SETTINGS_FILL_TOLERANCE: u8 = 2;
 
 /// Whether `pixel` is `colour`, within [`SETTINGS_FILL_TOLERANCE`].
-fn is_fill(pixel: Rgb, colour: tairix_theme::Rgba) -> bool {
+fn is_fill(pixel: Rgb, colour: tairix_colour::Rgba) -> bool {
     pixel.0.abs_diff(colour.r) <= SETTINGS_FILL_TOLERANCE
         && pixel.1.abs_diff(colour.g) <= SETTINGS_FILL_TOLERANCE
         && pixel.2.abs_diff(colour.b) <= SETTINGS_FILL_TOLERANCE
@@ -13746,7 +13746,7 @@ fn share_drawn_as(
             total += 1;
             if is_fill(
                 *pixel,
-                tairix_theme::Rgba::rgb(expected.r, expected.g, expected.b),
+                tairix_colour::Rgba::rgb(expected.r, expected.g, expected.b),
             ) {
                 kept += 1;
             }
@@ -13803,7 +13803,7 @@ const MAX_SETTINGS_STATEMENT_INK: f64 = 0.5;
 const MIN_SETTINGS_PLATE_EDGES: usize = 2;
 
 /// The longest unbroken run of `colour` along `row`.
-fn longest_run(row: &[Rgb], colour: tairix_theme::Rgba) -> usize {
+fn longest_run(row: &[Rgb], colour: tairix_colour::Rgba) -> usize {
     let mut longest = 0;
     let mut run = 0;
     for pixel in row {
@@ -13819,7 +13819,7 @@ fn longest_run(row: &[Rgb], colour: tairix_theme::Rgba) -> usize {
 /// A pane's plates are filled with the same surface as the column behind
 /// them, so the rim is the only thing that tells a plate from the column —
 /// and no line of words draws a run anywhere near that long.
-fn plate_edges(rows: &[Vec<Rgb>], rim: tairix_theme::Rgba) -> usize {
+fn plate_edges(rows: &[Vec<Rgb>], rim: tairix_colour::Rgba) -> usize {
     rows.iter()
         .filter(|row| !row.is_empty() && longest_run(row, rim).saturating_mul(2) >= row.len())
         .count()
@@ -13935,7 +13935,7 @@ enum TrackPart {
 ///
 /// Read as runs, keeping only the last three, so a row costs one pass and no
 /// allocation.
-fn row_holds_track(row: &[Rgb], fill: tairix_theme::Rgba, groove: tairix_theme::Rgba) -> bool {
+fn row_holds_track(row: &[Rgb], fill: tairix_colour::Rgba, groove: tairix_colour::Rgba) -> bool {
     let part = |pixel: Rgb| {
         if is_fill(pixel, fill) {
             TrackPart::Fill
@@ -16939,10 +16939,10 @@ mod tests {
     /// short to be a track.
     #[test]
     fn a_capacity_track_is_a_fill_meeting_its_groove() {
-        let fill = tairix_theme::Rgba::rgb(0xe0, 0x40, 0x40);
-        let groove = tairix_theme::Rgba::rgb(0x20, 0x20, 0x20);
+        let fill = tairix_colour::Rgba::rgb(0xe0, 0x40, 0x40);
+        let groove = tairix_colour::Rgba::rgb(0x20, 0x20, 0x20);
         let other = (0x80, 0x80, 0x80);
-        let at = |colour: tairix_theme::Rgba| (colour.r, colour.g, colour.b);
+        let at = |colour: tairix_colour::Rgba| (colour.r, colour.g, colour.b);
         let row = |parts: &[(Rgb, usize)]| -> Vec<Rgb> {
             parts
                 .iter()
@@ -16976,7 +16976,7 @@ mod tests {
     /// words would draw.
     #[test]
     fn a_plate_edge_is_one_long_run_of_the_rim() {
-        let rim = tairix_theme::Rgba::rgb(0x23, 0x2b, 0x30);
+        let rim = tairix_colour::Rgba::rgb(0x23, 0x2b, 0x30);
         let other = (0x0f, 0x13, 0x16);
         let at = (rim.r, rim.g, rim.b);
         let row = |parts: &[(Rgb, usize)]| -> Vec<Rgb> {

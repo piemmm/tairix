@@ -7,12 +7,13 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_abi::window_ipc::{PreviewSubject, WINDOW_PREVIEW_MAX_SIDE};
+use tairix_colour::Rgb;
 use tairix_controls::{FieldGroup, FieldLayout, PictureChoice};
 use tairix_geometry::{to_i32, Rect, Scale};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
 use tairix_wallpaper::{
-    wallpaper_path, Backdrop, CatalogItem, DesktopSettings, Rgb, ScreensaverKind, WallpaperChoice,
+    wallpaper_path, Backdrop, CatalogItem, DesktopSettings, ScreensaverKind, WallpaperChoice,
     WallpaperPath,
 };
 

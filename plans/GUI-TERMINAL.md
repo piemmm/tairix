@@ -273,11 +273,13 @@ accept no typeface from the app.
 
 `userland/apps/terminal/src/settings.rs` — a modal sheet composed from the
 shared Reactive Alloy controls (`Panel`, `Tabs`, `Slider`, `Radio`, `Button`,
-`SwatchGrid`), on its own popup surface.
+`SwatchGrid`, `ColourPicker`), on its own popup surface.
 
 - **Appearance**: the scheme chooser, the text-size slider, and the custom
-  scheme's editor — a `SwatchGrid` of the twenty editable colours with
-  red/green/blue sliders for the selected well.
+  scheme's editor — a `SwatchGrid` of the twenty editable colours and a
+  `ColourPicker` on the selected well, captioned with its name. The picker's
+  samples restyle the windows live and its settle is the write, so a drag is
+  one write; changing the well settles what the picker held first.
 - **Effects**: one labelled slider per effect — opacity, backdrop blur, scan
   lines, glow, fuzz, phosphor, wobble — built from and read back through the
   one ordered `EffectKey::ALL` list, so a reordering cannot redirect a slider
@@ -511,7 +513,7 @@ Four kinds of change are the sheet's rather than a control's:
 | A switched tab replaces every row and re-clamps the bar | the body and scrollbar bands |
 | A value written back into a control is also spelled out in the label beside it (`Text size 14px`, `Blur 40%`) | that whole row |
 | A scroll moves every row the body shows | the body band |
-| A mark of the sheet's own moves — keyboard focus, the scheme dot, the channels the selected well points the sliders at | the elements it moves between, through `damage::move_mark` |
+| A mark of the sheet's own moves — keyboard focus, the scheme dot, the well the picker edits | the elements it moves between, through `damage::move_mark` |
 
 A mark a *container* draws on its own children stays the container's to report,
 because only it can name them: the strip's keyboard cursor (`Tabs::set_current`)

@@ -604,6 +604,7 @@ tairix/
 │   ├── collections/     # Heap-backed no_std containers not in core/alloc: the
 │   │                    #   hash, indexed, ordered, and concurrent tiers. The
 │   │                    #   allocation-free ones are `lib/inline`.
+│   ├── colour/          # The sRGB colour: value, transfer, HSV/HSL, hex notation.
 │   ├── complete/        # Shared filename-completion engine.
 │   ├── compress/        # First-party LZ codec + the RFC 1951/1950 DEFLATE
 │   │                    #   and zlib codec foreign formats need.

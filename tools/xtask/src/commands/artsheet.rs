@@ -31,6 +31,8 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
+use tairix_colour::legibility::contrast_ratio;
+use tairix_colour::Rgb;
 use tairix_hash::FastHash;
 use tairix_raster::surface::Surface;
 use tairix_raster::Color;
@@ -823,7 +825,7 @@ fn desktop(theme: &Theme) -> Color {
 
 /// The WCAG contrast ratio between two opaque tones.
 pub(super) fn contrast(a: Color, b: Color) -> f64 {
-    tairix_theme::legibility::contrast_ratio([a.r, a.g, a.b], [b.r, b.g, b.b])
+    contrast_ratio(Rgb::new(a.r, a.g, a.b), Rgb::new(b.r, b.g, b.b))
 }
 
 /// A digest of the cell's pixels, which is what a drift check compares.

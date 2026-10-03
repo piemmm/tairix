@@ -41,6 +41,7 @@ use tairix_abi::net_ipc::NetServerAddr;
 use tairix_abi::time::Duration64;
 use tairix_abi::window_ipc::PreviewSubject;
 use tairix_abi::{BundleId, Errno};
+use tairix_colour::Rgb;
 use tairix_controls::{
     stack, Button, ButtonContent, ComboBox, ControlRole, ControlState, FieldAction, FieldControl,
     FieldGroup, FieldGroupAction, FieldLayout, FieldRow, Keystroke, SecretField, Slider,
@@ -56,8 +57,8 @@ use tairix_users::Salt;
 use tairix_util::conf::ValueShape;
 use tairix_wallpaper::{
     Backdrop, CatalogItem, CursorSize, DesktopSettings, DisplayOffAfter, IconFlow, IconSort,
-    IdleAfter, PointerSpeed, PointerTrail, PrimaryButton, RepeatRate, Rgb, ScreensaverKind,
-    SettingsKey, WallpaperFit,
+    IdleAfter, PointerSpeed, PointerTrail, PrimaryButton, RepeatRate, ScreensaverKind, SettingsKey,
+    WallpaperFit,
 };
 
 use crate::accounts::{self, AccountFacts, AccountField, AccountRun, AccountSetting, Unappliable};
@@ -891,7 +892,7 @@ fn backdrop_ladder(current: Backdrop) -> Vec<(String, Backdrop)> {
         .collect();
     if let Backdrop::Colour(rgb) = current {
         if !ladder.iter().any(|(_, offered)| *offered == current) {
-            ladder.push((rgb.to_hex(), current));
+            ladder.push((rgb.hex().to_string(), current));
         }
     }
     ladder

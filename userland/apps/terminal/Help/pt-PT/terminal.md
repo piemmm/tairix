@@ -54,8 +54,10 @@ trabalho), *Midnight*, *Phosphor*, *Amber*, *Ember*, *Contrast*,
 *Paper* e *Custom*. Escolher *Custom* utiliza as cores editadas por
 baixo do seletor: uma grelha das vinte cores de que um ecrã é composto —
 o fundo, o primeiro plano, o cursor, o texto do cursor e as dezasseis
-cores ANSI — com seletores de vermelho, verde e azul para a que estiver
-selecionada.
+cores ANSI — e um seletor de cor para a que estiver selecionada. O
+seletor define-a por matiz, saturação e valor, por vermelho, verde e
+azul, ou pela sua escrita hexadecimal, e mostra ao lado a cor que a casa
+tinha quando foi selecionada, que um clique repõe.
 
 **Efeitos** define como o ecrã é desenhado.
 

@@ -53,7 +53,7 @@ tairix-path = { path = "../path", version = "=0.0.0" }
 [dev-dependencies]
 tairix-font = { path = "../font", version = "=0.0.0", features = ["test-util"] }
 # The one contrast measure a badge's symbol is held clear of its plate by.
-tairix-theme = { path = "../theme", version = "=0.0.0", features = ["test-util"] }
+tairix-colour = { path = "../colour", version = "=0.0.0", features = ["test-util"] }
 
 [lints]
 workspace = true

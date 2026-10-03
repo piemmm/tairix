@@ -1240,6 +1240,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-colour"
+version = "0.0.0"
+dependencies = [
+ "tairix-fuzzseed",
+ "tairix-util",
+]
+
+[[package]]
 name = "tairix-complete"
 version = "0.0.0"
 dependencies = [
@@ -1294,9 +1302,11 @@ name = "tairix-controls"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-colour",
  "tairix-font",
  "tairix-geometry",
  "tairix-icon",
+ "tairix-inline",
  "tairix-input",
  "tairix-parallel",
  "tairix-raster",
@@ -1421,6 +1431,7 @@ dependencies = [
  "tairix-appstore",
  "tairix-browse",
  "tairix-caps",
+ "tairix-colour",
  "tairix-controls",
  "tairix-cursor",
  "tairix-display",
@@ -2253,6 +2264,7 @@ name = "tairix-greeter"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-colour",
  "tairix-controls",
  "tairix-font",
  "tairix-geometry",
@@ -2376,6 +2388,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-appstore",
+ "tairix-colour",
  "tairix-font",
  "tairix-hash",
  "tairix-log",
@@ -2383,7 +2396,6 @@ dependencies = [
  "tairix-raster",
  "tairix-reclaim",
  "tairix-svg",
- "tairix-theme",
 ]
 
 [[package]]
@@ -3000,6 +3012,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-browse",
+ "tairix-colour",
  "tairix-controls",
  "tairix-font",
  "tairix-geometry",
@@ -3145,11 +3158,11 @@ dependencies = [
 name = "tairix-raster"
 version = "0.0.0"
 dependencies = [
+ "tairix-colour",
  "tairix-fuzzseed",
  "tairix-inline",
  "tairix-parallel",
  "tairix-reclaim",
- "tairix-theme",
  "tairix-util",
 ]
 
@@ -3158,12 +3171,12 @@ name = "tairix-raytrace"
 version = "0.0.0"
 dependencies = [
  "tairix-collections",
+ "tairix-colour",
  "tairix-hash",
  "tairix-parallel",
  "tairix-raster",
  "tairix-rng",
  "tairix-terrain",
- "tairix-theme",
  "tairix-util",
 ]
 
@@ -3304,6 +3317,7 @@ dependencies = [
  "tairix-abi",
  "tairix-appconf",
  "tairix-appdata",
+ "tairix-colour",
  "tairix-controls",
  "tairix-font",
  "tairix-geometry",
@@ -3363,6 +3377,7 @@ dependencies = [
  "tairix-abi",
  "tairix-appdata",
  "tairix-browse",
+ "tairix-colour",
  "tairix-controls",
  "tairix-font",
  "tairix-geometry",
@@ -3449,6 +3464,7 @@ dependencies = [
 name = "tairix-svg"
 version = "0.0.0"
 dependencies = [
+ "tairix-colour",
  "tairix-fuzzseed",
  "tairix-raster",
  "tairix-util",
@@ -3459,6 +3475,7 @@ name = "tairix-switchboard"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-colour",
  "tairix-controls",
  "tairix-font",
  "tairix-geometry",
@@ -3572,6 +3589,7 @@ name = "tairix-taskbar"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-colour",
  "tairix-controls",
  "tairix-font",
  "tairix-geometry",
@@ -3621,6 +3639,7 @@ dependencies = [
  "tairix-abi",
  "tairix-appconf",
  "tairix-appdata",
+ "tairix-colour",
  "tairix-controls",
  "tairix-display",
  "tairix-font",
@@ -6972,6 +6991,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-browse",
+ "tairix-colour",
  "tairix-controls",
  "tairix-font",
  "tairix-geometry",
@@ -6994,9 +7014,9 @@ name = "tairix-theme"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-colour",
  "tairix-inline",
  "tairix-path",
- "tairix-util",
 ]
 
 [[package]]
@@ -7245,6 +7265,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-appconf",
+ "tairix-colour",
  "tairix-fuzzseed",
  "tairix-geometry",
  "tairix-path",
@@ -7278,6 +7299,7 @@ name = "tairix-widgets"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-colour",
  "tairix-controls",
  "tairix-font",
  "tairix-geometry",
@@ -7407,6 +7429,7 @@ name = "tairix-wm"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-colour",
  "tairix-controls",
  "tairix-cursor",
  "tairix-display",
@@ -7435,6 +7458,7 @@ dependencies = [
  "tairix-arch-api",
  "tairix-browse",
  "tairix-cc",
+ "tairix-colour",
  "tairix-controls",
  "tairix-cpuops",
  "tairix-crypto",

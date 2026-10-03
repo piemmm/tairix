@@ -245,7 +245,7 @@ pub enum IconKind {
     /// A tipped paint bucket, for filling an area.
     ToolFill,
     /// An eyedropper, for taking a colour from a picture.
-    ToolPicker,
+    ToolEyedropper,
     /// A line between two handles, for drawing straight lines.
     ToolLine,
     /// A rectangle's outline, for drawing rectangles.
@@ -348,7 +348,7 @@ impl IconKind {
             "tool-spray" => Self::ToolSpray,
             "tool-eraser" => Self::ToolEraser,
             "tool-fill" => Self::ToolFill,
-            "tool-picker" => Self::ToolPicker,
+            "tool-eyedropper" => Self::ToolEyedropper,
             "tool-line" => Self::ToolLine,
             "tool-rectangle" => Self::ToolRectangle,
             "tool-ellipse" => Self::ToolEllipse,
@@ -453,7 +453,7 @@ impl IconKind {
             Self::ToolSpray => 83,
             Self::ToolEraser => 84,
             Self::ToolFill => 85,
-            Self::ToolPicker => 86,
+            Self::ToolEyedropper => 86,
             Self::ToolLine => 87,
             Self::ToolRectangle => 88,
             Self::ToolEllipse => 89,
@@ -557,7 +557,7 @@ impl IconKind {
             Self::ToolSpray => "tool-spray",
             Self::ToolEraser => "tool-eraser",
             Self::ToolFill => "tool-fill",
-            Self::ToolPicker => "tool-picker",
+            Self::ToolEyedropper => "tool-eyedropper",
             Self::ToolLine => "tool-line",
             Self::ToolRectangle => "tool-rectangle",
             Self::ToolEllipse => "tool-ellipse",
@@ -644,7 +644,7 @@ pub fn builtin_icon(kind: IconKind, color: Color) -> VectorIcon {
         IconKind::ToolSpray => tool_spray(color),
         IconKind::ToolEraser => tool_eraser(color),
         IconKind::ToolFill => tool_fill(color),
-        IconKind::ToolPicker => tool_picker(color),
+        IconKind::ToolEyedropper => tool_eyedropper(color),
         IconKind::ToolLine => tool_line(color),
         IconKind::ToolRectangle => tool_rectangle(color),
         IconKind::ToolEllipse => tool_ellipse(color),
@@ -1327,7 +1327,7 @@ fn tool_fill(color: Color) -> alloc::vec::Vec<IconLayer> {
 
 /// An eyedropper on the diagonal: its bulb, the collar below it, and the
 /// glass tube narrowing to the tip that takes the colour.
-fn tool_picker(color: Color) -> alloc::vec::Vec<IconLayer> {
+fn tool_eyedropper(color: Color) -> alloc::vec::Vec<IconLayer> {
     const BULB: &[(i32, i32)] = &[(14, 6), (18, 2), (22, 6), (18, 10)];
     const COLLAR: &[(i32, i32)] = &[(12, 7), (13, 6), (18, 11), (17, 12)];
     const TUBE: &[(i32, i32)] = &[(13, 9), (15, 11), (7, 19), (4, 20), (5, 17)];

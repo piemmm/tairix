@@ -4,8 +4,9 @@
 
 use tairix_theme::Theme;
 
-use crate::scheme::{ColorScheme, Rgb, Scheme};
+use crate::scheme::{ColorScheme, Scheme};
 use crate::swatch::{adopt, apply, colour, grid_for, COLUMNS, WELL_COUNT};
+use tairix_colour::Rgb;
 
 fn scheme() -> ColorScheme {
     Scheme::Contrast.palette().expect("contrast has a palette")
@@ -36,7 +37,7 @@ fn the_twenty_wells_are_laid_out_in_the_documented_order() {
 fn an_edited_well_is_what_the_scheme_reads_back() {
     let mut grid = grid_for(&scheme());
     let orange = Rgb::new(0xff, 0x80, 0x00);
-    grid.set_colour(0, orange.opaque());
+    grid.set_colour(0, tairix_raster::Color::from(orange));
     let mut applied = scheme();
     apply(&grid, &mut applied);
     assert_eq!(applied.background, orange);
@@ -45,11 +46,11 @@ fn an_edited_well_is_what_the_scheme_reads_back() {
 #[test]
 fn adopting_a_scheme_keeps_the_well_being_edited() {
     let mut grid = grid_for(&scheme());
-    grid.adopt_selected(7);
+    grid.adopt_selected(Some(7));
     let mut other = scheme();
     other.ansi[3] = Rgb::new(0x65, 0x43, 0x21);
     adopt(&mut grid, &other);
-    assert_eq!(grid.selected(), 7);
+    assert_eq!(grid.selected(), Some(7));
     let mut read = scheme();
     apply(&grid, &mut read);
     assert_eq!(read, other);

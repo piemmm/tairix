@@ -12,8 +12,9 @@ use tairix_abi::switchboard_ipc::{
 };
 use tairix_abi::sysinfo::{LoadAverage, MountAvailability};
 use tairix_abi::Duration64;
+use tairix_colour::Rgba;
 use tairix_controls::{CompositionBar, MetricTile, PressureKind};
-use tairix_theme::{Rgba, TextRole, Theme};
+use tairix_theme::{TextRole, Theme};
 use tairix_wm::{Color, Point, Rect, Scale, Surface};
 
 use super::super::fixtures::{report, share};

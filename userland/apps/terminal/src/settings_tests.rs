@@ -16,7 +16,8 @@ use tairix_theme::Theme;
 
 use crate::effects::{EffectKey, Effects, FULL, MIN_OPACITY};
 use crate::profile::{Profile, MAX_FONT_SIZE_PX, MIN_FONT_SIZE_PX};
-use crate::scheme::{Rgb, Scheme};
+use crate::scheme::Scheme;
+use tairix_colour::Rgb;
 
 use super::{
     footer_split, panel_bounds, split_row, Focus, Layout, Settings, SheetOutcome, Style,
@@ -242,7 +243,8 @@ fn shift_key(sheet: &mut Settings, viewport: Rect, key: Key) -> SheetOutcome {
 
 /// Tab forward until `target` holds focus.
 fn focus_on(sheet: &mut Settings, viewport: Rect, target: Focus) {
-    for _ in 0..=sheet.focus_order().len() {
+    // The picker walks its own parts on Tab before handing the focus on.
+    for _ in 0..=sheet.focus_order().len() + 16 {
         if sheet.focus == target {
             return;
         }
@@ -435,49 +437,106 @@ fn clicking_the_text_size_track_settles_the_value_it_jumped_to() {
 // --- Appearance: the custom-scheme editor ----------------------------------
 
 #[test]
-fn a_channel_slider_edits_the_selected_well_of_the_custom_scheme() {
+fn the_picker_edits_the_selected_well_of_the_custom_scheme() {
     let mut sheet = sheet();
     let before = sheet.profile().custom;
     assert_eq!(
         sheet.swatches.selected(),
-        0,
+        Some(0),
         "the background well opens selected"
     );
+    assert_eq!(sheet.picker.colour(), before.background.opaque());
 
-    focus_on(&mut sheet, CLIENT, Focus::Channel(0));
+    // The picker takes the keyboard on its plane, where Up raises the value.
+    focus_on(&mut sheet, CLIENT, Focus::Picker);
     assert_eq!(
-        key(&mut sheet, CLIENT, Key::Named(NamedKey::End)),
+        key(&mut sheet, CLIENT, Key::Named(NamedKey::Up)),
         SheetOutcome::Settled
     );
 
-    assert_eq!(sheet.profile().custom.background.r, u8::MAX);
-    assert_eq!(sheet.profile().custom.background.g, before.background.g);
-    assert_eq!(sheet.profile().custom.background.b, before.background.b);
+    let edited = sheet.profile().custom;
+    assert_ne!(edited.background, before.background);
+    assert_eq!(edited.background, sheet.picker.colour().without_alpha());
     assert_eq!(
-        sheet.profile().custom.foreground,
-        before.foreground,
+        edited.foreground, before.foreground,
         "only the selected well is edited"
     );
 }
 
 #[test]
-fn selecting_another_well_repoints_the_channel_sliders() {
+fn selecting_another_well_points_the_picker_at_it() {
     let mut sheet = sheet();
-    sheet.swatches.adopt_selected(1);
-    sheet.sync_channel_sliders();
-
-    focus_on(&mut sheet, CLIENT, Focus::Channel(2));
+    let before = sheet.profile().custom;
+    focus_on(&mut sheet, CLIENT, Focus::Swatches);
+    key(&mut sheet, CLIENT, Key::Named(NamedKey::Right));
+    assert_eq!(sheet.swatches.selected(), Some(1));
+    assert_eq!(sheet.picker.colour(), before.foreground.opaque());
     assert_eq!(
-        key(&mut sheet, CLIENT, Key::Named(NamedKey::Home)),
+        sheet.picker.earlier(),
+        Some(before.foreground.opaque()),
+        "what the well was stands beside it"
+    );
+
+    focus_on(&mut sheet, CLIENT, Focus::Picker);
+    assert_eq!(
+        key(&mut sheet, CLIENT, Key::Named(NamedKey::Down)),
         SheetOutcome::Settled
     );
-
-    assert_eq!(sheet.profile().custom.foreground.b, 0);
-    assert_ne!(
+    assert_ne!(sheet.profile().custom.foreground, before.foreground);
+    assert_eq!(
         sheet.profile().custom.background,
-        sheet.profile().custom.foreground,
+        before.background,
         "the background well was left alone"
     );
+}
+
+/// Typing in the picker is live and unsettled; a click on another well
+/// settles it on the well it was typed for, then points the picker anew.
+#[test]
+fn a_colour_typed_then_left_for_another_well_stays_with_its_own() {
+    let mut sheet = sheet();
+    let before = sheet.profile().custom;
+    focus_on(&mut sheet, CLIENT, Focus::Picker);
+    // From the plane, past the hue strip and the earlier colour, to the hex.
+    for _ in 0..3 {
+        key(&mut sheet, CLIENT, Key::Named(NamedKey::Tab));
+    }
+    let ctrl = Modifiers {
+        ctrl: true,
+        ..Modifiers::default()
+    };
+    let theme = theme();
+    let sink = &mut damage::sink();
+    sheet.on_key(Key::Char('a'), ctrl, CLIENT, SCALE, &theme, sink);
+    for digit in "#123456".chars() {
+        key(&mut sheet, CLIENT, Key::Char(digit));
+    }
+    let typed = Rgb::new(0x12, 0x34, 0x56);
+    assert_eq!(sheet.profile().custom.background, typed, "typing is live");
+
+    let (layout, _) = resolved(&sheet, CLIENT);
+    let style = Style::new(SCALE, &theme);
+    let row = layout.laid_out(Focus::Swatches).expect("the grid is a row");
+    let (_, grid) = super::swatch_caption_split(row, style.scale, style.font);
+    let well = sheet.swatches.cell_rect(grid, 1).expect("a second well");
+    let shown = layout.view.to_window(well).expect("the well shows");
+    assert_eq!(
+        press_at(&mut sheet, CLIENT, centre(shown)),
+        SheetOutcome::Settled
+    );
+    sheet.on_pointer(&RELEASE, CLIENT, SCALE, &theme, sink);
+
+    assert_eq!(sheet.swatches.selected(), Some(1));
+    let custom = sheet.profile().custom;
+    assert_eq!(
+        custom.background, typed,
+        "the typing settled where it was typed"
+    );
+    assert_eq!(
+        custom.foreground, before.foreground,
+        "the well chosen kept its own"
+    );
+    assert_eq!(sheet.picker.colour(), before.foreground.opaque());
 }
 
 // --- Effects ---------------------------------------------------------------
@@ -637,8 +696,8 @@ fn restore_defaults_asks_the_caller_rather_than_resetting_the_sheet() {
     let mut sheet = sheet();
     let row = visible_row(&sheet, CLIENT, Focus::Scheme(1));
     click_at(&mut sheet, CLIENT, centre(row));
-    focus_on(&mut sheet, CLIENT, Focus::Channel(0));
-    key(&mut sheet, CLIENT, Key::Named(NamedKey::End));
+    focus_on(&mut sheet, CLIENT, Focus::Picker);
+    key(&mut sheet, CLIENT, Key::Named(NamedKey::Up));
     let edited = *sheet.profile();
     assert_ne!(edited, Profile::default(), "the profile really was edited");
 
@@ -722,38 +781,33 @@ fn adopting_mid_drag_leaves_the_drag_in_hand() {
 }
 
 /// The colours arriving from the store do not move the selected well, so a
-/// channel slider being edited keeps editing the colour the user chose.
+/// drag in the picker keeps editing the colour the user chose.
 #[test]
-fn adopting_keeps_the_well_the_channel_sliders_edit() {
+fn adopting_keeps_the_well_the_picker_edits() {
     let mut sheet = sheet();
-    sheet.swatches.adopt_selected(5);
-    sheet.sync_channel_sliders();
-    // The channel rows sit at the end of the body.
-    focus_on(&mut sheet, CLIENT, Focus::Scroll);
-    key(&mut sheet, CLIENT, Key::Named(NamedKey::End));
-    let row = visible_row(&sheet, CLIENT, Focus::Channel(0));
+    focus_on(&mut sheet, CLIENT, Focus::Swatches);
+    for _ in 0..5 {
+        key(&mut sheet, CLIENT, Key::Named(NamedKey::Right));
+    }
+    assert_eq!(sheet.swatches.selected(), Some(5));
+    focus_on(&mut sheet, CLIENT, Focus::Picker);
+    let plane = picker_point(&sheet, CLIENT, (2, 2));
     assert_eq!(
-        press_at(&mut sheet, CLIENT, slider_point(row, 0)),
-        SheetOutcome::Edited
+        press_at(&mut sheet, CLIENT, plane),
+        SheetOutcome::Edited,
+        "a press on the plane drags it"
     );
 
     let mut answer = *sheet.profile();
     answer.custom.background = Rgb::new(0x21, 0x43, 0x65);
     adopt(&mut sheet, answer);
-    assert_eq!(sheet.swatches.selected(), 5);
+    assert_eq!(sheet.swatches.selected(), Some(5));
 
-    sheet.on_pointer(
-        &moved(slider_point(row, 1000)),
-        CLIENT,
-        SCALE,
-        &theme(),
-        &mut damage::sink(),
-    );
     sheet.on_pointer(&RELEASE, CLIENT, SCALE, &theme(), &mut damage::sink());
     let settled = *sheet.profile();
     assert_eq!(
-        settled.custom.ansi[1].r,
-        u8::MAX,
+        settled.custom.ansi[1],
+        sheet.picker.colour().without_alpha(),
         "well 5 is the second ANSI colour"
     );
     assert_eq!(
@@ -865,7 +919,7 @@ fn a_keyboard_only_session_reaches_a_row_the_body_cannot_show() {
         .expect("the appearance tab has rows");
     focus_on(&mut sheet, TINY, last);
     assert_eq!(
-        key(&mut sheet, TINY, Key::Named(NamedKey::End)),
+        key(&mut sheet, TINY, Key::Named(NamedKey::Up)),
         SheetOutcome::Settled,
         "a row unreachable by pointer on a tiny viewport is still editable"
     );
@@ -1036,30 +1090,25 @@ fn a_keyed_effect_edit_reports_its_label() {
     assert!(covers(&damage, row));
 }
 
-/// Choosing another well re-points all three channel sliders, which is the
-/// sheet's own write into controls it did not touch.
+/// Choosing another well points the picker at it, which is the sheet's own
+/// write into a control it did not touch.
 #[test]
-fn selecting_a_well_reports_the_channel_rows_it_repoints() {
+fn selecting_a_well_reports_the_picker_it_repoints() {
     let mut sheet = sheet();
-    // The channel rows sit below the swatch grid, so once the grid has focus
-    // the body is scrolled to its end to show them before anything is
-    // asserted about their pixels.
+    // The picker sits below the swatch grid, so once the grid has focus the
+    // body is scrolled to its end to show it before anything is asserted
+    // about its pixels.
     focus_on(&mut sheet, CLIENT, Focus::Swatches);
     let end = resolved(&sheet, CLIENT).1.range().max_offset();
     wheel_to(&mut sheet, CLIENT, end);
-    let seated: Vec<Rect> = (0..3)
-        .filter_map(|index| row_rect(&sheet, CLIENT, Focus::Channel(index)))
-        .collect();
-    assert!(!seated.is_empty(), "at least one channel row is on screen");
+    let seated = visible_row(&sheet, CLIENT, Focus::Picker);
 
     let mut damage = damage::sink();
     key_into(&mut sheet, CLIENT, Key::Named(NamedKey::Right), &mut damage);
-    for row in seated {
-        assert!(
-            covers(&damage, row),
-            "a slider now showing another well's channel is redrawn"
-        );
-    }
+    assert!(
+        covers(&damage, seated),
+        "the picker now showing another well is redrawn"
+    );
 }
 
 /// Scrolling moves every row, and the bar reports only its own thumb.
@@ -1303,28 +1352,21 @@ fn a_row_the_bodys_edge_cuts_shows_its_part_inside_the_body() {
 fn the_hidden_part_of_a_cut_row_takes_no_pointer() {
     let mut sheet = sheet();
     let body = body(&sheet, CLIENT);
-    let row = Focus::Channel(0);
-    // Scrolled so the body's bottom edge crosses the slider's middle.
+    let row = Focus::Picker;
+    // Scrolled so the body's bottom edge crosses the picker's middle.
     let laid = laid_out(&sheet, CLIENT, row);
     let middle = laid.top() + to_i32(laid.height) / 2;
-    wheel_to(
-        &mut sheet,
-        CLIENT,
-        u64::try_from(middle - body.bottom()).expect("the row lies below the body"),
-    );
+    // A detent's units scroll two and a half pixels each, so the wheel lands
+    // exactly only on an even offset.
+    let cut = u64::try_from(middle - body.bottom()).expect("the row lies below the body");
+    wheel_to(&mut sheet, CLIENT, cut & !1);
     let shown = visible_row(&sheet, CLIENT, row);
     assert!(shown.height < laid.height, "the body's edge cuts the row");
     let (restore, _) = footer_buttons(&sheet, CLIENT);
-    let under = Point::new(slider_point(shown, 250).x, body.bottom() + 2);
+    let under = Point::new(shown.left() + 4, body.bottom() + 2);
     assert!(restore.contains(under), "the point is over the footer");
     let custom = sheet.profile().custom;
 
-    sheet.on_pointer(&moved(under), CLIENT, SCALE, &theme(), &mut damage::sink());
-    assert_ne!(
-        sheet.channel_sliders[0].state().pointer,
-        tairix_controls::PointerState::Hover,
-        "the row is not hovered through its hidden part"
-    );
     assert_eq!(
         click_at(&mut sheet, CLIENT, under),
         SheetOutcome::Restore,
@@ -1333,15 +1375,27 @@ fn the_hidden_part_of_a_cut_row_takes_no_pointer() {
     assert_eq!(
         sheet.profile().custom,
         custom,
-        "and the slider moved nothing"
+        "and the picker moved nothing"
     );
 
     // The part that shows is the row's.
-    assert_eq!(
-        press_at(&mut sheet, CLIENT, slider_point(shown, 250)),
-        SheetOutcome::Edited
-    );
+    let plane = picker_point(&sheet, CLIENT, (4, 4));
+    assert!(shown.contains(plane), "the plane's corner shows");
+    assert_eq!(press_at(&mut sheet, CLIENT, plane), SheetOutcome::Edited);
     assert_ne!(sheet.profile().custom, custom);
+}
+
+/// A point `(across, down)` pixels into the picker, where the sheet shows it:
+/// the picker's plane starts at its top-left corner.
+fn picker_point(sheet: &Settings, viewport: Rect, (across, down): (i32, i32)) -> Point {
+    let (layout, _) = resolved(sheet, viewport);
+    let theme = theme();
+    let area = super::picker_area(&layout, Style::new(SCALE, &theme));
+    let laid = Point::new(area.left() + across, area.top() + down);
+    layout
+        .view
+        .to_window(Rect::new(laid.x, laid.y, 1, 1))
+        .map_or(laid, |shown| shown.origin)
 }
 
 /// The pixel at `(x, y)`.

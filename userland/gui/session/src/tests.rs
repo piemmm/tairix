@@ -7265,7 +7265,7 @@ fn the_backdrop_ground_is_the_colour_where_no_picture_is_installed() {
     let (shell, _comp) = headless_desktop();
     let ground = shell
         .backdrop_ground(
-            tairix_wallpaper::Backdrop::Colour(tairix_wallpaper::Rgb::new(10, 20, 30)),
+            tairix_wallpaper::Backdrop::Colour(tairix_colour::Rgb::new(10, 20, 30)),
             8,
             4,
         )
@@ -11147,7 +11147,8 @@ fn a_desktop_with_no_artwork_at_all_still_draws_every_icon_from_its_glyphs() {
 
 use crate::desktop::Desktop;
 use tairix_browse::GridView;
-use tairix_wallpaper::{Backdrop, CursorSize, DesktopSettings, Rgb};
+use tairix_colour::Rgb;
+use tairix_wallpaper::{Backdrop, CursorSize, DesktopSettings};
 use tairix_window::WindowHost;
 use tairix_wm::{Region, Window};
 

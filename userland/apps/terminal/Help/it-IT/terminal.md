@@ -56,7 +56,10 @@ segue l'aspetto scuro o chiaro del desktop), *Midnight*, *Phosphor*,
 vengono utilizzati i colori modificati sotto il selettore: una griglia
 dei venti colori con cui viene disegnato uno schermo — lo sfondo, il
 primo piano, il cursore, il testo del cursore e i sedici colori ANSI —
-con cursori rosso, verde e blu per quello selezionato.
+e un selettore di colore per quello selezionato. Il selettore lo imposta
+per tonalità, saturazione e valore, per rosso, verde e blu, o con la sua
+scrittura esadecimale, e mostra accanto il colore che la casella aveva
+quando è stata selezionata, che un clic ripristina.
 
 **Effetti** imposta il modo in cui viene disegnato lo schermo.
 

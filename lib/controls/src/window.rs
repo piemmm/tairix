@@ -25,12 +25,13 @@
 
 use alloc::string::String;
 
+use tairix_colour::Rgba;
 use tairix_font::ELLIPSIS;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::{IconKind, IconPicture};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{div255, round_rect_coverage, Color, Ring, RingInk, Surface, SUBPIXEL};
-use tairix_theme::{Palette, Rgba, TextRole, Theme};
+use tairix_theme::{Palette, TextRole, Theme};
 
 use crate::damage;
 use crate::paint::{

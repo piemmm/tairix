@@ -28,12 +28,13 @@
 //! operator rounds at a caller-chosen bias ([`div255_biased`]): the plain
 //! form rounds to nearest, and a translucent field — a wash here, a
 //! translucent window in the compositor — varies it per pixel from a
-//! [`DitherRow`] and stays smooth instead of contouring. A theme [`Rgba`] token
-//! meets that algebra at a single edge — [`From<Rgba>`](Color) — which
-//! is why this crate depends on `lib/theme`: the conversion is owned in
-//! one place rather than re-implemented by each consumer.
+//! [`DitherRow`] and stays smooth instead of contouring. A colour value
+//! ([`Rgba`], or an opaque [`Rgb`]) meets that algebra at a single edge —
+//! [`From<Rgba>`](Color) — so the conversion is owned in one place rather
+//! than re-implemented by each consumer.
 //!
-//! [`Rgba`]: tairix_theme::Rgba
+//! [`Rgba`]: tairix_colour::Rgba
+//! [`Rgb`]: tairix_colour::Rgb
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
