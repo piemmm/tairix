@@ -2,7 +2,6 @@ use alloc::vec::Vec;
 
 use super::*;
 use crate::heightfield::Heightfield;
-use crate::scene::Grid;
 use crate::shade::{Crown, Shade};
 use crate::shape::Shape;
 use crate::vector::PACKET;
@@ -11,7 +10,7 @@ use crate::vector::PACKET;
 /// carrying `attributes`.
 fn level(attributes: Option<[u8; 4]>) -> Heightfield {
     let mut field = Heightfield::new(16, (-4.0, -4.0), 0.5, false).expect("a grid");
-    let side = field.rows();
+    let side = field.side();
     for (_, band) in field.bands(0..side, side) {
         band.fill(0.0);
     }

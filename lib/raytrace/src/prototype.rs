@@ -14,7 +14,7 @@ use tairix_util::mathf;
 use crate::bvh::{Builder, Bvh, Walk};
 use crate::leaf::Outline;
 use crate::shape::{Aabb, Hit};
-use crate::vector::{Ray, Vec3};
+use crate::vector::{single, singles, Ray, Vec3};
 
 /// A limb: a tube tapering from radius `radii[0]` at `a` to `radii[1]` at
 /// `b`, each end rounded by a sphere of its radius, so a chain of them bends
@@ -44,7 +44,7 @@ impl Tube {
         (material, key): (u16, u32),
         side: Vec3,
     ) -> Self {
-        let (a, b) = (stored(a), stored(b));
+        let (a, b) = (singles(a), singles(b));
         let (first, second) = round((point(b) - point(a)).normalized());
         let (x, y) = (side.dot(first), side.dot(second));
         let turn = if x * x + y * y > 1e-12 {
@@ -121,22 +121,6 @@ pub(crate) struct Prototype {
 /// A point held in single precision, back in double.
 pub(crate) fn point(at: [f32; 3]) -> Vec3 {
     Vec3::new(f64::from(at[0]), f64::from(at[1]), f64::from(at[2]))
-}
-
-/// A point in the single precision a part holds.
-pub(crate) fn stored(at: Vec3) -> [f32; 3] {
-    [single(at.x), single(at.y), single(at.z)]
-}
-
-/// A value in single precision.
-pub(crate) fn single(value: f64) -> f32 {
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "a prototype's parts are millimetres across metres, well within single precision"
-    )]
-    {
-        value as f32
-    }
 }
 
 /// A prototype whose hierarchy is still being built.

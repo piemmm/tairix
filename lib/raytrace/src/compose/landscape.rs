@@ -20,7 +20,7 @@ use super::plants::{self, Character, Fallen, Grassland, Grove, Kind, Stand, Tier
 use super::stones::Stones;
 use super::weather::{self, Climate, Cover, Hour, Outdoors};
 use super::woodland::{Beneath, Deadfall, Rooting, Wood, Woodland, ANYWHERE};
-use super::{direction, rgb, Composed, Dice, Landing, Look, Stage, View, GOLD};
+use super::{direction, lumens, rgb, Composed, Dice, Landing, Look, Stage, View, GOLD};
 
 use crate::course::Mark;
 use crate::grass::Seen;
@@ -1286,14 +1286,12 @@ fn marvel(stage: &mut Stage, dice: &mut Dice, land: &Land, vantage: &Vantage) ->
 fn look(weather: Outdoors, view: View, brightness: f64) -> Look {
     Look {
         sky: weather.sky,
-        fog: None,
         exposure: match weather.exposure {
             Exposure::Metered { key } => Exposure::Metered {
                 key: key * brightness,
             },
             fixed @ Exposure::Fixed(_) => fixed,
         },
-        daylight: weather.daylight,
         view,
     }
 }
@@ -2224,7 +2222,13 @@ fn lighthouse(stage: &mut Stage, dice: &mut Dice, base: Vec3, lit: bool) -> Opti
     stage.dome(deck + Vec3::UP * 2.5, room + 0.1, iron)?;
     let lamp = deck + Vec3::UP * 1.4;
     if lit {
-        stage.orb(lamp, 0.45, rgb(0xFF_F0_C8) * dice.range(60.0, 90.0))
+        // A lighthouse lamp of a kilowatt or two, its light shed every way
+        // through the lantern's glass.
+        stage.orb(
+            lamp,
+            0.45,
+            lumens(0xFF_F0_C8, dice.range(20_000.0, 40_000.0), 0.45),
+        )
     } else {
         let brass = stage.metal(super::BRASS, 0.1)?;
         stage
@@ -2815,9 +2819,7 @@ pub(super) fn lagoon(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
     stage.ground(0.0, water)?;
     let look = Look {
         sky: weather.sky,
-        fog: None,
         exposure: weather.exposure,
-        daylight: weather.daylight,
         view: View::Framed {
             yaw,
             elevation: dice.angle(4.0, 12.0),

@@ -96,10 +96,10 @@ fn paving(stage: &mut Stage, dice: &mut Dice) -> Option<usize> {
 }
 
 /// What a building stands on.
-///
-/// Held once, while the building is set out, so the space a plaza's land
-/// takes beside the endless floor's nothing costs nothing.
-#[allow(clippy::large_enum_variant)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "held once while a building is set out, and a box could not fail gracefully"
+)]
 enum Footing {
     /// Tiles to the horizon.
     Endless,
@@ -471,9 +471,7 @@ fn finish(
     let weather = weather::outdoors(stage, dice, &MONUMENT, facing)?;
     let look = Look {
         sky: weather.sky,
-        fog: None,
         exposure: weather.exposure,
-        daylight: weather.daylight,
         view: View::Placed {
             eye,
             target,
@@ -737,9 +735,7 @@ impl Aqueduct {
         let weather = weather::outdoors(stage, dice, &VALLEY, facing)?;
         Some(Look {
             sky: weather.sky,
-            fog: None,
             exposure: weather.exposure,
-            daylight: weather.daylight,
             view: View::Placed {
                 eye,
                 target,
@@ -996,9 +992,7 @@ pub(super) fn ruins(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
     let weather = weather::outdoors(stage, dice, &WILD, facing)?;
     let look = Look {
         sky: weather.sky,
-        fog: None,
         exposure: weather.exposure,
-        daylight: weather.daylight,
         view: View::Placed {
             eye,
             target,

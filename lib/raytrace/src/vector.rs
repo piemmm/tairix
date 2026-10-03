@@ -2,10 +2,34 @@
 
 pub(crate) use tairix_util::space::{Frame, Pose, Vec3};
 
+use crate::noise::cell;
+
 /// A count as a real number: every count a scene holds lies far below where
 /// a float stops counting exactly, and a larger one saturates.
 pub(crate) fn real(count: usize) -> f64 {
     f64::from(u32::try_from(count).unwrap_or(u32::MAX))
+}
+
+/// The cell of a grid a non-negative `value` lies in, counted from nought,
+/// and how far into it: nought for a negative or `NaN` one.
+pub(crate) fn cell_of(value: f64) -> (usize, f64) {
+    let (whole, fraction) = cell(value.max(0.0));
+    (usize::try_from(whole).unwrap_or(usize::MAX), fraction)
+}
+
+/// `value` in single precision, rounded to the nearest; infinite past its
+/// range.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "single precision is what each of the crate's grids, beams and parts keeps"
+)]
+pub(crate) fn single(value: f64) -> f32 {
+    value as f32
+}
+
+/// Each of `value`'s three in single precision.
+pub(crate) fn singles(value: Vec3) -> [f32; 3] {
+    [single(value.x), single(value.y), single(value.z)]
 }
 
 /// `done` of `total` as a share in `0.0..=1.0`, whole when there was nothing

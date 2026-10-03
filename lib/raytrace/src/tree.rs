@@ -18,8 +18,8 @@ use tairix_rng::{NonCryptoRng, RandU64};
 use tairix_util::mathf;
 
 use crate::leaf::Outline;
-use crate::prototype::{single, stored, Blade, Building, Part, Prototype, Tube, BUILD_UNIT};
-use crate::vector::{Frame, Vec3};
+use crate::prototype::{Blade, Building, Part, Prototype, Tube, BUILD_UNIT};
+use crate::vector::{single, singles, Frame, Vec3};
 
 /// The shape a crown fills: how long a limb grows by where it leaves the
 /// trunk, from the crown's top to its foot.
@@ -800,9 +800,9 @@ impl Grower {
         let fold = leafing.fold * self.range((0.6, 1.2));
         let key = self.next_key();
         self.push(Part::Leaf(Blade {
-            base: stored(base),
-            normal: stored(normal),
-            axis: stored(axis),
+            base: singles(base),
+            normal: singles(normal),
+            axis: singles(axis),
             length: single(size),
             width: single(size * leafing.breadth),
             outline: leafing.outline,
@@ -1026,9 +1026,9 @@ fn grow_frond(
                         * (0.85 + 0.3 * dice.next_f64());
                     key = crate::sample::mix32(key ^ pair ^ 0x5a);
                     parts.push(Part::Leaf(Blade {
-                        base: stored(base),
-                        normal: stored(normal),
-                        axis: stored(axis),
+                        base: singles(base),
+                        normal: singles(normal),
+                        axis: singles(axis),
                         length: single(leaflet),
                         width: single(leaflet * shape.leaflet.1),
                         outline: shape.outline,

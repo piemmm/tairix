@@ -33,7 +33,7 @@ use crate::scene::{Object, Scene, Sight, NEAR};
 use crate::shape::Shape;
 use crate::tone::Encoder;
 use crate::trace::{lift, resolved, Tracer};
-use crate::vector::{real, share, Pose, Ray, Vec3};
+use crate::vector::{real, share, single, Pose, Ray, Vec3};
 
 /// A tile's side, in metres.
 const TILE: f64 = 2.0;
@@ -298,7 +298,7 @@ impl Flat {
         };
         // Kept as a beam keeps its own, so a level surface's beams land where
         // its flat image says.
-        let level = drifts(Vec3::UP)?.map(|drift| drift.map(|value| f64::from(stored(value))));
+        let level = drifts(Vec3::UP)?.map(|drift| drift.map(|value| f64::from(single(value))));
         let mut bend = [0.0f64; 2];
         for normal in [
             Vec3::new(-TILT, 1.0, 0.0).normalized(),
@@ -912,7 +912,7 @@ impl Focusing {
             texel: focus.texel,
             ..Caustics::default()
         };
-        if let Some((toward, cos_radius, _)) = scene.sun() {
+        if let Some((toward, cos_radius)) = scene.sun_at(Vec3::ZERO) {
             let horizontal = mathf::hypot(toward.x, toward.z);
             laid.toward = toward;
             laid.way = if horizontal > 1e-9 {
@@ -1697,8 +1697,8 @@ fn surface(
 /// `normal`, under a sun toward `toward`.
 fn beam(sheet: &Sheet, toward: Vec3, point: Vec3, normal: Vec3) -> Beam {
     let mut beam = Beam {
-        height: stored(point.y),
-        drift: sheet.flat.drift.map(|drift| drift.map(stored)),
+        height: single(point.y),
+        drift: sheet.flat.drift.map(|drift| drift.map(single)),
         flux: [0.0; 2],
     };
     let cos_i = normal.dot(toward);
@@ -1712,26 +1712,17 @@ fn beam(sheet: &Sheet, toward: Vec3, point: Vec3, normal: Vec3) -> Beam {
     // beneath it.
     let lit = cos_i / normal.y.max(1e-6);
     if let Some(sunk) = refract(-toward, normal, sheet.ior).filter(|sunk| sunk.y < -1e-6) {
-        beam.drift[0] = [stored(sunk.x / -sunk.y), stored(sunk.z / -sunk.y)];
-        beam.flux[0] = stored((1.0 - reflected) * lit / sheet.flat.flux[0]);
+        beam.drift[0] = [single(sunk.x / -sunk.y), single(sunk.z / -sunk.y)];
+        beam.flux[0] = single((1.0 - reflected) * lit / sheet.flat.flux[0]);
     }
     let cast = (-toward).reflect(normal);
     beam.drift[1] = if cast.y >= LEAST_CLIMB {
-        beam.flux[1] = stored(reflected * lit / sheet.flat.flux[1].max(1e-12));
-        [stored(cast.x / cast.y), stored(cast.z / cast.y)]
+        beam.flux[1] = single(reflected * lit / sheet.flat.flux[1].max(1e-12));
+        [single(cast.x / cast.y), single(cast.z / cast.y)]
     } else {
         [f32::NAN; 2]
     };
     beam
-}
-
-/// `value` as a beam keeps it.
-#[allow(
-    clippy::cast_possible_truncation,
-    reason = "a beam keeps its height, drift and flux as singles, rounded to the nearest"
-)]
-fn stored(value: f64) -> f32 {
-    value as f32
 }
 
 /// Where the survey found the sun's light reaching a point the picture shows

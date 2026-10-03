@@ -15,6 +15,7 @@ use tairix_util::{fallible, mathf};
 
 use crate::adapt::Adaptation;
 use crate::band;
+use crate::body::sunlight;
 use crate::bvh::{Builder, Bvh, Cursor, Walk};
 use crate::camera::Camera;
 use crate::caustic::{Caustics, Focusing};
@@ -26,11 +27,12 @@ use crate::light::Light;
 use crate::material::{Material, Water};
 use crate::prototype::Prototype;
 use crate::radiosity::{Gathering, Radiosity};
+use crate::sample::{cosine_hemisphere, GOLDEN_RATIO};
 use crate::shade::Shades;
 use crate::shape::{Aabb, Face, Geometry, Hit, Shape};
-use crate::sky::Sky;
+use crate::sky::{Dome, Seeing, Sky};
 use crate::trace::Meter;
-use crate::vector::{real, Members, Pose, Ray, Vec3};
+use crate::vector::{Members, Pose, Ray, Vec3};
 
 /// How near a ray may meet a surface: nearer is the surface it left.
 pub(crate) const NEAR: f64 = 1e-7;
@@ -101,13 +103,6 @@ pub(crate) struct Glare {
     pub(crate) irradiance: Vec3,
 }
 
-/// Haze between the camera and what it sees.
-#[derive(Copy, Clone, Debug)]
-pub(crate) struct Fog {
-    /// How much of the light is lost per unit of distance.
-    pub(crate) density: f64,
-}
-
 /// Everything a scene is, before its hierarchy is built.
 #[derive(Debug)]
 pub(crate) struct Parts {
@@ -119,12 +114,10 @@ pub(crate) struct Parts {
     pub(crate) materials: Vec<Material>,
     pub(crate) lights: Vec<Light>,
     pub(crate) sky: Sky,
-    pub(crate) fog: Option<Fog>,
     /// The shade a land's woods cast, which roofs the air beneath them.
     pub(crate) shades: Option<Shades>,
     pub(crate) camera: Camera,
     pub(crate) exposure: Exposure,
-    pub(crate) daylight: f64,
 }
 
 /// A scene composed, with the work that makes it traceable still to do.
@@ -329,39 +322,6 @@ impl Draft {
     }
 }
 
-/// A square grid of values filled a band of rows at a time: a height grid,
-/// or a cloud layer's cover.
-pub(crate) trait Grid {
-    /// How many rows, and so vertices a row, the grid has.
-    fn rows(&self) -> usize;
-    /// Where its vertices lie.
-    fn layout(&self) -> Layout;
-    /// Its rows `range`, as disjoint bands `rows` rows high, each with the
-    /// row it starts at.
-    fn bands(
-        &mut self,
-        range: core::ops::Range<usize>,
-        rows: usize,
-    ) -> impl Iterator<Item = (usize, &mut [f32])>;
-}
-
-/// Where a grid's vertices lie: the world x and z of vertex `(0, 0)` and the
-/// distance between neighbours.
-#[derive(Copy, Clone, Debug)]
-pub(crate) struct Layout {
-    pub(crate) origin: (f64, f64),
-    pub(crate) step: f64,
-}
-
-impl Layout {
-    pub(crate) fn vertex(&self, column: usize, row: usize) -> (f64, f64) {
-        (
-            self.origin.0 + self.step * real(column),
-            self.origin.1 + self.step * real(row),
-        )
-    }
-}
-
 /// What an object does to a shadow ray.
 enum Shadow {
     Missed,
@@ -381,7 +341,6 @@ pub struct Scene {
     pub(crate) materials: Vec<Material>,
     pub(crate) lights: Vec<Light>,
     pub(crate) sky: Sky,
-    pub(crate) fog: Option<Fog>,
     pub(crate) shades: Option<Shades>,
     pub(crate) camera: Camera,
     /// What a radiance is scaled by before it is toned for the screen.
@@ -394,9 +353,10 @@ pub struct Scene {
     /// The range one exposure cannot hold, compressed sample by sample, once
     /// measured; `None` where the exposure holds the whole scene.
     pub(crate) adaptation: Option<Adaptation>,
-    /// Roughly how much light falls on the scene, as a share of a clear
-    /// day's: what the glow within water is scaled by.
-    pub(crate) daylight: f64,
+    /// How much light falls on the scene's level, channel by channel, as a
+    /// share of the sunlight above the air: what the glow within water,
+    /// authored under that sunlight, is scaled by.
+    pub(crate) daylight: Vec3,
     /// The objects that are bodies of water, which the sun's light reaches
     /// what lies beneath them through and what stands over them off.
     pub(crate) waters: Vec<usize>,
@@ -422,6 +382,55 @@ pub(crate) struct Building {
 
 /// Objects' worth of a scene's hierarchy built in one step.
 const BUILD_UNIT: usize = 16_384;
+
+/// Samples of each sun's disc, and of the sky above, the light falling on a
+/// scene's level is measured by.
+const DAYLIGHT_DISC: u32 = 16;
+const DAYLIGHT_SKY: u32 = 256;
+
+/// How much light falls on the level beneath `eye` from `lights`' discs and
+/// from `sky`, cloud and all, as a share of the sunlight above the air,
+/// channel by channel; all of it under a room's walls, where no water lies.
+fn daylight(sky: &Sky, lights: &[Light], eye: Vec3) -> Vec3 {
+    if matches!(sky.dome, Dome::Gradient(_)) {
+        return Vec3::ONE;
+    }
+    let at = Vec3::new(eye.x, 0.0, eye.z);
+    let mut falling = Vec3::ZERO;
+    for light in lights
+        .iter()
+        .filter(|light| matches!(light, Light::Sun { .. }))
+    {
+        for incidence in light.samples(at, DAYLIGHT_DISC, sky) {
+            falling += incidence.light
+                * incidence.kept
+                * (incidence.dir.y.max(0.0) / f64::from(DAYLIGHT_DISC));
+        }
+    }
+    let seeing = Seeing {
+        fine: false,
+        spread: None,
+        jitter: 0.5,
+    };
+    for index in 0..DAYLIGHT_SKY {
+        // Spread over the sky above as its cosine weighs it, two by two in
+        // even steps and the golden ratio's.
+        let golden = f64::from(index) * GOLDEN_RATIO;
+        let pair = (
+            (f64::from(index) + 0.5) / f64::from(DAYLIGHT_SKY),
+            golden - mathf::floor(golden),
+        );
+        let (x, z, y) = cosine_hemisphere(pair);
+        let light = sky.radiance(at, Vec3::new(x, y, z), seeing);
+        falling += light * (core::f64::consts::PI / f64::from(DAYLIGHT_SKY));
+    }
+    let above = sunlight();
+    Vec3::new(
+        falling.x / above.x,
+        falling.y / above.y,
+        falling.z / above.z,
+    )
+}
 
 /// A draft's progress once its scene is ready, in thousandths.
 const PROGRESS_WHOLE: u16 = 1000;
@@ -453,9 +462,9 @@ impl Building {
             prototypes: parts.prototypes,
             lawns: parts.lawns,
             materials: parts.materials,
+            daylight: daylight(&parts.sky, &parts.lights, parts.camera.eye()),
             lights: parts.lights,
             sky: parts.sky,
-            fog: parts.fog,
             shades: parts.shades,
             camera: parts.camera,
             exposure: match parts.exposure {
@@ -465,7 +474,6 @@ impl Building {
             glare: None,
             radiosity: None,
             adaptation: None,
-            daylight: parts.daylight,
             waters,
             caustics: Caustics::default(),
             bvh: builder.finish(),
@@ -725,17 +733,27 @@ impl Scene {
         nearest
     }
 
-    /// The first sun lighting the scene: which way it lies, the cosine of its
-    /// disc's angular radius, and its radiance.
-    pub(crate) fn sun(&self) -> Option<(Vec3, f64, Vec3)> {
-        self.lights.iter().find_map(|light| match *light {
+    /// The first sun lighting the scene, or the moon: the disc the lens
+    /// spreads glare about and the water focuses.
+    pub(crate) fn sun(&self) -> Option<&Light> {
+        self.lights
+            .iter()
+            .find(|light| matches!(light, Light::Sun { .. }))
+    }
+
+    /// The way the first sun's light comes in at `point`, as the air bends
+    /// it, and the cosine of its disc's radius; `None` with no sun, or where
+    /// it has set.
+    pub(crate) fn sun_at(&self, point: Vec3) -> Option<(Vec3, f64)> {
+        match *self.sun()? {
             Light::Sun {
-                toward,
-                cos_radius,
-                radiance,
-            } => Some((toward, cos_radius, radiance)),
+                toward, cos_radius, ..
+            } => self
+                .sky
+                .arriving(point, toward)
+                .map(|arriving| (arriving.dir, cos_radius)),
             _ => None,
-        })
+        }
     }
 
     /// The blades of the sward `point` lies within, if it lies within one.

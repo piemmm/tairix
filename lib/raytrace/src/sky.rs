@@ -1,267 +1,37 @@
-//! The sky every ray that escapes the scene sees: the atmosphere, or for a
-//! studio or a lit room a gradient from the horizon to the zenith and the
-//! glow a lamp or a low sun spreads about itself; a layer of cloud; and at
-//! night the stars. The sun's own disc is a light, sampled as one, and not
-//! part of the sky.
-
-use alloc::vec::Vec;
-use core::f64::consts::PI;
-use core::ops::Range;
+//! The sky every ray that escapes the scene sees: the atmosphere and the
+//! stars beyond it, or about a studio the walls of its room; and the cloud.
+//! The sun's own disc is a light, sampled as one, and not part of the sky.
 
 use tairix_parallel::JobRunner;
 use tairix_util::{fallible, mathf};
 
-use crate::atmosphere::{Atmosphere, Lit};
+use crate::atmosphere::{Arriving, Atmosphere, Bend, Lit};
 use crate::cloud::{sunlight_levels, Cloudbank, Lighting, SUNLIGHT_LEVELS};
-use crate::heightfield::{banded, bilinear};
-use crate::noise::{noise2, smoothstep};
-use crate::sample::{mix32, unit};
-use crate::scene::{Grid, Layout};
-use crate::vector::{real, Vec3};
+use crate::noise::smoothstep;
+use crate::stars::Starfield;
+use crate::vector::Vec3;
 
-/// A layer of cloud `altitude` up.
-///
-/// Its cover comes from a grid, filled a band of rows at a time as a height
-/// grid is, `span` across and centred over the scene; finer noise at trace
-/// time sharpens its edges past the grid's own resolution.
-#[derive(Clone, Debug)]
-pub(crate) struct Clouds {
-    /// Vertices along each side of the cover grid.
-    side: usize,
-    span: f64,
-    cover: Vec<f32>,
-    pub(crate) altitude: f64,
-    /// The density at which cloud begins, and over how much more it
-    /// thickens to full.
-    pub(crate) threshold: f64,
-    pub(crate) softness: f64,
-    /// How opaque a full cloud is, as an optical depth.
-    pub(crate) depth: f64,
-    /// The light a cloud's shaded underside gives, and the sunlight on it.
-    pub(crate) shade: Vec3,
-    pub(crate) sunlight: Vec3,
-    /// The unit direction toward the sun that lights it.
-    pub(crate) toward: Vec3,
-    /// The scale of the finer noise that sharpens the cover.
-    pub(crate) detail: f64,
-    pub(crate) seed: u32,
-    /// Whether the layer is a whole grey ceiling, its underside lit more.
-    pub(crate) overcast: bool,
-}
-
-impl Clouds {
-    /// A layer whose cover grid has `cells` cells a side over `span`; `None`
-    /// when the heap will not hold it.
-    pub(crate) fn new(cells: usize, span: f64, template: CloudLook) -> Option<Self> {
-        let side = cells.checked_add(1)?;
-        Some(Self {
-            side,
-            span,
-            cover: fallible::filled(side.checked_mul(side)?, 0.0f32)?,
-            altitude: template.altitude,
-            threshold: template.threshold,
-            softness: template.softness,
-            depth: template.depth,
-            shade: template.shade,
-            sunlight: template.sunlight,
-            toward: template.toward,
-            detail: template.detail,
-            seed: template.seed,
-            overcast: template.overcast,
-        })
-    }
-
-    /// Light the layer by `dome`: the sun reaching its height, reddened and
-    /// dimmed by the air below and the Earth's shadow, and the sky's light on
-    /// its underside.
-    pub(crate) fn settle(&mut self, dome: &Dome) {
-        let Dome::Air(atmosphere) = dome else {
-            return;
-        };
-        let air = atmosphere.air();
-        let reaching = atmosphere.sunlight(self.altitude, air.sun) * air.solar;
-        let low = air.sun.y < 0.25;
-        self.sunlight = reaching * if low { 0.042 } else { 0.032 };
-        self.shade = atmosphere.ambient() * if self.overcast { 1.1 } else { 0.9 };
-    }
-
-    /// The cloud's density at world `(x, z)`: the grid's, and when `fine`
-    /// the finer noise's on top of it.
-    fn density(&self, x: f64, z: f64, fine: bool) -> f64 {
-        let cells = self.side.saturating_sub(1);
-        let step = self.span / real(cells);
-        let (u, v) = ((x + 0.5 * self.span) / step, (z + 0.5 * self.span) / step);
-        let limit = real(cells) - 1e-9;
-        if !(0.0..limit).contains(&u) || !(0.0..limit).contains(&v) {
-            return -1.0;
-        }
-        let (column, row) = (mathf::floor(u), mathf::floor(v));
-        let (across, down) = (u - column, v - row);
-        let (left, near) = (
-            usize::try_from(mathf::round_i32(column)).unwrap_or(0),
-            usize::try_from(mathf::round_i32(row)).unwrap_or(0),
-        );
-        let at = |column: usize, row: usize| {
-            f64::from(
-                self.cover
-                    .get(row * self.side + column)
-                    .copied()
-                    .unwrap_or(-1.0),
-            )
-        };
-        let corners = [
-            at(left, near),
-            at(left + 1, near),
-            at(left, near + 1),
-            at(left + 1, near + 1),
-        ];
-        let coarse = bilinear(corners, (across, down));
-        if !fine {
-            return coarse;
-        }
-        coarse
-            + 0.22 * noise2(x / self.detail, z / self.detail, self.seed)
-            + 0.1
-                * noise2(
-                    x / (0.4 * self.detail),
-                    z / (0.4 * self.detail),
-                    self.seed ^ 5,
-                )
-    }
-
-    /// How much cloud covers world `(x, z)`, from `0.0` clear to `1.0`.
-    fn cover_at(&self, x: f64, z: f64, fine: bool) -> f64 {
-        smoothstep(
-            self.threshold,
-            self.threshold + self.softness,
-            self.density(x, z, fine),
-        )
-    }
-
-    /// The colour of the cloud a ray from `origin` along `dir` meets, and
-    /// how much of what is behind it it hides.
-    fn seen(&self, origin: Vec3, dir: Vec3, fine: bool) -> Option<(Vec3, f64)> {
-        if dir.y < 0.015 || origin.y >= self.altitude {
-            return None;
-        }
-        let t = (self.altitude - origin.y) / dir.y;
-        // Far off, the layer thins into the haze toward the horizon.
-        let fade = mathf::exp(-t / (0.35 * self.span));
-        if fade < 0.01 {
-            return None;
-        }
-        let point = origin + dir * t;
-        let cover = self.cover_at(point.x, point.z, fine);
-        if cover <= 0.0 {
-            return None;
-        }
-        let opacity = (1.0 - mathf::exp(-cover * self.depth)) * fade;
-        // Toward the sun the cloud above shadows the part seen; its edges,
-        // lit through thin cloud, shine.
-        let reach = 700.0 / self.toward.y.max(0.12);
-        let shadowing = self.cover_at(
-            point.x + self.toward.x * reach,
-            point.z + self.toward.z * reach,
-            false,
-        );
-        let lit = mathf::exp(-shadowing * self.depth * 0.45);
-        let forward = scattering(dir.dot(self.toward), 0.6) * 4.0 * PI;
-        let direct = self.sunlight * (lit * (0.35 + 0.65 * forward.min(6.0)));
-        let colour = self.shade * (1.0 - 0.4 * cover) + direct * (1.0 - 0.5 * cover);
-        Some((colour, opacity))
-    }
-
-    /// How much of the sunlight toward `toward` reaches `point` through the
-    /// layer.
-    pub(crate) fn shadow(&self, point: Vec3, toward: Vec3) -> f64 {
-        if toward.y < 0.015 || point.y >= self.altitude {
-            return 1.0;
-        }
-        let t = (self.altitude - point.y) / toward.y;
-        let spot = point + toward * t;
-        mathf::exp(-self.cover_at(spot.x, spot.z, false) * self.depth)
-    }
-}
-
-impl Grid for Clouds {
-    fn rows(&self) -> usize {
-        self.side
-    }
-
-    fn layout(&self) -> Layout {
-        Layout {
-            origin: (-0.5 * self.span, -0.5 * self.span),
-            step: self.span / real(self.side.saturating_sub(1)),
-        }
-    }
-
-    fn bands(
-        &mut self,
-        range: Range<usize>,
-        rows: usize,
-    ) -> impl Iterator<Item = (usize, &mut [f32])> {
-        banded(&mut self.cover, self.side, range, rows)
-    }
-}
-
-/// What a cloud layer looks like, before its cover is drawn.
-#[derive(Copy, Clone, Debug)]
-pub(crate) struct CloudLook {
-    pub(crate) altitude: f64,
-    pub(crate) threshold: f64,
-    pub(crate) softness: f64,
-    pub(crate) depth: f64,
-    pub(crate) shade: Vec3,
-    pub(crate) sunlight: Vec3,
-    pub(crate) toward: Vec3,
-    pub(crate) detail: f64,
-    pub(crate) seed: u32,
-    pub(crate) overcast: bool,
-}
-
-/// The Henyey–Greenstein phase function: how much of the light a cloud
-/// scatters goes out at `cos` to the way it came, for asymmetry `g`.
-fn scattering(cos: f64, g: f64) -> f64 {
-    let base = 1.0 + g * g - 2.0 * g * cos;
-    (1.0 - g * g) / (4.0 * PI * base * mathf::sqrt(base.max(1e-9)))
-}
-
-/// The haze the sun lights about itself.
-#[derive(Copy, Clone, Debug)]
-pub(crate) struct Glow {
-    /// The unit direction toward the sun.
-    pub(crate) toward: Vec3,
-    /// The halo's colour at its brightest.
-    pub(crate) colour: Vec3,
-    /// How much of the halo hugs the horizon beneath the sun, as at sunset.
-    pub(crate) horizon: f64,
-}
-
-/// A gradient from the horizon to the zenith: a studio's backdrop, or the
-/// dark about a lit room.
+/// A gradient from the horizon to the zenith: the walls of the room a
+/// studio's pieces stand in.
 #[derive(Clone, Debug)]
 pub(crate) struct Gradient {
     pub(crate) zenith: Vec3,
     pub(crate) horizon: Vec3,
     /// Below the horizon, where no ground reaches.
     pub(crate) ground: Vec3,
-    pub(crate) glow: Option<Glow>,
 }
 
 impl Gradient {
-    /// The light the sun's glow adds toward `dir`.
-    fn glow(&self, dir: Vec3) -> Vec3 {
-        let Some(glow) = self.glow else {
-            return Vec3::ZERO;
-        };
-        let near = dir.dot(glow.toward).max(0.0);
-        let n2 = near * near;
-        let n4 = n2 * n2;
-        let n8 = n4 * n4;
-        let n32 = n8 * n8 * n8 * n8;
-        let low = (1.0 - dir.y.abs()).max(0.0);
-        let low4 = low * low * low * low;
-        glow.colour * (0.35 * n8 + 0.9 * n32 * n32 + glow.horizon * low4 * low4 * n2)
+    /// The walls' light toward `dir`.
+    fn at(&self, dir: Vec3) -> Vec3 {
+        let up = dir.y;
+        if up >= 0.0 {
+            let low = 1.0 - up;
+            let low2 = low * low;
+            self.zenith.lerp(self.horizon, low2 * low2)
+        } else {
+            self.horizon.lerp(self.ground, smoothstep(0.0, 0.15, -up))
+        }
     }
 }
 
@@ -281,29 +51,34 @@ pub(crate) enum Dome {
 #[derive(Clone, Debug)]
 pub(crate) struct Sky {
     pub(crate) dome: Dome,
-    /// How bright the stars are; `0.0` for none.
-    pub(crate) stars: f64,
-    /// A high, thin sheet of cloud above everything: cirrus.
-    pub(crate) clouds: Option<Clouds>,
-    /// The cloud a ray marches through.
-    pub(crate) bank: Option<Cloudbank>,
+    /// The stars beyond the air of a sky out of doors.
+    pub(crate) stars: Option<Starfield>,
+    /// The cloud a ray marches through: the low and middle decks, and above
+    /// them a high deck of cirrus.
+    pub(crate) low: Option<Cloudbank>,
+    pub(crate) high: Option<Cloudbank>,
 }
 
-/// The share of the sun's glow the haze before the horizon takes.
-const HAZE_GLOW: f64 = 0.4;
-
-/// Star cells along each edge of each face of the cube the sky is mapped
-/// onto: a cell holds one star at most.
-const STAR_CELLS: f64 = 120.0;
-/// Out of 256, how many cells hold a star.
-const STAR_SHARE: u32 = 40;
-/// A star's angular radius, in radians.
-const STAR_RADIUS: f64 = 0.0011;
+/// How a ray escaping the scene sees the sky.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct Seeing {
+    /// Whether it is seen directly or reflected, which takes the clouds'
+    /// finest edges.
+    pub(crate) fine: bool,
+    /// The angle the ray's footprint spans, which a star is spread over;
+    /// `None` for a ray scattered off a diffuse surface, which takes the
+    /// stars' mean.
+    pub(crate) spread: Option<f64>,
+    /// In `0.0..1.0`: how a march through cloud staggers where along its
+    /// steps it reads the cloud, so no two samples of a pixel band alike.
+    pub(crate) jitter: f64,
+}
 
 impl Sky {
     /// Build the next unit of the sky across `runner` — the atmosphere's
-    /// tables, then the cloud bank's — and once both are built, light the
-    /// clouds by the air; whether the sky is done, or `None` when the heap
+    /// tables, then the high bank's and the low bank's, each aimed along the
+    /// sunlight the air bends to it — and once all are built, light the
+    /// banks by the air; whether the sky is done, or `None` when the heap
     /// will not hold it.
     pub(crate) fn build(&mut self, runner: &dyn JobRunner) -> Option<bool> {
         if let Dome::Air(atmosphere) = &mut self.dome {
@@ -311,84 +86,180 @@ impl Sky {
                 return Some(false);
             }
         }
-        if let Some(bank) = self.bank.as_mut() {
-            if !bank.step(runner)? {
+        if let Dome::Air(atmosphere) = &self.dome {
+            for bank in [self.high.as_mut(), self.low.as_mut()]
+                .into_iter()
+                .flatten()
+            {
+                let (floor, ceiling) = bank.span();
+                let height = f64::midpoint(floor, ceiling);
+                let toward = atmosphere.air().sun;
+                bank.aim(
+                    atmosphere
+                        .arriving(height, toward)
+                        .map_or(toward, |arriving| arriving.dir),
+                );
+            }
+        }
+        if let Some(high) = self.high.as_mut() {
+            if !high.step(runner, None)? {
                 return Some(false);
             }
         }
-        if let Some(clouds) = self.clouds.as_mut() {
-            clouds.settle(&self.dome);
+        if let Some(low) = self.low.as_mut() {
+            if !low.step(runner, self.high.as_ref())? {
+                return Some(false);
+            }
         }
-        if let (Some(bank), Dome::Air(atmosphere)) = (self.bank.as_mut(), &self.dome) {
+        if let Dome::Air(atmosphere) = &self.dome {
             let air = atmosphere.air();
-            let levels = sunlight_levels(bank.span())
-                .map(|height| atmosphere.sunlight(height, air.sun) * air.solar);
-            let sunlight = fallible::collected(SUNLIGHT_LEVELS, levels)?;
-            let ground = atmosphere.sunlight(0.0, air.sun) * air.solar * air.sun.y.max(0.0);
-            bank.light_by(Lighting {
-                sunlight,
-                above: atmosphere.ambient(),
-                below: air.albedo * ((ground * (1.0 / PI)) + atmosphere.ambient()),
-            });
+            // The sunlight on the level ground, which it gives back to the
+            // clouds' undersides: arriving as the air bends and squashes it.
+            let ground = atmosphere
+                .arriving(0.0, air.sun)
+                .map_or(Vec3::ZERO, |arriving| {
+                    arriving.kept * air.solar * (arriving.dir.y.max(0.0) * arriving.stretch)
+                });
+            let below =
+                air.albedo * (ground * (1.0 / core::f64::consts::PI) + atmosphere.ambient());
+            for bank in [self.high.as_mut(), self.low.as_mut()]
+                .into_iter()
+                .flatten()
+            {
+                let levels = sunlight_levels(bank.span())
+                    .map(|height| atmosphere.sunlight(height, air.sun) * air.solar);
+                bank.light_by(Lighting {
+                    sunlight: fallible::collected(SUNLIGHT_LEVELS, levels)?,
+                    above: atmosphere.ambient(),
+                    below,
+                });
+            }
         }
         Some(true)
     }
 
-    /// What a ray escaping from `origin` along the unit `dir` sees; `fine`
-    /// when it is seen directly or reflected, so clouds keep their finest
-    /// edges.
+    /// What a ray escaping from `origin` along the unit `dir` sees.
     ///
-    /// Before a bank's cloud lies the air between it and the ray's origin,
-    /// which dims the cloud and adds its own glow; behind it, whatever of the
-    /// clear sky's light the cloud lets through. `jitter` staggers a march
-    /// through the bank from one sample to the next.
-    pub(crate) fn radiance(&self, origin: Vec3, dir: Vec3, fine: bool, jitter: f64) -> Vec3 {
-        let mut clear = self.clear(dir);
-        if let Some((cloud, opacity)) = self
-            .clouds
-            .as_ref()
-            .and_then(|clouds| clouds.seen(origin, dir, fine))
-        {
-            clear = clear.lerp(cloud, opacity);
-        }
-        let Some((cloud, kept, depth)) = self
-            .bank
-            .as_ref()
-            .and_then(|bank| bank.seen(origin, dir, fine, jitter))
-        else {
-            return clear;
+    /// Before each bank's cloud lies the air between it and the ray's origin,
+    /// which dims the cloud and adds its own glow; behind the last, whatever
+    /// of the clear sky's light the cloud lets through.
+    pub(crate) fn radiance(&self, origin: Vec3, dir: Vec3, seeing: Seeing) -> Vec3 {
+        let met = |bank: Option<&Cloudbank>| {
+            bank.and_then(|bank| bank.seen(origin, dir, seeing.fine, seeing.jitter))
         };
-        let (scattered, through) = match &self.dome {
-            Dome::Air(atmosphere) => {
-                let between = atmosphere.between(dir, depth);
-                (between.light(), between.kept)
+        let (mut near, mut far) = (met(self.low.as_ref()), met(self.high.as_ref()));
+        if let (Some(low), Some(high)) = (near, far) {
+            if high.2 < low.2 {
+                (near, far) = (far, near);
             }
-            Dome::Gradient(_) => (Vec3::ZERO, Vec3::ONE),
-        };
-        scattered + cloud * through + (clear - scattered).max(Vec3::ZERO) * kept
+        }
+        let (mut light, mut through, mut before) = (Vec3::ZERO, 1.0, Vec3::ZERO);
+        for (cloud, kept, depth) in [near, far].into_iter().flatten() {
+            let (scattered, crossed) = match &self.dome {
+                Dome::Air(atmosphere) => {
+                    let between = atmosphere.between(dir, depth);
+                    (between.light(), between.kept)
+                }
+                Dome::Gradient(_) => (Vec3::ZERO, Vec3::ONE),
+            };
+            light += ((scattered - before).max(Vec3::ZERO) + cloud * crossed) * through;
+            through *= kept;
+            before = scattered;
+        }
+        if through <= 0.0 {
+            return light;
+        }
+        let clear = self.clear(origin, dir, seeing.spread);
+        light + (clear - before).max(Vec3::ZERO) * through
     }
 
-    /// How much of the sunlight toward `toward` reaches `point`: what the
-    /// air keeps of it at the point's height, and what the clouds let past.
-    pub(crate) fn sunlight(&self, point: Vec3, toward: Vec3) -> Vec3 {
+    /// How much of the light arriving at `point` along the unit `dir`, the
+    /// way it comes in, crossed the air and the clouds.
+    pub(crate) fn transmitted(&self, point: Vec3, dir: Vec3) -> Vec3 {
         let air = match &self.dome {
-            Dome::Air(atmosphere) => atmosphere.sunlight(point.y, toward),
+            Dome::Air(atmosphere) => atmosphere
+                .leaving(point.y, dir)
+                .map_or(Vec3::ZERO, |leaving| leaving.kept),
             Dome::Gradient(_) => Vec3::ONE,
         };
-        air * self.clouded(point, toward)
+        air * self.clouded(point, dir)
     }
 
-    /// How much of the sunlight toward `toward` the clouds let reach `point`.
-    pub(crate) fn clouded(&self, point: Vec3, toward: Vec3) -> f64 {
-        let sheet = self
-            .clouds
-            .as_ref()
-            .map_or(1.0, |clouds| clouds.shadow(point, toward));
-        let bank = self
-            .bank
-            .as_ref()
-            .map_or(1.0, |bank| bank.shadow(point, toward));
-        sheet * bank
+    /// How much of the sunlight arriving at `point` along `dir` the clouds
+    /// let reach it.
+    pub(crate) fn clouded(&self, point: Vec3, dir: Vec3) -> f64 {
+        [self.low.as_ref(), self.high.as_ref()]
+            .into_iter()
+            .flatten()
+            .map(|bank| bank.shadow(point, dir))
+            .product()
+    }
+
+    /// How the light from the true direction `toward` arrives at `point`:
+    /// bent by the air, or as it is under a room's walls; `None` where the
+    /// Earth stands between.
+    pub(crate) fn arriving(&self, point: Vec3, toward: Vec3) -> Option<Arriving> {
+        match &self.dome {
+            Dome::Air(atmosphere) => atmosphere.arriving(point.y, toward),
+            Dome::Gradient(_) => Some(Arriving {
+                dir: toward,
+                stretch: 1.0,
+                kept: Vec3::ONE,
+                bend: Bend::none(toward),
+            }),
+        }
+    }
+
+    /// The true direction the green light a ray from `point` along `dir`
+    /// meets comes from, and the solid angle that light is seen over for
+    /// each it truly fills; `None` where the ray meets the ground.
+    pub(crate) fn leaving(&self, point: Vec3, dir: Vec3) -> Option<(Vec3, f64)> {
+        match &self.dome {
+            Dome::Air(atmosphere) => atmosphere
+                .leaving(point.y, dir)
+                .map(|leaving| (leaving.toward, leaving.stretch)),
+            Dome::Gradient(_) => Some((dir, 1.0)),
+        }
+    }
+
+    /// The true directions each channel of the light a ray from `point`
+    /// along `dir` meets comes from, and what of it the air and the clouds
+    /// let reach `point`; `None` where the ray meets the ground.
+    pub(crate) fn beyond(&self, point: Vec3, dir: Vec3) -> Option<([Vec3; 3], Vec3)> {
+        let (sources, kept) = match &self.dome {
+            Dome::Air(atmosphere) => {
+                let leaving = atmosphere.leaving(point.y, dir)?;
+                (
+                    atmosphere.sources(dir, leaving.bend, leaving.toward),
+                    leaving.kept,
+                )
+            }
+            Dome::Gradient(_) => ([dir; 3], Vec3::ONE),
+        };
+        Some((sources, kept * self.clouded(point, dir)))
+    }
+
+    /// The true directions each channel of the light `arriving` comes from,
+    /// the green's being `toward`.
+    pub(crate) fn channels(&self, arriving: &Arriving, toward: Vec3) -> [Vec3; 3] {
+        match &self.dome {
+            Dome::Air(atmosphere) => atmosphere.sources(arriving.dir, arriving.bend, toward),
+            Dome::Gradient(_) => [toward; 3],
+        }
+    }
+
+    /// The cosine to the centre of a disc of angular radius whose cosine is
+    /// `cos_radius` below which a ray meets no channel of its light,
+    /// however the air bends it.
+    pub(crate) fn reach(&self, cos_radius: f64) -> f64 {
+        match &self.dome {
+            Dome::Air(atmosphere) => {
+                let (cos, sin) = atmosphere.bending();
+                let sin_radius = mathf::sqrt(((1.0 - cos_radius) * (1.0 + cos_radius)).max(0.0));
+                cos_radius * cos - sin_radius * sin
+            }
+            Dome::Gradient(_) => cos_radius,
+        }
     }
 
     /// What a ray from the eye along `dir` shows of `light` met `distance`
@@ -408,90 +279,29 @@ impl Sky {
         }
     }
 
-    /// The sky without its clouds.
-    fn clear(&self, dir: Vec3) -> Vec3 {
-        let up = dir.y;
-        let mut colour = match &self.dome {
-            Dome::Air(atmosphere) => atmosphere.sky(dir),
-            Dome::Gradient(gradient) => {
-                let base = if up >= 0.0 {
-                    let low = 1.0 - up;
-                    let low2 = low * low;
-                    gradient.zenith.lerp(gradient.horizon, low2 * low2)
-                } else {
-                    gradient
-                        .horizon
-                        .lerp(gradient.ground, smoothstep(0.0, 0.15, -up))
-                };
-                base + gradient.glow(dir)
-            }
-        };
-        if self.stars > 0.0 && up > 0.0 {
-            colour += Vec3::splat(Self::star(dir) * self.stars * smoothstep(0.0, 0.2, up));
-        }
-        colour
-    }
-
-    /// The colour of the haze toward the level `dir`, which a scene's fog
-    /// takes: the horizon's, and a share of the sun's glow, which the long
-    /// path to the horizon gathers in full and the shorter one to a hill does
-    /// not.
-    pub(crate) fn haze(&self, dir: Vec3) -> Vec3 {
+    /// The sky without its clouds: the air's light and, past it, the stars
+    /// bright enough to show against it that the air lets through, each where
+    /// the air bends its light from.
+    fn clear(&self, origin: Vec3, dir: Vec3, spread: Option<f64>) -> Vec3 {
         match &self.dome {
-            Dome::Gradient(gradient) => gradient.horizon + gradient.glow(dir) * HAZE_GLOW,
-            Dome::Air(atmosphere) => atmosphere.sky(dir),
+            Dome::Air(atmosphere) => {
+                let air = atmosphere.sky(dir);
+                let Some((stars, glimpse)) = self
+                    .stars
+                    .as_ref()
+                    .and_then(|stars| Some((stars, stars.glimpse(spread, air)?)))
+                else {
+                    return air;
+                };
+                atmosphere.leaving(origin.y, dir).map_or(air, |leaving| {
+                    air + stars.radiance(leaving.toward, glimpse) * leaving.kept
+                })
+            }
+            Dome::Gradient(gradient) => gradient.at(dir),
         }
-    }
-
-    /// How bright the star of the cell `dir` falls in is along it.
-    ///
-    /// The sky is mapped onto a cube, and each face cut into a grid: a
-    /// direction and its cell's star lie on the same face in the same cell,
-    /// and the star is kept off the cell's walls, so none is ever cut.
-    fn star(dir: Vec3) -> f64 {
-        let size = Vec3::new(dir.x.abs(), dir.y.abs(), dir.z.abs());
-        let (face, major, u, v) = if size.x >= size.y && size.x >= size.z {
-            (u32::from(dir.x < 0.0), size.x, dir.y, dir.z)
-        } else if size.y >= size.z {
-            (2 + u32::from(dir.y < 0.0), size.y, dir.x, dir.z)
-        } else {
-            (4 + u32::from(dir.z < 0.0), size.z, dir.x, dir.y)
-        };
-        let grid = |along: f64| (along / major + 1.0) * (0.5 * STAR_CELLS);
-        let (column, row) = (mathf::floor(grid(u)), mathf::floor(grid(v)));
-        let key = mix32(
-            face.wrapping_mul(0x9e37_79b9)
-                ^ mix32(
-                    mathf::round_i32(column).cast_unsigned()
-                        ^ mix32(mathf::round_i32(row).cast_unsigned()),
-                ),
-        );
-        if key & 0xff >= STAR_SHARE {
-            return 0.0;
-        }
-        // Two star radii clear of the walls even at a face's corner, where a
-        // cell spans the least angle.
-        let jitter = |cell: f64, salt: u32| {
-            let at = cell + 0.3 + 0.4 * unit(mix32(key ^ salt));
-            at / STAR_CELLS * 2.0 - 1.0
-        };
-        let (first, second) = (jitter(column, 1), jitter(row, 2));
-        let sign = if face % 2 == 0 { 1.0 } else { -1.0 };
-        let star = match face / 2 {
-            0 => Vec3::new(sign, first, second),
-            1 => Vec3::new(first, sign, second),
-            _ => Vec3::new(first, second, sign),
-        }
-        .normalized();
-        let falloff = (dir - star).length() / STAR_RADIUS;
-        if falloff > 3.0 {
-            return 0.0;
-        }
-        let brightness = unit(mix32(key ^ 3));
-        brightness * brightness * brightness * mathf::exp(-falloff * falloff)
     }
 }
 
 #[cfg(test)]
 #[path = "sky_tests.rs"]
-mod tests;
+pub(crate) mod tests;

@@ -4,15 +4,22 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{Draft, Exposure, Object, Parts, Scene, Sight};
+use core::f64::consts::{FRAC_PI_2, TAU};
+
+use tairix_util::mathf;
+
+use super::{daylight, Draft, Exposure, Object, Parts, Scene, Sight};
+use crate::atmosphere::Air;
+use crate::body::{self, sunlight};
 use crate::camera::Camera;
 use crate::compose::Setting;
 use crate::detail::Detail;
+use crate::light::Light;
 use crate::material::{Finish, Material};
 use crate::pigment::Pigment;
 use crate::sample::{mix32, unit};
 use crate::shape::Shape;
-use crate::sky::{Dome, Gradient, Sky};
+use crate::sky::{Dome, Gradient, Seeing, Sky};
 use crate::vector::{Frame, Pose, Ray, Vec3, PACKET};
 
 fn object(shape: Shape, material: usize, filter: Option<Vec3>) -> Object {
@@ -60,17 +67,14 @@ fn parts(objects: Vec<Object>) -> Parts {
                 zenith: Vec3::ONE,
                 horizon: Vec3::ONE,
                 ground: Vec3::ONE,
-                glow: None,
             }),
-            stars: 0.0,
-            clouds: None,
-            bank: None,
+            stars: None,
+            low: None,
+            high: None,
         },
-        fog: None,
         shades: None,
         camera: Camera::looking(Vec3::new(0.0, 1.0, -5.0), Vec3::ZERO, 0.8, 1.0, (0.0, 1.0)),
         exposure: Exposure::Fixed(1.0),
-        daylight: 1.0,
     }
 }
 
@@ -260,7 +264,12 @@ fn fingerprint(scene: &Scene) -> Vec<u64> {
     }
     for step in 0..24u32 {
         let dir = Vec3::new(f64::from(step) * 0.1 - 1.0, 0.3, 0.9).normalized();
-        let light = scene.sky.radiance(Vec3::ZERO, dir, true, 0.5);
+        let seeing = crate::sky::Seeing {
+            fine: true,
+            spread: Some(1e-3),
+            jitter: 0.5,
+        };
+        let light = scene.sky.radiance(Vec3::ZERO, dir, seeing);
         marks.extend([light.x.to_bits(), light.y.to_bits(), light.z.to_bits()]);
     }
     marks.push(scene.exposure.to_bits());
@@ -440,4 +449,146 @@ fn a_draft_with_no_beams_to_lay_gives_their_share_to_gathering() {
             "{setting:?} gathers from {from} against {expected}"
         );
     }
+}
+
+/// Where the daylight tests' eye stands, and the level beneath it.
+const EYE: Vec3 = Vec3::new(0.0, 2.0, 0.0);
+const LEVEL: Vec3 = Vec3::new(0.0, 0.0, 0.0);
+
+/// An open sky over sea level lit by `light`, which stands toward `toward`.
+fn open_under(toward: Vec3, light: &Light) -> Sky {
+    let air = Air {
+        sun: toward,
+        solar: light.irradiance(),
+        base: 0.0,
+        haze: 1.0,
+        albedo: Vec3::splat(0.2),
+        eye: EYE,
+    };
+    crate::sky::tests::open(air, None)
+}
+
+/// The unit direction `elevation` degrees above the horizon.
+fn raised(elevation: f64) -> Vec3 {
+    let radians = elevation.to_radians();
+    Vec3::new(0.0, mathf::sin(radians), mathf::cos(radians))
+}
+
+/// The sun `elevation` degrees up, and the open sky it lights.
+fn sunlit(elevation: f64) -> (Sky, Light) {
+    let sun = body::sun(raised(elevation));
+    (open_under(raised(elevation), &sun), sun)
+}
+
+/// `light` over the sunlight above the air, channel by channel.
+fn of_sunlight(light: Vec3) -> Vec3 {
+    let above = sunlight();
+    Vec3::new(light.x / above.x, light.y / above.y, light.z / above.z)
+}
+
+/// The light falling on the level is the sun's beam as the air keeps and
+/// spreads it, and the sky's light over the whole sky above, which a fine
+/// grid over the sky's rings and spokes gathers as well.
+#[test]
+fn the_daylight_on_the_level_is_the_suns_kept_beam_and_the_whole_skys_light() {
+    let (sky, sun) = sunlit(60.0);
+    let (whole, skylight) = (daylight(&sky, &[sun], EYE), daylight(&sky, &[], EYE));
+    let arriving = sky.arriving(LEVEL, raised(60.0)).expect("the sun is up");
+    let beam = arriving.kept * (arriving.dir.y * arriving.stretch);
+    for channel in 0..3 {
+        let (sampled, expected) = (
+            whole.along(channel) - skylight.along(channel),
+            beam.along(channel),
+        );
+        assert!(
+            (sampled / expected - 1.0).abs() < 1e-2,
+            "{channel}: {sampled} against {expected}"
+        );
+    }
+    let seeing = Seeing {
+        fine: false,
+        spread: None,
+        jitter: 0.5,
+    };
+    let (rings, spokes) = (180u32, 360u32);
+    let mut gathered = Vec3::ZERO;
+    for ring in 0..rings {
+        let edge = |ring: u32| mathf::sin(f64::from(ring) / f64::from(rings) * FRAC_PI_2);
+        let (low, high) = (edge(ring), edge(ring + 1));
+        // Each ring's share of the level's cosine-weighted sky.
+        let weight = 0.5 * (high * high - low * low) * TAU / f64::from(spokes);
+        let rise = mathf::sin((f64::from(ring) + 0.5) / f64::from(rings) * FRAC_PI_2);
+        let level = mathf::sqrt(1.0 - rise * rise);
+        for spoke in 0..spokes {
+            let heading = (f64::from(spoke) + 0.5) / f64::from(spokes) * TAU;
+            let dir = Vec3::new(
+                level * mathf::sin(heading),
+                rise,
+                level * mathf::cos(heading),
+            );
+            gathered += sky.radiance(LEVEL, dir, seeing) * weight;
+        }
+    }
+    let expected = of_sunlight(gathered);
+    for channel in 0..3 {
+        let (sampled, expected) = (skylight.along(channel), expected.along(channel));
+        assert!(
+            (sampled / expected - 1.0).abs() < 1e-2,
+            "{channel}: {sampled} against {expected}"
+        );
+    }
+    assert!(
+        skylight.z > skylight.y && skylight.y > skylight.x && skylight.y > 0.02,
+        "the clear sky adds blue light most: {skylight:?}"
+    );
+}
+
+/// Ever less light falls as the sun sinks, and once it has set only the
+/// twilight sky's.
+#[test]
+fn ever_less_light_falls_as_the_sun_sinks_and_once_set_only_the_twilights() {
+    let falling = [60.0, 20.0, 5.0, -4.0].map(|elevation| {
+        let (sky, sun) = sunlit(elevation);
+        daylight(&sky, &[sun], EYE)
+    });
+    for pair in falling.windows(2) {
+        assert!(pair[1].y < pair[0].y, "{falling:?}");
+    }
+    let (sky, sun) = sunlit(-4.0);
+    assert_eq!(daylight(&sky, &[sun], EYE), daylight(&sky, &[], EYE));
+    assert!(
+        falling[3].y > 0.0 && falling[3].y < 1e-2,
+        "{:?}",
+        falling[3]
+    );
+}
+
+/// By the full moon the level takes the moon's share of what the sun as high
+/// would give it, which is what darkens a deep pool's glow at night.
+#[test]
+fn by_the_full_moon_the_level_takes_the_moons_share_of_daylight() {
+    let moon = body::full_moon(raised(60.0));
+    let sky = open_under(raised(60.0), &moon);
+    let share = of_sunlight(moon.irradiance());
+    let moonlit = daylight(&sky, &[moon], EYE);
+    let (sky, sun) = sunlit(60.0);
+    let sunlit = daylight(&sky, &[sun], EYE);
+    assert!(share.y < 1e-5, "{share:?}");
+    for channel in 0..3 {
+        let (by_moon, by_sun) = (
+            moonlit.along(channel) / share.along(channel),
+            sunlit.along(channel),
+        );
+        assert!(
+            (by_moon / by_sun - 1.0).abs() < 1e-2,
+            "{channel}: {by_moon} against {by_sun}"
+        );
+    }
+}
+
+/// Under a room's walls the whole light falls, there being no water to dim.
+#[test]
+fn under_a_rooms_walls_the_whole_daylight_falls() {
+    let sky = parts(Vec::new()).sky;
+    assert_eq!(daylight(&sky, &[body::sun(raised(60.0))], EYE), Vec3::ONE);
 }

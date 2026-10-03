@@ -28,10 +28,9 @@ use crate::ground::Floor;
 use crate::heightfield::Heightfield;
 use crate::land::{Land, Lie};
 use crate::noise::{cells2, fbm2, hash3, smoothstep};
-use crate::prototype::single;
 use crate::sample::{mix32, unit};
 use crate::shade::{Casting, Shade, Shades, Shading, NEAR_CELL, ROOFED};
-use crate::vector::{real, share, Frame, Pose, Vec3};
+use crate::vector::{real, share, single, Frame, Pose, Vec3};
 
 /// How a wood grows over a land.
 #[derive(Copy, Clone, Debug)]

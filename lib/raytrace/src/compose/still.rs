@@ -9,14 +9,14 @@ use super::landscape::{self, Lawning, Vantage, GREEN};
 use super::plants::{self, Character, Kind};
 use super::weather::{self, Climate, Cover, Hour};
 use super::{
-    direction, rgb, softbox, sun, Composed, Cut, Dice, Look, Stage, View, CHECKERS, GLASS_TINTS,
-    LAMPS, VIVID,
+    direction, lit, lumens, rgb, softbox, Composed, Cut, Dice, Look, Stage, View, CHECKERS,
+    GLASS_TINTS, LAMPS, VIVID,
 };
 use crate::light::Light;
 use crate::material::{Finish, Material, Relief};
 use crate::pigment::Pigment;
 use crate::scene::Exposure;
-use crate::sky::{Dome, Glow, Gradient, Sky};
+use crate::sky::{Dome, Gradient, Sky};
 use crate::tree::Season;
 use crate::vector::{Frame, Vec3};
 
@@ -26,6 +26,23 @@ const CLASSIC: Climate = Climate {
     haze: (1.0, 2.2),
     base: 100.0,
     albedo: 0.2,
+};
+/// Crystals on black glass in the last of the day, high cloud still catching
+/// it now and then.
+const DUSK: Climate = Climate {
+    hours: &[(Hour::Dusk, 1)],
+    covers: &[(Cover::Clear, 5), (Cover::Cirrus, 2), (Cover::Fair, 1)],
+    haze: (1.0, 1.8),
+    base: 100.0,
+    albedo: 0.1,
+};
+/// Glass and chrome among lamps under the full moon.
+const NIGHT: Climate = Climate {
+    hours: &[(Hour::Night, 1)],
+    covers: &[(Cover::Clear, 6), (Cover::Cirrus, 1), (Cover::Fair, 1)],
+    haze: (1.0, 2.0),
+    base: 100.0,
+    albedo: 0.12,
 };
 
 pub(super) fn classic(stage: &mut Stage, dice: &mut Dice) -> Option<Look> {
@@ -39,21 +56,9 @@ pub(super) fn classic(stage: &mut Stage, dice: &mut Dice) -> Option<Look> {
         _ => circle(stage, dice)?,
     }
     let weather = weather::outdoors(stage, dice, &CLASSIC, yaw + PI)?;
-    // A cool fill from the side away from the sun, so no shadow is black.
-    let away = direction(
-        yaw,
-        dice.sign() * dice.angle(120.0, 170.0),
-        35.0_f64.to_radians(),
-    ) * 6.0;
-    stage.light(Light::Point {
-        at: away,
-        intensity: rgb(0xB8_C8_FF) * dice.range(2.0, 4.0),
-    })?;
     Some(Look {
         sky: weather.sky,
-        fog: None,
         exposure: weather.exposure,
-        daylight: weather.daylight,
         view: View::Framed {
             yaw,
             elevation: dice.angle(10.0, 26.0),
@@ -319,9 +324,7 @@ pub(super) fn studio(stage: &mut Stage, dice: &mut Dice) -> Option<Look> {
     };
     Some(Look {
         sky,
-        fog: None,
         exposure: Exposure::Fixed(exposure),
-        daylight: 1.0,
         view: View::Framed {
             yaw,
             elevation: dice.angle(8.0, 22.0),
@@ -407,11 +410,10 @@ fn room(zenith: u32, horizon: u32, ground: u32) -> Sky {
             zenith: rgb(zenith),
             horizon: rgb(horizon),
             ground: rgb(ground),
-            glow: None,
         }),
-        stars: 0.0,
-        clouds: None,
-        bank: None,
+        stars: None,
+        low: None,
+        high: None,
     }
 }
 
@@ -497,8 +499,9 @@ pub(super) fn crystals(stage: &mut Stage, dice: &mut Dice) -> Option<Look> {
             gem,
         )?;
     }
-    // Coloured spots before the crystals; behind them the last of the day
-    // glows along the horizon, and it is that glow they bend toward the eye.
+    // Coloured display spots before the crystals; behind them the last of the
+    // day glows along the horizon, and it is that glow they bend toward the
+    // eye.
     for turn in [dice.range(30.0, 80.0), -dice.range(30.0, 80.0)] {
         let at = direction(yaw, turn.to_radians(), dice.angle(40.0, 65.0)) * 5.5;
         stage.light(Light::Spot {
@@ -506,35 +509,19 @@ pub(super) fn crystals(stage: &mut Stage, dice: &mut Dice) -> Option<Look> {
             axis: (Vec3::UP * 0.4 - at).normalized(),
             cos_inner: mathf::cos(16.0_f64.to_radians()),
             cos_outer: mathf::cos(28.0_f64.to_radians()),
-            intensity: rgb(dice.pick(&LAMPS)?) * dice.range(25.0, 45.0),
+            intensity: lit(dice.pick(&LAMPS)?, dice.range(3000.0, 8000.0)),
         })?;
     }
     if dice.chance(0.6) {
         if let Some((x, z)) = stage.place(dice, ((0.0, 0.0), 2.8), 0.12) {
-            let colour = rgb(dice.pick(&LAMPS)?);
-            stage.orb(Vec3::new(x, dice.range(0.12, 0.9), z), 0.12, colour * 4.0)?;
+            let glow = lumens(dice.pick(&LAMPS)?, dice.range(150.0, 400.0), 0.12);
+            stage.orb(Vec3::new(x, dice.range(0.12, 0.9), z), 0.12, glow)?;
         }
     }
-    let dusk = direction(yaw, PI + dice.angle(-40.0, 40.0), (-4.0_f64).to_radians());
+    let weather = weather::outdoors(stage, dice, &DUSK, yaw + PI)?;
     Some(Look {
-        sky: Sky {
-            dome: Dome::Gradient(Gradient {
-                zenith: rgb(0x0C_0C_22),
-                horizon: rgb(0x4A_32_60).lerp(rgb(dice.pick(&LAMPS)?), 0.25),
-                ground: rgb(0x06_06_08),
-                glow: Some(Glow {
-                    toward: dusk,
-                    colour: rgb(0xE8_80_60),
-                    horizon: 2.0,
-                }),
-            }),
-            stars: 0.3,
-            clouds: None,
-            bank: None,
-        },
-        fog: None,
-        exposure: Exposure::Fixed(1.2),
-        daylight: 1.0,
+        sky: weather.sky,
+        exposure: weather.exposure,
         view: View::Framed {
             yaw,
             elevation: dice.angle(6.0, 16.0),
@@ -637,9 +624,8 @@ pub(super) fn nocturne(stage: &mut Stage, dice: &mut Dice) -> Option<Look> {
         };
         piece(stage, dice, Vec3::new(x, 0.0, z), radius, material)?;
     }
-    // Lamps bright enough to light what stands near them, and no brighter,
-    // so each keeps its colour on screen: floating, on the floor, or on
-    // posts.
+    // Lamps that light what stands near them, under the moon's far fainter
+    // light.
     let posts = dice.chance(0.4);
     let iron = stage.metal(rgb(0x2A_2A_2E), 0.35)?;
     for _ in 0..dice.count(4, 6) {
@@ -647,7 +633,7 @@ pub(super) fn nocturne(stage: &mut Stage, dice: &mut Dice) -> Option<Look> {
         let Some((x, z)) = stage.place(dice, ((0.0, 0.0), 3.6), radius) else {
             continue;
         };
-        let colour = rgb(dice.pick(&LAMPS)?);
+        let colour = dice.pick(&LAMPS)?;
         let height = if posts {
             let height = dice.range(1.2, 2.0);
             stage.post(Vec3::new(x, 0.0, z), (0.05, 0.03, height), iron, dice)?;
@@ -660,7 +646,7 @@ pub(super) fn nocturne(stage: &mut Stage, dice: &mut Dice) -> Option<Look> {
         stage.orb(
             Vec3::new(x, height, z),
             radius,
-            colour * dice.range(3.5, 6.0),
+            lumens(colour, dice.range(200.0, 800.0), radius),
         )?;
     }
     let spot_at = direction(
@@ -673,29 +659,12 @@ pub(super) fn nocturne(stage: &mut Stage, dice: &mut Dice) -> Option<Look> {
         axis: (Vec3::UP * 0.3 - spot_at).normalized(),
         cos_inner: mathf::cos(14.0_f64.to_radians()),
         cos_outer: mathf::cos(28.0_f64.to_radians()),
-        intensity: rgb(0xFF_EE_DC) * dice.range(12.0, 20.0),
+        intensity: lit(0xFF_EE_DC, dice.range(1500.0, 4000.0)),
     })?;
-    let moon = direction(yaw, dice.angle(120.0, 240.0), dice.angle(22.0, 48.0));
-    stage.light(sun(moon, 1.1, rgb(0xB8_C8_FF), 0.25))?;
+    let weather = weather::outdoors(stage, dice, &NIGHT, yaw + PI)?;
     Some(Look {
-        sky: Sky {
-            dome: Dome::Gradient(Gradient {
-                zenith: rgb(0x05_07_14),
-                horizon: rgb(0x1A_20_3C),
-                ground: rgb(0x06_06_08),
-                glow: Some(Glow {
-                    toward: moon,
-                    colour: rgb(0x30_3C_60),
-                    horizon: 0.0,
-                }),
-            }),
-            stars: dice.range(0.35, 0.6),
-            clouds: None,
-            bank: None,
-        },
-        fog: Some(crate::scene::Fog { density: 0.01 }),
-        exposure: Exposure::Fixed(1.9),
-        daylight: 1.0,
+        sky: weather.sky,
+        exposure: weather.exposure,
         view: View::Framed {
             yaw,
             elevation: dice.angle(9.0, 20.0),
@@ -789,9 +758,7 @@ pub(super) fn bubbles(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
     let target = middle + Vec3::UP * (terrain.height(middle.x, middle.z) + dice.range(1.4, 2.2));
     let look = Look {
         sky: weather.sky,
-        fog: None,
         exposure: weather.exposure,
-        daylight: weather.daylight,
         view: View::Placed {
             eye,
             target,

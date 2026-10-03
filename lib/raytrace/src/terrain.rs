@@ -394,29 +394,6 @@ impl Sea {
     }
 }
 
-/// The grid a cloud layer's cover is drawn from.
-#[derive(Clone, Debug)]
-pub(crate) struct Cloudscape {
-    /// How far apart its largest clouds are.
-    pub(crate) scale: f64,
-    /// How much longer than wide it draws them, and along which heading:
-    /// `1.0` for heaps of cumulus, more for streaks of cirrus.
-    pub(crate) stretch: f64,
-    pub(crate) heading: f64,
-    pub(crate) seed: u32,
-}
-
-impl Cloudscape {
-    /// The cloud's density at `(x, z)`, roughly `-1.0..=1.0`.
-    pub(crate) fn density(&self, x: f64, z: f64) -> f64 {
-        let (cos, sin) = (mathf::cos(self.heading), mathf::sin(self.heading));
-        let along = (x * cos + z * sin) / (self.scale * self.stretch);
-        let across = (-x * sin + z * cos) / self.scale;
-        let (u, v) = warp(along, across, self.seed, 0.6);
-        fbm2(u, v, self.seed, (5, 0.52, 2.0))
-    }
-}
-
 #[cfg(test)]
 #[path = "terrain_tests.rs"]
 mod tests;

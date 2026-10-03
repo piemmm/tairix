@@ -2,6 +2,7 @@ use core::f64::consts::TAU;
 
 use super::*;
 use crate::sample::{mix32, unit};
+use crate::vector::single;
 use tairix_parallel::JobRunner;
 
 /// A grid of `cells` a side, `step` apart from `origin`, filled from
@@ -14,15 +15,12 @@ fn filled(
     height: impl Fn(f64, f64) -> f64,
 ) -> Heightfield {
     let mut field = Heightfield::new(cells, origin, step, wrap).expect("a grid");
-    let (layout, side) = (field.layout(), field.rows());
+    let (((origin_x, origin_z), step), side) = (field.placing(), field.side());
     for (start, band) in field.bands(0..side, 3) {
         for (offset, row) in band.chunks_mut(side).enumerate() {
+            let z = origin_z + step * real(start + offset);
             for (column, cell) in row.iter_mut().enumerate() {
-                let (x, z) = layout.vertex(column, start + offset);
-                // The grid holds `f32` heights, as the scene's grids do.
-                #[allow(clippy::cast_possible_truncation)]
-                let narrowed = height(x, z) as f32;
-                *cell = narrowed;
+                *cell = single(height(origin_x + step * real(column), z));
             }
         }
     }

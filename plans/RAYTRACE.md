@@ -57,6 +57,8 @@ D503, D505 and D514–D520 (the tracer's open defects).
 | RT39 | Scene detail: one generator at two profiles, *Simple* (low memory, every setting, the screensaver's default) and *Maximum* (up to 2 GB, all the realism the budget buys), chosen by `screensaver.raytrace.detail` | done |
 | RT40 | One land generator, the tracer's and WinterSun's: the land's stages renderer-neutral, keyed by place and seam-free, in crates WinterSun builds its realm's land with at *Maximum* | planned |
 | RT41 | Local adaptation, a gentle photographic HDR: a sky seen from a dark room or over a dark wood keeps its detail and the room its shadows, only the range a display cannot hold compressed, and a scene one exposure holds left exactly as it is | done |
+| RT42 | Lights as measured: the sun at its true size with its limb darkened, bent by the standard atmosphere; the full moon at its true size, brightness and colour; Allen's stars with Tycho-2's colours; lamps in lumens and candelas; the dusk and night still lifes under the open sky; cirrus lit as ice | done |
+| RT43 | Water clouds lit by multiple scattering that holds for thin cloud too, in place of the octave, powder and ambient approximations | planned |
 
 ## Standing rules
 
@@ -413,6 +415,42 @@ spent on droplets, which today only smooth the land.
   and the slope say — boulder fields, scree fanning below crags, pebbles in
   the hollows — never an even sprinkle; leaf litter as thick as the crowns
   above shed.
+
+## RT42, RT43 — Lights as measured
+
+Every light out of doors comes of a published measurement, nothing tuned
+(`docs/src/lib/raytrace.md`, *The sun, the moon and the stars*):
+
+- The sun's disc is 959″ in radius and brings the sunlight above the air; its
+  limb darkens as Neckel and Labs measured it. The air bends its light as
+  standard dry air over the 1976 Standard Atmosphere does: the atmosphere's
+  transmittance is kept along bent paths from the true direction, the
+  sunlight a height takes spread as the path squashes the disc and scattered
+  about the way it arrives, and the same paths say where a ray seen leaving a
+  point comes from, with the solid angle's change for a sample's density.
+  Each channel bends by its own refractivity.
+- By night the light is the full moon's, as RT32 has yet to give other
+  phases: its true size from the eye, 14 magnitudes below the sun, the ROLO
+  model's colour, its disc even.
+- The stars are Allen's census to magnitude 12 in three tiers by brightness,
+  each a cube cell's Poisson share of its tier, their colours Tycho-2's, the
+  fainter a glow; seen through the ray's footprint, through the air and never
+  below its horizon. A tier that could not show against the sky a ray sees it
+  over, as by day, is not searched.
+- Lamps are lumens and candelas through the sunlight's illuminance, 133 334
+  lx. The dusk crystals and the night garden stand under the weather's own
+  dusk and full moon; the studio alone keeps a room's walls for its sky.
+- Water's glow is scaled by the light measured falling on the scene's level.
+- Cirrus is ice in a high bank of its own: single scattering by its phase,
+  Hillaire's series for the rest, the sky and ground in by the phase's share,
+  its shadow on the bank beneath. Every bank thins out over the last tenth of
+  its breadth, so none ends in a wall of cloud.
+
+RT43 remains: the water decks still take the production approximations —
+scattering octaves whose weights add light a thin edge has not scattered,
+powdered edges that darken it, and an ambient eased by height. They want the
+same footing as ice: a multiple-scattering term that vanishes as the cloud
+thins and holds energy as it thickens.
 
 ## RT32–RT36 — New scene families
 

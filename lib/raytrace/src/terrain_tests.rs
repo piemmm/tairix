@@ -194,30 +194,3 @@ fn a_seas_swells_keep_within_their_lengths() {
         "{lengths:?}"
     );
 }
-
-#[test]
-fn a_cloudscape_stays_about_its_range_and_stretches_along_its_heading() {
-    let heaps = Cloudscape {
-        scale: 900.0,
-        stretch: 1.0,
-        heading: 0.0,
-        seed: 5,
-    };
-    let streaks = Cloudscape {
-        scale: 900.0,
-        stretch: 6.0,
-        heading: 0.0,
-        seed: 5,
-    };
-    for (x, z) in places(2000, 20_000.0) {
-        assert!(heaps.density(x, z).abs() <= 1.2);
-        assert!(streaks.density(x, z).abs() <= 1.2);
-    }
-    // Streaks change far more slowly along their heading than across it.
-    let change = |form: &Cloudscape, (dx, dz): (f64, f64)| {
-        places(400, 10_000.0)
-            .map(|(x, z)| (form.density(x + dx, z + dz) - form.density(x, z)).abs())
-            .sum::<f64>()
-    };
-    assert!(change(&streaks, (300.0, 0.0)) < 0.5 * change(&streaks, (0.0, 300.0)));
-}

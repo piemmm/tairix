@@ -474,13 +474,16 @@ fn a_seed_shows_the_same_place_at_either_detail() {
         assert_eq!(suns(&simple.stage), suns(&maximum.stage), "{setting:?}");
         assert_eq!(simple_look.exposure, maximum_look.exposure, "{setting:?}");
         assert_eq!(
-            simple_look.sky.bank.is_some(),
-            maximum_look.sky.bank.is_some(),
-            "{setting:?}"
-        );
-        assert_eq!(
-            simple_look.sky.stars.to_bits(),
-            maximum_look.sky.stars.to_bits(),
+            (
+                simple_look.sky.low.is_some(),
+                simple_look.sky.high.is_some(),
+                simple_look.sky.stars.is_some()
+            ),
+            (
+                maximum_look.sky.low.is_some(),
+                maximum_look.sky.high.is_some(),
+                maximum_look.sky.stars.is_some()
+            ),
             "{setting:?}"
         );
         // The sward, laid in patches and keyed apart from whatever the woods

@@ -11,6 +11,14 @@
 //! them back in a few lookups, whatever the hour. Distances inside the model
 //! are kilometres; the scene's metres enter and leave through its base
 //! height above the sea.
+//!
+//! The sun's light is bent on its way down (`refraction`): what reaches a
+//! height is kept along the bent path from its true direction, spread as the
+//! path squashes the disc, and scattered about the way it arrives, so the
+//! Earth's shadow and a low sun's colour come of the air as it is. The same
+//! paths say where a ray seen leaving a point comes from, which lifts and
+//! squashes a disc near the horizon, each channel a little apart from the
+//! others.
 
 use alloc::vec::Vec;
 use core::f64::consts::{FRAC_PI_2, PI, TAU};
@@ -20,13 +28,18 @@ use tairix_parallel::JobRunner;
 use tairix_util::{fallible, mathf};
 
 use crate::band;
-use crate::vector::{real, Vec3};
+use crate::refraction::{refractivity, Refraction};
+use crate::vector::{cell_of, real, single, singles, Vec3};
 
 /// The Earth's radius, and the top of its atmosphere, in kilometres.
-const GROUND: f64 = 6360.0;
-const TOP: f64 = 6460.0;
+pub(crate) const GROUND: f64 = 6360.0;
+pub(crate) const TOP: f64 = 6460.0;
 /// The atmosphere's depth.
 const DEPTH: f64 = TOP - GROUND;
+
+/// The red, green and blue channels' wavelengths, in micrometres: those the
+/// scattering below is measured at.
+pub(crate) const WAVELENGTHS: [f64; 3] = [0.680, 0.550, 0.440];
 
 /// Rayleigh scattering at sea level, per kilometre, and its scale height.
 const RAYLEIGH: Vec3 = Vec3::new(5.802e-3, 13.558e-3, 33.1e-3);
@@ -42,16 +55,15 @@ const MIE_G: f64 = 0.8;
 /// 25 km up.
 const OZONE: Vec3 = Vec3::new(0.650e-3, 1.881e-3, 0.085e-3);
 
-/// The table sizes: the transmittance's heights and directions, the
+/// The table sizes: the bent paths' directions and heights, the
 /// multiple-scattering table's, the sky's azimuths and elevations, and the
 /// aerial table's slices of distance.
-const TRANSMITTANCE: (usize, usize) = (128, 48);
+const PATHS: (usize, usize) = (256, 48);
 const MULTIPLE: (usize, usize) = (24, 24);
 const VIEW: (usize, usize) = (96, 128);
 const AERIAL: (usize, usize, usize) = (32, 48, 32);
 
-/// Steps taken along a path to space, and along a sky or aerial ray.
-const TRANSMITTANCE_STEPS: u32 = 40;
+/// Steps taken along a sky or aerial ray.
 const VIEW_STEPS: u32 = 30;
 const MULTIPLE_STEPS: u32 = 16;
 /// Directions the multiple-scattering table integrates over.
@@ -59,7 +71,7 @@ const MULTIPLE_DIRECTIONS: u32 = 64;
 
 /// How far the aerial table reaches, in kilometres: past it the scene is
 /// the sky's.
-const AERIAL_REACH: f64 = 60.0;
+pub(crate) const AERIAL_REACH: f64 = 60.0;
 
 /// What the atmosphere is like and where the sun stands in it.
 #[derive(Copy, Clone, Debug)]
@@ -114,23 +126,13 @@ impl Table {
 
 /// `at` in `0.0..=1.0` as a cell of `count` and how far toward the next.
 fn split(at: f64, count: usize) -> (usize, f64) {
-    let place = at.clamp(0.0, 1.0) * real(count.saturating_sub(1));
-    let whole = mathf::floor(place);
-    let index = usize::try_from(mathf::round_i32(whole)).unwrap_or(0);
-    (index.min(count.saturating_sub(1)), place - whole)
+    let (index, along) = cell_of(at.clamp(0.0, 1.0) * real(count.saturating_sub(1)));
+    (index.min(count.saturating_sub(1)), along)
 }
 
 /// The centre of cell `index` of `count` across the unit interval.
 fn centre(index: usize, count: usize) -> f64 {
     real(index) / real(count.saturating_sub(1).max(1))
-}
-
-fn stored(colour: Vec3) -> [f32; 3] {
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "the tables hold single precision: light needs no more"
-    )]
-    [colour.x as f32, colour.y as f32, colour.z as f32]
 }
 
 /// The air at `height` kilometres up: its scattering by molecules and by
@@ -146,7 +148,13 @@ struct Medium {
 #[derive(Clone, Debug)]
 pub(crate) struct Atmosphere {
     air: Air,
-    transmittance: Table,
+    refraction: Refraction,
+    /// Each channel's bending, against the green's.
+    dispersion: Vec3,
+    paths: Paths,
+    /// The cosine and sine of the most any channel of a ray leaving the
+    /// scene is bent.
+    bending: (f64, f64),
     multiple: Table,
     view: Table,
     /// For each of the eye's directions, the light scattered toward it and
@@ -160,7 +168,7 @@ pub(crate) struct Atmosphere {
 /// How far the tables are built.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum Stage {
-    Transmittance(usize),
+    Paths(usize),
     Multiple(usize),
     View(usize),
     Aerial(usize),
@@ -170,14 +178,62 @@ enum Stage {
 /// Rows of a table built in one unit of work by each core.
 const UNIT_ROWS: usize = 1;
 
+/// Light from a true direction as it reaches a point through the bending air.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct Arriving {
+    /// The unit direction it arrives from.
+    pub(crate) dir: Vec3,
+    /// The solid angle it arrives over, for each it set out in: under one
+    /// near the horizon, where the air squashes what is seen there.
+    pub(crate) stretch: f64,
+    /// What the air keeps of it.
+    pub(crate) kept: Vec3,
+    pub(crate) bend: Bend,
+}
+
+/// A ray leaving a point, traced back out through the bending air.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct Leaving {
+    /// The unit true direction the green light it meets comes from.
+    pub(crate) toward: Vec3,
+    /// What the air keeps of that light.
+    pub(crate) kept: Vec3,
+    /// The solid angle that light is seen over, for each it truly fills.
+    pub(crate) stretch: f64,
+    pub(crate) bend: Bend,
+}
+
+/// How the air bends the green light seen along a ray: the cosine and sine
+/// of the zenith angle it is seen at, and how much further from the zenith
+/// it truly comes from.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct Bend {
+    seen: (f64, f64),
+    by: f64,
+}
+
+impl Bend {
+    /// No bend, for the unit `dir` under a room's walls.
+    pub(crate) fn none(dir: Vec3) -> Self {
+        Self {
+            seen: (dir.y, mathf::hypot(dir.x, dir.z)),
+            by: 0.0,
+        }
+    }
+}
+
 impl Atmosphere {
     /// The atmosphere of `air`, its tables still to build; `None` when the
     /// heap will not hold them.
     pub(crate) fn new(air: Air) -> Option<Self> {
         let (azimuths, elevations, slices) = AERIAL;
+        let [red, green, blue] = WAVELENGTHS.map(refractivity);
         Some(Self {
             air,
-            transmittance: Table::new(TRANSMITTANCE)?,
+            refraction: Refraction::new(green),
+            dispersion: Vec3::new(red / green, 1.0, blue / green),
+            paths: Paths::new()?,
+            bending: (1.0, 0.0),
             multiple: Table::new(MULTIPLE)?,
             view: Table::new(VIEW)?,
             aerial: fallible::filled(
@@ -185,7 +241,7 @@ impl Atmosphere {
                 Slice::stored(Scattered::NONE),
             )?,
             ambient: Vec3::ZERO,
-            stage: Stage::Transmittance(0),
+            stage: Stage::Paths(0),
         })
     }
 
@@ -205,23 +261,25 @@ impl Atmosphere {
     pub(crate) fn step(&mut self, runner: &dyn JobRunner) -> bool {
         let unit = UNIT_ROWS * runner.width().max(1);
         match self.stage {
-            Stage::Transmittance(row) => {
-                let end = (row + unit).min(TRANSMITTANCE.1);
-                let air = self.air;
-                fill_rows(&mut self.transmittance, row..end, runner, &|u, v| {
-                    transmittance_texel(&air, u, v)
+            Stage::Paths(row) => {
+                let end = (row + unit).min(PATHS.1);
+                let (air, refraction) = (self.air, &self.refraction);
+                self.paths.fill(row..end, runner, &|row, slot| {
+                    path_row(&air, refraction, row, slot);
                 });
-                self.stage = if end >= TRANSMITTANCE.1 {
-                    Stage::Multiple(0)
+                if end >= PATHS.1 {
+                    let most = self.paths.most_bent() * self.dispersion.max_element();
+                    self.bending = (mathf::cos(most), mathf::sin(most));
+                    self.stage = Stage::Multiple(0);
                 } else {
-                    Stage::Transmittance(end)
-                };
+                    self.stage = Stage::Paths(end);
+                }
             }
             Stage::Multiple(row) => {
                 let end = (row + unit).min(MULTIPLE.1);
-                let (air, table) = (self.air, &self.transmittance);
+                let (air, paths) = (self.air, &self.paths);
                 fill_rows(&mut self.multiple, row..end, runner, &|u, v| {
-                    multiple_texel(&air, table, u, v)
+                    multiple_texel(&air, paths, u, v)
                 });
                 self.stage = if end >= MULTIPLE.1 {
                     Stage::View(0)
@@ -233,7 +291,7 @@ impl Atmosphere {
                 let end = (row + unit).min(VIEW.1);
                 let reader = Reader {
                     air: &self.air,
-                    transmittance: &self.transmittance,
+                    paths: &self.paths,
                     multiple: &self.multiple,
                 };
                 fill_rows(&mut self.view, row..end, runner, &|u, v| {
@@ -260,23 +318,13 @@ impl Atmosphere {
         self.stage == Stage::Done
     }
 
-    /// What the finished tables read from: the transmittance and the multiple
-    /// scattering, borrowed.
-    fn reader(&self) -> Reader<'_> {
-        Reader {
-            air: &self.air,
-            transmittance: &self.transmittance,
-            multiple: &self.multiple,
-        }
-    }
-
     /// Fill the aerial table's elevation rows `rows` across `runner`.
     fn fill_aerial(&mut self, rows: Range<usize>, runner: &dyn JobRunner) {
         let (azimuths, _, slices) = AERIAL;
         let per_row = azimuths * slices;
         let reader = Reader {
             air: &self.air,
-            transmittance: &self.transmittance,
+            paths: &self.paths,
             multiple: &self.multiple,
         };
         let Some(cells) = self
@@ -333,13 +381,67 @@ impl Atmosphere {
         self.ambient
     }
 
-    /// How much of the sun's light reaches a point `height` metres above
-    /// the scene's level, along the unit `toward` it: the air's, to space,
-    /// and nothing where the Earth stands between.
+    /// How much of the light from the true direction `toward` reaches a
+    /// point `height` metres above the scene's level, square to the way it
+    /// arrives: kept along its bent path, and spread over the more sky or
+    /// the less the air turns it into; nothing where the Earth stands
+    /// between.
     pub(crate) fn sunlight(&self, height: f64, toward: Vec3) -> Vec3 {
-        let altitude = (self.air.base + height) / 1000.0;
-        self.reader()
-            .transmittance(GROUND + altitude.max(0.0), toward.y)
+        self.paths
+            .bent(radius(&self.air, height), toward.y.clamp(-1.0, 1.0))
+            .map_or(Vec3::ZERO, |bent| bent.lit())
+    }
+
+    /// How the light from the true direction `toward` arrives at a point
+    /// `height` metres above the scene's level; `None` where the Earth
+    /// stands between.
+    pub(crate) fn arriving(&self, height: f64, toward: Vec3) -> Option<Arriving> {
+        let bent = self
+            .paths
+            .bent(radius(&self.air, height), toward.y.clamp(-1.0, 1.0))?;
+        let seen = bent.seen();
+        Some(Arriving {
+            dir: turned(toward, seen),
+            stretch: bent.stretch,
+            kept: bent.kept,
+            bend: Bend { seen, by: bent.by },
+        })
+    }
+
+    /// Where a ray leaving a point `height` metres above the scene's level
+    /// along the unit `dir` comes from; `None` where it meets the ground.
+    pub(crate) fn leaving(&self, height: f64, dir: Vec3) -> Option<Leaving> {
+        let mu = dir.y.clamp(-1.0, 1.0);
+        let way = self.paths.leaving(radius(&self.air, height), mu)?;
+        let seen = (mu, mathf::hypot(dir.x, dir.z));
+        let truly = tilt(seen, way.bend);
+        // The solid angles' ratio, `sin z dz` against its source's; toward
+        // the zenith the sines' ratio runs to the slope's inverse.
+        let squeeze = if truly.1 > 1e-12 {
+            seen.1 / truly.1
+        } else {
+            1.0 / way.slope
+        };
+        Some(Leaving {
+            toward: turned(dir, truly),
+            kept: (-way.depth).exp(),
+            stretch: squeeze / way.slope,
+            bend: Bend { seen, by: way.bend },
+        })
+    }
+
+    /// The true directions each channel of the light seen along the unit
+    /// `dir` comes from, the air bending each its own way past `bend`; the
+    /// green's is `green`.
+    pub(crate) fn sources(&self, dir: Vec3, bend: Bend, green: Vec3) -> [Vec3; 3] {
+        let source = |share: f64| turned(dir, tilt(bend.seen, bend.by * share));
+        [source(self.dispersion.x), green, source(self.dispersion.z)]
+    }
+
+    /// The cosine and sine of the most the air bends any channel of a ray
+    /// leaving the scene.
+    pub(crate) const fn bending(&self) -> (f64, f64) {
+        self.bending
     }
 
     /// What a ray from the eye along the unit `dir` shows of `light` met
@@ -381,10 +483,9 @@ impl Atmosphere {
         if place < 0.0 {
             return Scattered::NONE.lerp(read(0), (place + 1.0).clamp(0.0, 1.0));
         }
-        let whole = mathf::floor(place);
-        let index = usize::try_from(mathf::round_i32(whole)).unwrap_or(0);
+        let (index, along) = cell_of(place);
         let last = slices.saturating_sub(1);
-        read(index.min(last)).lerp(read((index + 1).min(last)), (place - whole).clamp(0.0, 1.0))
+        read(index.min(last)).lerp(read((index + 1).min(last)), along.clamp(0.0, 1.0))
     }
 }
 
@@ -443,9 +544,9 @@ struct Slice {
 impl Slice {
     fn stored(scattered: Scattered) -> Self {
         Self {
-            sun: stored(scattered.sun),
-            sky: stored(scattered.sky),
-            kept: stored(scattered.kept),
+            sun: singles(scattered.sun),
+            sky: singles(scattered.sky),
+            kept: singles(scattered.kept),
         }
     }
 
@@ -475,7 +576,7 @@ fn fill_rows(
     band::for_each(runner, cells, (start, columns), &|row, cells| {
         let v = centre(row, height);
         for (column, cell) in cells.iter_mut().enumerate() {
-            *cell = stored(texel(centre(column, columns), v));
+            *cell = singles(texel(centre(column, columns), v));
         }
     });
 }
@@ -483,17 +584,11 @@ fn fill_rows(
 /// What finished tables read from.
 struct Reader<'a> {
     air: &'a Air,
-    transmittance: &'a Table,
+    paths: &'a Paths,
     multiple: &'a Table,
 }
 
 impl Reader<'_> {
-    /// The light kept from radius `r` along a direction whose cosine to the
-    /// local vertical is `mu`, to space; nothing if the ray meets the ground.
-    fn transmittance(&self, r: f64, mu: f64) -> Vec3 {
-        self.transmittance.at(transmittance_uv(r, mu))
-    }
-
     /// The light multiple scattering adds at radius `r` for a sun whose
     /// cosine to the local vertical is `mu_sun`, per unit of scattering.
     fn multiple(&self, r: f64, mu_sun: f64) -> Vec3 {
@@ -538,7 +633,6 @@ impl Reader<'_> {
     fn march_span(&self, dir: Vec3, (from, to): (f64, f64), steps: u32) -> Scattered {
         let sun = self.air.sun;
         let cos = dir.dot(sun);
-        let (phase_r, phase_m) = (rayleigh_phase(cos), mie_phase(cos, MIE_G));
         let eye = Vec3::new(0.0, eye_radius(self.air), 0.0);
         let step = (to - from) / f64::from(steps.max(1));
         let mut gathered = Scattered::NONE;
@@ -549,9 +643,15 @@ impl Reader<'_> {
             let up = point / r;
             let medium = medium(r - GROUND, self.air.haze);
             let sun_cos = up.dot(sun);
-            let sunlit = self.transmittance(r, sun_cos);
+            // The sun's light arrives bent toward the vertical, and scatters
+            // about the way it arrives.
+            let single = self.paths.bent(r, sun_cos).map_or(Vec3::ZERO, |bent| {
+                let cos = bent.toward(cos, up.dot(dir));
+                (medium.rayleigh * rayleigh_phase(cos)
+                    + Vec3::splat(medium.mie * mie_phase(cos, MIE_G)))
+                    * bent.lit()
+            });
             let multiple = self.multiple(r, sun_cos);
-            let single = (medium.rayleigh * phase_r + Vec3::splat(medium.mie * phase_m)) * sunlit;
             let sky = (medium.rayleigh + Vec3::splat(medium.mie)) * multiple;
             let through = (medium.extinction * -step).exp();
             let kept = gathered.kept;
@@ -580,9 +680,16 @@ fn integrated(source: Vec3, extinction: Vec3, through: Vec3) -> Vec3 {
     )
 }
 
-/// The eye's distance from the Earth's centre.
+/// The distance from the Earth's centre of a point `height` metres above
+/// `air`'s scene's level, in kilometres.
+fn radius(air: &Air, height: f64) -> f64 {
+    GROUND + ((air.base + height) / 1000.0).max(0.0)
+}
+
+/// The eye's distance from the Earth's centre: at least a metre above the
+/// ground, which the sky's table splits at the eye's own horizon.
 fn eye_radius(air: &Air) -> f64 {
-    GROUND + ((air.base + air.eye.y) / 1000.0).max(0.001)
+    radius(air, air.eye.y).max(GROUND + 1e-3)
 }
 
 /// The air `height` kilometres up.
@@ -618,38 +725,327 @@ fn top_distance(r: f64, mu: f64) -> f64 {
     (-r * mu + mathf::sqrt(disc.max(0.0))).max(0.0)
 }
 
-/// Where the transmittance from radius `r` at `mu` is kept: the horizon's
-/// neighbourhood and the lowest air, where it changes fastest, given most.
-fn transmittance_uv(r: f64, mu: f64) -> (f64, f64) {
-    let mu = mu.clamp(-1.0, 1.0);
-    let u = 0.5 + 0.5 * mu.signum() * mathf::sqrt(mu.abs());
-    let v = mathf::sqrt(((r - GROUND) / DEPTH).clamp(0.0, 1.0));
-    (u, v)
+/// One bent path out of the air, at one end's zenith angle: what it keeps,
+/// how far its other end's zenith angle lies past this one's, and how fast
+/// that changes with this one.
+#[derive(Copy, Clone, Debug, Default)]
+struct Way {
+    depth: [f32; 3],
+    bend: f32,
+    slope: f32,
 }
 
-/// The transmittance table's texel `(u, v)`.
-fn transmittance_texel(air: &Air, u: f64, v: f64) -> Vec3 {
-    let signed = 2.0 * u - 1.0;
-    let mu = signed.signum() * signed * signed;
-    let r = GROUND + v * v * DEPTH;
-    if ground_distance(r, mu).is_some() {
-        return Vec3::ZERO;
+impl Way {
+    const NONE: Self = Self {
+        depth: [0.0; 3],
+        bend: 0.0,
+        slope: 0.0,
+    };
+}
+
+/// A path read back, blended between the ways about it.
+#[derive(Copy, Clone, Debug)]
+struct Read {
+    depth: Vec3,
+    bend: f64,
+    slope: f64,
+}
+
+impl Read {
+    fn of(way: Way) -> Self {
+        let [r, g, b] = way.depth.map(f64::from);
+        Self {
+            depth: Vec3::new(r, g, b),
+            bend: f64::from(way.bend),
+            slope: f64::from(way.slope),
+        }
     }
-    let length = top_distance(r, mu);
-    let step = length / f64::from(TRANSMITTANCE_STEPS);
-    let mut depth = Vec3::ZERO;
-    for index in 0..TRANSMITTANCE_STEPS {
-        let t = (f64::from(index) + 0.5) * step;
-        let height = mathf::sqrt(r * r + t * t + 2.0 * r * mu * t) - GROUND;
-        depth += medium(height, air.haze).extinction * step;
+
+    fn lerp(self, other: Self, t: f64) -> Self {
+        Self {
+            depth: self.depth.lerp(other.depth, t),
+            bend: self.bend + (other.bend - self.bend) * t,
+            slope: self.slope + (other.slope - self.slope) * t,
+        }
     }
-    (-depth).exp()
+
+    /// The light reaching along this way from a true zenith cosine `mu`.
+    fn bent(&self, mu: f64) -> Bent {
+        let sin = mathf::sqrt(((1.0 - mu) * (1.0 + mu)).max(0.0));
+        let (sin_bend, cos_bend) = (mathf::sin(self.bend), mathf::cos(self.bend));
+        // The solid angles' ratio, `sin z dz` against its source's; toward
+        // the zenith the sines' ratio runs to the slope itself.
+        let squeeze = if sin > 1e-12 {
+            cos_bend - mu * sin_bend / sin
+        } else {
+            self.slope
+        };
+        Bent {
+            kept: (-self.depth).exp(),
+            stretch: squeeze * self.slope,
+            truly: (mu, sin),
+            by: self.bend,
+            bend: (cos_bend, sin_bend),
+        }
+    }
+}
+
+/// Light from a true direction reaching a point along a bent way.
+#[derive(Copy, Clone, Debug)]
+struct Bent {
+    /// What of it the air keeps, and the solid angle it arrives over for
+    /// each it set out in.
+    kept: Vec3,
+    stretch: f64,
+    /// The cosine and sine of its true zenith angle; how much nearer the
+    /// zenith it arrives, and that angle's cosine and sine.
+    truly: (f64, f64),
+    by: f64,
+    bend: (f64, f64),
+}
+
+impl Bent {
+    /// Its irradiance square to the way it arrives, as a share of what set
+    /// out: what the air keeps, spread as the air squashes it.
+    fn lit(&self) -> Vec3 {
+        self.kept * self.stretch
+    }
+
+    /// The cosine and sine of the zenith angle it arrives at.
+    fn seen(&self) -> (f64, f64) {
+        let ((mu, sin), (cos_bend, sin_bend)) = (self.truly, self.bend);
+        (
+            mu * cos_bend + sin * sin_bend,
+            sin * cos_bend - mu * sin_bend,
+        )
+    }
+
+    /// Its cosine, as it arrives, to a ray whose cosine to its true
+    /// direction is `cos` and to the vertical is `rise`.
+    fn toward(&self, cos: f64, rise: f64) -> f64 {
+        let ((mu, sin), (cos_bend, sin_bend)) = (self.truly, self.bend);
+        if sin <= 1e-12 {
+            return cos;
+        }
+        cos * cos_bend + sin_bend * (rise - cos * mu) / sin
+    }
+}
+
+/// One height's bent paths: the rays leaving it, by their own zenith angle,
+/// and the light reaching it, by the true zenith angle it comes from; and
+/// the lowest zenith cosine of each, below which the ground stands.
+///
+/// Each runs from the way that grazes the ground, the lowest any path there
+/// reaches, up to the zenith, packed as the square of the way up so the
+/// horizon, where the air bends and dims most, is held finest.
+#[derive(Clone, Debug)]
+struct Row {
+    leaving: [Way; PATHS.0],
+    reaching: [Way; PATHS.0],
+    lowest: (f64, f64),
+}
+
+/// The bent paths out of the air from every height.
+#[derive(Clone, Debug)]
+struct Paths {
+    rows: Vec<Row>,
+}
+
+impl Paths {
+    fn new() -> Option<Self> {
+        let empty = Row {
+            leaving: [Way::NONE; PATHS.0],
+            reaching: [Way::NONE; PATHS.0],
+            lowest: (1.0, 1.0),
+        };
+        Some(Self {
+            rows: fallible::filled(PATHS.1, empty)?,
+        })
+    }
+
+    /// Fill rows `rows` across `runner`, each as `fill` has it.
+    fn fill(
+        &mut self,
+        rows: Range<usize>,
+        runner: &dyn JobRunner,
+        fill: &(dyn Fn(usize, &mut Row) + Sync),
+    ) {
+        let end = rows.end.min(PATHS.1);
+        let Some(slots) = self.rows.get_mut(rows.start..end) else {
+            return;
+        };
+        band::for_each(runner, slots, (rows.start, 1), &|row, slots| {
+            for slot in slots {
+                fill(row, slot);
+            }
+        });
+    }
+
+    /// The most a way leaving any height is bent.
+    fn most_bent(&self) -> f64 {
+        self.rows
+            .iter()
+            .flat_map(|row| &row.leaving)
+            .map(|way| f64::from(way.bend))
+            .fold(0.0, f64::max)
+    }
+
+    /// The ray leaving radius `r` at zenith cosine `mu`; `None` below the
+    /// lowest, which meets the ground.
+    fn leaving(&self, r: f64, mu: f64) -> Option<Read> {
+        self.read(r, mu, false)
+    }
+
+    /// The light reaching radius `r` from a true zenith cosine `mu`; `None`
+    /// below the lowest, which the Earth stands in the way of.
+    fn bent(&self, r: f64, mu: f64) -> Option<Bent> {
+        self.read(r, mu, true).map(|way| way.bent(mu))
+    }
+
+    /// What of the light from a true zenith cosine `mu` reaches radius `r`,
+    /// square to the way it arrives.
+    fn sunlit(&self, r: f64, mu: f64) -> Vec3 {
+        self.bent(r, mu).map_or(Vec3::ZERO, |bent| bent.lit())
+    }
+
+    /// The way at radius `r` and zenith cosine `mu` in the rows' halves for
+    /// light reaching where `reaching`, else for rays leaving, blended
+    /// between the two rows about `r`.
+    fn read(&self, r: f64, mu: f64, reaching: bool) -> Option<Read> {
+        let (columns, rows) = PATHS;
+        let (row, across) = split(mathf::sqrt(((r - GROUND) / DEPTH).clamp(0.0, 1.0)), rows);
+        let (here, there) = (self.rows.get(row)?, self.rows.get((row + 1).min(rows - 1))?);
+        let lowest = |row: &Row| if reaching { row.lowest.1 } else { row.lowest.0 };
+        let (low, high) = (lowest(here), lowest(there));
+        if mu < low + (high - low) * across {
+            return None;
+        }
+        let along = |row: &Row, lowest: f64| {
+            let up = mathf::sqrt(((mu - lowest) / (1.0 - lowest).max(1e-12)).clamp(0.0, 1.0));
+            let (column, rise) = split(up, columns);
+            let ways = if reaching {
+                &row.reaching
+            } else {
+                &row.leaving
+            };
+            let at = |column: usize| Read::of(ways.get(column).copied().unwrap_or_default());
+            at(column).lerp(at((column + 1).min(columns - 1)), rise)
+        };
+        Some(along(here, low).lerp(along(there, high), across))
+    }
+}
+
+/// How far from the Earth's centre the bent paths' row `row` lies.
+fn row_radius(row: usize) -> f64 {
+    let v = centre(row, PATHS.1);
+    GROUND + v * v * DEPTH
+}
+
+/// The zenith cosine at radius `r` of the ray that just grazes the ground.
+fn grazing(refraction: &Refraction, r: f64) -> f64 {
+    let level = refraction.index(0.0) * GROUND / (refraction.index(r - GROUND) * r);
+    -mathf::sqrt((1.0 - level * level).max(0.0))
+}
+
+/// Fill `slot`, row `row` of the bent paths: trace its rays out from the
+/// grazing one to the zenith, then turn them about for the light reaching
+/// it from each true direction.
+fn path_row(air: &Air, refraction: &Refraction, row: usize, slot: &mut Row) {
+    let (columns, _) = PATHS;
+    let r = row_radius(row);
+    let lowest = grazing(refraction, r);
+    let extinction = |height: f64| medium(height, air.haze).extinction;
+    let mut seen = [0.0; PATHS.0];
+    let mut true_zenith = [0.0; PATHS.0];
+    let mut depth = [Vec3::ZERO; PATHS.0];
+    for column in 0..columns {
+        let up = centre(column, columns);
+        let mu = lowest + (1.0 - lowest) * up * up;
+        let zenith = mathf::acos(mu.clamp(-1.0, 1.0));
+        let path = refraction
+            .trace((r, mu), (GROUND, TOP), &extinction)
+            .unwrap_or(crate::refraction::Path {
+                zenith,
+                depth: Vec3::splat(f64::from(f32::MAX)),
+            });
+        seen[column] = zenith;
+        true_zenith[column] = path.zenith;
+        depth[column] = path.depth;
+    }
+    // How fast the true zenith angle turns with the seen one, from either
+    // neighbour, or the one there is at an end.
+    let slope = |column: usize| {
+        let (before, after) = (column.saturating_sub(1), (column + 1).min(columns - 1));
+        let (from, to) = (
+            seen[before] - seen[after],
+            true_zenith[before] - true_zenith[after],
+        );
+        if from.abs() > 1e-15 {
+            to / from
+        } else {
+            1.0
+        }
+    };
+    for (column, way) in slot.leaving.iter_mut().enumerate() {
+        *way = Way {
+            depth: singles(depth[column]),
+            bend: single(true_zenith[column] - seen[column]),
+            slope: single(slope(column)),
+        };
+    }
+    // The light reaching the row comes from no lower than its grazing ray
+    // leaves toward: its true direction, as stored.
+    let lowest_true = mathf::cos(seen[0] + f64::from(single(true_zenith[0] - seen[0])));
+    slot.lowest = (lowest, lowest_true);
+    let mut ray = 0;
+    for (column, way) in slot.reaching.iter_mut().enumerate() {
+        let up = centre(column, columns);
+        let target = mathf::acos((lowest_true + (1.0 - lowest_true) * up * up).clamp(-1.0, 1.0));
+        // The true zenith angles fall as the rays rise: find the two the
+        // target lies between.
+        while ray + 1 < columns - 1 && true_zenith[ray + 1] > target {
+            ray += 1;
+        }
+        let next = (ray + 1).min(columns - 1);
+        let span = true_zenith[ray] - true_zenith[next];
+        let t = if span > 1e-15 {
+            ((true_zenith[ray] - target) / span).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let at = seen[ray] + (seen[next] - seen[ray]) * t;
+        let turning = slope(ray) + (slope(next) - slope(ray)) * t;
+        *way = Way {
+            depth: singles(depth[ray].lerp(depth[next], t)),
+            bend: single(target - at),
+            slope: single(if turning > 1e-12 { 1.0 / turning } else { 1.0 }),
+        };
+    }
+}
+
+/// The unit `dir` turned in its own vertical plane to stand at the zenith
+/// angle whose cosine and sine are `(cos, sin)`; as it is when it stands
+/// straight up or down.
+fn turned(dir: Vec3, (cos, sin): (f64, f64)) -> Vec3 {
+    let level = mathf::hypot(dir.x, dir.z);
+    if level < 1e-12 {
+        return dir;
+    }
+    let across = sin / level;
+    Vec3::new(dir.x * across, cos, dir.z * across)
+}
+
+/// The cosine and sine of the zenith angle whose own are `(cos, sin)`, `by`
+/// further from the zenith.
+fn tilt((cos, sin): (f64, f64), by: f64) -> (f64, f64) {
+    let (sin_by, cos_by) = (mathf::sin(by), mathf::cos(by));
+    (cos * cos_by - sin * sin_by, sin * cos_by + cos * sin_by)
 }
 
 /// The multiple-scattering table's texel `(u, v)`: at the height `v` names
 /// with the sun at the cosine `u` names, what scattering again and again
 /// adds per unit of scattering, for a unit sun (Hillaire, section 5.5).
-fn multiple_texel(air: &Air, transmittance: &Table, u: f64, v: f64) -> Vec3 {
+fn multiple_texel(air: &Air, paths: &Paths, u: f64, v: f64) -> Vec3 {
     let mu_sun = 2.0 * u - 1.0;
     let r = GROUND + v * DEPTH + 1e-3;
     let sun = Vec3::new(mathf::sqrt((1.0 - mu_sun * mu_sun).max(0.0)), mu_sun, 0.0);
@@ -672,7 +1068,7 @@ fn multiple_texel(air: &Air, transmittance: &Table, u: f64, v: f64) -> Vec3 {
             let radius = point.length();
             let medium = medium(radius - GROUND, air.haze);
             let scattering = medium.rayleigh + Vec3::splat(medium.mie);
-            let sunlit = transmittance.at(transmittance_uv(radius, (point / radius).dot(sun)));
+            let sunlit = paths.sunlit(radius, (point / radius).dot(sun));
             let through = (medium.extinction * -step).exp();
             let gathered = integrated(scattering, medium.extinction, through) * kept;
             second += gathered * sunlit * isotropic;
@@ -680,22 +1076,30 @@ fn multiple_texel(air: &Air, transmittance: &Table, u: f64, v: f64) -> Vec3 {
             kept = kept * through;
         }
         if let Some(distance) = ground {
-            let point = origin + dir * distance;
-            let up = point.normalized();
-            let lit = transmittance.at(transmittance_uv(GROUND, up.dot(sun)));
-            second += kept * lit * air.albedo * (up.dot(sun).max(0.0) / PI);
+            let up = (origin + dir * distance).normalized();
+            let lit = paths
+                .bent(GROUND, up.dot(sun))
+                .map_or(Vec3::ZERO, |bent| bent.lit() * bent.seen().0.max(0.0));
+            second += kept * lit * air.albedo * (1.0 / PI);
         }
     }
     // Means over the sphere: the isotropic phase at the texel and the sphere's
     // solid angle cancel.
     let mean = 1.0 / f64::from(MULTIPLE_DIRECTIONS);
     let (second, transfer) = (second * mean, transfer * mean);
-    let spread = |s: f64, f: f64| s / (1.0 - f.min(0.999));
     Vec3::new(
-        spread(second.x, transfer.x),
-        spread(second.y, transfer.y),
-        spread(second.z, transfer.z),
+        every_order(second.x, transfer.x),
+        every_order(second.y, transfer.y),
+        every_order(second.z, transfer.z),
     )
+}
+
+/// Hillaire's sum of every order of scattering past the first, from the
+/// second order's light and the share of each order's light the next
+/// passes on: held short of the whole where a medium scatters nearly all it
+/// takes and keeps none.
+pub(crate) fn every_order(second: f64, transfer: f64) -> f64 {
+    second / (1.0 - transfer.min(0.999))
 }
 
 /// Rayleigh's phase function.

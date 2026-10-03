@@ -25,8 +25,9 @@ takes, a seed shows the same place at either detail.
 - **Still lifes** stand on a plane: a checkerboard of spheres, gems, rings and
   stacks under the open sky; a studio's plinth under softboxes, high or low
   key; crystal clusters, or crystals grown out of a stone, on black glass at
-  dusk; glass and chrome among lamps at night; soap bubbles drifting over a
-  meadow.
+  dusk, under display spots; glass and chrome among garden lamps under the
+  full moon; soap bubbles drifting over a meadow. Only the studio is indoors:
+  the others stand under the open sky's weather, dusk and night included.
 - **Buildings** stand on a paved plaza, on tiles to the horizon or on open land
   with woods about it: a colonnade in three orders, a loggia of arches or a
   two-tier aqueduct across a valley, a domed rotunda, a ruined temple in long
@@ -40,7 +41,78 @@ The weather (`compose::weather`) sets the hour and the cloud. The sky is a
 physical atmosphere over a round Earth (Hillaire, EGSR 2020), its sky, sun
 colour and aerial perspective tabulated once per scene; clouds are volumetric
 decks marched as the medium they are (Schneider 2015; Hillaire 2016), dimming
-the sun and the sky they stand in front of.
+the sun and the sky they stand in front of. Each cell of a deck's weather map
+bounds the heights its cloud can reach, so a march strides straight through
+the air above and below them. A bank thins out over the last tenth of its
+breadth rather than ending in a wall of cloud. Cirrus is a deck of its own, of
+ice, in a bank high above the rest.
+
+## The sun, the moon and the stars
+
+Every light out of doors is measured, not chosen (`body`, `stars`,
+`refraction`):
+
+- **The sun** stands at infinity where it truly is, its disc 959″ in radius
+  (the IAU solar radius over the astronomical unit) and its light the
+  sunlight above the air, `SOLAR` in the scene's units, which the camera is
+  balanced to. The disc darkens toward its limb as `μ^α`, α at each channel's
+  wavelength from Neckel and Labs' profiles as Hestroffer and Magnan (1998)
+  fit them, normalised so the disc still brings the whole sunlight.
+- **The air bends it.** The index of refraction is standard dry air's
+  (Ciddor 1996) over the 1976 Standard Atmosphere's density; the path a ray
+  bends along out of the air is traced once per scene from every height in
+  every direction (`atmosphere::Paths`), and the sunlight reaching a height is
+  kept along that bent path from its true direction, spread as the path
+  squashes the disc, and scattered by the air about the way it arrives. So a
+  sun at the horizon
+  stands lifted by some 33′ and squashed by the change of that lift across
+  it, a little less light reaching from the squashed disc; sunset comes later
+  than the geometry would have it, and the Earth's shadow edge is where the
+  bent light leaves it. Each channel bends by its own refractivity, so a low
+  sun's upper rim is blue and its lower red. The disc a ray sees is lit as
+  limb darkening says at the true direction each channel's bent ray points,
+  and dimmed along that ray, so the lower limb of a setting sun is redder
+  than its upper. The eye's own rays, which cross only the level scene, stay
+  straight.
+- **The full moon** lights the night: the sunlight its grey reflects, 14
+  magnitudes fainter than the sun (−12.74 against −26.74) and warmer, as the
+  ROLO lunar model (Kieffer and Stone 2005) gives its reflectance across the
+  channels. It is reckoned from the eye, nearer and so larger and brighter
+  the higher it stands; lit square on, its disc is evenly bright. The night
+  sky is the atmosphere lit by it.
+- **The stars** are Allen's census, star by star to magnitude 12 — in three
+  tiers by brightness, each cut into cube cells of its own, coarse for the few
+  bright and fine for the many faint; each cell holds a Poisson draw of its
+  solid angle's share of its tier, placed, made bright and coloured from its
+  own key, with Tycho-2's colours turned to a tint by the colour index for
+  blue against green and a blackbody's (Ballesteros 2012) red — and the light
+  of the fainter, to magnitude 19.5, a glow. A ray sees a star through its
+  footprint, a pixel's for the eye, as a Gaussian holding all of the star's
+  light; a footprint broader than a tier's cells, as a scattered ray's, sees
+  that tier's mean. A tier whose brightest star could not add a ten-thousandth
+  to the sky it is seen against, about a hundredth of an eight-bit pixel's
+  least step, is not looked for: by day most are not. The stars shine through
+  the air, dimmed and lifted as it bends their light, and none below its
+  horizon.
+- **Lamps** shine in real units: a garden globe in lumens, a spotlight in
+  candelas, turned to the scene's light by the sunlight's illuminance above
+  the air (133 334 lx, Darula, Kittler and Gueymard 2005). Beside them the
+  full moon gives the faint light it does.
+
+What deep water glows with is scaled by the light falling on the scene's
+level, measured channel by channel once the sky is built — the sun's disc
+through the air and the cloud, and the sky above, cosine-weighted — so water
+by moonlight glows only as much as moonlight lights it, and at sunset with
+sunset's colour.
+
+Cirrus is ice: its sunlight is scattered once exactly by rough ice crystals'
+phase (asymmetry 0.75, Yang et al. 2013); the light scattered again and
+again is Hillaire's isotropic series over the deck as its mean extinction
+lays it out by height, scaled by `1 − g`; and the sky's light and the
+ground's are scattered in by the share of the phase each hemisphere sends
+the eye. Its bank's shadow dims the light the lower bank is lit by, and both
+shade the ground. The water decks' octaves, powdered edges and ambient remain
+the production approximations of Schneider and Wrenninge.
 
 ## Lands
 

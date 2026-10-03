@@ -12,7 +12,7 @@ use tairix_util::mathf;
 use super::*;
 use crate::camera::Camera;
 use crate::detail::Detail;
-use crate::light::Light;
+use crate::light::{Light, Limb};
 use crate::material::{Finish, Material, Relief, Wind};
 use crate::pigment::Pigment;
 use crate::scene::{Exposure, Object, Parts};
@@ -30,7 +30,7 @@ fn laid(
     drift: impl Fn(f64, f64) -> [[f64; 2]; 2],
 ) -> Caustics {
     let flat = Flat {
-        drift: level.map(|drift| drift.map(|value| f64::from(stored(value)))),
+        drift: level.map(|drift| drift.map(|value| f64::from(single(value)))),
         flux: [1.0; 2],
         disc: [(0.0, 0.0); 2],
         bend: [1.0; 2],
@@ -72,7 +72,7 @@ fn laid(
                     let at = (corner.0 + step * real(column), corner.1 + step * real(row));
                     caustics.beams[layer.beams + row * side + column] = Beam {
                         height: 0.0,
-                        drift: drift(at.0, at.1).map(|drift| drift.map(stored)),
+                        drift: drift(at.0, at.1).map(|drift| drift.map(single)),
                         flux: [1.0; 2],
                     };
                 }
@@ -465,11 +465,10 @@ fn pool(slope_variance: f64) -> crate::scene::Scene {
             zenith: Vec3::new(0.15, 0.25, 0.5),
             horizon: Vec3::new(0.4, 0.5, 0.7),
             ground: Vec3::splat(0.2),
-            glow: None,
         }),
-        stars: 0.0,
-        clouds: None,
-        bank: None,
+        stars: None,
+        low: None,
+        high: None,
     };
     let waves = Relief::waves(
         Wind {
@@ -520,9 +519,9 @@ fn pool(slope_variance: f64) -> crate::scene::Scene {
             toward,
             cos_radius,
             radiance: Vec3::splat(3.0 / solid),
+            limb: Limb::Even,
         }],
         sky,
-        fog: None,
         shades: None,
         camera: Camera::looking(
             Vec3::new(0.0, 1.6, -1.2),
@@ -532,7 +531,6 @@ fn pool(slope_variance: f64) -> crate::scene::Scene {
             (0.0, 1.0),
         ),
         exposure: Exposure::Fixed(0.6),
-        daylight: 1.0,
     })
     .expect("a pool")
 }

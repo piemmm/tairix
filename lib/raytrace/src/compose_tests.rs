@@ -171,7 +171,15 @@ fn every_scene_is_lit_and_made_of_sound_parts() {
             !scene.lights.is_empty()
                 || scene
                     .sky
-                    .radiance(Vec3::ZERO, Vec3::UP, false, 0.5)
+                    .radiance(
+                        Vec3::ZERO,
+                        Vec3::UP,
+                        crate::sky::Seeing {
+                            fine: false,
+                            spread: None,
+                            jitter: 0.5,
+                        },
+                    )
                     .max_element()
                     > 0.0,
             "{what}: unlit"
@@ -200,8 +208,13 @@ fn every_scene_is_lit_and_made_of_sound_parts() {
             );
             assert_eq!(object.filter.is_some(), clear, "{what}: object {index}");
             if let Some(light) = object.light {
-                let owner = scene.lights.get(light).and_then(Light::object);
-                assert_eq!(owner, u32::try_from(index).ok(), "{what}: lamp {light}");
+                assert!(
+                    matches!(
+                        scene.lights.get(light),
+                        Some(Light::Orb { .. } | Light::Panel { .. })
+                    ),
+                    "{what}: object {index}'s lamp {light} has a surface"
+                );
             }
             match object.shape {
                 Shape::Hull { first, count, .. } => {
@@ -848,4 +861,38 @@ fn every_setting_prepares_at_the_plainer_detail() {
             });
         }
     });
+}
+
+/// A lamp's light is its colour at the luminous strength it is rated at, in
+/// the scene's units, whatever its colour.
+#[test]
+fn a_lamps_light_is_as_bright_as_it_is_rated_whatever_its_colour() {
+    for colour in LAMPS.iter().copied().chain([0xFF_FF_FF, 0x20_40_FF]) {
+        let light = lit(colour, 2500.0);
+        let (tint, luminous) = (rgb(colour), 2500.0 * body::per_lux());
+        assert!(
+            (light.luminance() / luminous - 1.0).abs() < 1e-12,
+            "{colour:06x}: {light:?}"
+        );
+        let scale = light.luminance() / tint.luminance();
+        assert!(
+            (light - tint * scale).max_element().abs() < 1e-12 * light.max_element(),
+            "{colour:06x}: {light:?} is not {tint:?}"
+        );
+    }
+}
+
+/// A glowing ball sheds the lumens it is rated at: its surface, as bright
+/// from every way, gives off pi times its luminance from each square metre.
+#[test]
+fn a_glowing_ball_sheds_the_lumens_it_is_rated_at() {
+    for (flux, radius) in [(400.0, 0.12), (30_000.0, 0.45), (5.0, 0.01)] {
+        let radiance = lumens(0xFF_E4_B8, flux, radius);
+        let area = 4.0 * PI * radius * radius;
+        let shed = radiance.luminance() * PI * area / body::per_lux();
+        assert!(
+            (shed / flux - 1.0).abs() < 1e-12,
+            "{flux} at {radius}: {shed}"
+        );
+    }
 }

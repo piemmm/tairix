@@ -1,23 +1,24 @@
 //! The lights a scene is lit by, and how a shading point samples each.
 //!
-//! A point, a spot and the sun are sampled outright; an orb and a panel are
+//! A spot and the sun are sampled outright; an orb and a panel are
 //! also objects a reflected ray can find by chance, so each answers the
 //! density it would have drawn that direction with, and the two ways of
-//! finding it are weighed against each other.
+//! finding it are weighed against each other. The sun's disc is drawn where
+//! it truly stands and seen where the air bends its light to, its density
+//! taken over the solid angle the light arrives in.
 
 use core::f64::consts::TAU;
 
 use tairix_util::mathf;
 
 use crate::noise::smoothstep;
-use crate::sample::cone;
+use crate::sample::{cone, mix32, unit};
+use crate::sky::Sky;
 use crate::vector::{Frame, Vec3};
 
 /// One light.
 #[derive(Clone, Debug)]
 pub(crate) enum Light {
-    /// A point shining `intensity` every way.
-    Point { at: Vec3, intensity: Vec3 },
     /// A point shining `intensity` down the unit `axis`: full strength within
     /// `cos_inner` of it, fading to nothing at `cos_outer`.
     Spot {
@@ -27,29 +28,63 @@ pub(crate) enum Light {
         cos_outer: f64,
         intensity: Vec3,
     },
-    /// A distant disc of `radiance` toward the unit `toward`, `cos_radius`
-    /// across: the sun, or the moon.
+    /// A distant disc whose true direction is the unit `toward`, `cos_radius`
+    /// across, of mean `radiance` spread over it as `limb` has it: the sun,
+    /// or the moon.
     Sun {
         toward: Vec3,
         cos_radius: f64,
         radiance: Vec3,
+        limb: Limb,
     },
-    /// Scene object `object`, a sphere glowing `radiance`.
+    /// A sphere glowing `radiance`, a scene object of its own.
     Orb {
-        object: u32,
         centre: Vec3,
         radius: f64,
         radiance: Vec3,
     },
-    /// Scene object `object`, a rectangle glowing `radiance` from its face
-    /// only.
+    /// A rectangle glowing `radiance` from its face only, a scene object of
+    /// its own.
     Panel {
-        object: u32,
         corner: Vec3,
         edge_u: Vec3,
         edge_v: Vec3,
         radiance: Vec3,
     },
+}
+
+/// How a disc's brightness falls toward its edge.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub(crate) enum Limb {
+    /// Evenly bright: the full moon, lit square on.
+    Even,
+    /// As `μ^α` of the cosine `μ` of the angle the line of sight meets its
+    /// surface at, each channel with its own `α`: the sun.
+    Darkening(Vec3),
+}
+
+impl Limb {
+    /// The radiance of each channel the share of the way from the disc's
+    /// centre to its edge `fractions` says, as a share of its mean.
+    pub(crate) fn across(self, fractions: [f64; 3]) -> Vec3 {
+        let Self::Darkening(power) = self else {
+            return Vec3::ONE;
+        };
+        let channel = |alpha: f64, fraction: f64| {
+            let cosine = mathf::sqrt((1.0 - fraction * fraction).max(0.0));
+            // `μ^α` over its mean across the disc, `2/(α + 2)`.
+            if cosine > 0.0 {
+                mathf::exp(alpha * mathf::ln(cosine)) * (0.5 * alpha + 1.0)
+            } else {
+                0.0
+            }
+        };
+        Vec3::new(
+            channel(power.x, fractions[0]),
+            channel(power.y, fractions[1]),
+            channel(power.z, fractions[2]),
+        )
+    }
 }
 
 /// Light arriving at a shading point from one sample of one light.
@@ -61,33 +96,49 @@ pub(crate) struct Incidence {
     pub(crate) distance: f64,
     /// The light arriving, already divided by the density it was drawn with.
     pub(crate) light: Vec3,
-    /// That density per unit solid angle; `0.0` for a point or a spot, which
-    /// nothing but sampling can find.
+    /// That density per unit solid angle; `0.0` for a spot, which nothing
+    /// but sampling can find.
     pub(crate) density: f64,
+    /// What of its light the air and the clouds let through: all of it but
+    /// the sun's.
+    pub(crate) kept: Vec3,
 }
 
 impl Light {
-    /// The scene object that is this light's own surface, if it has one.
-    pub(crate) const fn object(&self) -> Option<u32> {
+    /// The light a disc sends square to its way above the air: its mean
+    /// radiance over its solid angle; nothing for a light with no disc.
+    pub(crate) fn irradiance(&self) -> Vec3 {
         match *self {
-            Self::Orb { object, .. } | Self::Panel { object, .. } => Some(object),
-            Self::Point { .. } | Self::Spot { .. } | Self::Sun { .. } => None,
+            Self::Sun {
+                cos_radius,
+                radiance,
+                ..
+            } => radiance / disc_density(cos_radius),
+            Self::Spot { .. } | Self::Orb { .. } | Self::Panel { .. } => Vec3::ZERO,
         }
     }
 
-    /// One sample of the light reaching `p`, drawn from `pair`; `None` when
-    /// none can.
-    pub(crate) fn sample(&self, p: Vec3, pair: (f64, f64)) -> Option<Incidence> {
+    /// `count` samples of the light reaching `p` under `sky`, spread evenly
+    /// over it.
+    pub(crate) fn samples<'a>(
+        &'a self,
+        p: Vec3,
+        count: u32,
+        sky: &'a Sky,
+    ) -> impl Iterator<Item = Incidence> + 'a {
+        (0..count).filter_map(move |index| {
+            let pair = (
+                (f64::from(index) + 0.5) / f64::from(count),
+                unit(mix32(index ^ 0x9e37)),
+            );
+            self.sample(p, pair, sky)
+        })
+    }
+
+    /// One sample of the light reaching `p` under `sky`, drawn from `pair`;
+    /// `None` when none can.
+    pub(crate) fn sample(&self, p: Vec3, pair: (f64, f64), sky: &Sky) -> Option<Incidence> {
         match *self {
-            Self::Point { at, intensity } => {
-                let (dir, distance) = toward(p, at)?;
-                Some(Incidence {
-                    dir,
-                    distance,
-                    light: intensity / (distance * distance),
-                    density: 0.0,
-                })
-            }
             Self::Spot {
                 at,
                 axis,
@@ -105,20 +156,22 @@ impl Light {
                     distance,
                     light: intensity * (spread * spread / (distance * distance)),
                     density: 0.0,
+                    kept: Vec3::ONE,
                 })
             }
             Self::Sun {
-                toward,
-                cos_radius,
-                radiance,
+                toward, cos_radius, ..
             } => {
                 let (x, y, z) = cone(cos_radius, pair);
-                let density = disc_density(cos_radius);
+                let from = Frame::around(toward).to_world(Vec3::new(x, y, z));
+                let arriving = sky.arriving(p, from)?;
+                let density = disc_density(cos_radius) / arriving.stretch;
                 Some(Incidence {
-                    dir: Frame::around(toward).to_world(Vec3::new(x, y, z)),
+                    dir: arriving.dir,
                     distance: f64::INFINITY,
-                    light: radiance / density,
+                    light: self.shine(sky.channels(&arriving, from)) / density,
                     density,
+                    kept: arriving.kept * sky.clouded(p, arriving.dir),
                 })
             }
             Self::Orb {
@@ -145,6 +198,7 @@ impl Light {
                     distance: reach,
                     light: radiance / density,
                     density,
+                    kept: Vec3::ONE,
                 })
             }
             Self::Panel {
@@ -162,25 +216,23 @@ impl Light {
                     distance,
                     light: radiance / density,
                     density,
+                    kept: Vec3::ONE,
                 })
             }
         }
     }
 
     /// The density [`sample`](Self::sample) draws the unit `dir` from `p`
-    /// with, for a ray that met this light `distance` along it.
-    pub(crate) fn density(&self, p: Vec3, dir: Vec3, distance: f64) -> f64 {
+    /// under `sky` with, for a ray that met this light `distance` along it.
+    pub(crate) fn density(&self, p: Vec3, dir: Vec3, distance: f64, sky: &Sky) -> f64 {
         match *self {
-            Self::Point { .. } | Self::Spot { .. } => 0.0,
+            Self::Spot { .. } => 0.0,
             Self::Sun {
                 toward, cos_radius, ..
-            } => {
-                if dir.dot(toward) >= cos_radius {
-                    disc_density(cos_radius)
-                } else {
-                    0.0
-                }
-            }
+            } => sky
+                .leaving(p, dir)
+                .filter(|&(from, _)| from.dot(toward) >= cos_radius)
+                .map_or(0.0, |(_, stretch)| disc_density(cos_radius) / stretch),
             Self::Orb { centre, radius, .. } => {
                 orb_cone((centre - p).length(), radius).map_or(0.0, |(_, _, density)| density)
             }
@@ -190,11 +242,54 @@ impl Light {
         }
     }
 
+    /// The radiance a ray from `origin` along the unit `dir` meets on this
+    /// light's disc, each channel's where its own bent ray truly points, as
+    /// the air and the clouds let it through; nothing for a light with no
+    /// disc.
+    pub(crate) fn disc(&self, origin: Vec3, dir: Vec3, sky: &Sky) -> Vec3 {
+        let Self::Sun {
+            toward, cos_radius, ..
+        } = *self
+        else {
+            return Vec3::ZERO;
+        };
+        if dir.dot(toward) < sky.reach(cos_radius) {
+            return Vec3::ZERO;
+        }
+        sky.beyond(origin, dir)
+            .map_or(Vec3::ZERO, |(sources, kept)| self.shine(sources) * kept)
+    }
+
+    /// The radiance this disc shows of light whose channels truly come from
+    /// `sources`: as its limb has it, and none past its edge.
+    fn shine(&self, sources: [Vec3; 3]) -> Vec3 {
+        let Self::Sun {
+            toward,
+            cos_radius,
+            radiance,
+            limb,
+        } = *self
+        else {
+            return Vec3::ZERO;
+        };
+        let radius = sine(cos_radius);
+        let cosines = sources.map(|source| source.dot(toward));
+        let profile = limb.across(cosines.map(|cos| (sine(cos) / radius).min(1.0)));
+        let shown = |channel: usize| {
+            if cosines[channel] >= cos_radius {
+                radiance.along(channel) * profile.along(channel)
+            } else {
+                0.0
+            }
+        };
+        Vec3::new(shown(0), shown(1), shown(2))
+    }
+
     /// The radiance a ray arriving along `dir` sees on this light's own
     /// surface: the panel shines from its face alone.
     pub(crate) fn seen(&self, dir: Vec3) -> Vec3 {
         match *self {
-            Self::Orb { radiance, .. } | Self::Sun { radiance, .. } => radiance,
+            Self::Orb { radiance, .. } => radiance,
             Self::Panel {
                 edge_u,
                 edge_v,
@@ -207,9 +302,15 @@ impl Light {
                     Vec3::ZERO
                 }
             }
-            Self::Point { .. } | Self::Spot { .. } => Vec3::ZERO,
+            Self::Spot { .. } | Self::Sun { .. } => Vec3::ZERO,
         }
     }
+}
+
+/// The sine of the angle whose cosine is `cos`, kept precise for a small
+/// angle.
+fn sine(cos: f64) -> f64 {
+    mathf::sqrt(((1.0 - cos) * (1.0 + cos)).max(0.0))
 }
 
 /// The unit direction and distance from `from` to `to`; `None` when they
@@ -234,7 +335,7 @@ fn orb_cone(distance: f64, radius: f64) -> Option<(f64, f64, f64)> {
 
 /// The uniform density over the disc whose angular radius has cosine
 /// `cos_radius`.
-fn disc_density(cos_radius: f64) -> f64 {
+pub(crate) fn disc_density(cos_radius: f64) -> f64 {
     cone_density(1.0 - cos_radius)
 }
 

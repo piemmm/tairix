@@ -36,7 +36,7 @@ use crate::course::{smoothed, Courses, Mark, Nearest, Reach};
 use crate::heightfield::{apart, Heightfield, Sealing, ABSENT};
 use crate::noise::{fbm2, noise2, ridged2, smoothstep};
 use crate::terrain::Terrain;
-use crate::vector::{real, share, Vec3};
+use crate::vector::{real, share, single, Vec3};
 
 /// How water wears a land.
 #[derive(Copy, Clone, Debug)]
@@ -445,16 +445,6 @@ fn encode_lane(road: f64, path: f64) -> u8 {
 
 fn byte(value: f64) -> u8 {
     u8::try_from(mathf::round_i32(value.clamp(0.0, 255.0))).unwrap_or(u8::MAX)
-}
-
-fn single(value: f64) -> f32 {
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "the land's grids hold single precision"
-    )]
-    {
-        value as f32
-    }
 }
 
 /// Where a land's build stands.

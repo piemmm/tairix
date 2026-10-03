@@ -64,9 +64,9 @@ fn a_bent_chain_of_limbs_leaves_no_gap_at_its_joint() {
 fn a_leaf_is_met_within_its_outline_and_missed_outside_it() {
     let leaf = Prototype::new(
         vec![Part::Leaf(Blade {
-            base: stored(Vec3::ZERO),
-            normal: stored(Vec3::UP),
-            axis: stored(Vec3::new(1.0, 0.0, 0.0)),
+            base: singles(Vec3::ZERO),
+            normal: singles(Vec3::UP),
+            axis: singles(Vec3::new(1.0, 0.0, 0.0)),
             length: 0.1,
             width: 0.04,
             outline: Outline::Ovate { teeth: 0 },

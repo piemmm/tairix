@@ -7,8 +7,9 @@ use tairix_util::mathf;
 use core::f64::consts::PI;
 
 use super::{power, Quality, Tracer};
+use crate::atmosphere::Air;
 use crate::camera::Camera;
-use crate::light::Light;
+use crate::light::{Light, Limb};
 use crate::material::{fresnel, Finish, Material, Relief, Wind, COAT_F0};
 use crate::pigment::Pigment;
 use crate::sample::Sampler;
@@ -28,11 +29,10 @@ fn gradient(zenith: Vec3, horizon: Vec3, ground: Vec3) -> Sky {
             zenith,
             horizon,
             ground,
-            glow: None,
         }),
-        stars: 0.0,
-        clouds: None,
-        bank: None,
+        stars: None,
+        low: None,
+        high: None,
     }
 }
 
@@ -86,11 +86,9 @@ impl Setup {
             materials: self.materials,
             lights: self.lights,
             sky: self.sky,
-            fog: None,
             shades: self.shades,
             camera: Camera::looking(self.eye, self.target, 0.3, 1.0, (0.0, 1.0)),
             exposure: Exposure::Fixed(1.0),
-            daylight: 1.0,
         })
         .expect("a scene")
     }
@@ -98,6 +96,17 @@ impl Setup {
 
 fn ball(centre: Vec3, radius: f64) -> Shape {
     Shape::Sphere { centre, radius }
+}
+
+/// A spot at `at` shining `intensity` down over everything below it.
+fn overhead(at: Vec3, intensity: f64) -> Light {
+    Light::Spot {
+        at,
+        axis: -Vec3::UP,
+        cos_inner: 0.0,
+        cos_outer: -0.5,
+        intensity: Vec3::splat(intensity),
+    }
 }
 
 fn ground() -> Shape {
@@ -229,7 +238,6 @@ fn a_lamp_seen_directly_shows_its_own_radiance() {
         None,
     );
     setup.lights.push(Light::Orb {
-        object: 0,
         centre: Vec3::ZERO,
         radius: 1.0,
         radiance,
@@ -255,10 +263,7 @@ fn a_clear_ball_casts_a_lighter_shadow_than_an_opaque_one() {
         if let Some((material, filter)) = blocker {
             setup.add(ball(Vec3::new(0.0, 1.0, 0.0), 0.6), material, filter);
         }
-        setup.lights.push(Light::Point {
-            at: Vec3::new(0.0, 3.0, 0.0),
-            intensity: Vec3::splat(9.0),
-        });
+        setup.lights.push(overhead(Vec3::new(0.0, 3.0, 0.0), 9.0));
         // Looking at the floor just beside the ball, where its shadow falls.
         setup.eye = Vec3::new(0.0, 0.5, -3.0);
         setup.target = Vec3::new(0.0, 0.0, -0.1);
@@ -288,10 +293,7 @@ fn a_pixel_traces_the_same_every_time() {
         ),
         None,
     );
-    setup.lights.push(Light::Point {
-        at: Vec3::new(2.0, 3.0, -3.0),
-        intensity: Vec3::splat(5.0),
-    });
+    setup.lights.push(overhead(Vec3::new(2.0, 3.0, -3.0), 5.0));
     let scene = setup.scene();
     for x in 0..SIZE.0 {
         assert_eq!(shown(&scene, (x, 4)), shown(&scene, (x, 4)));
@@ -420,10 +422,9 @@ fn a_pattern_turns_with_its_object() {
     assert!((spot.normal - turned.frame.to_local(surface.normal)).length() < 1e-12);
 }
 
-/// Below the horizon, a ray that meets nothing has passed into the haze;
-/// above it, the sky shows.
+/// A ray that meets nothing sees the sky, above the horizon and below it.
 #[test]
-fn below_the_horizon_nothing_met_is_haze() {
+fn a_ray_meeting_nothing_sees_the_sky() {
     let mut setup = Setup::new(gradient(
         Vec3::new(0.1, 0.2, 0.6),
         Vec3::new(0.7, 0.75, 0.8),
@@ -434,27 +435,21 @@ fn below_the_horizon_nothing_met_is_haze() {
         Material::new(Pigment::Solid(Vec3::ONE), Finish::Matte),
         None,
     );
-    let mut scene = setup.scene();
-    scene.fog = Some(crate::scene::Fog { density: 0.001 });
+    let scene = setup.scene();
     let encoder = Encoder::new().expect("an encoder");
     let tracer = Tracer::new(&scene, &encoder, SIZE, 1);
     let mut sampler = crate::sample::Sampler::new(1, 0);
-    let down = crate::vector::Ray::new(Vec3::ZERO, Vec3::new(1.0, -0.1, 0.0).normalized());
-    let seen = tracer.radiance(&down, super::Path::EYE, &mut sampler);
-    assert!(
-        close(seen, scene.sky.haze(Vec3::new(1.0, 0.0, 0.0)), 1e-12),
-        "{seen:?}"
-    );
-    let up = crate::vector::Ray::new(Vec3::ZERO, Vec3::new(1.0, 0.5, 0.0).normalized());
-    let sky = tracer.radiance(&up, super::Path::EYE, &mut sampler);
-    assert!(
-        close(
-            sky,
-            scene.sky.radiance(Vec3::ZERO, up.dir, true, 0.5),
-            1e-12
-        ),
-        "{sky:?}"
-    );
+    let seeing = crate::sky::Seeing {
+        fine: true,
+        spread: Some(tracer.pixel_angle),
+        jitter: 0.5,
+    };
+    for dir in [Vec3::new(1.0, -0.1, 0.0), Vec3::new(1.0, 0.5, 0.0)] {
+        let ray = crate::vector::Ray::new(Vec3::ZERO, dir.normalized());
+        let seen = tracer.radiance(&ray, super::Path::EYE, &mut sampler);
+        let sky = scene.sky.radiance(Vec3::ZERO, ray.dir, seeing);
+        assert!(close(seen, sky, 1e-12), "{seen:?} against {sky:?}");
+    }
 }
 
 /// A room of a floor and a roof over it, the sun low enough to light the floor
@@ -482,6 +477,7 @@ fn the_light_a_floor_gives_back_lights_the_roof_above_it() {
             toward: Vec3::new(0.8, 0.6, 0.0),
             cos_radius: 0.9999,
             radiance: Vec3::splat(5000.0),
+            limb: Limb::Even,
         });
         setup.eye = Vec3::new(0.0, 0.3, 0.0);
         setup.target = Vec3::new(0.0, 1.0, 0.1);
@@ -516,7 +512,6 @@ fn a_lamp_is_counted_once_on_the_surface_it_lights() {
         None,
     );
     setup.lights.push(Light::Orb {
-        object: u32::try_from(orb).expect("few objects"),
         centre: Vec3::new(0.0, height, 0.0),
         radius,
         radiance,
@@ -618,6 +613,7 @@ fn the_sun_lights_only_the_air_it_reaches() {
         toward: Vec3::new(1.0, 0.12, 0.0).normalized(),
         cos_radius: 0.9999,
         radiance: Vec3::splat(5000.0),
+        limb: Limb::Even,
     });
     let scene = setup.scene();
     let encoder = Encoder::new().expect("an encoder");
@@ -648,6 +644,49 @@ fn the_sun_lights_only_the_air_it_reaches() {
         (across - 2.0 / 3.0).abs() < 0.06,
         "a third of it in the shadow: {across}"
     );
+}
+
+/// After sunset no sunlight reaches the eye's own air, so nothing standing
+/// in the sun's way shadows it: the air holds the light its table gives,
+/// the sunlit air high above the Earth's shadow and all.
+#[test]
+fn a_set_sun_shadows_none_of_the_air_the_eye_looks_through() {
+    let radians = (-2.0_f64).to_radians();
+    let toward = Vec3::new(0.0, mathf::sin(radians), mathf::cos(radians));
+    let air = Air {
+        sun: toward,
+        solar: Vec3::splat(20.0),
+        base: 0.0,
+        haze: 1.0,
+        albedo: Vec3::splat(0.2),
+        eye: Vec3::new(0.0, 0.0, -5.0),
+    };
+    let mut setup = Setup::new(crate::sky::tests::open(air, None));
+    setup.add(
+        ground(),
+        Material::new(Pigment::Solid(Vec3::splat(0.3)), Finish::Matte),
+        None,
+    );
+    setup.eye = Vec3::new(0.0, 1.7, -5.0);
+    setup.lights.push(Light::Sun {
+        toward,
+        cos_radius: mathf::cos(0.004_65),
+        radiance: Vec3::splat(1000.0),
+        limb: Limb::Even,
+    });
+    let scene = setup.scene();
+    let encoder = Encoder::new().expect("an encoder");
+    let tracer = Tracer::new(&scene, &encoder, SIZE, 0x5eed);
+    assert!(tracer.sun.is_none(), "set at the eye");
+    // Toward where the sun truly lies, below the horizon, the ground stands.
+    let ray = Ray::new(
+        Vec3::new(0.0, 1.7, -5.0),
+        Vec3::new(0.0, 0.02, 1.0).normalized(),
+    );
+    for index in 0..16 {
+        let mut sampler = Sampler::new(0x5eed, index);
+        assert_eq!(tracer.sunlit_air(&ray, 1000.0, &mut sampler), Vec3::ONE);
+    }
 }
 
 /// An evenly lit picture is exposed to its key; one a third of which is a
@@ -843,6 +882,7 @@ fn sun_at(elevation: f64, irradiance: f64) -> Light {
         toward: Vec3::new(mathf::cos(elevation), mathf::sin(elevation), 0.0),
         cos_radius,
         radiance: Vec3::splat(irradiance / solid),
+        limb: Limb::Even,
     }
 }
 
@@ -1057,7 +1097,7 @@ fn under_water_the_sun_reaches_a_highlight_only_by_its_reflection() {
             share: 1.0,
         }),
         translucent: Vec3::ZERO,
-        points_only: false,
+        spots_only: false,
     };
     let water = super::Medium {
         absorb: Vec3::splat(0.1),

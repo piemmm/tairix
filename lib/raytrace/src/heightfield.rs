@@ -26,9 +26,8 @@ use tairix_util::mathf::{self, fmax, fmin};
 
 use crate::band;
 use crate::lanes::{Corners, Lanes};
-use crate::scene::{Grid, Layout};
 use crate::shape::{quadratic, reciprocal, Aabb, Hit};
-use crate::vector::{real, share, Ray, Vec3};
+use crate::vector::{cell_of, real, share, Ray, Vec3};
 
 /// How far a ray is followed over a wrapping grid's tiles: beyond this a swell
 /// is finer than a pixel, and the grid lies at its mean level out to the
@@ -112,19 +111,10 @@ pub(crate) const ABSENT: f32 = f32::NEG_INFINITY;
 /// nor built up, on no road or path, and green enough for anything to grow.
 pub(crate) const PLAIN: [f64; 4] = [0.0, 0.5, 0.0, 1.0];
 
-impl Grid for Heightfield {
-    fn rows(&self) -> usize {
-        self.side
-    }
-
-    fn layout(&self) -> Layout {
-        Layout {
-            origin: self.origin,
-            step: self.step,
-        }
-    }
-
-    fn bands(
+impl Heightfield {
+    /// Its rows `range`, as disjoint bands `rows` rows high, each with the
+    /// row it starts at.
+    pub(crate) fn bands(
         &mut self,
         range: Range<usize>,
         rows: usize,
@@ -136,7 +126,7 @@ impl Grid for Heightfield {
 
 /// `values`, rows of `side`, over `range`, as disjoint bands `rows` rows
 /// high, each with the row it starts at.
-pub(crate) fn banded(
+fn banded(
     values: &mut [f32],
     side: usize,
     range: Range<usize>,
@@ -565,7 +555,7 @@ impl Heightfield {
             whole
         };
         (
-            count(whole).min(cells.saturating_sub(1)),
+            cell_of(whole).0.min(cells.saturating_sub(1)),
             fraction.clamp(0.0, 1.0),
         )
     }
@@ -1051,11 +1041,6 @@ impl Extremes {
 fn smallest_root(a: f64, b: f64, c: f64, reach: f64) -> Option<f64> {
     let (near, far) = quadratic(a, 0.5 * b, c)?;
     [near, far].into_iter().find(|t| *t > 0.0 && *t <= reach)
-}
-
-/// A non-negative whole float as a grid index.
-fn count(whole: f64) -> usize {
-    usize::try_from(mathf::round_i32(whole.max(0.0))).unwrap_or(0)
 }
 
 #[cfg(test)]

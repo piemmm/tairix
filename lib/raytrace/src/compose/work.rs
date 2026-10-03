@@ -9,10 +9,8 @@ use tairix_util::fallible;
 
 use crate::grass::Lawn;
 use crate::heightfield::{apart, Heightfield, Sealing};
-use crate::scene::Grid;
-use crate::sky::Clouds;
-use crate::terrain::{Cloudscape, Sea};
-use crate::vector::share;
+use crate::terrain::Sea;
+use crate::vector::{real, share, single};
 
 /// What fills a grid.
 ///
@@ -26,7 +24,6 @@ use crate::vector::share;
 #[derive(Debug)]
 pub(crate) enum Form {
     Sea(Sea),
-    Clouds(Cloudscape),
     /// How high a sward's shoots stand over the ground it grows on, a vertex
     /// to each block of `block` by `block` of its cells.
     Canopy {
@@ -35,19 +32,11 @@ pub(crate) enum Form {
     },
 }
 
-/// Which grid a fill fills.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub(crate) enum Target {
-    /// The scene's height grid of this index.
-    Field(usize),
-    /// The sky's cloud cover.
-    Clouds,
-}
-
-/// A grid still being filled.
+/// A height grid still being filled.
 #[derive(Debug)]
 pub(crate) struct Fill {
-    pub(crate) target: Target,
+    /// The index of the scene's height grid it fills.
+    pub(crate) field: usize,
     pub(crate) form: Form,
     /// The first row not yet filled.
     pub(crate) row: usize,
@@ -66,90 +55,70 @@ const UNIT_VERTICES: usize = 8192;
 /// How few vertices a band of a grid should hold to be worth another core.
 const FILL_GRAIN: usize = 2048;
 
-/// The grids a fill can reach.
-pub(crate) struct Grids<'a> {
-    pub(crate) fields: &'a mut [Heightfield],
-    pub(crate) clouds: Option<&'a mut Clouds>,
-}
-
 impl Fill {
-    /// A fill of `target` from `form`, from its first row.
-    pub(crate) fn new(target: Target, form: Form) -> Self {
+    /// A fill of the scene's height grid `field` from `form`, from its first
+    /// row.
+    pub(crate) fn new(field: usize, form: Form) -> Self {
         Self {
-            target,
+            field,
             form,
             row: 0,
             sealing: Sealing::BEGUN,
         }
     }
 
-    /// How far the fill has come, `rows` the rows of the grid it fills and
-    /// `field` that grid if it is a height grid.
-    pub(crate) fn done(&self, rows: usize, field: Option<&Heightfield>) -> f64 {
-        let filled = share(self.row, rows);
-        match field {
-            Some(field) => {
-                (1.0 - SEALING_SHARE) * filled + SEALING_SHARE * self.sealing.done(field)
-            }
-            None => filled,
-        }
+    /// How far the fill of `field`, the grid it fills, has come.
+    pub(crate) fn done(&self, field: &Heightfield) -> f64 {
+        let filled = share(self.row, field.side());
+        (1.0 - SEALING_SHARE) * filled + SEALING_SHARE * self.sealing.done(field)
     }
 
-    /// Fill the next unit of rows, spread over `runner`, then seal a height
-    /// grid a unit at a time once its last row is filled: whether all of it
-    /// is done, or `None` when the grids it names are not there to fill and
-    /// read.
-    pub(crate) fn step(&mut self, grids: Grids<'_>, runner: &dyn JobRunner) -> Option<bool> {
+    /// Fill the next unit of rows of its grid among `fields`, spread over
+    /// `runner`, then seal it a unit at a time once its last row is filled:
+    /// whether all of it is done, or `None` when the grids it names are not
+    /// there to fill and read.
+    pub(crate) fn step(
+        &mut self,
+        fields: &mut [Heightfield],
+        runner: &dyn JobRunner,
+    ) -> Option<bool> {
         let Self {
-            target,
+            field: index,
             form,
             row,
             sealing,
         } = self;
-        let Grids { fields, clouds } = grids;
-        if let Target::Field(index) = *target {
-            let field = fields.get_mut(index)?;
-            if *row >= field.side() {
-                return Some(sealing.step(field, runner));
-            }
+        let field = fields.get_mut(*index)?;
+        if *row >= field.side() {
+            return Some(sealing.step(field, runner));
         }
-        match (*target, &*form) {
-            (Target::Field(index), Form::Canopy { lawn, block }) => {
-                let (field, ground) = apart(fields, index, lawn.field as usize)?;
+        match &*form {
+            Form::Canopy { lawn, block } => {
+                let (field, ground) = apart(fields, *index, lawn.field as usize)?;
                 canopy(field, row, runner, &|x, z| {
                     lawn.canopy_at(ground, (x, z), *block)
                 });
             }
-            (Target::Field(index), Form::Sea(sea)) => {
-                advance(fields.get_mut(index)?, row, runner, &|x, z| {
-                    sea.height(x, z)
-                });
+            Form::Sea(sea) => {
+                advance(field, row, runner, &|x, z| sea.height(x, z));
             }
-            // A sky with no cloud layer has none to fill.
-            (Target::Clouds, Form::Clouds(cloudscape)) => {
-                return Some(clouds.is_none_or(|clouds| {
-                    advance(clouds, row, runner, &|x, z| cloudscape.density(x, z))
-                }));
-            }
-            _ => return None,
         }
         Some(false)
     }
 }
 
-/// Fill the unit of `grid`'s rows from `row`; whether it is full.
-fn advance<G: Grid>(
-    grid: &mut G,
+/// Fill the unit of `grid`'s rows from `row`.
+fn advance(
+    grid: &mut Heightfield,
     row: &mut usize,
     runner: &dyn JobRunner,
     value: &(dyn Fn(f64, f64) -> f64 + Sync),
-) -> bool {
-    let side = grid.rows();
+) {
+    let side = grid.side();
     let unit = (UNIT_VERTICES / side.max(1)).max(1) * runner.width().max(1);
     let rows = *row..(*row + unit).min(side);
     *row = rows.end;
     fill_grid(grid, rows, runner, value);
-    *row >= side
 }
 
 /// Fill the unit of the canopy grid `tops`'s rows from `row` with `value`
@@ -166,15 +135,10 @@ fn canopy(
     *row = rows.end;
     let ((origin_x, origin_z), step) = tops.placing();
     tops.each_row(rows, runner, &|(at, heights, kept)| {
-        let z = origin_z + step * crate::vector::real(*at);
+        let z = origin_z + step * real(*at);
         for (column, height) in heights.iter_mut().enumerate() {
-            let (top, packed) = value(origin_x + step * crate::vector::real(column), z);
-            #[allow(
-                clippy::cast_possible_truncation,
-                reason = "the grids hold single precision: heights need no more"
-            )]
-            let narrowed = top as f32;
-            *height = narrowed;
+            let (top, packed) = value(origin_x + step * real(column), z);
+            *height = single(top);
             if let Some(slot) = kept.get_mut(column) {
                 *slot = packed;
             }
@@ -185,26 +149,21 @@ fn canopy(
 /// Fill `rows` of `grid` with `value` at each vertex, the rows spread over
 /// `runner` in bands; on the calling thread alone when the heap will not
 /// hold the list of bands.
-fn fill_grid<G: Grid>(
-    grid: &mut G,
+fn fill_grid(
+    grid: &mut Heightfield,
     rows: Range<usize>,
     runner: &dyn JobRunner,
     value: &(dyn Fn(f64, f64) -> f64 + Sync),
 ) {
-    let side = grid.rows().max(1);
-    let layout = grid.layout();
+    let side = grid.side().max(1);
+    let ((origin_x, origin_z), step) = grid.placing();
     let pieces = tairix_parallel::bands(runner, rows.len(), FILL_GRAIN.div_ceil(side));
     let per = rows.len().div_ceil(pieces.max(1)).max(1);
     let fill_band = |(start, cells): &mut (usize, &mut [f32])| {
         for (offset, row) in cells.chunks_mut(side).enumerate() {
+            let z = origin_z + step * real(*start + offset);
             for (column, cell) in row.iter_mut().enumerate() {
-                let (x, z) = layout.vertex(column, *start + offset);
-                #[allow(
-                    clippy::cast_possible_truncation,
-                    reason = "the grids hold single precision: heights and densities need no more"
-                )]
-                let narrowed = value(x, z) as f32;
-                *cell = narrowed;
+                *cell = single(value(origin_x + step * real(column), z));
             }
         }
     };

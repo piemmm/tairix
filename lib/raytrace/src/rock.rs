@@ -14,8 +14,8 @@ use tairix_rng::{NonCryptoRng, RandU64};
 use tairix_util::mathf;
 
 use crate::noise::noise3;
-use crate::prototype::{stored, Building, Facet, Part, Prototype};
-use crate::vector::Vec3;
+use crate::prototype::{Building, Facet, Part, Prototype};
+use crate::vector::{singles, Vec3};
 
 /// How many times the icosahedron is subdivided: 5120 facets.
 const LEVELS: u32 = 4;
@@ -65,7 +65,7 @@ pub(crate) fn rock(habit: Habit, stock: u16, seed: u64) -> Option<Building> {
     }));
     let mut stored_vertices = Vec::new();
     stored_vertices.try_reserve_exact(vertices.len()).ok()?;
-    stored_vertices.extend(vertices.iter().map(|&vertex| stored(vertex)));
+    stored_vertices.extend(vertices.iter().map(|&vertex| singles(vertex)));
     Prototype::building(parts, stored_vertices, normals)
 }
 
@@ -198,7 +198,7 @@ fn normals_of(vertices: &[Vec3], faces: &[[u32; 3]]) -> Option<Vec<[f32; 3]>> {
     }
     let mut normals = Vec::new();
     normals.try_reserve_exact(sums.len()).ok()?;
-    normals.extend(sums.iter().map(|&sum| stored(sum.normalized())));
+    normals.extend(sums.iter().map(|&sum| singles(sum.normalized())));
     Some(normals)
 }
 

@@ -158,6 +158,34 @@ fn tables_built_across_workers_match_one_built_alone() {
     }
 }
 
+/// Low sunlight reaches the air bent toward the vertical, and scatters
+/// about the way it arrives rather than the way it set out.
+#[test]
+fn bent_sunlight_arrives_nearer_the_zenith_and_scatters_about_its_way_in() {
+    let atmosphere = built(air(0.5), &tairix_parallel::SERIAL);
+    let r = GROUND + 0.01;
+    for mu in [0.002, 0.02, 0.2, 0.7] {
+        let bent = atmosphere.paths.bent(r, mu).expect("above the shadow");
+        let sun = Vec3::new(mathf::sqrt(1.0 - mu * mu), mu, 0.0);
+        let (cos_seen, sin_seen) = bent.seen();
+        let apparent = Vec3::new(sin_seen, cos_seen, 0.0);
+        assert!(cos_seen > mu, "{mu}: lifted to {cos_seen}");
+        assert!((apparent.length() - 1.0).abs() < 1e-12);
+        assert!((apparent.dot(sun) - mathf::cos(bent.by)).abs() < 1e-12);
+        for step in 0..24u32 {
+            let around = f64::from(step) * 0.83;
+            let dir = Vec3::new(
+                mathf::cos(around),
+                f64::from(step) / 12.0 - 1.0,
+                mathf::sin(around),
+            )
+            .normalized();
+            let toward = bent.toward(dir.dot(sun), dir.y);
+            assert!((toward - dir.dot(apparent)).abs() < 1e-12, "{mu} {dir:?}");
+        }
+    }
+}
+
 #[test]
 fn the_ambient_is_the_skys_mean_over_the_hemisphere_weighed_by_its_cosine() {
     let mut atmosphere = Atmosphere::new(air(40.0)).expect("tables fit");

@@ -20,13 +20,14 @@ mod work;
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
-use core::f64::consts::{FRAC_PI_2, TAU};
+use core::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use tairix_colour::srgb_to_linear;
 use tairix_parallel::JobRunner;
 use tairix_rng::{NonCryptoRng, RandU64};
 use tairix_util::mathf;
 
+use crate::body;
 use crate::camera::Camera;
 use crate::deadwood::{log, stump, Top};
 use crate::detail::{Densities, Detail};
@@ -39,11 +40,11 @@ use crate::pigment::Pigment;
 use crate::prototype::{Building, Prototype, BUILD_UNIT};
 use crate::rock::{rock, Habit};
 use crate::sample::mix64;
-use crate::scene::{Exposure, Fog, Grid, Object, Parts};
+use crate::scene::{Exposure, Object, Parts};
 use crate::shade::{Crown, Shades};
 use crate::shape::{Aabb, Face, Geometry, Shape};
 use crate::sky::{Dome, Sky};
-use crate::terrain::{Cloudscape, Sea};
+use crate::terrain::Sea;
 use crate::tree::{fern, palm, saguaro, Growth, Season, Species, Stock};
 use crate::vector::{real, share, Frame, Pose, Ray, Vec3};
 use footprint::Footprints;
@@ -147,7 +148,7 @@ impl Setting {
     }
 }
 
-use work::{Fill, Form, Target};
+use work::{Fill, Form};
 
 /// A prototype a scene plans before it is traced: grown or built in the
 /// work behind the composition.
@@ -492,7 +493,10 @@ impl Composition {
         for lawn in &mut stage.lawns {
             lawn.seen.pixel = pixel;
         }
-        if let Some(bank) = look.sky.bank.as_mut() {
+        for bank in [look.sky.low.as_mut(), look.sky.high.as_mut()]
+            .into_iter()
+            .flatten()
+        {
             bank.centre_on((eye.x, eye.z));
         }
         if let Dome::Air(atmosphere) = &mut look.sky.dome {
@@ -533,18 +537,11 @@ impl Composition {
     /// How far one of the look's queued jobs has come.
     fn job_done(&self, job: &Job) -> f64 {
         match job {
-            Job::Fill(fill) => match fill.target {
-                Target::Field(index) => self
-                    .stage
-                    .fields
-                    .get(index)
-                    .map_or(1.0, |field| fill.done(field.rows(), Some(field))),
-                Target::Clouds => self
-                    .seen
-                    .as_ref()
-                    .and_then(|(look, _)| look.sky.clouds.as_ref())
-                    .map_or(1.0, |clouds| fill.done(clouds.rows(), None)),
-            },
+            Job::Fill(fill) => self
+                .stage
+                .fields
+                .get(fill.field)
+                .map_or(1.0, |field| fill.done(field)),
             Job::Grow(grow) => grow.done(),
             Job::Land(_) | Job::Plant(_) | Job::Sky => 0.0,
         }
@@ -586,15 +583,7 @@ impl Composition {
         };
         Some(match job {
             Job::Fill(mut fill) => {
-                let clouds = self
-                    .seen
-                    .as_mut()
-                    .and_then(|(look, _)| look.sky.clouds.as_mut());
-                let grids = work::Grids {
-                    fields: &mut self.stage.fields,
-                    clouds,
-                };
-                let whole = fill.step(grids, runner)?;
+                let whole = fill.step(&mut self.stage.fields, runner)?;
                 again(!whole, Job::Fill(fill))
             }
             Job::Land(landing) => self.land(landing, runner)?,
@@ -779,11 +768,7 @@ impl Dice {
 #[derive(Debug)]
 struct Look {
     sky: Sky,
-    fog: Option<Fog>,
     exposure: Exposure,
-    /// Roughly how much light falls on the scene, as a share of a clear
-    /// day's: what the glow within water is scaled by.
-    daylight: f64,
     view: View,
 }
 
@@ -895,7 +880,7 @@ impl Stage {
         let reserved = stage.objects.try_reserve(256).is_ok()
             && stage.faces.try_reserve(256).is_ok()
             && stage.fields.try_reserve_exact(MAX_FIELDS).is_ok()
-            && stage.fills.try_reserve_exact(MAX_FIELDS + 1).is_ok()
+            && stage.fills.try_reserve_exact(MAX_FIELDS).is_ok()
             && stage.materials.try_reserve(64).is_ok()
             && stage.lights.try_reserve_exact(MAX_LIGHTS).is_ok();
         reserved.then_some(stage)
@@ -989,7 +974,6 @@ impl Stage {
             true,
         )?;
         let light = self.light(Light::Orb {
-            object: u32::try_from(object).ok()?,
             centre,
             radius,
             radiance,
@@ -1015,7 +999,6 @@ impl Stage {
             false,
         )?;
         let light = self.light(Light::Panel {
-            object: u32::try_from(object).ok()?,
             corner,
             edge_u,
             edge_v,
@@ -1063,11 +1046,7 @@ impl Stage {
     /// Take `field` among the scene's grids, to be filled from `form`.
     fn grid(&mut self, field: Heightfield, form: Form) -> Option<u32> {
         let index = self.field(field)?;
-        push(
-            &mut self.fills,
-            MAX_FIELDS + 1,
-            Fill::new(Target::Field(index as usize), form),
-        )?;
+        push(&mut self.fills, MAX_FIELDS, Fill::new(index as usize, form))?;
         Some(index)
     }
 
@@ -1100,16 +1079,6 @@ impl Stage {
     /// Take `field` among the scene's grids, to be built as its land is.
     fn field(&mut self, field: Heightfield) -> Option<u32> {
         u32::try_from(push(&mut self.fields, MAX_FIELDS, field)?).ok()
-    }
-
-    /// Fill the sky's cloud layer from `form`, once the layer is set.
-    fn clouds(&mut self, form: Cloudscape) -> Option<()> {
-        push(
-            &mut self.fills,
-            MAX_FIELDS + 1,
-            Fill::new(Target::Clouds, Form::Clouds(form)),
-        )
-        .map(|_| ())
     }
 
     /// A place on the ground within `spread` of `centre` a piece `radius`
@@ -1216,11 +1185,9 @@ impl Stage {
             materials: self.materials,
             lights: self.lights,
             sky: look.sky,
-            fog: look.fog,
             shades: self.shades,
             camera,
             exposure: look.exposure,
-            daylight: look.daylight,
         }
     }
 }
@@ -1352,16 +1319,19 @@ fn rgb(hex: u32) -> Vec3 {
     Vec3::new(channel(16), channel(8), channel(0))
 }
 
-/// A sun of `irradiance` toward `toward`, its disc `radius` degrees across:
-/// the disc's radiance is what spreads that much light over its solid angle.
-fn sun(toward: Vec3, radius: f64, colour: Vec3, irradiance: f64) -> Light {
-    let cos_radius = mathf::cos(radius.to_radians());
-    let solid = TAU * (1.0 - cos_radius);
-    Light::Sun {
-        toward,
-        cos_radius,
-        radiance: colour * (irradiance / solid.max(1e-12)),
-    }
+/// The radiance of a glowing ball of `radius` metres that sheds `flux`
+/// lumens of light the colour of sRGB `0xRRGGBB`, evenly from all its
+/// surface.
+fn lumens(colour: u32, flux: f64, radius: f64) -> Vec3 {
+    let area = 4.0 * PI * radius * radius;
+    lit(colour, flux / (PI * area))
+}
+
+/// The colour of sRGB `0xRRGGBB` as light whose luminance is `photometric`,
+/// candelas or candelas a square metre, in the scene's units.
+fn lit(colour: u32, photometric: f64) -> Vec3 {
+    let tint = rgb(colour);
+    tint * (photometric * body::per_lux() / tint.luminance().max(1e-9))
 }
 
 /// A turn about a random axis, for a pattern no two pieces share.

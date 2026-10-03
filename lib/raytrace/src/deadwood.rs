@@ -9,9 +9,9 @@ use core::f64::consts::TAU;
 use tairix_rng::{NonCryptoRng, RandU64};
 use tairix_util::mathf;
 
-use crate::prototype::{stored, Building, Facet, Part, Prototype, Tube};
+use crate::prototype::{Building, Facet, Part, Prototype, Tube};
 use crate::sample::mix32;
-use crate::vector::{Frame, Vec3};
+use crate::vector::{singles, Frame, Vec3};
 
 /// The segments a fallen trunk is laid in.
 const LOG_SEGMENTS: u32 = 10;
@@ -230,14 +230,14 @@ pub(crate) fn stump(
             // The sawn face: a fan about the middle, a little inside the bark.
             vertices.try_reserve(FACE_SIDES as usize + 1).ok()?;
             normals.try_reserve(FACE_SIDES as usize + 1).ok()?;
-            let up = stored(lean.y);
-            vertices.push(stored(crown + lean.y * 0.002));
+            let up = singles(lean.y);
+            vertices.push(singles(crown + lean.y * 0.002));
             normals.push(up);
             for side in 0..FACE_SIDES {
                 let around = TAU * f64::from(side) / f64::from(FACE_SIDES);
                 let rim = crown
                     + (lean.x * mathf::cos(around) + lean.z * mathf::sin(around)) * (0.9 * radius);
-                vertices.push(stored(rim + lean.y * 0.002));
+                vertices.push(singles(rim + lean.y * 0.002));
                 normals.push(up);
             }
             for side in 0..FACE_SIDES {

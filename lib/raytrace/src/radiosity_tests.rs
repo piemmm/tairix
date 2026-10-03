@@ -10,7 +10,7 @@ use tairix_parallel::{Threaded, SERIAL};
 use super::*;
 use crate::camera::Camera;
 use crate::detail::Detail;
-use crate::light::Light;
+use crate::light::{Light, Limb};
 use crate::material::{Finish, Material};
 use crate::pigment::Pigment;
 use crate::scene::{Exposure, Object, Parts};
@@ -292,11 +292,10 @@ fn courtyard() -> Scene {
             zenith: Vec3::splat(0.2),
             horizon: Vec3::splat(0.3),
             ground: Vec3::splat(0.1),
-            glow: None,
         }),
-        stars: 0.0,
-        clouds: None,
-        bank: None,
+        stars: None,
+        low: None,
+        high: None,
     };
     Scene::new(Parts {
         objects: alloc::vec![
@@ -333,9 +332,9 @@ fn courtyard() -> Scene {
             toward: Vec3::new(-0.6, 0.5, 0.2).normalized(),
             cos_radius: 0.99999,
             radiance: Vec3::splat(4000.0),
+            limb: Limb::Even,
         }],
         sky,
-        fog: None,
         shades: None,
         camera: Camera::looking(
             Vec3::new(-3.0, 1.0, 0.5),
@@ -345,7 +344,6 @@ fn courtyard() -> Scene {
             (0.0, 1.0),
         ),
         exposure: Exposure::Fixed(1.0),
-        daylight: 1.0,
     })
     .expect("a scene")
 }
