@@ -11,9 +11,8 @@
 //! the driver maps a register window with the `mmio_map` syscall and carves a
 //! coherent DMA buffer with the `dma_alloc` syscall, passing those handles.
 //!
-//! [`RtDriverHost`] is that host. It is the user-space analogue of the
-//! in-kernel keyboard service's `IdentityMmioMapper` + frame-allocator DMA
-//! host: it implements [`DriverHost`](tairix_abi::DriverHost),
+//! [`RtDriverHost`] is that host. It implements
+//! [`DriverHost`](tairix_abi::DriverHost),
 //! [`MmioMapper`](tairix_abi::MmioMapper),
 //! and [`VirtioHost`](tairix_abi::driver::virtio::VirtioHost) over a small
 //! table of kernel-issued grants, resolving a driver's requested

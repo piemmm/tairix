@@ -143,7 +143,7 @@ under `qemu-system-aarch64 -M virt`.
 | RAM base | `0x4000_0000` | `0x0` (low 1 GiB; up to 8 GiB with the `>3GiB` window) |
 | Display | virtio-gpu / ramfb | VideoCore mailbox framebuffer → `drivers/display/rpi_hvs` (HVS) |
 | Storage | virtio-blk-mmio | EMMC2 SD host controller (`drivers/storage`) |
-| Input | virtio-keyboard-mmio | USB HID via the VL805/DWC2 USB host (`drivers/bus/usb`) |
+| Input | virtio-keyboard-mmio | USB HID behind the VL805 xHCI (`drivers/bus/usb/{vl805,xhci}` → `drivers/input/usb_hid`) |
 | Image builder | `tools/mkimage` emits `images/tairix-aarch64-rpi.img` (P9) | flash + boot the emitted image on metal |
 
 `drivers/display/rpi_hvs` already exists (HVS layer compositor, mock-host
@@ -446,13 +446,9 @@ settle the in-kernel bring-up uses. The metal capture read
 `timer_hz_from_tree=false timer_hz_hex=0x337_f980` — exactly the Pi 4's
 54 MHz crystal — so `CNTFRQ_EL0` is correctly programmed and a
 mis-programmed-rate over-wait is **ruled out** as the cause of the P10
-multi-second USB bring-up pause. The `4116` "bring-up delay timing
-measurement" (`keyboard_service` brackets the whole chain with
-`kernel_arch::read_cntpct` and tallies its `GenericTimerDelay`'s requested
-microseconds) read `requested_us_hex≈356 ms` (259 delay calls) yet
-`counter_elapsed_us_hex≈14.3 s` at the correct 54 MHz — so ≈14 s of real
-time elapsed with only ≈356 ms in `busy_delay_us`: the counter is sound and
-the seconds are code-side, but `4116` alone cannot split *where* they go.
+multi-second USB bring-up pause: a measurement of the bring-up found
+≈14.3 s of real time against ≈356 ms of requested delay at the correct
+54 MHz, so the counter is sound and the seconds were code-side.
 Two diagnostics localise it: `SerialSink` prefixes every line with a
 monotonic `CNTPCT_EL0`-derived `[<secs>.<millis>]` stamp (`kernel_arch::uptime_ms`,
 so a capture reads the real wall time between any two lines), and `build.rs`
@@ -1919,2064 +1915,249 @@ real hardware per a recorded checklist — done (operator metal acceptance).
 
 ### P10 — USB-HID input + desktop on the Pi
 
-- Bring up the Pi 4 USB host (VL805 PCIe → xHCI for the USB-A ports, and
-  the DWC2 OTG) far enough to enumerate a USB-HID keyboard + mouse under
-  `drivers/bus/usb` + `drivers/input`, so the WM input router has real
-  events.
+- Bring up the Pi 4 USB host — the VL805 xHCI behind the BCM2711 PCIe root
+  complex, serving the USB-A ports — far enough to enumerate USB-HID
+  keyboards and mice, so the WM input router has real events. The DWC2 OTG
+  port follows only if a use needs it.
 - Run `userland/gui/{wm,taskbar,session}` on the HVS path: the headless
   build stays first-class (§17.3), and the graphical session is the
   launchable option `userland/session/login` offers when the display +
   input drivers loaded.
 
-**Done — the keyboard comes up entirely in user space (the D5d flip).** The
-in-kernel `usb_keyboard::bring_up_keyboard` scaffold is **deleted** (§2.14);
-the Pi 4 USB-HID keyboard is now a chain of autoloaded, signed user-space
-driver bundles, each its own crate with its device logic co-located as a
-`lib` target (§2.22): `drivers/bus/pcie_brcm` trains the link and emits the
-VL805 PCI node, `drivers/bus/mailbox/vcmailbox` serves the VideoCore mailbox
-(layout shared via `lib/vcmailbox`), `drivers/bus/usb/vl805` reloads the
-firmware and emits the `usb,xhci` node, `drivers/bus/usb/xhci` binds it,
-brings the controller up over the shared `lib/usb` xHCI protocol and
-enumerates, and `drivers/input/usb_hid` serves each HID interface it publishes.
-The kernel's bootstrap floor is storage-only (§18.6). **The
-historical "Landed" subsections below describe the superseded in-kernel
-diagnostic path (the old `drivers/bus/usb` path is now `drivers/bus/usb/xhci`);
-they are retained for the PCIe root-cause findings that still apply to
-`drivers/bus/pcie_brcm`.** The chain's live acceptance with `usb_hid` (attach
-→ keystroke, detach → `usb_hid` unloads while the controller stays up,
-re-attach → autoloads again, and cold boot with the keyboard unplugged then
-plugged in) is `plans/USB.md` UM. **Metal-pending (`plans/OPEN-DEFECTS.md`
-D167):** a driver restart that recovers its predecessor's quarantined DMA —
-`vcmailbox`'s firmware-revision probe, which rests on the VideoCore answering
-property requests in posting order, the VL805's `HCRST` before
-`UsbDevice::start`, and GENET's `DMA_DISABLED` wait — each observed, after
-killing the driver mid-traffic, as the successor's `DMA_QUARANTINE_RELEASED`
-record carrying non-zero `bytes` (every bring-up records one, so the record
-alone proves nothing).
-**Remaining for P10:** run
-`userland/gui/{wm,taskbar,session}` on the HVS path so
-`userland/session/login` offers the launchable graphical session when the
-display + input drivers are present (the headless build stays first-class,
-§17.3). The status detail of record lives in `PLAN.md`.
+| Item | What it is | Status |
+|---|---|---|
+| 5a | Each chain driver owns its canonical `BIND_KEYS`; `HwMatchKey` matches PCI and USB classes with vendor/product wildcards | done |
+| 5b | Bus drivers describe what they enumerate as child nodes: `PciBus::describe_function` (the full 24-bit class), `UsbDevice::describe_device` (the interface class) | done |
+| 5c | One match policy, `lib/devmatch`, for the in-kernel floor and `devmgr` (5c-i); every in-kernel driver admitted through the signed-manifest gate `KernelDriverLoader::admit`, its manifest signed at build against the kernel's embedded trust anchor (5c-ii) | done |
+| 5d-0 | A driver reaches its device only through owner-checked per-task grants: the grant table (5d-0-ii (a)), the guarded `MmioWindowMap` (b), the retained live address space and its producers (b′), non-`FIXED` `mem_map` placement and `dma_alloc` (c) | done |
+| 5d-1 | `lib/drvrt`'s `RtDriverHost`: the driver host over those grants | done |
+| 5d-2 | User-space drivers by discovery: `resource_grants` (5d-2-i); grants minted at driver spawn (5d-2-ii (a)), `devmgr`-driven spawn through the signed gate (b-1), `lib/usb` (b-2-i), enumeration over the shared `Delay` (b-2-ii), the autoloaded driver binaries, the store scan and reader, and the `-M virt` autoload vertical (b-2-iii) | done |
+| 5e | The flip (D5d, B5): the in-kernel keyboard scaffold deleted, the floor storage only | done |
+| D1 | The runtime hardware-inventory store (`hwtree_store`) | done |
+| D2a | Block-device sharing (`shared_block`); the floor disk held for the system's life by the driver-store service (D2a-2) | done |
+| D2b | The read-only `/System` file service (D2b-1, `system_files`), reached over `ipc_call` (D2b-2) through the driver-store server (D2b-2c, `driver_store_server`, `tairix_abi::driver_store`) | done |
+| D3 | The VideoCore mailbox in user space: `tairix_abi::mailbox_ipc`, the server side of `ipc_call` (`call_recv`, `call_reply`), `drivers/bus/mailbox/vcmailbox` | done |
+| D4 | The flashable image ships the signed bus and USB class bundles (`image_drivers`); node removal (`hw_remove_node`) and its `devmgr` unload reaction (`plans/USB.md` U1) | done |
+| D5b | The kernel assigns a published node its identity (D5b.2a); `pcie_brcm` as an autoloaded user-space bus driver (D5b.2b) | done |
+| D5c | `vl805` reloads the firmware, then publishes `usb,xhci` | done |
+| D5d | The flip (5e, B5) | done |
+| B1 | The three-partition split and the read-only `/System` mount | done |
+| B2 | The `/System` store autoloaded before the unlock | done |
+| B3 | USB devices enumerated into the hardware tree, by the user-space `xhci` driver | done |
+| B4 | The EMMC2 root | done |
+| B5 | The flip (5e, D5d) | done |
+| GUI | `userland/gui/{wm,taskbar,session}` on the HVS path | planned |
 
-**Landed — the host-provable protocol layers** (the `emmc2`/`rpi_hvs`
-seam shape, §2.2; no QEMU vertical — QEMU models no Pi USB timing,
-§0.4):
+The `D` items are design D, the user-space driver chain the hardware tree
+sequences; the `B` items are design B, the pre-unlock store (below).
 
-- `drivers/input/usb_hid` (`tairix-drv-input-usb-hid`): HID
-  boot-protocol keyboard + mouse report decode (USB HID 1.11 App. B)
-  into `tairix_abi` `InputEvent`s behind the `ReportSource` seam,
-  which lives in `lib/abi` (`tairix_abi::driver::input`) because its
-  producer is the sibling xHCI driver and drivers depend only on
-  `lib/*` (§17.4). Stateful report diffing (one `Key` edge per change;
-  HID usage IDs, modifiers `0xE0..=0xE7`, buttons `0x110..` matching
-  the virtio pointer vocabulary), rollover handling, fail-closed
-  length/forged-source validation (§5.4), an event latch so undersized
-  `poll` buffers lose nothing, and a per-`poll` report budget (§2.1).
-  21 host tests; docs: `docs/src/drivers/input.md`.
-- `drivers/bus/usb` (`tairix-drv-bus-usb`, placeholder replaced): the
-  xHCI protocol layers and the HID enumeration engine over the
-  `RegisterBlock` register seam (`RegisterWindow` on metal, register-level
-  mock in tests) and the `DmaBank` memory seam (the `SlabBank` over
-  `lib/abi` `DmaSlab`s on metal, a shared in-memory buffer in tests) — `regs`
-  (cap/op/runtime/doorbell vocabulary), `trb` (fail-closed
-  `TrbType`/`CompletionCode`, event-field decode, byte conversion),
-  `ring` (memory-free `ProducerRing` returning `PushOutcome`s the
-  memory owner publishes; borrow-free `EventRingCursor`), `Xhci`
-  (§4.2 `open` prologue; `start` programming
-  `CONFIG`/`DCBAAP`/`CRCR` + interrupter 0's event ring over `RTSOFF`
-  and running the controller; `ack_event`; RW1C-safe `begin_port_reset`),
-  and `device::UsbDevice` — the single-device enumeration engine
-  (64-byte-aligned layout of all device-shared structures; Enable
-  Slot / Address Device / Configure Endpoint command flow; control
-  transfers: fail-closed `GET_DESCRIPTOR(device)`,
-  `SET_CONFIGURATION(1)`, `SET_PROTOCOL(boot)`; a primed interrupt-IN
-  ring) implementing `ReportSource` with end-to-end claim validation
-  (slot/endpoint/code/address/residual, §5.4) and retire/re-arm
-  across the Link-TRB wrap. 38 host tests against the register-level
-  mock plus an in-memory ring model sharing one buffer, including a
-  `BootKeyboard` decoding key events over the mock controller and the
-  fail-closed paths (forged residual, stalled class request, empty
-  port, double enumeration, bad DMA regions); docs:
-  `docs/src/drivers/bus.md`.
+**Input — done.** USB input comes up entirely in user space, as a chain of
+signed driver bundles in the read-only `/System` volume's `/System/Drivers/`
+store, autoloaded before the encrypted root is unlocked (design B, below).
+Each is its own crate with its device logic co-located as a `lib` target
+(§2.22):
 
-**Landed — ECAM configuration access** (the cross-arch path the VL805
-sits behind): `drivers/bus/pci` gained `mechanism_ecam`, an
-`EcamConfigSpace` `ConfigSpace` impl over a capability-mapped
-`tairix_abi::RegisterWindow` (PCI Express Base 3.0 §7.2.2 flat
-offset, `ConfigAddress::ecam_offset`), fail-closed to the all-ones
-"no device" sentinel on an out-of-window or malformed access (§5.4).
-The mechanism-agnostic enumeration / capability / BAR core is reused
-unchanged (§2.2); host-proven by a flat-ECAM VL805 fixture
-(`1106:3483` xHCI behind a root-port bridge) driving enumeration +
-MSI-X capability decode, plus offset/round-trip/sentinel unit tests.
-Docs: `docs/src/drivers/bus.md`, the crate README.
+1. `drivers/bus/pcie_brcm` binds the discovered `brcm,bcm2711-pcie` node,
+   trains the link and publishes the VL805's PCI function;
+2. `drivers/bus/mailbox/vcmailbox` serves the VideoCore mailbox, its
+   property layout shared through `lib/vcmailbox`;
+3. `drivers/bus/usb/vl805` reloads the VL805 firmware and only then
+   publishes the `usb,xhci` node, so firmware-before-bring-up holds by
+   construction;
+4. `drivers/bus/usb/xhci` brings the controller up over the shared `lib/usb`
+   engine and publishes each device it enumerates;
+5. `drivers/input/usb_hid` serves each HID interface.
 
-**Landed — PCIe host-bridge discovery** (the aarch64 `FdtDiscovery`
-walk): the `brcm,bcm2711-pcie` node is emitted generically (a `Bus`
-node whose controller/config — ECAM-access — `reg` window translates
-through the bus `ranges` exactly like every other device), with one
-per-device augmentation: the **inbound-DMA aperture** the bridge grants
-devices behind it, read from the node's `dma-ranges` by the new
-`fdt::dma_ranges_aperture` (the 3-cell child PCI address stepped over,
-the 2-cell parent CPU base + size decoded, fail-closed). It is emitted
-as `HwResource::dma(top, len)` — `top` the *exclusive* upper bound of
-the reachable CPU-physical window (`0xC000_0000`, the low 3 GiB of
-SDRAM, on the Pi 4), `len` its extent — matching the mailbox "carve
-below `base`" convention; the bases are discovered, never a board
-constant (§18.5). Host-proven by the platform discovery tests (a
-`/scb`-nested PCIe bridge: translated `reg` window `0xfd50_0000`/`0x9310`
-+ aperture `0xC000_0000`; the no-`dma-ranges` fail-closed case) and the
-`fdt::dma_ranges_aperture` unit tests (real Pi value, multi-entry span,
-absent/partial/out-of-range-cell refusals). **No `lib/abi` change** (so
-no C-header regen). Docs: `docs/src/platform/aarch64.md` ("Platform
-discovery").
+The kernel's bootstrap floor is storage only — virtio-blk and EMMC2 (§18.6).
+The chain's live acceptance (attach → keystroke, detach → `usb_hid` unloads
+while the controller stays up, re-attach → autoloads again, and cold boot
+with the keyboard unplugged then plugged in) is `plans/USB.md` UM.
+**Metal-pending (`plans/OPEN-DEFECTS.md` D167):** a driver restart that
+recovers its predecessor's quarantined DMA — `vcmailbox`'s
+firmware-revision probe, which rests on the VideoCore answering property
+requests in posting order, the VL805's `HCRST` before `UsbDevice::start`,
+and GENET's `DMA_DISABLED` wait — each observed, after killing the driver
+mid-traffic, as the successor's `DMA_QUARANTINE_RELEASED` record carrying
+non-zero `bytes` (every bring-up records one, so the record alone proves
+nothing).
 
-**Landed — the VL805 `wiring::open_discovered`** (host-provable): the
-generic-PCI seam `tairix_abi::driver::pci::PciBus` (a supertrait of
-`Bus`) carries `map_bar_window`, `enable_memory_space` and
-`set_bus_master` — the smaller surface a non-virtio, DMA-driving
-controller needs (no MSI-X). `Pci<C>` implements it by forwarding to the
-inherent BAR resolver and command-register helpers; no routing or mapping
-helper makes a function a bus master (`plans/IOMMU.md` IOM7);
-`mechanism_one`/`mechanism_ecam` now return `impl VirtioPciBus + MsixBus
-+ PciBus`. `drivers/bus/usb::wiring::open_discovered(host, bus,
-dma_aperture_top)` consumes a `&dyn PciBus` (so usb never names the pci
-crate, §17.4): it checks `CAP_MMIO_MAP`, enumerates for the USB-class
-function (`0x0C03`), carves the device-shared DMA region from the host
-DMA facility and verifies it lies wholly below the discovered
-inbound-DMA aperture `top` (fail-closed `OutOfRange`, §5.4), enables bus
-mastering, maps BAR0, and brings the controller up via `Xhci::open` +
-`UsbDevice::start`. **No `#[repr(C)]`/syscall change** — a new trait, so
-no C-header regen. Host-proven: pci tests (PciBus coercion,
-decoding and bus-master command bits, BAR0 map, absent-BAR refusal over the
-VL805 ECAM fixture) + usb `wiring_tests` (the cap/mapper/DMA-host
-fail-closed paths, no-USB-function `NotFound`, DMA-above-aperture
-`OutOfRange`, alloc-failure propagation, and the all-valid path enabling
-mastering and reaching the controller hand-off — the inert mock window
-faults, the metal boundary). Docs: `docs/src/drivers/bus.md`,
-`docs/src/abi/driver_traits.md`, the crate README.
+**Remaining for P10 (GUI):** run `userland/gui/{wm,taskbar,session}` on
+the HVS path so `userland/session/login` offers the launchable graphical session
+when the display + input drivers are present (the headless build stays
+first-class, §17.3).
 
-**Landed — the BCM2711 PCIe root-complex bring-up** (host-provable): the
-VL805 sits behind the BCM2711 root complex, which ships with its link
-**down** and whose configuration space is *not* flat ECAM. Two pieces
-close that gap. `drivers/bus/pci` gained `mechanism_brcm` +
-`BrcmConfigSpace`, the BCM2711 *windowed* (index/data) configuration
-access (`EXT_CFG_INDEX` 0x9000 / `EXT_CFG_DATA` 0x8000): the root-bus
-header is read directly, a downstream function's `(bus<<20)|(devfn<<12)`
-block address is written to the index register, then the dword is reached
-through the 4 KiB data window — the only BCM2711-specific knowledge, the
-enumeration/BAR/cap core unchanged (§2.2). The new
-`drivers/bus/pcie_brcm` crate (`BrcmPcieRc`) performs the link bring-up
-over the BCM2711 root-complex registers: reset + assert `PERST#`, power the SerDes
-(clear `IDDQ`), program `MISC_CTRL`, the inbound `RC_BAR2` viewport from
-the discovered `dma-ranges` (size via `encode_ibar_size`), disable
-`RC_BAR1`/`RC_BAR3`, confirm the root-port role (fail closed otherwise),
-advertise ASPM + the PCI-PCI bridge class, program the outbound `ranges`
-MMIO window, deassert `PERST#`, then poll `MISC_PCIE_STATUS` for link-up
-bounded by `DEFAULT_LINK_POLLS` (100 ms, fail closed). Written against a
-`RegisterBlock` (`RegisterWindow` on metal, register mock in tests) + `Delay`
-seam; `wiring::open_discovered` maps the controller window under
-`CAP_MMIO_MAP`. **No `lib/abi`/C-header change.** Host-proven: pci
-`mech_brcm` tests (root-bus direct read, downstream index/data,
-out-of-range/no-device, beyond-window fail-closed) + pcie_brcm tests (full
-reset→SerDes→window→link sequence, bridge-reset-before-MISC ordering, ibar
-encoding, fail-closed link-down + not-root-port, the wiring cap/mapper/
-inert-window paths). Docs: `docs/src/drivers/bus.md`, the crate README.
+#### What the BCM2711 PCIe bring-up must do
 
-**Landed — the in-kernel `DriverHost` serves both MMIO and DMA**
-(host-provable): the in-kernel host the VL805 chain needs is complete.
-`drvhost::HostConfig` gained an `mmio_mapper: Option<&dyn MmioMapper>`
-seam and `DriverHost::mmio_mapper()` is implemented on the loaded-driver
-view (alongside the existing `virtio_host()` DMA seam), so a loaded bus
-driver maps its own register windows through the capability-gated
-`KernelMmioMapper` *and* carves its DMA region through the per-driver
-`KernelVirtioHost` — both fail closed at the kernel `map_mmio`/`alloc_dma`
-gates (§5.4). **No `lib/abi`/C-header change** (the seam is a
-trait-method addition). Host-proven: drvhost
-`mmio_mapper_{default_none,some}_yields_*` accessor tests.
+Each fact below was established on metal and is pinned by a
+`drivers/bus/pcie_brcm` or `lib/pci` test; QEMU models no Pi PCIe (§0.4).
 
-**Landed — outbound-window discovery into the hardware tree**
-(host-provable): the `brcm,bcm2711-pcie` node now carries *both* address
-windows the VL805 wiring needs, read from the device tree. Alongside the
-inbound `dma-ranges` aperture (an `HwResource::dma`), the aarch64
-`FdtDiscovery` now decodes the bridge's outbound `ranges` memory window
-(`fdt::outbound_mmio_window`: the first memory-space entry's `phys.hi`
-space code, the 64-bit PCIe base from `phys.mid`/`phys.lo`, the CPU base
-and size from the parent cells) and emits it as a new
-`HwResource::bus_window(cpu_base, size, pcie_base)`. That required
-extending the hwtree ABI with `HwResourceKind::BusWindow` and a third
-`xlate` (far-side/translated base) field on `HwResource` (WIRE_LEN
-24→32; abi-v1 is unfrozen, §2.13) — a `BusWindow` is the general model
-for a CPU↔bus address-translation window, distinct from a plain `Mmio`
-register window so the controller `reg` is never conflated. C-header
-regenerated. Host-proven: `fdt::outbound_*` decoder tests (memory
-decode, I/O-space skip, absent/partial/out-of-range fail-closed), the
-`platform::emits_the_pcie_bridge_with_its_outbound_window` emission test,
-and the `HwResource::bus_window` round-trip in `lib/abi`.
+- **Touch no MISC register before the reset, and reset gently.** Until the
+  always-accessible RGR1 bridge `sw_init` (`0x9210`) is released, every
+  MISC-block access stalls for seconds and returns the root complex's
+  master-abort poison `0xdead_dead` (not TAIRiX's all-ones "no device"
+  sentinel). The bring-up releases only `sw_init`: it re-asserts no
+  fundamental reset and leaves the SerDes `IDDQ` alone, so no firmware the
+  previous boot stage left resident is dropped, and `train_link` makes the
+  one `PERST#`-deassert edge
+  (`reset_releases_sw_init_without_re_asserting_a_fundamental_reset`,
+  `bring_up_releases_sw_init_before_touching_misc_and_skips_the_serdes_toggle`).
+- **Program the root port as a bridge.** Its bus numbers (primary 0,
+  secondary 1, subordinate equal to the secondary — there is no on-board
+  switch), so configuration is forwarded; its Memory Base/Limit over the
+  discovered outbound PCIe range, which must lie below 4 GiB and fails
+  closed otherwise, so reads of the VL805's BAR are forwarded; and Memory
+  Space + Bus Master in its Command register **last**, after link-up, since
+  the root complex latches them only against a live link
+  (`program_bridge_bus_numbers`, `program_bridge_mem_window`,
+  `program_bridge_command`;
+  `bring_up_names_the_downstream_bus_so_config_is_forwarded`,
+  `bring_up_opens_the_bridge_memory_window_so_bar_reads_are_forwarded`,
+  `bring_up_enables_memory_space_and_bus_master_on_the_bridge`).
+- **Forward configuration only to device 0 of the secondary bus.** The root
+  port is a single-device link: a forwarded configuration read nothing
+  answers times out into a CPU external abort, so `lib/pci`'s windowed
+  `mech_brcm` resolves every other downstream target to "no device" without
+  touching the controller
+  (`phantom_downstream_targets_are_no_device_without_an_index_write`).
+- **The outbound window register packs the limit above the base.**
+  `MISC_CPU_2_PCIE_MEM_WIN0_BASE_LIMIT` (`0x4070`) holds the limit in bits
+  `[31:20]` and the base in `[15:4]`; transposed, the window is inverted and
+  every BAR read master-aborts
+  (`outbound_window_decodes_a_non_empty_range_covering_the_cpu_window`).
+- **The inbound side.** An `RC_BAR2` the firmware configured is kept, since
+  VideoCore's firmware load assumes it (`entry_inbound_window` reads the
+  state `start4.elf` left;
+  `bring_up_preserves_a_firmware_configured_inbound_window`).
+  `MISC_CTRL.SCB0_SIZE` is sized to the DMA region: left at its reset value,
+  the inbound decoder silently drops DMA past a small window while every
+  configuration and outbound access still works (`encode_scb_size`, `0x11`
+  for the Pi's 4 GiB viewport;
+  `encode_scb_size_sizes_the_inbound_scb_window_to_the_region`).
+- **Two address spaces.** A DMA buffer's device-visible address is its PCIe
+  address: the Pi 4's inbound viewport maps PCIe
+  `[0x4_0000_0000, 0x6_0000_0000)` onto RAM `[0, 0x2_0000_0000)`, and each
+  side is bounded in its own space (`kernel/core::devres::translate_device_addr`).
+  A BAR the reset left unassigned is placed in the outbound window by
+  `PciBus::assign_bar`
+  (`assign_bar_places_an_unassigned_64bit_bar_in_the_window`), and
+  `lib/drvrt`'s `RtDriverHost` translates an outbound `BusWindow` BAR to the
+  CPU window it maps.
 
-**Landed — the USB-keyboard composition engine** (host-provable). The
-inbound `dma-ranges` aperture is now emitted as
-`HwResource::dma_translated(top, len, inbound_pcie_base)`
-(`fdt::dma_ranges_aperture` captures the child PCI base in the resource's
-translation field — no wire change, the `xlate` field already existed),
-so `PcieWindows` is *fully* tree-derived. The whole chain is composed in
-`kernel/tairix-kernel::usb_keyboard` — the image-assembly seam
-(`Layer::Tooling`) is the one crate that may name the four driver crates
-across strata (§17.4 / §8), so the composition lives there; the engine is
-architecture-neutral (it consumes only the
-`lib/abi` driver seams + the discovered `HwNode`) and un-gated, so it
-compiles and host-tests on the CI host:
+#### What the VL805 and its xHCI need
 
-- `pcie_bringup_from_node(&HwNode) -> PcieBringup` reads the three
-  resources (controller `Mmio`, inbound `Dma`, outbound `BusWindow`) off
-  the discovered `brcm,bcm2711-pcie` node, fail-closed per missing
-  resource (§2.9) — relocated under Increment C-2 into the PCIe device's
-  own crate (`drivers/bus/pcie_brcm::wiring`, §2.2/§2.21), where it now
-  also backs the autonomous `bring_up_from_node` floor entry; the
-  composition re-exports and consumes it;
-- `ChainHost` is a `DriverHost` view lending the bus driver the kernel's
-  capability-gated MMIO mapper + per-driver DMA host (every map/alloc
-  re-checked kernel-side, §5.4);
-- `bring_up_keyboard(host, &PcieBringup, &dyn Delay)` runs the full chain
-  — `pcie_brcm::wiring::open_discovered` (link train) → `mechanism_brcm`
-  → `usb::wiring::open_discovered` → `UsbDevice::bring_up`
-  (scans root-hub ports 1..=max and attaches every connected device;
-  an empty controller comes up serving nothing) → `BootKeyboard`;
-- `QueueConsoleSink` feeds the produced bytes into the video console's
-  `ConsoleInput` queue (`console_input`/`VIDEO_KEYBOARD`), short-pushing
-  without spin (§2.1).
+- **Firmware.** The link bring-up's `PERST#` drops the VideoCore-loaded
+  firmware on EEPROM-less boards, so `vl805` reloads it with one
+  `NOTIFY_XHCI_RESET` (tag `0x30058`, `dev_addr` `0x10_0000`) once the BAR is
+  based. The reply can take longer than the 1 s Linux allows, so the
+  mailbox driver waits up to `REPLY_WINDOW_NS` (4 s). The reload is
+  best-effort: the controller's own capability block at `Xhci::open` is the
+  readiness gate, never the vendor version register at configuration
+  `0x50`. A `GET_FIRMWARE_REVISION` probe (`vl805::probe_firmware_revision`)
+  tells a dead mailbox path from VideoCore dropping only the xHCI tag. The
+  property buffer sizes each tag's value buffer to the larger of request and
+  response, and `find_tag` fails an oversized reply closed.
+- **Controller start (`lib/usb`).** Only stale write-1-to-clear status is
+  cleared before `HCRST`, and `CNR` is enforced after it
+  (`open_resets_a_halted_controller_with_pre_reset_cnr_and_hse`). The
+  scratchpad buffers `HCSPARAMS2` names — 31 pages on the VL805 — are
+  reserved and `DCBAA[0]` pointed at them, without which no command
+  completes (`start_reserves_scratchpad_and_programs_dcbaa0`). `PORTSC.PP`
+  is asserted on a port-power-controlled controller before connects are
+  debounced (`bring_up_connects_a_port_only_after_power`).
+- **Enumeration (`lib/usb`).** `SET_PROTOCOL(boot)` and the interrupt-IN
+  ring go only to a HID interface: a hub STALLs the request, halting the EP0
+  it still needs, and an armed hub status pipe interleaves its events with
+  the hub's EP0 `GET_STATUS` transfers
+  (`enumerating_a_hub_leaves_ep0_usable_for_the_hub_descriptor`,
+  `enumerating_a_hub_does_not_arm_its_interrupt_endpoint`). A device behind
+  a hub is addressed on its own slot with the Route String and, at full or
+  low speed behind a high-speed hub, the TT; the hub's slot is first marked
+  a hub with its port count and TT think time, or its split transactions are
+  never scheduled
+  (`enumerate_downstream_hid_addresses_a_full_speed_keyboard_through_the_hub`,
+  `addressing_a_downstream_keyboard_marks_the_parent_hub_as_a_hub`). The
+  interrupt endpoint is taken from its descriptor — DCI, `wMaxPacketSize`
+  and `bInterval` — with a non-zero Max ESIT Payload, or the periodic
+  scheduler reserves nothing for it
+  (`downstream_keyboard_is_serviced_on_its_descriptor_reported_endpoint`,
+  `the_downstream_interrupt_endpoint_carries_a_nonzero_max_esit_payload`).
+  A failed attach records its stage, the raw completion code of the last
+  event it saw, and why the wait rejected it (`EnumStage`,
+  `last_completion_code`, `last_reject_reason`, `last_event_type`).
+- **DMA ordering.** The BCM2711's PCIe is not I/O-coherent. User-space DMA
+  is Normal Non-Cacheable from `dma_alloc`, and `lib/usb` orders it with
+  `lib/dma-barrier`: `dma_wmb` before the controller start and each
+  doorbell, `dma_rmb` between an event's cycle bit and its body.
 
-Host-proven: the `usb_keyboard` composition tests (the sink delivers /
-drops-overflow-without-spin, `ChainHost` reports caps/mapper/dma, the
-chain fails closed without `CAP_MMIO_MAP`, and the chain reaches the
-BCM2711 root-complex bring-up over a mapped window and fails closed
-`DeviceFault` on the inert mock — the metal boundary), plus the usb
-bring-up root-port-scan tests; the discovered-node parse tests
-(window assembly + each fail-closed missing resource + a non-zero inbound
-PCIe base) moved with `pcie_bringup_from_node` into the `pcie_brcm` crate
-under Increment C-2 (§2.2/§2.21).
+#### Pre-unlock signed driver store (design B)
 
-**Landed — the aarch64 boot-path invocation** (host-proven up to the
-metal boundary; the live bring-up is a metal-acceptance item, §0.4). The
-production aarch64 boot path now starts the chain as an **in-kernel
-keyboard service kthread**:
-
-- `kernel/arch/aarch64::platform::pcie_bringup` resolves the
-  `brcm,bcm2711-pcie` node's three windows (controller `reg`, inbound
-  `dma-ranges` aperture, outbound `ranges`) with a single early-returning
-  `scan_translated` walk, **pre-MMU-safe** (it reads only the matched
-  node's own properties, like the console/GIC/video walks); a tree with no
-  such node yields `None` (the `virt` shape, §18.4).
-- `boot_aarch64` runs it pre-MMU, folds the controller-register and
-  outbound-window gigapages into the identity **Device** mask
-  (`identity_device_mask`) so both are identity-mapped Device memory before
-  the MMU comes on, then stashes the `Copy` discovery for the spawn seam
-  (`keyboard_service::record_discovery`) **after** the MMU is enabled — the
-  seam's `SpinLock` `compare_exchange` is an atomic RMW that is
-  UNPREDICTABLE on MMU-off memory (P6c-2), so the store is deferred past
-  translation-enable while the windows themselves are read pre-MMU.
-- `kernel/tairix-kernel::keyboard_service` supplies the concrete
-  `DriverHost` halves: an `IdentityMmioMapper` (capability-gated; admits a
-  window only inside the controller block or outbound window, returns a
-  `phys == virt` `RegisterWindow` — no live page-table edit, since the boot
-  path already mapped those gigapages, §5.4/§2.16) and a `FrameDmaHost`
-  (capability-gated; carves the 16 KiB xHCI region with
-  `FrameAllocator::alloc_order`, translates the frame to its device-visible
-  address through the inbound viewport, and rejects anything outside the
-  aperture, §5.4). A `GenericTimerDelay` over `kernel_arch::busy_delay_us`
-  (`CNTPCT_EL0`) drives the link-training settle waits.
-- The PID 1 spawn seam (`init_spawn`) calls
-  `keyboard_service::bring_up_keyboard_into_tree(ctx)` **before** `admit_init`
-  drives the dispatch loop: it runs `bring_up_keyboard` once on the boot CPU,
-  emits the enumerated HID node into the boot tree (design B / B3), and hands
-  the live keyboard to `keyboard_service::spawn_pump`, whose kthread is
-  admitted onto the boot CPU's run queue and runs alongside PID 1 looping
-  `usb_hid::pump_once` into the input-focus arbiter
-  (`ArbiterConsoleSink`), yielding between polls (§2.1). A bring-up failure
-  ends the service fail-closed (the video login parks with no keyboard,
-  §2.9); with no discovered bridge (the `virt` shape) nothing is started.
-- **Metal diagnostics (logging).** Because the bring-up is metal-only and
-  was previously silent on failure, it logs one-shot, allocation-free
-  events to the serial sink so a silent keyboard is diagnosable from a UART
-  capture alone (§2.16/§19.4 — never on the poll loop): `boot_aarch64`
-  logs the discovered `brcm,bcm2711-pcie` chipset windows (id `4100`),
-  `spawn_pump` logs the report-pump kthread admitted/skipped (id `4103`), and
-  `bring_up_keyboard` logs each stage and the failing stage+`DriverError`
-  (id `4101`), a one-shot post-link PCIe configuration scan listing every
-  responding function (`function_count_hex` + per-function
-  bdf/vendor/device/class, id `4104`), plus the enumerated device's
-  vid/pid/slot (id `4102`). See `docs/src/platform/aarch64.md`.
-- **Downstream config forwarding + single-device config gate (fixed).**
-  The VL805 on bus 1 was invisible because the BCM2711 ships the root
-  port's type-1 bridge bus-number register (`PCI_PRIMARY_BUS`, config
-  offset `0x18`, exposed at the controller register block's offset 0) at 0,
-  forwarding no configuration to its secondary bus. `BrcmPcieRc::bring_up`
-  programs it (`program_bridge_bus_numbers`, primary 0 / secondary
-  `RC_SECONDARY_BUS` 1) when it presents the RC as a PCI-PCI bridge.
-  Enabling forwarding then exposed a boot **wedge**: the bus walk is a flat
-  256-bus scan, and a config read to a non-existent forwarded target (any
-  device but `01:00.0`, or any bus beyond the directly-attached one) emits
-  a TLP nothing answers — `CFG_READ_UR_MODE` only master-aborts requests
-  the RC itself refuses, so a *forwarded* TLP's completion timeout becomes a
-  CPU external abort that hangs the boot CPU (capture stops right after
-  `4101 link trained`). Fixed in the windowed accessor: the BCM2711 root
-  port is a single-device link, so `mechanism_brcm(window, secondary_bus)`
-  forwards a transaction **only** to `device 0` on the secondary bus and
-  resolves every other downstream target to the `0xFFFF_FFFF` sentinel
-  without touching the controller (it never forwards to an absent target); the
-  bridge subordinate is kept equal to the secondary (no on-board switch,
-  §2.3). Host-proven by `bring_up_names_the_downstream_bus_so_config_is_forwarded`
-  and `mech_brcm::phantom_downstream_targets_are_no_device_without_an_index_write`.
-  The metal `4104` capture then listed **two** functions (the bridge plus
-  the VL805 `1106:3483` class `0c03`), confirming discovery is complete.
-- **xHCI DMA-aperture bound — CPU-vs-PCIe address space (fixed).** With the
-  VL805 discovered, the `4101` xHCI controller bring-up failed
-  `err=out_of_range`: the device-shared DMA carve was bounded in the wrong
-  address space. `DmaSlab::phys()` is a *device-visible* (PCIe-space)
-  address, but `keyboard_service::FrameDmaHost` and
-  `tairix_drv_bus_usb::wiring::open_discovered` compared it against the
-  *CPU-physical* inbound-aperture top (`0x2_0000_0000`). The Pi 4 inbound
-  viewport maps PCIe `[0x4_0000_0000, 0x6_0000_0000)` onto RAM
-  `[0, 0x2_0000_0000)`, so every frame's device address (≈ `0x4_xxxx`)
-  exceeded the CPU top and the carve was refused before any hardware was
-  touched. Fixed by bounding each side in its own space: `FrameDmaHost` now
-  checks the frame's CPU-physical span against the CPU window top and
-  translates afterwards, and `bring_up_keyboard` passes `open_discovered`
-  the device-visible top (`inbound_pcie_base + inbound_size`, checked). The
-  redundant, address-space-ambiguous `PcieBringup.dma_aperture_top` field
-  (derivable from `windows`) was removed (§2.2/§2.14). Host-proven by
-  `keyboard_service::dma_host_admits_a_low_frame_through_a_high_pcie_viewport`.
-- **xHCI register BAR mapping — bridge-aware translation + unassigned-BAR
-  assignment (fixed).** `keyboard_service::IdentityMmioMapper` is
-  bridge-aware: it applies the outbound `ranges` translation
-  (`outbound_cpu_base + (bus − outbound_pcie_base)`) to reach the
-  identity-mapped CPU address (the generic PCI walk only knows bus addresses;
-  resolving them is the host bridge's job), the controller
-  regs block stays CPU-physical/identity and is resolved first, and a request
-  only partially overlapping the numerically-overlapping Pi 4 regs island
-  (`0xfd50_0000`) is refused fail-closed (§5.4). `IdentityMmioMapper::new`
-  takes `outbound_pcie_base`; `with_diag(&SERIAL_SINK)` logs each map decision
-  one-shot (`EventId(4105)`, off the poll path) so a metal capture shows the
-  refused base. That capture localised the real cause: the VL805's BAR0
-  address bits read **zero** — the BAR is sized/typed but *unassigned*
-  (firmware programs BARs, but resetting and re-enumerating the root complex
-  leaves the downstream function unassigned), so mapping it targets address 0.
-  Assigning resources from the bridge's outbound window is the PCI core's job;
-  added `PciBus::assign_bar(bdf, bar_index, window_base,
-  window_size)` (implemented on `Pci<C>`): it probes BAR size/type and, when
-  the address bits are zero, writes the lowest size-aligned PCIe-bus address
-  in the window (both dwords for a 64-bit BAR, control bits preserved); an
-  already-based BAR is left untouched (no-op under QEMU/firmware-assigned).
-  `usb::wiring::open_discovered` takes the outbound window and calls
-  `assign_bar` before `map_bar_window`. Host-proven by
-  `pci::assign_bar_places_an_unassigned_64bit_bar_in_the_window` (+ idempotent
-  / oversize / I/O / absent cases), `usb::open_discovered_enables_mastering_
-  and_reaches_the_controller` (asserts the window reaches `assign_bar`), and
-  `keyboard_service::mapper_translates_a_bar_through_the_outbound_viewport`.
-- **VL805 firmware fallback (current).** `open_controller` follows the safe order: configure the PCIe bridge and assign/map BAR0 first, read the
-  VL805 firmware version at config `0x50`, skip any reload when it is already
-  non-zero, and issue exactly one `NOTIFY_XHCI_RESET` only when the bounded
-  version wait stays `0`. The mailbox uses the shared `lib/vcmailbox`
-  protocol over the boot-discovered VideoCore doorbell and a cache-maintained
-  static property buffer; `4108` records the fallback outcome and `4113` the
-  diagnostic response value. Host-proven by
-  `open_controller_reloads_firmware_when_version_stays_zero`,
-  `firmware_reload_is_skipped_when_version_is_already_loaded`, and the
-  `lib/vcmailbox` encode/decode/coherency tests. Live keyboard enumeration is
-  the remaining on-metal acceptance item (QEMU models no Pi PCIe/USB, §0.4).
-- **BAR still `dead_dead` after the reload = bridge memory window never
-  forwarded; fixed by programming it during root-complex bring-up.** A
-  later metal capture showed the reorder + readiness poll necessary but not
-  sufficient: `4108 Reloaded` and `4109 … ready_hex=0` with the capability
-  header *still* uniform `dead_dead` after the full budget. The cause was
-  not the reload but a missing bring-up step: a PCI-PCI bridge forwards a
-  *memory* transaction downstream only when the address lies inside its
-  **Memory Base/Limit** window (type-1 config offset `0x20`), and the
-  BCM2711 ships it empty (base `0`, limit `0`). The bring-up had programmed
-  the bridge *bus-number* register (so *config* reads reached the VL805 —
-  the `4104` scan saw `1106:3483`) and the controller's CPU→PCIe outbound
-  *translation* (`MEM_WIN0`), but never the bridge memory window, so the
-  root port master-aborted every CPU access to the VL805's BAR. The fix is
-  `BrcmPcieRc::program_bridge_mem_window` (run right after the bus-number
-  programming): it sets the bridge Memory Base/Limit to cover the discovered
-  outbound PCIe range (`[outbound_pcie_base, +outbound_size)`), the range
-  BARs are assigned within, as a full PCI enumerator does (which the
-  windowed `mech_brcm` accessor does not perform). The register encodes only
-  address bits `[31:20]` and the non-prefetchable window decodes below 4 GiB,
-  so a window reaching the 4 GiB line fails closed (§5.4); the BCM2711's
-  outbound base `0xc000_0000` is well below it. Host-proven:
-  `bring_up_opens_the_bridge_memory_window_so_bar_reads_are_forwarded`
-  asserts the window covers `0xc000_0000..0x1_0000_0000`. Metal acceptance
-  item: a healthy capture should now read a real `CAPLENGTH` at `4107`/`4109
-  ready_hex=1`; a `4109 ready_hex=0` with `dead_dead` after this fix would
-  localise the fault past the bridge window to the reload step itself
-  (mailbox sequence / `dev_addr` / board firmware). QEMU models no Pi PCIe
-  (§0.4).
-- **`4110` configuration read-back — measuring which write stuck after the
-  bridge-window fix.** A capture *after* the bridge-window fix still showed
-  `4108 Reloaded`, `4109 ready_hex=0` and `4107` uniform `dead_dead`. At that
-  point the whole controller/bridge programming chain is present in code
-  (bridge bus numbers, bridge Memory Base/Limit, CPU→PCIe outbound
-  translation, VL805 BAR assignment, VL805 command-register memory-space +
-  bus-master), yet the mapped BAR aborts while *config* reads still succeed.
-  Rather than guess again (§15.7), `open_controller` now reads each
-  programmed register *back* (one-shot `EventId(4110)`, after BAR assign +
-  command enable, before `Xhci::open`): bridge `0x18`/`0x20`/`0x04` and VL805
-  `0x04`/`0x10`/`0x14`. Served by a new read-only `PciBus::read_config(bdf,
-  offset)` (lib/abi, implemented on `Pci<C>`, reaches both the bus-0 bridge
-  and the VL805 via `mech_brcm`); fail-closed (a faulting read renders the
-  all-ones sentinel, never propagated, §2.9), one-shot (never on the poll
-  path, §2.16/§19.4). Host-proven: `read_config_returns_the_dword_at_the_byte_offset`
-  (abi), `config_readback_dumps_each_register_once` +
-  `config_readback_renders_a_sentinel_for_a_faulting_read` (usb_keyboard).
-  QEMU models no Pi PCIe/USB (§0.4).
-- **Enable the root-port bridge Command register *after* the link is up
-  (done; landed on metal but not the fix).** `BrcmPcieRc::program_bridge_command` sets Memory Space +
-  Bus Master in the root port's Command register (config `0x04`, the standard
-  PCI-PCI bridge enable). The `4110` capture showed it read back `0x0000`
-  while the adjacent bus-number (`0x18`) and Memory Base/Limit (`0x20`) writes
-  — same direct bus-0 path — stuck, so the offset is right and the difference
-  is *timing*: the integrated RC latches Memory Space Enable only against a
-  **live link**, and the earlier bring-up wrote it during the config phase
-  with `PERST#` still asserted. A working boot chain enables the root port
-  only after the link trains. Fix: `bring_up` now calls `program_bridge_command`
-  **last**, after `train_link` + the fail-closed `link_up()` confirmation, so
-  MEM-space/bus-master latch against the trained link. This is the unifying
-  explanation for the triple symptom — `VideoCore` reaches the VL805 over the
-  same configured bus to load firmware ("VideoCore expects from us a
-  configured PCI bus"), so an un-latched bridge command master-aborts *both*
-  our BAR reads *and* the firmware-load writes, leaving `dead_dead`,
-  `fw_version=0`, and `response=0` together. Host-proven:
-  `bring_up_enables_memory_space_and_bus_master_on_the_bridge` (asserts the
-  command write follows the final `PERST#`-deassert). **Metal outcome:** the
-  later capture confirmed `bridge_command_status_hex` now reads back `0x6`
-  (the latch fix works) — but the VL805 BAR is *still* `dead_dead` and
-  `vl805_fw_version_hex` *still* `0` both before and after the reload, so the
-  bridge command was a real defect but not the firmware-load fix. QEMU models
-  no Pi PCIe/USB (§0.4).
-- **Gate readiness on the VL805 firmware version, not the aborting BAR
-  (done; the gate is the correct signal — firmware-load is the metal-only
-  residual).** `open_controller` gates readiness on `wait_for_firmware_loaded`:
-  it polls the VL805 **XHCI MCU firmware version** (config `0x50`, the
-  *working* vendor firmware-version register) for a non-zero
-  build id, bounded by `FW_LOADED_BUDGET_US` (~2 s wall time) — strictly more
-  correct than the old gate, which polled the master-aborting BAR. The
-  `NOTIFY_XHCI_RESET` reload is demoted to fire **only** if the version stays
-  `0` (a redundant reload of an already-(re)loading VL805 can kill it,
-  raspberrypi/firmware #1380), then the BAR caps wait (`4109`) runs once the
-  firmware is loaded. Logged one-shot as `EventId(4118)`
-  (`polls_hex`/`fw_version_hex`/`ready_hex`). Host-proven:
-  `open_controller_reloads_the_firmware_as_a_fallback_when_version_stays_zero`
-  (the reload fires + two `4118` records when `0x50` stays `0`) and
-  `open_controller_skips_the_firmware_reload_when_mapping_fails`.
-  **Decisive metal + known-good datapoint (this confirms the gate and
-  closes the host-side investigation):** the `4118` capture shows
-  `fw_version_hex=0` through the full ~2 s budget, a no-op `NOTIFY_XHCI_RESET`,
-  and a second `4118` still `0`. On the *same* board a known-good capture
-  reads `0x50 = 0x000138c0` (a real firmware build id
-  `VideoCore` writes on load), `10.l = 0xc000000c` (BAR0 based at `0xc000_0000`,
-  **prefetchable**), `04.w = 0x0546` (mem-space + bus-master). So `0x50` *is*
-  the genuine firmware-version register on this board, and our `0` /
-  non-prefetchable `BAR0=0xc0000004` / `dead_dead` are all consistent symptoms
-  of a genuinely firmware-less VL805 — i.e. the `4118` gate observes exactly the
-  right thing and is **not** a red herring. Every host-verifiable PCI element
-  (outbound window decode, bridge command/bus-numbers/mem-window, BAR address,
-  and the `NOTIFY_XHCI_RESET` message: tag `0x30058`, dev_addr `0x10_0000`) is
-  proven correct. The sole residual is that our
-  `NOTIFY_XHCI_RESET` is *honoured* (tag response bit set) yet a no-op
-  (firmware version never advances), where the same flow elsewhere loads the
-  blob — a `VideoCore`/board-firmware-state matter that produces no further
-  signal on the (now-proven-correct) PCI side and cannot be reproduced or
-  verified without the hardware (QEMU models no Pi PCIe/USB, §0.4).
-- **Inbound-window lead (raspberrypi/firmware #1617, then pftf/RPi4 #1495)
-  — IN PROGRESS (metal capture pending).** #1617 suggested `VideoCore`
-  loads the VL805 firmware over PCIe **through an inbound DMA window**. The
-  bring-up read-back of that inbound window was byte-identical to the
-  known-good **runtime** window `IB MEM 0x0..0x1ffffffff -> 0x4_0000_0000`.
-  But #1495 shows the
-  `NOTIFY_XHCI_RESET` load *assumes* a particular `RC_BAR2` state instead of
-  reading it back, and the blob is **not** loaded at runtime, so
-  matching its runtime window does not prove the window matches what
-  `VideoCore` assumes at the load moment. The standing change pursues this
-  (host-proven; decisive datapoint is metal):
-  - `BrcmPcieRc::entry_inbound_window` captures `RC_BAR2`/`RC_BAR1`/`RC_BAR3`
-    **as `start4.elf` left them**, before bring-up touches them, logged
-    one-shot as `EventId(4120)` (`log_entry_inbound_window`), so a metal run
-    sees the firmware's own inbound window. Tests:
-    `entry_inbound_window_reports_the_state_before_bring_up_programs_it` /
-    `..._logs_one_4120_record`. (The matching post-program window read-backs —
-    a former `EventId(4119)`/`4111` and `BrcmPcieRc::inbound_window_readback`/
-    `outbound_window_readback` — were removed once bring-up was metal-confirmed:
-    reading those MISC registers after the link trains stalls for seconds on
-    real BCM2711 silicon while the in-kernel bring-up holds the CPU, and they
-    add no functional value with the link up — `AGENTS.md` §2.14/§2.16.)
-  - `bring_up` now **preserves a firmware-configured `RC_BAR2`** (a non-zero
-    size field) rather than overwriting it, honouring VideoCore's assumed
-    state; it only programs the inbound window from discovery when the firmware
-    left it unconfigured. Test:
-    `bring_up_preserves_a_firmware_configured_inbound_window`.
-  - The mailbox `Timeout` is now localised: `vcmailbox::ExchangeStats`
-    (`MmioMailbox::last_exchange_stats`) records the timeout stage (post-room
-    vs response), posted word, poll counts and last status, logged as
-    `EventId(4121)` (`keyboard_service::log_mailbox_exchange`). Test:
-    `mmio_exchange_stats_localise_the_timeout_stage`.
-  - A **runtime mailbox liveness probe** (`GET_FIRMWARE_REVISION` tag `0x1` —
-    a state-free read) is issued over the same channel immediately **before**
-    the `NOTIFY_XHCI_RESET` reload; it now lives with its one consumer as
-    `vl805::probe_firmware_revision`, the in-kernel keyboard-service scaffold
-    that used to drive it having been deleted at B5. It separates a broken
-    post-MMU mailbox path from `VideoCore` dropping only the xHCI tag (a
-    successful probe with a non-zero revision, then a reload timeout). Tests:
-    `firmware_revision_query_lays_out_the_get_tag`,
-    `firmware_revision_round_trips_through_a_healthy_firmware`,
-    `firmware_revision_decode_fails_closed`,
-    `probe_firmware_revision_reads_the_revision_word`.
-  - **Mailbox response-length handling audited and confirmed correct**
-    (against the VideoCore property protocol as documented in the
-    raspberrypi.stackexchange.com #133040 answer). The classic bug — telling
-    VideoCore a `0`-byte value buffer so it cannot reply — does not occur:
-    `push_tag` sizes every tag's value-buffer length word to
-    `max(request, response)` words (`ALLOCATE`=8 B, `GET_PITCH` /
-    `GET_FIRMWARE_REVISION` / `NOTIFY_XHCI_RESET`=4 B), and `find_tag` reads
-    the per-tag response data bounded by that buffer. Because we never
-    under-provision, the protocol's "response length may exceed buffer length,
-    real data = `min(buffer, response)`" truncation case cannot arise for our
-    fixed-layout tags, so `find_tag` fails such a reply closed rather than
-    clamping (`AGENTS.md` §5.4). Pinned by `encode_lays_out_header_tags_and_end_marker`,
-    `xhci_reset_lays_out_the_dev_addr_tag`,
-    `firmware_revision_query_lays_out_the_get_tag` and
-    `decode_rejects_short_and_oversized_tag_responses`. The metal
-    `4122 probe_outcome=ok` (revision read over the same buffer) with
-    `4121 timeout_stage=response` is therefore VideoCore dropping the xHCI tag
-    at the firmware handoff, **not** a response-length/buffer-sizing fault.
-  - **Firmware-version register no longer gates the bring-up — probe the
-    authoritative BAR capability block instead (latest experiment;
-    `AGENTS.md` §2.9 / §15.7).** The config-space `0x50` register is a VL805
-    *vendor* convenience, not the xHCI controller's readiness signal; the
-    controller's own capability block (`CAPLENGTH`/`HCIVERSION` on the BAR,
-    xHCI 1.2 §5.3) is. The metal capture (`4118`/`4121`/`4122`) shows `0x50`
-    staying `0` and `VideoCore` dropping the working mailbox's
-    `NOTIFY_XHCI_RESET` tag, yet on a board whose boot firmware left the
-    controller's MCU firmware resident the capability block can be live
-    regardless. So `open_controller` now treats the firmware-version wait +
-    one-shot `NOTIFY_XHCI_RESET` reload as **best-effort/diagnostic**: it
-    records the decision as `EventId(4123)` (`log_firmware_gate`,
-    `firmware_loaded_hex`) and **always proceeds** to `wait_for_caps_ready`
-    (`4109`) + `Xhci::open` — the real fail-closed gate — rather than aborting
-    at `DeviceFault` before the BAR was ever probed (the previous behaviour
-    never logged `4109`/`4107`/`4114`/`4106` on the failing metal path). Tests:
-    `open_controller_probes_the_bar_when_reload_does_not_make_version_loaded`,
-    `open_controller_probes_the_bar_when_firmware_reload_fails`,
-    `open_controller_proceeds_after_reload_makes_version_loaded`. **Decisive
-    metal datapoint:** the now-reachable `4109 ready_hex=1` (a live
-    `CAPLENGTH`/`HCIVERSION` at `4107`) with the keyboard enumerating (`4102`)
-    proves the controller's firmware is resident and the in-tree path is
-    complete regardless of `0x50`; `4109 ready_hex=0` with `dead_dead` caps
-    confirms the controller genuinely never decodes, pinning the residual on
-    the boot-firmware handoff below. Metal-only (QEMU models no Pi PCIe/USB,
-    §0.4).
-  - **`4124` post-reload PCIe error snapshot — done: no master abort, VL805
-    reachable.** The read-only `log_bridge_error_status` (`4124`) logged
-    immediately after the reload reads the root-port command/status (`0x04`),
-    the root-port **Secondary Status** (config `0x1C`, bits `[31:16]`), and
-    the VL805 command/status (`0x04`). The metal capture read
-    `bridge_secondary_status=0` (no Received Master/Target Abort) with the
-    bridge + VL805 commands enabled (`0x...0006`/`0x...0146`), so
-    `VideoCore`'s firmware-load is **not** master-aborting on the bridge — the
-    downstream VL805 path is reachable. This **disproves** the bus-reach
-    hypothesis (the former "option B": realigning `pcie_brcm` inbound
-    `dma-ranges`/`RC_BAR2` with the BCM2711 PCIe bring-up sequence is no longer indicated —
-    the BAR capability block also reads live at `4107`/`4109`, confirming the
-    PCI path works end-to-end). The dropped `4121 timeout_stage=response`
-    therefore points at `VideoCore`'s loader, not the bus. Host-proven by the
-    `4124` assertion in
-    `open_controller_probes_the_bar_when_reload_does_not_make_version_loaded`.
-  - **Reload response-wait too short — done: the reload now completes.** The
-    reload formerly busy-polled `DEFAULT_POLL_BUDGET` (1,000,000) iterations,
-    which the metal capture showed completing in only ≈400 ms (the
-    `4122`→`4121` gap) — well under the **full second** the vendor bring-up allows the same
-    property call. The reload mailbox now uses a dedicated `FIRMWARE_RELOAD_POLL_BUDGET`
-    (`10 × DEFAULT_POLL_BUDGET`, ≈4 s of metal wall time, above that 1 s),
-    and `reload()` measures the reload's real `CNTPCT_EL0` wall time (shared
-    pure `keyboard_service::counter_elapsed_us`) into the `4121`
-    `wait_elapsed_us_hex` field (with `poll_budget_hex`). The follow-up metal
-    capture **confirmed** the fix: `4121 timeout_stage=none`, `last_status=1`,
-    `wait_elapsed_us≈0x16266` (≈90 ms), and `4108` now logs *reloaded*
-    (success) rather than the old timeout — the prior give-up was premature.
-    Host-proven by `counter_elapsed_us_converts_a_tick_span_at_the_counter_rate`
-    and `counter_elapsed_us_fails_closed_on_a_zero_or_reordered_sample`.
-  - **Inbound SCB window unsized — `MISC_CTRL_SCB0_SIZE`: done, metal-confirmed.**
-    Comparing our `pcie_brcm` `bring_up` against the known-working BCM2711
-    PCIe bring-up sequence found the one
-    concrete divergence: both program `MISC_CTRL.SCB0_SIZE =
-    ilog2(round_pow2(region)) - 15` (bits `[31:27]`, mask `0xf800_0000`) to
-    size the inbound SCB (PCIe→system-memory) decode window to the DMA region,
-    **unconditionally** on the BCM2711, while our `bring_up` left `SCB0_SIZE`
-    at its reset default. An undersized inbound decoder silently drops a
-    PCIe→memory DMA past that small window while config reads, enumeration, BAR
-    assignment and the outbound path all succeed (the `4124` snapshot showed
-    **no** master-abort), so `VideoCore`'s `NOTIFY_XHCI_RESET` firmware-load
-    completed yet never landed the blob. `pcie_brcm` now programs `SCB0_SIZE`
-    (`encode_scb_size`, fail-closed `0` outside 64 KiB‥64 GiB; `0x11` for the
-    Pi's 4 GiB viewport) and the inbound read-back (`4119`/`4120`) carries a
-    `misc_ctrl_hex` field. **The metal capture confirmed the fix decisively:**
-    `4118 fw_version=0x138c0 ready=1`, `4108` *reloaded*, `4123
-    firmware_loaded=1`, and `Xhci::open` brought the controller fully online
-    (`4101 … enumerating root hub`, `4106 max_ports=5`). The VL805 firmware
-    handoff is solved — the long firmware-never-loads investigation is closed.
-    Host-proven by `encode_scb_size_sizes_the_inbound_scb_window_to_the_region`,
-    `bring_up_trains_the_link_and_programs_the_windows` (SCB0 assertion) and
-    `inbound_window_readback_reports_the_programmed_viewport`.
-  - **Root-hub port power (`PORTSC.PP`): done, metal-confirmed.**
-    With the controller online, the residual moved to root-hub enumeration:
-    `4101 no usb device enumerated on the root hub err=device_fault`. The scan
-    (now `UsbDevice::bring_up`'s root-port walk) read each port's Current Connect
-    Status **once**, immediately after Run, with no Port Power asserted and no
-    connect debounce — but the Host Controller Reset in `Xhci::open` clears
-    every `PORTSC`, and the VL805 is port-power-controlled (`HCCPARAMS1`
-    PPC = 1), so a powered-off port reports disconnected regardless of what is
-    attached (xHCI 1.2 §4.19.1.1). The scan now asserts `PORTSC.PP`
-    (`Xhci::set_port_power`, masking the write-1-to-clear bits) on every
-    reported port, then debounce-polls `1..=max_ports` (bounded by the engine
-    budget, fail-closed `NotFound` on a genuinely empty hub) for the first port
-    to report a device; `EventId(4125)` logs every root port's post-power
-    `PORTSC` (raw + decoded `ccs`/`pp`/`ped`/`speed`) on the failure path.
-    **The metal capture confirmed the fix:** `4125` now reads port 1
-    `ccs=1 pp=1 ped=1 speed=3` (a connected, enabled, high-speed device) with
-    the other four ports powered but empty — so power asserts correctly and the
-    device is present. Host-proven by `drivers/bus/usb`
-    `set_port_power_asserts_pp_and_rejects_a_bad_port`,
-    `bring_up_powers_every_root_port` and
-    `bring_up_connects_a_port_only_after_power`.
-  - **Enumeration fault localisation (`EnumStage` / `4126`): done, the
-    localiser that pinned the next root cause.** With a device on port 1 the
-    `device_fault` was *inside* the root attach; the single coarse
-    `DriverError::DeviceFault` could not say where. The driver records a
-    breadcrumb — `enum_stage()` (an `EnumStage` discriminant set as each step
-    runs) and `last_completion_code()` (the raw xHCI completion code of the last
-    event that step observed, reset to `0` = none/timeout at the start of each
-    command/control transfer, set undecoded via `Trb::completion_code_raw`) —
-    logged one-shot on the failure path as `EventId(4126)`
-    (`stage_hex` + `completion_hex`) before the `4125` port dump. Host-proven by
-    `drivers/bus/usb` `root_attach_records_the_configured_stage_on_success`
-    and `root_attach_fails_closed_on_a_non_stall_class_fault`.
-  - **Non-coherent DMA cache maintenance — done; necessary but not
-    sufficient (`AGENTS.md` §4 / §15.7).** The `4126` metal capture read
-    `stage_hex=2` (Enable Slot)
-    `completion_hex=0`: the *first* command issued to the online controller
-    never produced a Command Completion event, although the capability block
-    reads live over MMIO and a device is attached — the controller is not
-    consuming the command ring at all, the signature of a **cache coherency**
-    gap. The BCM2711 PCIe root complex is **not** I/O-coherent (the very reason
-    the VideoCore mailbox and the HVS framebuffer already clean/invalidate on
-    this platform), yet the xHCI device-shared DMA region is plain cacheable,
-    identity-mapped RAM and the engine's `DmaSlab`-backed read/write did **no**
-    maintenance: the command-ring TRB the CPU wrote stayed in a dirty cache
-    line the controller never saw (stale memory → no command → no completion),
-    and symmetrically the CPU would read a stale event ring. The fix gives
-    `DmaSlab` an optional `SlabCoherencyFn` (`with_coherency`) and a
-    `sync_range(offset, len)` that cleans **and** invalidates the touched range
-    to the point of coherency; the USB engine's DMA-bank read/write invalidates
-    **before** every read and cleans **after** every write, and
-    `keyboard_service::FrameDmaHost` wires the aarch64
-    `clean_invalidate_dcache_range` (`dc civac` + `dsb`) into every minted slab
-    (a slab without a shim — coherent interconnect / host test — skips it).
-    Host-proven by
-    `dma_slab_sync_range_brackets_only_in_bounds_ranges_through_the_hook`
-    (lib/virtio) and
-    `slab_bank_brackets_writes_and_reads_with_cache_maintenance`
-    (lib/usb). A rebuilt image carrying the maintenance still captured
-    `4126 stage_hex=2 completion_hex=0`, so it was necessary but not the whole
-    cause — the controller had a second reason not to consume the command ring
-    (the scratchpad lever below).
-  - **Scratchpad buffers — done; `AGENTS.md` §4 / §15.7.** The
-    residual `stage=2 completion=0` was the missing xHCI **scratchpad buffers**.
-    `HCSPARAMS2` Max Scratchpad Buffers names page-sized buffers software must
-    reserve and point `DCBAA[0]` at before the controller can run any command
-    (xHCI §4.20); the VL805 datasheet reports `HCSPARAMS2 = 0xFC00_0031` — **31**
-    buffers (`SPR = 1`) — but the driver read neither `HCSPARAMS2` nor `PAGESIZE`
-    and allocated none, so `DCBAA[0]` stayed zero, the controller had nowhere to
-    save state, and it executed no command despite accepting Run/Stop and
-    reporting a live capability block. `Xhci::open` now reads `HCSPARAMS2`/
-    `PAGESIZE` (`max_scratchpad_buffers()` / `page_size()`, surfaced as `4106`
-    `max_scratchpad_hex`); `device::Layout` reserves a page-aligned scratchpad
-    pointer array plus that many page-aligned buffer pages (fail-closed if the
-    bank cannot supply the chunk or a scratchpad-needing controller reports no
-    page size / an unaligned base); `UsbDevice::start` fills the array with
-    each buffer's device-visible base and points `DCBAA[0]` at it; and the
-    engine's shared chunk is grown from the `tairix_usb::SlabBank` sized
-    exactly to that reported geometry (the 31 × 4 KiB pages plus the
-    rings/contexts), with each device's region a further chunk grown on
-    attach and released on detach. Host-proven by `drivers/bus/usb`
-    `start_reserves_scratchpad_and_programs_dcbaa0` (a mock that, like the VL805,
-    withholds every command completion until `DCBAA[0]` is programmed —
-    enumeration then runs end to end),
-    `start_stalls_without_scratchpad_on_a_controller_that_needs_it`, and the
-    `hcsparams2_decodes_the_vl805_scratchpad_count` /
-    `pagesize_decodes_the_lowest_supported_page` decode tests. **Decisive metal
-    datapoint:** `4106 max_scratchpad_hex=0x1f` confirms the count is read, and
-    the keyboard enumerating (`4102`) — or `4126` advancing past `stage_hex=2` —
-    confirms the missing scratchpad was the blocker; a still-stuck `stage_hex=2
-    completion_hex=0` means the command ring is still not consumed for a further
-    reason. Metal-only beyond the host tests (QEMU models no Pi PCIe/USB, §0.4).
-    **Metal-confirmed:** the capture read `4106 max_scratchpad_hex=0x1f` and
-    `4126` advanced to `stage_hex=8 completion_hex=6` — the command ring runs and
-    the device addresses, reads its descriptors, and configures.
-  - **`SET_PROTOCOL(boot)` STALL tolerated — done; `AGENTS.md`
-    §2.9 / §15.7.** With the scratchpad reserved, enumeration reached the
-    last step and stopped at `4126 stage_hex=8 completion_hex=6`: the HID
-    `SET_PROTOCOL(boot)` class request (`EnumStage::SetProtocol`) answered
-    **STALL** (code `6`). `SET_PROTOCOL` is mandatory only for boot-subclass
-    devices (HID 1.11 §7.2.6); a device that does not implement it STALLs,
-    and a STALL on the default control endpoint is a *protocol* stall that
-    auto-clears on the next SETUP (USB 2.0 §8.5.3.4), so the device stays
-    usable in its default protocol (a non-implementing device ignores a
-    stalled `SET_PROTOCOL`). The driver treated any non-Success control
-    completion as `device_fault`, aborting an otherwise enumerable keyboard.
-    The enumeration now issues `SET_PROTOCOL(boot)` through `control_optional`,
-    which absorbs a STALL (raw code preserved in `last_completion`), primes
-    the interrupt-IN ring, and reaches `EnumStage::Configured`; every other
-    completion still fails closed. It is the last EP0 transfer and EP0 is not
-    reused, so a halted control endpoint after the STALL is immaterial.
-    Host-proven by `drivers/bus/usb` `root_attach_tolerates_a_stalled_set_protocol`
-    and `root_attach_fails_closed_on_a_non_stall_class_fault`.
-    **Metal-confirmed:** the capture logs `4102 vendor=2109 product=3431` —
-    enumeration runs end to end, so the tolerated STALL was the last
-    *enumeration* blocker. What enumerates, however, is the onboard hub, not
-    the keyboard (the hub-topology lever below).
-  - **Hub topology.** The `4102` device is `2109:3431` — the Pi 4B's
-    **onboard VIA Labs USB hub** between the VL805 root hub and the four USB-A
-    ports. The keyboard is plugged into a USB-A port, so it enumerates
-    *downstream* of that hub, not on a root-hub port; the bring-up enumerated
-    and configured the hub itself but a hub emits no HID reports, so login
-    still sees no keystrokes. The enumerated device's `bDeviceClass` is `0x09`
-    (`DeviceDescriptor::is_hub`). When the device is a hub the bring-up reads
-    its `bNbrPorts` (class `GET_DESCRIPTOR(hub)`), asserts Port Power on every
-    downstream port (class `SET_FEATURE(PORT_POWER)`), waits
-    `HUB_POWER_ON_GOOD_US` (~100 ms), and logs each downstream port's class
-    `GET_STATUS` as `EventId(4127)` (`UsbDevice::hub_num_ports` /
-    `power_hub_port` / `hub_port_status` over the hub's already-addressed EP0).
-    The `4127` record with `connected_hex=1` pins which downstream port the
-    keyboard is on and its `speed_hex`.
-  - **EP0 halted by `SET_PROTOCOL` on the hub — done; `AGENTS.md` §15.7.**
-    The metal capture read `4101 reading the hub descriptor failed
-    err=device_fault`: the class `GET_DESCRIPTOR(hub)` faulted though the
-    device/config-descriptor reads on the same EP0 had succeeded. Root cause:
-    the enumeration issued the HID `SET_PROTOCOL(boot)` to *every* device,
-    including the hub; a hub is not a HID device so it STALLs that request, and
-    an xHCI STALL **halts** the control endpoint (xHCI §4.10.2.4) until reset.
-    `control_optional` tolerated the STALL on the (now-broken) assumption that
-    it is the last EP0 transfer of enumeration — but a hub reuses EP0 for the
-    hub-descriptor read, which then ran on a halted endpoint. Fixed by issuing
-    `SET_PROTOCOL(boot)` **only** to a HID interface (`InterfaceInfo::is_hid`,
-    `bInterfaceClass == 0x03`); a hub (interface class `0x09`) never receives
-    it, so its EP0 stays usable. A keyboard plugged directly into the root hub
-    is unaffected (its HID interface still gets it, still last). The `4127`
-    hub-descriptor-read failure log now also carries `completion_hex` (raw xHCI
-    completion code). Host-proven by `drivers/bus/usb`
-    `root_attach_recognises_a_hub_via_the_device_class`,
-    `enumerating_a_hub_leaves_ep0_usable_for_the_hub_descriptor` (the mock
-    STALLs the hub's `SET_PROTOCOL` and models the EP0 halt — fails before the
-    gate, passes after), `hub_discovery_finds_the_downstream_device`,
-    `hub_port_reads_disconnected_until_powered`, and
-    `a_forged_hub_descriptor_fails_the_attach_closed`.
-  - **Per-port `GET_STATUS` faults — current lever; `AGENTS.md` §15.7.** With
-    the EP0 fix the hub-descriptor read succeeds (metal `4127 num_ports=4`) and
-    Port Power is asserted on every downstream port, but the capture then read
-    every port's `wstatus_hex=0xffff` (the all-ones sentinel) with
-    `completion_hex=0` — each per-port class `GET_STATUS` (USB 2.0 §11.24.2.7)
-    faulted while `GET_DESCRIPTOR(hub)` and `SET_FEATURE(PORT_POWER)` on the
-    same EP0 succeeded. The sentinel-decoded `connected=1 speed=2` are
-    artifacts, not real reads, so the downstream port holding the keyboard is
-    still unknown.
-  - **`completion_hex=0` was a diagnostic gap, now fixed (done).** The four
-    `4127` records are spaced at the same ~250 ms serial cadence as the
-    non-faulting `4125` lines, so each `GET_STATUS` failed *fast* (not after
-    the million-iteration budget) — an event almost certainly arrived.
-    `UsbDevice::control`/`command` recorded `last_completion` only **after**
-    `await_event_for` returned `Ok`, but `await_event_for` returns `Err` before
-    that on an unexpected TRB address *or* a completion code outside the
-    modelled set {1,2,3,4,5,6,13} (its fail-closed `completion_code()` decode),
-    leaving the `0` "no event" sentinel — so a real-but-rejected code was
-    mislabelled as a timeout. `await_event_for` now records
-    `last_completion = completion_code_raw()` the instant it observes any
-    command/transfer event (before the address match and the decode), so
-    `completion_hex` is truthful: a genuine `0` now means no event at all, a
-    non-zero value names what the hub answered (including a reserved /
-    controller-specific code). The now-redundant post-`await` assignments in
-    `control`/`command` were dropped (§2.2/§2.14). Host-proven by
-    `faulting_hub_port_status_records_the_completion_code` (STALL `6`) and the
-    new `faulting_hub_port_status_records_an_undecodable_completion_code` (the
-    unmodelled xHCI code `7`: fails closed on the decode yet
-    `last_completion_code()` now retains `7` — read `0` before the fix).
-  - **Latest capture + reject localisation — current lever; `AGENTS.md`
-    §15.7.** With `completion_hex` truthful the metal capture named it: ports
-    1–2 read `completion_hex=0x0d` (xHCI ShortPacket, the IN data stage), ports
-    3–4 `completion_hex=0`, **all** still failing closed (`wstatus=0xffff`).
-    Every *other* EP0 control transfer (device/config/hub descriptors,
-    `SET_ADDRESS`/`SET_CONFIGURATION`, `SET_FEATURE(PORT_POWER)`) succeeds on
-    the same EP0, so only the class `GET_STATUS` fails; `control` already
-    tolerates a ShortPacket data stage, so the `0x0d` is the data stage and the
-    **status-stage** event then fails the wait — and the ~250 ms logging
-    cadence shows the wait rejects *fast*, so a real event arrives that it
-    rejects, not a timeout. The remaining gap was that `await_event_for`
-    discarded *why* it rejected and *what* it saw; it now records a
-    `last_reject` reason (`1` unexpected TRB type, `2` TRB-address mismatch, `3`
-    undecodable completion code, `4` budget timeout) and the rejected event's
-    raw `last_event_type` (reset per transfer, exposed via
-    `UsbDevice::last_reject_reason`/`last_event_type`; behaviour unchanged —
-    same fail-closed `Err`, §2.9), surfaced as `evtype_hex`/`reject_hex` on the
-    `4127` record. Host-proven by `Trb::trb_type_raw` and
-    `faulting_hub_port_status_records_an_unexpected_event_type` (a `GET_STATUS`
-    answered by a `NoOp`-type event: the wait fails closed,
-    `last_reject_reason()=1`, `last_event_type()=8`, `last_completion_code()` a
-    truthful `0`).
-  - **Root cause of the `GET_STATUS` faults: the hub's interrupt endpoint was
-    armed — fixed.** The metal capture came back `reject_hex=2`
-    (TRB-address mismatch) with `evtype_hex=0x20` (a real Transfer Event) on
-    ports 1–2, and ports 3–4 with no event (`completion=0`/`reject=0` = the
-    EP0 ring had wedged from the earlier faults). Root cause:
-    the enumeration configured, primed, and doorbelled the **interrupt-IN
-    endpoint for every enumerated device, including the hub**. A hub's
-    interrupt endpoint is its status-change pipe; once armed and doorbelled the
-    hub delivers asynchronous status-change reports, and those interrupt
-    Transfer Events interleave with the subsequent EP0 hub-class `GET_STATUS`
-    control transfers — their TRB pointer is not in the control wait's watch
-    list, so `await_event_for` rejects them (`reject=2`), and the faulted
-    transfer leaves its TRBs in flight, wedging the EP0 ring for the remaining
-    ports. Fixed by configuring/priming/doorbelling the interrupt-IN endpoint
-    (and issuing `SET_PROTOCOL(boot)`) **only for a HID interface**
-    (`InterfaceInfo::is_hid`): a hub keeps only its control endpoint, which is
-    all the downstream-port `GET_STATUS` polling needs, so no async event is
-    ever generated to corrupt it. A keyboard plugged directly into the root hub
-    is unaffected (its HID interface still arms its report ring). Host-proven by
-    `drivers/bus/usb` `enumerating_a_hub_does_not_arm_its_interrupt_endpoint`.
-    The metal capture then read clean: `4127` reported real
-    `connected_hex`/`speed_hex` per port (the keyboard on a downstream port,
-    full speed).
-  - **Downstream addressing — done (second xHCI slot, Route String + TT).**
-    `UsbDevice::enumerate_downstream_hid(down_port, speed)` addresses the
-    keyboard hanging off the hub on a **second** slot: the hub stays addressed
-    on its slot (`Layout` reserves a second `output_ctx2`/`ep0_ring2`, and
-    `control`/`address_device`/`next_report` follow the active slot via
-    `ep0_ring_off`/`output_ctx_off`), and the downstream slot's context carries
-    the **Route String** (the hub's downstream port, §8.9) plus — for a
-    full/low-speed device behind the high-speed hub — the **TT** Hub Slot ID +
-    Port Number (§6.2.2). `slot_ctx_dwords` takes a `SlotCtxBase` (speed,
-    root_port, route, TT); the post-Address sequence is the shared
-    `finish_enumeration` (identical to a root-port device). A latent bug fixed
-    in passing: `control`'s data-stage publish wrote the *first* slot's ring
-    offset, harmless for a root device but fatal for the second slot. The kernel
-    `usb_keyboard::address_downstream_keyboard` finds the connected port, resets
-    it (`SET_FEATURE(PORT_RESET)`, kernel-owned recovery delay), confirms it
-    enabled, and addresses it, logging the keyboard under `EventId(4128)`.
-    Host-proven by `enumerate_downstream_hid_addresses_a_full_speed_keyboard_through_the_hub`
-    (full speed → TT validated), `..._omits_the_tt_for_a_high_speed_device`, and
-    `..._before_a_hub_is_addressed_fails_closed`. **Metal: `4128` confirmed** —
-    a re-flash logged the keyboard (`3434:0e21`, slot 2, hub port 4, full
-    speed). Metal-only beyond the host tests (QEMU models no Pi PCIe/USB, §0.4).
-  - **Mark the parent hub as a hub — done (downstream keystrokes flow).**
-    With `4128` confirmed on metal, pressing keys still produced nothing: the
-    keyboard was addressed but never delivered a report. The hub had been
-    enumerated like any device, leaving the **Hub** bit clear in its slot
-    context, so the VL805 never scheduled the full-speed keyboard's split
-    transactions (Address Device still succeeds, hence `4128` passed). Fix:
-    `enumerate_downstream_hid` now calls `configure_hub_slot` before addressing
-    the device — it reads the hub descriptor (`read_hub_topology`, validated by
-    `HubDescriptor::decode`: `bNbrPorts` + `wHubCharacteristics` TT Think
-    Time), copies the hub's live output slot
-    context (`read_ctx`), sets the **Hub** bit + **Number of Ports** + **TT
-    Think Time** (single-TT, MTT clear), and issues an `A0`-only Configure
-    Endpoint over the hub's slot (xHCI §6.2.2). The mock now requires the Hub
-    bit on that command and delivers no downstream interrupt report until it is
-    set, so `addressing_a_downstream_keyboard_marks_the_parent_hub_as_a_hub`
-    and the existing full-speed drain test fail before the fix and pass after.
-    **Metal:** a re-flash still typed nothing at the prompt — the keyboard is
-    addressed and the hub marked, but no report reaches the console; the next
-    bullet instruments the poll loop to localise that.
-  - **Keyboard poll-loop diagnostics — done (`4129`/`4130`/`4131`).** With the
-    keyboard addressed (`4128`) and the hub marked, typing still produced
-    nothing. After bring-up the keyboard service polls forever
-    (`pump_once` → decode → `ArbiterConsoleSink`), and that loop **discarded
-    its result** (`let _ = pump_once(...)`), so a UART capture could not tell
-    whether reports arrive, whether `next_report` faults, or whether the loop
-    runs at all. `keyboard_service`'s loop now folds each poll result into
-    `usb_keyboard::KeyboardPumpDiagnostics`, which emits three **bounded** audit
-    events (§2.16 / §19.4): a one-shot `4129` the first time a report drains
-    (keystrokes flow), an on-change `4130` carrying the `DriverError` name when
-    `pump_once` faults (capped at 16), and a capped `4131` heartbeat (every 1024
-    polls, ≤ 32 total) carrying cumulative `polls`/`events`/`errors`. The metal
-    reading splits the failure: `4129` present ⇒ path works; recurring
-    `4130 err=device_fault` ⇒ `next_report` rejects the controller's
-    interrupt-IN events; `4131` polls climbing with `events=0 errors=0` ⇒ the
-    loop is alive but the controller never completes the interrupt endpoint.
-    Host-proven by `pump_diagnostics_logs_the_first_report_only_once`,
-    `..._logs_a_pump_error_on_change_and_caps_it`, and
-    `..._emits_a_bounded_heartbeat`. **Metal:** the re-flash read the `4131`
-    branch — the heartbeat climbed (`polls 0x400`→`0x8000`) with
-    `events=0 errors=0`, no `4129`/`4130`: the loop polled fine, `next_report`
-    never faulted, but the controller serviced the interrupt endpoint never;
-    the next bullet fixes that. Docs: `docs/src/platform/aarch64.md`.
-  - **Interrupt-endpoint Max ESIT Payload — done (the no-report fix).** The
-    `4131 events=0` reading localised the silent keyboard to "addressed but the
-    periodic endpoint is serviced never". Root cause: the interrupt-IN endpoint
-    context (`ep_ctx_dwords`) left **Max ESIT Payload** zero (§6.2.3.8 dword 4
-    bits 16:31). The xHCI periodic scheduler reserves no bus bandwidth for a
-    periodic endpoint whose Max ESIT Payload is zero (§4.14.2), so the
-    controller scheduled the full-speed keyboard's split transactions through
-    the hub's TT *never* — Address Device and Configure Endpoint both succeed
-    (hence `4128`), but no report ever flows. The fix programs Max ESIT
-    Payload = the max packet size for any periodic (non-zero-Interval)
-    endpoint; a control endpoint leaves the field reserved-zero. The mock now
-    delivers no interrupt report while the payload is zero, so
-    `the_downstream_interrupt_endpoint_carries_a_nonzero_max_esit_payload` and
-    every existing report-drain test fail before the fix and pass after.
-    **Metal:** the re-flash did **not** change the symptom — `4131` still
-    climbed with `events=0`, no `4129`/`4130` — so a non-zero Max ESIT Payload
-    is necessary but was not the (only) cause; the next bullet found it. Docs:
-    `docs/src/drivers/bus.md`, `docs/src/platform/aarch64.md`.
-  - **Interrupt endpoint read from the descriptor — done (the no-report fix
-    that held).** With the hub marked and a non-zero Max ESIT Payload the metal
-    keyboard was *still* silent (`4131 events=0`). The remaining wrong
-    assumption was the endpoint itself: the driver hard-coded the interrupt-IN
-    endpoint as endpoint 1 (DCI 3), a fixed interval, and an 8-byte packet, and
-    never read the keyboard's endpoint descriptor. A keyboard whose
-    interrupt-IN endpoint is not endpoint 1 then has its Configure Endpoint,
-    doorbell, and `next_report` all aimed at the wrong DCI, so the controller
-    schedules the real endpoint never — Address Device + Configure Endpoint
-    succeed (hence `4128`), but no report flows. `InterfaceInfo::decode_all`
-    now walks past each default-alternate interface to its first interrupt-IN
-    endpoint and captures its DCI (`2·endpoint_number + 1`), `wMaxPacketSize`, and
-    `bInterval`; `finish_enumeration` configures/doorbells/drains that DCI
-    (stored as `UsbDevice::int_dci`) and `interrupt_interval` derives the
-    endpoint-context Interval from `bInterval` + speed (xHCI Table 6-12) rather
-    than a fixed exponent; a HID interface with no interrupt-IN endpoint fails
-    closed (`BadMagic`). The mock derives the configured DCI from the Configure
-    Endpoint add flags and posts interrupt events with it, so
-    `downstream_keyboard_is_serviced_on_its_descriptor_reported_endpoint` (a
-    keyboard whose interrupt endpoint is endpoint 2 → DCI 5) fails before the
-    fix and passes after. **Metal: confirmed.** The re-flash drove the
-    on-screen `Username:`/`Password:` prompt from the USB keyboard — `4129`
-    drained the first report and `4131` then climbed with the keystroke count
-    (`events` rising as keys were pressed, `errors=0`). The Pi 4B USB-HID
-    keyboard path is end-to-end working; the remaining metal residual is login
-    itself (`users_db_read err=12` — no users database, P11 follow-up), not the
-    keyboard. Docs: `docs/src/drivers/bus.md`, `docs/src/platform/aarch64.md`.
-  - **Path forward — the no-touch probe (implemented; `AGENTS.md` §15.7).**
-    The user declined the chain-load route, so the gentlest possible
-    bring-up is the chosen decisive experiment: `reset_controller` only
-    **releases** the bridge `sw_init` the previous boot stage left asserted
-    and does **not** re-assert a fundamental reset or toggle the SerDes
-    `IDDQ`, leaving any resident VL805 firmware untouched; `train_link`
-    deasserts the already-asserted `PERST#` (the single firmware-(re)load
-    edge), and the `NOTIFY_XHCI_RESET` reload stays a best-effort fallback
-    issued only when config `0x50` (the `4118` firmware-version wait) stays
-    `0` — its outcome no longer aborts the bring-up (see the
-    firmware-version-gate bullet above; the gate is now the BAR capability
-    block at `Xhci::open`).
-    Host-proven by `pcie_brcm::reset_releases_sw_init_without_re_asserting_a_fundamental_reset`
-    and `bring_up_releases_sw_init_before_touching_misc_and_skips_the_serdes_toggle`.
-    Decisive metal measurement: `4110`/`4114` `vl805_fw_version_hex` going
-    non-zero (with a live `CAPLENGTH` at `4107`/`4109`) proves `start4.elf`
-    left the firmware resident and our earlier reset was destroying it (the
-    in-tree fix is then complete); still `0`/`dead_dead` proves the
-    bare-metal handoff genuinely never loads it, leaving a boot-chain /
-    firmware matter (a chain-loader that loads the
-    VL805 firmware once after PCIe config, or a `start4.elf`/`config.txt`
-    change keeping PCIe up across the handoff) as the only remaining path.
-    Metal-only either way (QEMU models no Pi PCIe/USB, §0.4).
-- **Outbound-window read-back diagnostic — removed (done, §2.14/§2.16).** A
-  one-shot outbound-window read-back (a former `EventId(4111)` over
-  `BrcmPcieRc::outbound_window_readback`) originally **pinned the root cause**
-  below (`mem_win0_base_limit=0x00003ff0` = an inverted, empty window). It and
-  its inbound twin (`EventId(4119)`/`inbound_window_readback`) were removed once
-  bring-up was metal-confirmed: reading those MISC registers after the link
-  trains stalls for seconds on real BCM2711 silicon while the in-kernel
-  bring-up holds the CPU, and they add no functional value with the link up.
-  The inverted-window fix is permanent and guarded by the kept driver test
-  `outbound_window_decodes_a_non_empty_range_covering_the_cpu_window` (below).
-- **Resolved (superseded) — reset the controller before touching MISC,
-  unconditionally.** `0xdead_dead` is the **BCM2711 root complex's master-abort
-  poison** (distinct from TAIRiX's all-ones `0xffff_ffff` sentinel) — returned
-  when a CPU access reaches the RC but no target decodes the address. An
-  earlier design read `MISC_PCIE_STATUS` at entry and *skipped* the reset when
-  the link was already up, to preserve the bootloader-loaded VL805 firmware.
-  The metal captures killed that twice over: the entry status read is itself a
-  MISC-block access that master-aborts ~10.8 s **before** the reset (so it
-  cannot report the link state — it *is* the bring-up pause, see P4), and
-  `entry_link_up` read `0` on every capture because the bootloader hands the
-  link off **down** (the standard cold-reset flow), so the skip path never engaged.
-  The skip-reset path, `entry_link_up`, and the `4112` log are therefore
-  removed (§2.14), and `BrcmPcieRc::bring_up` unconditionally resets, matching
-  the BCM2711 PCIe bring-up sequence: cycle the always-accessible RGR1 bridge
-  `sw_init` reset (+ `PERST#`) **before** any MISC access, then clear the
-  SerDes IDDQ, program the windows, deassert `PERST#`, poll for link-up, ending
-  fail-closed (§2.9/§5.4). The firmware the reset drops is reloaded over the
-  freshly-trained link via `NOTIFY_XHCI_RESET` (the working flow on this
-  board). Host-proven:
-  `bring_up_releases_sw_init_before_touching_misc_and_skips_the_serdes_toggle` +
-  `bring_up_trains_the_link_and_programs_the_windows`. The pause vanishing on
-  metal is an on-metal acceptance item (QEMU models no Pi PCIe/USB, §0.4).
-- **Firmware reload sequenced after the VL805's BAR is based (done).** The
-  reload fires after the map prefix bases the BAR +
-  sets memory/bus-master decode and before the caps wait/`Xhci::open`
-  (non-fatal, §2.9/§18.4) — `dev_addr=0x10_0000` and the property message
-  match the vendor's VL805 reset message exactly. Its outcome/response
-  (`4108`/`4113`) and a post-reload config + cap re-read (`EventId(4114)`,
-  `log_post_reload_state`) are logged one-shot. Host-proven:
-  `open_controller_reloads_the_firmware_after_the_bar_is_based` and
-  `open_controller_skips_the_firmware_reload_when_mapping_fails`.
-- **Resolved — the persistent `dead_dead` was an inverted outbound window
-  (the firmware-load was a red herring).** With the reload sequenced
-  correctly the metal `4114` still showed the VL805 fully present and
-  correctly programmed after the reload (`1106:3483`, BAR0 based at
-  `0xc000_0000`, mem-space + bus-master enabled) yet the caps stayed
-  `dead_dead`; that, plus USB working under other operating systems on the same
-  card/firmware, redirected the search from the firmware to the **outbound
-  (CPU→PCIe) translation window** (the path config reads do not exercise). The
-  bug was in `tairix_drv_bus_pcie_brcm::regs`: the BCM2711 *proprietary*
-  `MISC_CPU_2_PCIE_MEM_WIN0_BASE_LIMIT` (`0x4070`) packs the **limit** in bits
-  `[31:20]` and the **base** in `[15:4]`,
-  but `MEM_WIN0_BASE_LIMIT_BASE_MASK`/`..._LIMIT_MASK` were
-  defined with the halves transposed, so `program_outbound_window` wrote the
-  base into the limit's half and vice-versa. For the Pi 4 window that yielded
-  the metal-captured value `0x00003ff0` = base `0x6_3ff00000` *above* limit
-  `0x6_00000000`: an inverted, empty window decoding nothing, so every BAR
-  read master-aborted to `dead_dead` regardless of firmware. The fix swaps the
-  two mask constants; the expected Pi read-back is
-  `mem_win0_base_limit=0x3ff00000` with `base_hi=limit_hi=0x6`.
-  Host-proven by
-  `outbound_window_decodes_a_non_empty_range_covering_the_cpu_window`
-  (decodes the full CPU base/limit with the *hardware* field positions,
-  independent of the named constants; fails before the swap with
-  `base 0x6_3ff00000 > limit 0x6_00000000`, passes after). The live VL805
-  answering a plausible `CAPLENGTH` remains the on-metal acceptance item (§0.4
-  — QEMU models no Pi PCIe/USB).
-- **Firmware-load instrument — the VL805 `0x50` version register.** The
-  `4110`/`4114` config read-backs now also dump `vl805_fw_version_hex` (the
-  VL805 XHCI MCU firmware version at PCI config offset `0x50`), the register
-  the vendor firmware-init sequence reads to confirm a load (`0` until
-  loaded, a non-zero build id once `VideoCore` loads the blob). It is read
-  over configuration space, which works on metal even while the BAR aborts,
-  so a metal capture now distinguishes "firmware never loaded" (`0x50`=0,
-  a board/firmware matter outside TAIRiX code) from "loaded but the BAR
-  window still does not decode" (`0x50`≠0) directly, instead of inferring it
-  from the `dead_dead` BAR. Host-proven by
-  `config_readback_dumps_each_register_once`.
-- The seam is the new `kernel/core` `InitSpawnCtx::spawn_kernel_service`
-  (admits a `spawn_kthread` whose body drives an object-safe `YieldHandle`,
-  so it need not name the port's context-switch type) + `static_frames`
-  (the leaked `'static` allocator the DMA region is held from for the
-  driver's lifetime, §4).
-
-Host-proven: the `platform::pcie_bringup` decoder tests, the
-`keyboard_service` mapper/DMA host capability+bounds tests, and the
-kernel-core `spawn_kernel_service` admission test; the freestanding
-aarch64 kernel builds with the full wiring. The VL805 BAR now answers a
-plausible `CAPLENGTH` on metal; the current fix moves `Xhci::open` past the
-halted pre-reset `USBSTS=0x805` (`HCH|HSE|CNR`) and reset-stuck
-`USBSTS=0x815` (`HCH|HSE|PCD|CNR`) states by clearing only stale
-write-1-to-clear status latches before `HCRST`, then enforcing `CNR` after
-reset. Host-proven by `open_resets_a_halted_controller_with_pre_reset_cnr_and_hse`.
-**Remaining — metal only:** xHCI reset/start completing on the real VL805 and
-a USB keyboard driving the video-console login (the §0.4 on-metal checklist).
-The architecturally-correct long-term home is still a `devmgr`-autoloaded
-userland keyboard *service* (rides the DriverSpawner-over-IPC gap, Stage
-4.HW increment 1); the in-kernel service is the interim. Then the DWC2 OTG
-path if needed; then the WM/taskbar/session on the HVS path.
-
-**Migrating the chain onto `hwtree` + `devmgr` autoload, then deleting the
-composition module — in progress (`PLAN.md` Stage 4.HW item 5).**
-`kernel/tairix-kernel::usb_keyboard` is a *scaffold*: the one crate §17.4
-lets name the four driver crates of the Pi 4 chain (`pcie_brcm` →
-`pci::mechanism_brcm` → `bus_usb` → `input_usb_hid`). It must not become
-the model for board support — one hand-written composition module per board
-is exactly the §2.2/§2.3 sprawl to avoid. The scaling-correct steady state
-is the §18 data-driven path: every chain node is discovered into the
-`hwtree` and `devmgr` autoloads the matching driver against its signed bind
-table, so a new board is match **data**, not new code. Sub-increments
-(`PLAN.md` Stage 4.HW item 5, one fully-gated landing each):
-- **5a — done.** Each chain driver crate owns its canonical bind table as
-  `pub const BIND_KEYS` (`pcie_brcm` compatible `brcm,bcm2711-pcie`;
-  `bus_usb` xHCI PCI class `0x0C0330` vendor/device-wildcard; `usb_hid`
-  HID boot keyboard `0x030101` + mouse `0x030102` vendor/product-wildcard),
-  `HwMatchKey`'s constructors are `const`, and `HwMatchKey::matches` adds
-  the PCI/USB class-with-wildcard semantics `tairix_devmgr` resolves
-  against (no `#[repr(C)]` change, no C-header drift).
-- **5b** runtime `hwtree` child attachment by the bus drivers. **5b-i —
-  done:** `PciBus::describe_function(bdf, parent_id, node_id)` (lib/abi,
-  implemented on `Pci<C>`) returns an enumerated function as a child
-  `HwNode` carrying one `HwMatchKey::pci` of its `vendor:device` and **full
-  24-bit class** read from config dword 2 (`base<<16|sub<<8|prog_if` — the
-  16-bit `BusDevice::class` drops prog_if, so the xHCI `0x0C0330` is told
-  apart from older USB host classes), `HwDeviceClass` from the base class,
-  fail-closed `NotFound` on an absent function (§2.9/§18.5); a new trait
-  method only (no `#[repr(C)]`/C-header drift), host-proven that the VL805
-  node matches `bus_usb::BIND_KEYS`. **5b-ii — done:** `bus_usb` emits the
-  HID device under the VL805 keyed by its **interface** class
-  (`0x030101`/`0x030102`). The enumeration now reads the
-  configuration descriptor and parses every default-alternate interface
-  descriptor (`InterfaceInfo::decode_all`, fail-closed): the discovered `bConfigurationValue`
-  / `bInterfaceNumber` drive `SET_CONFIGURATION` / `SET_PROTOCOL(boot)` (no
-  longer hard-coded `1` / `0`), the 24-bit interface class is captured (never
-  fabricated, §18.5), and `UsbDevice::describe_device(parent, node)` returns an
-  `Input` `HwNode` with one `HwMatchKey::usb` of `vid:pid` + that class (a new
-  method only — no C-header drift), host-proven that the `usb_hid::BIND_KEYS`
-  keyboard key resolves against it. The remaining sub-increments turn the
-  bring-up *around* — from a module that hunts for the keyboard to
-  data-driven discovery + `devmgr` autoload (one fully-gated landing each;
-  the live VL805 path is a §0.4 metal-acceptance item, so each touching
-  chunk lands host tests + a metal checklist and the operator supplies the
-  UART log between chunks):
-  - **5c-i — done:** the match policy moved out of `devmgr` into the shared
-    **`lib/devmatch`** crate (`resolve`/`best_bind_priority`/
-    `DriverCandidate`/`MatchResolution`), the single §18.3 definition the
-    kernel reaches without a kernel→userland edge (§2.2 / §17.4; `devmgr`
-    re-exports it). The in-kernel production driver-candidate catalogue
-    (`kernel/tairix-kernel::driver_catalog`) pairs each chain driver's
-    canonical `BIND_KEYS` with its `/System/Drivers/` path (authored from
-    the crates' tables, never re-typed), and `keyboard_service` gates the
-    bring-up on it: `resolve_discovered_bridge` resolves the discovered
-    `brcm,bcm2711-pcie` identity (`platform::PCIE_COMPATIBLE` — the
-    discovery contract, never a fabricated key, §18.5) against the catalogue
-    and proceeds **only on a bound `Winner`** (audit `EventId(4112)`),
-    leaving an unmatched/tied node unbound + logged and the service
-    unstarted (§18.4 / §2.9). The kernel no longer hunts: it brings the bus
-    up because a driver's bind table matched a discovered node. Host-tested;
-    the freestanding aarch64 kernel builds with the gate. **Metal checkpoint
-    (operator, §0.9):** re-flash, confirm the on-screen `Username:` prompt
-    still takes keystrokes (parity), supply the UART log with the `4112`
-    bound record.
-  - **5c-ii — done:** the in-kernel chain bring-up is admitted through the
-    signed-manifest `drvhost::Host::load` gate, not a bare `register()`
-    call. `build.rs` (`emit_signed_driver_manifests`) bakes a signed
-    `DriverManifest` for each chain driver — `kind = InKernel`, stamped with
-    the kernel's `SYSCALL_TABLE_HASH`, requesting `CAP_DRV_LOAD`, carrying
-    the driver crate's own `BIND_KEYS` — Ed25519-signed with the build's
-    deterministic driver-signing key (`KERNEL_DRIVER_SIGNING_SEED`), and
-    embeds the matching public key as the kernel's sole driver trust anchor.
-    `kernel/tairix-kernel::driver_loader::ChainDriverLoader::admit` runs the
-    full `Host::load` pipeline (trust-anchor + signature verification,
-    syscall-hash match, `CAP_DRV_LOAD` / `CAP_DRV_KERNEL` gates, bind-table
-    validation, in-process `register()` hand-off). The chain `register()`s
-    are admission-only (§8 capability check), so the gate uses a plain
-    `Host` with no MMIO/DMA host; the real register-window mapping + DMA
-    carve still run over the keyboard service's own capability-gated
-    `ChainHost` after admission. `keyboard_service::bring_up_keyboard_into_tree`
-    admits `pcie_brcm` + `bus_usb` before bring-up (fail closed → no service),
-    and **re-matches the enumerated HID child** against the
-    catalogue (`bring_up_keyboard` now returns the keyboard + the
-    `UsbDevice::describe_device` `HwNode`) and admits `usb_hid` before the
-    report pump (fail closed → no input). Audited at `EventId(4132)`.
-    `tairix-drvhost` is now an aarch64 dependency. Host-tested
-    (`driver_loader` 5 tests: all three baked images verify, the
-    `CAP_DRV_LOAD` / `CAP_DRV_KERNEL` / unknown-path refusals fail closed);
-    the freestanding aarch64 kernel builds clean. **Metal checkpoint
-    (operator, §0.9):** re-flash, confirm the `Username:` prompt still takes
-    keystrokes (parity), and supply the UART log showing the `4132` admitted
-    records for `pcie_brcm`, `bus_usb`, and `usb_hid`.
-  - **5d-0** the `DriverHost` DMA/MMIO surface reachable **over IPC** (the
-    standing gap, Stage 4.HW increment 1's remainder). The arch-neutral
-    **security foundation is landed**: a new `abi-v1` syscall **`mmio_map`**
-    (no. 26, gated on `CAP_MMIO_MAP`, audited) maps a *granted* device MMIO
-    window into the calling driver's own address space. A driver passes an
-    unforgeable, kernel-issued device-resource grant **handle** (never a raw
-    phys address); the kernel-core handler resolves it **against the calling
-    task** through the per-task device-resource grant table (owner-checked
-    forgery defence, §5.4), validates the grant names a memory window
-    (`devres::mappable_window` — `Mmio`/`BusWindow`), and maps only that
-    region through the architecture `devres::MmioMapFacility` producer
-    (§18.3 — a driver reaches only the resources its matched node requested;
-    §4 — no ambient authority). The map facility fails closed to its NULL
-    default (`NULL_MMIO_MAP_FACILITY` → `NotImplemented`), exactly as
-    `mem_map` shipped its core handler before its arch producer. **5d-0-ii
-    (a) — the concrete grant table — LANDED.** The per-task device-resource
-    grants live in `kernel/core::aspace::AddressSpaceRegistry` alongside the
-    task's streams and limits (the same per-process lifecycle, so a parallel
-    per-task registry + lock is avoided, §2.2): `mint_grant(task, resource)`
-    issues a per-task, monotonic, never-reused handle from `1` (handle `0`
-    reserved-invalid); `grant(task, handle)` resolves it owner-checked (a
-    foreign task or unknown handle → `None`, the forgery defence the handler
-    relies on); and `withdraw` reclaims every grant when the task exits. The
-    `mmio_map` handler now resolves through `aspaces`, and the placeholder
-    `devres::ResourceGrants` trait / `EmptyResourceGrants` /
-    `NULL_RESOURCE_GRANTS` / `with_resource_grants` seam from the security
-    foundation was deleted in place (§2.13 / §2.14). Host-tested (the grant
-    store's 6 unit tests + the 5 `mmio_map` handler tests minting real
-    grants); no `lib/abi`/C-header change. **5d-0-ii (b) — the guarded
-    borrowed-space MMIO mapper mechanism — LANDED.**
-    `kernel/mem::mmio::MmioWindowMap` is the per-task guarded MMIO
-    virtual-window allocator (bounded window + slot bitmap + per-region
-    guard/data accounting) that maps a device window into a **borrowed**
-    `&mut AddressSpace<P>` — caching disabled (`NO_CACHE`), never executable
-    (W^X, §19.2), unmapped guard pages bracketing every window (§4), and an
-    all-or-nothing fail-closed unwind on a part-way page-table failure
-    (§2.9). It is the device-window analogue of `kernel/mem::anon`'s
-    `map_anonymous` and the mechanism the production `MmioMapFacility` will
-    drive against a task's retained live address space. The existing owned
-    `MmioMap` (the in-kernel driver-host register-window mapper consumed by
-    `KernelMmioMapper`) is now a thin wrapper delegating to `MmioWindowMap`,
-    so the guarded logic has one definition (§2.2) with no consumer churn.
-    Host-tested (8 borrowed-space tests + the 15 existing `MmioMap` tests
-    still green); no `lib/abi`/C-header change. **5d-0-ii (b′)-1 — the
-    arch-neutral live-address-space retention mechanism + production
-    producers — LANDED (host-proven).** A task's *live, mutable*
-    `AddressSpace<P>` is now retainable and reachable from its own syscall
-    path, closing the immutable-`FrozenAddressSpace` gap the producers needed:
-    - `kernel/mem::live` (`LiveUserSpace` object-safe `Send` trait +
-      generic `LiveSpace<P, M>`) erases the live space behind one boundary
-      (so `kernel/core` names no concrete `P`, §17.4), composing the audited
-      `map_anonymous`/`unmap_anonymous` + `MmioWindowMap` with no second
-      mapping path (§2.2); `LiveSpaceError` unions their errors. 7 host tests.
-    - `kernel/core::kthread` retains the boxed space in the task's
-      `ThreadControl` and **publishes a per-CPU pointer to it** in a new
-      `USER_LIVE_SPACE` table — published before switch-in, cleared on
-      switch-back, exactly as the existing `USER_RESUME` handle — so the
-      access is exclusive to the one CPU running the (trapped) task; the
-      `with_current_live_space(cpu, f)` accessor and the
-      `spawn_user_kthread_with_stack_live` admission entry expose it. No
-      live page table is ever stored behind a shared lock (the documented
-      `!Send`/`!Sync` reason a frozen snapshot was used remains intact).
-    - `kernel/core::live_producer` (`LiveMemMap<A>` / `LiveMmioMap<A>`,
-      holding `&'static A` like `KernelProcessWait`) are the production
-      `MemMap` / `MmioMapFacility` producers: they read `arch.current_cpu()`,
-      route through `with_current_live_space`, fold `LiveSpaceError`→`Errno`,
-      and fail closed (`NotImplemented`) when the running task has no retained
-      space. `mmio_map` is fully served (the device window's placement is the
-      guarded `MmioWindowMap`); anonymous `mem_map` is served for `FIXED`
-      placement, with the non-`FIXED` per-task user-VA placement allocator
-      the remaining `SP5b` follow-on (fail-closed `NotImplemented` until
-      then — never a guessed base). 8 host tests. fmt + clippy `-D warnings`
-      clean; no `lib/abi`/C-header change.
-    **5d-0-ii (b′)-2 — retention wired into production (every bare-metal
-    port) — LANDED.** The optional live space is threaded through the
-    `admit_init` / `admit_process` seam as
-    `Option<Box<dyn LiveUserSpace + Send>>`. Every bare-metal port's
-    `init_spawn` (PID 1) and `spawn_producer` (the `spawn` syscall's children)
-    freezes a snapshot for the copy path **and** builds a `LiveSpace` from the
-    *same* arch space (device-window region 1 GiB above the image bias;
-    anonymous frames from the `'static` kernel allocator), admitting through
-    `spawn_user_kthread_with_stack_live` so the runtime publishes it on the
-    per-CPU slot. The MMIO/anon/DMA window offsets are the one shared
-    `spawn_layout` definition every port derives its bases from (§2.2); the
-    per-port direct map differs (aarch64/riscv64 identity, x86_64 the
-    higher-half `KERNEL_VMA_BASE` map the image build also uses). `kernel_main`
-    installs `LiveMemMap` / `LiveMmioMap` / `LiveDmaAlloc` for **every** port
-    (arch-generic, no `cfg`): a task that retains no live space still fails
-    `mem_map` / `mmio_map` / `dma_alloc` closed exactly as the `NULL_*`
-    defaults did (wasm32's linear-memory model is an honest n/a). The Arch-HAL
-    `PageTableFrames` gained a `Sync` supertrait so a port's `AddressSpace`
-    (which retains the frame source) is `Send` and can be the boxed
-    `LiveUserSpace` (every implementor was already `Sync`). **Arch fix:**
-    `kernel/arch/aarch64::leaf_attrs_for` mapped any `DEVICE` page EL1-only,
-    so a user-space driver's `mmio_map` window permission-faulted at EL0; a new
-    `el0_device_leaf_attrs` (`AP_RW_EL0`, Device, PXN|UXN) is selected for
-    `DEVICE | USER` (regression-tested). Proven on `-M virt` by the
-    `mmio_map_qemu_aarch64` vertical: the kernel retains a `LiveSpace`, admits
-    the EL0 fixture via `spawn_user_kthread_with_stack_live`, mints a grant for
-    the first virtio-MMIO transport, and the program maps it through `mmio_map`
-    + reads the `MagicValue` register (`0x74726976`) back. New `tairix_rt::mmio_map`
-    wrapper; no `lib/abi`/C-header change. The registry-backed grant
-    owner-check (§5.4) is host-proven in `kernel/core`.
-    **5d-0-ii (c) — non-`FIXED` `mem_map` placement allocator — LANDED.**
-    `kernel/mem::AnonWindowMap` (a per-task user-VA placement allocator: bump
-    cursor + free-list of released holes, so a large heap window costs no RAM
-    until the frame allocator backs a mapping — §24.1; the placement window is
-    address space, the physical backing fails closed as deterministic OOM)
-    chooses the base for a non-`FIXED` anonymous mapping. `LiveSpace` carries
-    one (`map_anonymous_placed`), composing it with the already-audited
-    `map_anonymous`/`unmap_anonymous` (no second mapping path, §2.2);
-    `unmap_anonymous` validates + releases the placement record before any
-    teardown (fail closed on a wrong base/extent, §5.4). `LiveMemMap::map`
-    routes non-`FIXED` requests there while `FIXED` still names `addr_hint`;
-    every port's `init_spawn`/`spawn_producer` thread the shared
-    `spawn_layout::ANON_WINDOW_OFFSET` (4 GiB above the image bias — the
-    topmost user region, above the device/DMA/shared windows) and size the
-    window from discovered RAM via `user_windows::user_windows`
-    (physical RAM clamped to half the addressable user VA above the base,
-    floored at 16 MiB; the demand-paged `file_map` window takes the
-    remainder — `docs/src/architecture/memory.md` §7f/§7o), never a fixed
-    `const` ceiling (§24.1). Host-tested
-    (`user_windows` 7 + `AnonWindowMap` 7 + `LiveSpace`
-    placement 4 + `LiveMemMap` routing 2) and proven on `-M virt` by the
-    extended `mmio_map_qemu_aarch64` vertical (the EL0 program maps its granted
-    window **and** round-trips a placed `mem_map`: map → write sentinel →
-    read-back → `mem_unmap`). No `lib/abi`/C-header change.
-    **5d-0-ii (c) DMA half — LANDED.** New `abi-v1` syscall **`dma_alloc`**
-    (no. 27, `CAP_MEM_DMA`, audited) carves a driver's DMA buffer bounded by
-    the grant's `addr_limit` over the same retained-live-space +
-    owner-checked-grant machinery (`with_current_live_space`, `Dma`-kind
-    grant): it resolves the grant owner-checked, validates it via
-    `kernel/core::devres::dma_constraint` (rejecting zero/over-max length),
-    carves a physically-contiguous, zeroed, coherent `RW` buffer below the
-    grant's `addr_limit` through the `devres::DmaAllocFacility` producer,
-    returns the CPU-VA, and copies the device-visible base out to a user
-    pointer. The device-visible base is resolved by
-    `devres::translate_device_addr`: the CPU-physical base for a coherent
-    constraint, or — for a translating inbound viewport
-    (`HwResource::dma_translated`, the Pi 4 PCIe `IB MEM 0x0..0x1ffffffff ->
-    0x4_0000_0000` `dma-ranges`) — that base re-based onto the far side of the
-    viewport, checked/fail-closed (§18.1). The guarded carve has one
-    definition — `kernel/mem`'s borrowed `DmaWindowMap`, with the in-kernel
-    `DmaPool` re-expressed as its owning wrapper (§2.2); `LiveSpace` gained
-    `alloc_dma` + a DMA window and reclaims (zeroes + frees) every live DMA
-    block on `Drop` at task exit (§4). `LiveDmaAlloc` is installed for every
-    port in `kernel_main`; the aarch64 `init_spawn`/`spawn_producer` thread
-    the shared `spawn_layout::DMA_WINDOW_OFFSET`/`PAGES` (3 GiB above the
-    image bias). Host-tested (`kernel/mem` carve / addr-limit / Drop-reclaim,
-    `devres` constraint, the `dma_alloc` handler, the `LiveDmaAlloc`
-    producer, `abi-sys` marshalling) and proven on `-M virt` by the extended
-    `mmio_map_qemu_aarch64` vertical (the EL0 program now also carves a
-    `dma_alloc` buffer and round-trips a sentinel through it). New
-    `tairix_rt::dma_alloc` + `tairix_sys_dma_alloc`; C header regenerated.
-  - **5d** the continuous keyboard *service* in **user space**, autoloaded
-    by `devmgr` over the 5d-0 surface, feeding the input-focus arbiter.
-    - **5d-1 — the rt-backed `DriverHost` (`lib/drvrt`) — DONE
-      (host-proven).** The user-space analogue of the in-kernel keyboard
-      service's `IdentityMmioMapper` + frame-allocator DMA host: a driver
-      process can no longer reach the kernel frame allocator / identity map,
-      so `tairix_drvrt::RtDriverHost` implements `DriverHost` + `MmioMapper` +
-      `VirtioHost` over a fixed table of kernel-issued device-resource grants
-      (`GrantedResource` = handle + `HwResource`). `map_window` resolves a
-      requested `(phys,len)` to the covering grant, maps that grant's whole
-      window **once** with the `mmio_map` syscall (cached, §2.16), and
-      translates an outbound `BusWindow` BAR's PCIe-bus address to the mapped
-      CPU window (§18.1); `alloc_dma_zeroed` carves the device-shared region
-      with `dma_alloc` against the DMA grant and mints a `DmaSlab` (device
-      base from the grant, optional caller-supplied non-coherent
-      `SlabCoherencyFn` — the shim is never synthesised in this
-      platform-neutral crate, §2.20). The two syscalls sit behind the
-      host-testable `GrantSyscalls` seam (production `RtGrantSyscalls` forwards
-      to `tairix_rt`, §2.2); the host adds no authority — every capability +
-      bound is re-checked kernel-side and a forged/foreign handle fails closed
-      (§4/§5.4/§2.9). Allocation-free (`MAX_GRANTS` array) so it works before
-      the SP5b heap. 18 host tests (window resolve, sub-offset, BAR
-      translation, map-once, every fail-closed path, DMA carve + coherency,
-      multi-grant resolution); registered in §3 + `SUMMARY.md`; docs
-      `docs/src/lib/drvrt.md`. **No metal/virt step** (no production
-      grant-minter/driver-process consumer yet — that is 5d-2).
-    - **5d-2-i — the `resource_grants` grant-delivery syscall — DONE
-      (host-proven).** The piece `RtDriverHost` consumes to learn *which*
-      handles it holds: new `abi-v1` syscall **`resource_grants`** (no. 28,
-      **no capability** — a task reads only its own grants, the §16.6/§24.3
-      own-process baseline; unaudited) serialises the **calling task's** minted
-      grant set from the same per-task `AddressSpaceRegistry` grant table as
-      consecutive `tairix_abi::hwtree::GrantedResource` records (handle +
-      `HwResource`, `WIRE_LEN` = 40; the one wire/owning definition, re-exported
-      by `lib/drvrt`, §2.2), copies them out through the validated boundary, and
-      returns the byte count — `0` for an unbound task (§18.4), `BufferTooSmall`
-      rather than a partial list (§2.9), `BadAddress` for an unregistered caller
-      (§19.1). `AddressSpaceRegistry::grants_to_le_bytes` does the
-      ascending-handle serialisation; `RtDriverHost::from_grants_query` is the
-      production constructor that issues the syscall into a fixed `MAX_GRANTS`
-      buffer and builds the grant table (`RtDriverHost::new` keeps the
-      caller-supplied-slice path for tests/verticals). New
-      `tairix_rt::resource_grants` + `tairix_sys_resource_grants`; C header
-      regenerated. Host-tested (abi round-trip + decode-reject, 5 kernel-core
-      handler tests, 4 drvrt `from_grants_query` tests, abi-sys marshal). **No
-      metal/virt step** (no production grant-minter / driver-process consumer
-      yet — that is 5d-2-ii).
-    - **5d-2-ii (a) — the production driver-spawn grant minter — DONE
-      (host-proven + `-M virt`).** The privileged driver-spawn path now mints
-      the spawned driver's device-resource grants at admission: `KernelSpawnCtx`
-      carries a `grants: &[HwResource]` (the matched node's requested
-      resources, kernel-sourced — never an untrusted caller, §4), and
-      `admit_process` calls `AddressSpaceRegistry::mint_grant(child, resource)`
-      once per resource after the child is fully registered, keyed to the
-      child's own kernel-trusted id (owner-checked, monotonic handles from 1,
-      reclaimed on exit). The ordinary `spawn` syscall passes an **empty**
-      slice — a user task grants no device windows (§4/§5.2). The child reads
-      its handles back through `resource_grants` (5d-2-i). Host-tested in
-      kernel/core (mint-per-resource, owner-check, `GrantedResource`
-      serialisation, the empty-grant user-spawn case) and proven on `-M virt`
-      by the extended `driver_spawn_qemu_aarch64` vertical: the stub is spawned
-      through the production `KernelSpawnCtx`/`spawn_with` with a granted
-      MMIO window, enumerates it via `resource_grants` (handle 1, MMIO,
-      non-zero length), and refuses to reply on any shortfall — so the host
-      PASS proves the spawn minted and delivered the grant. No `lib/abi`/
-      C-header change (the grants are a kernel-side ctx field).
-    - **5d-2-ii (b-1) — the `devmgr`-driven driver-spawn path — done
-      (host-proven + `-M virt`).** `devmgr::DriverLoader::load` gained a
-      `resources: &[HwResource]` argument that `DeviceManager::autoload`
-      sources from the matched `HwNode::resources`, realising §18.3 (a loaded
-      driver receives only the resources its matched node requested). The
-      production loader `kernel/tairix-kernel::driver_spawn_loader::
-      SpawnDriverLoader` (impl `devmgr::DriverLoader`) runs the signed
-      `drvhost::Host::load` gate on the discovered `kind = UserSpace` image and
-      spawns the verified payload through the arch `DriverProcessSpawn` seam,
-      threading those resources into `KernelSpawnCtx.grants` (the (a) minter).
-      Host-tested with a recording spawn double; proven end to end on `-M virt`
-      by the extended `driver_spawn_qemu_aarch64` vertical (discovered virtio
-      node → `13001` node-bound → signed gate → spawn → grant read back via
-      `resource_grants` → `4302` PASS). **Security hardening (§2.17):** the
-      `drvhost` manifest signature now covers the **payload**, so a spawned
-      driver's program is authenticated (regression `tampered_payload_refused`);
-      empty-payload in-kernel images are unaffected.
-    - **5d-2-ii (b-2-i) — `lib/usb` extraction — done (host-proven + whole
-      gate).** The §17.4 layering forbids a `drivers/*`/`userland/*` crate from
-      depending on another `drivers/*` crate, so an arch-neutral user-space
-      keyboard driver could not compose `drivers/bus/usb` (xHCI) with
-      `drivers/input/usb_hid` (HID decode) while the xHCI protocol sat inside
-      the bus driver. The bus-agnostic xHCI protocol (`RegisterBlock` register seam,
-      `Xhci` controller engine, TRB/ring vocabulary, single-device HID
-      `UsbDevice` enumeration) therefore moved into a new `lib/usb`
-      (`tairix-usb`, `lib/abi`-only, `no_std`, Tier-1-portable) — the USB
-      analogue of `lib/virtio` ↔ `drivers/bus/virtio` (§2.2/§6/§17.4).
-      `drivers/bus/usb` keeps only the §8 `register`, the §18.3 `BIND_KEYS`, and
-      the PCI BAR/DMA `wiring` over `tairix_usb`; the kernel scaffold + `wiring`
-      repoint to `tairix_usb::{Xhci, device::*, regs}`. The 81 USB tests split
-      with the code (71 protocol `lib/usb` + 10 driver `register`/bind/wiring);
-      whole gate green (`cargo xtask ci` incl. both Pi images, `fuzz --secs 5`,
-      `soak both`, `cargo xtask test --qemu`). Docs: `docs/src/lib/usb.md`,
-      `docs/src/drivers/bus.md`, the two crate READMEs, AGENTS.md §3 + SUMMARY.
-    - **5d-2-ii (b-2-ii) — generic boot-keyboard orchestration + shared
-      `Delay` seam — done (host-proven).** The arch-neutral
-      root→hub→downstream-HID bring-up sequence is now one definition,
-      `tairix_usb::device::UsbDevice::enumerate_boot_keyboard(delay)` in
-      `lib/usb` (§2.2/§18): enumerate the first connected root-hub port and,
-      when it is a hub (the Pi 4B onboard hub), power its ports, settle, find
-      the connected one, reset it, settle, and address the device behind it on
-      a second slot — discovered, never a guessed port, failing closed. Its
-      timed settles use the microsecond `Delay` seam, hoisted from
-      `drivers/bus/pcie_brcm` into `lib/abi` (`tairix_abi::Delay`) so the PCIe
-      and USB driver crates share one trait (§2.2; `pcie_brcm` re-exports it,
-      callers unchanged; a trait, so no C-header change). The in-kernel
-      `keyboard_service` scaffold's `bring_up_keyboard` now calls the shared
-      routine and its duplicated `log_hub_ports`/`address_downstream_keyboard`/
-      `log_downstream_keyboard` + the `4127`/`4128` event-ids are deleted
-      (§2.2/§2.14). Host-proven (`lib/usb` 74 tests incl.
-      `enumerate_boot_keyboard_{returns_a_directly_attached_keyboard,
-      descends_through_a_hub_to_the_keyboard,
-      fails_closed_when_a_hub_has_no_connected_downstream}`; kernel lib tests
-      green). Docs: `docs/src/lib/usb.md`, `docs/src/platform/aarch64.md`.
-      Touches the metal-confirmed scaffold bring-up (behaviour-equivalent by
-      construction) ⇒ an operator §0.9 metal re-verify (parity: the on-screen
-      `Username:` prompt still takes keystrokes).
-    - **5d-2-ii (b-2-ii) — arch-neutral boot-keyboard orchestration — done
-      (host-proven).** `drivers/input/usb_hid::service::bring_up_boot_keyboard`
-      is the composition the user-space keyboard driver runs at start-up. Over
-      its `DriverHost` (the rt-backed host built from its kernel-issued grants)
-      it builds the growable `tairix_usb::SlabBank` over its host's DMA seam
-      with the discovered aperture top (every chunk is aperture-checked at
-      allocation time, fail closed, §5.4), maps its granted xHCI register
-      BAR, brings the controller up (`tairix_usb::Xhci::open` +
-      `UsbDevice::start`, growing the geometry-sized shared chunk — the one
-      engine definition in `lib/usb`, §2.2), and runs the
-      arch-neutral `enumerate_boot_keyboard`, returning a `BootKeyboard` the
-      service loop drives with `pump_once`. It names no PCI/BCM2711/board
-      (§2.20): the board PCIe root-complex bring-up + BAR assignment stay in the
-      separate board bus driver, and the keyboard node is granted only its
-      already-assigned BAR + a DMA constraint (§18.3). `usb_hid` now depends on
-      `lib/usb` (a lib, §17.4). Host-proven (6 `service` tests: the cap-missing /
-      no-mapper / no-DMA-host refusals, a DMA carve above the aperture and a
-      DMA-alloc failure refused, and the all-valid path reaching the controller
-      hand-off where the inert mock window faults `DeviceFault` — the metal
-      boundary, mirroring `bus_usb`'s `wiring` tests). No `lib/abi`/C-header
-      change; whole gate green. Docs: `docs/src/drivers/input.md`,
-      `docs/src/lib/usb.md`, both crate READMEs.
-    - **5d-2-ii (b-2-iii) — done (host-proven + `-M virt`)** the
-      `devmgr`-autoloaded keyboard driver `rxe`: the autoloadable driver, the
-      signed-bundle root fixture, and the `-M virt` autoload vertical are
-      landed (the per-piece status follows). What remains under this item is
-      the `tools/mkimage` signed bundle and the 5e flip, both gated below.
-      - **`lib/hid` extraction + the keyboard driver `rxe` binary — done
-        (host-proven, all three Tier-1 targets).** The §17.4 layering forbids a
-        `drivers/*`/`userland/*` crate from depending on another `drivers/*`
-        crate, and the kernel still links `drivers/input/usb_hid` for the
-        transitional in-kernel scaffold (so adding the userland runtime
-        `tairix-rt` there would inject a duplicate `panic_impl`/`_start` into the
-        kernel). Both are resolved by extracting the reusable HID logic into a
-        **new `lib/hid` (`tairix-hid`)** crate — the decoders (`BootKeyboard`,
-        `HidMouse`), the console producer (`KeyboardConsole`, `pump_once`,
-        `ConsoleSink`), and the xHCI boot-keyboard orchestration
-        (`bring_up_boot_keyboard`, `derive_keyboard_resources`,
-        `KeyboardResources`) — the USB analogue of `lib/usb` ↔ `drivers/bus/usb`
-        (§2.2 / §6 / §17.4). `drivers/input/usb_hid` shrinks to the §8 driver
-        identity (`register` + `BIND_KEYS`, `lib/abi`-only). The kernel scaffold
-        repoints its decode/console imports to `tairix_hid` (keeping `register`
-        + `BIND_KEYS` from `usb_hid`). The new **`drivers/input/usb_kbd`
-        (`tairix-drv-input-usb-kbd`, `src/main.rs`)** binary is the
-        `devmgr`-autoloaded user-space keyboard driver: a pure-Rust `tairix-rt`
-        program depending **only** on `lib/*` (hid/drvrt/rt/caps/abi, so §17.4
-        holds and the kernel never links `tairix-rt`) that builds
-        `RtDriverHost::from_grants_query` over its kernel-issued grants
-        (coherency `None` — the kernel carves coherent DMA, platform-neutral
-        §2.20), derives its BAR + DMA aperture from the same delivered grants
-        with the new host-tested `tairix_hid::derive_keyboard_resources` over the
-        new `RtDriverHost::resources()` accessor (no second `resource_grants`
-        syscall, §2.16), runs `bring_up_boot_keyboard`, then loops `pump_once`
-        with a `KeyInjectSink` over `key_inject` and the userland `ClockDelay`,
-        yielding between polls (§2.1). Fail-closed exit codes (§2.9); every
-        capability + bound re-checked kernel-side (§5.4).
-        `derive_keyboard_resources` handles the Pi 4 shape (outbound `BusWindow`
-        BAR + translated inbound `Dma`) and the `virt` shape (`Mmio` BAR +
-        untranslated `Dma`), ignores an IRQ grant, and refuses a
-        missing/ambiguous/zero-length grant. Host-proven (`tairix-hid` 45 tests
-        incl. 9 derivation cases; `usb_hid` 4; `drvrt` 24 incl. 2 `resources()`);
-        usb_kbd + the aarch64 kernel build freestanding on all three Tier-1
-        targets. **No `lib/abi`/C-header change.** No metal step yet (additive;
-        the in-kernel scaffold still drives the metal keyboard until the boot
-        wiring lands and 5e retires it). Docs: `docs/src/lib/hid.md`,
-        `docs/src/drivers/input.md`, `docs/src/lib/drvrt.md`, the crate READMEs;
-        AGENTS.md §3 + SUMMARY.md gained `lib/hid`.
-      - **Scheduler-agnostic kernel/core spawn-with seam — done (host-proven).**
-        The production boot wiring is "hosted in `kernel/core`, which owns the
-        scheduler", but the bin crate must not name the concrete scheduler
-        (§17.1) and kernel/core cannot depend on `tairix_devmgr` (userland,
-        §17.4). The seam that resolves this is now landed: the kernel/core
-        [`ProcessSpawn`] trait gained `spawn_with(rxe, ctx, granted, args)` (the
-        driver-spawn analogue of `spawn(EmbeddedProgram, ctx)` — raw image bytes
-        + the manifest∩caller capability set + the node grants riding on `ctx`,
-        §18.3), so a generic caller holding `&dyn ProcessSpawn` can spawn a
-        driver into its own hardware-isolated process without naming the port's
-        spawn mechanism or the selected scheduler. The default fails closed
-        (`Errno::NotImplemented`, §2.9); the aarch64 producer's former
-        arch-inherent `spawn_with` is now that trait method (one definition,
-        §2.2), and the `driver_spawn_qemu_aarch64` `-M virt` vertical drives the
-        chain through it. No `lib/abi`/C-header change.
-      - **Signed-store candidate scan — done (host-proven).** The §18.3 store
-        scan that turns the installed `/System/Drivers/` bundles into autoload
-        candidates is landed as `tairix_drvhost::store`
-        (`userland/system/drvhost/src/store.rs`): `scan_store(source, paths,
-        sink) -> DriverStore` reads each enumerated bundle through the existing
-        `ImageSource`, parses its `.rxe` manifest with the same `ParsedImage`
-        splitter the load gate uses (no drift, §2.2), decodes its bind table
-        fail-closed, and emits an owned `ScannedDriver` whose
-        `DriverStore::candidates()` lends the canonical
-        `tairix_devmatch::DriverCandidate` slice `DeviceManager::autoload`
-        consumes. The scan is a **match** step only — it grants no authority and
-        verifies no signature; signature/syscall-hash/capability/`kind`
-        verification stay at `Host::load` when (and only when) a candidate wins
-        a node (§18.6). An unreadable/malformed/bad-bind bundle is skipped and
-        logged (`DRIVER_STORE_ENTRY_SKIPPED` 7031), never fatal (§18.4/§5.4);
-        an accepted one is audited `DRIVER_STORE_CANDIDATE` 7030. drvhost gained
-        a `lib/devmatch` dep (lib/* only, §17.4) and reuses its own `HandleBuf`
-        decimal formatter (§2.2). Host-proven (8 `store::tests`: order-preserved
-        accepts, each fail-closed skip reason, empty store, end-to-end through
-        the real `devmatch::resolve`). No `lib/abi`/C-header change. Docs:
-        `docs/src/drivers/host.md` ("Signed-store scan"). No metal step (the
-        scan has no production consumer yet — the boot wiring below is next).
-      - **`/System/Drivers/` store enumeration (kernel half) — done
-        (host-proven).** `tairix_kernel_core::driver_store::enumerate_driver_store`
-        is the boot-time walk that turns the on-disk store tree into the bundle
-        image-path list `scan_store` consumes. Mirroring `users::load_users_db`,
-        it builds the shared root-backed VFS (`crate::fs::root_backed_vfs` — the
-        private-root-mount handle + minimal `Vfs` builder hoisted out of
-        `users.rs`, §2.2) and walks `/System/Drivers/` through the §5.3-checked
-        per-inode delegation under the uid-0 bootstrap identity (no §5.1 bypass),
-        collecting every regular file's path. Structural path discovery only — it
-        never reads, parses, or trusts a bundle (the load gate does, §18.6); the
-        walk is bounded (`MAX_STORE_DEPTH` 8 / `MAX_STORE_DRIVERS` 256, §24.4)
-        and fail-closed: a missing store, an unreadable sub-directory, or a
-        malformed entry simply contributes fewer paths and never aborts the boot
-        (§18.4/§2.9). One audit record `DriverStoreScanned` (4042, `drivers` /
-        `skipped` counts). Host-proven (7 `driver_store` tests over a tree mock
-        fs: nested store in order, missing store, unreadable-subdir skip,
-        depth/count bounds, empty store). No `lib/abi`/C-header change. Docs:
-        `docs/src/architecture/kernel.md` (audit catalogue). No metal step (no
-        production consumer yet — the boot wiring below is next).
-      - **VFS-backed `ImageSource` (the bundle-byte reader) — done
-        (host-proven).** The enumeration above yields the bundle *paths*; this
-        reads their *bytes*. `tairix_kernel_core::driver_store::DriverImageReader`
-        builds the shared root-backed VFS once (§2.16) and `read_image(fs, path,
-        buf)` reads one bundle off the mounted root under the uid-0 bootstrap
-        identity: it validates the path lies strictly within `/System/Drivers/`,
-        bounds the file against `MAX_DRIVER_IMAGE_LEN` (16 MiB §24.4) *before*
-        any read, reads the whole file, and **appends** it to `buf` (the
-        `ImageSource` contract), failing closed and leaving `buf` untouched on
-        any refusal (§5.4/§2.9); `DriverImageError`→`Errno`. The `ImageSource`
-        trait is `drvhost`'s (userland) and §17.4 forbids a `kernel/core`→drvhost
-        edge, so the bin crate (the one layer that may name `drvhost`) supplies
-        the thin delegating adapter `tairix_kernel::driver_store_source::VfsImageSource`
-        — `DriverImageReader` + the root-volume driver behind a `RefCell` (the
-        `&self` `read` vs `&mut` driver bridge; the scan is single-threaded, one
-        bundle at a time), adding no authority. Host-proven (11 kernel-core
-        reader tests: byte-for-byte, append, empty, out-of-store, missing,
-        directory, oversize-before-read, gated-unreadable, short-read unwind,
-        errno map; 4 bin-crate adapter tests: delegate+append, multi-bundle one
-        borrow, missing→`NotFound`, out-of-store→`PermissionDenied`). No
-        `lib/abi`/C-header change. Docs: `docs/src/drivers/host.md` ("Reading
-        the bundle bytes off the root volume"). No metal step (no production
-        consumer yet — the boot wiring below is next).
-      - **Boot-wiring composition — done (host-proven).**
-        `tairix_kernel::driver_autoload::autoload_drivers(tree, store_paths,
-        image_source, trusted, spawn, args, caller_caps, sink)` is the single
-        production composition that turns the discovered hardware tree + the
-        installed signed store into autoloaded user-space drivers: it scans the
-        store (`drvhost::store::scan_store` over the `VfsImageSource` against
-        the `enumerate_driver_store` paths — a match-only step, §18.6), runs
-        `devmgr::DeviceManager::autoload` over the candidates, and loads each
-        winner through `driver_spawn_loader::SpawnDriverLoader` (signed
-        `Host::load` gate → process spawn with exactly the matched node's
-        resource grants, §18.3). It adds no policy; it lives in the bin crate
-        (the one layer that may name both `devmgr` and `drvhost`, §17.4) and
-        takes the spawn mechanism behind the `DriverProcessSpawn` seam so it
-        stays scheduler-agnostic (§17.1). Host-proven (5 `driver_autoload`
-        tests: a signed match spawns with exactly the node's two resources, an
-        untrusted signature fails the node closed and never spawns, a caller
-        without `CAP_DRV_LOAD` loads nothing, an unmatched node is left unbound,
-        an empty store binds nothing). No `lib/abi`/C-header change. Docs:
-        `docs/src/drivers/host.md` ("Autoloading by discovery").
-      - **Mounted-root composition — done (host-proven).**
-        `tairix_kernel::driver_autoload::autoload_from_mounted_root(fs, tree,
-        trusted, spawn, args, caller_caps, sink)` is the thin production glue
-        the live boot path drives once the root is mounted: it sources the
-        store paths *and* the bundle bytes from the just-mounted root volume
-        `fs` (the arxfs driver) — `enumerate_driver_store(fs, …)` for the
-        §5.3-checked path walk, then a `VfsImageSource` over the *same* `fs`
-        for the bytes (the two `&mut fs` reads are strictly sequential, so the
-        one borrow never overlaps) — and defers entirely to `autoload_drivers`
-        for match + signed gate + spawn. It adds no policy and fails closed
-        only if the private root mount cannot be built (`VfsError`); a missing
-        / empty / malformed store binds nothing in `Ok` (§18.4 / §2.9).
-        Host-proven (3 `driver_autoload` tests over the shared `MockRootFs`
-        fixture: a planted signed bundle is *discovered* and spawned with
-        exactly the node's resources, an empty store binds nothing, an
-        untrusted bundle fails the node closed). No `lib/abi`/C-header change.
-        Docs: `docs/src/drivers/host.md` ("Autoloading by discovery").
-      - **Scheduler-agnostic driver-spawn seam — done (host-proven + `-M
-        virt`).** `InitSpawnCtx::spawn_driver_process(spawn, path, rxe, caps,
-        grants, args, node_id)` (default fail-closed `NotImplemented`, §2.9)
-        is the production
-        seam a scheduler-agnostic caller drives to spawn a verified driver
-        into its own process: the kernel/core `KernelInitSpawner` impl builds
-        the live `KernelSpawnCtx` (the matched node's `grants` minted
-        owner-checked, §18.3; the driver established `DescriptorTable::closed`
-        — a driver is not a text session, §20; recorded against the kernel
-        boot supervisor `SecTaskId(0)`; the child's process name attested
-        from the kernel-resolved driver-store `path` via the shared
-        `ProcName::from_path` rule — a bundle's generic `Run` entry point
-        names its owning driver directory, any other path its final
-        component — so `ps`/`top` always name the driver, never `Run`) and
-        drives the architecture's
-        `ProcessSpawn::spawn_with`, so the bin crate never names the
-        feature-selected scheduler or `KernelSpawnCtx` (§17.1). `KernelInitSpawner`
-        is now public + constructible (`new`, holding the leaked-`'static`
-        `ProcessWait` `run_phases` hands back) for the same "verticals drive the
-        production path, not a copy" reason `KernelSpawnCtx` is (§2.2). The
-        bin-crate `driver_spawn_loader::InitCtxDriverProcessSpawn`
-        (`DriverProcessSpawn` over a `&dyn InitSpawnCtx` + the arch
-        `&dyn ProcessSpawn`) is the bridge `SpawnDriverLoader` reaches it
-        through. Host-proven (kernel/core: default-fail-closed +
-        delegation-to-a-recording-producer; bin crate: the adapter forwards
-        payload/caps/grants/args unchanged) and the `driver_spawn_qemu_aarch64`
-        `-M virt` vertical now drives the chain through this seam (no
-        hand-built `KernelSpawnCtx`). No `lib/abi`/C-header change.
-      - **Boot-path attachment — done (host-proven + `-M virt`).** The
-        production unlock kthread now runs the autoload composition off the
-        just-mounted root. Landed: the `'static`-spawner seam
-        (`InitSpawn::spawn_init` takes `&'static (dyn InitSpawnCtx + Sync)`,
-        `kernel_main` leaks the ctx, forwarded through the three arch
-        `init_spawn` seams to `unlock_service::spawn_if_present`); the
-        discovered-hardware-tree stash (`audit_root_storage_binding` collects
-        the full tree — virtio-MMIO block child probed in — and `record_boot`
-        resolves the root binding from it and moves it into `HW_TREE`); and
-        the unlock-kthread tail call (`aarch64::root_unlock::run_unlock` builds
-        an arch-neutral `unlock_service::AutoloadHook` over the stashed tree +
-        the leaked `'static` ctx and hands it to
-        `unlock_root_disk_interactively` as the `MountedRootHook`, which calls
-        `autoload_from_mounted_root` the instant the root mounts — binding
-        nothing when no node matches, §18.4). Empty store ⇒ nothing autoloads
-        in `Ok`. The autoloadable user-space input driver is **now landed** (the
-        first sub-bullet); **remaining** is its `-M virt` autoload vertical, the
-        signed bundle, and the 5e flip:
-        - the autoloadable **user-space input driver `rxe`** the `-M virt`
-          vertical proves: `-M virt` presents a **virtio-input** keyboard
-          (not USB/xHCI — no QEMU vertical models xHCI), served by
-          `drivers/input/virtio_input`. The driver's §18.3 `BIND_KEYS` bind
-          table is **landed** (`HwMatchKey::virtio(18)` at the exact-match
-          priority tier — the single source of truth its signed manifest is
-          authored from; host-tested + README/`docs/src/drivers/input.md`).
-          The reusable `open`/`poll`/`decode` device logic is **now extracted**
-          to the new `lib/virtio_input` (`tairix-virtio-input`) crate — the
-          §17.4 analogue of `lib/hid` ↔ `usb_hid` — so both the in-kernel
-          `-M virt` verticals and the user-space `rxe` compose it without a
-          `drivers/*`→`drivers/*` edge; `drivers/input/virtio_input` is now the
-          thin §8 `register` + `BIND_KEYS` shell (the device id is
-          `tairix_virtio_input::VIRTIO_INPUT_DEVICE_ID`), and the
-          `virtio_qemu_support` harness consumes `VirtioInput` from the lib.
-          Host-proven (`tairix-virtio-input` 9 device-logic tests, driver shell
-          2). The **lib-reachable concrete virtio MMIO transport** the
-          user-space driver needs is **now landed**: `MmioTransport` moved from
-          `drivers/bus/virtio` into `lib/virtio` (it depends only on the
-          bounds-checked `RegisterWindow` + the protocol types), so an
-          arch-neutral `drivers/input/*` `rxe` can build it without a
-          `drivers/*`→`drivers/*` edge (§17.4 — the `lib/usb` ↔ `drivers/bus/usb`
-          precedent). `drivers/bus/virtio` re-exports it from `tairix_virtio`
-          (existing `tairix_drv_bus_virtio::MmioTransport` import sites resolve
-          unchanged, §2.2); §3, `docs/src/drivers/virtio.md`, and the
-          `transport_mmio` tests moved with it. The autoloadable `rxe`
-          **binary is now landed**: `drivers/input/virtio_kbd`
-          (`tairix-drv-input-virtio-kbd`, `src/main.rs`) is the `usb_kbd`
-          analogue — a freestanding `tairix-rt` program depending only on
-          `lib/*` (`lib/virtio`, `lib/virtio_input`, `lib/drvrt`, `lib/rt`,
-          `lib/caps`, `lib/abi`) that builds `RtDriverHost::from_grants_query`
-          over its kernel-issued grants, resolves its sole granted register
-          window with the new `tairix_abi::driver::sole_register_window`
-          (built on `HwResource::register_window_base`, the one §2.2 definition
-          of "which address names this resource's register window" — shared
-          with `lib/hid`'s `derive_keyboard_resources`), maps it, builds the
-          `MmioTransport`, runs `VirtioInput::open` over the host as
-          `VirtioHost`, and loops `poll` → `VirtioKeyboardConsole::feed` →
-          `key_inject` (the new `evdev`-keycode console producer in
-          `lib/virtio_input`, resolving the US layout through the shared
-          `tairix_keymap::key_input`, §2.2). The
-          `virtio_driver_layer_is_on_lib_only` deps-check binds the new crate to
-          `lib/virtio` (not the bus driver). Host-proven (`lib/abi`
-          `sole_register_window`/`register_window_base` tests,
-          `lib/virtio_input` `console` tests; the binary builds host + all three
-          Tier-1 freestanding); whole gate green (`cargo xtask ci` incl. both
-          Pi images, `fuzz --secs 5`, soak). No `lib/abi`/C-header change (the
-          helper is a Rust fn, not a `#[repr(C)]` type/syscall). This is the
-          most architecturally honest "driver in user space by discovery" proof
-          on the hardware `virt` actually has (the metal Pi keyboard stays
-          `usb_kbd`, flipped at 5e). **Remaining** is the vertical + bundle:
-        - **virtio-input hardware-tree discovery — done (host-proven).** The
-          bootstrap-floor virtio-MMIO enumeration now also discovers
-          **user-space-autoloadable input devices**:
-          `hwdiscovery::observe_virtio_mmio_input_devices` probes each
-          `virtio,mmio` slot's `DeviceID` for virtio-input
-          (`VIRTIO_INPUT_DEVICE_ID = 18`) and emits a discovered
-          `HwDeviceClass::Input` node keyed by `HwMatchKey::virtio(18)` and
-          carrying `HwResource::mmio(base, len)`. Unlike the in-kernel block
-          floor (whose bring-up re-derives the window from the tree by base) a
-          user-space input driver is minted a grant per requested resource
-          (§18.3), so the node **must** carry its window; the extent is the
-          discovered `reg` length surfaced by the new
-          `VirtioMmioBus::slot_window` (§18.1 — discovered, never a literal),
-          implemented in `drivers/bus/mmio`. Wired into
-          `aarch64::boot::audit_root_storage_binding` beside the block probe,
-          so the leaked hardware tree the unlock kthread autoloads against
-          carries the input node. Additive + metal-neutral (no `virtio,mmio`
-          on the Pi tree, §2.17); host-tested (`root_storage` input-discovery
-          tests, `slot_window` in `lib/abi` + `drivers/bus/mmio`); whole gate
-          green incl. the full `-M virt` matrix. This is the discovery the
-          autoload spawn below binds against.
-        - the `-M virt` autoload vertical — **done**.
-          `tests/integration/autoload_input_qemu_aarch64` boots the production
-          aarch64 pipeline on `virt` with the shared encrypted-root whole-disk
-          fixture, planted with the kernel-signed autoload driver bundles the
-          `image_drivers` pipeline cross-compiles and signs (the
-          `virtio_kbd.rxe` bundle at `/System/Drivers/input/virtio_kbd/Run`),
-          and an attached
-          `virtio-keyboard-device`. The runner types the passphrase; the unlock
-          kthread mounts the root, and its post-mount `AutoloadHook` scans the
-          signed store, verifies the bundle against the kernel's embedded
-          `KERNEL_DRIVER_SIGNER_PUBKEY`, matches it to the discovered
-          virtio-input node, and spawns it into its own user-space process; the
-          injected key is decoded and delivered via `key_inject`, and the audit
-          sink reports PASS on `AuditEvent::InputDelivered` (`EventId(4050)`).
-          The `image_drivers` pipeline (`build_virtio_kbd_bundle`, the one
-          definition every image consumer shares, §2.2) cross-compiles
-          `drivers/input/virtio_kbd` PIE (the one shared `lib/rt/Run.ld` every
-          `Run` program links), converts it to an `rxe` relocated for the shared
-          `tairix_itest_harness::USER_IMAGE_BIAS`, and signs it via the shared
-          `tairix_itest_harness::driver_image` composer with
-          `build_support::KERNEL_DRIVER_SIGNING_SEED` over the driver's own
-          `BIND_KEYS` + caps (`CAP_MMIO_MAP`/`CAP_MEM_DMA`/`CAP_INPUT_INJECT`).
-          The autoload caller presents the delegatable
-          `unlock_service::autoload_caps` superset (`service_caps` +
-          `CAP_INPUT_INJECT` + `CAP_IRQ_BIND` + `CAP_IPC_BIND_PRIVILEGED`), so an
-          autoloaded input driver's
-          manifest∩caller intersection can grant the injection authority while
-          the unlock kthread's own context stays minimal (§5.2 / §5.4). The
-          seed-hoist and one-shot `InputDelivered` witness prerequisites are
-          done; the signed bundle is host-proven valid + matched over the real
-          `scan_store`/`devmatch` path (the `image_drivers` autoload-decision
-          tests);
-        - `tools/mkimage` laying the signed input-driver bundle into the
-          signed driver store, signed with the kernel's driver-signing trust
-          anchor (a seed shared in one place with the kernel build, §2.2) —
-          deferred with (d). **Superseded by design B (see "Pre-unlock signed
-          driver store" below):** the store must live on a volume reachable
-          *before* the encrypted-root passphrase, so the bundle is laid into
-          the read-only `/System` volume, not the encrypted root.
-        - **5e / (d):** flip `init_spawn`'s
-          `keyboard_service::bring_up_keyboard_into_tree` / `spawn_pump`
-          to the autoload path and delete the in-kernel scaffold + evict
-          `usb_hid` from `driver_catalog::IN_KERNEL_DRIVERS`, in the same change
-          (§2.14). **This is the *last* design-B increment** (see below): it is
-          blocked not merely on a §0.9 metal re-flash but on the pre-unlock
-          `/System`-volume store, the metal USB→`hwtree` enumeration, and the
-          live EMMC2 root bring-up all landing first. Until then the in-kernel
-          scaffold stays the metal keyboard driver and stays wired, so the
-          working metal keyboard never regresses (§2.17).
-      - **Userland clock + `Delay` prerequisite — done (host-proven).**
-        `tairix_rt::clock_get` (the first-party wrapper over `abi-v1` syscall 7,
-        the raw `u64` nanosecond reading, no coarsening of its own) and
-        `tairix_rt::ClockDelay` — the one userland `tairix_abi::Delay`
-        implementation (`delay_us` parks cooperatively via `clock_get` +
-        `yield_now`, never a hard spin §2.1; `now_us` floors the reading to
-        whole microseconds) — live in the single userland runtime so every
-        driver process shares one clock-backed `Delay` rather than each rolling
-        its own (§2.2). This is the `Delay` the keyboard-driver binary hands to
-        `service::bring_up_boot_keyboard`. Host-proven (`tairix-rt` tests: the
-        `clock_get` trap marshalling via the `abi-trap` seam, `now_us`
-        flooring, and the cooperative-wait core `spin_until_ns` — past-deadline
-        returns without yielding, advancing-clock yields a bounded count). No
-        `lib/abi`/C-header change (the syscall already existed).
-  - **5e** delete `usb_keyboard.rs` + `keyboard_service.rs` (§2.14) and evict
-    `usb_hid` from `driver_catalog::IN_KERNEL_DRIVERS` (§18.6) once the
-    generic path drives the chain end to end on metal — the **last** design-B
-    increment (below).
-
-#### Pre-unlock signed driver store (design B) — the correct §18 keyboard-at-unlock path
-
-**The constraint that fixes the design.** On metal the USB keyboard is needed
-to *type the encrypted-root unlock passphrase* (`root_unlock.rs`:
-`video::is_active()` reads `VIDEO_KEYBOARD`). The keyboard driver therefore
-cannot be autoloaded *from* the encrypted root — that volume is not mounted
-until the passphrase is entered (chicken-and-egg). The proven `-M virt`
-autoload vertical sidesteps this only because its passphrase is typed on the
-UART while the keyboard driver autoloads *post-mount*. A keyboard-served
-HDMI unlock prompt needs the input driver up **before** unlock.
+**The constraint.** On metal the USB keyboard types the encrypted-root
+unlock passphrase, so its drivers cannot be autoloaded *from* the encrypted
+root: that volume is not mounted until the passphrase is entered.
 
 **The decision (operator-approved): a dedicated read-only, signed `/System`
 volume reachable before unlock.** Drivers keep their §16.2 home
-(`/System/Drivers/`), so this is *not* the expedient "drivers on the FAT boot
-partition" layering smell. Security holds without encrypting `/System`:
-**every bundle is Ed25519-signed and verified against the kernel's embedded
-trust anchor at load (§18.6)**, so a tampered read-only store is detected and
-fails closed — encryption would add nothing the per-bundle signature does not
-already give, and `/System` holds no secrets. The encrypted root keeps only
-the secret-bearing user data (`/Users`, app/user installs, `/Storage`).
+(`/System/Drivers/`), not the FAT boot partition. Security holds without
+encrypting `/System`: **every bundle is Ed25519-signed and verified against
+the kernel's embedded trust anchor at load (§18.6)**, so a tampered
+read-only store fails closed, and `/System` holds no secrets. The encrypted
+root keeps only the secret-bearing user data (`/Users`, app/user installs,
+`/Storage`).
 
-**Target on-disk layout (the §16/§11 image; `tools/mkimage`):** three MBR
-partitions — (1) FAT boot (firmware/kernel/`root.unlock`, unchanged);
-(2) **`/System` — read-only `ARXFS`, unencrypted, signed-bundle store**;
-(3) data root — encrypted `ARXFS` carrying `/Users`/`/Apps`/`/Storage` and
-`/System/Security/Users`. The installer (§11) authors the same split; expert
-mode may not collapse it.
+**On-disk layout (the §16/§11 image; `tools/mkimage`):** three MBR
+partitions — (1) FAT boot (firmware, kernel, `root.unlock`); (2) **`/System`
+— read-only `ARXFS`, unencrypted, the signed-bundle store**; (3) the data
+root — encrypted `ARXFS` carrying `/Users`/`/Apps`/`/Storage` and
+`/System/Security/Users`. The installer (§11) authors the same split, and
+expert mode may not collapse it.
 
-**Boot sequencing (the §18 path, no ambient authority, fail closed §5.4):**
-1. bootstrap-floor storage + bus bring-up (incl. the metal PCIe-RC + xHCI);
-2. enumerate every device — **including the USB-HID keyboard behind the VL805
-   hub — into the `tairix_abi::hwtree`** (metal USB→tree enumeration, the
-   piece the deleted scaffold did imperatively);
-3. mount the read-only `/System` volume and **autoload its signed
-   `/System/Drivers/` store against the discovered tree** (`devmgr` match →
-   signed gate → user-space spawn), bringing the keyboard up in user space;
-4. unlock the data root and install the users database. The bootstrap tries
-   the **blank** passphrase silently first, so the installer image unlocks
-   with **no prompt** at all (§11); only a non-blank passphrase (debug
-   `root`, or a production operator-chosen one) draws the `Root passphrase:`
-   prompt (now keyboard-served on HDMI).
+**Boot sequencing (no ambient authority, fail closed §5.4):**
+1. the storage bootstrap floor (virtio-blk or EMMC2) binds the root block
+   device;
+2. the unlock kthread mounts the read-only `/System` volume and autoloads
+   its signed store against the discovered tree (`devmgr` match → signed
+   gate → user-space spawn); the bus drivers publish what they enumerate,
+   and each published node autoloads in turn, bringing the keyboard up;
+3. it unlocks the data root and installs the users database. The blank
+   passphrase is tried silently first, so the installer image unlocks with
+   no prompt (§11); only a non-blank passphrase draws the keyboard-served
+   `Root passphrase:` prompt.
 
-**Staged increments (each one fully-gated; host/`-M virt`-verifiable unless
-marked metal).** The in-kernel `keyboard_service`/`usb_keyboard.rs` scaffold
-stays the metal driver and stays wired throughout, so the working metal
-keyboard never regresses (§2.17), until the final flip:
-- **B1 — three-partition layout + read-only `/System` mount. DONE (host +
-  `-M virt`).** `lib/partition` carries a `ARXFSSystem` role (MBR type byte
-  `0x7e`, GPT GUID `TYPE_GUID_ARXFS_SYSTEM`). `ARXFS::open_read_only` mounts
-  a volume read-only and every mutator fails closed (`commit` backstop +
-  early `deny_if_read_only` guards, §5.4). The `/System` volume is a `ARXFS`
-  volume keyed by the non-secret well-known `tairix_drv_fs_arxfs::
-  SYSTEM_VOLUME_KEY` (effectively unencrypted; integrity rests on the
-  per-bundle signatures, §18.6). `tools/mkimage::rootfs::build_system_partition`
-  lays the §16.2 skeleton at the volume root and `build_rpi_image` emits the
-  three MBR partitions (boot @2048 / `/System` @133120 / encrypted root). The
-  kernel discovers + mounts `/System` read-only over a `lib/partition` window
-  in `root_mount::autoload_system_drivers`, auditing `SYSTEM_VOLUME_MOUNTED`
-  (4140) / `SYSTEM_VOLUME_UNAVAILABLE` (4141). The `encrypted_root_image`
-  `-M virt` fixture authors the split (the autoload driver bundles it plants
-  are built and signed by the `image_drivers` pipeline). The installer
-  (§11) is a Stage-8 placeholder; the split author is `tools/mkimage`.
-- **B2 — relocate the autoload store to the `/System` volume + run it
-  pre-unlock. DONE (host + `-M virt`).** The aarch64 unlock kthread now calls
-  `root_mount::autoload_system_drivers(&mut blk, &mut AutoloadHook, audit)`
-  **once, before** `unlock_root_disk_interactively`: it mounts the read-only
-  `/System` volume and runs the `AutoloadHook` against it, so the keyboard
-  driver is spawned in user space before the passphrase prompt
-  (keyboard-up-before-unlock). The encrypted-root post-mount hook is gone —
-  `unlock_root_and_load_users`/`mount_root_disk_and_load_users`/
-  `unlock_root_disk_interactively` no longer take a hook and `NoMountedRootHook`
-  is deleted (§2.14). The driver store is addressed **relative to the scanned
-  volume's root**: `enumerate_driver_store`/`DriverImageReader::read_image` take
-  an explicit `store_root`, and the `/System` volume (whose own root *is*
-  `/System`) is scanned at the volume-relative `tairix_kernel_core::
-  SYSTEM_VOLUME_STORE_PATH` (`/Drivers`), the §16.2 `/System/Drivers/` store.
-  The fixtures plant the signed `virtio_kbd` bundle into the `/System` volume's
-  `Drivers/` store (shared `tairix_test_arxfs_image::plant_nested_file`; the
-  encrypted root carries no drivers, §2.14), which sizes itself to what it
-  holds (`tairix_syshelp::build_system_volume`). `autoload_input_qemu_aarch64`
-  proves the full discover→signed
-  gate→spawn→`key_inject` path runs pre-unlock (PASS on
-  `AuditEvent::InputDelivered` 4050).
-- **B3 — floor USB→`hwtree` enumeration. DONE (host + metal).** Design A
-  (operator-approved): the bootstrap-floor USB bring-up
-  **owns** xHCI enumeration and emits the discovered HID-keyboard node into
-  the boot hardware tree, so the §18 discovery path sees the keyboard like
-  every other device (`AGENTS.md` §18.2). The controller is brought up
-  **once**, on the boot CPU at the init seam:
-  `keyboard_service::bring_up_keyboard_into_tree(ctx)` runs the VL805 chain
-  (the former kthread bring-up, unchanged) and returns the
-  `UsbDevice::describe_device` `HwNode` plus the live keyboard wrapped in a
-  one-shot-exclusive-owner `SendKeyboard` (`unsafe impl Send`, §2.10);
-  `init_spawn` attaches the node to the discovered tree via the host-tested
-  `unlock_service::augment_boot_tree` (the pure `extended_tree` core, §2.2)
-  **before** the unlock kthread reads `take_boot().tree`, then
-  `keyboard_service::spawn_pump(ctx, keyboard)` runs the report pump only
-  (no second bring-up, §2.16). The in-kernel pump stays the live keyboard
-  driver (§2.17) and `devmgr` leaves the node **unbound** — the metal
-  `/System/Drivers/` store carries no `usb_kbd` bundle until the B5 flip
-  (§18.4). The path is inert on `-M virt`/host (it only fires when a
-  `brcm,bcm2711-pcie` bridge is discovered), so the QEMU matrix is
-  unaffected; the live VL805 enumeration into the tree has no Pi-board QEMU
-  vertical (§0.4) and is metal-gated. Host-proven: `extended_tree` order
-  test + the engine's existing `bring_up`/`describe_device` suite; the
-  freestanding aarch64 kernel builds clean. **Metal-confirmed (§0.9):** the
-  Pi 4 UART log shows the keyboard brought up once at the init seam
-  (`4129` first report drained / `4131` heartbeat) and `devmgr` `13002`
-  *unbound* records for the enumerated HID node (matched against the store,
-  no bundle yet) — the node reached the autoload tree without a second
-  bring-up, and a typed keystroke reaches the prompt.
-- **B4 — live EMMC2 root bring-up. DONE (host + metal).** The aarch64
-  root-unlock kthread now dispatches
-  on which floor block driver `root_storage` bound: `virtio_blk_unlock` (the
-  proven `-M virt` / x86_64 path, device-IRQ + DMA) or the `emmc2_unlock`
-  arm. That arm admits `tairix-drv-storage-emmc2` through the signed §8 load
-  gate, resolves the matched node's **sole register window**
-  (`tairix_abi::driver::sole_register_window` — never a board constant, §18.1
-  / §2.20), maps it under `CAP_MMIO_MAP` through `Emmc2Host` + the shared
-  `KernelMmioMapper`, binds the controller's GIC SPI, carves the ADMA2 staging
-  inside the node's DMA window (`Emmc2DmaHost`, `CAP_MEM_DMA`), lends the
-  bring-up the firmware's EMMC2 clock and SD supplies (P8), opens the card,
-  and feeds the `Block` to the **shared** `finish_unlock` tail (mount + read-only
-  `/System` autoload + interactive unlock) virtio-blk also feeds (§2.2). The
-  fail-closed EMMC2 stub at `spawn_if_present` (`root unbound` for any
-  non-virtio binding) is deleted (§2.14); only a genuinely unknown floor
-  driver now fails closed. Host-proven at the driver level (`emmc2`
-  `MockSdhci` read/write + `wiring`/`BIND_KEYS` suites; `sole_register_window`
-  in `lib/abi`; the freestanding aarch64 kernel builds + clippy clean). No
-  `lib/abi`/C-header change. **Metal status — DONE (metal-confirmed).** On a
-  real Pi 4 the root-unlock kthread brings the SD card up over programmed
-  I/O, mounts the read-only `/System` volume (`SYSTEM_VOLUME_MOUNTED` 4140),
-  and unlocks + mounts the encrypted root (`4133` → users db `4040`
-  `records=1` → `ROOT_UNLOCK_INSTALLED` 4136 → `4139` login can
-  authenticate). Two SD bring-up defects found via the `stage=` field were
-  fixed to get there; they are the load-bearing facts of the driver's
-  `bringup::power_and_clock` and `geometry_from_csd`: (1) the host-controller
-  reset clears SD Bus Power, so bring-up powers the card rail (3.3 V via
-  `CONTROL0`, Linux's `0x0F`) before clocking; (2) the SDHCI controller right-aligns the
-  CRC-stripped R2 response, so `CSD_STRUCTURE` is read at `RESP3[23:22]`
-  (`(resp[3] >> 22) & 0x3`, consistent with `C_SIZE` at `RESP1[29:8]`) and
-  `MockSdhci` mirrors that layout. Both regression-tested
+What the finished parts guarantee:
+
+- **B1 — the split.** `lib/partition` carries the `ARXFSSystem` role (MBR type
+  `0x7e`, GPT `TYPE_GUID_ARXFS_SYSTEM`). `ARXFS::open_read_only` fails every
+  mutator closed. The `/System` volume is keyed by the non-secret
+  `SYSTEM_VOLUME_KEY`, its integrity resting on the per-bundle signatures.
+  `root_mount::with_system_volume` mounts it read-only only once its
+  `Drivers` store is found (`SYSTEM_VOLUME_MOUNTED` 4140, each decline
+  `SYSTEM_VOLUME_UNAVAILABLE` 4141) and never aborts the boot.
+- **B2 — pre-unlock autoload.** The store is scanned relative to the volume's
+  own root, at `SYSTEM_VOLUME_STORE_PATH` (`/Drivers`). `tools/xtask`'s
+  `image_drivers` installs the signed bus and USB class bundles there;
+  `autoload_caps` carries `CAP_HW_EMIT` and `CAP_MAILBOX` for them, each
+  driver still bounded by its manifest's intersection. Proven on `-M virt`
+  by `autoload_input_qemu_aarch64` (discover → signed gate → spawn →
+  `key_inject`, all before the unlock).
+- **B4 — the EMMC2 root.** The unlock kthread dispatches on the floor block
+  driver bound — virtio-blk or EMMC2 — into one shared `finish_unlock`
+  tail. EMMC2 is admitted through the signed load gate and maps only its
+  node's sole register window. Its two bring-up facts: the controller reset
+  clears SD Bus Power, so the card rail is powered (3.3 V) before clocking;
+  and the controller right-aligns the CRC-stripped R2 response, so
+  `CSD_STRUCTURE` is `RESP3[23:22]`
   (`a_stalled_or_unpowered_controller_fails_closed_at_the_first_command`,
-  `structure_bits_above_the_field_are_not_read_as_v2`); the `EventId(4139)`
-  failure line carries `stage=` + `error=` for any future stall. Metal
-  acceptance also surfaced — and this increment fixed — two login defects
-  that were masking the unlocked root (see P11 for the mechanism): (1)
-  `login` read the users database **once** at startup, but design B spawns
-  it before the unlock, so it cached the pre-unlock answer and refused
-  `root`/`root` forever; and (2) `login` printed its `Username:` prompt
-  immediately, on the **same** console the unlock kthread was prompting
-  `Root passphrase:` on, so the two prompts drew over each other. Both are
-  fixed by the `LateUsersDb` three-state machine + `tairix_login::supervise`
-  (see P11): while the unlock is pending `users_db_read` returns
-  `WouldBlock`, so `login` waits without prompting; once it resolves the
-  installed database is picked up (or the deny-all prompt runs).
-- **B5 (= 5e / D5d) — the flip — DONE (whole gate green).** The image now
-  installs the signed bus bundles and the USB class drivers into
-  `/System/Drivers/` through `tools/xtask` `commands/image_drivers.rs` over the
-  `tools/mkimage` `drivers` seam. The in-kernel keyboard scaffold
-  (`keyboard_service.rs` + `usb_keyboard.rs`, the init-seam bring-up call, the
-  boot PCIe/mailbox stash, and `unlock_service::augment_boot_tree`) is deleted
-  (§2.14), and `driver_catalog::IN_KERNEL_DRIVERS` is the storage bootstrap
-  floor only — virtio-blk + EMMC2 (§18.6); `pcie_brcm`/`bus_usb`/`usb_hid` are
-  evicted from it and the kernel's deps/`build.rs`. The keyboard comes up
-  entirely in user space: `FdtDiscovery` seeds the discovered
-  `brcm,bcm2711-pcie` + VideoCore mailbox nodes, `devmgr` autoloads the
-  recursive chain (pcie_brcm → emits VL805 fn → vl805 reloads firmware + emits
-  `usb,xhci` → `xhci` enumerates → `usb_hid` serves the keyboard), and
-  `autoload_caps` carries
-  `CAP_HW_EMIT` + `CAP_MAILBOX` so the bus bundles can emit nodes / call the
-  mailbox (per-driver manifest∩ still binds, §5.2). The `hw_remove_node`
-  syscall (no. 38) landed as the kernel-side mirror of `hw_emit_node`
-  (ownership-checked subtree removal + generation bump); the device-manager
-  unload reaction and the modular host-controller-driver / class-driver split
-  it serves are staged in `plans/USB.md` (U1 — kernel driver-unload mechanism
-  + devmgr unload-on-removal reaction — is the next increment). The live
-  enumerate→emit→autoload chain is metal-gated (§0.9): no `-M virt` Pi-USB
-  vertical exists (§0.4). **Metal acceptance:** top-down autoload from
-  `/System` and a keystroke with the scaffold gone.
-  - **DMA ordering (latest metal iteration).** With the EMMC2 store scan sped
-    up (P8 4-bit/data-clock), the keyboard enumeration reached
-    `EnumStage::SetConfiguration` then failed `id=4126 … completion_hex=1
-    reject_hex=2` — a SUCCESS xHCI Transfer Event whose TRB pointer mismatched
-    the awaited status TRB. Root cause: the device-shared DMA buffer is Normal
-    **Non-Cacheable** (coherent) but the user-space driver issued **no memory
-    barriers**, so on the non-I/O-coherent BCM2711 PCIe the controller could
-    observe the doorbell before the published TRBs and the driver could read a
-    fresh event cycle bit with a stale TRB pointer (a torn read). The gap was
-    latent until the faster boot outran the controller's write-back window.
-    Fix: new `lib/dma-barrier` crate (`dma_wmb`/`dma_rmb`, the user-space §1
-    asm carve-out analogous to `lib/abi-trap`; aarch64 `dmb oshst`/`dmb oshld`,
-    x86_64 `sfence`/`lfence`, riscv64 `fence iorw,iorw`, host/wasm32 no-op),
-    wired into `lib/usb` at the controller-start + doorbell handoffs and the
-    `poll_event` read (cycle bit first → `dma_rmb` → entry body). Host/CI-proven;
-    the live keystroke is the metal acceptance item. Same-class gap in
-    `lib/virtio`'s notify/used-ring path is the next consumer to adopt the
-    barrier (§2.18 tracked follow-up).
-  - **Console hand-off after a *successful* unlock (latest metal iteration).**
-    With the keyboard delivering, the unlock succeeded but neither console
-    could be typed into at `Username:` (keyboard *and* serial). Cause: the
-    in-kernel unlock kthread owns console 0 for the passphrase prompt and
-    must release it when the unlock resolves, but only the fail-closed
-    branches called `release_console0_to_login` — the **success** path
-    skipped it, so the console-0 gate stayed latched shut and the UART
-    receive interrupt stayed masked (a successful unlock had no host/CI
-    coverage: the `root_unlock_login` vertical drives the policy, not the
-    kthread). Fix: the release is now coupled to the unlock *resolving* —
-    `unlock_root_disk_interactively` takes an `on_resolved` callback fired
-    exactly once on **every** outcome and internal return path (the kthread
-    passes `release_console0_to_login`, which now also `console_wake`s so
-    type-ahead buffered during the closed window is delivered). Regression
-    `root_mount::the_console_is_released_on_every_unlock_outcome` (Installed
-    + GaveUp) and the `root_unlock_login` vertical now asserts the release
-    fired on success.
-  - **`users_db_read` pending poll no longer logs as an error.** With login
-    working end-to-end, the boot log still showed a `[ERROR] id=5004
-    SYSCALL_HANDLER_REJECTED … users_db_read err=19` every ~5 s while the
-    encrypted root unlocked: `WouldBlock` (the `abi-v1` "nothing yet, retry"
-    signal `login` legitimately gets while pending) was audited as a genuine
-    ERROR-level rejection. The dispatcher now records an audited handler's
-    `WouldBlock` as the distinct, below-`Info` `SYSCALL_HANDLER_WOULD_BLOCK`
-    (Debug, id 5005) instead of `SYSCALL_HANDLER_REJECTED` (id 5004) — it is
-    not a rejection (every check passed, no security decision was taken), so a
-    poll-while-pending cannot flood the log, while the record stays available
-    for flood/DoS forensics when the level is lowered (`AGENTS.md` §2.1 /
-    §19.4). Regressions in `kernel/syscall` (`audit`: id/level frozen;
-    `table`: `WouldBlock` → 5005, a real rejection still → 5004).
-    Likewise `NotFound` — the "no such object" answer a routine existence
-    probe gets (`login` opening the optional `system.conf` store and the
-    desktop bundle each round, both documented fail-closed-to-default) —
-    is recorded as the below-`Info` `SYSCALL_HANDLER_NOT_FOUND` (Debug,
-    id 5006), never 5004: a genuine authorisation refusal is
-    `PermissionDenied`, which the secured VFS never masks as `NotFound`,
-    so no security decision is hidden. Regressions in `kernel/syscall`
-    (`audit`: id/level frozen; `table`: `NotFound` → 5006).
-  - **The silent blank-passphrase probe no longer logs as an error.** With
-    the `users_db_read` poll quietened, the one remaining boot `[ERROR]` was
-    `id=4134 ROOT_MOUNT_REJECTED … cause=unlock_refused`: `root_mount`'s
-    interactive unlock tries the **blank** passphrase silently first (so a
-    fresh installer image boots with no prompt, §11), and on a non-blank
-    image that probe fails `Mount(PermissionDenied)` on *every* boot — an
-    expected fail-closed authentication non-match, but `reject()` logged it
-    at ERROR. A wrong passphrase is now classified (`rejection_record`) as
-    the below-`Info` `4142` `ROOT_UNLOCK_KEY_REJECTED` (Debug); `4134`
-    `ROOT_MOUNT_REJECTED` (Error) is narrowed to *structural* refusals
-    (unreadable/invalid descriptor, missing/malformed table or partition,
-    non-arxfs volume, device fault). The interactive wrong-attempt audit
-    stays `4137` `ROOT_UNLOCK_RETRY` (Warn) and give-up `4138` (Error). So
-    neither the per-boot probe nor routine retries flood the log, while the
-    record stays available for brute-force forensics when the level is
-    lowered (`AGENTS.md` §2.1 / §19.4). Regressions in
-    `kernel/tairix-kernel` `root_mount`: the two wrong-passphrase tests
-    assert no `4134`, a new classifier test pins
-    wrong-passphrase → (4142, Debug) and every structural refusal →
-    (4134, Error).
+  `structure_bits_above_the_field_are_not_read_as_v2`).
+- **The hand-off to login.** Login waits on the unlock rather than racing
+  its prompt (P11). `unlock_root_disk_interactively`'s `on_resolved`
+  releases console 0 on every outcome and wakes any type-ahead
+  (`the_console_is_released_on_every_unlock_outcome`). Neither the silent
+  blank-passphrase probe nor login's pending `users_db_read` poll logs as an
+  error: a wrong passphrase is `ROOT_UNLOCK_KEY_REJECTED` (4142, Debug)
+  while a structural refusal stays `ROOT_MOUNT_REJECTED` (4134, Error), and
+  an audited handler's `WouldBlock` and `NotFound` are
+  `SYSCALL_HANDLER_WOULD_BLOCK` and `SYSCALL_HANDLER_NOT_FOUND` (5005 and
+  5006, Debug), never the 5004 rejection.
 
 **Done when:** on real hardware the desktop composites through `rpi_hvs`,
 the taskbar renders, and a USB keyboard/mouse drives the WM; a recorded
@@ -4452,8 +2633,7 @@ two users — or the same user twice — can be logged in concurrently.
        `provides_root_block` entries: virtio-blk + EMMC2). The kernel binds a
        block driver because that driver's signed bind table matched a
        discovered node's identity, never because it *hunted* for a disk
-       (§18.3 / §18.5 / §18.6). It is the storage analogue of the keyboard
-       bind gate (`keyboard_service`): a streaming `RootBlockSelection`
+       (§18.3 / §18.5 / §18.6). A streaming `RootBlockSelection`
        resolves each node off the discovery sink with no whole-tree buffer
        (§2.16). It is **resolution only** — it mounts nothing — so the
        metal-confirmed boot is unaffected (§2.17). Fail closed (§2.9):
@@ -4564,8 +2744,7 @@ two users — or the same user twice — can be logged in concurrently.
        LANDED (host-proven + the whole `-M virt` QEMU matrix green, both Pi
        images built).** `kernel/tairix-kernel::unlock_service` admits an
        in-kernel root-unlock scheduler kthread at the aarch64 init seam (in
-       `init_spawn`, right after the keyboard scaffold, before `admit_init`
-       diverges) that brings the bootstrap virtio-blk root device up over the
+       `init_spawn`, before `admit_init` diverges) that brings the bootstrap virtio-blk root device up over the
        INCREMENT (1) device-IRQ path and runs the device-independent
        `unlock_root_disk_interactively` policy. What landed:
        - `unlock_service` (top-level module, host-tested on the CI host): the

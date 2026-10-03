@@ -31,13 +31,13 @@ layering), §18 (discovery and the floor), §19 (threat model), §24 and §26
 | IOM5 | Revocation instead of quarantine on translated nodes: a driver's death blocks its streams and frees every carve at once; an orderly removal frees (D241); the quarantine confined to untranslated nodes | done |
 | IOM6 | Faults: drained in thread context from each unit's interrupt, stable audit events, a per-unit budget, a storm silences the stream and marks the node `Offline`. Host-proven against the register-level VT-d model, and a live QEMU vertical provokes one real fault delivered through the fault-event MSI, attributed to the device's node, canary untouched (§12). The storm stays host-proven — not live (§12) | done |
 | IOM7 | Default-deny from the first bus-master enable: units enabled before TAIRiX sets Bus Master Enable on any function; bus mastering follows ownership | done |
-| IOM8 | Isolation groups: requester-ID aliasing, ACS on the upstream path, multi-function devices without ACS, shared platform stream ids; the group is the unit of domain ownership | planned |
-| IOM9 | PCI identity and extended configuration space: every function a node carrying its segment:BDF, the 0x100+ capability walk (ACS, ATS, PRI, PASID, SR-IOV), segment-aware ECAM. Includes discriminating `PciFunction::admit`'s `VIRTIO_F_ACCESS_PLATFORM` gate to virtio functions by vendor id, so a non-virtio translated master is published with its stream rather than refused — latent until non-virtio PCI discovery exists (`plans/OPEN-DEFECTS.md`) | planned |
+| IOM8 | Isolation groups: requester-ID aliasing, ACS turned on and read on the upstream path and a switch's internal bus, multi-function devices without ACS, the extended-capability walk ACS lives in; the group is the unit of ownership | done |
+| IOM9 | PCI identity: every function a node carrying its segment:BDF, the ATS, PRI, PASID and SR-IOV capabilities decoded on IOM8's extended-capability walk, segment-aware ECAM. Includes discriminating `PciFunction::admit`'s `VIRTIO_F_ACCESS_PLATFORM` gate to virtio functions by vendor id, so a non-virtio translated master is published with its stream rather than refused — latent until non-virtio PCI discovery exists (`plans/OPEN-DEFECTS.md` D507) | planned |
 | IOM10 | ATS, PRI and PASID policy: ATS off at the device and refused at the unit; untrusted external-facing ports | planned |
 | IOM11 | x86_64 interrupt remapping: VT-d IR (IRTEs, remappable MSI and IO-APIC entries, source-id validation) and x2APIC under EIM | planned |
 | IOM12 | `kernel/iommu/amdvi`: AMD-Vi — IVRS discovery, the device table, command buffer, event log, its page tables and interrupt remapping tables | planned |
 | IOM13 | The generic PCIe ECAM host bridge on aarch64 and riscv64 `virt` (`pci-host-ecam-generic`) — the prerequisite for every translated vertical off x86 | planned |
-| IOM14 | FDT translation topology: `#iommu-cells`, `iommus`, `iommu-map` and `iommu-map-mask` in `lib/fdt` and the shared walk | planned |
+| IOM14 | FDT translation topology: `#iommu-cells`, `iommus`, `iommu-map` and `iommu-map-mask` in `lib/fdt` and the shared walk, naming one group for platform masters that share a stream id | planned |
 | IOM15 | `kernel/iommu/smmuv3`: Arm SMMUv3 — the stream table, stage 2 (stage 1 where stage 2 is absent), the command queue with `CMD_SYNC`, the event queue, `GERROR`, `GBPA` abort | planned |
 | IOM16 | `kernel/iommu/riscv`: the RISC-V IOMMU — the device directory, second-stage (first-stage where absent) tables, the command queue with `IOFENCE.C`, the fault queue | planned |
 | IOM17 | `kernel/iommu/virtio`: virtio-iommu — attach, map, unmap and probe over the request queue, faults on the event queue, bypass off; ACPI VIOT and FDT topology | planned |
@@ -117,11 +117,13 @@ These are settled. A change that contradicts one stops and asks (§15.7).
    frees every carve at once. The quarantine (D167) stays for untranslated
    nodes, where nothing but a reset can prove a device quiet.
 
-8. **One owner per stream, attached lazily.** A stream belongs to at most one
-   live domain. A parent that publishes a child for the same device (a bus
-   driver and the controller it exposes) never carves, so the child's driver
-   attaches the stream at its first carve; a second live owner is refused and
-   its carve fails. IOM8 widens "stream" to "isolation group".
+8. **One owner per isolation group, attached lazily.** A group belongs to at
+   most one live domain, which translates the streams of its owner's own node
+   alone. A parent that publishes a child for the same device (a bus driver
+   and the controller it exposes) never carves, so the child's driver claims
+   the group at its first carve; a second live owner of the group is refused
+   and its carve fails. The unit refuses a second domain any one stream as
+   well, so a tree that misnames a group still cannot share a stream.
 
 9. **Faults are security events.** A translation fault is drained in thread
    context from the unit's interrupt — never polled — recorded with a stable
@@ -166,7 +168,11 @@ These are settled. A change that contradicts one stops and asks (§15.7).
 Residual, and named: a bug in a unit's family code (the TCB grew by it); a
 unit erratum a family must work around; a platform with no unit; the moments
 between firmware's hand-off and the boot probe, which only firmware's own
-protected memory regions cover; physical attacks (§19.9).
+protected memory regions cover; a device below a port without ACS source
+validation presenting another's requester id, which grouping cannot stop;
+peer traffic between root ports, taken on the root complex's word (the PCI
+Express specification requires ACS on a root port that routes it); physical
+attacks (§19.9).
 
 ## 1. IOM1 — topology in the hardware tree
 
@@ -344,14 +350,20 @@ owner, and clears it as it takes the function back.
   every process (`PortIoFacility::kernel_owned`).
 - **Before take-over.** The probe stops these functions mastering:
   - every function behind a unit, whose stream the unit will block anyway,
-    except a bridge or one a unit keeps a firmware window for (decision 4);
+    except one that masters nothing of its own — a bridge with a type-1 or
+    type-2 header, which forwards, or a host bridge, the root complex's own
+    function, whose Bus Master Enable chipsets commonly hardwire on, so take
+    over would report it refused on every boot — or one a unit keeps a
+    firmware window for (decision 4). An LPC bridge is type 0 and is stopped;
   - every virtio function it publishes or refuses.
 
-  A function behind no unit that TAIRiX does not drive is left as firmware
-  left it (decision 12). At each unit's enable, the facility reads every
-  recorded function behind it. The ones still mastering without a firmware
-  window are reported as `masters` on the unit's `DmaTranslationUnit`
-  record.
+  A function behind a unit is stopped whether or not its unit then comes up:
+  one firmware keeps no window for has no claim on DMA after the hand-off. A
+  function behind no unit that TAIRiX does not drive is left as firmware left
+  it (decision 12). At each unit's enable, the facility stops every recorded
+  function behind it still mastering without a firmware window, and reports
+  how many it stopped and how many would not stop (`stopped`, `refused` on
+  the unit's `DmaTranslationUnit` record).
 - **Translated owners.** The facility grants bus mastering once an owner's
   domain is attached, at its first carve.
   - It names the owner's streams, so a bus-published child of a device
@@ -369,21 +381,35 @@ owner, and clears it as it takes the function back.
   owner before it releases a block (`DeviceTranslation::end`). Whichever
   context drops the space, the order is: withdraw, block, one confirmed
   invalidation, free.
-- **Changes carry their owner's generation.** The host keeps, for each
-  function, the generation of the latest owner that changed it, and ignores
-  a change from an earlier one. Owners are admitted in generation order, so
-  an owner whose end lands after its successor began never stops the
-  successor's function.
+- **Changes are ordered by when owners began.** The host hands out an epoch
+  as each owner begins — an untranslated driver at its first carve, a
+  translated owner as it is published — keeps, for each function, the epoch
+  of the latest owner that changed it, and ignores a change from one that
+  began earlier. A node's successor retires its predecessor first, and a
+  group's next owner waits for its holder's end, so an owner whose end lands
+  late never stops its successor, whatever generations they were admitted
+  with: a parent and the child it published for one device share a function.
 - **Untranslated owners.** On x86_64 with no unit, the kernel still owns
   configuration space. A driver's function masters from its first carve
   (`dma_alloc`, `shm_create_dma`; the floor disk at its hand-over) until the
-  driver ends. That narrows the window but confines nothing; the quarantine
+  driver ends; a driver never handed its function takes nothing back. The
+  bit is written under the address-space registry's lock, where a concurrent
+  carve of the same driver waits, so none is answered before its function
+  masters. That narrows the window but confines nothing; the quarantine
   stays (decisions 7, 12).
+- **The kernel's own device.** The floor bring-up claims the floor disk's
+  node for the kernel before it touches the device
+  (`InitSpawnCtx::claim_for_kernel`), so no process is admitted as its driver,
+  translated or not: none can reach the device or take its function back.
 - **The Pi.** `drivers/bus/pcie_brcm` owns the VL805's configuration space.
-  - It makes the function a bus master as it publishes it, and stops it if
-    the publish is refused.
-  - Nothing tells it when the xHCI driver two nodes down ends, and the
-    platform has no unit (decision 12).
+  - It makes the function a bus master just before it publishes it: the
+    driver may run the moment its node is published, and the halted
+    controller issues no DMA before its driver runs it. A refused publish
+    stops it again, and the refusal is reported whether or not the function
+    stops.
+  - Nothing tells it when the xHCI driver ends, so the function keeps
+    mastering past its driver (`plans/OPEN-DEFECTS.md` D587); the platform
+    has no unit (decision 12).
   - The root port's own Bus Master Enable forwards for the whole subtree and
     originates no DMA. It must be set after the link trains, and it stays on
     for the bridge's life.
@@ -391,19 +417,62 @@ owner, and clears it as it takes the function back.
   Enable clear disables itself and drops DRIVER_OK. So the grant lands
   before a driver sets DRIVER_OK (its first carve precedes it), and a
   command bit that already holds the asked value is never written.
-- **Audit.** Each change the kernel makes is recorded with what the
-  function reads back (`DmaBusMaster`, 4147).
+- **Audit.** Each change the kernel makes is recorded with its owner's node
+  and generation and what the function reads back (`DmaBusMaster`, 4147),
+  under the host's lock, so the records keep the order the changes landed
+  in. A reach for the configuration ports is refused and recorded
+  (`PortIoRefused`, 4158).
 
-## 7. IOM8–IOM11 — isolation groups, identity, ATS, interrupt remapping
+## 7. IOM8 — isolation groups
 
-- **Groups.** Two streams the fabric cannot keep apart — a conventional PCI
-  device behind a PCIe-to-PCI bridge (the bridge's alias), a multi-function
-  device without ACS, functions behind a switch port without ACS source
-  validation and peer-to-peer redirect, or platform masters sharing an id —
-  form one group, and the group is what one owner attaches. The bus driver
-  that enumerates a subtree is trusted for that subtree's isolation facts,
-  because it can rewrite them in configuration space; the kernel bounds it to
-  the subtree its grant covers.
+Two functions the fabric cannot keep apart form one group, and one owner
+holds a group at a time.
+
+- **In the tree.** Each translated node carries its own `IommuStream`, an
+  `IommuAlias` for each further stream the fabric tags its DMA with, and one
+  `IommuGroup` — `(unit, id)`, the id the least requester id among the
+  group's members. A group covers only itself and an alias only aliases
+  inside it, and neither covers a requester stream: a child for the same
+  device keeps its parent's group, and no driver can turn an alias into a
+  function it may master. Delegating a finer grouping to a bus driver that
+  enumerates a subtree of its own is IOM13's, with the first such driver.
+- **Aliases.** Every bridge between a function and its root bus that takes
+  ownership of its requests tags them: one to conventional PCI with its
+  secondary bus and function `00.0`, a conventional one or one from
+  conventional PCI with its own id; a PCI Express port passes them on (PCI
+  Express to PCI/PCI-X Bridge rev. 1.0 §2.3). The owner's domain translates
+  every alias with the node's own stream, and a firmware window is kept on
+  every alias of the function it names.
+- **Grouping** (`lib/pci::topology`, from one walk of the hierarchy). A
+  function joins the furthest device its DMA cannot be told apart from — the
+  topmost bridge that tags it, then every bridge above whose path to the root
+  lacks ACS — and that device, sharing a slot without ACS, joins its siblings
+  that lack it too: Linux's `pci_device_group`, without device-specific
+  exceptions. A port isolates when Source Validation, Request and Completion
+  Redirect and Upstream Forwarding, each it implements, are on. Beyond
+  Linux, a bus below the root complex holding a bridge that does not
+  isolate, or an endpoint beside a bridge, is open — a request reaches every
+  function on it without passing a port that redirects it — and everything
+  below an open bus is one group; grouping by the path alone would let one
+  downstream port without ACS reach its siblings' devices.
+- **ACS.** Where a unit covers the segment, the walk turns on every
+  isolating control each function offers and reads back what the hardware
+  kept. The controls live in extended configuration space, so a segment
+  reached through mechanism #1 groups as if no function had ACS.
+- **Ownership.** A second node's owner is refused its first carve
+  (`DmaError::GroupBusy`, answering `Busy`, audited `DmaGroupRefused`, 4148)
+  while the group's holder lives; a holder whose end the unit could not
+  confirm keeps the group from every successor, and the kernel's floor disk
+  keeps its group from every driver. The domain translates only the owner's
+  own node's streams: the group's other members stay blocked, or in their
+  firmware domains, so a function the owner was not handed cannot master
+  into its domain and a firmware-mastered sibling never shares it.
+- **Unconfinable.** A function whose group spans units, or that is tagged
+  with more streams than a node can name, is published to no driver and
+  audited (`DmaTranslationBypass`, `reason=unconfinable`).
+
+## 7a. IOM9–IOM11 — identity, ATS, interrupt remapping
+
 - **ATS.** Disabled in the device's ATS capability and refused at the unit
   (VT-d context `TT` untranslated-only; SMMUv3 `EATS` zero; AMD-Vi `IOTLB`
   zero; RISC-V `EN_ATS` zero).
@@ -434,7 +503,8 @@ owner, and clears it as it takes the function back.
 ## 9. Performance
 
 Mapping happens at carve time, so a driver's steady-state rings cost nothing
-per I/O. Leaves are the largest the alignments allow, because a buddy carve is
+per I/O. Discovery walks the hierarchy once and every observer reads that
+walk; grouping is one pass, a union over each function's path to its root. Leaves are the largest the alignments allow, because a buddy carve is
 naturally aligned and its IOVA is allocated at its own alignment. Teardown is
 one confirmed sync per domain, not one per carve, in every death path: a
 space's teardown ends its owner before it releases a block. Bus mastering costs
@@ -446,8 +516,9 @@ hash probe under a per-facility lock, off every hot path. Neither
 facility-wide lock is held across a wait on a unit: an owner's first carve
 retires a predecessor and adopts its streams under that owner's own state,
 which it holds from before the owner is published, so only carves for the
-same node wait for it; firmware domains are taken out of their table before
-they are destroyed. A unit serialises its own queue, and every wait on it is
+same node wait for it; a group's next owner waits for its holder's end under
+that holder's state alone; firmware domains are taken out of their table
+before they are destroyed. A unit serialises its own queue, and every wait on it is
 bounded by the family's command budget. Domain ids are handed out fresh first,
 then in the order they were freed, at constant cost. IOM20 adds
 measurement-backed batching for streaming mappings, per-descriptor wait status
@@ -514,12 +585,18 @@ whose updates are logarithmic rather than a sorted vector's linear moves.
     - a predecessor's withdraw before its successor's grant;
     - `forget`, an unconfirmed end, a failed adoption and a firmware window;
     - a node removed while its first carve is made;
-    - the take-over count.
+    - the stragglers stopped at take-over;
+    - owners of one shared function ordered by when they began, not by
+      generation.
   - **kernel/mem:** teardown ends a translated owner once, first.
   - **Syscall-layer tests:** an untranslated driver masters from its carve to
-    its end; a refused carve grants nothing; a translated one follows its
-    domain; a kernel-owned port opens to no grant.
-  - **The PCI host and the probe's quiesce rule** are host-tested.
+    its end, the bit written under the registry's lock; a driver never handed
+    its function takes nothing back; a refused carve grants nothing; a
+    translated one follows its domain; a kernel-owned port opens to no grant,
+    and the refusal is recorded; a node the kernel drives admits no driver.
+  - **The PCI host** (epochs, the record made under its lock, the take-over
+    stop) and **the probe's stop rule** (an LPC bridge stopped, no host bridge
+    and no type-1 bridge) are host-tested.
   - **Live:** `tairix-test-dma-translation-qemu-x86-64` fails on a unit
     taking over a mastering function, or on a function granted before
     translation. It passes only on a key that arrives after the keyboard's
@@ -528,7 +605,36 @@ whose updates are logarithmic rather than a sorted vector's linear moves.
   - **Live:** `tairix-test-dma-fault-qemu-x86-64` ends its owner after the
     canary and passes only once the function reads back not mastering.
   - **The untranslated grant** is exercised by every untranslated x86_64
-    virtio vertical: without it the device can neither DMA nor interrupt.
+    vertical whose driver is autoloaded (`autoload_input`,
+    `netstack_autoload`): without it the device can neither DMA nor
+    interrupt. The harness verticals set the bit themselves (D579).
+- **IOM8:**
+  - **lib/pci topology tests:** aliasing through bridges to and from
+    conventional PCI and nested ones; ACS on root and downstream ports; a
+    switch with one port lacking ACS grouped whole, and an endpoint beside a
+    switch's ports; slots with and without ACS; reserved port types;
+    held-back and unassigned buses; every bus-number tree that is no tree
+    refused. The walk over a writable mock turns ACS on and reads it back,
+    and finds none through a port that ignores the write, a mechanism with
+    no extended space, or a malformed extended list.
+  - **ABI:** the alias and group facts round-trip, refuse non-canonical
+    encodings, and cover only what the rules above allow.
+  - **DMAR:** a firmware window is kept for every alias of its function,
+    once.
+  - **Facility:** aliases attached and blocked with the rest; one owner per
+    group, the refusal audited; a forgotten owner freeing its group; the
+    kernel's group; an unconfirmed end keeping its group; a node naming no
+    group, two, or a stream on another unit carving nothing; a fault on an
+    alias laid against its owner; mastering named by requester streams
+    only; a refused adoption leaving attribution intact.
+  - **Probe:** each function's stream, aliases and group; unconfinable groups
+    (two units, more aliases than a node names).
+  - **Live:** `tairix-test-dma-translation-qemu-x86-64` hangs its keyboard
+    behind a `pcie-pci-bridge`: QEMU delivers its DMA under the bridge's
+    alias, so the key arrives only if the alias is translated, and any
+    translation fault fails the run. Group exclusion between two live
+    drivers stays host-proven: which of two drivers carves first is a race,
+    and a vertical that passes on whichever wins proves nothing.
 - **The storm stays host-proven, not live.** QEMU's virtio device calls
   `virtio_error` and breaks on the first refused DMA, and the storm threshold
   sits above any VT-d fault ring, so a live storm would need ~512 device resets

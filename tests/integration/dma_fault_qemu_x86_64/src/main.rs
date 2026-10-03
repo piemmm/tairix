@@ -50,15 +50,14 @@ mod kernel {
 
     use alloc::boxed::Box;
 
-    use tairix_abi::driver::pci::requester_id;
+    use tairix_abi::driver::pci::config_address;
     use tairix_abi::hwtree::snapshot_nodes;
-    use tairix_abi::{CapabilityId, HwNode};
+    use tairix_abi::{CapabilityId, HwMatchKey, HwNode};
     use tairix_arch_x86_64::paging::{AddressSpace as ArchAddressSpace, PageTablePool};
     use tairix_arch_x86_64::qemu_exit;
     use tairix_caps::CapabilitySet;
     use tairix_drv_bus_virtio::PciTransport;
     use tairix_drv_storage_virtio_blk::VIRTIO_BLK_DEVICE_ID;
-    use tairix_kernel::hwdiscovery::virtio_pci_modern_device_id;
     use tairix_kernel::hwtree_store::HW_TREE_SOURCE;
     use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
     use tairix_kernel::x86_64::arch_wrapper::published_irq_table;
@@ -205,7 +204,8 @@ mod kernel {
                 if matches!(
                     field(event, "outcome"),
                     Some(FieldValue::Str("translating"))
-                ) && matches!(field(event, "masters"), Some(FieldValue::UnsignedInt(0)))
+                ) && matches!(field(event, "stopped"), Some(FieldValue::UnsignedInt(0)))
+                    && matches!(field(event, "refused"), Some(FieldValue::UnsignedInt(0)))
                 {
                     self.translating.store(true, Ordering::Release);
                     self.settle();
@@ -332,20 +332,21 @@ mod kernel {
         );
     }
 
-    /// The translated hardware-tree node of the function at requester id
-    /// `requester`: the one that masters DMA through a unit (carries an
+    /// The translated virtio-blk node the probe published: the device this
+    /// vertical drives, whose DMA its unit confines (it carries an
     /// `IommuStream`).
-    fn translated_node(requester: u32) -> Result<HwNode, &'static str> {
+    fn translated_block_node() -> Result<HwNode, &'static str> {
         let snapshot = HW_TREE_SOURCE
             .snapshot()
             .map_err(|_| "hardware-tree snapshot")?;
+        let key = HwMatchKey::virtio(VIRTIO_BLK_DEVICE_ID);
         snapshot_nodes(&snapshot)
             .ok_or("hardware-tree decode")?
             .find(|node| {
-                node.address() == requester
+                node.match_keys().contains(&key)
                     && node.resources().iter().any(|r| r.iommu_streams().is_ok())
             })
-            .ok_or("no translated node for the provisioned function")
+            .ok_or("no translated virtio-blk node")
     }
 
     /// The provisioned device: its transport, the `'static` translated DMA
@@ -389,19 +390,19 @@ mod kernel {
             .map_err(|_| "mmio map")?,
         ));
 
-        let device_id = u16::try_from(virtio_pci_modern_device_id(VIRTIO_BLK_DEVICE_ID))
-            .map_err(|_| "virtio-blk device id out of range")?;
-        let (mut transport, bdf) = {
+        // The device's node, and the function the probe published it for.
+        let node = translated_block_node()?;
+        let requester = u16::try_from(node.address()).map_err(|_| "node names no function")?;
+        let bdf = config_address(requester);
+        let mut transport = {
             let mapper = KernelMmioMapper::new(&mut *mmio, caller, audit);
-            let prov = pci
-                .with(|bus| provision_virtio_pci(bus, device_id, &mapper, PciTransport::new))
-                .map_err(|_| "virtio-PCI provisioning")?;
-            (prov.transport, prov.bdf)
+            pci.with(|bus| provision_virtio_pci(bus, bdf, &mapper, PciTransport::new))
+                .map_err(|_| "virtio-PCI provisioning")?
+                .transport
         };
 
-        // The device's node, by its requester id, and the domain it carves
-        // through: the kernel's own, which no driver can take.
-        let node = translated_node(u32::from(requester_id(bdf)))?;
+        // The domain the device carves through: the kernel's own, which no
+        // driver can take.
         if !translation.translates(node.id()) {
             return Err("provisioned function is not behind a translation unit");
         }

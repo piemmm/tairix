@@ -896,13 +896,13 @@ the inherent ones and whose `map_virtio_window` default composes the
 resolve with the mapper. The default is inherited rather than
 re-implemented, so the seam ring 0 calls is the only such path.
 
-The kernel's `provision_virtio_pci(bus, device_id, mapper, build)` (in
-`kernel/virtio/src/virtio_pci_walk.rs`) takes a
-`&dyn VirtioPciBus`, enumerates the bus into a bounded table, picks the
-first function matching `VIRTIO_PCI_VENDOR_ID` and the requested device
-ID, maps the four windows through the `CAP_MMIO_MAP`-gated `MmioMapper`,
+The kernel's `provision_virtio_pci(bus, bdf, mapper, build)` (in
+`kernel/virtio/src/virtio_pci_walk.rs`) takes a `&dyn VirtioPciBus` and
+the function its caller's bound node was published for, maps that
+function's four windows through the `CAP_MMIO_MAP`-gated `MmioMapper`,
 reads the notify multiplier, and assembles a `PciTransportWindows`
-(which lives in `lib/virtio`). It does not name a concrete transport
+(which lives in `lib/virtio`). It walks no bus: the function driven is the
+node bound, never the first of its kind the bus happens to hold. It does not name a concrete transport
 itself: the caller passes `build` — in production
 `PciTransport::new` — so `kernel/virtio` depends only on `lib/*` and
 never on the `drivers/bus/virtio` crate (`AGENTS.md` §17.4:
@@ -940,13 +940,31 @@ panic (`AGENTS.md` §2.9).
 
 `provision_virtio_pci` yields the transport its `build` closure
 constructs. The in-kernel floor disk's bring-up
-(`kernel/tairix-kernel/src/x86_64/root_unlock.rs`) provisions it through
+(`kernel/tairix-kernel/src/x86_64/root_unlock.rs`) claims its node for the
+kernel, so no process is admitted as its driver, provisions it through
 the kernel's one owner of PCI configuration space
 (`kernel/tairix-kernel/src/pci_host.rs`), routes its MSI-X interrupt (see
-below), and hands the transport to the signed virtio-blk driver over a
-per-driver DMA pool. User-space virtio drivers are granted their register
-windows, routed interrupt line and DMA constraint by the boot probe and
-never reach configuration space at all.
+below), hands the function over as a bus master — through its domain when
+a unit translates it, at once otherwise — and hands the transport to the
+signed virtio-blk driver over a per-driver DMA pool. User-space virtio
+drivers are granted their register windows, routed interrupt line and DMA
+constraint by the boot probe and never reach configuration space at all.
+
+### Topology and isolation
+
+`PciTopology::topology(acs)`, implemented by every mechanism, walks every
+function once and returns a `tairix_pci::topology::Topology`: each
+function's identity, header, PCI Express port type and ACS registers, the
+bridge forwarding to each bus — proven to form a tree, or the walk is
+refused `DeviceFault` — and each function's requester-id aliases and
+isolation group (`docs/src/security/iommu.md`). With `AcsPolicy::Enable`
+it first turns on the isolating ACS controls each function offers and
+reads back what stayed on. The legacy capability list and the extended
+list from offset `0x100` are each walked by one bounded iterator; the
+extended space is reached through ECAM and the BCM2711 window only, so
+mechanism #1 reports no extended capability. Every kernel PCI observer
+reads this one walk, so a bus is scanned once however many observers run
+and however many functions it holds.
 
 ### MSI-X interrupt routing
 
@@ -1008,7 +1026,7 @@ supertrait of `Bus`) is that seam:
   `MmioMapper` (refusing I/O-port and unused BARs). The resolved base is
   the address held in the BAR — a *PCIe-bus* address; turning it into a
   CPU mapping is the host bridge's job, so a bridge-aware `MmioMapper`
-  (the Pi 4's `IdentityMmioMapper`, which applies the outbound `ranges`
+  (`lib/drvrt`'s `RtDriverHost`, which applies an outbound `BusWindow`'s
   bus→CPU translation) does it, not this architecture-neutral walk;
 - `enable_memory_space(bdf)` turns on decoding of the function's
   memory BARs, and `set_bus_master(bdf, master)` lets it issue upstream
@@ -1166,10 +1184,9 @@ consumer (`lsusb`) attributes them to a single physical device —
 purely descriptive, never part of bind matching. It fails closed with
 `NotFound` before a device has been enumerated.
 
-Together with the bus-driver `BIND_KEYS` (item 5a), the `devmgr` autoload
-wiring (item 5c) is the data-driven path that **replaced** the former
-in-kernel `usb_keyboard` composition scaffold (deleted at `plans/PI.md`
-P10 D5d): the whole chain is now autoloaded user-space drivers.
+Together with the bus-driver `BIND_KEYS` (`plans/PI.md` P10 5a), the
+`devmgr` autoload wiring (5c) is the data-driven path the whole chain runs
+on: every link is an autoloaded user-space driver.
 
 ## Constructing the real-hardware bus
 

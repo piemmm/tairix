@@ -1161,10 +1161,10 @@ impl<'a, A: KernelArch> KernelInitSpawner<'a, A> {
     }
 
     /// End drivers, and hand kernel services their devices, through
-    /// `mastering`.
+    /// `mastering`, where the kernel owns configuration space.
     #[must_use]
-    pub fn with_mastering(mut self, mastering: crate::iommu::Mastering) -> Self {
-        self.mastering = Some(mastering);
+    pub fn with_mastering(mut self, mastering: Option<crate::iommu::Mastering>) -> Self {
+        self.mastering = mastering;
         self
     }
 }
@@ -1198,9 +1198,8 @@ enum DispatchRole {
 /// 2. Top up the buffered console transmit
 ///    ([`KernelArch::pump_console_tx`]). The loop calls this on **every**
 ///    successful dispatch, not only when it idles, so a port whose
-///    transmit is buffered keeps draining even while a perpetually
-///    runnable in-kernel kthread (e.g. the polled USB-keyboard report
-///    pump) keeps the loop from ever reaching its idle park — the output
+///    transmit is buffered keeps draining even while runnable tasks keep
+///    the loop from ever reaching its idle park — the output
 ///    then flows at the loop's dispatch rate, independent of the
 ///    transmit-FIFO interrupt the silicon may not self-sustain. A no-op on ports with synchronous
 ///    console output.
@@ -1815,6 +1814,10 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         self.mastering
     }
 
+    fn claim_for_kernel(&self, node: u32) -> Result<(), Errno> {
+        self.aspaces.write().claim_for_kernel(node)
+    }
+
     fn spawn_driver_process(
         &self,
         path: &str,
@@ -2249,7 +2252,9 @@ fn run_phases<A: KernelArch>(
 
     // Before any driver can be admitted, so no admitted driver's device
     // reaches memory its domain does not map.
-    let mastering = crate::iommu::Mastering::new(arch.bus_mastering(), audit_sink);
+    let mastering = arch
+        .bus_mastering()
+        .map(|port| crate::iommu::Mastering::new(port, audit_sink));
     let dma_translation =
         build_dma_translation(&arch, frame_allocator, hw_tree, audit_sink, mastering);
 
@@ -2814,7 +2819,7 @@ fn build_dma_translation<A: KernelArch + 'static>(
     frames: &'static FrameAllocator,
     tree: &'static (dyn crate::hwtree::HwTreeSource + 'static),
     audit: &'static (dyn Sink + Sync),
-    mastering: crate::iommu::Mastering,
+    mastering: Option<crate::iommu::Mastering>,
 ) -> Option<&'static crate::iommu::Translation> {
     let snapshot = tree.snapshot().ok()?;
     let mut nodes = alloc::vec::Vec::new();
@@ -2863,7 +2868,7 @@ fn build_dma_translation<A: KernelArch + 'static>(
         crate::iommu::Translation::start(taken, guarded, tree, audit, mastering);
     for (node, outcome) in outcomes {
         match outcome {
-            Ok(masters) => audit_unit_translating(audit, node, masters),
+            Ok(quiesced) => audit_unit_translating(audit, node, quiesced),
             Err(err) => audit_translation_unit(audit, node, unit_refusal(err)),
         }
     }
@@ -2963,12 +2968,18 @@ fn audit_translation_unit(audit: &(dyn Sink + Sync), node: u32, outcome: &'stati
     );
 }
 
-/// The unit at `node` translates; `masters` functions behind it were found
-/// mastering DMA as it took over though firmware keeps no window for them.
-fn audit_unit_translating(audit: &(dyn Sink + Sync), node: u32, masters: usize) {
+/// The unit at `node` translates; the functions behind it found mastering
+/// DMA as it took over, though firmware keeps no window for them, were
+/// stopped or would not stop.
+fn audit_unit_translating(audit: &(dyn Sink + Sync), node: u32, quiesced: crate::iommu::Quiesced) {
+    let count = |count: usize| tairix_log::FieldValue::UnsignedInt(count as u64);
     emit(
         audit,
-        Level::Info,
+        if quiesced.refused == 0 {
+            Level::Info
+        } else {
+            Level::Warn
+        },
         AuditEvent::DmaTranslationUnit,
         &[
             Field {
@@ -2980,10 +2991,12 @@ fn audit_unit_translating(audit: &(dyn Sink + Sync), node: u32, masters: usize) 
                 value: tairix_log::FieldValue::Str("translating"),
             },
             Field {
-                key: "masters",
-                value: tairix_log::FieldValue::UnsignedInt(
-                    u64::try_from(masters).unwrap_or(u64::MAX),
-                ),
+                key: "stopped",
+                value: count(quiesced.stopped),
+            },
+            Field {
+                key: "refused",
+                value: count(quiesced.refused),
             },
         ],
     );
@@ -3117,8 +3130,9 @@ pub(crate) struct KernelState<A: KernelArch> {
     /// The DMA translation boot started, when a unit discovery reported
     /// translates.
     pub(crate) dma_translation: Option<&'static crate::iommu::Translation>,
-    /// The bus mastering each DMA owner's function follows.
-    pub(crate) mastering: crate::iommu::Mastering,
+    /// The bus mastering each DMA owner's function follows, where the kernel
+    /// owns configuration space.
+    pub(crate) mastering: Option<crate::iommu::Mastering>,
 }
 
 fn phase_started(sink: &(dyn Sink + Sync), phase: Phase) {
@@ -3279,9 +3293,9 @@ mod tests {
 
     #[test]
     fn spawn_kernel_service_admits_a_kthread_on_the_boot_cpu() {
-        // The aarch64 keyboard service rides this seam (`plans/PI.md`
-        // P10/P11): a kernel-only kthread admitted alongside PID 1 so the
-        // dispatch loop runs it. Building a live `KernelState` through
+        // The root-unlock and write-back services ride this seam: a
+        // kernel-only kthread admitted alongside PID 1 so the dispatch loop
+        // runs it. Building a live `KernelState` through
         // `run_phases` and a `KernelInitSpawner` over it lets us assert the
         // service is admitted onto the boot CPU's scheduler.
         let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
@@ -3513,9 +3527,8 @@ mod tests {
     fn service_between_dispatches_tops_up_the_console_transmit() {
         // Regression for the Pi 4 metal serial stall: the dispatch loop's
         // Ran arm must top up the buffered console transmit on **every**
-        // dispatch, not only when it reaches the idle park — otherwise a
-        // perpetually-runnable in-kernel kthread (the polled USB-keyboard
-        // report pump) keeps the loop from ever idling and the log freezes
+        // dispatch, not only when it reaches the idle park — otherwise
+        // runnable tasks keep the loop from ever idling and the log freezes
         // on real silicon (the transmit-FIFO interrupt does not self-sustain
         // the drain). Before the fix the Ran arm only drained deferred wakes
         // and never pumped, so this count stayed `0`.

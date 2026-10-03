@@ -181,6 +181,7 @@ no ambient root, signed code) are designed in from the kernel up.
 | Encrypted root + encrypted swap, no plaintext mode (§4, §11) | Secret/data recovery at rest | ✓ | ✓ | ✓ | — |
 | Capability-gated, bounded DMA carves and MMIO grants (§4, §18.1) | A driver reaching device registers or memory it was not granted | ✓ | ✓ | ✓ | — |
 | DMA translation: a device reaches only its node's domain, revoked at its driver's end (§4, `plans/IOMMU.md`) | Malicious-device or compromised-driver DMA into any memory, before or after the unit takes over; a dead driver's device writing freed memory | ◐ VT-d | ▢ | ▢ | — |
+| Isolation groups: one owner at a time for devices the fabric cannot keep apart — requester-id aliases, ACS (`plans/IOMMU.md` IOM8) | Two drivers whose devices share a bridge's alias or reach each other peer-to-peer below the unit, each reaching the other's memory or device | ◐ VT-d | ▢ | ▢ | — |
 | A removed device's authority revoked at removal (§4, §18.4) | A vanished device's driver, or anything it delegated to, reaching its successor's registers, interrupts, endpoints or buffers | ✓ | ✓ | ✓ | — |
 | Continuous fuzzing of parsers/ABI/IPC/syscalls (§19.6) | Input-handling memory-safety bugs | ✓ | ✓ | ✓ | ✓ |
 | Keyed hashing of caller-chosen keys, per-boot / per-process (§26.2, §26.4) | Hash-flooding: chosen keys collapsing a hash index onto one bucket to starve a shared lock or a bonded link | ✓ | ✓ | ✓ boot seed | ◐ unkeyed |

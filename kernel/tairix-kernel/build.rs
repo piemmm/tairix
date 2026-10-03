@@ -433,11 +433,11 @@ fn build_signed_driver_image(
 
     // The drivers are statically linked; their `register()` only needs
     // `CAP_DRV_LOAD` (the admission check). `kind = InKernel` makes the
-    // gate additionally require `CAP_DRV_KERNEL` of the caller. No further capabilities are requested: the real MMIO/DMA work
-    // runs over the keyboard service's own capability-gated host, not this
-    // admission view.
+    // gate additionally require `CAP_DRV_KERNEL` of the caller. No further
+    // capabilities are requested: the real MMIO/DMA work runs over the
+    // bring-up's own capability-gated host, not this admission view.
     let caps = [CapabilityId::DRV_LOAD];
-    let bind_key_count = u8::try_from(bind_keys.len()).expect("chain bind tables fit in u8");
+    let bind_key_count = u8::try_from(bind_keys.len()).expect("floor bind tables fit in u8");
     let capability_count = u16::try_from(caps.len()).expect("caps fit in u16");
 
     let mut manifest = DriverManifest {

@@ -204,18 +204,14 @@ pub trait InitSpawnCtx {
     ///
     /// This is the in-kernel counterpart of [`admit_init`](Self::admit_init):
     /// where that admits a user (EL0) task, this admits a pure-kernel
-    /// coroutine (`plans/SPAWN.md` SP1, [`crate::spawn_kthread`]). Its sole
-    /// production use is the aarch64 USB-keyboard service
-    /// (`plans/PI.md` P10/P11): a driver loop that brings the VL805 chain up
-    /// once and then polls it forever, injecting decoded key presses into
-    /// the input-focus arbiter. Because the bring-up is slow (PCIe link
-    /// training) and the poll is continuous, it cannot run on the boot path
-    /// before user mode — it must be a scheduled task that yields between
-    /// polls so PID 1 also runs.
+    /// coroutine (`plans/SPAWN.md` SP1, [`crate::spawn_kthread`]). The
+    /// root-unlock and write-back services ride it: their work waits on
+    /// devices, so it must be a scheduled task rather than run on the boot
+    /// path before user mode.
     ///
     /// `body` is the service work: it owns its driver resources (mapped
-    /// register windows, the DMA region, the keyboard chain — all `'static`
-    /// because kernel state is never freed) and uses the object-safe
+    /// register windows, the DMA region — `'static` because kernel state is
+    /// never freed) and uses the object-safe
     /// [`crate::YieldHandle`] to suspend cooperatively, so it need not name
     /// the port's concrete context-switch type.
     /// A body that returns ends the service; a continuous service never
@@ -292,6 +288,20 @@ pub trait InitSpawnCtx {
     /// The default returns [`None`]: the kernel owns no configuration space.
     fn bus_mastering(&self) -> Option<crate::iommu::Mastering> {
         None
+    }
+
+    /// Take hardware-tree `node` for a kernel driver for good: no process is
+    /// admitted as its driver after this, so none can reach the device a
+    /// kernel service drives or take its function back.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::Busy`] while a driver holds the node. The default refuses with
+    /// [`Errno::NotImplemented`]: a context that cannot keep processes off the
+    /// node cannot host a kernel driver for it.
+    fn claim_for_kernel(&self, node: u32) -> Result<(), Errno> {
+        let _ = node;
+        Err(Errno::NotImplemented)
     }
 
     /// Spawn a verified user-space **driver** image into its own,

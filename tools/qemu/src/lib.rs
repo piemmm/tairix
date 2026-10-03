@@ -859,6 +859,11 @@ pub struct AttachedDevices {
     pub crypto_accelerator: bool,
     /// The pointing devices beside the keyboard.
     pub pointing: PointingDevices,
+    /// The input devices sit behind a PCIe-to-PCI bridge, which tags their
+    /// DMA with its own alias, so a translation unit sees the alias rather
+    /// than the device. Only x86_64's `q35` board has a PCIe root to hang the
+    /// bridge from.
+    pub input_bridge: bool,
 }
 
 /// The pointing devices a run attaches after its keyboard, in this order on
@@ -898,6 +903,7 @@ impl AttachedDevices {
         ramfb: false,
         crypto_accelerator: false,
         pointing: PointingDevices::NONE,
+        input_bridge: false,
     };
 }
 
@@ -1476,6 +1482,14 @@ impl Spec {
         self
     }
 
+    /// Put the input devices behind a PCIe-to-PCI bridge
+    /// ([`AttachedDevices::input_bridge`]).
+    #[must_use]
+    pub fn with_input_bridge(mut self) -> Self {
+        self.devices.input_bridge = true;
+        self
+    }
+
     /// Start the board's emulated real-time clock at `unix_secs` rather
     /// than the host clock, so a clock-chip driver's decoded reading is a
     /// value the vertical can assert against.
@@ -1842,6 +1856,16 @@ fn validate_boot_inputs(spec: &Spec) -> io::Result<()> {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
             format!("no DMA translation unit to attach on {:?}", spec.arch),
+        ));
+    }
+    // The bridge hangs from the `q35` PCIe root, which only a translated
+    // x86_64 run boots.
+    if spec.devices.input_bridge
+        && (spec.arch != Arch::X86_64 || spec.dma_translation != DmaTranslation::Present)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "an input bridge needs the translated x86_64 q35 board",
         ));
     }
     if !spec.kernel.is_file() {
@@ -5167,5 +5191,24 @@ mod dma_translation_tests {
             std::io::ErrorKind::NotFound,
             "x86_64 attaches one"
         );
+    }
+
+    /// The input bridge hangs from the translated `q35` board's PCIe root.
+    #[test]
+    fn an_input_bridge_needs_the_translated_x86_64_board() {
+        for spec in [
+            Spec::for_x86_64_kernel("/nonexistent/kernel"),
+            Spec::for_aarch64_kernel("/nonexistent/kernel"),
+        ] {
+            let refused = validate_boot_inputs(&spec.with_input_bridge()).expect_err("refused");
+            assert_eq!(refused.kind(), std::io::ErrorKind::Unsupported);
+        }
+        let x86 = validate_boot_inputs(
+            &Spec::for_x86_64_kernel("/nonexistent/kernel")
+                .with_dma_translation()
+                .with_input_bridge(),
+        )
+        .expect_err("no kernel");
+        assert_eq!(x86.kind(), std::io::ErrorKind::NotFound);
     }
 }

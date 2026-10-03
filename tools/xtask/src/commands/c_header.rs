@@ -756,6 +756,8 @@ fn resource_kind_name(kind: HwResourceKind) -> &'static str {
         HwResourceKind::IommuStream => "IOMMU_STREAM",
         HwResourceKind::IommuReserved => "IOMMU_RESERVED",
         HwResourceKind::Property => "PROPERTY",
+        HwResourceKind::IommuAlias => "IOMMU_ALIAS",
+        HwResourceKind::IommuGroup => "IOMMU_GROUP",
     }
 }
 

@@ -9,10 +9,8 @@
 //! Reference: Intel Virtualization Technology for Directed I/O, Architecture
 //! Specification, rev. 4.1, chapter 8.
 
-use tairix_abi::driver::pci::PciBus;
 use tairix_abi::{
-    HwDeviceClass, HwMatchKey, HwNode, HwResource, IommuReservedWindow, IommuStreams,
-    HW_NODE_ROOT_ID,
+    HwDeviceClass, HwMatchKey, HwNode, HwResource, IommuReservedWindow, HW_NODE_ROOT_ID,
 };
 use tairix_arch_api::{DiscoveryError, HwNodeSink};
 
@@ -554,30 +552,11 @@ impl DeviceScope<'_> {
     }
 }
 
-/// Bridge bus numbers read through a PCI bus's configuration space.
-pub struct PciBridges<'a>(pub &'a dyn PciBus);
-
-/// Configuration-space offsets and the type-1 header a bridge carries.
-const CONFIG_ID: u16 = 0x00;
-const CONFIG_HEADER: u16 = 0x0C;
-const CONFIG_BUSES: u16 = 0x18;
-const HEADER_BRIDGE: u32 = 1;
-
-impl BridgeBuses for PciBridges<'_> {
-    fn bus_range(&self, bridge: SourceId) -> Option<(u8, u8)> {
-        let bdf = tairix_abi::driver::pci::config_address(bridge.raw());
-        let id = self.0.read_config(bdf, CONFIG_ID).ok()?;
-        if id & 0xFFFF == 0xFFFF {
-            return None;
-        }
-        let header = self.0.read_config(bdf, CONFIG_HEADER).ok()?;
-        if (header >> 16) & 0x7F != HEADER_BRIDGE {
-            return None;
-        }
-        let [_, secondary, subordinate, _] =
-            self.0.read_config(bdf, CONFIG_BUSES).ok()?.to_le_bytes();
-        Some((secondary, subordinate))
-    }
+/// The requester ids the fabric tags a function's DMA with besides its own:
+/// a bridge that takes ownership of the requests below it.
+pub trait DmaAliases {
+    /// Visit each requester id `source`'s DMA also arrives as.
+    fn aliases(&self, source: SourceId, visit: &mut dyn FnMut(SourceId));
 }
 
 /// What [`emit_unit_nodes`] placed in the tree.
@@ -594,10 +573,12 @@ pub struct UnitNodes {
 
 /// Emit one [`HwDeviceClass::Iommu`] node per unit, numbered from `first_id`
 /// in table order and keyed `compatible`, carrying its register window and
-/// each firmware reserved window of a function it translates. `bridges`
-/// reads `segment`'s configuration space, so a window on another segment is
-/// never resolved through it. A full sink ends the emission: the units
-/// before it keep their nodes.
+/// each firmware reserved window of a function it translates — kept for the
+/// function's own stream and for every alias of it, since firmware's DMA
+/// arrives under whichever the fabric tags it with. `bridges` and `aliases`
+/// describe `segment`, so a window on another segment is never resolved
+/// through them. A full sink ends the emission: the units before it keep
+/// their nodes.
 ///
 /// # Errors
 ///
@@ -609,6 +590,7 @@ pub fn emit_unit_nodes(
     compatible: &[u8],
     segment: u16,
     bridges: &dyn BridgeBuses,
+    aliases: &dyn DmaAliases,
     sink: &mut dyn HwNodeSink,
 ) -> Result<UnitNodes, DiscoveryError> {
     let key = HwMatchKey::compatible(compatible).map_err(|_| DiscoveryError::MalformedSource)?;
@@ -645,20 +627,24 @@ pub fn emit_unit_nodes(
                 if dmar.unit_for(region.segment(), source, bridges) != Some(index) {
                     continue;
                 }
-                let Ok(window) =
-                    IommuReservedWindow::new(u32::from(source.raw()), region.base(), region.len())
-                        .map(HwResource::iommu_reserved_window)
-                else {
-                    placed.dropped += 1;
-                    continue;
+                let mut keep = |stream: SourceId| {
+                    let Ok(window) = IommuReservedWindow::new(
+                        u32::from(stream.raw()),
+                        region.base(),
+                        region.len(),
+                    )
+                    .map(HwResource::iommu_reserved_window) else {
+                        placed.dropped += 1;
+                        return;
+                    };
+                    // Firmware may name one window for a function twice, and
+                    // functions behind one bridge share its alias.
+                    if !node.resources().contains(&window) && node.push_resource(window).is_err() {
+                        placed.dropped += 1;
+                    }
                 };
-                // Firmware may name one window for a function twice.
-                if node.resources().contains(&window) {
-                    continue;
-                }
-                if node.push_resource(window).is_err() {
-                    placed.dropped += 1;
-                }
+                keep(source);
+                aliases.aliases(source, &mut keep);
             }
         }
         if sink.emit(node).is_err() {
@@ -669,24 +655,22 @@ pub fn emit_unit_nodes(
     Ok(placed)
 }
 
-/// The stream the PCI function `source` on `segment` masters DMA as, through
-/// the unit [`emit_unit_nodes`] numbered from `first_id`, or [`None`] when no
-/// unit with a node translates it.
+/// The node of the unit [`emit_unit_nodes`] numbered from `first_id` that
+/// translates the PCI function `source` on `segment`, or [`None`] when no
+/// unit with a node does.
 #[must_use]
-pub fn stream_resource(
+pub fn unit_node(
     dmar: &Dmar<'_>,
     first_id: u32,
     nodes: UnitNodes,
     segment: u16,
     source: SourceId,
     bridges: &dyn BridgeBuses,
-) -> Option<HwResource> {
+) -> Option<u32> {
     let index = dmar
         .unit_for(segment, source, bridges)
         .filter(|&index| index < nodes.emitted)?;
-    let unit = unit_node_id(first_id, index)?;
-    let streams = IommuStreams::new(unit, u32::from(source.raw()), 1).ok()?;
-    Some(HwResource::iommu_stream(streams))
+    unit_node_id(first_id, index)
 }
 
 fn unit_node_id(first_id: u32, index: usize) -> Option<u32> {

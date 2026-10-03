@@ -3,12 +3,15 @@
 //! (`plans/IOMMU.md`).
 //!
 //! A node is translated when its tree entry names an [`IommuStreams`] on a
-//! unit brought up here. Its owner's first carve creates a domain holding the
-//! node's streams and the firmware windows they keep; each carve maps there;
-//! the owner's end revokes it — streams blocked, the unit's caches confirmed
-//! clean — after which every carve of that generation is unreachable and is
-//! freed at once rather than quarantined. A stream no owner holds keeps only
-//! its firmware windows, in a firmware domain of its own.
+//! unit brought up here. Its owner's first carve claims the node's isolation
+//! group ([`tairix_abi::IommuGroup`]) and creates a domain translating every stream the
+//! node's DMA arrives as, with the firmware windows they keep; each carve maps
+//! there; the owner's end revokes it — streams blocked, the unit's caches
+//! confirmed clean — after which every carve of that generation is unreachable
+//! and is freed at once rather than quarantined. One owner holds a group at a
+//! time: the fabric cannot keep its members apart, so a second node's owner is
+//! refused until the first has ended. A stream no owner holds keeps only its
+//! firmware windows, in a firmware domain of its own.
 //!
 //! A node's function masters DMA only while an owner holds its domain: bus
 //! mastering is granted once the domain is attached and withdrawn before it
@@ -17,31 +20,34 @@
 //!
 //! An end the unit cannot confirm proves nothing about what the device can
 //! still reach, and nothing later can: the owner stays recorded for good, its
-//! carves are never reused, and the node takes no successor. The facility is
+//! carves are never reused, and its group takes no successor. The facility is
 //! the custody of translated carves for the same reason — a block reaches it
 //! only when its unit could not confirm the device lost it, so it keeps the
 //! frames for good.
 //!
-//! Locks are taken in the order owners → owner state → firmware → unit, and
-//! neither facility-wide lock is held across a wait on a unit: an adoption
-//! waits under its own owner's state alone, which it holds from before anyone
-//! else can reach the owner, so carves for other nodes go on meanwhile.
+//! Locks nest owner state → owners → tree, owner state → firmware → unit, and
+//! owner state → PCI host; no two owners' states are held at once. Neither
+//! facility-wide lock is held across a wait on a unit: an adoption waits under
+//! its own owner's state alone, which it holds from before anyone else can
+//! reach the owner, so carves for other groups go on meanwhile.
 
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::ops::{Range, RangeInclusive};
+use core::ops::Range;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use tairix_abi::driver::DriverBindKey;
 use tairix_abi::{
     HwMatchKey, HwNode, HwResourceKind, IommuReservedWindow, IommuStreams, RegisterWindow,
+    HW_NODE_MAX_RESOURCES,
 };
 use tairix_arch_api::PageTableFrames;
 use tairix_collections::HashMap;
 use tairix_devmatch::{DriverCandidate, MatchResolution};
 use tairix_hash::BuildFastHash;
+use tairix_inline::ArrayVec;
 use tairix_kernel_iommu_api::{Clock, Domain, IommuError, IommuUnit, TableCoherence};
 use tairix_kernel_mem::{AllocError, DeviceTranslation, DmaBlock, DmaCustody, DmaError};
 use tairix_log::{Field, FieldValue, Level, Sink};
@@ -54,7 +60,7 @@ mod faults;
 mod mastering;
 
 pub use faults::{FaultEnv, FAULT_LIMITS, FAULT_OWNER};
-pub use mastering::{BusMastering, MasterChange, MasterTarget, Mastering};
+pub use mastering::{BusMastering, MasterChange, MasterOwner, MasterTarget, Mastering, Quiesced};
 
 /// The generation the kernel's own bootstrap-floor drivers carve as. Every
 /// user driver's is later, and none can take a node from the kernel.
@@ -156,10 +162,53 @@ pub fn take_over(node: &HwNode, env: &UnitEnv<'_>) -> Result<Unit, Refusal> {
     })
 }
 
-/// A unit's node, and whether it started translating: if it did, how many
-/// functions behind it were found mastering DMA as it took over though
-/// firmware keeps no window for them.
-pub type UnitOutcome = (u32, Result<usize, IommuError>);
+/// A unit's node, and whether it started translating: if it did, the
+/// functions behind it found mastering DMA as it took over, though firmware
+/// keeps no window for them.
+pub type UnitOutcome = (u32, Result<Quiesced, IommuError>);
+
+/// Stream ranges one node names: its resources bound how many.
+type Streams = ArrayVec<IommuStreams, HW_NODE_MAX_RESOURCES>;
+
+/// A unit, by its index in the facility, and a group on it.
+type GroupKey = (usize, u32);
+
+/// What a translated node's tree entry says of its DMA.
+struct Identity {
+    unit: usize,
+    group: u32,
+    /// The streams naming the node's own functions.
+    requester: Streams,
+    /// The further streams the fabric delivers its DMA as.
+    aliases: Streams,
+}
+
+impl Identity {
+    fn group_key(&self) -> GroupKey {
+        (self.unit, self.group)
+    }
+
+    /// Every stream the node's DMA arrives as, once each, ascending.
+    fn streams(&self) -> Result<Vec<u32>, DmaError> {
+        let ranges = || {
+            self.requester
+                .as_slice()
+                .iter()
+                .chain(self.aliases.as_slice())
+        };
+        let count = ranges().try_fold(0usize, |total, range| {
+            total.checked_add(usize::try_from(range.count()).ok()?)
+        });
+        let mut streams = Vec::new();
+        streams
+            .try_reserve_exact(count.ok_or(DmaError::Translation)?)
+            .map_err(|_| DmaError::Alloc(AllocError::OutOfMemory))?;
+        streams.extend(ranges().flat_map(|range| stream_ids(*range)));
+        streams.sort_unstable();
+        streams.dedup();
+        Ok(streams)
+    }
+}
 
 /// The kernel's DMA translation.
 pub struct Translation {
@@ -168,7 +217,7 @@ pub struct Translation {
     guarded: Vec<Range<u64>>,
     tree: &'static dyn HwTreeSource,
     audit: &'static (dyn Sink + Sync),
-    mastering: Mastering,
+    mastering: Option<Mastering>,
     owners: SpinLock<Owners>,
     /// Streams no owner holds, each keeping its firmware windows.
     firmware: SpinLock<HashMap<(usize, u32), Domain<'static>, BuildFastHash>>,
@@ -179,64 +228,104 @@ struct Owners {
     /// carves nothing more, until the node leaves the tree — and for good if
     /// its end was not confirmed.
     nodes: HashMap<u32, Arc<Owner>, BuildFastHash>,
-    /// The node each recorded owner's streams belong to, by unit and stream,
-    /// so a fault is laid at its device's door.
+    /// Each group's latest owner: while it lives no other node's owner may
+    /// take the group, and one whose end was not confirmed keeps it for good.
+    groups: HashMap<GroupKey, Arc<Owner>, BuildFastHash>,
+    /// The node whose owner last attached each stream, by unit and stream,
+    /// so a fault is laid at its device's door. Written only once an
+    /// adoption has attached the stream.
     streams: HashMap<(usize, u32), u32, BuildFastHash>,
 }
 
 impl Owners {
-    /// Record `owner` for `node` if the node's record is still `expected`,
-    /// answering whether it did.
-    fn replace(
+    /// Record `owner` for its node and its group if neither record has moved
+    /// since it was read — still `predecessor` and `holder` — answering
+    /// whether it did. Room for every stream the owner will attach is taken
+    /// here, so indexing them once attached cannot fail.
+    fn publish(
         &mut self,
-        node: u32,
-        expected: Option<&Arc<Owner>>,
         owner: &Arc<Owner>,
+        predecessor: Option<&Arc<Owner>>,
+        holder: Option<&Arc<Owner>>,
     ) -> Result<bool, DmaError> {
-        let unchanged = match (self.nodes.get(&node), expected) {
-            (None, None) => true,
-            (Some(current), Some(expected)) => Arc::ptr_eq(current, expected),
-            _ => false,
-        };
-        if !unchanged {
+        let key = owner.identity.group_key();
+        if !same(self.nodes.get(&owner.node), predecessor) || !same(self.groups.get(&key), holder) {
             return Ok(false);
         }
         let out_of_memory = |_| DmaError::Alloc(AllocError::OutOfMemory);
-        if expected.is_none() {
-            let count =
-                usize::try_from(owner.streams.count()).map_err(|_| DmaError::Translation)?;
-            self.streams.try_reserve(count).map_err(out_of_memory)?;
-            self.nodes.try_reserve(1).map_err(out_of_memory)?;
-            for stream in stream_range(owner.streams) {
-                let _ = self.streams.try_insert((owner.unit, stream), node);
-            }
-        }
-        let _ = self.nodes.try_insert(node, Arc::clone(owner));
+        self.nodes.try_reserve(1).map_err(out_of_memory)?;
+        self.groups.try_reserve(1).map_err(out_of_memory)?;
+        self.streams
+            .try_reserve(owner.streams.len())
+            .map_err(out_of_memory)?;
+        let _ = self.nodes.try_insert(owner.node, Arc::clone(owner));
+        let _ = self.groups.try_insert(key, Arc::clone(owner));
         Ok(true)
     }
 
-    /// Put `predecessor` back as `node`'s record if `owner` still holds it,
-    /// or forget the node when there was none.
-    fn restore(&mut self, node: u32, owner: &Arc<Owner>, predecessor: Option<Arc<Owner>>) {
-        if !self
-            .nodes
-            .get(&node)
-            .is_some_and(|current| Arc::ptr_eq(current, owner))
-        {
-            return;
-        }
-        match predecessor {
-            Some(predecessor) => {
-                let _ = self.nodes.try_insert(node, predecessor);
-            }
-            None => self.remove(node, owner),
+    /// Lay the streams `owner`'s adoption attached at its node's door.
+    fn attached(&mut self, owner: &Owner) {
+        for &stream in &owner.streams {
+            // Room was taken at publication, so this cannot allocate.
+            let _ = self
+                .streams
+                .try_insert((owner.identity.unit, stream), owner.node);
         }
     }
 
-    fn remove(&mut self, node: u32, owner: &Owner) {
-        self.nodes.remove(&node);
-        for stream in stream_range(owner.streams) {
-            self.streams.remove(&(owner.unit, stream));
+    /// Put each record `owner`, whose adoption failed, holds back as it was.
+    fn restore(
+        &mut self,
+        owner: &Arc<Owner>,
+        predecessor: Option<Arc<Owner>>,
+        holder: Option<Arc<Owner>>,
+    ) {
+        put_back(&mut self.nodes, owner.node, owner, predecessor);
+        put_back(&mut self.groups, owner.identity.group_key(), owner, holder);
+    }
+
+    /// Forget `owner`, whose node left the tree and whose end the unit
+    /// confirmed, wherever it is still the record.
+    fn forget(&mut self, owner: &Arc<Owner>) {
+        if same(self.nodes.get(&owner.node), Some(owner)) {
+            self.nodes.remove(&owner.node);
+        }
+        let key = owner.identity.group_key();
+        if same(self.groups.get(&key), Some(owner)) {
+            self.groups.remove(&key);
+        }
+        let (unit, node) = (owner.identity.unit, owner.node);
+        self.streams
+            .retain(|&(at, _), &mut holder| at != unit || holder != node);
+    }
+}
+
+fn same(current: Option<&Arc<Owner>>, expected: Option<&Arc<Owner>>) -> bool {
+    match (current, expected) {
+        (None, None) => true,
+        (Some(current), Some(expected)) => Arc::ptr_eq(current, expected),
+        _ => false,
+    }
+}
+
+/// Make `previous` `key`'s record again if `owner` still holds it, or forget
+/// the key when there was none.
+fn put_back<K: core::hash::Hash + Eq>(
+    records: &mut HashMap<K, Arc<Owner>, BuildFastHash>,
+    key: K,
+    owner: &Arc<Owner>,
+    previous: Option<Arc<Owner>>,
+) {
+    if !same(records.get(&key), Some(owner)) {
+        return;
+    }
+    match previous {
+        // The key is present, so the replacement cannot allocate.
+        Some(previous) => {
+            let _ = records.try_insert(key, previous);
+        }
+        None => {
+            records.remove(&key);
         }
     }
 }
@@ -244,20 +333,34 @@ impl Owners {
 struct Owner {
     generation: u64,
     node: u32,
-    unit: usize,
-    streams: IommuStreams,
+    identity: Identity,
+    /// Every stream its domain translates, ascending: the identity's, once
+    /// each, worked out at its first carve so its end allocates nothing.
+    streams: Vec<u32>,
+    /// When it began, which orders its function's bus-mastering changes.
+    epoch: u64,
     state: SpinLock<OwnerState>,
     /// Whether a carve of this owner was audited as unconfirmed: once per
     /// owner, so a driver retrying it cannot flood the log.
     unconfirmed: AtomicBool,
 }
 
+impl Owner {
+    fn master(&self) -> MasterOwner {
+        MasterOwner {
+            node: self.node,
+            generation: self.generation,
+            epoch: self.epoch,
+        }
+    }
+}
+
 enum OwnerState {
     /// Held under the owner's lock while its domain is made; never seen.
     Adopting,
     Live(Domain<'static>),
-    /// Its domain could not be made; the node's record went back to what
-    /// was there before.
+    /// Its domain could not be made; the node's and the group's records went
+    /// back to what was there before.
     Unadopted(DmaError),
     Revoked {
         confirmed: bool,
@@ -267,19 +370,20 @@ enum OwnerState {
 impl Translation {
     /// Start translating through `units`: each stream firmware keeps a window
     /// for is attached to its firmware domain, the functions behind the unit
-    /// still mastering without one are counted, then each unit is enabled.
+    /// still mastering without one are stopped, then each unit is enabled.
     /// `guarded` is every discovered unit's register window, kept from every
     /// process whether or not its unit translates; a carve the unit could not
     /// confirm is recorded to `audit`; bus mastering follows each owner
-    /// through `mastering`. Beside the facility, each unit's outcome; one that
-    /// did not enable is dropped, and its devices stay untranslated.
+    /// through `mastering`, where the kernel owns configuration space. Beside
+    /// the facility, each unit's outcome; one that did not enable is dropped,
+    /// and its devices stay untranslated.
     #[must_use]
     pub fn start(
         units: Vec<Unit>,
         guarded: Vec<Range<u64>>,
         tree: &'static dyn HwTreeSource,
         audit: &'static (dyn Sink + Sync),
-        mastering: Mastering,
+        mastering: Option<Mastering>,
     ) -> (Self, Vec<UnitOutcome>) {
         let mut translation = Self {
             units: Vec::with_capacity(units.len()),
@@ -289,6 +393,7 @@ impl Translation {
             mastering,
             owners: SpinLock::new(Owners {
                 nodes: HashMap::with_hasher(BuildFastHash::new()),
+                groups: HashMap::with_hasher(BuildFastHash::new()),
                 streams: HashMap::with_hasher(BuildFastHash::new()),
             }),
             firmware: SpinLock::new(HashMap::with_hasher(BuildFastHash::new())),
@@ -303,10 +408,12 @@ impl Translation {
                 let stream = translation.units[index].reserved[window].stream();
                 translation.restore_firmware(index, stream);
             }
-            let masters = translation.mastering.strays(node, &|stream| {
-                translation.keeps_firmware(index, stream..=stream)
-            });
-            let outcome = enable.enable().map(|()| masters);
+            let quiesced = translation
+                .mastering
+                .map_or_else(Quiesced::default, |mastering| {
+                    mastering.quiesce(node, &|stream| translation.keeps_firmware(index, stream))
+                });
+            let outcome = enable.enable().map(|()| quiesced);
             if outcome.is_err() {
                 translation
                     .firmware
@@ -319,10 +426,16 @@ impl Translation {
         (translation, outcomes)
     }
 
-    /// Whether `node`'s DMA is translated here.
+    /// Whether `node` masters DMA through a unit translating here.
     #[must_use]
     pub fn translates(&self, node: u32) -> bool {
-        self.stream_of(node).is_ok()
+        self.tree.node(node).ok().flatten().is_some_and(|entry| {
+            entry
+                .resources()
+                .iter()
+                .filter_map(|r| r.iommu_streams().ok())
+                .any(|streams| self.unit_index(streams.unit()).is_some())
+        })
     }
 
     /// Whether `[base, base + len)` reaches into any discovered unit's
@@ -366,21 +479,18 @@ impl Translation {
         if !self.retire(&owner) {
             return false;
         }
-        let mut owners = self.owners.lock();
-        if owners
-            .nodes
-            .get(&node)
-            .is_some_and(|recorded| Arc::ptr_eq(recorded, &owner))
-        {
-            owners.remove(node, &owner);
-        }
+        self.owners.lock().forget(&owner);
         true
     }
 
-    /// The node whose owner holds `stream` on unit `unit`, if any owner was
-    /// ever recorded for it.
+    /// The node whose owner last attached `stream` on unit `unit`, if any
+    /// owner was ever recorded for it.
     fn node_of(&self, unit: usize, stream: u32) -> Option<u32> {
         self.owners.lock().streams.get(&(unit, stream)).copied()
+    }
+
+    fn unit_index(&self, node: u32) -> Option<usize> {
+        self.units.iter().position(|unit| unit.node == node)
     }
 
     /// End `owner`'s domain once, handing its streams back to their firmware
@@ -390,73 +500,102 @@ impl Translation {
     /// The device stops mastering before its domain is destroyed, so a
     /// transfer in flight is not faulted by its own revocation; only the
     /// live arm withdraws, so a second retirer cannot stop what a successor
-    /// was since granted.
+    /// was since granted. The end is published only once every stream is
+    /// back with firmware, so a successor that sees it never adopts a stream
+    /// a restore is still attaching.
     fn retire(&self, owner: &Owner) -> bool {
         let mut state = owner.state.lock();
-        let (confirmed, stopped) =
+        let confirmed =
             match core::mem::replace(&mut *state, OwnerState::Revoked { confirmed: false }) {
                 OwnerState::Live(domain) => {
-                    let stopped = if self.keeps_firmware(owner.unit, stream_range(owner.streams)) {
-                        None
-                    } else {
-                        self.mastering
-                            .withdraw(MasterTarget::Streams(owner.streams), owner.generation)
-                    };
-                    (domain.destroy().is_ok(), stopped)
+                    let requester = owner.identity.requester.as_slice();
+                    if !self.keeps_any_firmware(owner.identity.unit, requester) {
+                        if let Some(mastering) = self.mastering {
+                            mastering.set(MasterTarget::Streams(requester), false, owner.master());
+                        }
+                    }
+                    domain.destroy().is_ok()
                 }
-                OwnerState::Adopting | OwnerState::Unadopted(_) => (true, None),
+                OwnerState::Adopting | OwnerState::Unadopted(_) => true,
                 OwnerState::Revoked { confirmed } => {
                     *state = OwnerState::Revoked { confirmed };
                     return confirmed;
                 }
             };
-        *state = OwnerState::Revoked { confirmed };
-        self.mastering.record(owner.node, false, stopped);
-        drop(state);
-        for stream in stream_range(owner.streams) {
-            self.restore_firmware(owner.unit, stream);
+        for &stream in &owner.streams {
+            self.restore_firmware(owner.identity.unit, stream);
         }
+        *state = OwnerState::Revoked { confirmed };
+        drop(state);
         if !confirmed && !owner.unconfirmed.swap(true, Ordering::Relaxed) {
             audit_unconfirmed(self.audit, owner.node, owner.generation);
         }
         confirmed
     }
 
-    /// Whether firmware keeps a window on `unit` for any of `streams`: it
-    /// still masters them, so their function keeps its bus mastering.
-    fn keeps_firmware(&self, unit: usize, streams: RangeInclusive<u32>) -> bool {
+    /// Whether firmware keeps a window on `unit` for `stream`: it still
+    /// masters it, so its function keeps its bus mastering.
+    fn keeps_firmware(&self, unit: usize, stream: u32) -> bool {
         self.units[unit]
             .reserved
             .iter()
-            .any(|window| streams.contains(&window.stream()))
+            .any(|window| window.stream() == stream)
     }
 
-    fn stream_of(&self, node: u32) -> Result<(usize, IommuStreams), DmaError> {
+    fn keeps_any_firmware(&self, unit: usize, ranges: &[IommuStreams]) -> bool {
+        self.units[unit]
+            .reserved
+            .iter()
+            .any(|window| ranges.iter().any(|range| range.contains(window.stream())))
+    }
+
+    /// What `node`'s tree entry says of its DMA: one group, and every stream
+    /// on that group's unit, the unit translating here. Anything else is not
+    /// an identity a domain can be made for.
+    fn identity_of(&self, node: u32) -> Result<Identity, DmaError> {
         let entry = self
             .tree
             .node(node)
             .ok()
             .flatten()
             .ok_or(DmaError::DeviceGone)?;
-        let streams = entry
+        let mut groups = entry
             .resources()
             .iter()
-            .find_map(|r| r.iommu_streams().ok())
-            .ok_or(DmaError::Translation)?;
-        let unit = self
-            .units
-            .iter()
-            .position(|u| u.node == streams.unit())
-            .ok_or(DmaError::Translation)?;
-        Ok((unit, streams))
+            .filter_map(|r| r.iommu_group().ok());
+        let (Some(group), None) = (groups.next(), groups.next()) else {
+            return Err(DmaError::Translation);
+        };
+        let unit = self.unit_index(group.unit()).ok_or(DmaError::Translation)?;
+        let mut identity = Identity {
+            unit,
+            group: group.id(),
+            requester: ArrayVec::new(),
+            aliases: ArrayVec::new(),
+        };
+        for resource in entry.resources() {
+            let (streams, into) = match resource.kind() {
+                Some(HwResourceKind::IommuStream) => {
+                    (resource.iommu_streams(), &mut identity.requester)
+                }
+                Some(HwResourceKind::IommuAlias) => {
+                    (resource.iommu_aliases(), &mut identity.aliases)
+                }
+                _ => continue,
+            };
+            let streams = streams.map_err(|_| DmaError::Translation)?;
+            if streams.unit() != group.unit() || into.try_push(streams).is_err() {
+                return Err(DmaError::Translation);
+            }
+        }
+        if identity.requester.is_empty() {
+            return Err(DmaError::Translation);
+        }
+        Ok(identity)
     }
 
-    /// The firmware windows `unit` keeps for any of `streams`.
-    fn windows(
-        &self,
-        unit: usize,
-        streams: &RangeInclusive<u32>,
-    ) -> Result<Vec<Range<u64>>, IommuError> {
+    /// The firmware windows `unit` keeps for any of `streams`, ascending.
+    fn windows(&self, unit: usize, streams: &[u32]) -> Result<Vec<Range<u64>>, IommuError> {
         let reserved = &self.units[unit].reserved;
         let mut windows = Vec::new();
         windows
@@ -465,7 +604,7 @@ impl Translation {
         windows.extend(
             reserved
                 .iter()
-                .filter(|window| streams.contains(&window.stream()))
+                .filter(|window| streams.binary_search(&window.stream()).is_ok())
                 .map(|window| window.base()..window.base() + window.len()),
         );
         Ok(windows)
@@ -479,7 +618,7 @@ impl Translation {
         if self.firmware.lock().contains_key(&(unit, stream)) {
             return;
         }
-        let Ok(windows) = self.windows(unit, &(stream..=stream)) else {
+        let Ok(windows) = self.windows(unit, &[stream]) else {
             return;
         };
         if windows.is_empty() {
@@ -492,6 +631,23 @@ impl Translation {
             let mut firmware = self.firmware.lock();
             if firmware.try_reserve(1).is_ok() && !firmware.contains_key(&(unit, stream)) {
                 let _ = firmware.try_insert((unit, stream), domain);
+            }
+        }
+    }
+
+    /// Whether the group `holder` holds is free for an owner of `node`
+    /// admitted as `generation`: its owner ended, and the unit confirmed it.
+    /// Waits for an adoption or an end in flight, holding nothing else.
+    fn free(&self, holder: &Owner, node: u32, generation: u64) -> Result<(), DmaError> {
+        match &*holder.state.lock() {
+            OwnerState::Revoked { confirmed: true } | OwnerState::Unadopted(_) => Ok(()),
+            OwnerState::Revoked { confirmed: false } => Err(DmaError::Translation),
+            OwnerState::Live(_) | OwnerState::Adopting => {
+                if holder.generation == KERNEL_OWNER {
+                    return Err(DmaError::KernelOwned);
+                }
+                audit_group_refused(self.audit, node, generation, holder);
+                Err(DmaError::GroupBusy)
             }
         }
     }
@@ -516,16 +672,27 @@ impl Translation {
                 }
             };
             // An earlier owner's end precedes any carve of a later one, and a
-            // stream whose end was not confirmed takes no successor.
+            // group whose end was not confirmed takes no successor.
             if predecessor.as_ref().is_some_and(|p| !self.retire(p)) {
                 return Err(DmaError::Translation);
             }
-            let (unit, streams) = self.stream_of(node)?;
+            let identity = self.identity_of(node)?;
+            let streams = identity.streams()?;
+            let holder = self
+                .owners
+                .lock()
+                .groups
+                .get(&identity.group_key())
+                .cloned();
+            if let Some(holder) = holder.as_ref().filter(|holder| holder.node != node) {
+                self.free(holder, node, generation)?;
+            }
             let owner = Arc::new(Owner {
                 generation,
                 node,
-                unit,
+                identity,
                 streams,
+                epoch: self.mastering.map_or(0, |mastering| mastering.begin()),
                 state: SpinLock::new(OwnerState::Adopting),
                 unconfirmed: AtomicBool::new(false),
             });
@@ -533,57 +700,63 @@ impl Translation {
             let published = {
                 let mut owners = self.owners.lock();
                 // Checked under the lock `forget` takes after a removal, so
-                // a node that left once `stream_of` saw it is never attached:
-                // either `forget` finds this owner, or this finds it gone.
+                // a node that left once `identity_of` saw it is never
+                // attached: either `forget` finds this owner, or this finds
+                // it gone.
                 if !self.tree.is_live(node) {
                     return Err(DmaError::DeviceGone);
                 }
-                owners.replace(node, predecessor.as_ref(), &owner)?
+                owners.publish(&owner, predecessor.as_ref(), holder.as_ref())?
             };
             if !published {
                 continue;
             }
-            match self.adopt(unit, streams) {
-                Ok(domain) => *state = OwnerState::Live(domain),
+            match self.adopt(owner.identity.unit, &owner.streams) {
+                Ok(domain) => {
+                    self.owners.lock().attached(&owner);
+                    *state = OwnerState::Live(domain);
+                }
                 Err(err) => {
                     *state = OwnerState::Unadopted(err);
                     drop(state);
-                    self.owners.lock().restore(node, &owner, predecessor);
+                    self.owners.lock().restore(&owner, predecessor, holder);
                     return Err(err);
                 }
             }
-            // Recorded under the owner's lock, so its withdrawal can never be
-            // logged ahead of it.
-            let mastered = self
-                .mastering
-                .grant(MasterTarget::Streams(streams), generation);
-            self.mastering.record(node, true, mastered);
+            // Made under the owner's lock, so its withdrawal can never land
+            // ahead of it.
+            if let Some(mastering) = self.mastering {
+                mastering.set(
+                    MasterTarget::Streams(owner.identity.requester.as_slice()),
+                    true,
+                    owner.master(),
+                );
+            }
             drop(state);
             return Ok(owner);
         }
     }
 
-    /// A domain holding `streams` and the firmware windows they keep, their
-    /// firmware domains given up for it. Nothing of the carve that asked is
-    /// mapped yet, so a failure leaves no memory unconfirmed, and every
-    /// stream it leaves blocked gets its firmware domain back.
-    fn adopt(&self, unit: usize, streams: IommuStreams) -> Result<Domain<'static>, DmaError> {
-        let ids = stream_range(streams);
-        let adopted = self.windows(unit, &ids).and_then(|windows| {
-            for stream in ids.clone() {
+    /// A domain translating `streams` and holding the firmware windows they
+    /// keep, their firmware domains given up for it. Nothing of the carve that
+    /// asked is mapped yet, so a failure leaves no memory unconfirmed, and
+    /// every stream it leaves blocked gets its firmware domain back.
+    fn adopt(&self, unit: usize, streams: &[u32]) -> Result<Domain<'static>, DmaError> {
+        let adopted = self.windows(unit, streams).and_then(|windows| {
+            for &stream in streams {
                 let firmware = self.firmware.lock().remove(&(unit, stream));
                 if let Some(domain) = firmware {
                     domain.destroy()?;
                 }
             }
             let mut domain = Domain::new(self.units[unit].unit, &windows)?;
-            for stream in ids.clone() {
+            for &stream in streams {
                 domain.attach(stream)?;
             }
             Ok(domain)
         });
         adopted.map_err(|err| {
-            for stream in ids {
+            for &stream in streams {
                 self.restore_firmware(unit, stream);
             }
             match err {
@@ -614,6 +787,34 @@ pub(crate) fn audit_unconfirmed(audit: &(dyn Sink + Sync), node: u32, generation
     );
 }
 
+/// Record that `node`'s owner admitted as `generation` was refused its first
+/// carve: `holder`, another node's owner, holds their isolation group.
+fn audit_group_refused(audit: &(dyn Sink + Sync), node: u32, generation: u64, holder: &Owner) {
+    emit(
+        audit,
+        Level::Warn,
+        AuditEvent::DmaGroupRefused,
+        &[
+            Field {
+                key: "node",
+                value: FieldValue::UnsignedInt(u64::from(node)),
+            },
+            Field {
+                key: "generation",
+                value: FieldValue::UnsignedInt(generation),
+            },
+            Field {
+                key: "group",
+                value: FieldValue::UnsignedInt(u64::from(holder.identity.group)),
+            },
+            Field {
+                key: "holder",
+                value: FieldValue::UnsignedInt(u64::from(holder.node)),
+            },
+        ],
+    );
+}
+
 impl Translation {
     /// Audit `result` if it is `owner`'s first carve the unit could not
     /// confirm.
@@ -634,7 +835,7 @@ impl Translation {
     }
 }
 
-fn stream_range(streams: IommuStreams) -> RangeInclusive<u32> {
+fn stream_ids(streams: IommuStreams) -> core::ops::RangeInclusive<u32> {
     streams.first()..=streams.first() + (streams.count() - 1)
 }
 

@@ -13,12 +13,13 @@
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use tairix_abi::driver::msix::MsixBus;
 use tairix_abi::driver::pci::{PciBus, BUS_MASTER_ENABLE, COMMAND_OFFSET};
 use tairix_abi::driver::virtio_pci::VirtioPciBus;
 use tairix_abi::IommuStreams;
-use tairix_kernel_core::iommu::{BusMastering, MasterChange, MasterTarget, KERNEL_OWNER};
+use tairix_kernel_core::iommu::{BusMastering, MasterChange, MasterTarget, Quiesced};
 use tairix_sync::SpinLock;
 
 /// The seams the kernel drives a PCI bus through: enumeration and virtio
@@ -32,28 +33,24 @@ impl<B: VirtioPciBus + MsixBus + PciBus + ?Sized> HostBus for B {}
 pub struct Function {
     /// Its configuration address.
     pub address: u64,
-    /// The node it was published as; [`None`] for one the kernel stopped and
-    /// handed to no driver.
+    /// The node it was published as; [`None`] for one the kernel published
+    /// no node for.
     pub node: Option<u32>,
-    /// The stream a translation unit knows it by, if one does.
+    /// The stream a translation unit knows it by as its own, if one does.
     pub stream: Option<IommuStreams>,
 }
 
 impl Function {
     /// Whether `target` names this function. Streams name only a function
-    /// that was handed over, whose stream lies in them.
-    fn named_by(&self, target: MasterTarget) -> bool {
+    /// that was handed over, whose own stream lies in one of them.
+    fn named_by(&self, target: MasterTarget<'_>) -> bool {
         match target {
             MasterTarget::Node(node) => self.node == Some(node),
-            MasterTarget::Streams(streams) => {
+            MasterTarget::Streams(ranges) => {
                 self.node.is_some()
-                    && self.stream.is_some_and(|own| {
-                        own.unit() == streams.unit()
-                            && own
-                                .first()
-                                .checked_sub(streams.first())
-                                .is_some_and(|offset| offset < streams.count())
-                    })
+                    && self
+                        .stream
+                        .is_some_and(|own| ranges.iter().any(|range| range.covers(own)))
             }
         }
     }
@@ -63,13 +60,16 @@ impl Function {
 pub struct PciHost {
     state: SpinLock<HostState>,
     functions: Vec<Function>,
+    /// The next ownership epoch handed out; every function's record starts
+    /// below it.
+    epochs: AtomicU64,
 }
 
 /// What every access to the bus is serialised over.
 struct HostState {
     bus: Box<dyn HostBus + Send>,
-    /// For each of the host's functions, the generation of the latest owner
-    /// that changed its bus mastering.
+    /// For each of the host's functions, the epoch of the latest owner that
+    /// changed its bus mastering.
     changed_by: Vec<u64>,
 }
 
@@ -78,10 +78,11 @@ impl PciHost {
     /// handed over, or stopped and kept.
     #[must_use]
     pub fn new(bus: Box<dyn HostBus + Send>, functions: Vec<Function>) -> Self {
-        let changed_by = alloc::vec![KERNEL_OWNER; functions.len()];
+        let changed_by = alloc::vec![0; functions.len()];
         Self {
             state: SpinLock::new(HostState { bus, changed_by }),
             functions,
+            epochs: AtomicU64::new(1),
         }
     }
 
@@ -101,43 +102,62 @@ fn mastering(bus: &dyn HostBus, address: u64) -> Option<bool> {
 }
 
 impl BusMastering for PciHost {
+    fn begin(&self) -> u64 {
+        // Only uniqueness and order matter, and the counter is the whole of
+        // the state.
+        self.epochs.fetch_add(1, Ordering::Relaxed)
+    }
+
     fn set_mastering(
         &self,
-        target: MasterTarget,
+        target: MasterTarget<'_>,
         master: bool,
-        generation: u64,
-    ) -> Option<MasterChange> {
+        epoch: u64,
+        report: &mut dyn FnMut(MasterChange),
+    ) {
         let mut state = self.state.lock();
         let HostState { bus, changed_by } = &mut *state;
         let mut change = None;
         for (function, latest) in self.functions.iter().zip(changed_by.iter_mut()) {
-            if !function.named_by(target) || generation < *latest {
+            if !function.named_by(target) || epoch < *latest {
                 continue;
             }
             let Some(was) = mastering(&**bus, function.address) else {
                 continue;
             };
-            *latest = generation;
+            *latest = epoch;
             let changed = was != master && bus.set_bus_master(function.address, master).is_ok();
             let refused = mastering(&**bus, function.address) != Some(master);
             let seen: &mut MasterChange = change.get_or_insert_default();
             seen.changed |= changed;
             seen.refused |= refused;
         }
-        change
+        if let Some(change) = change {
+            report(change);
+        }
     }
 
-    fn strays(&self, unit: u32, keeps: &dyn Fn(u32) -> bool) -> usize {
+    fn quiesce(&self, unit: u32, keeps: &dyn Fn(u32) -> bool) -> Quiesced {
         let state = self.state.lock();
-        self.functions
-            .iter()
-            .filter(|function| {
-                function
-                    .stream
-                    .is_some_and(|stream| stream.unit() == unit && !keeps(stream.first()))
-            })
-            .filter(|function| mastering(&*state.bus, function.address) == Some(true))
-            .count()
+        let mut quiesced = Quiesced::default();
+        for function in &self.functions {
+            if !function
+                .stream
+                .is_some_and(|stream| stream.unit() == unit && !keeps(stream.first()))
+            {
+                continue;
+            }
+            if mastering(&*state.bus, function.address) != Some(true) {
+                continue;
+            }
+            let _ = state.bus.set_bus_master(function.address, false);
+            if mastering(&*state.bus, function.address) == Some(false) {
+                quiesced.stopped += 1;
+            } else {
+                quiesced.refused += 1;
+            }
+        }
+        quiesced
     }
 }
 
@@ -248,7 +268,7 @@ mod tests {
     const DEVICE: u64 = 0x0000_1800;
     const QUIET: u64 = 0x0000_1F00;
     const STUCK: u64 = 0x0000_2000;
-    /// A user driver's generation: every one is later than the kernel's.
+    /// An owner's epoch.
     const OWNER: u64 = 3;
 
     fn stream(first: u32, count: u32) -> IommuStreams {
@@ -299,22 +319,37 @@ mod tests {
         refused: false,
     };
 
+    /// What `host` reported for one change, if anything.
+    fn change(
+        host: &PciHost,
+        target: MasterTarget<'_>,
+        master: bool,
+        epoch: u64,
+    ) -> Option<MasterChange> {
+        let mut reported = None;
+        host.set_mastering(target, master, epoch, &mut |change| {
+            assert!(host.state.is_locked(), "reported before another change");
+            assert!(reported.replace(change).is_none(), "reported once");
+        });
+        reported
+    }
+
     #[test]
     fn a_node_s_function_is_granted_and_withdrawn_and_read_back() {
         let host = rig(0x0002, &[]);
         assert_eq!(
-            host.set_mastering(MasterTarget::Node(7), true, OWNER),
+            change(&host, MasterTarget::Node(7), true, OWNER),
             Some(APPLIED)
         );
         assert_eq!(command(&host, DEVICE), 0x0006);
         assert_eq!(command(&host, QUIET), 0x0002, "only the named function");
         assert_eq!(
-            host.set_mastering(MasterTarget::Node(7), true, OWNER),
+            change(&host, MasterTarget::Node(7), true, OWNER),
             Some(MasterChange::default()),
             "a bit already on is not written again"
         );
         assert_eq!(
-            host.set_mastering(MasterTarget::Node(7), false, OWNER),
+            change(&host, MasterTarget::Node(7), false, OWNER),
             Some(APPLIED)
         );
         assert_eq!(command(&host, DEVICE), 0x0002);
@@ -324,19 +359,27 @@ mod tests {
     fn an_owner_that_ends_after_its_successor_began_leaves_the_successor_mastering() {
         let host = rig(0, &[]);
         let node = MasterTarget::Node(7);
-        assert_eq!(host.set_mastering(node, true, OWNER), Some(APPLIED));
+        assert_eq!(change(&host, node, true, OWNER), Some(APPLIED));
         assert_eq!(
-            host.set_mastering(node, true, OWNER + 1),
+            change(&host, node, true, OWNER + 1),
             Some(MasterChange::default())
         );
         assert_eq!(
-            host.set_mastering(node, false, OWNER),
+            change(&host, node, false, OWNER),
             None,
             "the earlier owner's late end"
         );
         assert_eq!(command(&host, DEVICE), BUS_MASTER_ENABLE);
-        assert_eq!(host.set_mastering(node, false, OWNER + 1), Some(APPLIED));
+        assert_eq!(change(&host, node, false, OWNER + 1), Some(APPLIED));
         assert_eq!(command(&host, DEVICE), 0);
+    }
+
+    #[test]
+    fn epochs_are_handed_out_in_order() {
+        let host = rig(0, &[]);
+        let first = host.begin();
+        assert!(first > 0, "above every function's starting record");
+        assert!(host.begin() > first);
     }
 
     #[test]
@@ -344,20 +387,22 @@ mod tests {
         let host = rig(0, &[]);
         // A child published for the same device carries a range holding its
         // parent's stream, and masters through the parent's function.
+        let parent = [stream(0x10, 0x10)];
         assert_eq!(
-            host.set_mastering(MasterTarget::Streams(stream(0x10, 0x10)), true, OWNER),
+            change(&host, MasterTarget::Streams(&parent), true, OWNER),
             Some(APPLIED)
         );
         assert_eq!(command(&host, DEVICE), BUS_MASTER_ENABLE);
         assert_eq!(command(&host, QUIET), 0, "a function handed to no driver");
+        let beside = [stream(0x19, 4), stream(0x0, 0x18)];
         assert_eq!(
-            host.set_mastering(MasterTarget::Streams(stream(0x19, 4)), true, OWNER),
+            change(&host, MasterTarget::Streams(&beside), true, OWNER),
             None,
-            "a range missing the stream names nothing"
+            "ranges missing the stream name nothing"
         );
-        let elsewhere = IommuStreams::new(UNIT + 1, 0x18, 1).unwrap();
+        let elsewhere = [IommuStreams::new(UNIT + 1, 0x18, 1).unwrap()];
         assert_eq!(
-            host.set_mastering(MasterTarget::Streams(elsewhere), true, OWNER),
+            change(&host, MasterTarget::Streams(&elsewhere), true, OWNER),
             None
         );
     }
@@ -365,7 +410,7 @@ mod tests {
     #[test]
     fn a_node_the_host_never_handed_over_names_nothing() {
         assert_eq!(
-            rig(0, &[]).set_mastering(MasterTarget::Node(8), true, OWNER),
+            change(&rig(0, &[]), MasterTarget::Node(8), true, OWNER),
             None
         );
     }
@@ -373,7 +418,7 @@ mod tests {
     #[test]
     fn a_function_that_ignores_the_write_is_refused() {
         assert_eq!(
-            rig(0, &[]).set_mastering(MasterTarget::Node(9), true, OWNER),
+            change(&rig(0, &[]), MasterTarget::Node(9), true, OWNER),
             Some(MasterChange {
                 changed: true,
                 refused: true,
@@ -384,18 +429,56 @@ mod tests {
     #[test]
     fn a_function_that_no_longer_answers_is_passed_over() {
         assert_eq!(
-            rig(0, &[DEVICE]).set_mastering(MasterTarget::Node(7), false, OWNER),
+            change(&rig(0, &[DEVICE]), MasterTarget::Node(7), false, OWNER),
             None
         );
     }
 
     #[test]
-    fn strays_count_every_mastering_function_behind_the_unit_without_a_window() {
+    fn quiesce_stops_every_mastering_function_behind_the_unit_without_a_window() {
         let host = rig(BUS_MASTER_ENABLE, &[]);
-        assert_eq!(host.strays(UNIT, &|_| false), 2, "handed over or not");
-        assert_eq!(host.strays(UNIT, &|stream| stream == 0x1F), 1);
-        assert_eq!(host.strays(UNIT + 1, &|_| false), 0);
-        assert_eq!(rig(0, &[]).strays(UNIT, &|_| false), 0);
+        assert_eq!(
+            host.quiesce(UNIT, &|stream| stream == 0x1F),
+            Quiesced {
+                stopped: 1,
+                refused: 0,
+            },
+            "the one firmware keeps a window for keeps mastering"
+        );
+        assert_eq!(command(&host, DEVICE), 0);
+        assert_eq!(command(&host, QUIET), BUS_MASTER_ENABLE);
+        assert_eq!(
+            host.quiesce(UNIT, &|_| false),
+            Quiesced {
+                stopped: 1,
+                refused: 0,
+            },
+            "handed over or not"
+        );
+        assert_eq!(host.quiesce(UNIT + 1, &|_| false), Quiesced::default());
+    }
+
+    #[test]
+    fn quiesce_reports_a_function_that_will_not_stop() {
+        let bus = CommandBus {
+            commands: SpinLock::new(vec![(STUCK, BUS_MASTER_ENABLE)]),
+            stuck: vec![STUCK],
+        };
+        let host = PciHost::new(
+            Box::new(bus),
+            vec![Function {
+                address: STUCK,
+                node: None,
+                stream: Some(stream(0x20, 1)),
+            }],
+        );
+        assert_eq!(
+            host.quiesce(UNIT, &|_| false),
+            Quiesced {
+                stopped: 0,
+                refused: 1,
+            }
+        );
     }
 
     #[test]

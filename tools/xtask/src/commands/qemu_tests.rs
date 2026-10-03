@@ -9587,12 +9587,13 @@ static TESTS: &[QemuTest] = &[
         serial: &[],
         expect: Expect::Pass,
     },
-    // `plans/IOMMU.md` MI0: the autoload-input vertical behind an
-    // `intel-iommu`, every virtio function translated
-    // (`dma_translation_gates`), so the floor disk and the keyboard driver
-    // reach memory only through their domains. PASS on the injected key after
-    // the unit audited `translating`. The sibling's budget holds: the unit
-    // adds a few invalidations per carve.
+    // `plans/IOMMU.md` MI0 and IOM8: the autoload-input vertical behind an
+    // `intel-iommu`, every virtio function translated and the keyboard behind
+    // a PCIe-to-PCI bridge (`dma_translation_gates`), so the floor disk and
+    // the keyboard driver reach memory only through their domains — the
+    // keyboard's under the bridge's alias. PASS on the injected key after the
+    // unit audited `translating`. The sibling's budget holds: the unit adds a
+    // few invalidations per carve.
     QemuTest {
         package: "tairix-test-dma-translation-qemu-x86-64",
         binary: "tairix-test-dma-translation-qemu-x86-64",
@@ -16154,11 +16155,20 @@ const DMA_TRANSLATION_BINARIES: [&str; 2] = [
     "tairix-test-dma-fault-qemu-x86-64",
 ];
 
+/// The translated vertical whose input devices sit behind a PCIe-to-PCI
+/// bridge, so its keyboard's DMA reaches the unit only under the bridge's
+/// alias (`plans/IOMMU.md` IOM8).
+const ALIASED_INPUT_BINARY: &str = "tairix-test-dma-translation-qemu-x86-64";
+
 /// [`DMA_TRANSLATION_BINARIES`]' translation unit on `spec`, and nothing on
 /// any other run.
 fn dma_translation_gates(spec: Spec, binary: &str) -> Spec {
-    if DMA_TRANSLATION_BINARIES.contains(&binary) {
-        spec.with_dma_translation()
+    if !DMA_TRANSLATION_BINARIES.contains(&binary) {
+        return spec;
+    }
+    let spec = spec.with_dma_translation();
+    if binary == ALIASED_INPUT_BINARY {
+        spec.with_input_bridge()
     } else {
         spec
     }

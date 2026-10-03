@@ -1105,14 +1105,36 @@ pub fn pci_host() -> Option<&'static crate::pci_host::PciHost> {
 
 /// Probe `pci`, then keep it as the kernel's owner of segment `segment`'s
 /// configuration space, with the functions the probe handed over.
-fn own_pci<B: crate::pci_host::HostBus + Send + 'static>(
+///
+/// The hierarchy is walked once, every observer reading the one walk. Where
+/// a unit covers the segment the walk turns ACS on first, so the isolation
+/// groups are as fine as the hardware allows; a hierarchy whose bus numbers
+/// form no tree has no trustworthy isolation, so nothing is published.
+fn own_pci<B: crate::pci_host::HostBus + tairix_pci::topology::PciTopology + Send + 'static>(
     pci: B,
     segment: u16,
     dmar: Option<&tairix_arch_x86_64::dmar::Dmar<'_>>,
     sink: &mut crate::boot_hwtree::CollectingHwNodeSink,
     log: &dyn Sink,
 ) {
-    let functions = probe_virtio_pci(&pci, segment, dmar, sink, log);
+    use tairix_pci::topology::AcsPolicy;
+
+    let covered = dmar.is_some_and(|dmar| dmar.units().any(|unit| unit.segment() == segment));
+    let acs = if covered {
+        AcsPolicy::Enable
+    } else {
+        AcsPolicy::Leave
+    };
+    let functions = if let Ok(topology) = pci.topology(acs) {
+        probe_virtio_pci(&pci, &topology, segment, dmar, sink, log)
+    } else {
+        log_dmar(
+            log,
+            Level::Error,
+            "pci hierarchy unreadable; none published",
+        );
+        Vec::new()
+    };
     let host = crate::pci_host::PciHost::new(Box::new(pci), functions);
     if PCI_HOST.call_once_infallible(move || host).is_err() {
         log_dmar(
@@ -1138,7 +1160,8 @@ unsafe fn ecam_bus(
 ) -> Option<(
     impl tairix_abi::driver::virtio_pci::VirtioPciBus
         + tairix_abi::driver::msix::MsixBus
-        + tairix_abi::driver::pci::PciBus,
+        + tairix_abi::driver::pci::PciBus
+        + tairix_pci::topology::PciTopology,
     u16,
 )> {
     use tairix_abi::RegisterWindow;
@@ -1203,159 +1226,187 @@ const _: () = assert!(
 static MSI_PROBE_PT_POOL: tairix_arch_x86_64::paging::PageTablePool =
     tairix_arch_x86_64::paging::PageTablePool::new();
 
-/// Run every virtio-PCI observer over `pci` (whichever config-access
-/// mechanism [`seed_virtio_pci`] selected), emitting the discovered
-/// virtio-blk (match-key-only), virtio-net, and virtio-input nodes into
-/// `sink`, and answer the functions whose configuration space the kernel now
-/// owns. One generic definition, so the ECAM and mechanism-#1 paths share the
-/// exact same probe.
+/// The bus ranges and aliases the DMAR's scopes are resolved through, read
+/// from the probe's own walk rather than configuration space again.
+struct Fabric<'t>(&'t tairix_pci::topology::Topology);
+
+impl tairix_arch_x86_64::dmar::BridgeBuses for Fabric<'_> {
+    fn bus_range(&self, bridge: tairix_arch_x86_64::dmar::SourceId) -> Option<(u8, u8)> {
+        let address = tairix_abi::driver::pci::config_address(bridge.raw());
+        let index = self.0.index_of(address)?;
+        match self.0.functions()[index].header {
+            tairix_pci::topology::Header::Bridge {
+                secondary,
+                subordinate,
+            } => Some((secondary, subordinate)),
+            tairix_pci::topology::Header::Endpoint => None,
+        }
+    }
+}
+
+impl tairix_arch_x86_64::dmar::DmaAliases for Fabric<'_> {
+    fn aliases(
+        &self,
+        source: tairix_arch_x86_64::dmar::SourceId,
+        visit: &mut dyn FnMut(tairix_arch_x86_64::dmar::SourceId),
+    ) {
+        let address = tairix_abi::driver::pci::config_address(source.raw());
+        let Some(index) = self.0.index_of(address) else {
+            return;
+        };
+        for alias in self.0.aliases(index) {
+            visit(tairix_arch_x86_64::dmar::SourceId::at(
+                tairix_abi::driver::pci::config_address(alias.requester),
+            ));
+        }
+    }
+}
+
+/// Emit a node for each of `dmar`'s units on `segment`, answering the table
+/// beside what was emitted; [`None`] when none could be.
+fn emit_units<'d, 'a>(
+    dmar: &'d tairix_arch_x86_64::dmar::Dmar<'a>,
+    segment: u16,
+    fabric: &Fabric<'_>,
+    sink: &mut crate::boot_hwtree::CollectingHwNodeSink,
+    log: &dyn Sink,
+) -> Option<(
+    &'d tairix_arch_x86_64::dmar::Dmar<'a>,
+    tairix_arch_x86_64::dmar::UnitNodes,
+)> {
+    let Ok(nodes) = tairix_arch_x86_64::dmar::emit_unit_nodes(
+        dmar,
+        crate::hwtree_node_ids::IOMMU_UNIT_NODE_BASE_ID,
+        tairix_kernel_iommu_vtd::COMPATIBLE,
+        segment,
+        fabric,
+        fabric,
+        sink,
+    ) else {
+        log_dmar(
+            log,
+            Level::Error,
+            "dma translation units undiscovered; dma unconfined",
+        );
+        return None;
+    };
+    if nodes.dropped != 0 {
+        log_dmar(
+            log,
+            Level::Warn,
+            "firmware dma windows no unit's node can carry; those devices lose them",
+        );
+    }
+    if nodes.emitted < dmar.units().count() {
+        log_dmar(
+            log,
+            Level::Warn,
+            "translation units past the tree's room; their devices stay untranslated",
+        );
+    }
+    Some((dmar, nodes))
+}
+
+/// Run every virtio-PCI observer over `topology`, the one walk of `pci`,
+/// emitting the virtio-blk (match-key-only), virtio-net, sound and input
+/// nodes into `sink`, and answer the functions whose configuration space the
+/// kernel now owns.
 ///
 /// Before anything is routed or published, every function TAIRiX takes from
-/// firmware stops mastering DMA
-/// ([`crate::hwdiscovery::quiesce_pci_functions`]), and nothing here makes
-/// one a bus master again: its owner's attached domain, or its owner's first
-/// carve, does.
+/// firmware stops mastering DMA ([`crate::pci_probe::stop_mastering`]), and
+/// nothing here makes one a bus master again: its owner's attached domain, or
+/// its owner's first carve, does.
 fn probe_virtio_pci<B: crate::pci_host::HostBus>(
     pci: &B,
+    topology: &tairix_pci::topology::Topology,
     segment: u16,
     dmar: Option<&tairix_arch_x86_64::dmar::Dmar<'_>>,
     sink: &mut crate::boot_hwtree::CollectingHwNodeSink,
     log: &dyn Sink,
 ) -> Vec<crate::pci_host::Function> {
+    use tairix_arch_x86_64::dmar::{unit_node, SourceId};
+
     // A function names its stream only once its unit's node is in the tree:
     // a stream on a unit nothing brings up would claim a translation that
     // never happens.
-    let bridges = tairix_arch_x86_64::dmar::PciBridges(pci);
+    let fabric = Fabric(topology);
     let first_unit = sink.nodes().len();
-    let translated = dmar.and_then(|dmar| {
-        let Ok(nodes) = tairix_arch_x86_64::dmar::emit_unit_nodes(
-            dmar,
-            crate::hwtree_node_ids::IOMMU_UNIT_NODE_BASE_ID,
-            tairix_kernel_iommu_vtd::COMPATIBLE,
-            segment,
-            &bridges,
-            sink,
-        ) else {
-            log_dmar(
-                log,
-                Level::Error,
-                "dma translation units undiscovered; dma unconfined",
-            );
-            return None;
-        };
-        if nodes.dropped != 0 {
-            log_dmar(
-                log,
-                Level::Warn,
-                "firmware dma windows no unit's node can carry; those devices lose them",
-            );
-        }
-        if nodes.emitted < dmar.units().count() {
-            log_dmar(
-                log,
-                Level::Warn,
-                "translation units past the tree's room; their devices stay untranslated",
-            );
-        }
-        Some((dmar, nodes))
-    });
-    let dma = |address: u64| {
+    let translated = dmar.and_then(|dmar| emit_units(dmar, segment, &fabric, sink, log));
+    let unit = |requester: u16| {
         translated.and_then(|(dmar, nodes)| {
-            tairix_arch_x86_64::dmar::stream_resource(
+            unit_node(
                 dmar,
                 crate::hwtree_node_ids::IOMMU_UNIT_NODE_BASE_ID,
                 nodes,
                 segment,
-                tairix_arch_x86_64::dmar::SourceId::at(address),
-                &bridges,
+                SourceId::at(tairix_abi::driver::pci::config_address(requester)),
+                &fabric,
             )
         })
     };
-
+    let Ok(identities) = crate::pci_probe::SegmentDma::new(topology, &unit) else {
+        log_dmar(
+            log,
+            Level::Error,
+            "pci dma identities unrecorded; none published",
+        );
+        return Vec::new();
+    };
     // The windows the unit nodes just emitted keep for firmware.
     let units = &sink.nodes()[first_unit..];
-    let keeps = |streams: tairix_abi::IommuStreams| {
+    let keeps = |stream: tairix_abi::IommuStreams| {
         units
             .iter()
-            .filter(|node| node.id() == streams.unit())
+            .filter(|node| node.id() == stream.unit())
             .flat_map(|node| {
                 node.resources()
                     .iter()
                     .filter_map(|resource| resource.iommu_reserved().ok())
             })
-            .any(|window| {
-                window
-                    .stream()
-                    .checked_sub(streams.first())
-                    .is_some_and(|offset| offset < streams.count())
-            })
+            .any(|window| stream.contains(window.stream()))
     };
-    let Ok(behind) = crate::hwdiscovery::quiesce_pci_functions(pci, &dma, &keeps) else {
+    if crate::pci_probe::stop_mastering(pci, topology, &identities, &keeps).is_err() {
         log_dmar(
             log,
             Level::Error,
             "pci functions left mastering; none published",
         );
         return Vec::new();
-    };
+    }
+    let dma = |address: u64| identities.of(address).cloned();
+    let mut functions = Vec::new();
+    if functions
+        .try_reserve_exact(topology.functions().len())
+        .is_err()
+    {
+        log_dmar(
+            log,
+            Level::Error,
+            "pci functions unrecorded; none published",
+        );
+        return Vec::new();
+    }
+    functions.extend(
+        topology
+            .functions()
+            .iter()
+            .map(tairix_pci::topology::Function::bus_device),
+    );
 
     let first = sink.nodes().len();
     // The virtio-blk storage node is match-key-only (the in-kernel floor
     // bring-up re-resolves its transport from PCI configuration space and
     // routes its own MSI-X, so it needs no discovery-time grant) and carries
-    // no interrupt line, so it is emitted unconditionally — independent of
-    // whether the MSI-X routing context below builds. An enumeration error
-    // leaves the disk undiscovered; whatever was collected is seeded
+    // no interrupt line, so it is emitted independent of whether the MSI-X
+    // routing context below builds. Whatever was collected is seeded
     // regardless (fail closed).
-    let _ = crate::hwdiscovery::observe_virtio_pci_block_devices(pci, &dma, sink, log);
-    observe_interrupt_driven(pci, &dma, sink, log);
-    record_functions(behind, &sink.nodes()[first..], log)
-}
-
-/// The functions whose configuration space the kernel owns: each one behind
-/// a unit the probe stopped or kept, and each node the PCI observers emitted
-/// (`published`), known by the requester id the probe itself recorded.
-fn record_functions(
-    behind: Vec<(u64, tairix_abi::IommuStreams)>,
-    published: &[tairix_abi::HwNode],
-    log: &dyn Sink,
-) -> Vec<crate::pci_host::Function> {
-    use crate::pci_host::Function;
-
-    let mut functions = Vec::new();
-    if functions
-        .try_reserve(behind.len() + published.len())
-        .is_err()
-    {
-        log_dmar(log, Level::Error, "pci functions unrecorded; none masters");
-        return functions;
-    }
-    functions.extend(behind.into_iter().map(|(address, stream)| Function {
-        address,
-        node: None,
-        stream: Some(stream),
-    }));
-    for node in published {
-        let Ok(requester) = u16::try_from(node.address()) else {
-            continue;
-        };
-        let address = tairix_abi::driver::pci::config_address(requester);
-        match functions
-            .iter_mut()
-            .find(|function| function.address == address)
-        {
-            Some(function) => function.node = Some(node.id()),
-            None => functions.push(Function {
-                address,
-                node: Some(node.id()),
-                stream: node
-                    .resources()
-                    .iter()
-                    .find_map(|resource| resource.iommu_streams().ok()),
-            }),
-        }
-    }
-    functions
+    let _ = crate::hwdiscovery::observe_virtio_pci_block_devices(pci, &functions, &dma, sink, log);
+    observe_interrupt_driven(pci, &functions, &dma, sink, log);
+    crate::pci_probe::record_functions(topology, &identities, &sink.nodes()[first..])
+        .unwrap_or_else(|_| {
+            log_dmar(log, Level::Error, "pci functions unrecorded; none masters");
+            Vec::new()
+        })
 }
 
 /// Discover the interrupt-driven virtio-PCI functions — virtio-net, sound
@@ -1372,6 +1423,7 @@ fn record_functions(
 /// granted a line that never delivers (fail closed).
 fn observe_interrupt_driven(
     pci: &dyn crate::pci_host::HostBus,
+    functions: &[tairix_abi::driver::bus::BusDevice],
     dma: crate::hwdiscovery::DmaIdentity<'_>,
     sink: &mut crate::boot_hwtree::CollectingHwNodeSink,
     log: &dyn Sink,
@@ -1426,9 +1478,15 @@ fn observe_interrupt_driven(
     // walk as a NIC, so one signed driver bundle binds on either bus; an
     // input function autoloads the user-space `virtio_kbd` driver, the
     // PCI-bus sibling of the device-tree input probe.
-    let _ = crate::hwdiscovery::observe_virtio_pci_network_devices(pci, &route_irq, dma, sink, log);
-    let _ = crate::hwdiscovery::observe_virtio_pci_audio_devices(pci, &route_irq, dma, sink, log);
-    let _ = crate::hwdiscovery::observe_virtio_pci_input_devices(pci, &route_irq, dma, sink, log);
+    let _ = crate::hwdiscovery::observe_virtio_pci_network_devices(
+        pci, functions, &route_irq, dma, sink, log,
+    );
+    let _ = crate::hwdiscovery::observe_virtio_pci_audio_devices(
+        pci, functions, &route_irq, dma, sink, log,
+    );
+    let _ = crate::hwdiscovery::observe_virtio_pci_input_devices(
+        pci, functions, &route_irq, dma, sink, log,
+    );
 }
 
 /// Enable the No-Execute-Enable bit in `IA32_EFER` on the current CPU.

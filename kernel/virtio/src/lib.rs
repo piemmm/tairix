@@ -60,6 +60,4 @@ pub use virtio_factory::{KernelVirtioFactory, KernelVirtioFactoryConfig};
 pub use virtio_mmio_walk::{
     provision_virtio_mmio, VirtioMmioProvision, VirtioMmioWalkError, MAX_SLOTS,
 };
-pub use virtio_pci_walk::{
-    provision_virtio_pci, VirtioPciWalkError, VirtioProvision, MAX_FUNCTIONS,
-};
+pub use virtio_pci_walk::{provision_virtio_pci, VirtioPciWalkError, VirtioProvision};

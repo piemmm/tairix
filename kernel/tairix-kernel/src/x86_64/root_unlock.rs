@@ -41,7 +41,7 @@ use tairix_abi::{HwNode, IrqHandle};
 use tairix_arch_x86_64::paging::{AddressSpace as ArchAddressSpace, PageTablePool};
 use tairix_caps::CapabilitySet;
 use tairix_drv_bus_virtio::PciTransport;
-use tairix_drv_storage_virtio_blk::{VirtioBlk, VIRTIO_BLK_DEVICE_ID};
+use tairix_drv_storage_virtio_blk::VirtioBlk;
 use tairix_kernel_core::{
     ConsoleRead, ConsoleWrite, CooperativeYield, InitSpawnCtx, IrqParkWaiter, YieldHandle,
 };
@@ -54,7 +54,6 @@ use tairix_log::{Level, Sink};
 use tairix_reclaim::MemoryPressure;
 
 use crate::driver_catalog::VIRTIO_BLK_PATH;
-use crate::hwdiscovery::virtio_pci_modern_device_id;
 use crate::root_storage::RootBlockBinding;
 use crate::unlock_orchestrate::{finish_unlock, UnlockConsole, UnlockEnv};
 use crate::unlock_service::{
@@ -367,6 +366,12 @@ fn virtio_blk_unlock<'a>(
 ) -> Result<Infallible, &'static str> {
     let audit = env.audit;
 
+    // From here the kernel drives the device: a process admitted as its
+    // driver could reach it too, or take its function back.
+    env.ctx
+        .claim_for_kernel(node.id())
+        .map_err(|_| "root-unlock: the floor disk's node has a driver")?;
+
     // The kernel's one owner of the configuration space the boot probe
     // enumerated: the floor disk is reached through it, never through a bus
     // of its own.
@@ -398,27 +403,21 @@ fn virtio_blk_unlock<'a>(
         .map_err(|_| "root-unlock: mmio map")?,
     ));
 
-    // The modern virtio-blk PCI device id (`0x1040 + type`) the provisioning
-    // walk matches; a value that does not fit the 16-bit PCI device-id field
-    // is refused fail-closed rather than truncated.
-    let device_id = u16::try_from(virtio_pci_modern_device_id(VIRTIO_BLK_DEVICE_ID))
-        .map_err(|_| "root-unlock: virtio-blk device id out of range")?;
+    // The function driven is the one the bound node was published for, by
+    // the requester id the probe recorded, so its DMA maps into that node's
+    // domain and no other disk's.
+    let requester =
+        u16::try_from(node.address()).map_err(|_| "root-unlock: floor node names no function")?;
+    let bdf = tairix_abi::driver::pci::config_address(requester);
 
     // Provision the four virtio configuration windows into a `PciTransport`
-    // through the `CAP_MMIO_MAP`-gated kernel mapper, capturing the function
-    // address for the MSI-X routing below.
-    let (mut transport, bdf) = {
+    // through the `CAP_MMIO_MAP`-gated kernel mapper.
+    let mut transport = {
         let mapper = KernelMmioMapper::new(&mut *mmio, caller, audit);
-        let prov = host
-            .with(|bus| provision_virtio_pci(bus, device_id, &mapper, PciTransport::new))
-            .map_err(|_| "root-unlock: virtio-PCI provisioning")?;
-        (prov.transport, prov.bdf)
+        host.with(|bus| provision_virtio_pci(bus, bdf, &mapper, PciTransport::new))
+            .map_err(|_| "root-unlock: virtio-PCI provisioning")?
+            .transport
     };
-    // The function driven must be the node bound, or its DMA would map into
-    // another device's domain.
-    if u32::from(tairix_abi::driver::pci::requester_id(bdf)) != node.address() {
-        return Err("root-unlock: provisioned function is not the bound node");
-    }
 
     // Allocate a **dedicated** MSI vector + virtual interrupt line for the
     // device's MSI-X message. An MSI-X completion is an edge message straight
@@ -471,7 +470,16 @@ fn virtio_blk_unlock<'a>(
         pool.translated(translator)
     } else {
         if let Some(mastering) = env.ctx.bus_mastering() {
-            mastering.hand_over(node.id(), tairix_kernel_core::iommu::KERNEL_OWNER);
+            let owner = tairix_kernel_core::iommu::MasterOwner {
+                node: node.id(),
+                generation: tairix_kernel_core::iommu::KERNEL_OWNER,
+                epoch: mastering.begin(),
+            };
+            mastering.set(
+                tairix_kernel_core::iommu::MasterTarget::Node(owner.node),
+                true,
+                owner,
+            );
         }
         pool
     };

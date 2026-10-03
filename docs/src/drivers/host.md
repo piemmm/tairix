@@ -206,34 +206,28 @@ and the `MmioMapper` trait it implements lives in `lib/abi` (`AGENTS.md`
 for the host's lifetime and lent unchanged to every driver load — its
 own window bitmap is the per-load state.
 
-### In-kernel chain admission (the Pi 4 USB keyboard)
+### In-kernel floor admission
 
-The Pi 4 USB chain (`pcie_brcm` → `vl805` → `bus_usb`) is the
-first *production* caller of the `Host::load` gate (`plans/PI.md` P10
-5c-ii). Its drivers are statically linked, and their §8 `register()`
-entries are admission-only (a `CAP_DRV_LOAD` check returning a marker),
-so `kernel/tairix-kernel/src/driver_loader.rs`'s `ChainDriverLoader`
-admits each one through a plain `Host` (no MMIO/DMA host: the real
-register-window mapping and DMA carve run afterwards over the keyboard
-service's own capability-gated host). The signed manifest images and the
-trust anchor are produced at build time by `build.rs`
-(`emit_signed_driver_manifests`): each `DriverManifest` is `kind =
+The bootstrap floor's block drivers — the ones that read the volume holding
+the signed driver store — are statically linked into the kernel, and each is
+admitted through the `Host::load` gate before it drives hardware:
+`kernel/tairix-kernel/src/driver_loader.rs`'s `KernelDriverLoader` runs the
+full pipeline (manifest parse, syscall-table-hash match, trust-anchor and
+Ed25519 signature check, the `CAP_DRV_LOAD` / `CAP_DRV_KERNEL` gates,
+bind-table validation) and then the driver's in-process `register()`. The
+signed manifests and the trust anchor are produced at build time by
+`build.rs` (`emit_signed_driver_manifests`): each `DriverManifest` is `kind =
 InKernel`, stamped with the kernel's `SYSCALL_TABLE_HASH`, requests
 `CAP_DRV_LOAD`, carries the driver crate's own `BIND_KEYS`, and is
 Ed25519-signed with the build's deterministic driver-signing key
-(`KERNEL_DRIVER_SIGNING_SEED`); the matching public key is embedded as
-the kernel's sole driver trust anchor. The seed has a single home in
-`kernel/tairix-kernel/src/build_support.rs` (the dependency-free
-`#[path]` module the build script pulls in), so a fixture or image build
-that lays a *kernel-trusted* bundle into the driver store signs from the
-same definition rather than a copy (`AGENTS.md` §2.2). The kernel trusts
-only the drivers its own reproducible build signed; secrecy of the seed
-buys nothing
-(`AGENTS.md` §19.3), so it is committed and the signatures stay
-bit-reproducible. The keyboard service admits the two bus drivers before
-bring-up and re-matches the enumerated HID child against the driver
-catalogue to admit the HID class driver before feeding input — fail closed at each
-step (`AGENTS.md` §5.4).
+(`KERNEL_DRIVER_SIGNING_SEED`); the matching public key is embedded as the
+kernel's sole driver trust anchor. The seed has a single home in
+`kernel/tairix-kernel/src/build_support.rs`, so an image build that lays a
+kernel-trusted bundle into the driver store signs from the same definition
+(`AGENTS.md` §2.2). Secrecy of the seed buys nothing (`AGENTS.md` §19.3): it
+is committed, and the signatures stay bit-reproducible. Every other driver —
+the Pi 4's PCIe, VL805 and xHCI drivers among them — is a signed
+`/System/Drivers/` bundle the device manager autoloads into user space.
 
 ### Signed-store scan
 

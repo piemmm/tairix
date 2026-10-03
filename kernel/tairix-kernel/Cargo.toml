@@ -104,6 +104,12 @@ tairix-reclaim = { path = "../../lib/reclaim", version = "=0.0.0" }
 tairix-kernel-sec = { path = "../sec", version = "=0.0.0" }
 tairix-kernel-sched-api = { path = "../sched/api", version = "=0.0.0" }
 tairix-sync = { path = "../../lib/sync", version = "=0.0.0" }
+# A function's aliases, held without allocating.
+tairix-inline = { path = "../../lib/inline", version = "=0.0.0" }
+# The PCI configuration-access library: the mechanisms a port's probe reaches
+# configuration space through, and the topology walk `pci_probe` reads each
+# function's isolation from.
+tairix-pci = { path = "../../lib/pci", version = "=0.0.0" }
 # The shared non-cryptographic hash the build-provenance fingerprint
 # (`src/build_support.rs`) is taken with, so the kernel carries no private
 # copy of a hash function.
@@ -247,14 +253,6 @@ tairix-arch-x86_64 = { path = "../arch/x86_64", version = "=0.0.0", features = [
 tairix-kernel-iommu-vtd = { path = "../iommu/vtd", version = "=0.0.0" }
 tairix-drvhost = { path = "../../userland/system/drvhost", version = "=0.0.0" }
 tairix-drv-bus-virtio = { path = "../../drivers/bus/virtio", version = "=0.0.0" }
-# The PCI configuration-access library (kernel → lib/*):
-# `boot_x86_64::seed_hardware_tree` builds an ECAM configuration-space bus
-# (`mechanism_ecam`) over the firmware MCFG window to enumerate the
-# virtio-PCI NIC and resolve its config windows for the two-process
-# virtio-net driver (`plans/NETWORK.md` N4e-x86_64). PCI config-access
-# mechanism logic is shared `lib/*`, so the kernel names
-# no `drivers/bus/*` PCI type.
-tairix-pci = { path = "../../lib/pci", version = "=0.0.0" }
 # The user-space device manager's autoload policy: the
 # kernel binary's `driver_spawn_loader` implements its `DriverLoader` seam to
 # spawn a discovered user-space driver, bridging `devmgr` policy to the

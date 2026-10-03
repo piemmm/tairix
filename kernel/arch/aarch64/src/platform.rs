@@ -282,8 +282,7 @@ pub struct PcieDiscovery {
 }
 
 /// Discover the BCM2711 PCIe root complex's three address windows from the
-/// firmware device tree at `fdt`, for the in-kernel USB-keyboard bring-up
-/// (`plans/PI.md` P10).
+/// firmware device tree at `fdt` (`plans/PI.md` P10).
 ///
 /// Uses the early-returning [`scan_translated`] walk, reading only the
 /// matched `brcm,bcm2711-pcie` node's own `reg`/`ranges`/`dma-ranges`
@@ -762,8 +761,7 @@ mod tests {
 
     #[test]
     fn pcie_bringup_is_none_when_no_bridge_is_present() {
-        // The QEMU `virt`-shaped tree (no `brcm,bcm2711-pcie` node) yields
-        // no bring-up, so the keyboard service is skipped.
+        // The QEMU `virt`-shaped tree has no `brcm,bcm2711-pcie` node.
         let blob = virt_like_arm(0x4000_0000, 0x2000_0000, "hvc", 30);
         let fdt = Fdt::new(&blob).expect("valid fdt");
         assert_eq!(pcie_bringup(&fdt), None);

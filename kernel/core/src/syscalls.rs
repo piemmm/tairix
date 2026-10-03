@@ -1194,7 +1194,8 @@ where
         }
         let driver = driver.ok_or(Errno::PermissionDenied)?;
         let translation = self.translation_of(&driver);
-        let hand_over = translation.is_none() && !driver.handed_over && self.mastering.is_some();
+        let hand_over =
+            translation.is_none() && driver.mastered.is_none() && self.mastering.is_some();
         let custodian = match translation {
             // A bus viewport rebasing an IOVA names no address the domain
             // knows.
@@ -1222,13 +1223,24 @@ where
     /// Hand an untranslated driver's function over once its first carve is
     /// made: it may master DMA from then on. A translated driver's function
     /// masters once its domain is attached, which the translation does.
+    ///
+    /// The bit is written under the registry's lock, so a concurrent first
+    /// carve of the same driver, which waits for it there, is never answered
+    /// before the function masters.
     fn hand_over_untranslated(&self, process: ProcessId, terms: &CarveTerms) {
         let Some(mastering) = self.mastering.filter(|_| terms.hand_over) else {
             return;
         };
-        if self.aspaces.write().first_hand_over(process) {
-            mastering.hand_over(terms.custodian.node, terms.custodian.generation);
+        let mut aspaces = self.aspaces.write();
+        if let Some(epoch) = aspaces.first_hand_over(process, || mastering.begin()) {
+            let owner = crate::iommu::MasterOwner {
+                node: terms.custodian.node,
+                generation: terms.custodian.generation,
+                epoch,
+            };
+            mastering.set(crate::iommu::MasterTarget::Node(owner.node), true, owner);
         }
+        drop(aspaces);
     }
 
     /// The translation `driver`'s node is carved through, if it is.
@@ -1682,6 +1694,7 @@ where
         };
         let port = addressable_port(&resource, port, width)?;
         if facility.kernel_owned(port, width) {
+            audit_port_refused(self.audit, caller.process(), port, width);
             return Err(Errno::PermissionDenied);
         }
         Ok(io(facility, port))
@@ -1729,11 +1742,11 @@ where
         self
     }
 
-    /// Install the bus mastering drivers' functions follow, consuming and
-    /// returning `self`.
+    /// Install the bus mastering drivers' functions follow, where the kernel
+    /// owns configuration space, consuming and returning `self`.
     #[must_use]
-    pub const fn with_mastering(mut self, mastering: crate::iommu::Mastering) -> Self {
-        self.mastering = Some(mastering);
+    pub const fn with_mastering(mut self, mastering: Option<crate::iommu::Mastering>) -> Self {
+        self.mastering = mastering;
         self
     }
 
@@ -3560,8 +3573,9 @@ where
         // come. The destroyed port took its own record of who was waiting
         // with it, so this is the one place the broadcast is right.
         crate::waitq::port_room_wake();
-        // A translated driver's device loses every carve at once here, so the
-        // releases below free its DMA memory rather than quarantine it.
+        // A driver's function stops mastering here, and a translated driver's
+        // device loses every carve at once, so the releases below free its
+        // DMA memory rather than quarantine it.
         let translated =
             end_driver_dma(self.dma_translation, self.mastering, self.aspaces, process);
         // Release every shared-memory mapping this process held, dropping
@@ -12873,9 +12887,9 @@ fn dispose_finished_load<E>(
 }
 
 /// End the DMA ownership of `process` if it is a driver: a node `translation`
-/// confines has its owner's domain revoked, and any other node's function
-/// stops mastering. Whether it was a translated driver. Read while its load
-/// record still stands.
+/// confines has its owner's domain revoked, and any other node's function,
+/// if it was handed to this driver, stops mastering. Whether it was a
+/// translated driver. Read while its load record still stands.
 pub(crate) fn end_driver_dma(
     translation: Option<&crate::iommu::Translation>,
     mastering: Option<crate::iommu::Mastering>,
@@ -12889,10 +12903,39 @@ pub(crate) fn end_driver_dma(
         translation.revoke(driver.node, driver.generation);
         return true;
     }
-    if let Some(mastering) = mastering {
-        mastering.take_back(driver.node, driver.generation);
+    if let (Some(mastering), Some(epoch)) = (mastering, driver.mastered) {
+        let owner = crate::iommu::MasterOwner {
+            node: driver.node,
+            generation: driver.generation,
+            epoch,
+        };
+        mastering.set(crate::iommu::MasterTarget::Node(driver.node), false, owner);
     }
     false
+}
+
+/// Record that `task`'s access to `width` bytes at `port` was refused: the
+/// kernel keeps those ports for itself.
+fn audit_port_refused(audit: &(dyn Sink + Sync), task: ProcessId, port: u16, width: PortWidth) {
+    crate::audit::emit(
+        audit,
+        Level::Warn,
+        AuditEvent::PortIoRefused,
+        &[
+            Field {
+                key: "port",
+                value: tairix_log::FieldValue::UnsignedInt(u64::from(port)),
+            },
+            Field {
+                key: "width",
+                value: tairix_log::FieldValue::UnsignedInt(width.bytes()),
+            },
+            Field {
+                key: "task",
+                value: tairix_log::FieldValue::UnsignedInt(task.0),
+            },
+        ],
+    );
 }
 
 /// Audit a child refused at admission because the session it was bound for
@@ -13913,7 +13956,7 @@ where
     /// Install the bus mastering, consuming and returning `self`: the
     /// hook-level mirror of [`KernelSyscallHandlers::with_mastering`].
     #[must_use]
-    pub fn with_mastering(mut self, mastering: crate::iommu::Mastering) -> Self {
+    pub fn with_mastering(mut self, mastering: Option<crate::iommu::Mastering>) -> Self {
         self.handlers = self.handlers.with_mastering(mastering);
         self
     }
@@ -29358,6 +29401,21 @@ mod tests {
         );
         assert_eq!(*facility.reads.lock(), None);
         assert_eq!(*facility.writes.lock(), None);
+        let refusals: Vec<_> = sink
+            .snapshot()
+            .into_iter()
+            .filter(|event| event.id == AuditEvent::PortIoRefused.id())
+            .collect();
+        assert_eq!(refusals.len(), 2, "each refusal is recorded");
+        for (key, expected) in [("port", "113"), ("width", "1"), ("task", "2")] {
+            assert!(
+                refusals[0]
+                    .fields
+                    .iter()
+                    .any(|(k, value)| k == key && value == expected),
+                "{key} = {expected}"
+            );
+        }
         assert_eq!(
             h.port_read(&ctx, handle, 0x70, tairix_abi::PortWidth::Byte),
             Ok(0xA5),
@@ -30497,37 +30555,67 @@ mod tests {
         );
     }
 
-    /// A port recording each bus-mastering change it is asked for, and the
-    /// generation of the owner it is asked for.
-    #[derive(Default)]
-    struct RecordingMastering(tairix_sync::SpinLock<Vec<(crate::iommu::MasterTarget, bool, u64)>>);
+    /// A port recording each bus-mastering change it is asked for — the node
+    /// it named (none for an owner's streams), the state asked and the
+    /// owner's epoch — and, when it watches a registry, whether that registry
+    /// could be read while the change was made.
+    struct RecordingMastering {
+        calls: tairix_sync::SpinLock<Vec<(Option<u32>, bool, u64)>>,
+        epochs: core::sync::atomic::AtomicU64,
+        registry: Option<&'static RwLock<AddressSpaceRegistry>>,
+        registry_free: tairix_sync::SpinLock<Vec<bool>>,
+    }
 
     impl RecordingMastering {
         fn leaked() -> &'static Self {
-            Box::leak(Box::default())
+            Self::watching(None)
         }
 
-        fn calls(&self) -> Vec<(crate::iommu::MasterTarget, bool, u64)> {
-            self.0.lock().clone()
+        fn watching(registry: Option<&'static RwLock<AddressSpaceRegistry>>) -> &'static Self {
+            Box::leak(Box::new(Self {
+                calls: tairix_sync::SpinLock::new(Vec::new()),
+                epochs: core::sync::atomic::AtomicU64::new(1),
+                registry,
+                registry_free: tairix_sync::SpinLock::new(Vec::new()),
+            }))
+        }
+
+        fn calls(&self) -> Vec<(Option<u32>, bool, u64)> {
+            self.calls.lock().clone()
         }
     }
 
     impl crate::iommu::BusMastering for RecordingMastering {
-        fn set_mastering(
-            &self,
-            target: crate::iommu::MasterTarget,
-            master: bool,
-            generation: u64,
-        ) -> Option<crate::iommu::MasterChange> {
-            self.0.lock().push((target, master, generation));
-            Some(crate::iommu::MasterChange {
-                changed: true,
-                refused: false,
-            })
+        fn begin(&self) -> u64 {
+            self.epochs
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
         }
 
-        fn strays(&self, _unit: u32, _keeps: &dyn Fn(u32) -> bool) -> usize {
-            0
+        fn set_mastering(
+            &self,
+            target: crate::iommu::MasterTarget<'_>,
+            master: bool,
+            epoch: u64,
+            report: &mut dyn FnMut(crate::iommu::MasterChange),
+        ) {
+            let node = match target {
+                crate::iommu::MasterTarget::Node(node) => Some(node),
+                crate::iommu::MasterTarget::Streams(_) => None,
+            };
+            self.calls.lock().push((node, master, epoch));
+            if let Some(registry) = self.registry {
+                self.registry_free
+                    .lock()
+                    .push(registry.try_read().is_some());
+            }
+            report(crate::iommu::MasterChange {
+                changed: true,
+                refused: false,
+            });
+        }
+
+        fn quiesce(&self, _unit: u32, _keeps: &dyn Fn(u32) -> bool) -> crate::iommu::Quiesced {
+            crate::iommu::Quiesced::default()
         }
     }
 
@@ -30551,36 +30639,100 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
         .with_dma_alloc_facility(recording_dma_facility())
-        .with_mastering(crate::iommu::Mastering::new(Some(port), sink));
+        .with_mastering(Some(crate::iommu::Mastering::new(port, sink)));
         aspaces
             .write()
             .admit_driver(ProcessId(2), 0x44, false)
             .expect("the node has no live driver");
         assert!(port.calls().is_empty(), "admission makes no bus master");
-        let generation = aspaces
-            .read()
-            .loaded_driver(ProcessId(2))
-            .expect("admitted")
-            .generation;
         // No address space is registered for task 2, so the copy-out fails
         // after the carve was made.
         assert_eq!(
             h.dma_alloc(&ctx, handle, 0x1000, 0x1234),
             Err(Errno::BadAddress)
         );
-        let node = crate::iommu::MasterTarget::Node(0x44);
-        assert_eq!(port.calls(), [(node, true, generation)]);
+        let epoch = aspaces
+            .read()
+            .loaded_driver(ProcessId(2))
+            .and_then(|driver| driver.mastered)
+            .expect("handed over");
+        assert_eq!(port.calls(), [(Some(0x44), true, epoch)]);
         assert_eq!(
             h.dma_alloc(&ctx, handle, 0x1000, 0x1234),
             Err(Errno::BadAddress)
         );
-        assert_eq!(port.calls(), [(node, true, generation)], "handed over once");
+        assert_eq!(
+            port.calls(),
+            [(Some(0x44), true, epoch)],
+            "handed over once"
+        );
         let _ = h.reclaim_process_resources(ProcessId(2));
         assert_eq!(
             port.calls(),
-            [(node, true, generation), (node, false, generation)],
+            [(Some(0x44), true, epoch), (Some(0x44), false, epoch)],
             "taken back for the owner that ended, never for a successor"
         );
+    }
+
+    /// A driver that never carved was never handed its function: its end must
+    /// not stop a device someone else masters — the kernel's own floor disk,
+    /// say, handed over before any driver.
+    #[test]
+    fn a_driver_never_handed_its_function_takes_nothing_back() {
+        let sink = make_sink();
+        let (_arch, _table, _ipc, aspaces, _rng, _irq) = mmio_scaffold();
+        let port = RecordingMastering::leaked();
+        aspaces
+            .write()
+            .admit_driver(ProcessId(2), 0x44, false)
+            .expect("the node has no live driver");
+        let mastering = Some(crate::iommu::Mastering::new(port, sink));
+        assert!(!end_driver_dma(None, mastering, &aspaces, ProcessId(2)));
+        assert!(port.calls().is_empty());
+
+        let epoch = aspaces
+            .write()
+            .first_hand_over(ProcessId(2), || 9)
+            .expect("handed over");
+        assert!(!end_driver_dma(None, mastering, &aspaces, ProcessId(2)));
+        assert_eq!(
+            port.calls(),
+            [(Some(0x44), false, epoch)],
+            "an unloaded or exiting driver gives back what it was handed"
+        );
+    }
+
+    /// Two threads of one driver may make its first carves at once: the one
+    /// that hands the function over writes the bit under the registry's lock,
+    /// where the other waits before its carve can be answered.
+    #[test]
+    fn an_untranslated_hand_over_is_made_under_the_registry_lock() {
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+        let aspaces: &'static RwLock<AddressSpaceRegistry> = Box::leak(Box::new(aspaces));
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let handle = aspaces.write().mint_grant(
+            ProcessId(2),
+            tairix_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
+        );
+        let port = RecordingMastering::watching(Some(aspaces));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, aspaces, &rng,
+        )
+        .with_dma_alloc_facility(recording_dma_facility())
+        .with_mastering(Some(crate::iommu::Mastering::new(port, sink)));
+        aspaces
+            .write()
+            .admit_driver(ProcessId(2), 0x44, false)
+            .expect("the node has no live driver");
+        let _ = h.dma_alloc(&ctx, handle, 0x1000, 0x1234);
+        assert_eq!(*port.registry_free.lock(), [false]);
     }
 
     #[test]
@@ -30608,7 +30760,7 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
         .with_dma_alloc_facility(facility)
-        .with_mastering(crate::iommu::Mastering::new(Some(port), sink));
+        .with_mastering(Some(crate::iommu::Mastering::new(port, sink)));
         aspaces
             .write()
             .admit_driver(ProcessId(2), 0x44, false)
@@ -30649,7 +30801,7 @@ mod tests {
         .with_hw_tree(tree)
         .with_dma_translation(translation)
         .with_dma_alloc_facility(recording_dma_facility())
-        .with_mastering(crate::iommu::Mastering::new(Some(port), sink));
+        .with_mastering(Some(crate::iommu::Mastering::new(port, sink)));
         aspaces
             .write()
             .admit_driver(ProcessId(2), 0x44, true)
@@ -30674,10 +30826,10 @@ mod tests {
             [true, false],
             "granted at the domain, withdrawn at the end"
         );
-        assert!(port
-            .calls()
-            .iter()
-            .all(|call| matches!(call.0, crate::iommu::MasterTarget::Streams(_))));
+        assert!(
+            port.calls().iter().all(|call| call.0.is_none()),
+            "named by the domain's streams"
+        );
     }
 
     /// Build a `RecordingDmaFacility` over a fresh-and-`None` carve record,
@@ -36135,6 +36287,10 @@ mod tests {
                 tairix_abi::IommuStreams::new(TRANSLATION_UNIT_NODE, stream, 1).expect("valid"),
             ))
             .expect("resource fits");
+            node.push_resource(tairix_abi::HwResource::iommu_group_member(
+                tairix_abi::IommuGroup::new(TRANSLATION_UNIT_NODE, stream),
+            ))
+            .expect("resource fits");
             encoded.push(node);
         }
         let tree: &'static StaticHwTree = Box::leak(Box::new(StaticHwTree::new(
@@ -36151,11 +36307,11 @@ mod tests {
             alloc::vec![0xFED9_0000..0xFED9_1000],
             tree,
             audit,
-            crate::iommu::Mastering::new(port, audit),
+            port.map(|port| crate::iommu::Mastering::new(port, audit)),
         );
         assert_eq!(
             outcomes,
-            [(TRANSLATION_UNIT_NODE, Ok(0))],
+            [(TRANSLATION_UNIT_NODE, Ok(crate::iommu::Quiesced::default()))],
             "the reference unit enables"
         );
         (Box::leak(Box::new(translation)), model, tree)
@@ -40346,6 +40502,51 @@ mod tests {
             .aspaces
             .read()
             .grant_covers(ProcessId(scene.task), &tairix_abi::HwResource::shared(id)));
+        let _ = crate::sharedreg::unmap(facility, ProcessId(scene.task), va);
+    }
+
+    /// A shared DMA region is a carve like `dma_alloc`'s: an untranslated
+    /// driver's first one hands it its function, once.
+    #[test]
+    fn shm_create_dma_hands_an_untranslated_driver_its_function() {
+        static QUARANTINE: RecordingQuarantine = RecordingQuarantine::new();
+        let sink = make_sink();
+        let (scene, handle) = DmaRegionScene::new(legacy_dma_window());
+        let sched = make_sched(scene.arch.clone());
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(scene.task, &[CapabilityId::SHM], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(scene.task),
+            caps: &caps,
+        };
+        let facility: &'static RecordingSharedFacility =
+            Box::leak(Box::new(RecordingSharedFacility { va: 0x2_0000_3000 }));
+        let port = RecordingMastering::leaked();
+        let h = KernelSyscallHandlers::new(
+            &sched,
+            &scene.table,
+            &scene.arch,
+            sink,
+            &scene.irq,
+            &ctl,
+            &scene.ipc,
+            &scene.aspaces,
+            &scene.rng,
+        )
+        .with_shared_mem_facility(facility)
+        .with_dma_quarantine(&QUARANTINE)
+        .with_mastering(Some(crate::iommu::Mastering::new(port, sink)));
+
+        let va = h
+            .shm_create_dma(&ctx, handle, 3000, 0x2000, 0x2008)
+            .expect("carves");
+        let epoch = scene
+            .aspaces
+            .read()
+            .loaded_driver(ProcessId(scene.task))
+            .and_then(|driver| driver.mastered)
+            .expect("handed over");
+        assert_eq!(port.calls(), [(Some(0x44), true, epoch)]);
         let _ = crate::sharedreg::unmap(facility, ProcessId(scene.task), va);
     }
 

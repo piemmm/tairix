@@ -93,9 +93,8 @@ impl BrcmConfigSpace {
     /// downstream target other than `device 0` on the configured
     /// secondary bus.
     fn data_offset(&self, addr: ConfigAddress) -> Option<usize> {
-        // The shared range gate; also guarantees the
-        // register byte offset is < 256, comfortably inside the 4 KiB
-        // data window.
+        // The shared range gate; also guarantees the register byte offset
+        // lies inside the 4 KiB data window.
         let block = addr.ecam_offset()?;
         let reg = (addr.register as usize) << 2;
         if addr.bus == 0 {

@@ -95,8 +95,9 @@ in all of them applies here without exception.
   `netstack_autoload_qemu_x86_64` (the two-process network vertical),
   `fat32_virtio_blk_pci_x86_64`, `arxfs_virtio_blk_pci_x86_64`,
   `vesa_display_qemu_x86_64`, `ps2_input_qemu_x86_64`, `irq_qemu_x86_64`;
-  the virtio-PCI provisioning seam and an in-kernel driver host
-  (`x86_64/driver_host.rs`) exist.
+  the virtio-PCI provisioning seam provisions the floor disk the kernel
+  drives; every other driver is a user-space bundle the device manager
+  autoloads.
 - **Live boot verticals over the production x86_64 pipeline:**
   `root_unlock_login`, `users_db`, `root_unlock_admission`, `spawn_session`,
   `autoload_input` (virtio keyboard), `netstack_autoload`/`_static`/`_dhcp`/

@@ -404,6 +404,9 @@ pub fn publish_usb_function(
 
 /// Make function `bdf` a bus master and publish `node` for it. A function no
 /// driver was handed does not master: a refused publish stops it again.
+///
+/// Mastering comes first because the driver may run the moment its node is
+/// published, and a halted controller issues no DMA before its driver runs it.
 fn hand_over(
     host: &dyn DriverHost,
     bus: &dyn PciBus,
@@ -411,11 +414,9 @@ fn hand_over(
     node: &HwNode,
 ) -> Result<(), DriverError> {
     bus.set_bus_master(bdf, true)?;
-    match host.emit_node(*node) {
-        Ok(()) => Ok(()),
-        Err(refused) => {
-            bus.set_bus_master(bdf, false)?;
-            Err(refused)
-        }
-    }
+    host.emit_node(*node).inspect_err(|_| {
+        // The refusal is what failed: a function that will not stop is one
+        // nothing here could stop.
+        let _ = bus.set_bus_master(bdf, false);
+    })
 }

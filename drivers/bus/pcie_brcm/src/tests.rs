@@ -928,6 +928,8 @@ struct StubPciBus {
     /// program; `false` models a function with no MSI capability (the
     /// default trait behaviour: `Unsupported`).
     route_msi_ok: bool,
+    /// Whether turning bus mastering off fails.
+    unmaster_fails: bool,
     /// The configuration calls the bus driver made, in order.
     calls: RefCell<Vec<&'static str>>,
 }
@@ -938,6 +940,7 @@ impl StubPciBus {
             has_usb: true,
             bar_bus_base,
             route_msi_ok: false,
+            unmaster_fails: false,
             calls: RefCell::new(Vec::new()),
         }
     }
@@ -981,6 +984,9 @@ impl PciBus for StubPciBus {
         self.calls
             .borrow_mut()
             .push(if master { "master" } else { "unmaster" });
+        if !master && self.unmaster_fails {
+            return Err(DriverError::DeviceFault);
+        }
         Ok(())
     }
 
@@ -1151,6 +1157,19 @@ fn publish_usb_function_propagates_a_refused_emit() {
     assert_eq!(
         wiring::publish_usb_function(&host, &bus, &PI_WINDOWS).err(),
         Some(DriverError::PermissionDenied)
+    );
+    assert_eq!(bus.calls.borrow().last(), Some(&"unmaster"));
+}
+
+#[test]
+fn a_refused_emit_is_reported_whether_or_not_the_function_stops() {
+    let mut bus = StubPciBus::new(PI_WINDOWS.outbound_pcie_base);
+    bus.unmaster_fails = true;
+    let host = RecordingHost::new(false);
+    assert_eq!(
+        wiring::publish_usb_function(&host, &bus, &PI_WINDOWS).err(),
+        Some(DriverError::PermissionDenied),
+        "the refusal is what failed"
     );
     assert_eq!(bus.calls.borrow().last(), Some(&"unmaster"));
 }

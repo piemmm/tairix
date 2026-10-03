@@ -2516,6 +2516,7 @@ dependencies = [
  "tairix-fdt",
  "tairix-fsprobe",
  "tairix-hash",
+ "tairix-inline",
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel-core",

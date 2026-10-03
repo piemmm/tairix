@@ -254,9 +254,7 @@ pub const UNLOCK_SERVICE: EventId = EventId(4139);
 pub const BOOT_TREE_REFUSED: EventId = EventId(4209);
 
 /// Synthetic owner process id for the unlock kthread's capability context
-/// and IRQ binding. Distinct from the keyboard service's so an audit observer
-/// can tell the two in-kernel services apart. The single definition every
-/// port shares.
+/// and IRQ binding, shared by every port.
 pub const UNLOCK_TASK: ProcessId = ProcessId(0x5b4);
 
 const _: () = assert!(

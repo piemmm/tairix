@@ -2,8 +2,9 @@
 
 **Stability tier: stable.** The public surface is the three
 `mechanism_*` constructors, the frozen `abi-v1` bus/transport seams
-(`Bus`, `VirtioPciBus`, `MsixBus`, `PciBus`) they return, and the shared
-bus-driver locate primitives (`find_function_by_class`,
+(`Bus`, `VirtioPciBus`, `MsixBus`, `PciBus`) they return, the
+configuration-space owner's `topology` walk (`PciTopology`, `Topology`),
+and the shared bus-driver locate primitives (`find_function_by_class`,
 `assign_and_map_bar`, `bus_to_cpu_phys`, and the `USB_CONTROLLER_CLASS`
 PCI class code) the xHCI driver and the BCM2711 PCIe bus driver both use;
 changing the seam surface is governed by `AGENTS.md` §9.
@@ -14,7 +15,10 @@ surface MSI / MSI-X descriptors, virtio-1.x configuration structures,
 and BAR (Base Address Register) windows, and it assigns/maps BARs and
 turns a function's decoding and bus mastering on and off for the owner of
 its configuration space. No routing or mapping helper makes a function a
-bus master. It lives in
+bus master. For the owner of a whole hierarchy it walks every function
+once (`PciTopology::topology`), turning ACS on where asked, and states each
+function's requester-id aliases and isolation group (`topology.rs`;
+`plans/IOMMU.md` IOM8). It lives in
 `lib/` because PCI configuration access is shared bus-protocol logic a
 `drivers/*` crate may not reach through a sibling driver (`AGENTS.md`
 §17.4) — the kernel boot pipeline, the user-space `drivers/bus/pcie_brcm`
@@ -40,7 +44,10 @@ selected at construction by the caller:
 
 The enumeration, capability-walk, BAR-sizing, and window/MSI-X hand-off
 core is mechanism-agnostic: it is parameterised over the `ConfigSpace`
-trait, which all three bridges implement.
+trait, which all three bridges implement. Mechanism #1 reaches the legacy
+256 bytes only; ECAM and the BCM2711 window reach a function's whole 4 KiB,
+its extended capabilities included, and a register a mechanism cannot reach
+reads all-ones.
 
 ## Supported hardware
 
@@ -108,17 +115,22 @@ pointer).
 - The BCM2711 windowed-access round-trip and bus-bound refusal tests.
 - Capability-list and BAR-sizing walkers, including the virtio-1.x
   configuration-structure decode.
-- The MSI-X routing hand-off: programming a table entry + enabling
-  the function, plus the not-found / out-of-range / I/O-BAR /
-  capability-denied failure paths.
+- The MSI-X routing hand-off: programming a table entry and turning MSI-X
+  and memory decoding on, never bus mastering, plus the not-found /
+  out-of-range / I/O-BAR / capability-denied failure paths.
 - The memory-BAR and virtio-config register-window hand-offs to a
   mock MMIO mapper (including the capability-denial path).
 - BAR assignment inside a bridge outbound window + `describe_function`
   child-node synthesis.
 - The shared locate primitives: `find_function_by_class` (first match /
-  fail-closed not-found), `assign_and_map_bar` (assign → enable → map
-  order), and `bus_to_cpu_phys` (outbound-window translation, in-window
-  and fail-closed-out-of-window).
+  fail-closed not-found), `assign_and_map_bar` (assign → decode → map,
+  never mastering), and `bus_to_cpu_phys` (outbound-window translation,
+  in-window and fail-closed-out-of-window).
+- The topology walk: aliasing through every kind of bridge, ACS on ports
+  and slots, a switch whose one port lacks ACS grouped whole, every
+  bus-number layout that forms no tree refused, and ACS turned on and read
+  back through a writable mock — including a port that ignores the write,
+  a mechanism with no extended space and a malformed extended list.
 
 ## License
 

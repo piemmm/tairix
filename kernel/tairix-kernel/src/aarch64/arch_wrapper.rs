@@ -253,8 +253,7 @@ impl KernelArch for Aarch64BinArch {
         // a per-byte spin. The dispatch loop calls
         // this on **every** iteration — after each dispatched task and again
         // before the idle `wfi` — so the log drains at the loop's rate even
-        // while a perpetually-runnable in-kernel kthread (the polled
-        // USB-keyboard report pump) keeps the loop from ever idling, and
+        // while runnable tasks keep the loop from idling, and
         // independent of whether the PL011 transmit interrupt self-sustains
         // the drain on real silicon (it does not reliably on the Pi 4's
         // flow-blocked UART — the metal stall this fixes). On a host build
@@ -745,10 +744,8 @@ pub static VIDEO_KEYBOARD: tairix_kernel_core::ConsoleInputQueue =
 /// window manager acquires the seat (`display_acquire`, owner-checked) the
 /// registry routes whole [`tairix_abi::input::KeyInput`] records to its
 /// desktop keyboard channel instead, drained by the owner's
-/// `keyboard_read`. The same `'static`
-/// is shared by the in-kernel keyboard driver's `ArbiterConsoleSink` (which
-/// injects key edges) and the `key_inject` / `display_acquire` /
-/// `display_release` / `keyboard_read` syscall handlers.
+/// `keyboard_read`. The same `'static` is shared by the `key_inject` /
+/// `display_acquire` / `display_release` / `keyboard_read` syscall handlers.
 ///
 /// It also carries the console list, so a lease transition hands the boot
 /// seat's **display surface** between that console and the session holding

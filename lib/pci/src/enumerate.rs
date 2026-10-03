@@ -8,6 +8,8 @@
 //! configuration space cannot fit more) so it terminates without
 //! external timeouts.
 
+use alloc::vec::Vec;
+
 use tairix_abi::driver::bus::BusDevice;
 use tairix_abi::driver::pci::{BUS_MASTER_ENABLE, COMMAND_OFFSET, MEMORY_SPACE_ENABLE};
 use tairix_abi::driver::virtio_pci::{
@@ -21,7 +23,20 @@ use tairix_abi::{
 
 use crate::config::{
     BarDescriptor, BarKind, Capability, ConfigAddress, ConfigSpace, CAP_ID_VENDOR,
+    EXTENDED_REGISTER,
 };
+use crate::topology::{Acs, AcsPolicy, Function, Header, PciTopology, PortType, Topology};
+
+/// Header layouts of a PCI-to-PCI and a `CardBus` bridge (PCI Local Bus 3.0
+/// §6.1, PCI-to-PCI Bridge 1.2 §3.2).
+const HEADER_BRIDGE: u8 = 1;
+const HEADER_CARDBUS: u8 = 2;
+
+/// The PCI Express capability's id (PCI Express Base 5.0 §7.5.3).
+const CAP_ID_EXPRESS: u8 = 0x10;
+
+/// The ACS extended capability's id (PCI Express Base 5.0 §7.7.8).
+const EXT_CAP_ID_ACS: u16 = 0x000D;
 
 /// Maximum number of BAR slots a type-0 PCI function exposes
 /// (PCI Local Bus 3.0 §6.1).
@@ -117,6 +132,12 @@ impl<C: ConfigSpace> Pci<C> {
         Self { config }
     }
 
+    /// The backend, for a test to inspect what was written.
+    #[cfg(test)]
+    pub(crate) const fn config_space(&self) -> &C {
+        &self.config
+    }
+
     /// Enumerate every responding function on every bus into `out`.
     ///
     /// Returns the number of entries written. If `out.len()` is
@@ -126,51 +147,157 @@ impl<C: ConfigSpace> Pci<C> {
     /// contract exactly.
     pub fn enumerate_into(&self, out: &mut [BusDevice]) -> Result<usize, DriverError> {
         let mut count = 0usize;
-        let mut overflow = false;
-        for bus_u8 in 0u8..=255 {
+        self.each_function(|addr, address, id, _| {
+            if let Some(slot) = out.get_mut(count) {
+                *slot = self.bus_device(addr, address, id);
+            }
+            count += 1;
+        });
+        if count > out.len() {
+            Err(DriverError::BufferTooSmall)
+        } else {
+            Ok(count)
+        }
+    }
+
+    /// Visit every responding function on every bus, in address order, with
+    /// its configuration address, its identity dword and whether its slot is
+    /// multi-function. Bounded by PCI's own limits — 256 buses of 32 devices
+    /// of 8 functions — so it terminates without a timeout.
+    pub(crate) fn each_function(&self, mut visit: impl FnMut(ConfigAddress, u64, u32, bool)) {
+        for bus in 0u8..=255 {
             for device in 0u8..32 {
-                let multi = self.is_multifunction(bus_u8, device);
-                let max_fn = if multi { 8 } else { 1 };
-                for function in 0..max_fn {
+                let multifunction = self.is_multifunction(bus, device);
+                let functions = if multifunction { 8 } else { 1 };
+                for function in 0..functions {
                     let addr = ConfigAddress {
-                        bus: bus_u8,
+                        bus,
                         device,
                         function,
                         register: 0,
                     };
                     let id = self.config.read32(addr);
-                    // Truncating the low 16 bits of a configuration
-                    // dword is lossless by definition (vendor ID is
-                    // 16 bits wide per PCI Local Bus 3.0 §6.2.1).
-                    let vendor = low_u16(id);
-                    if vendor == VENDOR_INVALID {
+                    if low_u16(id) == VENDOR_INVALID {
                         continue;
                     }
-                    let Some(address) = addr.pack_bdf() else {
-                        continue;
-                    };
-                    let device_id = low_u16(id >> 16);
-                    let class = self.read_class(addr);
-                    let entry = BusDevice {
-                        vendor: u32::from(vendor),
-                        device: u32::from(device_id),
-                        class,
-                        reserved0: 0,
-                        address,
-                    };
-                    if count < out.len() {
-                        out[count] = entry;
-                    } else {
-                        overflow = true;
+                    if let Some(address) = addr.pack_bdf() {
+                        visit(addr, address, id, multifunction);
                     }
-                    count += 1;
                 }
             }
         }
-        if overflow {
-            Err(DriverError::BufferTooSmall)
-        } else {
-            Ok(count)
+    }
+
+    /// The [`BusDevice`] record of the function at `addr` (configuration
+    /// `address`), whose identity dword is `id`.
+    fn bus_device(&self, addr: ConfigAddress, address: u64, id: u32) -> BusDevice {
+        BusDevice {
+            vendor: u32::from(low_u16(id)),
+            device: u32::from(low_u16(id >> 16)),
+            class: self.read_class(addr),
+            reserved0: 0,
+            address,
+        }
+    }
+
+    /// The legacy capability list of the function at `addr`, or [`None`]
+    /// when its status register advertises none.
+    pub(crate) fn legacy_capabilities(
+        &self,
+        addr: ConfigAddress,
+    ) -> Option<LegacyCapabilities<'_, C>> {
+        let status = low_u16(self.config.read32(addr_with_reg(addr, 1)) >> 16);
+        if status & STATUS_CAP_LIST == 0 {
+            return None;
+        }
+        // Cap pointer at config-space offset 0x34 (register dword 13).
+        let first = low_u8(self.config.read32(addr_with_reg(addr, 13)) & 0xFC);
+        Some(LegacyCapabilities {
+            pci: self,
+            addr,
+            next: first,
+            steps: 0,
+        })
+    }
+
+    /// The function at `addr` (configuration `address`, identity dword
+    /// `id`) as a topology walk records it, its isolating ACS controls turned
+    /// on first where `acs` says so.
+    fn read_function(
+        &self,
+        addr: ConfigAddress,
+        address: u64,
+        id: u32,
+        multifunction: bool,
+        acs: AcsPolicy,
+    ) -> Function {
+        let header = match low_u8(self.config.read32(addr_with_reg(addr, 3)) >> 16) & 0x7F {
+            HEADER_BRIDGE | HEADER_CARDBUS => {
+                let [_, secondary, subordinate, _] =
+                    self.config.read32(addr_with_reg(addr, 6)).to_le_bytes();
+                Header::Bridge {
+                    secondary,
+                    subordinate,
+                }
+            }
+            _ => Header::Endpoint,
+        };
+        let express = self
+            .legacy_capabilities(addr)
+            .and_then(|mut list| list.find(|&(_, header)| low_u8(header) == CAP_ID_EXPRESS))
+            .map(|(_, header)| PortType::from_field(low_u8(header >> 20) & 0xF));
+        Function {
+            address,
+            vendor: low_u16(id),
+            device: low_u16(id >> 16),
+            class: self.read_class_24(addr),
+            header,
+            multifunction,
+            express,
+            // Only a PCI Express function has extended space to hold it.
+            acs: express.and_then(|_| self.acs(addr, acs)),
+        }
+    }
+
+    /// The ACS registers of the `PCIe` function at `addr`, if it has the
+    /// capability, after turning on each isolating control it offers where
+    /// `policy` says so. The Capability half of the dword is read-only, so
+    /// writing it back unchanged leaves it as it was.
+    fn acs(&self, addr: ConfigAddress, policy: AcsPolicy) -> Option<Acs> {
+        let (header, _) = self
+            .extended_capabilities(addr)
+            .find(|&(_, header)| low_u16(header) == EXT_CAP_ID_ACS)?;
+        let registers = ConfigAddress {
+            register: header + 1,
+            ..addr
+        };
+        let read = || {
+            let dword = self.config.read32(registers);
+            Acs {
+                capable: low_u16(dword),
+                enabled: low_u16(dword >> 16),
+            }
+        };
+        let found = read();
+        let wanted = found.enabled | (found.capable & Acs::ISOLATING);
+        if policy == AcsPolicy::Leave || wanted == found.enabled {
+            return Some(found);
+        }
+        self.config.write32(
+            registers,
+            u32::from(wanted) << 16 | u32::from(found.capable),
+        );
+        Some(read())
+    }
+
+    /// The extended capability list of the `PCIe` function at `addr`: empty
+    /// where the mechanism reaches no extended space.
+    pub(crate) fn extended_capabilities(&self, addr: ConfigAddress) -> ExtendedCapabilities<'_, C> {
+        ExtendedCapabilities {
+            pci: self,
+            addr,
+            next: EXTENDED_REGISTER,
+            steps: 0,
         }
     }
 
@@ -187,32 +314,13 @@ impl<C: ConfigSpace> Pci<C> {
     ///   `next` pointer planted by a malfunctioning device.
     pub fn capabilities(&self, bdf: u64, out: &mut [Capability]) -> Result<usize, DriverError> {
         let addr = unpack_bdf(bdf, 0);
-        let status_cmd = self.config.read32(addr_with_reg(addr, 1));
-        let status = low_u16(status_cmd >> 16);
-        if status & STATUS_CAP_LIST == 0 {
-            return Err(DriverError::NotFound);
-        }
-        // Cap pointer at config-space offset 0x34 (register dword 13).
-        let cap_ptr_dword = self.config.read32(addr_with_reg(addr, 13));
-        let mut cap_offset = low_u8(cap_ptr_dword & 0xFC);
+        let mut list = self
+            .legacy_capabilities(addr)
+            .ok_or(DriverError::NotFound)?;
         let mut count = 0usize;
-        let mut overflow = false;
-        let mut steps = 0usize;
-        while steps < CAP_LIST_HARD_LIMIT {
-            steps += 1;
-            if cap_offset == 0 {
-                return if overflow {
-                    Err(DriverError::BufferTooSmall)
-                } else {
-                    Ok(count)
-                };
-            }
-            let header_addr = addr_with_byte_offset(addr, cap_offset);
-            let header = self.config.read32(header_addr);
-            let cap_id = low_u8(header);
-            let next = low_u8((header >> 8) & 0xFC);
+        for (cap_offset, header) in list.by_ref() {
             let msg_ctrl = low_u16(header >> 16);
-            let entry = match cap_id {
+            let entry = match low_u8(header) {
                 0x05 => decode_msi(self, addr, cap_offset, msg_ctrl),
                 0x11 => decode_msix(self, addr, cap_offset, msg_ctrl),
                 CAP_ID_VENDOR => decode_virtio(self, addr, cap_offset, msg_ctrl),
@@ -221,17 +329,21 @@ impl<C: ConfigSpace> Pci<C> {
                     id,
                 },
             };
-            if count < out.len() {
-                out[count] = entry;
-            } else {
-                overflow = true;
+            if let Some(slot) = out.get_mut(count) {
+                *slot = entry;
             }
             count += 1;
-            cap_offset = next;
         }
-        // Loop budget exhausted without hitting a `next == 0`
-        // terminator — assume a malfunctioning device.
-        Err(DriverError::DeviceFault)
+        if list.malformed() {
+            // The budget ran out before a `next == 0` terminator: almost
+            // certainly a circular list planted by a malfunctioning device.
+            return Err(DriverError::DeviceFault);
+        }
+        if count > out.len() {
+            Err(DriverError::BufferTooSmall)
+        } else {
+            Ok(count)
+        }
     }
 
     /// Decode every BAR slot of a *type-0* function into `out`.
@@ -398,24 +510,19 @@ impl<C: ConfigSpace> Pci<C> {
     /// Read the configuration-space dword at byte `offset` of function
     /// `bdf`.
     ///
-    /// `offset` is a byte offset into the 256-byte configuration header;
+    /// `offset` is a byte offset into the function's configuration space;
     /// it is resolved to the dword it falls in (the low two bits are
     /// ignored) and the little-endian dword is returned exactly as
-    /// configuration space holds it. A read-only diagnostic accessor —
-    /// it touches no state and confirms a prior write took effect (a
-    /// just-assigned BAR, an enabled command register, a programmed
-    /// bridge window). The in-tree [`ConfigSpace`] backends are
-    /// infallible, so this never errors; the
-    /// [`PciBus`](tairix_abi::driver::pci::PciBus) trait method reserves
-    /// the error arm for a future fallible transport.
+    /// configuration space holds it. A register the mechanism cannot reach
+    /// — extended space through mechanism #1, or past 4 KiB — reads
+    /// all-ones, as an absent function does. A read-only diagnostic
+    /// accessor: it touches no state.
     #[must_use]
     pub fn read_config(&self, bdf: u64, offset: u16) -> u32 {
-        // The byte offset's dword register index (offset >> 2), masked
-        // to the 8-bit register field — a 256-byte header has 64 dwords,
-        // so the cast is lossless.
-        let register = ((offset >> 2) & 0xFF) as u8;
-        self.config
-            .read32(addr_with_reg(unpack_bdf(bdf, 0), register))
+        self.config.read32(ConfigAddress {
+            register: offset >> 2,
+            ..unpack_bdf(bdf, 0)
+        })
     }
 
     /// Assign a memory base to the BAR at `bar_index` on function
@@ -1034,6 +1141,24 @@ impl<C: ConfigSpace> Pci<C> {
     }
 }
 
+impl<C: ConfigSpace> PciTopology for Pci<C> {
+    fn topology(&self, acs: AcsPolicy) -> Result<Topology, DriverError> {
+        let mut functions = Vec::new();
+        let mut exhausted = false;
+        self.each_function(|addr, address, id, multifunction| {
+            if functions.try_reserve(1).is_ok() {
+                functions.push(self.read_function(addr, address, id, multifunction, acs));
+            } else {
+                exhausted = true;
+            }
+        });
+        if exhausted {
+            return Err(DriverError::NoSpace);
+        }
+        Ok(Topology::new(functions)?)
+    }
+}
+
 #[inline]
 fn low_u8(v: u32) -> u8 {
     // Masking to 8 bits then casting is lossless by construction.
@@ -1091,12 +1216,85 @@ fn device_class_from_base(base_class: u8) -> HwDeviceClass {
 
 #[inline]
 fn addr_with_reg(addr: ConfigAddress, register: u8) -> ConfigAddress {
-    ConfigAddress { register, ..addr }
+    ConfigAddress {
+        register: u16::from(register),
+        ..addr
+    }
 }
 
 #[inline]
 fn addr_with_byte_offset(addr: ConfigAddress, byte_offset: u8) -> ConfigAddress {
     addr_with_reg(addr, byte_offset >> 2)
+}
+
+/// A function's legacy capability list: each entry's offset and header dword.
+/// A circular list stops at [`CAP_LIST_HARD_LIMIT`] entries, and says so.
+pub(crate) struct LegacyCapabilities<'p, C: ConfigSpace> {
+    pci: &'p Pci<C>,
+    addr: ConfigAddress,
+    next: u8,
+    steps: usize,
+}
+
+impl<C: ConfigSpace> LegacyCapabilities<'_, C> {
+    /// Whether the walk gave up on a list that never ended.
+    pub(crate) fn malformed(&self) -> bool {
+        self.next != 0 && self.steps >= CAP_LIST_HARD_LIMIT
+    }
+}
+
+impl<C: ConfigSpace> Iterator for LegacyCapabilities<'_, C> {
+    type Item = (u8, u32);
+
+    fn next(&mut self) -> Option<(u8, u32)> {
+        if self.next == 0 || self.steps >= CAP_LIST_HARD_LIMIT {
+            return None;
+        }
+        self.steps += 1;
+        let offset = self.next;
+        let header = self
+            .pci
+            .config
+            .read32(addr_with_byte_offset(self.addr, offset));
+        self.next = low_u8((header >> 8) & 0xFC);
+        Some((offset, header))
+    }
+}
+
+/// Entries a `PCIe` function's extended capability list can hold: each takes
+/// at least its header dword, in the 960 dwords past the legacy space.
+const EXTENDED_LIST_LIMIT: usize = 960;
+
+/// A `PCIe` function's extended capability list (PCI Express Base 5.0
+/// §7.6): each entry's dword index and header. It ends at an empty or
+/// absent header, a `next` of zero, or a `next` pointing back into the
+/// legacy space, which no well-formed list does.
+pub(crate) struct ExtendedCapabilities<'p, C: ConfigSpace> {
+    pci: &'p Pci<C>,
+    addr: ConfigAddress,
+    next: u16,
+    steps: usize,
+}
+
+impl<C: ConfigSpace> Iterator for ExtendedCapabilities<'_, C> {
+    type Item = (u16, u32);
+
+    fn next(&mut self) -> Option<(u16, u32)> {
+        if self.next < EXTENDED_REGISTER || self.steps >= EXTENDED_LIST_LIMIT {
+            return None;
+        }
+        self.steps += 1;
+        let register = self.next;
+        let header = self.pci.config.read32(ConfigAddress {
+            register,
+            ..self.addr
+        });
+        if header == 0 || header == 0xFFFF_FFFF {
+            return None;
+        }
+        self.next = u16::try_from(header >> 22).unwrap_or(0);
+        Some((register, header))
+    }
 }
 
 fn unpack_bdf(bdf: u64, register: u8) -> ConfigAddress {
@@ -1105,7 +1303,7 @@ fn unpack_bdf(bdf: u64, register: u8) -> ConfigAddress {
         bus,
         device,
         function,
-        register,
+        register: u16::from(register),
     }
 }
 

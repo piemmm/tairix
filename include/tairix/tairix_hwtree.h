@@ -77,6 +77,8 @@
 #define TAIRIX_HW_RES_IOMMU_STREAM ((uint16_t)12u)
 #define TAIRIX_HW_RES_IOMMU_RESERVED ((uint16_t)13u)
 #define TAIRIX_HW_RES_PROPERTY ((uint16_t)14u)
+#define TAIRIX_HW_RES_IOMMU_ALIAS ((uint16_t)15u)
+#define TAIRIX_HW_RES_IOMMU_GROUP ((uint16_t)16u)
 
 /* Property keys (uint32_t). */
 #define TAIRIX_HW_PROPERTY_USB_INTERFACE ((uint32_t)1u)

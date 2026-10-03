@@ -796,20 +796,13 @@ the Pi 4's 54 MHz crystal — so `CNTFRQ_EL0` is **correctly** programmed
 and a mis-programmed-rate `busy_delay_us` over-wait is ruled out as the
 cause of the multi-second USB bring-up pause.
 
-A `4116` "bring-up delay timing measurement" measures the whole bring-up
-chain: the keyboard service brackets it with `kernel_arch::read_cntpct`
-and tallies, in its `GenericTimerDelay`, how long the code *asked* to
-wait (`requested_us_hex`, over `delay_calls_hex` calls), reported against
-the `CNTPCT_EL0`-measured span (`counter_elapsed_us_hex`, same
-`timer_hz_hex` rate). The capture read `requested_us_hex=0x57030`
-(≈356 ms over `delay_calls_hex=0x103`=259 calls) yet
-`counter_elapsed_us_hex≈14.3 s` at the correct 54 MHz — so ≈14 s of
-*real* time elapsed with only ≈356 ms of it in `busy_delay_us`. The
-counter is sound; the seconds are code-side, outside the delays.
+A measurement of the then in-kernel bring-up found ≈14.3 s of real time
+against ≈356 ms of requested delay at the correct 54 MHz: the counter is
+sound, and the seconds were code-side, outside the delays.
 
-`4116` alone cannot say *where* in the chain those seconds go, so per-line
-log timestamps were added: `SerialSink::write_event` prefixes every line
-with `[<secs>.<millis>]`, a monotonic `CNTPCT_EL0`-derived stamp
+To say *where* those seconds went, per-line log timestamps were added:
+`SerialSink::write_event` prefixes every line with `[<secs>.<millis>]`, a
+monotonic `CNTPCT_EL0`-derived stamp
 (`kernel_arch::uptime_ms`, scaled by `CNTFRQ_EL0` — the same counter/rate
 `busy_delay_us` spins against; epoch unspecified, only differences
 matter), and `build.rs` emits a `KERNEL_BUILD_ID` (git short hash +
@@ -905,7 +898,7 @@ BCM2711's own PL011 / mini-UART on GPIO14/15, an on-SoC peripheral with
 no path to the PCIe root complex, so logging cannot perturb the
 controller or account for the pause.
 
-This is host-proven (the driver/usb_keyboard tests assert the release-only
+This is host-proven (the `pcie_brcm` tests assert the release-only
 `PERST#` sequence and the no-touch firmware path), but the live keyboard
 enumerating on metal is an on-metal acceptance item (no `raspi4b` in QEMU —
 QEMU models no Pi PCIe/USB). A healthy capture shows a live

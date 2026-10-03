@@ -190,6 +190,12 @@ pub mod hwtree_node_ids;
 #[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64", kernel_isa = "riscv64"))]
 pub mod pci_host;
 
+// What a kernel PCI probe makes of one segment: each function's DMA identity
+// behind a unit, the functions it stops mastering, and the PCI host's record
+// (`plans/IOMMU.md` IOM7, IOM8). Host-tested.
+#[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64", kernel_isa = "riscv64"))]
+pub mod pci_probe;
+
 // The boot-display publication step (`plans/DISPLAY.md` D7d): turns the
 // architecture port's discovered framebuffer-boot-console scan-out facts
 // into a display-class hardware-tree node carrying the geometry-carrying
@@ -611,14 +617,10 @@ pub use aarch64::arch_wrapper::{Aarch64BinArch, UartConsole, UART_CONSOLE};
 pub use x86_64::arch_wrapper::BinArch;
 #[cfg(kernel_isa = "x86_64")]
 pub use x86_64::dispatch::{production_dispatch, DISPATCH_SLOT};
-// The architecture-neutral virtio factory and provisioning walks now
-// live in `tairix-kernel-virtio` so every architecture port can reuse
-// them; re-exported here to keep this crate's public
-// API unchanged.
+// The boot paths and the QEMU verticals provision devices through these.
 pub use tairix_kernel_virtio::{
     provision_virtio_mmio, provision_virtio_pci, KernelVirtioFactory, KernelVirtioFactoryConfig,
-    VirtioMmioProvision, VirtioMmioWalkError, VirtioPciWalkError, VirtioProvision, MAX_FUNCTIONS,
-    MAX_SLOTS,
+    VirtioMmioProvision, VirtioMmioWalkError, VirtioPciWalkError, VirtioProvision, MAX_SLOTS,
 };
 
 #[cfg(all(freestanding, kernel_isa = "riscv64"))]

@@ -183,6 +183,9 @@ pub enum DmaError {
     Unconfirmed,
     /// The device belongs to a kernel driver: no process may carve for it.
     KernelOwned,
+    /// Another device the fabric cannot keep apart from this one has a live
+    /// owner, which holds their isolation group.
+    GroupBusy,
 }
 
 impl From<AllocError> for DmaError {
@@ -215,6 +218,9 @@ impl fmt::Display for DmaError {
             Self::Translation => f.write_str("dma translation unit refused the carve"),
             Self::Unconfirmed => f.write_str("dma translation unit did not confirm an unmap"),
             Self::KernelOwned => f.write_str("dma carve names a device a kernel driver owns"),
+            Self::GroupBusy => {
+                f.write_str("dma carve names a device whose isolation group another owner holds")
+            }
         }
     }
 }
@@ -297,7 +303,9 @@ pub trait DeviceTranslation: Sync {
     /// when the unit refuses (a node whose earlier end it could not confirm
     /// included), [`DmaError::DeviceGone`] for an owner whose domain was
     /// revoked or a node that has left the tree, [`DmaError::KernelOwned`] for
-    /// a node a kernel driver owns, and [`DmaError::Unconfirmed`] when a
+    /// a node a kernel driver owns, [`DmaError::GroupBusy`] for a node whose
+    /// isolation group another node's live owner holds, and
+    /// [`DmaError::Unconfirmed`] when a
     /// refused map could not be confirmed gone — the block must then never be
     /// reused.
     fn map(&self, node: u32, generation: u64, block: DmaBlock, limit: u64)

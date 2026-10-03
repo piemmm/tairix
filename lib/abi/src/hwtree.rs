@@ -589,6 +589,21 @@ pub enum HwResourceKind {
     /// The publisher states it about the device it describes; the kernel
     /// never reads one and holding one authorises nothing.
     Property = 14,
+    /// The fabric **also delivers the node's DMA as these stream ids**:
+    /// `base` is the unit's node id, `xlate` the first id, `len` how many. A
+    /// bridge that takes ownership of the requests below it (a PCIe-to-PCI
+    /// bridge) tags them with an id of its own. Recovered through
+    /// [`HwResource::iommu_aliases`].
+    ///
+    /// A fact: the node's domain translates them too, but they name no
+    /// function of the node's own, so nothing is made a bus master by one.
+    IommuAlias = 15,
+    /// The node's DMA **cannot be kept apart from that of every other node
+    /// naming this group**: `base` is the unit's node id, `xlate` the group's
+    /// id, `len` `1`. Recovered through [`HwResource::iommu_group`].
+    ///
+    /// A fact: the kernel lets one owner at a time carve through a group.
+    IommuGroup = 16,
 }
 
 /// What a [`HwResourceKind::Property`] states.
@@ -723,6 +738,8 @@ impl HwResourceKind {
         Self::IommuStream,
         Self::IommuReserved,
         Self::Property,
+        Self::IommuAlias,
+        Self::IommuGroup,
     ];
 
     /// Raw on-wire discriminant.
@@ -750,6 +767,8 @@ impl HwResourceKind {
             12 => Some(Self::IommuStream),
             13 => Some(Self::IommuReserved),
             14 => Some(Self::Property),
+            15 => Some(Self::IommuAlias),
+            16 => Some(Self::IommuGroup),
             _ => None,
         }
     }
@@ -778,9 +797,12 @@ impl HwResourceKind {
             Self::Shared => CapabilityId::SHM,
             // Read straight out of the record: no syscall resolves any of them
             // and holding one authorises nothing.
-            Self::LinkAddress | Self::IommuStream | Self::IommuReserved | Self::Property => {
-                return None
-            }
+            Self::LinkAddress
+            | Self::IommuStream
+            | Self::IommuReserved
+            | Self::Property
+            | Self::IommuAlias
+            | Self::IommuGroup => return None,
             // A bus-child or DMA-controller duty authorises binding a
             // reserved id, which is a privileged bind.
             Self::BusChild | Self::DmaController => CapabilityId::IPC_BIND_PRIVILEGED,
@@ -963,6 +985,36 @@ impl IommuReservedWindow {
     #[must_use]
     pub const fn is_empty(self) -> bool {
         false
+    }
+}
+
+/// An isolation group on one translation unit ([`HwResourceKind::IommuGroup`]):
+/// devices the fabric cannot keep apart — a requester id one bridge gives
+/// them all, or peer-to-peer a port or multi-function device without ACS
+/// passes below the unit.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct IommuGroup {
+    unit: u32,
+    id: u32,
+}
+
+impl IommuGroup {
+    /// Group `id` on the unit at hardware-tree node `unit`.
+    #[must_use]
+    pub const fn new(unit: u32, id: u32) -> Self {
+        Self { unit, id }
+    }
+
+    /// The translation unit's hardware-tree node id.
+    #[must_use]
+    pub const fn unit(self) -> u32 {
+        self.unit
+    }
+
+    /// The group's id, unique on its unit.
+    #[must_use]
+    pub const fn id(self) -> u32 {
+        self.id
     }
 }
 
@@ -1275,7 +1327,33 @@ impl HwResource {
     /// capability or flag the kind does not carry, or a unit, first id or
     /// count that does not fit a stream range.
     pub fn iommu_streams(&self) -> Result<IommuStreams, Errno> {
-        if self.kind() != Some(HwResourceKind::IommuStream) {
+        self.stream_range(HwResourceKind::IommuStream)
+    }
+
+    /// The fact that the fabric also delivers a node's DMA as `streams`
+    /// ([`HwResourceKind::IommuAlias`]).
+    #[must_use]
+    pub fn iommu_alias(streams: IommuStreams) -> Self {
+        Self::new_xlate(
+            HwResourceKind::IommuAlias,
+            u64::from(streams.unit()),
+            u64::from(streams.count()),
+            0,
+            u64::from(streams.first()),
+        )
+    }
+
+    /// The stream ids a [`HwResourceKind::IommuAlias`] resource carries.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::iommu_streams`].
+    pub fn iommu_aliases(&self) -> Result<IommuStreams, Errno> {
+        self.stream_range(HwResourceKind::IommuAlias)
+    }
+
+    fn stream_range(&self, kind: HwResourceKind) -> Result<IommuStreams, Errno> {
+        if self.kind() != Some(kind) {
             return Err(Errno::OutOfRange);
         }
         if self.capability != 0 || self.flags != 0 {
@@ -1289,6 +1367,39 @@ impl HwResource {
             return Err(Errno::BadMagic);
         };
         IommuStreams::new(unit, first, count).map_err(|_| Errno::BadMagic)
+    }
+
+    /// The fact that a node belongs to isolation group `group`
+    /// ([`HwResourceKind::IommuGroup`]).
+    #[must_use]
+    pub fn iommu_group_member(group: IommuGroup) -> Self {
+        Self::new_xlate(
+            HwResourceKind::IommuGroup,
+            u64::from(group.unit()),
+            1,
+            0,
+            u64::from(group.id()),
+        )
+    }
+
+    /// The group a [`HwResourceKind::IommuGroup`] resource names.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for another kind, or [`Errno::BadMagic`] for a
+    /// capability, flag or length the kind does not carry, or a unit or group
+    /// id past 32 bits.
+    pub fn iommu_group(&self) -> Result<IommuGroup, Errno> {
+        if self.kind() != Some(HwResourceKind::IommuGroup) {
+            return Err(Errno::OutOfRange);
+        }
+        if self.capability != 0 || self.flags != 0 || self.len != 1 {
+            return Err(Errno::BadMagic);
+        }
+        match (u32::try_from(self.base), u32::try_from(self.xlate)) {
+            (Ok(unit), Ok(id)) => Ok(IommuGroup::new(unit, id)),
+            _ => Err(Errno::BadMagic),
+        }
     }
 
     /// A firmware reserved window on a translation unit
@@ -1630,9 +1741,13 @@ impl HwResource {
     ///   [`DmaRequest`](HwResourceKind::DmaRequest) cover only themselves,
     ///   and a request line also covers an [`Endpoint`](HwResourceKind::Endpoint)
     ///   naming its controller: calling it, never binding it.
-    /// * [`IommuStream`](HwResourceKind::IommuStream) covers a sub-range of its
-    ///   own streams through the same unit; an
-    ///   [`IommuReserved`](HwResourceKind::IommuReserved) window only itself.
+    /// * [`IommuStream`](HwResourceKind::IommuStream) and
+    ///   [`IommuAlias`](HwResourceKind::IommuAlias) each cover a sub-range of
+    ///   their own streams through the same unit, never one of the other kind:
+    ///   an alias names no function, so it can never become a function's own
+    ///   stream. An [`IommuReserved`](HwResourceKind::IommuReserved) window and
+    ///   an [`IommuGroup`](HwResourceKind::IommuGroup) cover only themselves, so
+    ///   a child for the same device stays in its parent's group.
     #[must_use]
     pub fn covers(&self, child: &HwResource) -> bool {
         let (Some(parent_kind), Some(child_kind)) = (self.kind(), child.kind()) else {
@@ -1723,14 +1838,21 @@ impl HwResource {
             (HwResourceKind::DmaRequest, HwResourceKind::Endpoint) => {
                 child.flags == 0 && interval_contains(self.base, 1, child.base, child.len)
             }
-            (HwResourceKind::IommuStream, HwResourceKind::IommuStream) => {
+            (HwResourceKind::IommuStream, HwResourceKind::IommuStream)
+            | (HwResourceKind::IommuAlias, HwResourceKind::IommuAlias) => {
                 // A driver may name its own streams on a node for the same
                 // device, never a neighbour's: another device's stream would
                 // put that device's DMA in this driver's domain.
-                match (self.iommu_streams(), child.iommu_streams()) {
+                match (
+                    self.stream_range(parent_kind),
+                    child.stream_range(child_kind),
+                ) {
                     (Ok(parent), Ok(child)) => parent.covers(child),
                     _ => false,
                 }
+            }
+            (HwResourceKind::IommuGroup, HwResourceKind::IommuGroup) => {
+                self.iommu_group().is_ok() && self.iommu_group() == child.iommu_group()
             }
             (HwResourceKind::IommuReserved, HwResourceKind::IommuReserved) => {
                 self.iommu_reserved().is_ok()
@@ -2874,6 +2996,62 @@ mod tests {
         assert!(!parent.covers(&other_unit));
         assert!(!inside.covers(&parent));
         assert!(!parent.covers(&HwResource::dma(0, 0)));
+    }
+
+    #[test]
+    fn an_iommu_alias_round_trips_and_covers_only_aliases_inside_it() {
+        let streams = IommuStreams::new(3, 0x0200, 1).unwrap();
+        let alias = HwResource::iommu_alias(streams);
+        assert_eq!(alias.kind(), Some(HwResourceKind::IommuAlias));
+        assert_eq!(alias.required_capability(), Ok(None));
+        assert_eq!(alias.iommu_aliases(), Ok(streams));
+        assert_eq!(alias.iommu_streams(), Err(Errno::OutOfRange));
+        assert_eq!(HwResource::from_bytes(&alias.to_le_bytes()), Ok(alias));
+
+        let range = HwResource::iommu_alias(IommuStreams::new(3, 0x0200, 8).unwrap());
+        assert!(range.covers(&alias));
+        assert!(!alias.covers(&range));
+        let own = HwResource::iommu_stream(streams);
+        assert!(
+            !alias.covers(&own),
+            "an alias never becomes a function's own stream"
+        );
+        assert!(!own.covers(&alias), "nor a stream an alias");
+        let elsewhere = HwResource::iommu_alias(IommuStreams::new(4, 0x0200, 1).unwrap());
+        assert!(!range.covers(&elsewhere));
+
+        let mut wire = alias.to_le_bytes();
+        wire[4] = 1;
+        assert_eq!(
+            HwResource::from_bytes(&wire).unwrap().iommu_aliases(),
+            Err(Errno::BadMagic)
+        );
+    }
+
+    #[test]
+    fn an_iommu_group_round_trips_and_covers_only_itself() {
+        let group = IommuGroup::new(3, 0x0018);
+        let fact = HwResource::iommu_group_member(group);
+        assert_eq!(fact.kind(), Some(HwResourceKind::IommuGroup));
+        assert_eq!(fact.required_capability(), Ok(None));
+        assert_eq!(fact.iommu_group(), Ok(group));
+        assert_eq!(HwResource::from_bytes(&fact.to_le_bytes()), Ok(fact));
+        assert!(fact.covers(&fact));
+        for other in [IommuGroup::new(3, 0x0019), IommuGroup::new(4, 0x0018)] {
+            assert!(!fact.covers(&HwResource::iommu_group_member(other)));
+        }
+        assert!(!HwResource::iommu_stream(IommuStreams::new(3, 0, 0x100).unwrap()).covers(&fact));
+
+        for (at, value) in [(2, 1u8), (4, 1), (16, 2), (12, 1), (28, 1)] {
+            let mut wire = fact.to_le_bytes();
+            wire[at] = value;
+            assert_eq!(
+                HwResource::from_bytes(&wire).and_then(|fact| fact.iommu_group()),
+                Err(Errno::BadMagic),
+                "byte {at}"
+            );
+        }
+        assert_eq!(HwResource::dma(0, 0).iommu_group(), Err(Errno::OutOfRange));
     }
 
     #[test]

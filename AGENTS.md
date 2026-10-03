@@ -660,7 +660,7 @@ tairix/
 │   ├── parallel/        # Bounded data-parallel work engine (JobRunner + pool).
 │   ├── partition/       # Shared, scheme-neutral partition-table layer (MBR/GPT).
 │   ├── path/            # Shared filesystem path-spelling parser.
-│   ├── pci/             # PCI/PCIe configuration-access mechanism library.
+│   ├── pci/             # PCI/PCIe configuration access and the topology walk.
 │   ├── procinfo/        # Sysinfo API client helpers + info:/stats: resolver.
 │   ├── proglib/         # Program-library catalog registry (folders/entries).
 │   ├── raid/            # RAID composition engines (levels, dispatch, maintenance).

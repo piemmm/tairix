@@ -11,6 +11,12 @@
 //! input-focus arbiter is therefore a transfer that crossed the unit twice —
 //! the driver's queue setup and the device's event write.
 //!
+//! The keyboard sits behind a PCIe-to-PCI bridge, which tags its requests
+//! with the bridge's secondary bus and function `00.0`: its DMA reaches the
+//! unit under that alias, never its own requester id, so the key arrives only
+//! if its domain translates the alias too (`plans/IOMMU.md` IOM8). Any
+//! translation fault fails the run at once.
+//!
 //! No function may be a bus master before its unit translates and its
 //! owner's domain is attached (`plans/IOMMU.md` IOM7): the unit's record
 //! reports, read from every function behind it as it took over, that none
@@ -18,12 +24,13 @@
 //! domain holds its stream.
 //!
 //! PASS once `AuditEvent::InputDelivered` with `kind=key` follows
-//! `AuditEvent::DmaTranslationUnit` with `outcome=translating` and
-//! `masters=0`, and the keyboard's node was granted bus mastering
+//! `AuditEvent::DmaTranslationUnit` with `outcome=translating`, `stopped=0`
+//! and `refused=0`, and the keyboard's node was granted bus mastering
 //! (`AuditEvent::DmaBusMaster` `master=on`) after it. A unit left
 //! untranslated or taking over a function still mastering, a function made a
-//! bus master before any unit translates, or a key delivered before both,
-//! fails the run at once rather than passing on DMA that bypassed the unit.
+//! bus master before any unit translates, a translation fault, or a key
+//! delivered before both, fails the run at once rather than passing on DMA
+//! that bypassed the unit.
 
 #![cfg_attr(itest_x86_64, no_std)]
 #![cfg_attr(itest_x86_64, no_main)]
@@ -75,7 +82,8 @@ mod kernel {
                 if matches!(
                     field(event, "outcome"),
                     Some(FieldValue::Str("translating"))
-                ) && matches!(field(event, "masters"), Some(FieldValue::UnsignedInt(0)))
+                ) && matches!(field(event, "stopped"), Some(FieldValue::UnsignedInt(0)))
+                    && matches!(field(event, "refused"), Some(FieldValue::UnsignedInt(0)))
                 {
                     self.translating.store(true, Ordering::Release);
                 } else {
@@ -93,6 +101,8 @@ mod kernel {
                 {
                     self.keyboard_mastered.store(true, Ordering::Release);
                 }
+            } else if event.id.0 == AuditEvent::DmaTranslationFault.id().0 {
+                qemu_exit::exit_failure();
             } else if event.id.0 == AuditEvent::InputDelivered.id().0
                 && matches!(field(event, "kind"), Some(FieldValue::Str("key")))
             {

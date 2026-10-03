@@ -158,9 +158,9 @@ pub struct LoadedDriver {
     /// into its node's domain, and its end revokes that domain rather than
     /// quarantining them.
     pub translated: bool,
-    /// The node's function was handed to this driver as a bus master, at its
-    /// first carve.
-    pub handed_over: bool,
+    /// The epoch its node's function was handed to it at, as a bus master, at
+    /// its first carve; [`None`] while it has not been.
+    pub mastered: Option<u64>,
 }
 
 /// Maps each live task's [`ProcessId`] to its user address space and the
@@ -1546,10 +1546,29 @@ impl AddressSpaceRegistry {
                 generation,
                 dma_bytes: 0,
                 translated,
-                handed_over: false,
+                mastered: None,
             },
         );
         Ok(())
+    }
+
+    /// Take hardware-tree `node` for a kernel driver for good: it is held by
+    /// [`ProcessId::KERNEL`], which is never a loaded driver, so
+    /// [`admit_driver`](Self::admit_driver) refuses every process for it and
+    /// [`release_node`](Self::release_node) never frees it.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::Busy`] while a process is the node's driver.
+    pub fn claim_for_kernel(&mut self, node: u32) -> Result<(), Errno> {
+        match self.node_drivers.get(&node) {
+            Some(&holder) if holder != ProcessId::KERNEL => Err(Errno::Busy),
+            Some(_) => Ok(()),
+            None => {
+                self.node_drivers.insert(node, ProcessId::KERNEL);
+                Ok(())
+            }
+        }
     }
 
     /// Let the node the driver `task` holds take a successor: its last thread
@@ -1596,13 +1615,17 @@ impl AddressSpaceRegistry {
         }
     }
 
-    /// Mark the node the driver `task` holds handed to it, answering whether
-    /// it was not yet: a function is handed over once, at its driver's first
-    /// carve.
-    pub fn first_hand_over(&mut self, task: ProcessId) -> bool {
-        self.loaded_nodes
-            .get_mut(&task)
-            .is_some_and(|driver| !core::mem::replace(&mut driver.handed_over, true))
+    /// Mark the node the driver `task` holds handed to it at the epoch
+    /// `begin` answers, and answer that epoch, if it was not handed over yet:
+    /// a function is handed over once, at its driver's first carve.
+    pub fn first_hand_over(&mut self, task: ProcessId, begin: impl FnOnce() -> u64) -> Option<u64> {
+        let driver = self.loaded_nodes.get_mut(&task)?;
+        if driver.mastered.is_some() {
+            return None;
+        }
+        let epoch = begin();
+        driver.mastered = Some(epoch);
+        Some(epoch)
     }
 
     /// Tally `bytes` of DMA memory the driver `task` freed.
@@ -3423,21 +3446,52 @@ mod tests {
     #[test]
     fn a_driver_s_function_is_handed_to_it_once() {
         let mut reg = AddressSpaceRegistry::new();
-        assert!(!reg.first_hand_over(ProcessId(2)), "no driver, no function");
+        assert_eq!(
+            reg.first_hand_over(ProcessId(2), || 1),
+            None,
+            "no driver, no function"
+        );
         reg.admit_driver(ProcessId(2), 9, false)
             .expect("a free node");
-        assert!(reg.first_hand_over(ProcessId(2)));
-        assert!(!reg.first_hand_over(ProcessId(2)));
-        assert!(reg
-            .loaded_driver(ProcessId(2))
-            .is_some_and(|d| d.handed_over));
+        assert_eq!(reg.first_hand_over(ProcessId(2), || 4), Some(4));
+        assert_eq!(
+            reg.first_hand_over(ProcessId(2), || unreachable!("no second epoch")),
+            None
+        );
+        assert_eq!(
+            reg.loaded_driver(ProcessId(2)).and_then(|d| d.mastered),
+            Some(4)
+        );
 
         assert!(reg.withdraw(ProcessId(2)));
         reg.admit_driver(ProcessId(3), 9, false)
             .expect("the node is free once its driver is down");
-        assert!(
-            reg.first_hand_over(ProcessId(3)),
+        assert_eq!(
+            reg.first_hand_over(ProcessId(3), || 5),
+            Some(5),
             "a successor is handed the function afresh"
+        );
+    }
+
+    #[test]
+    fn a_node_the_kernel_drives_takes_no_process_as_its_driver() {
+        let mut reg = AddressSpaceRegistry::new();
+        reg.claim_for_kernel(9).expect("a free node");
+        reg.claim_for_kernel(9)
+            .expect("claiming again changes nothing");
+        assert_eq!(reg.admit_driver(ProcessId(2), 9, false), Err(Errno::Busy));
+        reg.release_node(ProcessId::KERNEL);
+        assert_eq!(
+            reg.admit_driver(ProcessId(2), 9, false),
+            Err(Errno::Busy),
+            "the kernel never lets it go"
+        );
+        reg.admit_driver(ProcessId(3), 10, false)
+            .expect("another node");
+        assert_eq!(
+            reg.claim_for_kernel(10),
+            Err(Errno::Busy),
+            "a node a process drives"
         );
     }
 

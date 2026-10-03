@@ -46,12 +46,17 @@ use tairix_abi::driver::pci::PciBus;
 use tairix_abi::driver::virtio_pci::VirtioPciBus;
 use tairix_abi::{DriverError, HwNode, MmioMapper, MsiMessage, PortIo, RegisterWindow};
 
+use crate::topology::PciTopology;
+
+extern crate alloc;
+
 pub(crate) mod config;
 pub(crate) mod enumerate;
 mod locate;
 pub(crate) mod mech_brcm;
 pub(crate) mod mech_ecam;
 pub(crate) mod mech_one;
+pub mod topology;
 
 #[cfg(test)]
 mod tests;
@@ -106,7 +111,7 @@ pub use mech_one::reaches_config_ports;
 /// space simply never call it and reach `PCIe` through memory-mapped
 /// ECAM, a separate seam.
 #[must_use]
-pub fn mechanism_one<P: PortIo>(pio: P) -> impl VirtioPciBus + MsixBus + PciBus {
+pub fn mechanism_one<P: PortIo>(pio: P) -> impl VirtioPciBus + MsixBus + PciBus + PciTopology {
     Pci::new(mech_one::PortIoConfigSpace::new(pio))
 }
 
@@ -142,7 +147,9 @@ pub fn mechanism_one<P: PortIo>(pio: P) -> impl VirtioPciBus + MsixBus + PciBus 
 /// controller, and the path any `PCIe` host bridge without an I/O-port
 /// space uses.
 #[must_use]
-pub fn mechanism_ecam(window: RegisterWindow) -> impl VirtioPciBus + MsixBus + PciBus {
+pub fn mechanism_ecam(
+    window: RegisterWindow,
+) -> impl VirtioPciBus + MsixBus + PciBus + PciTopology {
     Pci::new(mech_ecam::EcamConfigSpace::new(window))
 }
 
@@ -185,7 +192,7 @@ pub fn mechanism_ecam(window: RegisterWindow) -> impl VirtioPciBus + MsixBus + P
 pub fn mechanism_brcm(
     window: RegisterWindow,
     secondary_bus: u8,
-) -> impl VirtioPciBus + MsixBus + PciBus {
+) -> impl VirtioPciBus + MsixBus + PciBus + PciTopology {
     Pci::new(mech_brcm::BrcmConfigSpace::new(window, secondary_bus))
 }
 

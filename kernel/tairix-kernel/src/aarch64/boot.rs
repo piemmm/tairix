@@ -1568,8 +1568,8 @@ struct EarlyDiscovered {
     /// The BCM2711 PCIe root-complex windows, when the tree describes a
     /// `brcm,bcm2711-pcie` bridge (`plans/PI.md` P10): the controller
     /// register block and outbound MMIO window must be folded into the
-    /// identity Device mask, and the bring-up consumes all three windows.
-    /// `None` on a board with no bridge (the QEMU `virt` shape).
+    /// identity Device mask. `None` on a board with no bridge (the QEMU
+    /// `virt` shape).
     pcie: Option<platform::PcieDiscovery>,
     /// The rate in Hz the firmware was asked to run the ARM cores at, or `0`
     /// on a board with no firmware clock (the QEMU `virt` shape) or where the
@@ -1637,12 +1637,8 @@ fn configure_mmio_from_dtb(dtb: u64) -> EarlyDiscovered {
         }
         None => out.video = video::configure(&fdt, None),
     }
-    // Discover the BCM2711 PCIe bridge's windows for the in-kernel
-    // USB-keyboard service (`plans/PI.md` P10). The early-returning
-    // `scan_translated` walk is MMU-off-safe (it reads only the matched
-    // node's own properties), exactly like the console/GIC/video walks
-    // above; the QEMU `virt` tree carries no such node, so this is `None`
-    // there and the keyboard service is never started.
+    // The early-returning `scan_translated` walk is MMU-off-safe: it reads
+    // only the matched node's own properties, like the walks above.
     out.pcie = platform::pcie_bringup(&fdt);
     out
 }

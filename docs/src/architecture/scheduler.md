@@ -785,9 +785,8 @@ now launches the perpetual
 config, supervised alongside the per-console login sessions), which reads
 the discovered hardware tree and parks in `hw_tree_wait` for the life of
 the system — the first production caller of this blocking-wait path. The
-remaining production-launch work — the reactive bus-driver chain that emits
-the nodes `devmgr` reacts to — is staged in `plans/PI.md`
-(Design D D3–D5).
+bus drivers that publish the nodes `devmgr` reacts to are `plans/PI.md`
+design D (D3–D5).
 
 In both policies `on_timer_tick` increments the per-CPU
 preemption counter and returns; it does **not** call `Scheduler::step`.

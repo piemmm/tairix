@@ -131,8 +131,8 @@ pub use fs::{
 };
 pub use hwtree::{
     snapshot_nodes, HwDeviceClass, HwMatchKey, HwMatchKind, HwNode, HwProperty, HwRemoveFlags,
-    HwResource, HwResourceKind, HwTreeHeader, HwTreeNodes, IommuReservedWindow, IommuStreams,
-    MsiAllocation, HWTREE_VERSION_V1, HW_COMPATIBLE_MAX, HW_NODE_HEADER_LEN,
+    HwResource, HwResourceKind, HwTreeHeader, HwTreeNodes, IommuGroup, IommuReservedWindow,
+    IommuStreams, MsiAllocation, HWTREE_VERSION_V1, HW_COMPATIBLE_MAX, HW_NODE_HEADER_LEN,
     HW_NODE_MAX_MATCH_KEYS, HW_NODE_MAX_RESOURCES, HW_NODE_ROOT, HW_NODE_ROOT_ID,
     HW_VIRTUAL_BUS_COMPATIBLE, SIMPLE_FRAMEBUFFER_COMPATIBLE,
 };

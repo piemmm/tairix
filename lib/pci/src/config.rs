@@ -29,12 +29,20 @@ pub struct ConfigAddress {
     pub device: u8,
     /// Function number within the device (0..=7).
     pub function: u8,
-    /// Configuration-space register dword index (0..=63, i.e. the
-    /// byte offset divided by 4 — restricted to the legacy 256-byte
-    /// configuration space, sufficient for every device this driver
-    /// needs to enumerate in Stage 4).
-    pub register: u8,
+    /// Configuration-space register dword index: the byte offset divided by
+    /// 4. The legacy 256-byte space is `0..=63`; a `PCIe` function's extended
+    /// space runs on to `1023`, reachable only through a memory-mapped
+    /// mechanism.
+    pub register: u16,
 }
+
+/// Dword index of the first register past the legacy 256-byte configuration
+/// space: where a `PCIe` function's extended capabilities begin.
+pub const EXTENDED_REGISTER: u16 = 0x100 >> 2;
+
+/// One past the last dword index of a `PCIe` function's 4 KiB configuration
+/// space.
+const REGISTER_LIMIT: u16 = 0x1000 >> 2;
 
 impl ConfigAddress {
     /// Encoded `0xCF8` value, with the high enable bit set.
@@ -43,7 +51,7 @@ impl ConfigAddress {
     /// is the single defensive gate for the entire driver.
     #[must_use]
     pub fn to_cf8(self) -> Option<u32> {
-        if self.device > 31 || self.function > 7 || self.register > 63 {
+        if self.device > 31 || self.function > 7 || self.register >= EXTENDED_REGISTER {
             return None;
         }
         let bus = u32::from(self.bus);
@@ -76,12 +84,12 @@ impl ConfigAddress {
     /// mechanism-#1 path, so a malformed address is treated as
     /// "no device" by the caller rather than reaching the window.
     ///
-    /// `register` carries a *dword* index restricted to the legacy
-    /// 256-byte configuration space (0..=63), so the resulting offset
-    /// stays within the function's 4 KiB ECAM block.
+    /// `register` carries a *dword* index into the function's whole 4 KiB
+    /// configuration space, extended registers included, so the resulting
+    /// offset stays within the function's ECAM block.
     #[must_use]
     pub const fn ecam_offset(self) -> Option<usize> {
-        if self.device > 31 || self.function > 7 || self.register > 63 {
+        if self.device > 31 || self.function > 7 || self.register >= REGISTER_LIMIT {
             return None;
         }
         let bus = self.bus as usize;
@@ -357,16 +365,33 @@ mod tests {
             .ecam_offset(),
             None,
         );
-        assert_eq!(
+        let extended = |register| {
             ConfigAddress {
                 bus: 0,
                 device: 0,
                 function: 0,
-                register: 64
+                register,
             }
-            .ecam_offset(),
-            None,
-        );
+            .ecam_offset()
+        };
+        assert_eq!(extended(EXTENDED_REGISTER), Some(0x100), "extended space");
+        assert_eq!(extended(REGISTER_LIMIT - 1), Some(0xFFC), "its last dword");
+        assert_eq!(extended(REGISTER_LIMIT), None, "past the function's 4 KiB");
+    }
+
+    #[test]
+    fn mechanism_one_reaches_only_the_legacy_space() {
+        let at = |register| {
+            ConfigAddress {
+                bus: 0,
+                device: 0,
+                function: 0,
+                register,
+            }
+            .to_cf8()
+        };
+        assert_eq!(at(EXTENDED_REGISTER - 1), Some(0x8000_00FC));
+        assert_eq!(at(EXTENDED_REGISTER), None);
     }
 
     #[test]

@@ -86,7 +86,7 @@ pub(crate) fn dma_errno(err: DmaError) -> Errno {
         DmaError::NoCustody => Errno::NotImplemented,
         DmaError::DeviceGone => Errno::DeviceOffline,
         DmaError::CustodianMismatch => Errno::PermissionDenied,
-        DmaError::KernelOwned => Errno::Busy,
+        DmaError::KernelOwned | DmaError::GroupBusy => Errno::Busy,
         DmaError::Translation | DmaError::Unconfirmed => Errno::DeviceFault,
         // `PageTable`, `DirectMap`, `UnknownBuffer`, `InvalidPoolConfig`, and
         // any future (`#[non_exhaustive]`) variant fail closed to a generic

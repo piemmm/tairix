@@ -12,10 +12,9 @@
 //! Those bases used to be hand-picked literals kept apart only by prose,
 //! and a base once collided with the boot-display id in production. This
 //! module makes the whole scheme correct *by construction*: every base is
-//! `origin + index * stride`, so distinct indices cannot alias, and a
-//! compile-time guard proves a single probe walk (one id per enumerated bus
-//! slot, at most [`MAX_SLOTS`]) can never run off the end of its region
-//! into the next. Adding a region is claiming the next index here — never a
+//! `origin + index * stride`, so distinct indices cannot alias, and
+//! compile-time guards prove a single probe walk (one id per slot it
+//! enumerates) can never run off the end of its region into the next. Adding a region is claiming the next index here — never a
 //! fresh literal elsewhere.
 //!
 //! [`HwNode`]: tairix_abi::HwNode
@@ -28,10 +27,10 @@ use tairix_kernel_virtio::MAX_SLOTS;
 /// inside these regions.
 pub const HW_NODE_PROBE_ORIGIN: u32 = 0x8000_0000;
 
-/// Width of each reserved node-id region. A probe walk emits one id per
-/// enumerated bus slot, incrementing from its region base, so the region
-/// must be wider than the most slots a bus can present ([`MAX_SLOTS`]); the
-/// region spacing keeps consecutive regions from ever overlapping.
+/// Width of each reserved node-id region. A probe walk emits one id per slot
+/// it enumerates, incrementing from its region base, so the region holds the
+/// most a bus can present — every function of a PCI segment; the spacing
+/// keeps consecutive regions from ever overlapping.
 pub const HW_NODE_PROBE_REGION_STRIDE: u32 = 0x0001_0000;
 
 /// The base id of the reserved node-id region with the given `index`.
@@ -109,15 +108,23 @@ pub const VIRTIO_PCI_AUDIO_PROBE_NODE_BASE_ID: u32 = region(9);
 /// order.
 pub const IOMMU_UNIT_NODE_BASE_ID: u32 = region(10);
 
-// A single probe walk emits at most one id per enumerated bus slot
-// (`bus.enumerate` fills at most `MAX_SLOTS`; an overfull bus fails closed),
-// so the highest id a walk can reach in its region is
-// `base + (MAX_SLOTS - 1)`. Requiring `MAX_SLOTS <= stride` proves that id
-// never crosses into the next region — the guard that makes the derived
-// bases sufficient, not merely disjoint.
+// A probe walk emits at most one id per slot it enumerates — `MAX_SLOTS` on
+// a virtio-MMIO bus, every function of the segment on PCI — so the highest id
+// it can reach is that many past its base, which must stay below the next
+// region's.
 const _: () = assert!(
     MAX_SLOTS <= HW_NODE_PROBE_REGION_STRIDE as usize,
     "a probe walk must not overrun its node-id region into the next"
+);
+
+/// Functions one PCI segment holds.
+const PCI_SEGMENT_FUNCTIONS: usize = 256
+    * tairix_abi::driver::pci::PCI_DEVICES as usize
+    * tairix_abi::driver::pci::PCI_FUNCTIONS as usize;
+
+const _: () = assert!(
+    PCI_SEGMENT_FUNCTIONS <= HW_NODE_PROBE_REGION_STRIDE as usize,
+    "a PCI probe must not overrun its node-id region into the next"
 );
 
 #[cfg(test)]

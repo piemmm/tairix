@@ -3,22 +3,19 @@
 //!
 //! The device-agnostic bring-up *and* the FAT32 round-trip tail both
 //! live in the shared `tairix-test-virtio-qemu-support` crate. This module supplies only what is unique to this
-//! vertical: the modern virtio-blk PCI device id, the spawner registering
+//! vertical: the virtio-blk type, the spawner registering
 //! the loaded image through the virtio-blk `register`, and the boot harness.
 //! The device tail ([`fat32_round_trip`]) mounts the FAT32 volume the
 //! host harness planted on the backing disk and is the same code the
 //! riscv64 MMIO vertical would run.
 
-use tairix_drv_storage_virtio_blk::register as virtio_blk_register;
+use tairix_drv_storage_virtio_blk::{register as virtio_blk_register, VIRTIO_BLK_DEVICE_ID};
 use tairix_test_virtio_qemu_support::{
     define_boot_harness, fat32_round_trip, run_virtio_pci_scenario, FixedSpawner, ScenarioConfig,
     ScenarioTransport,
 };
 
 use crate::fixture::{RXE_IMAGE, SYSCALL_TABLE_HASH, TRUSTED_SIGNER_PUBKEY};
-
-/// Modern virtio-blk PCI device id (`0x1040 + virtio-blk`).
-const VIRTIO_BLK_DEVICE_ID: u16 = 0x1042;
 
 /// Spawner registering every verified manifest through the virtio-blk driver's
 /// `register` entry point.

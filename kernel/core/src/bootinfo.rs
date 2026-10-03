@@ -738,10 +738,8 @@ pub trait KernelArch: SchedulerArch {
     /// whole line) copies producer bytes into an in-memory ring
     /// and drains it opportunistically. That ring must keep draining even
     /// when the dispatch loop never reaches its idle
-    /// [`Self::wait_for_interrupt`] park — a perpetually-runnable in-kernel
-    /// kthread (e.g. the polled USB-keyboard report pump, which yields every
-    /// poll but never parks) keeps a task runnable forever, so an idle-only
-    /// drain would stall the log the instant such a kthread exists, and the
+    /// [`Self::wait_for_interrupt`] park — while tasks stay runnable an
+    /// idle-only drain would stall the log, and the
     /// transmit-FIFO "has-room" interrupt cannot be relied on to self-sustain
     /// the drain on real silicon. The dispatch loop therefore calls this on
     /// **every** iteration — after each successful dispatch and again before

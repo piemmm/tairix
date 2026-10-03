@@ -206,11 +206,24 @@ fn rdtsc() -> u64 {
 
 // --- Shared scenario -------------------------------------------------
 
-/// Perform the x86_64 virtio-PCI bring-up for the modern function whose
-/// PCI device id is `device_id` (`0x1040 + virtio type`), then drive the
-/// shared `load → reload → device round-trip → unload` lifecycle with
-/// `body` as the per-device tail. Never returns.
-pub fn run_virtio_pci_scenario<F>(device_id: u16, cfg: &ScenarioConfig<'_>, body: F) -> !
+/// The function the boot probe published a node for keyed by
+/// `virtio_type`, by the requester id it recorded.
+fn published_function(virtio_type: u32) -> Option<u64> {
+    let snapshot =
+        tairix_kernel_core::HwTreeSource::snapshot(&tairix_kernel::hwtree_store::HW_TREE_SOURCE)
+            .ok()?;
+    let key = tairix_abi::HwMatchKey::virtio(virtio_type);
+    let node = tairix_abi::hwtree::snapshot_nodes(&snapshot)?
+        .find(|node| node.match_keys().contains(&key))?;
+    let requester = u16::try_from(node.address()).ok()?;
+    Some(tairix_abi::driver::pci::config_address(requester))
+}
+
+/// Perform the x86_64 virtio-PCI bring-up for the modern function of virtio
+/// type `virtio_type` the boot probe published, then drive the shared
+/// `load → reload → device round-trip → unload` lifecycle with `body` as the
+/// per-device tail. Never returns.
+pub fn run_virtio_pci_scenario<F>(virtio_type: u32, cfg: &ScenarioConfig<'_>, body: F) -> !
 where
     F: FnOnce(&dyn QemuEnv, PciTransport, &dyn VirtioHost) -> Result<(), &'static str>,
 {
@@ -271,12 +284,14 @@ where
     ) else {
         env.fail("MMIO map construct");
     };
+    let Some(bdf) = published_function(virtio_type) else {
+        env.fail("no published function of the scenario's virtio type");
+    };
     let mut transport = {
         let mapper = KernelMmioMapper::new(&mut mmio, &caller, &SERIAL_SINK);
         let provisioned = pci.with(|bus| {
-            let prov =
-                tairix_kernel::provision_virtio_pci(bus, device_id, &mapper, PciTransport::new)
-                    .map_err(|_| "virtio-PCI provisioning walk")?;
+            let prov = tairix_kernel::provision_virtio_pci(bus, bdf, &mapper, PciTransport::new)
+                .map_err(|_| "virtio-PCI provisioning")?;
             bus.route_msix(prov.bdf, MSIX_ENTRY, msi, &mapper)
                 .map_err(|_| "route MSI-X")?;
             bus.set_bus_master(prov.bdf, true)

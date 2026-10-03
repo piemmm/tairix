@@ -82,6 +82,21 @@ impl BridgeBuses for Bridges {
 
 const NO_BRIDGES: &Bridges = &Bridges(Vec::new());
 
+/// Each function's aliases, by its source id.
+struct Aliases(Vec<(SourceId, SourceId)>);
+
+impl DmaAliases for Aliases {
+    fn aliases(&self, source: SourceId, visit: &mut dyn FnMut(SourceId)) {
+        for &(of, alias) in &self.0 {
+            if of == source {
+                visit(alias);
+            }
+        }
+    }
+}
+
+const NO_ALIASES: &Aliases = &Aliases(Vec::new());
+
 /// The shape QEMU's `intel-iommu` reports: one catch-all unit whose only
 /// scope names the I/O APIC.
 fn qemu_like() -> Vec<u8> {
@@ -325,8 +340,16 @@ fn every_unit_becomes_a_node_carrying_its_registers_and_reserved_windows() {
     let bytes = table(46, 0, &[graphics, rest, usb, stolen].concat());
     let dmar = Dmar::parse(&bytes).unwrap();
     let mut sink = Sink(Vec::new());
-    let placed =
-        emit_unit_nodes(&dmar, 0x800A_0000, b"intel,vtd", 0, NO_BRIDGES, &mut sink).unwrap();
+    let placed = emit_unit_nodes(
+        &dmar,
+        0x800A_0000,
+        b"intel,vtd",
+        0,
+        NO_BRIDGES,
+        NO_ALIASES,
+        &mut sink,
+    )
+    .unwrap();
     assert_eq!(
         placed,
         UnitNodes {
@@ -388,7 +411,8 @@ fn reserved_windows_past_a_node_s_room_are_counted_not_forced() {
     let bytes = table(46, 0, &structures);
     let dmar = Dmar::parse(&bytes).unwrap();
     let mut sink = Sink(Vec::new());
-    let placed = emit_unit_nodes(&dmar, 1, b"intel,vtd", 0, NO_BRIDGES, &mut sink).unwrap();
+    let placed =
+        emit_unit_nodes(&dmar, 1, b"intel,vtd", 0, NO_BRIDGES, NO_ALIASES, &mut sink).unwrap();
     assert_eq!(
         sink.0[0].resources().len(),
         tairix_abi::HW_NODE_MAX_RESOURCES
@@ -397,7 +421,7 @@ fn reserved_windows_past_a_node_s_room_are_counted_not_forced() {
 }
 
 #[test]
-fn a_function_s_stream_names_the_unit_node_that_translates_it() {
+fn a_function_is_translated_by_the_unit_node_its_scopes_name() {
     let graphics = drhd(0, 0, 0, 0xFED9_0000, &scope(1, 0, 0, &[(2, 0)]));
     let rest = drhd(DRHD_INCLUDE_PCI_ALL, 0, 0, 0xFED9_1000, &[]);
     let bytes = table(46, 0, &[graphics, rest].concat());
@@ -406,17 +430,11 @@ fn a_function_s_stream_names_the_unit_node_that_translates_it() {
         emitted: 2,
         dropped: 0,
     };
-    let stream = |source| stream_resource(&dmar, 0x800A_0000, both, 0, source, NO_BRIDGES);
+    let unit = |source| unit_node(&dmar, 0x800A_0000, both, 0, source, NO_BRIDGES);
+    assert_eq!(unit(sid(0, 2, 0)), Some(0x800A_0000));
+    assert_eq!(unit(sid(0, 3, 0)), Some(0x800A_0001));
     assert_eq!(
-        stream(sid(0, 2, 0)).unwrap().iommu_streams().unwrap(),
-        IommuStreams::new(0x800A_0000, 0x0010, 1).unwrap()
-    );
-    assert_eq!(
-        stream(sid(0, 3, 0)).unwrap().iommu_streams().unwrap(),
-        IommuStreams::new(0x800A_0001, 0x0018, 1).unwrap()
-    );
-    assert_eq!(
-        stream_resource(&dmar, 0x800A_0000, both, 1, sid(0, 3, 0), NO_BRIDGES),
+        unit_node(&dmar, 0x800A_0000, both, 1, sid(0, 3, 0), NO_BRIDGES),
         None
     );
     let first_only = UnitNodes {
@@ -424,9 +442,37 @@ fn a_function_s_stream_names_the_unit_node_that_translates_it() {
         dropped: 0,
     };
     assert_eq!(
-        stream_resource(&dmar, 0x800A_0000, first_only, 0, sid(0, 3, 0), NO_BRIDGES),
+        unit_node(&dmar, 0x800A_0000, first_only, 0, sid(0, 3, 0), NO_BRIDGES),
         None,
-        "a unit with no node brings nothing up, so its functions name no stream"
+        "a unit with no node brings nothing up, so its functions name none"
+    );
+}
+
+/// Firmware's DMA for a function behind a bridge to conventional PCI arrives
+/// under the bridge's alias, so the window is kept there too, once however
+/// many functions share it.
+#[test]
+fn a_reserved_window_is_kept_for_every_alias_of_its_function() {
+    let rest = drhd(DRHD_INCLUDE_PCI_ALL, 0, 0, 0xFED9_0000, &[]);
+    let first = rmrr(0, 0x7B80_0000, 0x7B8F_FFFF, &scope(1, 0, 2, &[(1, 0)]));
+    let second = rmrr(0, 0x7B80_0000, 0x7B8F_FFFF, &scope(1, 0, 2, &[(2, 0)]));
+    let bytes = table(46, 0, &[rest, first, second].concat());
+    let dmar = Dmar::parse(&bytes).unwrap();
+    let alias = sid(2, 0, 0);
+    let aliases = Aliases(vec![(sid(2, 1, 0), alias), (sid(2, 2, 0), alias)]);
+    let mut sink = Sink(Vec::new());
+    let placed =
+        emit_unit_nodes(&dmar, 1, b"intel,vtd", 0, NO_BRIDGES, &aliases, &mut sink).unwrap();
+    assert_eq!(placed.dropped, 0);
+    let streams: Vec<u32> = sink.0[0]
+        .resources()
+        .iter()
+        .filter_map(|r| r.iommu_reserved().ok())
+        .map(IommuReservedWindow::stream)
+        .collect();
+    assert_eq!(
+        streams,
+        [sid(2, 1, 0), alias, sid(2, 2, 0)].map(|stream| u32::from(stream.raw()))
     );
 }
 
@@ -474,7 +520,8 @@ fn a_window_firmware_names_twice_takes_one_slot() {
     let bytes = table(46, 0, &twice);
     let dmar = Dmar::parse(&bytes).unwrap();
     let mut sink = Sink(Vec::new());
-    let placed = emit_unit_nodes(&dmar, 1, b"intel,vtd", 0, NO_BRIDGES, &mut sink).unwrap();
+    let placed =
+        emit_unit_nodes(&dmar, 1, b"intel,vtd", 0, NO_BRIDGES, NO_ALIASES, &mut sink).unwrap();
     assert_eq!(placed.dropped, 0);
     let windows = sink.0[0]
         .resources()
@@ -494,7 +541,8 @@ fn a_window_on_a_segment_discovery_does_not_walk_is_never_resolved() {
     let bytes = table(46, 0, &[near, far, window].concat());
     let dmar = Dmar::parse(&bytes).unwrap();
     let mut sink = Sink(Vec::new());
-    let placed = emit_unit_nodes(&dmar, 1, b"intel,vtd", 0, NO_BRIDGES, &mut sink).unwrap();
+    let placed =
+        emit_unit_nodes(&dmar, 1, b"intel,vtd", 0, NO_BRIDGES, NO_ALIASES, &mut sink).unwrap();
     assert_eq!(placed.dropped, 1, "counted once, not once per unit");
     assert!(sink
         .0
@@ -521,82 +569,8 @@ fn a_full_tree_keeps_the_units_it_could_hold() {
     let bytes = table(46, 0, &[graphics, rest].concat());
     let dmar = Dmar::parse(&bytes).unwrap();
     let mut room = Room(1, Vec::new());
-    let placed = emit_unit_nodes(&dmar, 1, b"intel,vtd", 0, NO_BRIDGES, &mut room).unwrap();
+    let placed =
+        emit_unit_nodes(&dmar, 1, b"intel,vtd", 0, NO_BRIDGES, NO_ALIASES, &mut room).unwrap();
     assert_eq!(placed.emitted, 1);
     assert_eq!(room.1.len(), 1);
-}
-
-/// Configuration space as a map from a function's packed address and a dword
-/// offset to its value; everything else reads as no device.
-struct ConfigBus(Vec<(u64, u16, u32)>);
-
-impl tairix_abi::driver::bus::Bus for ConfigBus {
-    fn enumerate(
-        &self,
-        _out: &mut [tairix_abi::driver::bus::BusDevice],
-    ) -> Result<usize, tairix_abi::DriverError> {
-        Ok(0)
-    }
-}
-
-impl PciBus for ConfigBus {
-    fn map_bar_window(
-        &self,
-        _bdf: u64,
-        _bar_index: u8,
-        _mapper: &dyn tairix_abi::MmioMapper,
-    ) -> Result<tairix_abi::RegisterWindow, tairix_abi::DriverError> {
-        Err(tairix_abi::DriverError::Unsupported)
-    }
-
-    fn enable_memory_space(&self, _bdf: u64) -> Result<(), tairix_abi::DriverError> {
-        Err(tairix_abi::DriverError::Unsupported)
-    }
-
-    fn set_bus_master(&self, _bdf: u64, _master: bool) -> Result<(), tairix_abi::DriverError> {
-        Err(tairix_abi::DriverError::Unsupported)
-    }
-
-    fn assign_bar(
-        &self,
-        _bdf: u64,
-        _bar_index: u8,
-        _window_base: u64,
-        _window_size: u64,
-    ) -> Result<u64, tairix_abi::DriverError> {
-        Err(tairix_abi::DriverError::Unsupported)
-    }
-
-    fn read_config(&self, bdf: u64, offset: u16) -> Result<u32, tairix_abi::DriverError> {
-        Ok(self
-            .0
-            .iter()
-            .find(|&&(at, register, _)| at == bdf && register == offset)
-            .map_or(0xFFFF_FFFF, |&(_, _, value)| value))
-    }
-
-    fn describe_function(&self, _bdf: u64) -> Result<HwNode, tairix_abi::DriverError> {
-        Err(tairix_abi::DriverError::Unsupported)
-    }
-}
-
-#[test]
-fn a_bridge_s_buses_are_read_from_its_type_1_header() {
-    let port = u64::from(sid(0, 0x1C, 0).raw()) << 8;
-    let endpoint = u64::from(sid(0, 0x1F, 0).raw()) << 8;
-    let bus = ConfigBus(vec![
-        (port, CONFIG_ID, 0x9D10_8086),
-        (port, CONFIG_HEADER, 0x0081_0000),
-        (port, CONFIG_BUSES, 0x0004_0200),
-        (endpoint, CONFIG_ID, 0x1234_8086),
-        (endpoint, CONFIG_HEADER, 0),
-    ]);
-    let bridges = PciBridges(&bus);
-    assert_eq!(bridges.bus_range(sid(0, 0x1C, 0)), Some((2, 4)));
-    assert_eq!(
-        bridges.bus_range(sid(0, 0x1F, 0)),
-        None,
-        "a type-0 header is no bridge"
-    );
-    assert_eq!(bridges.bus_range(sid(0, 5, 0)), None, "no device answers");
 }

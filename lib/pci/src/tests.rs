@@ -87,11 +87,11 @@ struct MockFunction {
     bus: u8,
     device: u8,
     function: u8,
-    regs: Vec<(u8, u32)>,
+    regs: Vec<(u16, u32)>,
     /// Per-BAR sizing mask: `(register_dword_index, mask)`. The
     /// `bars()` enumerator writes `0xFFFF_FFFF` to a BAR, reads back
     /// the mask, then restores; the mock honours that protocol.
-    sizing: Vec<(u8, u32)>,
+    sizing: Vec<(u16, u32)>,
 }
 
 struct MockConfigSpace {
@@ -102,7 +102,7 @@ struct MockConfigSpace {
 #[derive(Default)]
 struct MockState {
     /// Active sizing probe: `(bus, dev, fn, reg)`.
-    probing: Option<(u8, u8, u8, u8)>,
+    probing: Option<(u8, u8, u8, u16)>,
     /// Log of every configuration-space write, so tests can assert the
     /// MSI-X enable hand-off without a private accessor on `Pci`.
     writes: Vec<(ConfigAddress, u32)>,
@@ -167,28 +167,28 @@ impl ConfigSpace for MockConfigSpace {
 // ---- The q35 fixture -----------------------------------------------------
 
 /// Encode a 16-bit vendor and 16-bit device-id into the dword-0 slot.
-fn id(vendor: u16, device: u16) -> (u8, u32) {
+fn id(vendor: u16, device: u16) -> (u16, u32) {
     (0, (u32::from(device) << 16) | u32::from(vendor))
 }
 
 /// Encode a class/subclass into dword 2 (upper 16 bits).
-fn class(class_subclass: u16) -> (u8, u32) {
+fn class(class_subclass: u16) -> (u16, u32) {
     (2, u32::from(class_subclass) << 16)
 }
 
 /// Encode the header-type / multi-function byte into dword 3 (bits 23..16).
-fn header(header_type: u8) -> (u8, u32) {
+fn header(header_type: u8) -> (u16, u32) {
     (3, u32::from(header_type) << 16)
 }
 
 /// Encode the status / command register at dword 1; we only care about
 /// the capability-list bit in the status half.
-fn status_with_caplist() -> (u8, u32) {
+fn status_with_caplist() -> (u16, u32) {
     (1, (1u32 << 4) << 16) // status bit 4 == cap list
 }
 
 /// Capability pointer at config-space byte offset 0x34 (dword 13).
-fn cap_pointer(byte_offset: u8) -> (u8, u32) {
+fn cap_pointer(byte_offset: u8) -> (u16, u32) {
     (13, u32::from(byte_offset))
 }
 
@@ -683,9 +683,9 @@ fn assign_bar_reports_not_found_for_an_absent_bar() {
 /// virtio reuses the PCI vendor-specific capability (`cap_id = 0x09`);
 /// the header dword packs `cap_vndr`, `cap_next`, `cap_len`, and
 /// `cfg_type` into bytes 0..=3 (virtio 1.x §4.1.4).
-fn virtio_cap_header(reg: u8, next: u8, cap_len: u8, cfg_type: u8) -> (u8, u32) {
+fn virtio_cap_header(reg: u8, next: u8, cap_len: u8, cfg_type: u8) -> (u16, u32) {
     (
-        reg,
+        u16::from(reg),
         0x09 | (u32::from(next) << 8) | (u32::from(cap_len) << 16) | (u32::from(cfg_type) << 24),
     )
 }
@@ -1172,7 +1172,7 @@ fn route_msi_programs_address_data_and_enables_single_vector() {
     pci.route_msi(msi_bdf(), message).expect("routes msi");
 
     let st = state.borrow();
-    let find = |register: u8| {
+    let find = |register: u16| {
         st.writes
             .iter()
             .rev()
@@ -1316,7 +1316,7 @@ const VL805_DEVICE: u16 = 0x3483;
 
 /// Plant one configuration dword at `(bus, device, function, register)`
 /// into the flat ECAM `backing`.
-fn put_ecam(backing: &mut [u32], bus: u8, device: u8, function: u8, register: u8, value: u32) {
+fn put_ecam(backing: &mut [u32], bus: u8, device: u8, function: u8, register: u16, value: u32) {
     let off = ConfigAddress {
         bus,
         device,
@@ -1663,8 +1663,8 @@ struct WindowedVirtio {
 
 /// Dword indices of the capabilities' fields: common at `0x40`, the access
 /// window at `0x88`.
-const COMMON_DWORD: u8 = 16;
-const ACCESS_DWORD: u8 = 34;
+const COMMON_DWORD: u16 = 16;
+const ACCESS_DWORD: u16 = 34;
 
 impl WindowedVirtio {
     fn new(features: u64) -> Self {

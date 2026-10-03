@@ -411,6 +411,18 @@ fn describe_resource(resource: &HwResource, line: &mut String) {
         Some(HwResourceKind::DmaController) => describe_dma_controller(resource, line),
         Some(HwResourceKind::DmaRequest) => describe_dma_request(resource, line),
         Some(HwResourceKind::IommuStream) => describe_iommu_stream(resource, line),
+        Some(HwResourceKind::IommuAlias) => describe_iommu_alias(resource, line),
+        Some(HwResourceKind::IommuGroup) => match resource.iommu_group() {
+            Ok(group) => {
+                let _ = write!(
+                    line,
+                    "DMA isolation group 0x{:x} on unit node {}",
+                    group.id(),
+                    group.unit()
+                );
+            }
+            Err(_) => line.push_str("DMA isolation group (malformed)"),
+        },
         Some(HwResourceKind::IommuReserved) => describe_iommu_reserved(resource, line),
         Some(HwResourceKind::Property) => match resource.property_value() {
             Ok((HwProperty::UsbInterface, number)) => {
@@ -429,6 +441,20 @@ fn describe_iommu_stream(resource: &HwResource, line: &mut String) {
         return;
     };
     let _ = write!(line, "DMA translated by unit node {} as ", streams.unit());
+    describe_streams(streams, line);
+}
+
+/// Append the further streams the fabric delivers a function's DMA as.
+fn describe_iommu_alias(resource: &HwResource, line: &mut String) {
+    let Ok(streams) = resource.iommu_aliases() else {
+        line.push_str("DMA alias (malformed stream)");
+        return;
+    };
+    let _ = write!(line, "DMA aliased on unit node {} as ", streams.unit());
+    describe_streams(streams, line);
+}
+
+fn describe_streams(streams: tairix_abi::IommuStreams, line: &mut String) {
     if streams.count() > 1 {
         let _ = write!(
             line,
@@ -818,6 +844,8 @@ C 02  Network controller
         for resource in [
             HwResource::iommu_stream(tairix_abi::IommuStreams::new(40, 0x18, 1).expect("valid")),
             HwResource::iommu_stream(tairix_abi::IommuStreams::new(40, 0x20, 4).expect("valid")),
+            HwResource::iommu_alias(tairix_abi::IommuStreams::new(40, 0x0200, 1).expect("valid")),
+            HwResource::iommu_group_member(tairix_abi::IommuGroup::new(40, 0x10)),
             HwResource::iommu_reserved_window(
                 tairix_abi::IommuReservedWindow::new(0x18, 0x7b80_0000, 0x10_0000).expect("valid"),
             ),
@@ -833,6 +861,8 @@ C 02  Network controller
             [
                 "  DMA translated by unit node 40 as stream 0x18",
                 "  DMA translated by unit node 40 as streams 0x20 (count 4)",
+                "  DMA aliased on unit node 40 as stream 0x200",
+                "  DMA isolation group 0x10 on unit node 40",
                 "  Firmware DMA window at 0x7b800000 [size=0x100000] for stream 0x18",
             ]
         );

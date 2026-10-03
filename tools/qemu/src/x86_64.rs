@@ -235,10 +235,21 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
 
     // The input devices as PCI functions, pinned to the modern layout the
     // virtio-input discovery probe matches, as virtio-blk and virtio-net are.
-    argv.extend(crate::input_device_args(
-        spec,
-        &format!("-pci,{}", virtio_pci_options(spec)),
-    ));
+    // Behind the bridge each takes a slot past 0, so its own requester id
+    // differs from the bridge's alias for it.
+    let input = crate::input_device_args(spec, &format!("-pci,{}", virtio_pci_options(spec)));
+    if spec.devices.input_bridge {
+        argv.push("-device".into());
+        argv.push(format!("pcie-pci-bridge,id={INPUT_BRIDGE},bus=pcie.0").into());
+        // `input` is `-device <arg>` pairs.
+        for (slot, mut arg) in (1u8..).zip(input.into_iter().skip(1).step_by(2)) {
+            arg.push(format!(",bus={INPUT_BRIDGE},addr=0x{slot:x}"));
+            argv.push("-device".into());
+            argv.push(arg);
+        }
+    } else {
+        argv.extend(input);
+    }
 
     // Attach a virtio sound device behind QEMU's `wav` backend, which writes
     // what the emulated card received to a host file the vertical then checks
@@ -252,6 +263,10 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
 
     argv
 }
+
+/// The id of the PCIe-to-PCI bridge the input devices sit behind
+/// ([`crate::AttachedDevices::input_bridge`]).
+const INPUT_BRIDGE: &str = "inputbridge";
 
 /// The options every virtio PCI function takes: the modern-only layout the
 /// boot walk decodes, and, behind a translation unit, reaching memory
@@ -372,6 +387,42 @@ mod tests {
         assert!(!plain
             .iter()
             .any(|a| a.contains("intel-iommu") || a == "q35"));
+    }
+
+    #[test]
+    fn bridged_input_hangs_behind_a_pcie_to_pci_bridge_past_slot_zero() {
+        let mut spec = fixture_spec(1).with_dma_translation().with_input_bridge();
+        spec = spec.with_virtio_keyboard("ready", "a");
+        spec.devices.pointing.mouse = true;
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
+        let bridge = argv
+            .iter()
+            .position(|a| a == "pcie-pci-bridge,id=inputbridge,bus=pcie.0")
+            .expect("the bridge is attached");
+        let keyboard = argv
+            .iter()
+            .position(|a| a.starts_with("virtio-keyboard-pci"))
+            .expect("the keyboard is attached");
+        assert!(bridge < keyboard, "the bridge precedes what hangs from it");
+        assert!(
+            argv[keyboard].ends_with(",bus=inputbridge,addr=0x1"),
+            "{}",
+            argv[keyboard]
+        );
+        assert!(argv[keyboard].contains("iommu_platform=on"));
+        let mouse = argv
+            .iter()
+            .find(|a| a.starts_with("virtio-mouse-pci"))
+            .expect("the mouse is attached");
+        assert!(mouse.ends_with(",bus=inputbridge,addr=0x2"), "{mouse}");
+
+        let plain = render(&build_argv(
+            &fixture_spec(1)
+                .with_dma_translation()
+                .with_virtio_keyboard("ready", "a"),
+            Path::new("/tmp/k.elf"),
+        ));
+        assert!(!plain.iter().any(|a| a.contains("pcie-pci-bridge")));
     }
 
     #[test]
