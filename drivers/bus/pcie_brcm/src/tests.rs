@@ -916,7 +916,7 @@ const USB_BDF: u64 = 0x0001_0000;
 const STUB_BAR_LEN: usize = 0x1000;
 
 /// A mock [`PciBus`] for the publish composition: it reports a single
-/// USB-class function, records the assign/enable/map call order, maps its
+/// USB-class function, records the configuration call order, maps its
 /// BAR at a configurable PCIe-bus base, and describes it as a VL805 node.
 struct StubPciBus {
     /// Whether the bus carries a USB-class function at all.
@@ -928,7 +928,7 @@ struct StubPciBus {
     /// program; `false` models a function with no MSI capability (the
     /// default trait behaviour: `Unsupported`).
     route_msi_ok: bool,
-    /// The assign/enable/map call sequence, in order.
+    /// The configuration calls the bus driver made, in order.
     calls: RefCell<Vec<&'static str>>,
 }
 
@@ -972,8 +972,15 @@ impl PciBus for StubPciBus {
             .map_err(MmioMapError::as_driver_error)
     }
 
-    fn enable_bus_master(&self, _bdf: u64) -> Result<(), DriverError> {
-        self.calls.borrow_mut().push("enable");
+    fn enable_memory_space(&self, _bdf: u64) -> Result<(), DriverError> {
+        self.calls.borrow_mut().push("decode");
+        Ok(())
+    }
+
+    fn set_bus_master(&self, _bdf: u64, master: bool) -> Result<(), DriverError> {
+        self.calls
+            .borrow_mut()
+            .push(if master { "master" } else { "unmaster" });
         Ok(())
     }
 
@@ -1073,8 +1080,12 @@ fn publish_usb_function_emits_the_translated_bar_and_dma_grants() {
     let host = RecordingHost::new(true);
     let node = wiring::publish_usb_function(&host, &bus, &PI_WINDOWS).expect("publishes");
 
-    // The shared `lib/pci` primitive drove assign → enable → map in order.
-    assert_eq!(bus.calls.borrow().as_slice(), &["assign", "enable", "map"]);
+    // The BAR is assigned, decoded and mapped, and the function made a bus
+    // master only as it is handed over.
+    assert_eq!(
+        bus.calls.borrow().as_slice(),
+        &["assign", "decode", "map", "master"]
+    );
 
     // The published node carries the function's match key plus exactly two
     // grant requests: the BAR as a CPU-physical `Mmio` window (inside the
@@ -1133,13 +1144,15 @@ fn publish_usb_function_fails_closed_when_the_bar_is_outside_the_outbound_window
 #[test]
 fn publish_usb_function_propagates_a_refused_emit() {
     // A host that refuses the node publish (no `CAP_HW_EMIT`, or the node
-    // requests an uncovered resource) surfaces the refusal — fail closed.
+    // requests an uncovered resource) surfaces the refusal — fail closed —
+    // and the function no driver was handed stops mastering again.
     let bus = StubPciBus::new(PI_WINDOWS.outbound_pcie_base);
     let host = RecordingHost::new(false);
     assert_eq!(
         wiring::publish_usb_function(&host, &bus, &PI_WINDOWS).err(),
         Some(DriverError::PermissionDenied)
     );
+    assert_eq!(bus.calls.borrow().last(), Some(&"unmaster"));
 }
 
 #[test]

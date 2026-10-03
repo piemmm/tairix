@@ -469,6 +469,9 @@ where
     /// a translated driver's carves map into its node's domain, which its
     /// end revokes.
     dma_translation: Option<&'static crate::iommu::Translation>,
+    /// The bus mastering an untranslated driver's function follows, where
+    /// the kernel owns configuration space.
+    mastering: Option<crate::iommu::Mastering>,
     /// The architecture MSI-alloc producer the `msi_alloc` syscall drives to
     /// mint an MSI vector and report its doorbell (`plans/PI.md` U-MSI).
     /// Defaults to [`NULL_MSI_ALLOC_FACILITY`] (fail closed with
@@ -650,6 +653,14 @@ impl StreamPos {
             entry.advance_cursor(n);
         }
     }
+}
+
+/// The terms a DMA carve is made on.
+struct CarveTerms {
+    constraint: crate::devres::DmaConstraint,
+    custodian: DmaCustodian,
+    /// The carver's function is untranslated and not yet handed to it.
+    hand_over: bool,
 }
 
 /// The path a filesystem-backed descriptor names and the authority every
@@ -951,6 +962,7 @@ where
             // binding is refused, so no carve can exist without it.
             dma_quarantine: &NULL_DMA_QUARANTINE,
             dma_translation: None,
+            mastering: None,
             // The MSI-alloc facility is unwired until the boot path installs
             // the arch producer: `msi_alloc` fails closed with
             // `NotImplemented` (a platform with no MSI controller) — never
@@ -1149,7 +1161,8 @@ where
     }
 
     /// The addressing constraint and custody a DMA carve of `len` bytes under
-    /// the caller's grant `handle` is made with.
+    /// the caller's grant `handle` is made with, and whether it hands the
+    /// caller's function over.
     ///
     /// `NotFound` for a handle that names no grant of the caller's (a forged
     /// or another driver's resolves to nothing), `OutOfRange` for a grant
@@ -1164,7 +1177,7 @@ where
         caller: &CallerContext<'_>,
         handle: u64,
         len: usize,
-    ) -> Result<(crate::devres::DmaConstraint, DmaCustodian), Errno> {
+    ) -> Result<CarveTerms, Errno> {
         let (resource, driver) = {
             let aspaces = self.aspaces.read();
             (
@@ -1180,7 +1193,9 @@ where
             return Err(Errno::OutOfRange);
         }
         let driver = driver.ok_or(Errno::PermissionDenied)?;
-        let custodian = match self.translation_of(&driver) {
+        let translation = self.translation_of(&driver);
+        let hand_over = translation.is_none() && !driver.handed_over && self.mastering.is_some();
+        let custodian = match translation {
             // A bus viewport rebasing an IOVA names no address the domain
             // knows.
             Some(_) if constraint.translated => return Err(Errno::NotSupported),
@@ -1197,7 +1212,23 @@ where
                 translation: None,
             },
         };
-        Ok((constraint, custodian))
+        Ok(CarveTerms {
+            constraint,
+            custodian,
+            hand_over,
+        })
+    }
+
+    /// Hand an untranslated driver's function over once its first carve is
+    /// made: it may master DMA from then on. A translated driver's function
+    /// masters once its domain is attached, which the translation does.
+    fn hand_over_untranslated(&self, process: ProcessId, terms: &CarveTerms) {
+        let Some(mastering) = self.mastering.filter(|_| terms.hand_over) else {
+            return;
+        };
+        if self.aspaces.write().first_hand_over(process) {
+            mastering.hand_over(terms.custodian.node, terms.custodian.generation);
+        }
     }
 
     /// The translation `driver`'s node is carved through, if it is.
@@ -1649,7 +1680,11 @@ where
         let Some(resource) = aspaces.grant(caller.process(), handle) else {
             return Err(Errno::NotFound);
         };
-        Ok(io(facility, addressable_port(&resource, port, width)?))
+        let port = addressable_port(&resource, port, width)?;
+        if facility.kernel_owned(port, width) {
+            return Err(Errno::PermissionDenied);
+        }
+        Ok(io(facility, port))
     }
 
     /// Install the architecture DMA-alloc producer the `dma_alloc` syscall
@@ -1691,6 +1726,14 @@ where
         translation: &'static crate::iommu::Translation,
     ) -> Self {
         self.dma_translation = Some(translation);
+        self
+    }
+
+    /// Install the bus mastering drivers' functions follow, consuming and
+    /// returning `self`.
+    #[must_use]
+    pub const fn with_mastering(mut self, mastering: crate::iommu::Mastering) -> Self {
+        self.mastering = Some(mastering);
         self
     }
 
@@ -3519,7 +3562,8 @@ where
         crate::waitq::port_room_wake();
         // A translated driver's device loses every carve at once here, so the
         // releases below free its DMA memory rather than quarantine it.
-        let translated = revoke_driver_dma(self.dma_translation, self.aspaces, self.audit, process);
+        let translated =
+            end_driver_dma(self.dma_translation, self.mastering, self.aspaces, process);
         // Release every shared-memory mapping this process held, dropping
         // each reference and zeroing + freeing any region whose last
         // reference this releases (zero-on-free). The registry scrubs a
@@ -7348,7 +7392,8 @@ where
         device_out: u64,
     ) -> SyscallResult {
         // The dispatcher enforced `CAP_MEM_DMA`.
-        let (constraint, custodian) = self.dma_carve_terms(caller, handle, len)?;
+        let terms = self.dma_carve_terms(caller, handle, len)?;
+        let constraint = &terms.constraint;
         // Mechanism: the installed producer carves a physically-contiguous,
         // zeroed, coherent block bounded by the grant's `addr_limit` into the
         // caller's own live address space. The default `NULL_DMA_ALLOC_FACILITY`
@@ -7356,7 +7401,7 @@ where
         // exhaustion surfaces as `OutOfMemory` (deterministic OOM).
         let carve = self
             .dma_alloc_facility
-            .alloc(len, constraint.addr_limit, custodian)?;
+            .alloc(len, constraint.addr_limit, terms.custodian)?;
         // Resolve the device-visible base the driver programs into its
         // hardware. For a coherent (untranslated) constraint it is the carved
         // CPU-physical base; for a translating inbound viewport
@@ -7365,7 +7410,7 @@ where
         // onto the far side of the viewport — checked, never wrapped. The carve
         // already lies below `addr_limit`, so this only re-bases it; a base
         // below the viewport's CPU window fails closed.
-        let device_addr = match translate_device_addr(&constraint, carve.device_addr) {
+        let device_addr = match translate_device_addr(constraint, carve.device_addr) {
             Ok(device_addr) => device_addr,
             Err(err) => {
                 // No device was handed a block its window cannot name, so it
@@ -7391,6 +7436,7 @@ where
         // registry snapshot before the copy below, so the copy path sees the
         // DMA window exactly as the space does.
         self.publish_region_mapping(caller.process(), carve.cpu_va, pages_spanning(carve.len));
+        self.hand_over_untranslated(caller.process(), &terms);
         // Hand the device-visible base back through the `device_out` user
         // pointer via the validated `copy_to_user` boundary, exactly as `wait` writes the reaped status — a faulting
         // `device_out` collapses onto the same fail-closed `BadAddress` an
@@ -9659,9 +9705,7 @@ where
         // became of them.
         if let Some(translation) = self.dma_translation {
             for &removed_node in &removed {
-                if let Some(generation) = translation.forget(removed_node) {
-                    crate::iommu::audit_unconfirmed(self.audit, removed_node, generation);
-                }
+                translation.forget(removed_node);
             }
         }
 
@@ -9949,18 +9993,18 @@ where
         if !caller.caps.has(tairix_abi::CapabilityId::SHM) {
             return Err(Errno::PermissionDenied);
         }
-        let (constraint, custodian) = self.dma_carve_terms(caller, handle, len)?;
+        let terms = self.dma_carve_terms(caller, handle, len)?;
         let pages = (len as u64).div_ceil(PAGE_SIZE as u64);
         let made = crate::sharedreg::create_dma(
             self.shared_mem_facility,
             caller.process(),
-            custodian,
+            terms.custodian,
             pages,
-            constraint.addr_limit,
+            terms.constraint.addr_limit,
         )?;
         // A block the grant's bus window cannot name is released before the
         // caller learns anything about it.
-        let device_addr = match translate_device_addr(&constraint, made.device_addr) {
+        let device_addr = match translate_device_addr(&terms.constraint, made.device_addr) {
             Ok(addr) => addr,
             Err(err) => {
                 self.release_shared_mapping(caller.process(), made.base_va);
@@ -9993,6 +10037,7 @@ where
                 return Err(Errno::BadAddress);
             }
         }
+        self.hand_over_untranslated(caller.process(), &terms);
         // The creator's own forwardable right to the region, as `shm_create`.
         let _handle = self
             .aspaces
@@ -12827,25 +12872,27 @@ fn dispose_finished_load<E>(
     }
 }
 
-/// End the DMA domain of `process` if it is a driver whose node `translation`
-/// confines, auditing an end its unit could not confirm. Whether it was a
-/// translated driver. Read while its load record still stands.
-pub(crate) fn revoke_driver_dma(
+/// End the DMA ownership of `process` if it is a driver: a node `translation`
+/// confines has its owner's domain revoked, and any other node's function
+/// stops mastering. Whether it was a translated driver. Read while its load
+/// record still stands.
+pub(crate) fn end_driver_dma(
     translation: Option<&crate::iommu::Translation>,
+    mastering: Option<crate::iommu::Mastering>,
     aspaces: &RwLock<AddressSpaceRegistry>,
-    audit: &(dyn Sink + Sync),
     process: ProcessId,
 ) -> bool {
     let Some(driver) = aspaces.read().loaded_driver(process) else {
         return false;
     };
-    let Some(translation) = translation.filter(|_| driver.translated) else {
-        return false;
-    };
-    if !translation.revoke(driver.node, driver.generation) {
-        crate::iommu::audit_unconfirmed(audit, driver.node, driver.generation);
+    if let Some(translation) = translation.filter(|_| driver.translated) {
+        translation.revoke(driver.node, driver.generation);
+        return true;
     }
-    true
+    if let Some(mastering) = mastering {
+        mastering.take_back(driver.node, driver.generation);
+    }
+    false
 }
 
 /// Audit a child refused at admission because the session it was bound for
@@ -13863,6 +13910,14 @@ where
         self
     }
 
+    /// Install the bus mastering, consuming and returning `self`: the
+    /// hook-level mirror of [`KernelSyscallHandlers::with_mastering`].
+    #[must_use]
+    pub fn with_mastering(mut self, mastering: crate::iommu::Mastering) -> Self {
+        self.handlers = self.handlers.with_mastering(mastering);
+        self
+    }
+
     /// Install the scheduler-side process-signal producer the `signal`
     /// syscall drives, consuming and returning `self` (`plans/SPAWN.md` `SP7b`).
     ///
@@ -14540,27 +14595,24 @@ mod tests {
     /// the core the task is running on now. Reusing the stale entry core
     /// instead would consult — and reschedule against — the wrong core's
     /// latch and resume handle, switching that core through another task's
-    /// saved context (a wild fault). The CPU indices are distinct from
-    /// every other latch-touching host test's (the per-CPU preempt latch is
-    /// a single process-wide array shared across the whole test binary), so
-    /// a parallel test thread can never arm the slot this one reads.
+    /// saved context (a wild fault).
     #[test]
     fn completion_outcome_reads_only_the_given_cpus_preempt_latch() {
-        const HERE: CpuId = 48;
-        const OTHER: CpuId = 49;
+        let here = crate::test_boot::claim_cpu();
+        let other = crate::test_boot::claim_cpu();
 
-        // A latch armed on `OTHER` must not divert a completion on `HERE`:
-        // the decision reads `HERE`'s own (unset) latch and returns. The
+        // A latch armed on `other` must not divert a completion on `here`:
+        // the decision reads `here`'s own (unset) latch and returns. The
         // drain result is passed explicitly (`woke = false`) so this pins
         // the per-CPU latch isolation without depending on the process-wide
         // wait-queue statics a parallel test may have flagged.
-        crate::preempt::note_preempt_tick(OTHER);
+        crate::preempt::note_preempt_tick(other);
         assert_eq!(
-            ordinary_completion(Ok(1), HERE, false),
+            ordinary_completion(Ok(1), here, false),
             DispatchOutcome::Returned(Ok(1))
         );
-        // `OTHER`'s latch is left intact — this completion never touched it.
-        assert!(crate::preempt::take_preempt_pending(OTHER));
+        // `other`'s latch is left intact — this completion never touched it.
+        assert!(crate::preempt::take_preempt_pending(other));
     }
 
     /// The **unseeded** boot reserve every generic handler test composes:
@@ -15215,9 +15267,9 @@ mod tests {
     /// statics a parallel test may have flagged cannot divert it.
     #[test]
     fn completion_outcome_without_a_latched_tick_returns() {
-        const CPU: CpuId = 50;
+        let cpu = crate::test_boot::claim_cpu();
         assert_eq!(
-            ordinary_completion(Ok(1), CPU, false),
+            ordinary_completion(Ok(1), cpu, false),
             DispatchOutcome::Returned(Ok(1))
         );
     }
@@ -15227,13 +15279,13 @@ mod tests {
     /// latched (`woke = true`, latch clear).
     #[test]
     fn completion_outcome_yields_on_a_deferred_wake() {
-        const CPU: CpuId = 55;
+        let cpu = crate::test_boot::claim_cpu();
         assert_eq!(
-            ordinary_completion(Ok(7), CPU, true),
+            ordinary_completion(Ok(7), cpu, true),
             DispatchOutcome::Reschedule {
                 result: Ok(7),
                 action: RescheduleAction::Yield,
-                cpu: CPU,
+                cpu,
             }
         );
     }
@@ -15249,18 +15301,18 @@ mod tests {
     /// decides.
     #[test]
     fn completion_outcome_with_a_latched_tick_yields_once() {
-        const CPU: CpuId = 51;
-        crate::preempt::note_preempt_tick(CPU);
+        let cpu = crate::test_boot::claim_cpu();
+        crate::preempt::note_preempt_tick(cpu);
         assert_eq!(
-            ordinary_completion(Ok(4), CPU, false),
+            ordinary_completion(Ok(4), cpu, false),
             DispatchOutcome::Reschedule {
                 result: Ok(4),
                 action: RescheduleAction::Yield,
-                cpu: CPU,
+                cpu,
             }
         );
         assert_eq!(
-            ordinary_completion(Ok(4), CPU, false),
+            ordinary_completion(Ok(4), cpu, false),
             DispatchOutcome::Returned(Ok(4))
         );
     }
@@ -15271,14 +15323,14 @@ mod tests {
     /// never be downgraded to a `Yield`).
     #[test]
     fn completion_outcome_explicit_reschedule_takes_precedence() {
-        const CPU: CpuId = 52;
-        crate::preempt::note_preempt_tick(CPU);
+        let cpu = crate::test_boot::claim_cpu();
+        crate::preempt::note_preempt_tick(cpu);
         assert_eq!(
-            completion_outcome(Some(SyscallNumber::EXIT), Ok(0), CPU),
+            completion_outcome(Some(SyscallNumber::EXIT), Ok(0), cpu),
             DispatchOutcome::Reschedule {
                 result: Ok(0),
                 action: RescheduleAction::Exit,
-                cpu: CPU,
+                cpu,
             }
         );
     }
@@ -28829,7 +28881,8 @@ mod tests {
         // published on. No other `kernel/core` test publishes on CPU 0
         // (`live_producer` uses CPUs ≥ 1), so the global slot is unshared
         // here (no flaky tests).
-        let arch = Arc::new(TestArch::with_cpus(1));
+        let cpu = crate::test_boot::claim_cpu();
+        let arch = Arc::new(TestArch::on_cpu(cpu));
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
@@ -28878,7 +28931,7 @@ mod tests {
             .map(heap, Frame(9), MapFlags::READ | MapFlags::USER)
             .expect("map heap page");
         let (live, _observer) = PublishedLive::published(live_space);
-        let _guard = crate::kthread::publish_live_space_for_test(0, live);
+        let _guard = crate::kthread::publish_live_space_for_test(cpu, live);
 
         let producer: &'static RecordingMemMap = Box::leak(Box::new(RecordingMemMap::new()));
         let h = KernelSyscallHandlers::new(
@@ -29012,14 +29065,11 @@ mod tests {
     /// publishes the region's teardown exactly as `mem_unmap` does.
     #[test]
     fn a_dying_threads_stack_leaves_nothing_translating_in_the_process_snapshot() {
-        // A CPU slot no other test in this crate publishes on, so the global
-        // per-CPU publication is unshared under a parallel run.
-        const CPU: u32 = 45;
+        let cpu = crate::test_boot::claim_cpu();
 
         install_trace_filter();
         let sink = make_sink();
-        let arch = Arc::new(TestArch::with_cpus(64));
-        arch.set_current_cpu(CPU);
+        let arch = Arc::new(TestArch::on_cpu(cpu));
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
@@ -29070,7 +29120,7 @@ mod tests {
             .expect("the sibling aliases the live record");
 
         let (live, _observer) = PublishedLive::published(space);
-        let _guard = crate::kthread::publish_live_space_for_test(CPU, live);
+        let _guard = crate::kthread::publish_live_space_for_test(cpu, live);
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
@@ -29173,6 +29223,8 @@ mod tests {
     struct RecordingPortIo {
         reads: tairix_sync::SpinLock<Option<(u16, tairix_abi::PortWidth)>>,
         writes: tairix_sync::SpinLock<Option<(u16, tairix_abi::PortValue)>>,
+        /// The one port this producer keeps for the kernel, if any.
+        kernel_owned: Option<u16>,
     }
 
     impl crate::devres::PortIoFacility for RecordingPortIo {
@@ -29184,12 +29236,17 @@ mod tests {
         fn write(&self, port: u16, value: tairix_abi::PortValue) {
             *self.writes.lock() = Some((port, value));
         }
+
+        fn kernel_owned(&self, port: u16, _width: tairix_abi::PortWidth) -> bool {
+            self.kernel_owned == Some(port)
+        }
     }
 
     fn recording_port_io() -> &'static RecordingPortIo {
         Box::leak(Box::new(RecordingPortIo {
             reads: tairix_sync::SpinLock::new(None),
             writes: tairix_sync::SpinLock::new(None),
+            kernel_owned: None,
         }))
     }
 
@@ -29263,6 +29320,48 @@ mod tests {
         assert_eq!(
             *facility.writes.lock(),
             Some((0x70, tairix_abi::PortValue::Byte(0x0B)))
+        );
+    }
+
+    /// A port the kernel keeps for itself opens to no grant, even one whose
+    /// range covers it, and the refusal reaches no instruction.
+    #[test]
+    fn a_kernel_owned_port_is_refused_whatever_the_grant() {
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let handle = aspaces
+            .write()
+            .mint_grant(ProcessId(2), tairix_abi::hwtree::HwResource::port(0x70, 2));
+        let facility: &'static RecordingPortIo = Box::leak(Box::new(RecordingPortIo {
+            reads: tairix_sync::SpinLock::new(None),
+            writes: tairix_sync::SpinLock::new(None),
+            kernel_owned: Some(0x71),
+        }));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_port_io_facility(Some(facility));
+        assert_eq!(
+            h.port_read(&ctx, handle, 0x71, tairix_abi::PortWidth::Byte),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            h.port_write(&ctx, handle, 0x71, tairix_abi::PortWidth::Byte, 0),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(*facility.reads.lock(), None);
+        assert_eq!(*facility.writes.lock(), None);
+        assert_eq!(
+            h.port_read(&ctx, handle, 0x70, tairix_abi::PortWidth::Byte),
+            Ok(0xA5),
+            "the rest of the grant still answers"
         );
     }
 
@@ -29695,10 +29794,9 @@ mod tests {
     /// already swept the driver's windows: the handler takes the new one back.
     #[test]
     fn a_window_mapped_as_its_grant_is_revoked_is_taken_back() {
-        const CPU: u32 = 51;
+        let cpu = crate::test_boot::claim_cpu();
         let sink = make_sink();
-        let arch = Arc::new(TestArch::with_cpus(CPU + 1));
-        arch.set_current_cpu(CPU);
+        let arch = Arc::new(TestArch::on_cpu(cpu));
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
@@ -29713,7 +29811,7 @@ mod tests {
             task_id: SecTaskId(driver),
             caps: &caps,
         };
-        let (space, _published) = driver_with_live_space(aspaces, driver, CPU);
+        let (space, _published) = driver_with_live_space(aspaces, driver, cpu);
         let handle = aspaces.write().mint_node_grant(
             ProcessId(driver),
             HwResource::mmio(0xFE00_0000, 0x1000),
@@ -29722,7 +29820,7 @@ mod tests {
         let facility: &'static RevokedMidMap = Box::leak(Box::new(RevokedMidMap {
             aspaces,
             node: 13,
-            cpu: CPU,
+            cpu,
         }));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, aspaces, &rng,
@@ -29748,10 +29846,9 @@ mod tests {
     /// The same for a shared region mapped as its grant is revoked.
     #[test]
     fn a_region_mapped_as_its_grant_is_revoked_is_taken_back() {
-        const CPU: u32 = 52;
+        let cpu = crate::test_boot::claim_cpu();
         let sink = make_sink();
-        let arch = Arc::new(TestArch::with_cpus(CPU + 1));
-        arch.set_current_cpu(CPU);
+        let arch = Arc::new(TestArch::on_cpu(cpu));
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
@@ -29771,7 +29868,7 @@ mod tests {
             Box::leak(Box::new(RecordingSharedFacility { va: 0x2_0000_1000 }));
         let (owner_va, region) =
             crate::sharedreg::create(owner_facility, ProcessId(owner), 1).expect("created");
-        let (_space, _published) = driver_with_live_space(aspaces, holder, CPU);
+        let (_space, _published) = driver_with_live_space(aspaces, holder, cpu);
         let handle =
             aspaces
                 .write()
@@ -29779,7 +29876,7 @@ mod tests {
         let facility: &'static RevokedMidMap = Box::leak(Box::new(RevokedMidMap {
             aspaces,
             node: 14,
-            cpu: CPU,
+            cpu,
         }));
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, aspaces, &rng,
@@ -30398,6 +30495,189 @@ mod tests {
             Some(0x1000),
             "the carve is tallied for the teardown record"
         );
+    }
+
+    /// A port recording each bus-mastering change it is asked for, and the
+    /// generation of the owner it is asked for.
+    #[derive(Default)]
+    struct RecordingMastering(tairix_sync::SpinLock<Vec<(crate::iommu::MasterTarget, bool, u64)>>);
+
+    impl RecordingMastering {
+        fn leaked() -> &'static Self {
+            Box::leak(Box::default())
+        }
+
+        fn calls(&self) -> Vec<(crate::iommu::MasterTarget, bool, u64)> {
+            self.0.lock().clone()
+        }
+    }
+
+    impl crate::iommu::BusMastering for RecordingMastering {
+        fn set_mastering(
+            &self,
+            target: crate::iommu::MasterTarget,
+            master: bool,
+            generation: u64,
+        ) -> Option<crate::iommu::MasterChange> {
+            self.0.lock().push((target, master, generation));
+            Some(crate::iommu::MasterChange {
+                changed: true,
+                refused: false,
+            })
+        }
+
+        fn strays(&self, _unit: u32, _keeps: &dyn Fn(u32) -> bool) -> usize {
+            0
+        }
+    }
+
+    #[test]
+    fn an_untranslated_driver_s_function_masters_from_its_carve_until_its_end() {
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let handle = aspaces.write().mint_grant(
+            ProcessId(2),
+            tairix_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
+        );
+        let port = RecordingMastering::leaked();
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_dma_alloc_facility(recording_dma_facility())
+        .with_mastering(crate::iommu::Mastering::new(Some(port), sink));
+        aspaces
+            .write()
+            .admit_driver(ProcessId(2), 0x44, false)
+            .expect("the node has no live driver");
+        assert!(port.calls().is_empty(), "admission makes no bus master");
+        let generation = aspaces
+            .read()
+            .loaded_driver(ProcessId(2))
+            .expect("admitted")
+            .generation;
+        // No address space is registered for task 2, so the copy-out fails
+        // after the carve was made.
+        assert_eq!(
+            h.dma_alloc(&ctx, handle, 0x1000, 0x1234),
+            Err(Errno::BadAddress)
+        );
+        let node = crate::iommu::MasterTarget::Node(0x44);
+        assert_eq!(port.calls(), [(node, true, generation)]);
+        assert_eq!(
+            h.dma_alloc(&ctx, handle, 0x1000, 0x1234),
+            Err(Errno::BadAddress)
+        );
+        assert_eq!(port.calls(), [(node, true, generation)], "handed over once");
+        let _ = h.reclaim_process_resources(ProcessId(2));
+        assert_eq!(
+            port.calls(),
+            [(node, true, generation), (node, false, generation)],
+            "taken back for the owner that ended, never for a successor"
+        );
+    }
+
+    #[test]
+    fn a_refused_carve_makes_no_bus_master() {
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let handle = aspaces.write().mint_grant(
+            ProcessId(2),
+            tairix_abi::hwtree::HwResource::dma(0x4000_0000, 0x1_0000),
+        );
+        let facility: &'static RecordingDmaFacility = Box::leak(Box::new(RecordingDmaFacility {
+            last: tairix_sync::SpinLock::new(None),
+            freed: tairix_sync::SpinLock::new(None),
+            ret: Err(Errno::OutOfMemory),
+        }));
+        let port = RecordingMastering::leaked();
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_dma_alloc_facility(facility)
+        .with_mastering(crate::iommu::Mastering::new(Some(port), sink));
+        aspaces
+            .write()
+            .admit_driver(ProcessId(2), 0x44, false)
+            .expect("the node has no live driver");
+        assert_eq!(
+            h.dma_alloc(&ctx, handle, 0x1000, 0x1234),
+            Err(Errno::OutOfMemory)
+        );
+        assert!(port.calls().is_empty());
+    }
+
+    #[test]
+    fn a_translated_driver_s_function_follows_its_domain_not_its_carves() {
+        use tairix_kernel_mem::DeviceTranslation;
+
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let port = RecordingMastering::leaked();
+        let (translation, _, tree) = translation_with(
+            &[0x44],
+            tairix_kernel_iommu_api::model::Behaviour::Correct,
+            sink,
+            Some(port),
+        );
+        let handle = aspaces
+            .write()
+            .mint_grant(ProcessId(2), tairix_abi::hwtree::HwResource::dma(0, 0));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_hw_tree(tree)
+        .with_dma_translation(translation)
+        .with_dma_alloc_facility(recording_dma_facility())
+        .with_mastering(crate::iommu::Mastering::new(Some(port), sink));
+        aspaces
+            .write()
+            .admit_driver(ProcessId(2), 0x44, true)
+            .expect("the node has no live driver");
+        let _ = h.dma_alloc(&ctx, handle, 0x1000, 0x1234);
+        assert!(
+            port.calls().is_empty(),
+            "a translated carve is handed over by its domain, not the syscall"
+        );
+        let generation = aspaces
+            .read()
+            .loaded_driver(ProcessId(2))
+            .expect("loaded")
+            .generation;
+        translation
+            .map(0x44, generation, translated_block(0x8000_0000), 0)
+            .expect("the first carve makes the domain");
+        let _ = h.reclaim_process_resources(ProcessId(2));
+        let flips: Vec<bool> = port.calls().iter().map(|call| call.1).collect();
+        assert_eq!(
+            flips,
+            [true, false],
+            "granted at the domain, withdrawn at the end"
+        );
+        assert!(port
+            .calls()
+            .iter()
+            .all(|call| matches!(call.0, crate::iommu::MasterTarget::Streams(_))));
     }
 
     /// Build a `RecordingDmaFacility` over a fresh-and-`None` carve record,
@@ -35826,6 +36106,21 @@ mod tests {
         &'static tairix_kernel_iommu_api::model::ModelUnit<'static>,
         &'static StaticHwTree,
     ) {
+        translation_with(nodes, behaviour, make_sink(), None)
+    }
+
+    /// [`translation_over`], auditing to `audit` and turning its owners'
+    /// bus mastering through `port`.
+    fn translation_with(
+        nodes: &[u32],
+        behaviour: tairix_kernel_iommu_api::model::Behaviour,
+        audit: &'static TestSink,
+        port: Option<&'static dyn crate::iommu::BusMastering>,
+    ) -> (
+        &'static crate::iommu::Translation,
+        &'static tairix_kernel_iommu_api::model::ModelUnit<'static>,
+        &'static StaticHwTree,
+    ) {
         let frames: &'static tairix_kernel_iommu_api::hostmem::HostFrames = Box::leak(Box::new(
             tairix_kernel_iommu_api::hostmem::HostFrames::new(0x1_0000_0000),
         ));
@@ -35855,11 +36150,12 @@ mod tests {
             alloc::vec![unit],
             alloc::vec![0xFED9_0000..0xFED9_1000],
             tree,
-            make_sink(),
+            audit,
+            crate::iommu::Mastering::new(port, audit),
         );
         assert_eq!(
             outcomes,
-            [(TRANSLATION_UNIT_NODE, Ok(()))],
+            [(TRANSLATION_UNIT_NODE, Ok(0))],
             "the reference unit enables"
         );
         (Box::leak(Box::new(translation)), model, tree)
@@ -36077,9 +36373,11 @@ mod tests {
         let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
         let sched = make_sched(arch.clone());
         let ctl = UnsupportedController;
-        let (translation, _, tree) = translation_over(
+        let (translation, _, tree) = translation_with(
             &[0x52],
             tairix_kernel_iommu_api::model::Behaviour::UnconfirmedBlock,
+            sink,
+            None,
         );
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
@@ -37743,19 +38041,16 @@ mod tests {
     /// count — the only work proportional to the resident set — stays zero.
     #[test]
     fn shm_map_and_unmap_publish_only_the_regions_own_pages() {
-        /// A CPU no other test publishes a live space on: the slot is global
-        /// and the suite runs in parallel.
-        const CPU: u32 = 20;
         /// Stands in for the session's resident set: a rebuild walks all of
         /// them, the region below is one page.
         const RESIDENT_PAGES: usize = 64;
         const RESIDENT_BASE: u64 = 0x9000_0000;
         const REGION_VA: u64 = 0x2_0000_1000;
 
+        let cpu = crate::test_boot::claim_cpu();
         install_trace_filter();
         let sink = make_sink();
-        let arch = Arc::new(TestArch::with_cpus(CPU + 1));
-        arch.set_current_cpu(CPU);
+        let arch = Arc::new(TestArch::on_cpu(cpu));
         let sched = make_sched(arch.clone());
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
@@ -37784,7 +38079,7 @@ mod tests {
         let region_page = Page::from_addr(VirtAddr::new(REGION_VA)).expect("aligned");
         let live_space = big_live_space(RESIDENT_BASE, RESIDENT_PAGES, region_page);
         let (live, observer) = PublishedLive::published(live_space);
-        let _guard = crate::kthread::publish_live_space_for_test(CPU, live);
+        let _guard = crate::kthread::publish_live_space_for_test(cpu, live);
 
         // A region owned by another task, granted to the mapper — the app
         // hands the session its frame region.

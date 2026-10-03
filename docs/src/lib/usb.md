@@ -53,8 +53,9 @@ depending on each other — the split `lib/virtio` ↔ `drivers/bus/virtio` uses
   outruns the interval budget the TT scheduled. Captured reports are queued
   per device in memory sized to that length (`REPORT_QUEUE_CAP` deep, the
   oldest dropped and counted when a consumer stalls). An interrupt endpoint's
-  context carries its own interval, Max Burst Size and Max ESIT Payload, and a
-  `SuperSpeed` bulk endpoint's carries its companion's burst
+  context carries its own interval, Max Burst Size, Max ESIT Payload and a
+  Max Packet Size held to its speed's maximum, so no transfer outruns its
+  buffer. A `SuperSpeed` bulk endpoint's carries its companion's burst
   (`BulkEndpoint::burst`), so a USB 3 storage device moves up to sixteen
   packets a burst.
   Enumerated interfaces go into a growable table of concurrently served **interfaces**, each with its own

@@ -204,11 +204,7 @@ which routes every request through the capability-gated
 and the `MmioMapper` trait it implements lives in `lib/abi` (`AGENTS.md`
 §17.4). Unlike the per-load boxed virtio host, the mapper is borrowed
 for the host's lifetime and lent unchanged to every driver load — its
-own window bitmap is the per-load state. The in-kernel composition that
-wires both seams at once (a bus driver that maps register windows *and*
-carves a DMA region — the VL805 xHCI behind the BCM2711 PCIe root
-complex, `plans/PI.md` P10) is `tairix_kernel::run_with_driver_host`
-(`kernel/tairix-kernel/src/driver_host.rs`).
+own window bitmap is the per-load state.
 
 ### In-kernel chain admission (the Pi 4 USB keyboard)
 

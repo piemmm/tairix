@@ -20,6 +20,7 @@ impl Qmp {
     /// leave negotiation mode.
     pub(crate) fn connect(path: &Path) -> io::Result<Self> {
         let stream = UnixStream::connect(path)?;
+        stream.set_read_timeout(Some(ANSWER_WITHIN))?;
         let mut qmp = Self {
             stream: BufReader::new(stream),
         };
@@ -63,7 +64,12 @@ impl Qmp {
         if remaining.is_zero() {
             return Err(silent());
         }
-        self.stream.get_ref().set_read_timeout(Some(remaining))?;
+        if !self.stream.buffer().contains(&b'\n') {
+            // macOS refuses options on a socket its peer has shut both ways.
+            // Such a read cannot block, and still returns what the monitor
+            // wrote before it went, so the timeout armed before stands.
+            let _ = self.stream.get_ref().set_read_timeout(Some(remaining));
+        }
         let mut line = String::new();
         match self.stream.read_line(&mut line) {
             Ok(0) => Err(io::Error::new(
@@ -115,7 +121,7 @@ pub(crate) fn tap_commands(x: u32, y: u32, contact: u16) -> [String; 2] {
 #[cfg(test)]
 mod tests {
     use super::{tap_commands, Qmp};
-    use std::io::{self, BufReader};
+    use std::io::{self, BufReader, Write};
     use std::os::unix::net::UnixStream;
     use std::time::{Duration, Instant};
 
@@ -130,6 +136,26 @@ mod tests {
         assert_eq!(silent.kind(), io::ErrorKind::TimedOut);
         let spent = qmp.line(Instant::now()).expect_err("no time left");
         assert_eq!(spent.kind(), io::ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn an_answer_written_before_the_monitor_hung_up_is_still_read() {
+        let (ours, mut theirs) = UnixStream::pair().expect("a socket pair");
+        theirs
+            .write_all(b"{\"timestamp\": {}, \"event\": \"RESUME\"}\n{\"return\": {}}\n")
+            .expect("the monitor answers");
+        drop(theirs);
+        let mut qmp = Qmp {
+            stream: BufReader::new(ours),
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        assert!(qmp.line(deadline).expect("the event").contains("RESUME"));
+        assert!(qmp
+            .line(deadline)
+            .expect("the answer")
+            .starts_with(r#"{"return""#));
+        let gone = qmp.line(deadline).expect_err("nothing follows the hang-up");
+        assert_eq!(gone.kind(), io::ErrorKind::UnexpectedEof);
     }
 
     #[test]

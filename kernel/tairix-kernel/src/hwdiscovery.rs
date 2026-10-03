@@ -17,14 +17,17 @@
 //! discovered by one shared core (`observe_virtio_mmio_interrupt_devices`);
 //! the block probe differs (a different resource shape) and stays separate.
 
+use alloc::vec::Vec;
+
 use tairix_abi::driver::bus::{Bus, BusDevice};
+use tairix_abi::driver::pci::PciBus;
 use tairix_abi::driver::virtio_mmio::VirtioMmioBus;
 use tairix_abi::driver::virtio_pci::{
     virtio_pci_window_resource, VirtioPciBus, VIRTIO_PCI_CFG_COMMON, VIRTIO_PCI_CFG_DEVICE,
     VIRTIO_PCI_CFG_ISR, VIRTIO_PCI_CFG_NOTIFY, VIRTIO_PCI_VENDOR_ID,
 };
 use tairix_abi::hwtree::HwResource;
-use tairix_abi::{DriverError, HwDeviceClass, HwMatchKey, HwNode, HW_NODE_ROOT_ID};
+use tairix_abi::{DriverError, HwDeviceClass, HwMatchKey, HwNode, IommuStreams, HW_NODE_ROOT_ID};
 use tairix_arch_api::{DiscoveryError, HwNodeSink};
 use tairix_drv_audio_virtio_snd::VIRTIO_SND_DEVICE_ID;
 use tairix_drv_storage_virtio_blk::VIRTIO_BLK_DEVICE_ID;
@@ -166,6 +169,64 @@ impl PciFunction {
         self.stream
             .is_none_or(|stream| node.push_resource(stream).is_ok())
     }
+}
+
+/// PCI base class of a bridge (PCI Local Bus 3.0 Appendix D).
+const PCI_BRIDGE_CLASS: u16 = 0x06;
+
+/// Stop every function on `bus` that TAIRiX takes from firmware mastering
+/// DMA, before any unit is taken over: TAIRiX makes a function a bus master
+/// only as it hands it to an owner (`plans/IOMMU.md` IOM7).
+///
+/// That is every function behind a unit (`dma` names its stream), whose
+/// stream the unit will block anyway, and every virtio function, which this
+/// probe hands to drivers. A function whose stream firmware keeps a window
+/// for (`keeps`) keeps mastering, since firmware still uses it. A bridge
+/// forwards for its whole subtree and is left alone, as is any other
+/// function behind no unit: nothing would confine it, and nothing says
+/// firmware is done with it.
+///
+/// Answers each function behind a unit, stopped or kept, with its stream.
+///
+/// # Errors
+///
+/// The bus enumeration's, a configuration write's, or
+/// [`DriverError::NoSpace`] when the answer cannot be allocated.
+pub fn quiesce_pci_functions(
+    bus: &dyn PciBus,
+    dma: DmaIdentity<'_>,
+    keeps: &dyn Fn(IommuStreams) -> bool,
+) -> Result<Vec<(u64, IommuStreams)>, DriverError> {
+    let blank = BusDevice {
+        vendor: 0,
+        device: 0,
+        class: 0,
+        reserved0: 0,
+        address: 0,
+    };
+    let mut table = [blank; MAX_SLOTS];
+    let count = bus.enumerate(&mut table)?;
+    let mut behind = Vec::new();
+    behind
+        .try_reserve(count)
+        .map_err(|_| DriverError::NoSpace)?;
+    for device in &table[..count] {
+        if device.class >> 8 == PCI_BRIDGE_CLASS {
+            continue;
+        }
+        match dma(device.address).and_then(|stream| stream.iommu_streams().ok()) {
+            Some(streams) => {
+                behind.push((device.address, streams));
+                if keeps(streams) {
+                    continue;
+                }
+            }
+            None if device.vendor != u32::from(VIRTIO_PCI_VENDOR_ID) => continue,
+            None => {}
+        }
+        bus.set_bus_master(device.address, false)?;
+    }
+    Ok(behind)
 }
 
 fn log_bypass(log: &dyn Sink, address: u64, stream: HwResource) {
@@ -1738,5 +1799,118 @@ mod tests {
         observe_virtio_pci_input_devices(&bus, &|_| None, &|_| None, &mut sink, &DiscardLog)
             .expect("enumerate");
         assert!(sink.nodes.is_empty());
+    }
+
+    /// A bus over a fixed function list that records every bus-master change.
+    struct QuiesceBus {
+        functions: alloc::vec::Vec<BusDevice>,
+        changes: tairix_sync::SpinLock<alloc::vec::Vec<(u64, bool)>>,
+    }
+
+    impl Bus for QuiesceBus {
+        fn enumerate(&self, out: &mut [BusDevice]) -> Result<usize, DriverError> {
+            out[..self.functions.len()].copy_from_slice(&self.functions);
+            Ok(self.functions.len())
+        }
+    }
+
+    impl PciBus for QuiesceBus {
+        fn map_bar_window(
+            &self,
+            _bdf: u64,
+            _bar_index: u8,
+            _mapper: &dyn tairix_abi::MmioMapper,
+        ) -> Result<tairix_abi::RegisterWindow, DriverError> {
+            Err(DriverError::Unsupported)
+        }
+
+        fn enable_memory_space(&self, _bdf: u64) -> Result<(), DriverError> {
+            Err(DriverError::Unsupported)
+        }
+
+        fn set_bus_master(&self, bdf: u64, master: bool) -> Result<(), DriverError> {
+            self.changes.lock().push((bdf, master));
+            Ok(())
+        }
+
+        fn assign_bar(
+            &self,
+            _bdf: u64,
+            _bar_index: u8,
+            _window_base: u64,
+            _window_size: u64,
+        ) -> Result<u64, DriverError> {
+            Err(DriverError::Unsupported)
+        }
+
+        fn read_config(&self, _bdf: u64, _offset: u16) -> Result<u32, DriverError> {
+            Err(DriverError::Unsupported)
+        }
+
+        fn describe_function(&self, _bdf: u64) -> Result<HwNode, DriverError> {
+            Err(DriverError::Unsupported)
+        }
+    }
+
+    #[test]
+    fn the_probe_stops_every_function_it_takes_from_firmware_and_no_other() {
+        const UNIT: u32 = 100;
+        const BRIDGE: u64 = 0x0000_0800;
+        const VIRTIO_ALONE: u64 = 0x0000_1800;
+        const VIRTIO_BEHIND: u64 = 0x0000_2000;
+        const FIRMWARE_KEPT: u64 = 0x0000_F800;
+        const AHCI_BEHIND: u64 = 0x0000_F900;
+        const AHCI_ALONE: u64 = 0x0001_0000;
+        let function = |vendor: u16, class: u16, address: u64| BusDevice {
+            vendor: u32::from(vendor),
+            device: 0,
+            class,
+            reserved0: 0,
+            address,
+        };
+        let bus = QuiesceBus {
+            functions: alloc::vec![
+                function(0x8086, 0x0604, BRIDGE),
+                function(VIRTIO_PCI_VENDOR_ID, 0x0100, VIRTIO_ALONE),
+                function(VIRTIO_PCI_VENDOR_ID, 0x0100, VIRTIO_BEHIND),
+                function(0x8086, 0x0C03, FIRMWARE_KEPT),
+                function(0x8086, 0x0106, AHCI_BEHIND),
+                function(0x8086, 0x0106, AHCI_ALONE),
+            ],
+            changes: tairix_sync::SpinLock::new(alloc::vec::Vec::new()),
+        };
+        let stream = |address: u64| {
+            IommuStreams::new(
+                UNIT,
+                u32::from(tairix_abi::driver::pci::requester_id(address)),
+                1,
+            )
+            .unwrap()
+        };
+        let dma = |address: u64| {
+            [BRIDGE, VIRTIO_BEHIND, FIRMWARE_KEPT, AHCI_BEHIND]
+                .contains(&address)
+                .then(|| HwResource::iommu_stream(stream(address)))
+        };
+        let keeps = |streams: IommuStreams| streams == stream(FIRMWARE_KEPT);
+        let behind = quiesce_pci_functions(&bus, &dma, &keeps).expect("quiesced");
+        assert_eq!(
+            *bus.changes.lock(),
+            [
+                (VIRTIO_ALONE, false),
+                (VIRTIO_BEHIND, false),
+                (AHCI_BEHIND, false)
+            ],
+            "every function behind a unit, and every virtio one"
+        );
+        assert_eq!(
+            behind,
+            [
+                (VIRTIO_BEHIND, stream(VIRTIO_BEHIND)),
+                (FIRMWARE_KEPT, stream(FIRMWARE_KEPT)),
+                (AHCI_BEHIND, stream(AHCI_BEHIND))
+            ],
+            "each function behind a unit, stopped or kept, but no bridge"
+        );
     }
 }

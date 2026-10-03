@@ -661,7 +661,10 @@ impl<R: RegisterBlock> BrcmPcieRc<R> {
 
     /// Enable Memory Space + Bus Master in the root port's Command register
     /// (the bridge enable a full enumerator does, gating downstream memory
-    /// forwarding and upstream DMA). Issued **after the link is trained**:
+    /// forwarding and upstream DMA). It stays on for the bridge's life: it
+    /// forwards for the whole subtree and originates no DMA, while each
+    /// downstream function masters only once handed over. Issued **after the
+    /// link is trained**:
     /// the integrated RC latches Memory Space Enable against a live link, so
     /// an earlier write does not stick. The high 16 bits (the RW1C Status
     /// register) are masked off so no latched status bit is cleared.

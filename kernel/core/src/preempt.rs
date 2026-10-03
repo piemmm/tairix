@@ -518,42 +518,40 @@ mod tests {
         TEST_GATE.with(|g| g.set(Some(gate)));
     }
 
-    /// Tests share the process-wide per-CPU slots; each test uses its own
-    /// CPU index so parallel test threads never observe each other.
     #[test]
     fn a_latched_tick_is_consumed_exactly_once() {
-        const CPU: CpuId = 40;
-        assert!(!take_preempt_pending(CPU));
-        note_preempt_tick(CPU);
-        assert!(take_preempt_pending(CPU));
+        let cpu = crate::test_boot::claim_cpu();
+        assert!(!take_preempt_pending(cpu));
+        note_preempt_tick(cpu);
+        assert!(take_preempt_pending(cpu));
         // Consumed: a second take sees nothing.
-        assert!(!take_preempt_pending(CPU));
+        assert!(!take_preempt_pending(cpu));
     }
 
     #[test]
     fn repeated_ticks_before_the_preemption_point_coalesce() {
-        const CPU: CpuId = 41;
-        note_preempt_tick(CPU);
-        note_preempt_tick(CPU);
-        assert!(take_preempt_pending(CPU));
-        assert!(!take_preempt_pending(CPU));
+        let cpu = crate::test_boot::claim_cpu();
+        note_preempt_tick(cpu);
+        note_preempt_tick(cpu);
+        assert!(take_preempt_pending(cpu));
+        assert!(!take_preempt_pending(cpu));
     }
 
     #[test]
     fn clearing_supersedes_a_latched_tick() {
-        const CPU: CpuId = 42;
-        note_preempt_tick(CPU);
-        clear_preempt_pending(CPU);
-        assert!(!take_preempt_pending(CPU));
+        let cpu = crate::test_boot::claim_cpu();
+        note_preempt_tick(cpu);
+        clear_preempt_pending(cpu);
+        assert!(!take_preempt_pending(cpu));
     }
 
     #[test]
     fn each_cpu_has_its_own_latch() {
-        const CPU_A: CpuId = 43;
-        const CPU_B: CpuId = 44;
-        note_preempt_tick(CPU_A);
-        assert!(!take_preempt_pending(CPU_B));
-        assert!(take_preempt_pending(CPU_A));
+        let cpu_a = crate::test_boot::claim_cpu();
+        let cpu_b = crate::test_boot::claim_cpu();
+        note_preempt_tick(cpu_a);
+        assert!(!take_preempt_pending(cpu_b));
+        assert!(take_preempt_pending(cpu_a));
     }
 
     #[test]
@@ -573,10 +571,10 @@ mod tests {
     /// aarch64 QEMU preemption vertical.)
     #[test]
     fn preempt_current_without_a_latch_does_nothing() {
-        const CPU: CpuId = 45;
-        assert_eq!(preemption_count(CPU), 0);
-        assert!(!preempt_current(CPU));
-        assert_eq!(preemption_count(CPU), 0);
+        let cpu = crate::test_boot::claim_cpu();
+        assert_eq!(preemption_count(cpu), 0);
+        assert!(!preempt_current(cpu));
+        assert_eq!(preemption_count(cpu), 0);
     }
 
     /// A latched tick with no published user task fails closed through
@@ -587,15 +585,15 @@ mod tests {
     /// after this failed suspension.
     #[test]
     fn failed_suspension_keeps_the_periodic_tick_alive() {
-        const CPU: CpuId = 46;
+        let cpu = crate::test_boot::claim_cpu();
         set_test_gate(&TEST_COMPETITOR_GATE);
-        let rearms_before = TEST_COMPETITOR_GATE.periodic_rearms(CPU);
-        note_preempt_tick(CPU);
-        assert!(!preempt_current(CPU));
-        assert_eq!(preemption_count(CPU), 0);
-        assert_eq!(TEST_COMPETITOR_GATE.periodic_rearms(CPU), rearms_before + 1);
+        let rearms_before = TEST_COMPETITOR_GATE.periodic_rearms(cpu);
+        note_preempt_tick(cpu);
+        assert!(!preempt_current(cpu));
+        assert_eq!(preemption_count(cpu), 0);
+        assert_eq!(TEST_COMPETITOR_GATE.periodic_rearms(cpu), rearms_before + 1);
         // The latch was taken even though no switch happened.
-        assert!(!take_preempt_pending(CPU));
+        assert!(!take_preempt_pending(cpu));
     }
 
     #[test]
@@ -611,12 +609,12 @@ mod tests {
     /// recorded.
     #[test]
     fn a_forced_yield_is_consumed_and_needs_no_competitor() {
-        const CPU: CpuId = 57;
-        assert!(!take_forced_yield(CPU));
-        request_forced_yield(CPU);
-        assert!(!preempt_current(CPU));
-        assert!(!take_forced_yield(CPU));
-        assert_eq!(preemption_count(CPU), 0);
+        let cpu = crate::test_boot::claim_cpu();
+        assert!(!take_forced_yield(cpu));
+        request_forced_yield(cpu);
+        assert!(!preempt_current(cpu));
+        assert!(!take_forced_yield(cpu));
+        assert_eq!(preemption_count(cpu), 0);
     }
 
     /// A delivered reschedule IPI takes the **un-gated** latch, never the
@@ -626,14 +624,14 @@ mod tests {
     /// the kill path had just nudged running until the monopoly guard fired.
     #[test]
     fn a_delivered_reschedule_ipi_requests_an_ungated_yield() {
-        const CPU: CpuId = 60;
-        crate::traps::on_reschedule_ipi(CPU);
+        let cpu = crate::test_boot::claim_cpu();
+        crate::traps::on_reschedule_ipi(cpu);
         assert!(
-            !take_preempt_pending(CPU),
+            !take_preempt_pending(cpu),
             "a directed IPI is not a quantum expiring"
         );
         assert!(
-            take_forced_yield(CPU),
+            take_forced_yield(cpu),
             "a directed IPI must request an un-gated yield"
         );
     }
@@ -643,10 +641,10 @@ mod tests {
     /// monopoly-guard window clean.
     #[test]
     fn clearing_supersedes_a_forced_yield() {
-        const CPU: CpuId = 58;
-        request_forced_yield(CPU);
-        clear_preempt_pending(CPU);
-        assert!(!take_forced_yield(CPU));
+        let cpu = crate::test_boot::claim_cpu();
+        request_forced_yield(cpu);
+        clear_preempt_pending(cpu);
+        assert!(!take_forced_yield(cpu));
     }
 
     /// A forced yield fires even with no competitor and no latched tick —
@@ -654,15 +652,15 @@ mod tests {
     /// otherwise leave running.
     #[test]
     fn a_forced_yield_alone_reaches_the_reschedule_path() {
-        const CPU: CpuId = 59;
+        let cpu = crate::test_boot::claim_cpu();
         // No tick latched, no competitor: without the forced latch this
         // would short-circuit to `false` before any reschedule attempt.
-        assert!(!take_preempt_pending(CPU));
-        request_forced_yield(CPU);
+        assert!(!take_preempt_pending(cpu));
+        request_forced_yield(cpu);
         // Reaches the (host: fail-closed) reschedule path and consumes the
         // latch; returns false only because no user task is published here.
-        assert!(!preempt_current(CPU));
-        assert!(!take_forced_yield(CPU));
+        assert!(!preempt_current(cpu));
+        assert!(!take_forced_yield(cpu));
     }
 
     /// The in-kernel boundary is free when nothing is owed: an in-kernel loop
@@ -671,13 +669,13 @@ mod tests {
     /// pays no context switch.
     #[test]
     fn the_in_kernel_boundary_is_free_when_no_tick_is_latched() {
-        const CPU: CpuId = 32;
+        let cpu = crate::test_boot::claim_cpu();
         set_test_gate(&TEST_COMPETITOR_GATE);
-        let rearms_before = TEST_COMPETITOR_GATE.periodic_rearms(CPU);
-        assert!(!take_preempt_pending(CPU));
-        assert!(!honour_latches(CPU));
-        assert_eq!(TEST_COMPETITOR_GATE.periodic_rearms(CPU), rearms_before);
-        assert_eq!(preemption_count(CPU), 0);
+        let rearms_before = TEST_COMPETITOR_GATE.periodic_rearms(cpu);
+        assert!(!take_preempt_pending(cpu));
+        assert!(!honour_latches(cpu));
+        assert_eq!(TEST_COMPETITOR_GATE.periodic_rearms(cpu), rearms_before);
+        assert_eq!(preemption_count(cpu), 0);
     }
 
     /// A tick latched while in-kernel code runs is honoured *at* the
@@ -690,29 +688,29 @@ mod tests {
     /// aarch64 QEMU preemption vertical).
     #[test]
     fn a_tick_latched_in_kernel_is_honoured_at_the_boundary() {
-        const CPU: CpuId = 33;
+        let cpu = crate::test_boot::claim_cpu();
         set_test_gate(&TEST_COMPETITOR_GATE);
-        let rearms_before = TEST_COMPETITOR_GATE.periodic_rearms(CPU);
-        note_preempt_tick(CPU);
-        assert!(!honour_latches(CPU));
-        assert_eq!(TEST_COMPETITOR_GATE.periodic_rearms(CPU), rearms_before + 1);
+        let rearms_before = TEST_COMPETITOR_GATE.periodic_rearms(cpu);
+        note_preempt_tick(cpu);
+        assert!(!honour_latches(cpu));
+        assert_eq!(TEST_COMPETITOR_GATE.periodic_rearms(cpu), rearms_before + 1);
         // Consumed at the boundary, so the next unit of work starts clean and
         // a single tick cannot yield twice.
-        assert!(!take_preempt_pending(CPU));
-        assert!(!honour_latches(CPU));
-        assert_eq!(preemption_count(CPU), 0);
+        assert!(!take_preempt_pending(cpu));
+        assert!(!honour_latches(cpu));
+        assert_eq!(preemption_count(cpu), 0);
     }
 
     /// The boundary yields only the CPU it is called for: a tick latched on
     /// one CPU is never consumed by another CPU's in-kernel loop.
     #[test]
     fn the_in_kernel_boundary_is_per_cpu() {
-        const CPU_A: CpuId = 34;
-        const CPU_B: CpuId = 35;
+        let cpu_a = crate::test_boot::claim_cpu();
+        let cpu_b = crate::test_boot::claim_cpu();
         set_test_gate(&TEST_COMPETITOR_GATE);
-        note_preempt_tick(CPU_A);
-        assert!(!honour_latches(CPU_B));
-        assert!(take_preempt_pending(CPU_A));
+        note_preempt_tick(cpu_a);
+        assert!(!honour_latches(cpu_b));
+        assert!(take_preempt_pending(cpu_a));
     }
 
     /// An out-of-range CPU fails closed: no phantom yield, no rearm.
@@ -728,25 +726,25 @@ mod tests {
     /// too; the tick is the only issuer left.
     #[test]
     fn an_overdue_cpu_is_forced_to_yield_from_the_tick_channel() {
-        const CPU: CpuId = 30;
         const STAMPED_NS: u64 = 1_000;
+        let cpu = crate::test_boot::claim_cpu();
         set_test_gate(&TEST_COMPETITOR_GATE);
-        let rearms_before = TEST_COMPETITOR_GATE.periodic_rearms(CPU);
-        crate::watchdog::set_activity(CPU, crate::watchdog::WatchdogActivity::Active);
-        crate::watchdog::note_progress(CPU, STAMPED_NS);
+        let rearms_before = TEST_COMPETITOR_GATE.periodic_rearms(cpu);
+        crate::watchdog::set_activity(cpu, crate::watchdog::WatchdogActivity::Active);
+        crate::watchdog::note_progress(cpu, STAMPED_NS);
         crate::watchdog::check_stall_at(
-            CPU,
+            cpu,
             STAMPED_NS + crate::watchdog::DEFAULT_MONOPOLY_YIELD_THRESHOLD_NS,
         );
         // No tick was latched, so reaching the (host: fail-closed) reschedule
         // path — which restores the periodic deadline — is only possible via
         // the forced latch the stall check just set.
-        assert!(!take_preempt_pending(CPU));
-        assert!(!preempt_current(CPU));
-        assert_eq!(TEST_COMPETITOR_GATE.periodic_rearms(CPU), rearms_before + 1);
+        assert!(!take_preempt_pending(cpu));
+        assert!(!preempt_current(cpu));
+        assert_eq!(TEST_COMPETITOR_GATE.periodic_rearms(cpu), rearms_before + 1);
         // Consumed exactly once: a second visit reaches nothing.
-        assert!(!preempt_current(CPU));
-        assert_eq!(TEST_COMPETITOR_GATE.periodic_rearms(CPU), rearms_before + 1);
+        assert!(!preempt_current(cpu));
+        assert_eq!(TEST_COMPETITOR_GATE.periodic_rearms(cpu), rearms_before + 1);
     }
 
     /// The same forced yield is honoured at the **in-kernel** boundary. A
@@ -755,16 +753,16 @@ mod tests {
     /// it never takes.
     #[test]
     fn a_forced_yield_alone_reaches_the_reschedule_path_in_kernel() {
-        const CPU: CpuId = 31;
+        let cpu = crate::test_boot::claim_cpu();
         set_test_gate(&TEST_COMPETITOR_GATE);
-        let rearms_before = TEST_COMPETITOR_GATE.periodic_rearms(CPU);
-        assert!(!take_preempt_pending(CPU));
-        request_forced_yield(CPU);
+        let rearms_before = TEST_COMPETITOR_GATE.periodic_rearms(cpu);
+        assert!(!take_preempt_pending(cpu));
+        request_forced_yield(cpu);
         // Reaches the (host: fail-closed) reschedule path, which restores the
         // periodic deadline, and consumes the latch exactly once.
-        assert!(!honour_latches(CPU));
-        assert_eq!(TEST_COMPETITOR_GATE.periodic_rearms(CPU), rearms_before + 1);
-        assert!(!honour_latches(CPU));
-        assert_eq!(TEST_COMPETITOR_GATE.periodic_rearms(CPU), rearms_before + 1);
+        assert!(!honour_latches(cpu));
+        assert_eq!(TEST_COMPETITOR_GATE.periodic_rearms(cpu), rearms_before + 1);
+        assert!(!honour_latches(cpu));
+        assert_eq!(TEST_COMPETITOR_GATE.periodic_rearms(cpu), rearms_before + 1);
     }
 }

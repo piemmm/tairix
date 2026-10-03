@@ -2034,10 +2034,11 @@ discovery").
 
 **Landed — the VL805 `wiring::open_discovered`** (host-provable): the
 generic-PCI seam `tairix_abi::driver::pci::PciBus` (a supertrait of
-`Bus`) carries `map_bar_window` + `enable_bus_master` — the smaller
-surface a non-virtio, DMA-driving controller needs (no MSI-X). `Pci<C>`
-implements it by forwarding to the inherent BAR resolver and a shared
-`enable_bus_master` that `route_msix` also calls (§2.2);
+`Bus`) carries `map_bar_window`, `enable_memory_space` and
+`set_bus_master` — the smaller surface a non-virtio, DMA-driving
+controller needs (no MSI-X). `Pci<C>` implements it by forwarding to the
+inherent BAR resolver and command-register helpers; no routing or mapping
+helper makes a function a bus master (`plans/IOMMU.md` IOM7);
 `mechanism_one`/`mechanism_ecam` now return `impl VirtioPciBus + MsixBus
 + PciBus`. `drivers/bus/usb::wiring::open_discovered(host, bus,
 dma_aperture_top)` consumes a `&dyn PciBus` (so usb never names the pci
@@ -2048,7 +2049,7 @@ inbound-DMA aperture `top` (fail-closed `OutOfRange`, §5.4), enables bus
 mastering, maps BAR0, and brings the controller up via `Xhci::open` +
 `UsbDevice::start`. **No `#[repr(C)]`/syscall change** — a new trait, so
 no C-header regen. Host-proven: pci tests (PciBus coercion,
-`enable_bus_master` command bits, BAR0 map, absent-BAR refusal over the
+decoding and bus-master command bits, BAR0 map, absent-BAR refusal over the
 VL805 ECAM fixture) + usb `wiring_tests` (the cap/mapper/DMA-host
 fail-closed paths, no-USB-function `NotFound`, DMA-above-aperture
 `OutOfRange`, alloc-failure propagation, and the all-valid path enabling
@@ -2091,14 +2092,9 @@ view (alongside the existing `virtio_host()` DMA seam), so a loaded bus
 driver maps its own register windows through the capability-gated
 `KernelMmioMapper` *and* carves its DMA region through the per-driver
 `KernelVirtioHost` — both fail closed at the kernel `map_mmio`/`alloc_dma`
-gates (§5.4). `kernel/tairix-kernel/src/driver_host.rs`'s
-`run_with_driver_host` assembles that host on a single boot frame
-(`KernelMmioMapper` + `KernelVirtioFactory`) and lends it to a `body`
-closure; every window and DMA pool is reclaimed when the closure returns
-(§4). **No `lib/abi`/C-header change** (the seam is a trait-method
-addition). Host-proven: drvhost `mmio_mapper_{default_none,some}_yields_*`
-accessor tests + the `driver_host` `host_serves_both_mmio_and_dma_*` /
-`driver_without_mmio_cap_is_refused_fail_closed` composition tests.
+gates (§5.4). **No `lib/abi`/C-header change** (the seam is a
+trait-method addition). Host-proven: drvhost
+`mmio_mapper_{default_none,some}_yields_*` accessor tests.
 
 **Landed — outbound-window discovery into the hardware tree**
 (host-provable): the `brcm,bcm2711-pcie` node now carries *both* address
@@ -2127,8 +2123,8 @@ translation field — no wire change, the `xlate` field already existed),
 so `PcieWindows` is *fully* tree-derived. The whole chain is composed in
 `kernel/tairix-kernel::usb_keyboard` — the image-assembly seam
 (`Layer::Tooling`) is the one crate that may name the four driver crates
-across strata (§17.4 / §8), so the composition lives there, like
-`virtio_boot`; the engine is architecture-neutral (it consumes only the
+across strata (§17.4 / §8), so the composition lives there; the engine is
+architecture-neutral (it consumes only the
 `lib/abi` driver seams + the discovered `HwNode`) and un-gated, so it
 compiles and host-tests on the CI host:
 

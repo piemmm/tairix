@@ -490,8 +490,10 @@ pub enum CpuStateInitError {
 #[cfg(not(feature = "test-arch"))]
 static CPU_STATES: OnceCell<Box<[CpuState]>> = OnceCell::new();
 
+/// One slot per CPU a host test may pin, plus the ids below
+/// `test_boot::CLAIMED_CPU_BASE` that no test is handed.
 #[cfg(any(test, feature = "test-arch"))]
-pub(crate) const TEST_CPUS: usize = 64;
+pub(crate) const TEST_CPUS: usize = 512;
 #[cfg(any(test, feature = "test-arch"))]
 static TEST_STATE: [CpuState; TEST_CPUS] = [const { CpuState::new() }; TEST_CPUS];
 

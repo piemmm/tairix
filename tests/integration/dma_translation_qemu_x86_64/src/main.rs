@@ -11,10 +11,19 @@
 //! input-focus arbiter is therefore a transfer that crossed the unit twice —
 //! the driver's queue setup and the device's event write.
 //!
+//! No function may be a bus master before its unit translates and its
+//! owner's domain is attached (`plans/IOMMU.md` IOM7): the unit's record
+//! reports, read from every function behind it as it took over, that none
+//! was, and each function is granted bus mastering only once its owner's
+//! domain holds its stream.
+//!
 //! PASS once `AuditEvent::InputDelivered` with `kind=key` follows
-//! `AuditEvent::DmaTranslationUnit` with `outcome=translating`. A unit left
-//! untranslated, or a key delivered before any unit translates, fails the run
-//! at once rather than passing on DMA that bypassed the unit.
+//! `AuditEvent::DmaTranslationUnit` with `outcome=translating` and
+//! `masters=0`, and the keyboard's node was granted bus mastering
+//! (`AuditEvent::DmaBusMaster` `master=on`) after it. A unit left
+//! untranslated or taking over a function still mastering, a function made a
+//! bus master before any unit translates, or a key delivered before both,
+//! fails the run at once rather than passing on DMA that bypassed the unit.
 
 #![cfg_attr(itest_x86_64, no_std)]
 #![cfg_attr(itest_x86_64, no_main)]
@@ -26,6 +35,7 @@ mod kernel {
     use core::sync::atomic::{AtomicBool, Ordering};
 
     use tairix_arch_x86_64::qemu_exit;
+    use tairix_kernel::hwtree_node_ids::VIRTIO_PCI_INPUT_PROBE_NODE_BASE_ID;
     use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
     use tairix_kernel::{
         boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
@@ -44,9 +54,10 @@ mod kernel {
     static ALLOCATOR: FreeListAllocator =
         unsafe { FreeListAllocator::new(HEAP.as_mut_ptr(), HEAP_BYTES) };
 
-    /// Replays every event to serial and judges the run on the two witnesses.
+    /// Replays every event to serial and judges the run on the witnesses.
     struct TranslationSink {
         translating: AtomicBool,
+        keyboard_mastered: AtomicBool,
     }
 
     fn field<'e>(event: &'e Event<'_>, key: &str) -> Option<&'e FieldValue<'e>> {
@@ -64,15 +75,30 @@ mod kernel {
                 if matches!(
                     field(event, "outcome"),
                     Some(FieldValue::Str("translating"))
-                ) {
+                ) && matches!(field(event, "masters"), Some(FieldValue::UnsignedInt(0)))
+                {
                     self.translating.store(true, Ordering::Release);
                 } else {
                     qemu_exit::exit_failure();
                 }
+            } else if event.id.0 == AuditEvent::DmaBusMaster.id().0
+                && matches!(field(event, "master"), Some(FieldValue::Str("on")))
+            {
+                if !self.translating.load(Ordering::Acquire) {
+                    qemu_exit::exit_failure();
+                }
+                if matches!(field(event, "node"), Some(FieldValue::UnsignedInt(node))
+                        if *node == u64::from(VIRTIO_PCI_INPUT_PROBE_NODE_BASE_ID))
+                    && matches!(field(event, "outcome"), Some(FieldValue::Str("applied")))
+                {
+                    self.keyboard_mastered.store(true, Ordering::Release);
+                }
             } else if event.id.0 == AuditEvent::InputDelivered.id().0
                 && matches!(field(event, "kind"), Some(FieldValue::Str("key")))
             {
-                if self.translating.load(Ordering::Acquire) {
+                if self.translating.load(Ordering::Acquire)
+                    && self.keyboard_mastered.load(Ordering::Acquire)
+                {
                     qemu_exit::exit_success();
                 }
                 qemu_exit::exit_failure();
@@ -82,6 +108,7 @@ mod kernel {
 
     static AUDIT_SINK: TranslationSink = TranslationSink {
         translating: AtomicBool::new(false),
+        keyboard_mastered: AtomicBool::new(false),
     };
 
     /// A panic halts the guest; the run times out and fails loud.

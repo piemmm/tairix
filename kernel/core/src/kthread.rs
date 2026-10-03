@@ -1713,6 +1713,10 @@ pub(crate) fn publish_live_space_for_test(
     cpu: CpuId,
     space: Arc<ProcessSpace>,
 ) -> LiveSpacePublishGuard {
+    assert!(
+        crate::test_boot::is_claimed_cpu(cpu),
+        "publish only on a CPU this test claimed"
+    );
     if let Some(state) = cpu_state::get(cpu) {
         *state.live_space.lock() = Some(LiveSpacePtr::borrowed(&space));
     }
@@ -1731,6 +1735,10 @@ pub(crate) fn publish_running_stack_for_test(
     cpu: CpuId,
     region: KernelStackRegion,
 ) -> RunningStackPublishGuard {
+    assert!(
+        crate::test_boot::is_claimed_cpu(cpu),
+        "publish only on a CPU this test claimed"
+    );
     publish_running_stack(cpu, region);
     RunningStackPublishGuard { cpu }
 }
@@ -1755,7 +1763,7 @@ mod tests {
     extern crate std;
     use std::cell::RefCell;
     use std::rc::Rc;
-    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
     use std::sync::Arc;
 
     use tairix_arch_api::{PrepareError, TaskEntry};
@@ -1777,6 +1785,14 @@ mod tests {
         /// Cooperative-park bracket calls observed (`enter` + `leave` each
         /// count one), so a test can assert which suspend thunk ran.
         brackets: AtomicUsize,
+        /// The CPU whose slots `switch` samples, mid-switch; `u32::MAX` for
+        /// none.
+        observed_cpu: AtomicU32,
+        /// The observed CPU's resume slot was published at switch time.
+        published_during_switch: AtomicBool,
+        /// The observed CPU's kernel-activity crumb at switch time.
+        #[cfg(feature = "watchdog-diagnostics")]
+        crumb_during_switch: core::sync::atomic::AtomicU8,
     }
 
     impl Recorder {
@@ -1791,6 +1807,10 @@ mod tests {
                 last_prev: AtomicU64::new(0),
                 last_next: AtomicU64::new(0),
                 brackets: AtomicUsize::new(0),
+                observed_cpu: AtomicU32::new(u32::MAX),
+                published_during_switch: AtomicBool::new(false),
+                #[cfg(feature = "watchdog-diagnostics")]
+                crumb_during_switch: core::sync::atomic::AtomicU8::new(u8::MAX),
             }
         }
     }
@@ -1829,21 +1849,17 @@ mod tests {
             self.0.switches.fetch_add(1, Ordering::SeqCst);
             self.0.last_prev.store(prev as u64, Ordering::SeqCst);
             self.0.last_next.store(next as u64, Ordering::SeqCst);
-            // Record whether CPU 62's resume slot is published at switch
-            // time (the kernel-kthread publish assertion; other tests use
-            // other CPU indices, so this never cross-talks).
-            if let Some(state) = cpu_state::get(62) {
+            // The crumb stamped on the way in is overwritten by
+            // `switch_return` the instant this returns, so it is observable
+            // nowhere else.
+            if let Some(state) = cpu_state::get(self.0.observed_cpu.load(Ordering::SeqCst)) {
                 if state.resume.lock().is_some() {
-                    PUBLISHED_DURING_SWITCH.store(true, Ordering::SeqCst);
+                    self.0.published_during_switch.store(true, Ordering::SeqCst);
                 }
-            }
-            // Sample CPU 48's kernel-activity crumb here, mid-switch: the
-            // crumb stamped on the way in is overwritten by `switch_return`
-            // the instant this call returns, so it is observable nowhere
-            // else.
-            #[cfg(feature = "watchdog-diagnostics")]
-            if let Some(state) = cpu_state::get(48) {
-                CRUMB_DURING_SWITCH.store(state.kbc_site.load(Ordering::SeqCst), Ordering::SeqCst);
+                #[cfg(feature = "watchdog-diagnostics")]
+                self.0
+                    .crumb_during_switch
+                    .store(state.kbc_site.load(Ordering::SeqCst), Ordering::SeqCst);
             }
             // No control transfer on the host (see the module docs); the
             // real switch is proven by the per-arch QEMU verticals.
@@ -1887,6 +1903,15 @@ mod tests {
         () => {{
             static REC: Recorder = Recorder::new();
             &REC
+        }};
+    }
+
+    /// A fresh zeroed counter for a user kthread's `pre_resume` hook to
+    /// tick, allocation-free for the same reason the recorder is.
+    macro_rules! pre_resume_counter {
+        () => {{
+            static HITS: AtomicUsize = AtomicUsize::new(0);
+            &HITS
         }};
     }
 
@@ -1949,10 +1974,7 @@ mod tests {
         let mut control = control_with(cs, stack);
         let ctl_addr = addr_of_mut!(*control) as u64;
 
-        // Every test that steps a dispatch uses its own CPU index: the
-        // resume and preempt tables are process-wide, so parallel test
-        // threads sharing an index would observe each other's slots.
-        let action = dispatch_step(&mut control, 40);
+        let action = dispatch_step(&mut control, crate::test_boot::claim_cpu());
 
         // One prepare, with the stack's top and the control block's exposed
         // address as the entry argument. That the *entry* is `trampoline` is
@@ -1978,19 +2000,16 @@ mod tests {
     /// task with neither an armed timer nor a pending reschedule.
     #[test]
     fn dispatch_step_preserves_a_tick_fired_after_policy_arm() {
-        // A CPU index no other host test latches (the per-CPU preempt latch
-        // is one process-wide array shared across the whole test binary),
-        // so parallel test threads never observe each other through it.
-        const CPU: CpuId = 47;
+        let cpu = crate::test_boot::claim_cpu();
         let rec = recorder!();
         let mut control = control_with(RecordingCs(rec), BoxStack::new().expect("stack allocates"));
 
         // Model the timer firing in EL1 after the policy arm and before the
         // context switch into user mode.
-        crate::preempt::note_preempt_tick(CPU);
-        let _ = dispatch_step(&mut control, CPU);
+        crate::preempt::note_preempt_tick(cpu);
+        let _ = dispatch_step(&mut control, cpu);
 
-        assert!(crate::preempt::take_preempt_pending(CPU));
+        assert!(crate::preempt::take_preempt_pending(cpu));
     }
 
     /// `dispatch_step` stamps the `user_switch` kernel-activity breadcrumb
@@ -2005,11 +2024,9 @@ mod tests {
     #[cfg(feature = "watchdog-diagnostics")]
     #[test]
     fn dispatch_step_stamps_the_user_switch_breadcrumb() {
-        // A CPU index no other host test writes a breadcrumb for (the
-        // per-CPU breadcrumb slots are one process-wide array), so parallel
-        // test threads never observe each other through it.
-        const CPU: CpuId = 48;
+        let cpu = crate::test_boot::claim_cpu();
         let rec = recorder!();
+        rec.observed_cpu.store(cpu, Ordering::SeqCst);
         let hits = pre_resume_counter!();
         // A *user* kthread: a kernel one never leaves EL1 and is crumbed
         // `kernel_body` instead.
@@ -2019,16 +2036,16 @@ mod tests {
             hits,
         );
 
-        let _ = dispatch_step(&mut control, CPU);
+        let _ = dispatch_step(&mut control, cpu);
 
         assert_eq!(
-            CRUMB_DURING_SWITCH.load(Ordering::SeqCst),
+            rec.crumb_during_switch.load(Ordering::SeqCst),
             crate::watchdog::KernelBreadcrumb::UserSwitch as u8,
             "the crumb into the context switch is user_switch",
         );
         // And it is replaced on the way back out, so a wedge in the
         // dispatcher-side teardown is not misattributed to the task.
-        let state = cpu_state::get(CPU).expect("test CPU index is in range");
+        let state = cpu_state::get(cpu).expect("test CPU index is in range");
         assert_eq!(
             state.kbc_site.load(Ordering::SeqCst),
             crate::watchdog::KernelBreadcrumb::SwitchReturn as u8,
@@ -2040,8 +2057,9 @@ mod tests {
         let rec = recorder!();
         let mut control = control_with(RecordingCs(rec), BoxStack::new().expect("stack allocates"));
 
-        let _ = dispatch_step(&mut control, 41);
-        let _ = dispatch_step(&mut control, 41);
+        let cpu = crate::test_boot::claim_cpu();
+        let _ = dispatch_step(&mut control, cpu);
+        let _ = dispatch_step(&mut control, cpu);
 
         // Prepare happens once; each step switches in.
         assert_eq!(rec.prepares.load(Ordering::SeqCst), 1);
@@ -2053,7 +2071,7 @@ mod tests {
     fn failed_prepare_exits_without_switching() {
         let mut control = control_with(FailingCs, BoxStack::new().expect("stack allocates"));
 
-        let action = dispatch_step(&mut control, 42);
+        let action = dispatch_step(&mut control, crate::test_boot::claim_cpu());
 
         // Fail closed: report Exit, mark terminal, never switch into an
         // unrunnable context.
@@ -2067,7 +2085,7 @@ mod tests {
         let mut control = control_with(RecordingCs(rec), BoxStack::new().expect("stack allocates"));
         control.state = RunState::Finished;
 
-        let action = dispatch_step(&mut control, 43);
+        let action = dispatch_step(&mut control, crate::test_boot::claim_cpu());
 
         assert_eq!(action, TaskAction::Exit);
         // A terminal task is never prepared or switched into again.
@@ -2108,19 +2126,20 @@ mod tests {
 
     #[test]
     fn spawn_kthread_admits_a_task_on_a_live_scheduler() {
-        let arch = Arc::new(TestArch::with_cpus(1));
-        let scheduler = Scheduler::new(SchedulerConfig::defaults_for(1), Arc::clone(&arch))
+        let cpu = crate::test_boot::claim_cpu();
+        let arch = Arc::new(TestArch::on_cpu(cpu));
+        let scheduler = Scheduler::new(SchedulerConfig::defaults_for(cpu + 1), Arc::clone(&arch))
             .expect("scheduler builds");
         let rec = recorder!();
 
-        let id = spawn_kthread(&scheduler, RecordingCs(rec), 0, Priority::Normal, |_y| {})
+        let id = spawn_kthread(&scheduler, RecordingCs(rec), cpu, Priority::Normal, |_y| {})
             .expect("kthread admitted");
         assert_eq!(scheduler.live_task_count(), 1);
 
         // One dispatch step runs the shim body, which (with the host's
         // no-op switch) reports Yield, so the task is re-enqueued and stays
         // live. The real coroutine run-to-exit is proven under QEMU.
-        let _ = scheduler.step(0);
+        let _ = scheduler.step(cpu);
         assert!(scheduler.run_count(id).expect("known task") >= 1);
         assert_ne!(scheduler.state_of(id), TaskState::Exited);
     }
@@ -2213,25 +2232,16 @@ mod tests {
 
     // --- EL0 reschedule seam (plans/SPAWN.md SP2) ----------------------
     //
-    // Each test uses a distinct CPU index into the shared `USER_RESUME`
-    // table so the parallel host test threads never collide, and clears
-    // any handle it publishes before returning.
-
-    /// A fresh zeroed counter for a user kthread's `pre_resume` hook to
-    /// tick, allocation-free for the same reason the recorder is.
-    macro_rules! pre_resume_counter {
-        () => {{
-            static HITS: AtomicUsize = AtomicUsize::new(0);
-            &HITS
-        }};
-    }
+    // Each test claims its CPU of the shared resume table, and clears any
+    // handle it publishes before returning.
 
     #[test]
     fn reschedule_current_without_a_published_handle_is_false() {
-        // No user task is running on CPU 63, so the trap path is told to
-        // fall back to an ordinary syscall return (fail closed).
-        assert!(!reschedule_current(63, RescheduleAction::Yield));
-        assert!(!reschedule_current(63, RescheduleAction::Exit));
+        // No user task is running on a fresh CPU, so the trap path is told
+        // to fall back to an ordinary syscall return (fail closed).
+        let cpu = crate::test_boot::claim_cpu();
+        assert!(!reschedule_current(cpu, RescheduleAction::Yield));
+        assert!(!reschedule_current(cpu, RescheduleAction::Exit));
     }
 
     #[test]
@@ -2248,7 +2258,7 @@ mod tests {
         let mut control = control_with(cs, BoxStack::new().expect("stack allocates"));
         let block = NonNull::from(&mut *control);
         let ctl: *mut ThreadControl<RecordingCs, BoxStack> = block.as_ptr();
-        let cpu: CpuId = 54;
+        let cpu = crate::test_boot::claim_cpu();
 
         // Model `dispatch_step`'s publish, then drive the trap-path entry
         // point directly. The handle's thunk reconstructs the task's
@@ -2284,7 +2294,7 @@ mod tests {
         // would run another task's kernel context under this task's page-table
         // root, so the step fails the task closed instead.
         let rec = recorder!();
-        let cpu: CpuId = 34;
+        let cpu = crate::test_boot::claim_cpu();
         let mut control = control_with(RecordingCs(rec), BoxStack::new().expect("stack allocates"));
 
         // One ordinary step seeds a real, in-bounds suspension point.
@@ -2321,7 +2331,7 @@ mod tests {
     fn a_refused_dispatch_step_publishes_nothing_for_the_cpu() {
         let rec = recorder!();
         let hits = pre_resume_counter!();
-        let cpu: CpuId = 35;
+        let cpu = crate::test_boot::claim_cpu();
         let mut control = user_control_with(
             RecordingCs(rec),
             BoxStack::new().expect("stack allocates"),
@@ -2381,36 +2391,55 @@ mod tests {
     /// actually on it, so a publication a later task left behind can never
     /// aim the panic unwinder at a retired stack.
     #[test]
+    #[should_panic(expected = "publish only on a CPU this test claimed")]
+    fn a_live_space_published_on_an_unclaimed_cpu_is_refused() {
+        // CPU 0 is the one every unpinned test reports: a space published
+        // there is what a sibling's snapshot refreeze once picked up.
+        let _ = publish_live_space_for_test(
+            0,
+            Arc::new(ProcessSpace::for_test(crate::procspace::host_test_space!())),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "publish only on a CPU this test claimed")]
+    fn a_running_stack_published_on_an_unclaimed_cpu_is_refused() {
+        let stack = BoxStack::new().expect("stack allocates");
+        let _ = publish_running_stack_for_test(7, stack.region());
+    }
+
+    #[test]
     fn the_published_running_stack_answers_only_for_an_sp_on_it() {
-        const CPU: CpuId = 7;
+        let cpu = crate::test_boot::claim_cpu();
+        let other = crate::test_boot::claim_cpu();
         let stack = BoxStack::new().expect("stack allocates");
         let region = stack.region();
         let base = region.base_addr();
         let top = region.top_addr();
 
         assert!(
-            running_stack(CPU, base).is_none(),
+            running_stack(cpu, base).is_none(),
             "nothing published, nothing vouched for"
         );
 
-        let published = publish_running_stack_for_test(CPU, region);
-        let found = running_stack(CPU, base).expect("sp on the published stack");
+        let published = publish_running_stack_for_test(cpu, region);
+        let found = running_stack(cpu, base).expect("sp on the published stack");
         assert_eq!(found.base_addr(), base);
         assert_eq!(found.top_addr(), top);
-        assert!(running_stack(CPU, top - 8).is_some(), "last word is on it");
-        assert!(running_stack(CPU, top).is_none(), "the top is exclusive");
-        assert!(running_stack(CPU, base - 8).is_none(), "below the base");
-        assert!(running_stack(CPU, 0).is_none(), "a null sp is never on it");
+        assert!(running_stack(cpu, top - 8).is_some(), "last word is on it");
+        assert!(running_stack(cpu, top).is_none(), "the top is exclusive");
+        assert!(running_stack(cpu, base - 8).is_none(), "below the base");
+        assert!(running_stack(cpu, 0).is_none(), "a null sp is never on it");
 
         // A different CPU's slot is untouched by this one's publication.
         assert!(
-            running_stack(CPU + 1, base).is_none(),
+            running_stack(other, base).is_none(),
             "the publication is this CPU's alone"
         );
 
         drop(published);
         assert!(
-            running_stack(CPU, base).is_none(),
+            running_stack(cpu, base).is_none(),
             "the publication is retracted when the task switches out"
         );
     }
@@ -2426,7 +2455,7 @@ mod tests {
     fn user_dispatch_step_runs_pre_resume_and_publishes_then_clears() {
         let rec = recorder!();
         let hits = pre_resume_counter!();
-        let cpu: CpuId = 61;
+        let cpu = crate::test_boot::claim_cpu();
         let mut control = user_control_with(
             RecordingCs(rec),
             BoxStack::new().expect("stack allocates"),
@@ -2456,7 +2485,7 @@ mod tests {
         // (its `pre_resume` fires) — `plans/FIX-DESKTOP.md` §2.6.5.
         let rec = recorder!();
         let hits = pre_resume_counter!();
-        let cpu: CpuId = 44;
+        let cpu = crate::test_boot::claim_cpu();
         let mut control = control_with(RecordingCs(rec), BoxStack::new().expect("stack allocates"));
 
         // Before the upgrade the task is a plain kernel kthread.
@@ -2489,35 +2518,24 @@ mod tests {
     #[test]
     fn kernel_dispatch_step_publishes_a_body_handle_then_clears_it() {
         let rec = recorder!();
-        let cpu: CpuId = 62;
+        let cpu = crate::test_boot::claim_cpu();
+        rec.observed_cpu.store(cpu, Ordering::SeqCst);
         // A plain kernel kthread (no `pre_resume`) is enrolled in the
         // resume table for the duration of its step — its body can suspend
         // through a blocking primitive (`reschedule_current`) exactly like
         // a user task's syscall trap — and retired the instant it switches
         // back.
         let mut control = control_with(RecordingCs(rec), BoxStack::new().expect("stack allocates"));
-        let published = &PUBLISHED_DURING_SWITCH;
-        published.store(false, Ordering::SeqCst);
         let _ = dispatch_step(&mut control, cpu);
         // The host double's `switch` observed the published slot while the
         // task was "running".
         assert!(
-            published.load(Ordering::SeqCst),
+            rec.published_during_switch.load(Ordering::SeqCst),
             "a kernel kthread's step must publish a resume handle"
         );
         // Retired after the switch-back: nothing to reschedule now.
         assert!(!reschedule_current(cpu, RescheduleAction::Yield));
     }
-
-    /// Set by [`RecordingCs::switch`] when the resume slot for CPU 62 is
-    /// published at switch time (the kernel-kthread publish assertion).
-    static PUBLISHED_DURING_SWITCH: AtomicBool = AtomicBool::new(false);
-
-    /// CPU 48's kernel-activity crumb as [`RecordingCs::switch`] saw it,
-    /// mid-switch (the `user_switch` crumb assertion).
-    #[cfg(feature = "watchdog-diagnostics")]
-    static CRUMB_DURING_SWITCH: core::sync::atomic::AtomicU8 =
-        core::sync::atomic::AtomicU8::new(u8::MAX);
 
     #[test]
     fn kernel_body_suspend_skips_the_cooperative_park_bracket() {
@@ -2529,7 +2547,7 @@ mod tests {
         let cs = RecordingCs(rec);
         let mut control = control_with(cs, BoxStack::new().expect("stack allocates"));
         let block = NonNull::from(&mut *control);
-        let cpu: CpuId = 53;
+        let cpu = crate::test_boot::claim_cpu();
 
         publish_resume::<RecordingCs, BoxStack>(
             cpu,
@@ -2574,8 +2592,7 @@ mod tests {
 
     #[test]
     fn a_user_task_holds_its_cpu_in_its_spaces_set_from_before_its_root_loads_until_it_parks() {
-        // A CPU no other test in this crate dispatches on.
-        const CPU: CpuId = 37;
+        let cpu = crate::test_boot::claim_cpu();
         install_park_translation(count_park);
 
         let space = Arc::new(crate::procspace::ProcessSpace::for_test(
@@ -2594,7 +2611,7 @@ mod tests {
         }));
         user.live = Some(Arc::clone(&space));
 
-        let _ = dispatch_step(&mut user, CPU);
+        let _ = dispatch_step(&mut user, cpu);
         assert!(
             joined.load(Ordering::SeqCst),
             "the CPU joined the set before the hook loaded the space's root"
@@ -2620,8 +2637,9 @@ mod tests {
             BoxStack::new().expect("stack allocates"),
             hits,
         );
+        let cpu = crate::test_boot::claim_cpu();
         let before = PARKS.with(core::cell::Cell::get);
-        let _ = dispatch_step(&mut user, 63);
+        let _ = dispatch_step(&mut user, cpu);
         assert_eq!(
             PARKS.with(core::cell::Cell::get),
             before + 1,
@@ -2631,7 +2649,7 @@ mod tests {
         let rec = recorder!();
         let mut kernel = control_with(RecordingCs(rec), BoxStack::new().expect("stack allocates"));
         let before = PARKS.with(core::cell::Cell::get);
-        let _ = dispatch_step(&mut kernel, 63);
+        let _ = dispatch_step(&mut kernel, cpu);
         assert_eq!(
             PARKS.with(core::cell::Cell::get),
             before,
@@ -2729,16 +2747,17 @@ mod tests {
             violated: true,
         };
         let mut control = control_with(RecordingCs(rec), stack);
+        let cpu = crate::test_boot::claim_cpu();
 
         // The first step prepares the frame and switches in (a host no-op),
         // then the switch-back guard check trips: the task is failed closed
         // (terminal + `Exit`) rather than trusted on a corrupt stack.
-        assert_eq!(dispatch_step(&mut control, 46), TaskAction::Exit);
+        assert_eq!(dispatch_step(&mut control, cpu), TaskAction::Exit);
         assert_eq!(control.state, RunState::Finished);
 
         // It stays terminal and is never switched into again.
         let before = rec.switches.load(Ordering::SeqCst);
-        assert_eq!(dispatch_step(&mut control, 46), TaskAction::Exit);
+        assert_eq!(dispatch_step(&mut control, cpu), TaskAction::Exit);
         assert_eq!(rec.switches.load(Ordering::SeqCst), before);
     }
 
@@ -2753,7 +2772,10 @@ mod tests {
 
         // With the guard intact the shim reports the task's requested action
         // (the default `Yield`) and the task stays runnable.
-        assert_eq!(dispatch_step(&mut control, 47), TaskAction::Yield);
+        assert_eq!(
+            dispatch_step(&mut control, crate::test_boot::claim_cpu()),
+            TaskAction::Yield
+        );
         assert_eq!(control.state, RunState::Running);
     }
 }

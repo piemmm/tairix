@@ -628,16 +628,19 @@ reaches the PCI driver through `&dyn PciBus`, never naming the concrete
 | Method                                | Capability gate                        |
 |---------------------------------------|----------------------------------------|
 | `map_bar_window(bdf, bar_index, mapper)` | `CAP_MMIO_MAP` (enforced by `mapper`). |
-| `enable_bus_master(bdf)`              | Driver handle.                         |
+| `enable_memory_space(bdf)`            | Configuration-space owner.             |
+| `set_bus_master(bdf, master)`         | Configuration-space owner.             |
 
 `map_bar_window` resolves the memory BAR's probed base/length and maps
 it through the `CAP_MMIO_MAP`-gated `MmioMapper` (refusing I/O-port and
-unused BARs); `enable_bus_master` sets the function's Memory Space + Bus
-Master Enable bits so the controller may issue upstream DMA. `Pci<C>`
-implements it by forwarding to the inherent methods, sharing the
-bus-master activation with `route_msix` (`AGENTS.md` §2.2). The xHCI
-bring-up consumes it in `tairix_drv_bus_usb::wiring::open_discovered`
-(see [Bus drivers](../drivers/bus.md#generic-pci-bar-hand-off-the-xhci--vl805-path)).
+unused BARs). `enable_memory_space` turns on decoding of the function's
+BARs, and `set_bus_master` lets it issue upstream memory requests (its
+DMA, and the writes that deliver its MSIs) or stops it. Only the owner of
+the function's configuration space calls `set_bus_master`, as it hands
+the function over or takes it back; nothing else makes a function a bus
+master (`plans/IOMMU.md` IOM7). The BCM2711 bus driver
+(`drivers/bus/pcie_brcm`) drives these for the VL805 (see
+[Bus drivers](../drivers/bus.md#generic-pci-bar-hand-off-the-xhci--vl805-path)).
 
 ## Versioning
 

@@ -158,6 +158,9 @@ pub struct LoadedDriver {
     /// into its node's domain, and its end revokes that domain rather than
     /// quarantining them.
     pub translated: bool,
+    /// The node's function was handed to this driver as a bus master, at its
+    /// first carve.
+    pub handed_over: bool,
 }
 
 /// Maps each live task's [`ProcessId`] to its user address space and the
@@ -1543,6 +1546,7 @@ impl AddressSpaceRegistry {
                 generation,
                 dma_bytes: 0,
                 translated,
+                handed_over: false,
             },
         );
         Ok(())
@@ -1590,6 +1594,15 @@ impl AddressSpaceRegistry {
         if let Some(driver) = self.loaded_nodes.get_mut(&task) {
             driver.dma_bytes = driver.dma_bytes.saturating_add(bytes);
         }
+    }
+
+    /// Mark the node the driver `task` holds handed to it, answering whether
+    /// it was not yet: a function is handed over once, at its driver's first
+    /// carve.
+    pub fn first_hand_over(&mut self, task: ProcessId) -> bool {
+        self.loaded_nodes
+            .get_mut(&task)
+            .is_some_and(|driver| !core::mem::replace(&mut driver.handed_over, true))
     }
 
     /// Tally `bytes` of DMA memory the driver `task` freed.
@@ -3404,6 +3417,27 @@ mod tests {
         assert!(
             second.translated,
             "the load records how its node reaches memory"
+        );
+    }
+
+    #[test]
+    fn a_driver_s_function_is_handed_to_it_once() {
+        let mut reg = AddressSpaceRegistry::new();
+        assert!(!reg.first_hand_over(ProcessId(2)), "no driver, no function");
+        reg.admit_driver(ProcessId(2), 9, false)
+            .expect("a free node");
+        assert!(reg.first_hand_over(ProcessId(2)));
+        assert!(!reg.first_hand_over(ProcessId(2)));
+        assert!(reg
+            .loaded_driver(ProcessId(2))
+            .is_some_and(|d| d.handed_over));
+
+        assert!(reg.withdraw(ProcessId(2)));
+        reg.admit_driver(ProcessId(3), 9, false)
+            .expect("the node is free once its driver is down");
+        assert!(
+            reg.first_hand_over(ProcessId(3)),
+            "a successor is handed the function afresh"
         );
     }
 

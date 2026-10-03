@@ -205,6 +205,14 @@ impl TestArch {
         self.current_cpu_reads.load(Ordering::Relaxed)
     }
 
+    /// A `TestArch` running on `cpu`, reporting just enough CPUs to hold it.
+    #[must_use]
+    pub fn on_cpu(cpu: CpuId) -> Self {
+        let arch = Self::with_cpus(cpu + 1);
+        arch.set_current_cpu(cpu);
+        arch
+    }
+
     /// Point [`SchedulerArch::current_cpu`] at `cpu`.
     pub fn set_current_cpu(&self, cpu: CpuId) {
         assert!(cpu < self.cpu_count, "current cpu out of range");

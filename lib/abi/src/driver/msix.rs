@@ -71,7 +71,10 @@ pub trait MsixBus: Bus {
     /// maps the addressed table entry through `mapper`, writes
     /// `message` and clears the entry's per-vector mask, then sets the
     /// MSI-X Enable bit and clears the function-wide mask in the
-    /// capability's Message Control register.
+    /// capability's Message Control register. It turns memory decoding on,
+    /// since the table lives in a BAR, and leaves bus mastering as it was:
+    /// the message is delivered only once the function is a bus master
+    /// ([`PciBus::set_bus_master`](super::pci::PciBus::set_bus_master)).
     ///
     /// # Errors
     ///

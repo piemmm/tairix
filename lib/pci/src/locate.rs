@@ -4,7 +4,7 @@
 //! These are the shared bus-driver primitives a DMA-driving host-controller
 //! driver (the generic xHCI driver) and a root-complex bus driver (the
 //! BCM2711 PCIe driver) both need: find the function to bind, and assign /
-//! enable / map its register BAR. They are defined here once, beside the
+//! decode / map its register BAR. They are defined here once, beside the
 //! configuration-access mechanism they drive, so the two callers share one
 //! definition rather than each carrying its own copy. Each operates over the `abi-v1` [`PciBus`] seam, so a caller never
 //! names this concrete crate's internals.
@@ -68,9 +68,11 @@ pub fn find_function_by_class(bus: &dyn PciBus, class: u16) -> Result<u64, Drive
         .ok_or(DriverError::NotFound)
 }
 
-/// Assign (when firmware left it unassigned), enable bus-mastering on, and
-/// map the memory BAR `bar_index` of function `bdf`, returning the mapped
-/// register window.
+/// Assign (when firmware left it unassigned), turn decoding on for, and map
+/// the memory BAR `bar_index` of function `bdf`, returning the mapped
+/// register window. Bus mastering is left to the hand-over
+/// ([`PciBus::set_bus_master`]): mapping a BAR makes no function a bus
+/// master.
 ///
 /// This is the prefix a DMA-driving PCI device driver runs before it can
 /// touch the controller, composed from three [`PciBus`] seam calls so the
@@ -80,9 +82,8 @@ pub fn find_function_by_class(bus: &dyn PciBus, class: u16) -> Result<u64, Drive
 ///   the bridge's outbound window `outbound_window` (`(pcie_base, size)`,
 ///   PCIe-bus space) when firmware left it unassigned — a no-op that returns
 ///   the existing base otherwise;
-/// * [`PciBus::enable_bus_master`] sets the bus-master enable bit the
-///   controller's upstream DMA depends on (firmware leaves it clear, PCI
-///   Local Bus 3.0 §6.2.2); and
+/// * [`PciBus::enable_memory_space`] turns on the decoding the BAR needs to
+///   answer; and
 /// * [`PciBus::map_bar_window`] maps the BAR through `mapper`, which enforces
 ///   [`CapabilityId::MMIO_MAP`](tairix_abi::CapabilityId::MMIO_MAP)
 ///   kernel-side (no ambient authority).
@@ -96,7 +97,7 @@ pub fn find_function_by_class(bus: &dyn PciBus, class: u16) -> Result<u64, Drive
 ///
 /// Every step fails closed: any error of
 /// [`PciBus::assign_bar`] (the BAR cannot be placed inside `outbound_window`),
-/// [`PciBus::enable_bus_master`], or [`PciBus::map_bar_window`] (no such BAR,
+/// [`PciBus::enable_memory_space`], or [`PciBus::map_bar_window`] (no such BAR,
 /// an I/O-port BAR, a size past `usize`, or a missing
 /// [`CapabilityId::MMIO_MAP`](tairix_abi::CapabilityId::MMIO_MAP)).
 ///
@@ -113,7 +114,7 @@ pub fn assign_and_map_bar(
 ) -> Result<RegisterWindow, DriverError> {
     let (outbound_base, outbound_size) = outbound_window;
     bus.assign_bar(bdf, bar_index, outbound_base, outbound_size)?;
-    bus.enable_bus_master(bdf)?;
+    bus.enable_memory_space(bdf)?;
     bus.map_bar_window(bdf, bar_index, mapper)
 }
 
@@ -155,7 +156,7 @@ mod tests {
     use tairix_abi::HwNode;
 
     /// A recording [`PciBus`] double: a fixed device list for
-    /// [`find_function_by_class`], and assign/enable/map calls captured so a
+    /// [`find_function_by_class`], and assign/decode/map calls captured so a
     /// test asserts [`assign_and_map_bar`] drove the three steps in order.
     struct StubBus {
         devices: &'static [BusDevice],
@@ -186,8 +187,13 @@ mod tests {
                 .map_err(|_| DriverError::DeviceFault)
         }
 
-        fn enable_bus_master(&self, _bdf: u64) -> Result<(), DriverError> {
-            self.calls.borrow_mut().push("enable");
+        fn enable_memory_space(&self, _bdf: u64) -> Result<(), DriverError> {
+            self.calls.borrow_mut().push("decode");
+            Ok(())
+        }
+
+        fn set_bus_master(&self, _bdf: u64, _master: bool) -> Result<(), DriverError> {
+            self.calls.borrow_mut().push("master");
             Ok(())
         }
 
@@ -285,7 +291,7 @@ mod tests {
     }
 
     #[test]
-    fn assign_and_map_drives_assign_then_enable_then_map() {
+    fn assign_and_map_drives_assign_then_decode_then_map_and_makes_no_master() {
         static DEVICES: [BusDevice; 1] = [BusDevice {
             vendor: 0x1106,
             device: 0x3483,
@@ -301,7 +307,7 @@ mod tests {
             assign_and_map_bar(&bus, 0x0001_0000, 0, (0xc000_0000, 0x4000_0000), &OkMapper)
                 .expect("maps the BAR");
         assert_eq!(window.phys_base(), 0xc000_0000);
-        assert_eq!(bus.calls.borrow().as_slice(), &["assign", "enable", "map"]);
+        assert_eq!(bus.calls.borrow().as_slice(), &["assign", "decode", "map"]);
     }
 
     #[test]

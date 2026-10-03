@@ -30,7 +30,7 @@ use tairix_abi::DriverError;
 use tairix_fuzzseed::Prng;
 use tairix_usb::device::{
     first_langid, DeviceDescriptor, HubDescriptor, InterfaceInfo, PeriodicShape, SerialNumber,
-    StringHeader,
+    StringHeader, INT_TRANSFER_MAX,
 };
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
@@ -485,6 +485,15 @@ fn check_configuration(buf: &[u8]) {
                 "a periodic endpoint moving nothing"
             );
             assert!(iface.int_shape.transactions <= 3);
+            // A transfer is armed to at least one interval's payload, so no
+            // speed may let an interval outrun the buffer it lands in.
+            for speed in 0..=u8::MAX {
+                let (_, payload) = iface.int_shape.payload(speed);
+                assert!(
+                    usize::try_from(payload).is_ok_and(|bytes| bytes <= INT_TRANSFER_MAX),
+                    "{iface:?} moves {payload} bytes an interval at speed {speed}"
+                );
+            }
         }
         assert!(iface.bulk_in2.dci == 0 || iface.bulk_in.dci != 0);
         assert!(iface.bulk_out2.dci == 0 || iface.bulk_out.dci != 0);

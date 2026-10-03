@@ -1476,9 +1476,7 @@ mod tests {
     /// As [`leaked_arch`], reporting `cpu` as the current CPU, so a park
     /// driven through it lands on the CPU the caller claimed.
     fn leaked_arch_on(cpu: tairix_kernel_sched_api::CpuId) -> &'static TestArch {
-        let arch = TestArch::with_cpus(cpu + 1);
-        arch.set_current_cpu(cpu);
-        std::boxed::Box::leak(std::boxed::Box::new(arch))
+        std::boxed::Box::leak(std::boxed::Box::new(TestArch::on_cpu(cpu)))
     }
 
     /// A device whose pending bytes deplete as they are read, standing in for

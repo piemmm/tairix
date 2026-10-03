@@ -1019,7 +1019,7 @@ const PORT_STATUS_HIGH_SPEED: u16 = 1 << 10;
 pub(crate) const SPEED_FULL: u8 = 1;
 
 /// xHCI protocol speed ID for a low-speed device (§7.2.1).
-const SPEED_LOW: u8 = 2;
+pub(crate) const SPEED_LOW: u8 = 2;
 
 /// xHCI protocol speed ID for a high-speed device (§7.2.1): the speed of
 /// the Pi 4B's onboard hub.
@@ -1257,13 +1257,31 @@ const SS_INTERRUPT_MAX_BURST: u8 = 2;
 /// microframe (USB 2.0 §5.9.1).
 const HS_MAX_ADDITIONAL_TRANSACTIONS: u8 = 2;
 
+/// The largest packet an interrupt endpoint may move at `speed` (USB 2.0
+/// §5.7.3, USB 3.2 §9.6.6).
+const fn interrupt_max_packet(speed: u8) -> u16 {
+    match speed {
+        SPEED_LOW => 8,
+        SPEED_HIGH | SPEED_SUPER => 1024,
+        _ => 64,
+    }
+}
+
 impl PeriodicShape {
+    /// The endpoint context's Max Packet Size at `speed` (xHCI §6.2.3): the
+    /// descriptor's, held to the most the speed allows, so the controller
+    /// refuses a device sending more than its transfer buffers hold.
+    #[must_use]
+    pub fn max_packet_at(self, speed: u8) -> u16 {
+        self.max_packet.min(interrupt_max_packet(speed))
+    }
+
     /// The endpoint context's Max Burst Size and Max ESIT Payload at `speed`
     /// (xHCI §6.2.3.4, §6.2.3.8): the packets one service interval bursts,
     /// less one, and the bytes it moves.
     #[must_use]
     pub fn payload(self, speed: u8) -> (u32, u32) {
-        let packet = u32::from(self.max_packet);
+        let packet = u32::from(self.max_packet_at(speed));
         let (burst, stated) = match speed {
             SPEED_SUPER => {
                 let (burst, bytes) = self.companion.unwrap_or((0, self.max_packet));
@@ -1274,7 +1292,7 @@ impl PeriodicShape {
         };
         let burst = u32::from(burst);
         let most = packet * (burst + 1);
-        let esit = stated.map_or(most, |bytes| u32::from(bytes).clamp(1, most));
+        let esit = stated.map_or(most, |bytes| u32::from(bytes).clamp(1, most.max(1)));
         (burst, esit)
     }
 }
@@ -2567,8 +2585,9 @@ impl DeviceState {
     /// # Errors
     ///
     /// [`DriverError::LengthOutOfRange`] for a `request` of zero or past
-    /// [`INT_TRANSFER_MAX`], or when memory for the report queue runs out;
-    /// [`DriverError::OutOfRange`] for a request other than the first.
+    /// [`INT_TRANSFER_MAX`], for a payload no transfer buffer holds, or when
+    /// memory for the report queue runs out; [`DriverError::OutOfRange`] for
+    /// a request other than the first.
     fn fix_int_transfer(&mut self, request: usize) -> Result<usize, DriverError> {
         let wanted = u16::try_from(request)
             .ok()
@@ -2582,6 +2601,9 @@ impl DeviceState {
             };
         }
         let transfer = wanted.max(self.int_payload);
+        if usize::from(transfer) > INT_TRANSFER_MAX {
+            return Err(DriverError::LengthOutOfRange);
+        }
         self.reports.size_for(usize::from(transfer))?;
         self.int_request = wanted;
         self.int_transfer = Some(transfer);
@@ -4474,7 +4496,7 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
             self.pending_hub_endpoint = (first.int_dci != DCI_CONTROL).then(|| {
                 (
                     first.int_dci,
-                    u32::from(first.int_shape.max_packet),
+                    u32::from(first.int_shape.max_packet_at(base.speed)),
                     interrupt_interval(base.speed, first.int_b_interval),
                 )
             });
@@ -4669,7 +4691,7 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
             1 + usize::from(iface.int_dci),
             &ep_ctx_dwords(
                 EP_TYPE_INTERRUPT_IN,
-                u32::from(iface.int_shape.max_packet),
+                u32::from(iface.int_shape.max_packet_at(base.speed)),
                 max_burst,
                 ring_base,
                 Some(Periodic {
@@ -7887,9 +7909,9 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
     /// [`DriverError::DeviceFault`] when no device is live at `index` or the
     /// device's interface carries no interrupt endpoint;
     /// [`DriverError::LengthOutOfRange`] for a `request` of zero or past
-    /// [`INT_TRANSFER_MAX`], or when memory for the report queue runs out;
-    /// [`DriverError::OutOfRange`] for a `request` other than the first; a
-    /// report longer than `buf`
+    /// [`INT_TRANSFER_MAX`], for a payload no transfer buffer holds, or when
+    /// memory for the report queue runs out; [`DriverError::OutOfRange`] for
+    /// a `request` other than the first; a report longer than `buf`
     /// ([`DriverError::BufferTooSmall`]); or a recorded fatal report
     /// completion (a device-gone / fail-closed code) surfaced once so the HCD
     /// confirms the port and detaches; or a fault reading the event ring.

@@ -2232,7 +2232,7 @@ mod tests {
     }
 
     #[test]
-    fn teardown_frees_a_translated_carve_its_unit_confirmed_unreachable() {
+    fn teardown_ends_a_translated_owner_once_then_frees_every_carve() {
         let (frames, simmap) = backing!();
         let held = custody!();
         let domains = crate::test_fixture::translation!();
@@ -2251,7 +2251,13 @@ mod tests {
             assert!(record.held.is_empty(), "nothing needed custody");
             assert_eq!(record.reserved, 0, "each reservation was returned");
         });
-        domains.with(|record| assert_eq!(record.unmapped.len(), 2));
+        domains.with(|record| {
+            assert_eq!(record.ended, [(TEST_NODE, TEST_GENERATION)]);
+            assert!(
+                record.unmapped.is_empty(),
+                "ended first, so no carve waited on the unit"
+            );
+        });
     }
 
     #[test]
@@ -2266,6 +2272,7 @@ mod tests {
                 .expect("carve");
         }
         assert_eq!(frames.free_frames(), before - 1);
+        domains.with(|record| assert_eq!(record.ended, [(TEST_NODE, TEST_GENERATION)]));
         held.with(|record| {
             assert_eq!(record.held.len(), 1, "the device may still reach it");
             let (_, _, block) = record.held[0];

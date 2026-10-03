@@ -1076,18 +1076,50 @@ unsafe fn seed_virtio_pci(
 ) {
     // Prefer ECAM when the firmware advertises an MCFG; else the universal
     // mechanism #1, which reaches segment 0 only. Whichever is chosen feeds
-    // the one generic probe.
+    // the one generic probe, and is kept as the kernel's way to the segment.
     // SAFETY: forwarded — `rsdp` (and its MCFG) are identity-mapped per the
     // caller's contract.
     match unsafe { ecam_bus(rsdp) } {
-        Some((pci, segment)) => probe_virtio_pci(&pci, segment, dmar, sink, log),
-        None => probe_virtio_pci(
-            &tairix_pci::mechanism_one(tairix_arch_x86_64::pio::x86_port_io()),
+        Some((pci, segment)) => own_pci(pci, segment, dmar, sink, log),
+        None => own_pci(
+            tairix_pci::mechanism_one(tairix_arch_x86_64::pio::x86_port_io()),
             0,
             dmar,
             sink,
             log,
         ),
+    }
+}
+
+/// The kernel's one owner of PCI configuration space, which the boot probe
+/// publishes.
+static PCI_HOST: tairix_sync::Once<crate::pci_host::PciHost> = tairix_sync::Once::new();
+
+/// The kernel's owner of PCI configuration space, once the boot probe has
+/// published it: every kernel access to a function's configuration space,
+/// and every change to its bus mastering, goes through it.
+#[must_use]
+pub fn pci_host() -> Option<&'static crate::pci_host::PciHost> {
+    PCI_HOST.get().ok().flatten()
+}
+
+/// Probe `pci`, then keep it as the kernel's owner of segment `segment`'s
+/// configuration space, with the functions the probe handed over.
+fn own_pci<B: crate::pci_host::HostBus + Send + 'static>(
+    pci: B,
+    segment: u16,
+    dmar: Option<&tairix_arch_x86_64::dmar::Dmar<'_>>,
+    sink: &mut crate::boot_hwtree::CollectingHwNodeSink,
+    log: &dyn Sink,
+) {
+    let functions = probe_virtio_pci(&pci, segment, dmar, sink, log);
+    let host = crate::pci_host::PciHost::new(Box::new(pci), functions);
+    if PCI_HOST.call_once_infallible(move || host).is_err() {
+        log_dmar(
+            log,
+            Level::Error,
+            "pci configuration space unowned; no function masters",
+        );
     }
 }
 
@@ -1129,8 +1161,8 @@ unsafe fn ecam_bus(
     // within the live direct physical map, so `ptr` is a valid,
     // uniquely-owned pointer to `len` bytes for the kernel's lifetime.
     // Config space is only ever accessed through the bounded
-    // `RegisterWindow` accessors this window backs; nothing else aliases it
-    // during single-CPU bring-up.
+    // `RegisterWindow` accessors this window backs: by the boot probe alone,
+    // then only under the kernel's PCI host lock (`own_pci`).
     let window = unsafe { RegisterWindow::from_mapping(ecam.base, ptr, len) };
     Some((tairix_pci::mechanism_ecam(window), ecam.segment))
 }
@@ -1174,43 +1206,27 @@ static MSI_PROBE_PT_POOL: tairix_arch_x86_64::paging::PageTablePool =
 /// Run every virtio-PCI observer over `pci` (whichever config-access
 /// mechanism [`seed_virtio_pci`] selected), emitting the discovered
 /// virtio-blk (match-key-only), virtio-net, and virtio-input nodes into
-/// `sink`. One generic definition, so the ECAM and mechanism-#1 paths share
-/// the exact same probe.
+/// `sink`, and answer the functions whose configuration space the kernel now
+/// owns. One generic definition, so the ECAM and mechanism-#1 paths share the
+/// exact same probe.
 ///
-/// The enumerator acts as the x86_64 "bus driver" for the interrupt-driven
-/// (virtio-net, virtio-input) functions: it MSI-allocates a dedicated kernel
-/// vector, programs the function's MSI-X table entry 0 with that vector's
-/// doorbell, and grants the driver the routed MSI *line* — so a user-space
-/// driver only `irq_bind`s the line and never touches PCI configuration or
-/// the MSI-X BAR (the kernel owns interrupt routing).
-fn probe_virtio_pci<B>(
+/// Before anything is routed or published, every function TAIRiX takes from
+/// firmware stops mastering DMA
+/// ([`crate::hwdiscovery::quiesce_pci_functions`]), and nothing here makes
+/// one a bus master again: its owner's attached domain, or its owner's first
+/// carve, does.
+fn probe_virtio_pci<B: crate::pci_host::HostBus>(
     pci: &B,
     segment: u16,
     dmar: Option<&tairix_arch_x86_64::dmar::Dmar<'_>>,
     sink: &mut crate::boot_hwtree::CollectingHwNodeSink,
     log: &dyn Sink,
-) where
-    B: tairix_abi::driver::virtio_pci::VirtioPciBus
-        + tairix_abi::driver::msix::MsixBus
-        + tairix_abi::driver::pci::PciBus,
-{
-    use tairix_arch_x86_64::paging::AddressSpace as ArchAddressSpace;
-    use tairix_kernel_mem::{AddressSpace, DirectPhysMap, MmioMap, VirtAddr};
-    use tairix_kernel_sec::captable::TaskCapabilities;
-    use tairix_kernel_sec::identity::UserId;
-    use tairix_kernel_virtio::KernelMmioMapper;
-
-    // The virtio-blk storage node is match-key-only (the in-kernel floor
-    // bring-up re-resolves its transport from PCI configuration space and
-    // routes its own MSI-X, so it needs no discovery-time grant) and carries
-    // no interrupt line, so it is emitted unconditionally — independent of
-    // whether the MSI-X routing context below builds. An enumeration error
-    // leaves the disk undiscovered; whatever was collected is seeded
-    // regardless (fail closed).
+) -> Vec<crate::pci_host::Function> {
     // A function names its stream only once its unit's node is in the tree:
     // a stream on a unit nothing brings up would claim a translation that
     // never happens.
     let bridges = tairix_arch_x86_64::dmar::PciBridges(pci);
+    let first_unit = sink.nodes().len();
     let translated = dmar.and_then(|dmar| {
         let Ok(nodes) = tairix_arch_x86_64::dmar::emit_unit_nodes(
             dmar,
@@ -1256,21 +1272,116 @@ fn probe_virtio_pci<B>(
         })
     };
 
-    let _ = crate::hwdiscovery::observe_virtio_pci_block_devices(pci, &dma, sink, log);
+    // The windows the unit nodes just emitted keep for firmware.
+    let units = &sink.nodes()[first_unit..];
+    let keeps = |streams: tairix_abi::IommuStreams| {
+        units
+            .iter()
+            .filter(|node| node.id() == streams.unit())
+            .flat_map(|node| {
+                node.resources()
+                    .iter()
+                    .filter_map(|resource| resource.iommu_reserved().ok())
+            })
+            .any(|window| {
+                window
+                    .stream()
+                    .checked_sub(streams.first())
+                    .is_some_and(|offset| offset < streams.count())
+            })
+    };
+    let Ok(behind) = crate::hwdiscovery::quiesce_pci_functions(pci, &dma, &keeps) else {
+        log_dmar(
+            log,
+            Level::Error,
+            "pci functions left mastering; none published",
+        );
+        return Vec::new();
+    };
 
-    // Build the boot-time MSI-X routing context the interrupt-driven
-    // (virtio-net, virtio-input) probes need. An interrupt-driven virtio-PCI
-    // function is a message-signalled-interrupt device: the enumerator (this
-    // in-kernel probe, acting as the x86_64 "bus driver") allocates a
-    // dedicated kernel MSI vector, programs the function's MSI-X table entry
-    // 0 with that vector's doorbell, and grants the driver the routed MSI
-    // *line* — so the user-space driver only `irq_bind`s the line and never
-    // touches PCI configuration space or the MSI-X BAR (the kernel owns
-    // interrupt routing, exactly as Linux's PCI core does). The MSI-X table
-    // write goes through a throwaway `CAP_MMIO_MAP` register-window map over
-    // the direct physical map; if that context cannot be built the
-    // interrupt-driven functions are left undiscovered rather than granted a
-    // line that never delivers (fail closed).
+    let first = sink.nodes().len();
+    // The virtio-blk storage node is match-key-only (the in-kernel floor
+    // bring-up re-resolves its transport from PCI configuration space and
+    // routes its own MSI-X, so it needs no discovery-time grant) and carries
+    // no interrupt line, so it is emitted unconditionally — independent of
+    // whether the MSI-X routing context below builds. An enumeration error
+    // leaves the disk undiscovered; whatever was collected is seeded
+    // regardless (fail closed).
+    let _ = crate::hwdiscovery::observe_virtio_pci_block_devices(pci, &dma, sink, log);
+    observe_interrupt_driven(pci, &dma, sink, log);
+    record_functions(behind, &sink.nodes()[first..], log)
+}
+
+/// The functions whose configuration space the kernel owns: each one behind
+/// a unit the probe stopped or kept, and each node the PCI observers emitted
+/// (`published`), known by the requester id the probe itself recorded.
+fn record_functions(
+    behind: Vec<(u64, tairix_abi::IommuStreams)>,
+    published: &[tairix_abi::HwNode],
+    log: &dyn Sink,
+) -> Vec<crate::pci_host::Function> {
+    use crate::pci_host::Function;
+
+    let mut functions = Vec::new();
+    if functions
+        .try_reserve(behind.len() + published.len())
+        .is_err()
+    {
+        log_dmar(log, Level::Error, "pci functions unrecorded; none masters");
+        return functions;
+    }
+    functions.extend(behind.into_iter().map(|(address, stream)| Function {
+        address,
+        node: None,
+        stream: Some(stream),
+    }));
+    for node in published {
+        let Ok(requester) = u16::try_from(node.address()) else {
+            continue;
+        };
+        let address = tairix_abi::driver::pci::config_address(requester);
+        match functions
+            .iter_mut()
+            .find(|function| function.address == address)
+        {
+            Some(function) => function.node = Some(node.id()),
+            None => functions.push(Function {
+                address,
+                node: Some(node.id()),
+                stream: node
+                    .resources()
+                    .iter()
+                    .find_map(|resource| resource.iommu_streams().ok()),
+            }),
+        }
+    }
+    functions
+}
+
+/// Discover the interrupt-driven virtio-PCI functions — virtio-net, sound
+/// and input — each with its MSI-X routed.
+///
+/// The enumerator acts as the x86_64 "bus driver" for them: it
+/// MSI-allocates a dedicated kernel vector, programs the function's MSI-X
+/// table entry 0 with that vector's doorbell, and grants the driver the
+/// routed MSI *line*, so a user-space driver only `irq_bind`s the line and
+/// never touches PCI configuration or the MSI-X BAR (the kernel owns
+/// interrupt routing). The table write goes through a throwaway
+/// `CAP_MMIO_MAP` register-window map over the direct physical map; if that
+/// context cannot be built the functions are left undiscovered rather than
+/// granted a line that never delivers (fail closed).
+fn observe_interrupt_driven(
+    pci: &dyn crate::pci_host::HostBus,
+    dma: crate::hwdiscovery::DmaIdentity<'_>,
+    sink: &mut crate::boot_hwtree::CollectingHwNodeSink,
+    log: &dyn Sink,
+) {
+    use tairix_arch_x86_64::paging::AddressSpace as ArchAddressSpace;
+    use tairix_kernel_mem::{AddressSpace, DirectPhysMap, MmioMap, VirtAddr};
+    use tairix_kernel_sec::captable::TaskCapabilities;
+    use tairix_kernel_sec::identity::UserId;
+    use tairix_kernel_virtio::KernelMmioMapper;
+
     // SAFETY: the boot paging code installed this direct map in every
     // translation root it builds and never tears it down.
     let Some(phys) =
@@ -1300,12 +1411,9 @@ fn probe_virtio_pci<B>(
         TaskCapabilities::derive(MSI_PROBE_TASK, UserId(0), probe_caps, probe_caps, log);
     let mapper = KernelMmioMapper::new(&mut mmio, &route_caps, log);
 
-    // Route each interrupt-driven function: allocate a dedicated MSI vector +
-    // virtual line, program the function's MSI-X entry 0 with that vector's
-    // doorbell (targeting the BSP LAPIC), and hand the observer the routed MSI
-    // line to grant. A function whose vector could not be allocated or whose
-    // MSI-X could not be programmed is left undiscovered (fail closed): a
-    // granted line that never delivers would strand its driver parked forever.
+    // A function whose vector could not be allocated or whose MSI-X could not
+    // be programmed is left undiscovered (fail closed): a granted line that
+    // never delivers would strand its driver parked forever.
     let route_irq = |bdf: u64| -> Option<u32> {
         let (vector, message) = crate::x86_64::msi::kernel_message().ok()?;
         pci.route_msix(bdf, MSIX_PROBE_ENTRY, message, &mapper)
@@ -1313,24 +1421,14 @@ fn probe_virtio_pci<B>(
         Some(vector.line)
     };
 
-    // Emit every virtio-net function as an interrupt-driven NIC node carrying
-    // its four role-tagged config windows + DMA + the routed MSI line. An
-    // enumeration error leaves the NIC undiscovered; whatever was collected is
-    // seeded regardless.
-    let _ =
-        crate::hwdiscovery::observe_virtio_pci_network_devices(pci, &route_irq, &dma, sink, log);
-    // A sound card is discovered by the same PCI walk as a NIC, so one
-    // signed driver bundle binds on either bus.
-    let _ = crate::hwdiscovery::observe_virtio_pci_audio_devices(pci, &route_irq, &dma, sink, log);
-
-    // Emit every virtio-input function (a `-device virtio-keyboard-pci` /
-    // `virtio-mouse-pci`) as an interrupt-driven input node carrying its four
-    // role-tagged config windows + DMA + the routed MSI line, so `devmgr`
-    // autoloads the user-space `virtio_kbd` driver against it — the PCI-bus
-    // sibling of the aarch64/riscv64 device-tree input probe. Like the NIC it
-    // parks on its interrupt, so an enumeration error leaves the keyboard
-    // undiscovered; whatever was collected is seeded regardless (fail closed).
-    let _ = crate::hwdiscovery::observe_virtio_pci_input_devices(pci, &route_irq, &dma, sink, log);
+    // An enumeration error leaves that class undiscovered; whatever was
+    // collected is seeded regardless. A sound card is discovered by the same
+    // walk as a NIC, so one signed driver bundle binds on either bus; an
+    // input function autoloads the user-space `virtio_kbd` driver, the
+    // PCI-bus sibling of the device-tree input probe.
+    let _ = crate::hwdiscovery::observe_virtio_pci_network_devices(pci, &route_irq, dma, sink, log);
+    let _ = crate::hwdiscovery::observe_virtio_pci_audio_devices(pci, &route_irq, dma, sink, log);
+    let _ = crate::hwdiscovery::observe_virtio_pci_input_devices(pci, &route_irq, dma, sink, log);
 }
 
 /// Enable the No-Execute-Enable bit in `IA32_EFER` on the current CPU.

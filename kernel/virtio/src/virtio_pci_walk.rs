@@ -50,12 +50,6 @@ pub enum VirtioPciWalkError {
     /// The mapped windows did not form a valid transport (e.g. a
     /// malformed common-configuration capability).
     Transport(VirtioError),
-    /// Routing the device's MSI-X interrupt failed (propagated
-    /// verbatim from
-    /// [`route_msix`](tairix_abi::driver::msix::MsixBus::route_msix);
-    /// e.g. the caller lacks `CAP_MMIO_MAP` or the function
-    /// advertises no MSI-X capability).
-    RouteMsix(DriverError),
 }
 
 /// A provisioned virtio-PCI device: the transport `T` the caller's

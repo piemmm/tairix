@@ -37,10 +37,8 @@ use core::convert::Infallible;
 use alloc::boxed::Box;
 
 use tairix_abi::driver::dma::PoolId;
-use tairix_abi::driver::msix::MsixBus;
 use tairix_abi::{HwNode, IrqHandle};
 use tairix_arch_x86_64::paging::{AddressSpace as ArchAddressSpace, PageTablePool};
-use tairix_arch_x86_64::pio::x86_port_io;
 use tairix_caps::CapabilitySet;
 use tairix_drv_bus_virtio::PciTransport;
 use tairix_drv_storage_virtio_blk::{VirtioBlk, VIRTIO_BLK_DEVICE_ID};
@@ -369,10 +367,10 @@ fn virtio_blk_unlock<'a>(
 ) -> Result<Infallible, &'static str> {
     let audit = env.audit;
 
-    // Build the PCI bus over configuration mechanism #1 (port I/O), the same
-    // access path the x86_64 virtio-PCI verticals drive; the arch port
-    // supplies the `PortIo` backend.
-    let bus = tairix_pci::mechanism_one(x86_port_io());
+    // The kernel's one owner of the configuration space the boot probe
+    // enumerated: the floor disk is reached through it, never through a bus
+    // of its own.
+    let host = crate::x86_64::boot::pci_host().ok_or("root-unlock: no PCI host")?;
 
     // The device backing is boot-leaked to `'static`: the brought-up disk is
     // shared for the life of the system by two independent preemptive tasks
@@ -411,7 +409,8 @@ fn virtio_blk_unlock<'a>(
     // address for the MSI-X routing below.
     let (mut transport, bdf) = {
         let mapper = KernelMmioMapper::new(&mut *mmio, caller, audit);
-        let prov = provision_virtio_pci(&bus, device_id, &mapper, PciTransport::new)
+        let prov = host
+            .with(|bus| provision_virtio_pci(bus, device_id, &mapper, PciTransport::new))
             .map_err(|_| "root-unlock: virtio-PCI provisioning")?;
         (prov.transport, prov.bdf)
     };
@@ -444,7 +443,7 @@ fn virtio_blk_unlock<'a>(
     // MSI-X on the transport so every queue signals through it.
     {
         let mapper = KernelMmioMapper::new(&mut *mmio, caller, audit);
-        bus.route_msix(bdf, MSIX_ENTRY, msi, &mapper)
+        host.with(|bus| bus.route_msix(bdf, MSIX_ENTRY, msi, &mapper))
             .map_err(|_| "root-unlock: route MSI-X")?;
     }
     transport.enable_msix(MSIX_ENTRY);
@@ -465,9 +464,16 @@ fn virtio_blk_unlock<'a>(
         phys,
     )
     .map_err(|_| "root-unlock: dma pool")?;
-    let pool = match floor_translator(env.ctx, node) {
-        Some(translator) => pool.translated(translator),
-        None => pool,
+    // A translated floor masters once its domain is attached at the first
+    // carve; an untranslated one is handed its device here, before the
+    // driver can program it.
+    let pool = if let Some(translator) = floor_translator(env.ctx, node) {
+        pool.translated(translator)
+    } else {
+        if let Some(mastering) = env.ctx.bus_mastering() {
+            mastering.hand_over(node.id(), tairix_kernel_core::iommu::KERNEL_OWNER);
+        }
+        pool
     };
     let controller_dyn: &'static (dyn IrqController + Sync) = composite;
     let waiter: &'static IrqParkWaiter = Box::leak(Box::new(IrqParkWaiter::new(

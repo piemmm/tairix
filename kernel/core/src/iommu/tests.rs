@@ -15,12 +15,15 @@ use super::*;
 use crate::audit::AuditEvent;
 use crate::devres::MsiAllocFacility;
 use crate::hwtree::HwNodeLiveness;
-use crate::test_sink::{CapturedEvent, TestSink};
+use crate::test_sink::{with_log_level, CapturedEvent, TestSink};
 
 /// A tree holding the nodes a test put in it, and the health it was told.
 struct Tree {
     nodes: SpinLock<Vec<HwNode>>,
     health: SpinLock<Vec<(u32, FaultDomainState)>>,
+    /// The next lookup that finds its node removes it, as a removal racing
+    /// the caller would.
+    vanish: core::sync::atomic::AtomicBool,
 }
 
 impl Tree {
@@ -28,6 +31,7 @@ impl Tree {
         Self {
             nodes: SpinLock::new(Vec::new()),
             health: SpinLock::new(Vec::new()),
+            vanish: core::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -85,12 +89,16 @@ impl HwTreeSource for Tree {
     }
 
     fn node(&self, node_id: u32) -> Result<Option<HwNode>, Errno> {
-        Ok(self
-            .nodes
-            .lock()
-            .iter()
-            .find(|node| node.id() == node_id)
-            .copied())
+        let mut nodes = self.nodes.lock();
+        let found = nodes.iter().find(|node| node.id() == node_id).copied();
+        if found.is_some()
+            && self
+                .vanish
+                .swap(false, core::sync::atomic::Ordering::Relaxed)
+        {
+            nodes.retain(|node| node.id() != node_id);
+        }
+        Ok(found)
     }
 }
 
@@ -142,15 +150,92 @@ fn started(
     tree: &'static Tree,
     reserved: Vec<IommuReservedWindow>,
 ) -> Translation {
+    started_with(model, tree, reserved, None, audit_sink())
+}
+
+/// [`started`], its owners' functions mastering through `port`, audited to
+/// `audit`.
+fn started_with(
+    model: &'static ModelUnit<'static>,
+    tree: &'static Tree,
+    reserved: Vec<IommuReservedWindow>,
+    port: Option<&'static Port>,
+    audit: &'static TestSink,
+) -> Translation {
     tree.add(&device_node(DEVICE, STREAM));
+    let mastering = Mastering::new(port.map(|port| port as &'static dyn BusMastering), audit);
     let (translation, outcomes) = Translation::start(
         vec![unit(model, reserved)],
         vec![REGISTERS],
         tree,
-        audit_sink(),
+        audit,
+        mastering,
     );
-    assert_eq!(outcomes, [(UNIT_NODE, Ok(()))]);
+    assert_eq!(outcomes, [(UNIT_NODE, Ok(0))]);
     translation
+}
+
+/// A port that records each mastering change with the domain its stream was
+/// attached to at that moment, and answers that it changed; and the
+/// functions behind the unit it reports mastering at take-over.
+struct Port {
+    model: &'static ModelUnit<'static>,
+    calls: SpinLock<Vec<MasterCall>>,
+    mastering_at_take_over: Vec<u32>,
+}
+
+/// A change a port was asked for: its target, the state asked, the domain
+/// then holding the stream, and the owner's generation.
+type MasterCall = (
+    MasterTarget,
+    bool,
+    Option<tairix_kernel_iommu_api::DomainId>,
+    u64,
+);
+
+impl Port {
+    fn new(model: &'static ModelUnit<'static>, mastering_at_take_over: Vec<u32>) -> &'static Self {
+        Box::leak(Box::new(Self {
+            model,
+            calls: SpinLock::new(Vec::new()),
+            mastering_at_take_over,
+        }))
+    }
+
+    fn calls(&self) -> Vec<MasterCall> {
+        self.calls.lock().clone()
+    }
+}
+
+impl BusMastering for Port {
+    fn set_mastering(
+        &self,
+        target: MasterTarget,
+        master: bool,
+        generation: u64,
+    ) -> Option<MasterChange> {
+        self.calls
+            .lock()
+            .push((target, master, self.model.attached(STREAM), generation));
+        Some(MasterChange {
+            changed: true,
+            refused: false,
+        })
+    }
+
+    fn strays(&self, unit: u32, keeps: &dyn Fn(u32) -> bool) -> usize {
+        if unit != UNIT_NODE {
+            return 0;
+        }
+        self.mastering_at_take_over
+            .iter()
+            .filter(|&&stream| !keeps(stream))
+            .count()
+    }
+}
+
+fn streams(stream: u32) -> MasterTarget {
+    MasterTarget::Streams(IommuStreams::new(UNIT_NODE, stream, 1).unwrap())
 }
 
 #[test]
@@ -317,7 +402,7 @@ fn a_removed_node_is_forgotten_and_its_carves_are_unreachable() {
     let translation = started(model, tree, Vec::new());
     let iova = translation.map(DEVICE, 1, block(0x8000_0000), 0).unwrap();
     tree.drop_node(DEVICE);
-    assert_eq!(translation.forget(DEVICE), None);
+    assert!(translation.forget(DEVICE));
     assert_eq!(model.access(STREAM, iova, true), None);
     assert_eq!(
         translation.unmap(DEVICE, 1, iova, block(0x8000_0000)),
@@ -336,7 +421,7 @@ fn a_removed_node_whose_end_is_unconfirmed_stays_recorded() {
     let translation = started(model, tree, Vec::new());
     let iova = translation.map(DEVICE, 1, block(0x8000_0000), 0).unwrap();
     tree.drop_node(DEVICE);
-    assert_eq!(translation.forget(DEVICE), Some(1));
+    assert!(!translation.forget(DEVICE), "the unit could not confirm it");
     assert_eq!(
         translation.unmap(DEVICE, 1, iova, block(0x8000_0000)),
         Err(DmaError::Unconfirmed)
@@ -418,11 +503,13 @@ fn firmware_windows_stay_reachable_before_during_and_after_an_owner() {
 fn a_unit_that_will_not_enable_is_dropped_and_translates_nothing() {
     let (model, tree) = rig!(Behaviour::RefusesEnable);
     tree.add(&device_node(DEVICE, STREAM));
+    let audit = audit_sink();
     let (translation, outcomes) = Translation::start(
         vec![unit(model, Vec::new())],
         vec![REGISTERS],
         tree,
-        audit_sink(),
+        audit,
+        Mastering::new(None, audit),
     );
     assert_eq!(outcomes, [(UNIT_NODE, Err(IommuError::Hardware))]);
     assert_eq!(translation.units(), 0);
@@ -588,7 +675,7 @@ fn a_dead_driver_s_device_is_still_named_and_a_forgotten_node_s_is_not() {
     assert_eq!(model.access(STREAM, PAGE, true), None);
     translation.drain_pass(0, &mut budget, sink, &NoClock);
     tree.drop_node(DEVICE);
-    assert_eq!(translation.forget(DEVICE), None);
+    assert!(translation.forget(DEVICE));
     assert_eq!(model.access(STREAM, 2 * PAGE, true), None);
     translation.drain_pass(0, &mut budget, sink, &NoClock);
     let faults = recorded(sink, AuditEvent::DmaTranslationFault);
@@ -729,8 +816,13 @@ fn an_unconfirmed_free_is_audited_once_per_owner() {
     let (model, tree) = rig!(Behaviour::UnconfirmedSync);
     tree.add(&device_node(DEVICE, STREAM));
     let sink = audit_sink();
-    let (translation, _) =
-        Translation::start(vec![unit(model, Vec::new())], vec![REGISTERS], tree, sink);
+    let (translation, _) = Translation::start(
+        vec![unit(model, Vec::new())],
+        vec![REGISTERS],
+        tree,
+        sink,
+        Mastering::new(None, sink),
+    );
     let iova = translation.map(DEVICE, 1, block(0x8000_0000), 0).unwrap();
     for _ in 0..3 {
         assert_eq!(
@@ -742,4 +834,169 @@ fn an_unconfirmed_free_is_audited_once_per_owner() {
     assert_eq!(unconfirmed.len(), 1);
     assert_eq!(field(&unconfirmed[0], "node"), Some("7"));
     assert_eq!(field(&unconfirmed[0], "generation"), Some("1"));
+}
+
+/// A firmware window on `stream`.
+fn firmware_window(stream: u32) -> IommuReservedWindow {
+    IommuReservedWindow::new(stream, 0x7B80_0000, 0x10_0000).unwrap()
+}
+
+#[test]
+fn an_owner_s_function_masters_once_its_domain_is_attached() {
+    let (model, tree) = rig!(Behaviour::Correct);
+    let port = Port::new(model, Vec::new());
+    let audit = audit_sink();
+    let translation = started_with(model, tree, Vec::new(), Some(port), audit);
+    assert!(port.calls().is_empty(), "nothing masters before an owner");
+    with_log_level(Level::Info, || {
+        translation.map(DEVICE, 1, block(0x8000_0000), 0).unwrap();
+        translation.map(DEVICE, 1, block(0x9000_0000), 0).unwrap();
+    });
+    let calls = port.calls();
+    assert_eq!(calls.len(), 1, "granted once, at the owner's first carve");
+    assert_eq!((calls[0].0, calls[0].1), (streams(STREAM), true));
+    assert!(calls[0].2.is_some(), "its domain held the stream first");
+    let granted = recorded(audit, AuditEvent::DmaBusMaster);
+    assert_eq!(granted.len(), 1);
+    assert_eq!(field(&granted[0], "node"), Some("7"));
+    assert_eq!(field(&granted[0], "master"), Some("on"));
+    assert_eq!(field(&granted[0], "outcome"), Some("applied"));
+}
+
+#[test]
+fn an_owner_s_function_stops_mastering_before_its_domain_is_destroyed() {
+    let (model, tree) = rig!(Behaviour::Correct);
+    let port = Port::new(model, Vec::new());
+    let audit = audit_sink();
+    let translation = started_with(model, tree, Vec::new(), Some(port), audit);
+    with_log_level(Level::Info, || {
+        translation.map(DEVICE, 1, block(0x8000_0000), 0).unwrap();
+        assert!(translation.revoke(DEVICE, 1));
+    });
+    let calls = port.calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!((calls[1].0, calls[1].1), (streams(STREAM), false));
+    assert_eq!(
+        calls[1].2, calls[0].2,
+        "stopped while its own domain still held the stream"
+    );
+    assert_eq!(model.attached(STREAM), None, "then blocked");
+    let records = recorded(audit, AuditEvent::DmaBusMaster);
+    assert_eq!(field(&records[1], "master"), Some("off"));
+}
+
+#[test]
+fn a_predecessor_stops_mastering_before_its_successor_masters() {
+    let (model, tree) = rig!(Behaviour::Correct);
+    let port = Port::new(model, Vec::new());
+    let translation = started_with(model, tree, Vec::new(), Some(port), audit_sink());
+    translation.map(DEVICE, 1, block(0x8000_0000), 0).unwrap();
+    translation.map(DEVICE, 2, block(0x9000_0000), 0).unwrap();
+    let calls = port.calls();
+    let order: Vec<bool> = calls.iter().map(|call| call.1).collect();
+    assert_eq!(order, [true, false, true]);
+    assert_eq!(
+        calls[1].2, calls[0].2,
+        "the predecessor stopped in its domain"
+    );
+    assert_ne!(calls[2].2, calls[0].2, "the successor masters in its own");
+    let generations: Vec<u64> = calls.iter().map(|call| call.3).collect();
+    assert_eq!(generations, [1, 1, 2], "each change names its owner");
+}
+
+#[test]
+fn a_removed_node_s_function_stops_mastering() {
+    let (model, tree) = rig!(Behaviour::Correct);
+    let port = Port::new(model, Vec::new());
+    let translation = started_with(model, tree, Vec::new(), Some(port), audit_sink());
+    translation.map(DEVICE, 1, block(0x8000_0000), 0).unwrap();
+    tree.drop_node(DEVICE);
+    assert!(translation.forget(DEVICE));
+    let calls = port.calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!((calls[1].0, calls[1].1), (streams(STREAM), false));
+}
+
+#[test]
+fn an_unconfirmed_end_stops_mastering_and_no_successor_masters_again() {
+    let (model, tree) = rig!(Behaviour::UnconfirmedBlock);
+    let port = Port::new(model, Vec::new());
+    let audit = audit_sink();
+    let translation = started_with(model, tree, Vec::new(), Some(port), audit);
+    translation.map(DEVICE, 1, block(0x8000_0000), 0).unwrap();
+    assert!(!translation.revoke(DEVICE, 1));
+    assert_eq!(
+        translation.map(DEVICE, 2, block(0x9000_0000), 0),
+        Err(DmaError::Translation)
+    );
+    let order: Vec<bool> = port.calls().iter().map(|call| call.1).collect();
+    assert_eq!(order, [true, false]);
+    let unconfirmed = recorded(audit, AuditEvent::DmaTranslationUnconfirmed);
+    assert_eq!(unconfirmed.len(), 1, "the end is audited once");
+    assert_eq!(field(&unconfirmed[0], "generation"), Some("1"));
+}
+
+#[test]
+fn a_failed_adoption_never_masters() {
+    // Adopting the stream gives up its firmware domain first; a block the
+    // unit cannot confirm fails the adoption.
+    let (model, tree) = rig!(Behaviour::UnconfirmedBlock);
+    let port = Port::new(model, Vec::new());
+    let translation = started_with(
+        model,
+        tree,
+        vec![firmware_window(STREAM)],
+        Some(port),
+        audit_sink(),
+    );
+    assert!(translation.map(DEVICE, 1, block(0x8000_0000), 0).is_err());
+    assert!(port.calls().is_empty());
+}
+
+#[test]
+fn a_stream_firmware_keeps_a_window_for_keeps_mastering_past_its_owner() {
+    let (model, tree) = rig!(Behaviour::Correct);
+    let port = Port::new(model, Vec::new());
+    let translation = started_with(
+        model,
+        tree,
+        vec![firmware_window(STREAM)],
+        Some(port),
+        audit_sink(),
+    );
+    translation.map(DEVICE, 1, block(0x8000_0000), 0).unwrap();
+    assert!(translation.revoke(DEVICE, 1));
+    let order: Vec<bool> = port.calls().iter().map(|call| call.1).collect();
+    assert_eq!(order, [true], "firmware masters it again");
+}
+
+#[test]
+fn a_node_that_leaves_as_its_first_carve_is_made_is_never_attached() {
+    let (model, tree) = rig!(Behaviour::Correct);
+    let port = Port::new(model, Vec::new());
+    let translation = started_with(model, tree, Vec::new(), Some(port), audit_sink());
+    tree.vanish
+        .store(true, core::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        translation.map(DEVICE, 1, block(0x8000_0000), 0),
+        Err(DmaError::DeviceGone)
+    );
+    assert_eq!(model.attached(STREAM), None);
+    assert!(port.calls().is_empty());
+}
+
+#[test]
+fn take_over_counts_the_functions_still_mastering_without_a_firmware_window() {
+    let (model, tree) = rig!(Behaviour::Correct);
+    tree.add(&device_node(DEVICE, STREAM));
+    let port = Port::new(model, vec![STREAM, 0x0018]);
+    let audit = audit_sink();
+    let (_translation, outcomes) = Translation::start(
+        vec![unit(model, vec![firmware_window(0x0018)])],
+        vec![REGISTERS],
+        tree,
+        audit,
+        Mastering::new(Some(port), audit),
+    );
+    assert_eq!(outcomes, [(UNIT_NODE, Ok(1))]);
 }

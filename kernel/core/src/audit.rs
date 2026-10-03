@@ -48,8 +48,9 @@
 //! | 4091 | Warn | `DMA_QUARANTINED` | audit | A driver ended holding DMA memory its device may still master; it passed to its node's quarantine, not the allocator. The `node`, `generation` and `bytes` fields name the node, the dead driver's admission generation, and what it held. |
 //! | 4092 | Info | `DMA_QUARANTINE_RELEASED` | audit | Quarantined DMA memory returned to the allocator, scrubbed. `cause` is `reset` (a later driver for the `node` declared its device reset; recorded even when nothing was freed) or `removed` (a surprise removal retired the node; recorded only when something was freed); `bytes` is what was freed. |
 //! | 4093 | Info | `HW_NODE_GRANTS_REVOKED` | audit | A removed hardware-tree `node`'s authority was revoked from every task holding it: `grants` revoked across `holders` tasks, whose bindings of its interrupt lines, windows onto its registers and mappings of its shared regions were torn down. `killed` counts holders whose access could not be torn down and which were killed instead; the record is Warn when it is non-zero. |
-//! | 4094 | Info/Warn | `DMA_TRANSLATION_UNIT` | audit | A translation unit discovery reported was brought up, or left its devices unconfined. `node` is the unit's node and `outcome` is `translating`, the refusal (`unmatched`, `no_registers`, `exhausted`, `unconfirmed`, `hardware`, `refused`), or `faults_unrouted` with a `reason` when its fault interrupt could not be served. |
+//! | 4094 | Info/Warn | `DMA_TRANSLATION_UNIT` | audit | A translation unit discovery reported was brought up, or left its devices unconfined. `node` is the unit's node and `outcome` is `translating` (with `masters`, the functions behind it found mastering DMA at take-over with no firmware window), the refusal (`unmatched`, `no_registers`, `exhausted`, `unconfirmed`, `hardware`, `refused`), or `faults_unrouted` with a `reason` when its fault interrupt could not be served. |
 //! | 4095 | Error | `DMA_TRANSLATION_UNCONFIRMED` | audit | A unit could not confirm that a translation ended — a driver's domain, a removed node's, or one carve's — so what it reached is kept for good. Carries `node` and `generation`. |
+//! | 4147 | Info/Warn | `DMA_BUS_MASTER` | audit | The kernel turned a function's bus mastering on as its DMA owner began or off as it ended: `node`, `master` (`on`/`off`), and `outcome` (`applied`, or `refused` where a function still reports otherwise). |
 //! | 4101 | Warn | `FS_MUTATION_DENIED` | audit | A filesystem mutation was refused by the secured VFS; nothing changed (fail closed). Carries the same `op`/`uid`/`path`(/`to`/`mode`/`owner`/`group`) fields as `FS_NODE_MUTATED` plus the refusal's `errno`. |
 //! | 4130 | Warn | `VOLUME_DEGRADED`   | audit | A served volume's backing block device reported itself unhealthy while still serving I/O. Emitted once on the edge into `Degraded`; the `dev` field names the block-service endpoint. |
 //! | 4131 | Warn | `VOLUME_RECOVERING` | audit | A served volume's backing block device stalled/reset and entered its bounded recovery grace window. Emitted once on the edge into `Recovering`; `dev` names the block-service endpoint. |
@@ -554,7 +555,9 @@ pub enum AuditEvent {
     /// `node` is the unit's node and `outcome` is `translating`, or why its
     /// devices reach memory unconfined: `unmatched`, `no_registers`, or the
     /// family's refusal; `faults_unrouted`, with a `reason`, when its fault
-    /// interrupt could not be served.
+    /// interrupt could not be served. A `translating` record carries
+    /// `masters`: the functions behind the unit found mastering DMA as it
+    /// took over though firmware keeps no window for them.
     DmaTranslationUnit,
     /// A translation unit could not confirm that a translation ended, so the
     /// device may still reach what it mapped: that memory is kept for good,
@@ -562,6 +565,12 @@ pub enum AuditEvent {
     ///
     /// Carries the `node` and the driver's admission `generation`.
     DmaTranslationUnconfirmed,
+    /// The kernel turned a function's bus mastering on as its DMA owner
+    /// began, or off as it ended.
+    ///
+    /// Carries the owner's `node`, `master` (`on` or `off`), and `outcome`:
+    /// `applied`, or `refused` where a function still reports otherwise.
+    DmaBusMaster,
     /// A capability- and permission-checked filesystem mutation succeeded.
     ///
     /// Emitted by the `fs_mkdir` / `fs_unlink` / `fs_rename` / `fs_set_mode`
@@ -773,6 +782,7 @@ impl AuditEvent {
             Self::DmaTranslationStorm => 4089,
             Self::DmaTranslationUnit => 4094,
             Self::DmaTranslationUnconfirmed => 4095,
+            Self::DmaBusMaster => 4147,
             Self::FsNodeMutated => 4100,
             Self::FsMutationDenied => 4101,
             Self::SystemConfigApplied => 4110,
@@ -854,6 +864,7 @@ impl AuditEvent {
             Self::DmaTranslationStorm => "dma translation fault storm silenced",
             Self::DmaTranslationUnit => "dma translation unit brought up",
             Self::DmaTranslationUnconfirmed => "dma translation end unconfirmed",
+            Self::DmaBusMaster => "bus mastering changed",
             Self::FsNodeMutated => "filesystem node mutated",
             Self::FsMutationDenied => "filesystem mutation denied",
             Self::SystemConfigApplied => "system configuration applied",
@@ -955,6 +966,7 @@ mod tests {
         AuditEvent::DmaTranslationStorm,
         AuditEvent::DmaTranslationUnit,
         AuditEvent::DmaTranslationUnconfirmed,
+        AuditEvent::DmaBusMaster,
         AuditEvent::FsNodeMutated,
         AuditEvent::FsMutationDenied,
         AuditEvent::SystemConfigApplied,
@@ -976,7 +988,7 @@ mod tests {
         // A guard on the list itself: the count is the one thing neither
         // exhaustive match can enforce, so it is asserted rather than
         // assumed.
-        assert_eq!(ALL.len(), 72, "a new event belongs in `ALL`");
+        assert_eq!(ALL.len(), 73, "a new event belongs in `ALL`");
     }
 
     #[test]

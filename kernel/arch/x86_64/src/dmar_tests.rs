@@ -549,7 +549,11 @@ impl PciBus for ConfigBus {
         Err(tairix_abi::DriverError::Unsupported)
     }
 
-    fn enable_bus_master(&self, _bdf: u64) -> Result<(), tairix_abi::DriverError> {
+    fn enable_memory_space(&self, _bdf: u64) -> Result<(), tairix_abi::DriverError> {
+        Err(tairix_abi::DriverError::Unsupported)
+    }
+
+    fn set_bus_master(&self, _bdf: u64, _master: bool) -> Result<(), tairix_abi::DriverError> {
         Err(tairix_abi::DriverError::Unsupported)
     }
 

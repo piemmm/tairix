@@ -76,8 +76,8 @@ tairix-abi = { path = "../../lib/abi", version = "=0.0.0" }
 # The `kalloc` module re-exports it under the historical path.
 tairix-kalloc = { path = "../../lib/kalloc", version = "=0.0.0" }
 tairix-caps = { path = "../../lib/caps", version = "=0.0.0" }
-# The `virtio_boot` wiring config names `Ed25519PublicKey` for the
-# driver-host trust-anchor list (`drvhost::HostConfig::trusted_signers`).
+# The Ed25519 driver-signing trust anchor the signed load gate verifies
+# against.
 tairix-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
 # The deterministic node ↔ bind-table match policy,
 # shared with the user-space `devmgr`: the
@@ -237,7 +237,7 @@ zeroize = { version = "1.8.1", default-features = false }
 # name (`build.rs`).
 
 # x86_64: the architecture port plus the driver-host / virtio-bus crates
-# the x86_64 boot pipeline (`boot`, `virtio_boot`, `ioapic_controller`)
+# the x86_64 boot pipeline (`boot`, `root_unlock`, `ioapic_controller`)
 # links. `drvhost` itself stays free of `kernel/*` deps; the kernel-side
 # DMA/MMIO hosts live in `kernel/virtio`.
 [target.'cfg(target_arch = "x86_64")'.dependencies]
@@ -299,7 +299,7 @@ tairix-fdt = { path = "../../lib/fdt", version = "=0.0.0" }
 # P10 5c-ii): the root-storage bring-up admits each statically-linked
 # bootstrap-floor block driver through `drvhost::Host::load` (Ed25519
 # signature + `CAP_DRV_LOAD` / `CAP_DRV_KERNEL`) before it reads the volume,
-# exactly as the x86_64 `virtio_boot` path does. `drvhost` stays free of
+# exactly as the x86_64 root-unlock path does. `drvhost` stays free of
 # `kernel/*` deps; the in-kernel resource hosts live
 # elsewhere.
 tairix-drvhost = { path = "../../userland/system/drvhost", version = "=0.0.0" }
@@ -448,6 +448,3 @@ tairix-test-encrypted-root-image = { path = "../../tests/integration/encrypted_r
 # The same test parses the served `users-v1` text and authenticates the
 # planted account, proving the served database is usable (`plans/PI.md` P11).
 tairix-users = { path = "../../lib/users", version = "=0.0.0" }
-# The `virtio_boot` wiring test signs a synthetic `.rxe` manifest with a
-# known keypair so the live `drvhost::Host` accepts it, through the same
-# wrapped Ed25519 the production verifier checks against.

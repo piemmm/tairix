@@ -12,7 +12,9 @@ PCI/PCIe configuration-access **library** (`lib/*`, not a driver crate):
 it enumerates devices and walks each function's capability list to
 surface MSI / MSI-X descriptors, virtio-1.x configuration structures,
 and BAR (Base Address Register) windows, and it assigns/maps BARs and
-enables bus-mastering for a DMA-driving device driver. It lives in
+turns a function's decoding and bus mastering on and off for the owner of
+its configuration space. No routing or mapping helper makes a function a
+bus master. It lives in
 `lib/` because PCI configuration access is shared bus-protocol logic a
 `drivers/*` crate may not reach through a sibling driver (`AGENTS.md`
 §17.4) — the kernel boot pipeline, the user-space `drivers/bus/pcie_brcm`
@@ -23,7 +25,10 @@ Configuration space is reached through one of three access mechanisms,
 selected at construction by the caller:
 
 - **Mechanism #1** (`0xCF8` / `0xCFC`, x86_64) — the legacy I/O-port
-  bridge (`mechanism_one`), behind the `tairix_abi::PortIo` seam.
+  bridge (`mechanism_one`), behind the `tairix_abi::PortIo` seam. The two
+  ports are one machine-wide resource, so the caller serialises every
+  access, and `reaches_config_ports` names them for the port-I/O gate
+  that keeps them from every process.
 - **ECAM / MMCONFIG** (`mechanism_ecam`) — PCIe enhanced configuration
   access: configuration space is mapped flat into MMIO, one 4 KiB
   block per `(bus, device, function)`, reached through a

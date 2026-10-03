@@ -76,6 +76,41 @@ unit did not confirm stays recorded for good: its carves leak, and the node
 takes no further driver's carves. The translation is itself the custody of
 translated carves, and it never frees what reaches it.
 
+## Bus mastering follows ownership
+
+A function issues DMA, and the writes that deliver its MSIs, only while its
+Bus Master Enable is set. TAIRiX sets it only as a function is handed to an
+owner, and clears it as that owner ends. No routing or mapping step sets it.
+
+- **One owner of configuration space.** On x86_64 the kernel owns the
+  configuration space of every function its boot probe enumerates. It
+  reaches them through one PCI host, one access at a time, and keeps a
+  record of what it handed over, built from its own emission. No process
+  can be granted the configuration ports.
+- **Nothing masters at take-over.** Before any unit is taken over, the
+  probe stops mastering:
+  - every function behind a unit, except a bridge or a function whose
+    stream firmware keeps a window for;
+  - every virtio function.
+
+  As each unit is enabled, the kernel reads every recorded function behind
+  it and reports any still mastering (`masters` on the unit's record).
+- **Translated.** A function masters once its owner's domain is attached,
+  and stops before that domain is destroyed, so its device is quiet before
+  its streams are blocked. A stream firmware keeps a window for is handed
+  back to firmware still mastering.
+- **Untranslated.** A function masters from its owner's first carve until
+  its owner ends. This narrows the window but confines nothing; the
+  quarantine stays.
+- **In owner order.** Every change is made for an owner's generation, and
+  the kernel ignores one from an owner older than the last to change that
+  function, so an owner that ends late never stops its successor's device.
+- **Raspberry Pi 4.** The PCIe bus driver owns the VL805's configuration
+  space. It makes the function a bus master as it publishes it, and stops
+  it if the publish is refused. The root port's own bit forwards for the
+  whole subtree and stays on for the bridge's life. The platform has no
+  unit.
+
 ## Faults
 
 Each unit's fault interrupt — a message-signalled interrupt the kernel takes
@@ -110,8 +145,9 @@ need hundreds of device resets, a load-dependent test.
 | `DmaTranslationBypass` | 4087 | discovery refused a function behind a unit that would not use it; `address`, `unit` |
 | `DmaTranslationFault` | 4088 | a unit refused an access; `unit`, `stream`, `iova`, `access`, `reason`, `suppressed`, and `node` where an owner holds the stream |
 | `DmaTranslationStorm` | 4089 | a stream stormed: silenced, its node `Offline`; the fault's fields and `outcome` |
-| `DmaTranslationUnit` | 4094 | boot brought a unit up (`outcome=translating`) or left it untranslated (`unmatched`, `no_registers`, `exhausted`, `unconfirmed`, `hardware`, `refused`); `faults_unrouted` with a `reason` when its faults cannot be served |
+| `DmaTranslationUnit` | 4094 | boot brought a unit up (`outcome=translating`, with `masters`, the functions behind it found mastering as it took over without a firmware window) or left it untranslated (`unmatched`, `no_registers`, `exhausted`, `unconfirmed`, `hardware`, `refused`); `faults_unrouted` with a `reason` when its faults cannot be served |
 | `DmaTranslationUnconfirmed` | 4095 | a unit could not confirm a translation ended — a driver's domain, a removed node's, or one carve's; `node`, `generation` |
+| `DmaBusMaster` | 4147 | the kernel turned a function's bus mastering on as its owner began or off as it ended; `node`, `master` (`on`/`off`), `outcome` (`applied`, or `refused` where the function reads back otherwise) |
 
 A malformed DMAR, or unit nodes that could not be emitted, is logged at boot
 (`4103`): every device's DMA is then unconfined.
@@ -119,6 +155,5 @@ A malformed DMAR, or unit nodes that could not be emitted, is logged at boot
 ## What is staged
 
 Isolation groups for devices that share a requester id, interrupt remapping,
-AMD-Vi, SMMUv3, the RISC-V IOMMU and virtio-iommu, closing the window before
-the kernel takes a unit over, multi-segment discovery, and the administrator's
-view are ledger items in `plans/IOMMU.md`.
+AMD-Vi, SMMUv3, the RISC-V IOMMU and virtio-iommu, multi-segment discovery,
+and the administrator's view are ledger items in `plans/IOMMU.md`.

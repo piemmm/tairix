@@ -15,11 +15,19 @@
 //! against the device's node and stream. The canary stays zero, proving the
 //! refused write landed nowhere.
 //!
+//! The driver then ends its owner through the facility's revocation, the
+//! retire every driver's end takes, and the function it was handed stops
+//! mastering: `AuditEvent::DmaBusMaster` `master=off`, read back from the
+//! function, for the node granted `master=on` when its domain was attached
+//! (`plans/IOMMU.md` IOM7).
+//!
 //! PASS via QEMU `isa-debug-exit` once, after
-//! `AuditEvent::DmaTranslationUnit` `outcome=translating`, a write
-//! `DmaTranslationFault` attributed to a node arrives **and** the driver has
-//! reported its canary clean. A unit that did not translate, a fault before any
-//! unit translates, a canary the write reached, or an un-admittable driver each
+//! `AuditEvent::DmaTranslationUnit` `outcome=translating` with no function
+//! found mastering as the unit took over, a write `DmaTranslationFault`
+//! attributed to a node arrives, the driver has reported its canary clean,
+//! **and** its function stopped mastering. A unit that did not translate, a
+//! function mastering before any unit translates, a fault before any unit
+//! translates, a canary the write reached, or an un-admittable driver each
 //! fail the run.
 //!
 //! The 512-fault storm/silence path is proven against the register-level model
@@ -38,16 +46,14 @@ extern crate alloc;
 mod kernel {
     use core::convert::Infallible;
     use core::panic::PanicInfo;
-    use core::sync::atomic::{AtomicBool, Ordering};
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     use alloc::boxed::Box;
 
-    use tairix_abi::driver::msix::MsixBus;
     use tairix_abi::driver::pci::requester_id;
     use tairix_abi::hwtree::snapshot_nodes;
     use tairix_abi::{CapabilityId, HwNode};
     use tairix_arch_x86_64::paging::{AddressSpace as ArchAddressSpace, PageTablePool};
-    use tairix_arch_x86_64::pio::x86_port_io;
     use tairix_arch_x86_64::qemu_exit;
     use tairix_caps::CapabilitySet;
     use tairix_drv_bus_virtio::PciTransport;
@@ -132,13 +138,20 @@ mod kernel {
     /// boot/init pools.
     static PT_POOL: PageTablePool = PageTablePool::new();
 
+    /// No node has been granted bus mastering yet.
+    const NO_NODE: u64 = u64::MAX;
+
     /// Replays every event to serial and judges the run on the ordered witness
-    /// set: the unit translating, then a node-attributed write fault and the
-    /// driver's canary-clean marker (in any order).
+    /// set: the unit translating with no function mastering, then a
+    /// node-attributed write fault, the driver's canary-clean marker, and its
+    /// function's bus mastering withdrawn (in any order).
     struct FaultSink {
         translating: AtomicBool,
         fault_seen: AtomicBool,
         canary_clean: AtomicBool,
+        /// The node granted bus mastering once the unit translates.
+        mastered: AtomicU64,
+        withdrawn: AtomicBool,
     }
 
     impl FaultSink {
@@ -146,8 +159,32 @@ mod kernel {
             if self.translating.load(Ordering::Acquire)
                 && self.fault_seen.load(Ordering::Acquire)
                 && self.canary_clean.load(Ordering::Acquire)
+                && self.withdrawn.load(Ordering::Acquire)
             {
                 qemu_exit::exit_success();
+            }
+        }
+
+        /// A function's bus mastering changed: granted only once a unit
+        /// translates, and withdrawn, read back, from the node granted it.
+        fn mastering(&self, event: &Event<'_>) {
+            let Some(FieldValue::UnsignedInt(node)) = field(event, "node") else {
+                qemu_exit::exit_failure();
+            };
+            let applied = matches!(field(event, "outcome"), Some(FieldValue::Str("applied")));
+            match field(event, "master") {
+                Some(FieldValue::Str("on"))
+                    if applied && self.translating.load(Ordering::Acquire) =>
+                {
+                    self.mastered.store(*node, Ordering::Release);
+                }
+                Some(FieldValue::Str("off"))
+                    if applied && self.mastered.load(Ordering::Acquire) == *node =>
+                {
+                    self.withdrawn.store(true, Ordering::Release);
+                    self.settle();
+                }
+                _ => qemu_exit::exit_failure(),
             }
         }
     }
@@ -168,7 +205,8 @@ mod kernel {
                 if matches!(
                     field(event, "outcome"),
                     Some(FieldValue::Str("translating"))
-                ) {
+                ) && matches!(field(event, "masters"), Some(FieldValue::UnsignedInt(0)))
+                {
                     self.translating.store(true, Ordering::Release);
                     self.settle();
                 } else {
@@ -192,6 +230,8 @@ mod kernel {
             } else if id == CANARY_CLEAN_EVENT_ID {
                 self.canary_clean.store(true, Ordering::Release);
                 self.settle();
+            } else if id == AuditEvent::DmaBusMaster.id().0 {
+                self.mastering(event);
             }
         }
     }
@@ -200,6 +240,8 @@ mod kernel {
         translating: AtomicBool::new(false),
         fault_seen: AtomicBool::new(false),
         canary_clean: AtomicBool::new(false),
+        mastered: AtomicU64::new(NO_NODE),
+        withdrawn: AtomicBool::new(false),
     };
 
     /// The bin-local PID 1 spawn seam: the production PID 1 build, with the
@@ -306,11 +348,12 @@ mod kernel {
             .ok_or("no translated node for the provisioned function")
     }
 
-    /// The provisioned device: its transport and the `'static` translated DMA
-    /// host its rings and buffers carve through.
+    /// The provisioned device: its transport, the `'static` translated DMA
+    /// host its rings and buffers carve through, and its node.
     type OpenedDevice = (
         PciTransport,
         &'static KernelVirtioHost<'static, ArchAddressSpace, dyn Sink + Sync>,
+        u32,
     );
 
     /// Provision the misbehaving virtio-blk-PCI device through its node's
@@ -330,7 +373,7 @@ mod kernel {
             driver_caps(),
             audit,
         )));
-        let bus = tairix_pci::mechanism_one(x86_port_io());
+        let pci = tairix_kernel::x86_64::boot::pci_host().ok_or("no PCI host")?;
 
         // Throwaway MMIO register-window map (bookkeeping only; device access is
         // through the identity direct map).
@@ -350,7 +393,8 @@ mod kernel {
             .map_err(|_| "virtio-blk device id out of range")?;
         let (mut transport, bdf) = {
             let mapper = KernelMmioMapper::new(&mut *mmio, caller, audit);
-            let prov = provision_virtio_pci(&bus, device_id, &mapper, PciTransport::new)
+            let prov = pci
+                .with(|bus| provision_virtio_pci(bus, device_id, &mapper, PciTransport::new))
                 .map_err(|_| "virtio-PCI provisioning")?;
             (prov.transport, prov.bdf)
         };
@@ -379,7 +423,7 @@ mod kernel {
         let handle = bind.handle;
         {
             let mapper = KernelMmioMapper::new(&mut *mmio, caller, audit);
-            bus.route_msix(bdf, MSIX_ENTRY, msi, &mapper)
+            pci.with(|bus| bus.route_msix(bdf, MSIX_ENTRY, msi, &mapper))
                 .map_err(|_| "route MSI-X")?;
         }
         transport.enable_msix(MSIX_ENTRY);
@@ -407,7 +451,7 @@ mod kernel {
         let host: &'static KernelVirtioHost<'static, _, dyn Sink + Sync> = Box::leak(Box::new(
             KernelVirtioHost::new(pool, caller, audit, PoolId::fresh(), table, handle, waiter),
         ));
-        Ok((transport, host))
+        Ok((transport, host, node.id()))
     }
 
     /// Bring the device online (virtio 1.1 §3.1) and set up queue 0. Accepting
@@ -448,7 +492,7 @@ mod kernel {
         let translation = ctx.dma_translation().ok_or("no dma translation unit")?;
         let phys = &SPAWN_TABLE_PHYSMAP;
 
-        let (mut transport, host) = open_translated_device(audit, frames, phys, translation)?;
+        let (mut transport, host, node) = open_translated_device(audit, frames, phys, translation)?;
         let mut rq = online(&mut transport, host)?;
 
         // A read-request header (device-read): sector 0.
@@ -508,8 +552,14 @@ mod kernel {
         }
         mark_canary_clean(audit);
 
-        // Work done; the witness sink ends the run on the fault record and the
-        // marker. Park for life so nothing the device was handed is torn down.
+        // End the owner the way every driver's end does: the function stops
+        // mastering before its domain goes.
+        if !translation.revoke(node, KERNEL_OWNER) {
+            return Err("the unit could not confirm the owner's end");
+        }
+
+        // Work done; the witness sink ends the run on the records and the
+        // marker. Park for life so nothing the device was handed is freed.
         loop {
             let _ = host.notify_wait(0, u64::MAX);
         }

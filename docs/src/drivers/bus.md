@@ -633,8 +633,10 @@ descriptor's `bInterval` and the device speed (high/SuperSpeed
 `bInterval − 1`; full/low-speed frames → the `fls(bInterval × 8) − 1`
 microframe exponent, clamped 3..=10, xHCI Table 6-12); its Max Burst Size
 and Max ESIT Payload come from the high-speed transaction bits of
-`wMaxPacketSize` or the `SuperSpeed` endpoint companion. Every endpoint is
-polled at its own interval. Hard-coding the
+`wMaxPacketSize` or the `SuperSpeed` endpoint companion. A `wMaxPacketSize`
+past the speed's interrupt maximum (8, 64 or 1024 bytes) is held to it in the
+endpoint context, so the controller refuses a longer packet and a transfer
+never outruns its buffer. Every endpoint is polled at its own interval. Hard-coding the
 endpoint as endpoint 1 (DCI 3) left the controller polling — and the
 doorbell ringing — the wrong endpoint for a keyboard whose interrupt-IN
 endpoint sat elsewhere, so it scheduled the real endpoint never: the
@@ -937,26 +939,14 @@ panic (`AGENTS.md` §2.9).
 ### Boot wiring
 
 `provision_virtio_pci` yields the transport its `build` closure
-constructs, but a virtio-class driver also needs a per-process DMA host
-and a driver host to run its signed
-`.rxe`. `kernel/tairix-kernel/src/virtio_boot.rs` joins the three:
-`provision_and_run(config, make_table, body)` takes a
-`VirtioBootConfig` bundling the bus (reached through both the
-`VirtioPciBus` and `MsixBus` seams), the per-driver `MmioMap`, the DMA
-frame allocator + direct physical map, the device's bound `IrqHandle`
-plus the MSI-X table entry and architecture-built `MsiMessage` that
-delivers its vector, and the driver-host trust inputs. It builds a
-`KernelMmioMapper`, provisions the `PciTransport`, routes the device's
-MSI-X interrupt through the same mapper (see below), constructs a
-`KernelVirtioFactory`, and hands a live `drvhost::Host` (with the
-factory wired into `HostConfig::virtio_host_factory`) plus the
-transport to the `body` closure. The scope/callback shape keeps the
-mapper, factory, and host — and every per-driver DMA pool the factory
-mints — on one boot frame, so all of it is reclaimed when `body`
-returns and no driver retains a register window or DMA mapping past its
-load (`AGENTS.md` §4). The boot walk fails closed with a
-`VirtioPciWalkError` and never constructs the host if the device, a
-window, or the interrupt route cannot be resolved.
+constructs. The in-kernel floor disk's bring-up
+(`kernel/tairix-kernel/src/x86_64/root_unlock.rs`) provisions it through
+the kernel's one owner of PCI configuration space
+(`kernel/tairix-kernel/src/pci_host.rs`), routes its MSI-X interrupt (see
+below), and hands the transport to the signed virtio-blk driver over a
+per-driver DMA pool. User-space virtio drivers are granted their register
+windows, routed interrupt line and DMA constraint by the boot probe and
+never reach configuration space at all.
 
 ### MSI-X interrupt routing
 
@@ -995,12 +985,14 @@ a frozen ABI seam rather than the concrete type: `Pci<C>` implements
 `tairix_abi::driver::msix::MsixBus` (a supertrait of `Bus`), so the
 boot path can route a device's interrupt through a single `&dyn
 MsixBus` without naming a concrete `drivers/bus/*` type
-(`AGENTS.md` §8). `provision_and_run` calls it once per device — after
-the four register windows are mapped and before the driver host is
-built — so a routing failure fails the whole bring-up closed
-(`VirtioPciWalkError::RouteMsix`) without loading a driver whose
-`notify_wait` could never wake. Legacy MSI and INTx routing are not
-implemented.
+(`AGENTS.md` §8). A route that fails leaves the function undiscovered,
+rather than granting a line that never delivers. Legacy INTx routing is
+not implemented.
+
+Routing turns memory decoding on, since the table lives in a BAR, and
+leaves bus mastering as it was: an MSI is an upstream memory write, so
+the function delivers only once its owner makes it a bus master
+([Bus mastering](#bus-mastering-follows-ownership)).
 
 ### Generic-PCI BAR hand-off (the xHCI / VL805 path)
 
@@ -1018,9 +1010,11 @@ supertrait of `Bus`) is that seam:
   CPU mapping is the host bridge's job, so a bridge-aware `MmioMapper`
   (the Pi 4's `IdentityMmioMapper`, which applies the outbound `ranges`
   bus→CPU translation) does it, not this architecture-neutral walk;
-- `enable_bus_master(bdf)` sets the function's Memory Space + Bus
-  Master Enable bits (PCI Local Bus 3.0 §6.2.2) so the controller may
-  issue the upstream DMA its rings live in.
+- `enable_memory_space(bdf)` turns on decoding of the function's
+  memory BARs, and `set_bus_master(bdf, master)` lets it issue upstream
+  memory requests or stops it (PCI Local Bus 3.0 §6.2.2). Each changes
+  only its own command bit and writes nothing when the bit already holds
+  the asked value.
 - `assign_bar(bdf, bar_index, window_base, window_size)` assigns the
   BAR a base when firmware left it **unassigned** (address bits zero),
   placing it at the lowest size-aligned PCIe-bus address inside the host
@@ -1044,11 +1038,30 @@ supertrait of `Bus`) is that seam:
   (bus 0) and a downstream function through the same windowed accessor.
 
 `Pci<C>` implements `PciBus` by forwarding to the inherent
-`map_bar_window` / `enable_bus_master` / `assign_bar` / `read_config`; `route_msix` calls the same
-`enable_bus_master`, so the activation has one definition
-(`AGENTS.md` §2.2). A device-class driver reaches the bus only through
-`&dyn PciBus`, never naming the concrete `lib/pci` crate
+`map_bar_window` / `enable_memory_space` / `set_bus_master` /
+`assign_bar` / `read_config`. A device-class driver reaches the bus only
+through `&dyn PciBus`, never naming the concrete `lib/pci` crate
 (`AGENTS.md` §17.4).
+
+### Bus mastering follows ownership
+
+No routing or mapping helper makes a function a bus master
+(`plans/IOMMU.md` IOM7). The owner of a function's configuration space
+sets Bus Master Enable when it hands the function over and clears it
+when it takes the function back:
+
+- **The x86_64 kernel** owns every function its boot probe enumerates.
+  Before any translation unit is taken over, the probe stops mastering
+  every virtio function, and every function behind a unit except a
+  bridge or one firmware keeps a reserved window for. Afterwards a
+  translated function masters once its owner's domain is attached, and
+  stops before that domain is destroyed. An untranslated one masters
+  from its owner's first carve until its owner ends.
+- **The BCM2711 root complex driver** (`drivers/bus/pcie_brcm`) owns
+  the VL805's configuration space. It makes the function a bus master
+  as it publishes it, and stops it again if the publish is refused. The
+  root port's own Bus Master Enable forwards for the whole subtree and
+  stays on for the bridge's life.
 
 The xHCI host-controller driver consumes it in
 `tairix_drv_bus_usb::bringup`. The board bus drivers assign the
@@ -1160,27 +1173,25 @@ P10 D5d): the whole chain is now autoloaded user-space drivers.
 
 ## Constructing the real-hardware bus
 
-The boot pipeline reaches PCI through a single public constructor,
-`tairix_pci::mechanism_one(pio)`. It builds the bus over
-configuration **mechanism #1** — the `0xCF8` address word / `0xCFC`
-data word port pair (PCI Local Bus 3.0 §3.2.2.3.2) — and returns it as
-`impl VirtioPciBus + MsixBus + PciBus`. All three traits have `Bus` as
-a supertrait, so the value also coerces to `&dyn Bus`; the concrete
-`Pci` type stays crate-private (`AGENTS.md` §8). The constructor is
-architecture-neutral and carries no `cfg(target_arch …)` gate: the
-`pio` argument is a `tairix_abi::PortIo` backend, and the only `in`/
-`out` instructions live inside the architecture port that supplies it
-(for x86_64, `tairix_arch_x86_64::pio::x86_port_io()`). This keeps the
-driver free of inline assembly and target gates (`AGENTS.md` §17.2 /
-§17.4). Construction performs no I/O — it only stores the supplied
-backend — so it is sound to call before the host bridge has been
-probed; configuration access happens lazily on the trait methods. Ring
-0 hands the result to `tairix_kernel::provision_virtio_pci` /
-`provision_and_run` as the `&dyn VirtioPciBus` + `&dyn MsixBus` device
-bus. Non-x86 architectures reach PCIe through memory-mapped ECAM via
-`mechanism_ecam(window)`, which performs no port I/O and exposes the
-same `VirtioPciBus + MsixBus + PciBus` seams; the Pi 4's VL805 xHCI is
-reached through its `PciBus` view (see above).
+The x86_64 boot pipeline reaches PCI through `tairix_pci::mechanism_ecam(window)`
+where the firmware's MCFG describes an ECAM window, and otherwise through
+`tairix_pci::mechanism_one(pio)`: configuration **mechanism #1**, the
+`0xCF8` address word / `0xCFC` data word port pair (PCI Local Bus 3.0
+§3.2.2.3.2). Both return `impl VirtioPciBus + MsixBus + PciBus`; every
+trait has `Bus` as a supertrait, and the concrete `Pci` type stays
+crate-private (`AGENTS.md` §8). Neither constructor carries a
+`cfg(target_arch …)` gate: the `pio` argument is a `tairix_abi::PortIo`
+backend, so the only `in`/`out` instructions live inside the architecture
+port that supplies it (`tairix_arch_x86_64::pio::x86_port_io()`).
+Construction performs no I/O.
+
+Ring 0 keeps the result as its one owner of that segment's configuration
+space (`tairix_kernel::pci_host::PciHost`). Every kernel access goes
+through it one at a time, because mechanism #1 reaches every function
+through one machine-wide pair of ports and a command register changes by
+a read and a write; no process may be granted those ports. The Pi 4's
+VL805 is reached through the BCM2711 windowed mechanism's `PciBus` view
+(see above).
 
 ## Shared types
 

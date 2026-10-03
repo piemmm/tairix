@@ -180,7 +180,7 @@ no ambient root, signed code) are designed in from the kernel up.
 | Boot-stack poison guard, read back by the post-mortem (§4, §19.2) | Early-boot stack overrun corrupting `.bss` silently, before the MMU exists to fault on it | ✓ | ✓ | ✓ | — |
 | Encrypted root + encrypted swap, no plaintext mode (§4, §11) | Secret/data recovery at rest | ✓ | ✓ | ✓ | — |
 | Capability-gated, bounded DMA carves and MMIO grants (§4, §18.1) | A driver reaching device registers or memory it was not granted | ✓ | ✓ | ✓ | — |
-| DMA translation: a device reaches only its node's domain, revoked at its driver's end (§4, `plans/IOMMU.md`) | Malicious-device or compromised-driver DMA into any memory; a dead driver's device writing freed memory | ◐ VT-d | ▢ | ▢ | — |
+| DMA translation: a device reaches only its node's domain, revoked at its driver's end (§4, `plans/IOMMU.md`) | Malicious-device or compromised-driver DMA into any memory, before or after the unit takes over; a dead driver's device writing freed memory | ◐ VT-d | ▢ | ▢ | — |
 | A removed device's authority revoked at removal (§4, §18.4) | A vanished device's driver, or anything it delegated to, reaching its successor's registers, interrupts, endpoints or buffers | ✓ | ✓ | ✓ | — |
 | Continuous fuzzing of parsers/ABI/IPC/syscalls (§19.6) | Input-handling memory-safety bugs | ✓ | ✓ | ✓ | ✓ |
 | Keyed hashing of caller-chosen keys, per-boot / per-process (§26.2, §26.4) | Hash-flooding: chosen keys collapsing a hash index onto one bucket to starve a shared lock or a bonded link | ✓ | ✓ | ✓ boot seed | ◐ unkeyed |

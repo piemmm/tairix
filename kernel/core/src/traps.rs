@@ -70,16 +70,13 @@ pub extern "C" fn on_reschedule_ipi(cpu: CpuId) {
 mod tests {
     use super::{on_timer_tick, on_user_preempt_point};
     use crate::preempt::{preemption_count, take_preempt_pending};
-    use tairix_arch_api::CpuId;
 
-    /// The per-CPU slots are process-wide, so each case owns its own CPU
-    /// index and never observes another test thread's latch.
     #[test]
     fn the_timer_tick_latches_the_pending_preemption() {
-        const CPU: CpuId = 36;
-        on_timer_tick(CPU);
+        let cpu = crate::test_boot::claim_cpu();
+        on_timer_tick(cpu);
         assert!(
-            take_preempt_pending(CPU),
+            take_preempt_pending(cpu),
             "a fired tick must latch the CPU's pending preemption"
         );
     }
@@ -88,9 +85,9 @@ mod tests {
     /// nor fault on a CPU with no user task switched in.
     #[test]
     fn the_user_preempt_point_is_a_no_op_when_nothing_is_owed() {
-        const CPU: CpuId = 38;
-        assert_eq!(preemption_count(CPU), 0);
-        on_user_preempt_point(CPU);
-        assert_eq!(preemption_count(CPU), 0);
+        let cpu = crate::test_boot::claim_cpu();
+        assert_eq!(preemption_count(cpu), 0);
+        on_user_preempt_point(cpu);
+        assert_eq!(preemption_count(cpu), 0);
     }
 }

@@ -4,8 +4,9 @@
 //! *virtio*-specific register windows a virtio transport needs. A
 //! non-virtio PCI device — an xHCI USB host controller, say — needs a
 //! different, smaller surface: the physical window of one of its base
-//! address registers (BARs), and the function's bus-mastering bit set
-//! so it may issue the upstream DMA its rings live in.
+//! address registers (BARs), memory decoding on, and bus mastering turned
+//! on by whoever owns the function's configuration space when it hands the
+//! function over (`plans/IOMMU.md` IOM7).
 //!
 //! [`PciBus`] is that surface. The PCI configuration-access library
 //! (`lib/pci`) implements it; a device-class driver (`drivers/bus/usb`,
@@ -22,6 +23,16 @@ use super::bus::Bus;
 use super::msix::MsiMessage;
 use super::{DriverError, MmioMapper, RegisterWindow};
 use crate::HwNode;
+
+/// Byte offset of a function's command/status dword in its configuration
+/// header (PCI Local Bus 3.0 §6.2.2).
+pub const COMMAND_OFFSET: u16 = 0x04;
+/// The command register's Memory Space Enable bit: the function decodes its
+/// memory BARs.
+pub const MEMORY_SPACE_ENABLE: u32 = 1 << 1;
+/// The command register's Bus Master Enable bit: the function may issue
+/// upstream memory requests, its DMA and the writes that deliver its MSIs.
+pub const BUS_MASTER_ENABLE: u32 = 1 << 2;
 
 /// Devices one PCI bus holds.
 pub const PCI_DEVICES: u8 = 32;
@@ -69,9 +80,10 @@ pub fn config_address(id: u16) -> u64 {
 /// [`MmioMapper`], which enforces
 /// [`CapabilityId::MMIO_MAP`](crate::CapabilityId::MMIO_MAP); the
 /// implementation synthesises no pointer itself (no
-/// ambient authority). [`enable_bus_master`](Self::enable_bus_master)
-/// touches only the function's own configuration space, which the bus
-/// driver already reaches by holding its [`DriverHandle`](crate::driver::DriverHandle).
+/// ambient authority). [`enable_memory_space`](Self::enable_memory_space)
+/// and [`set_bus_master`](Self::set_bus_master) touch only the function's
+/// own configuration space, which the bus driver already reaches by holding
+/// its [`DriverHandle`](crate::driver::DriverHandle).
 pub trait PciBus: Bus {
     /// Resolve the memory BAR at `bar_index` on function `bdf` and ask
     /// `mapper` to map it, returning the resulting [`RegisterWindow`].
@@ -102,24 +114,37 @@ pub trait PciBus: Bus {
         mapper: &dyn MmioMapper,
     ) -> Result<RegisterWindow, DriverError>;
 
-    /// Enable memory-space decoding and bus-mastering on function
-    /// `bdf` (PCI Local Bus 3.0 §6.2.2).
-    ///
-    /// Firmware leaves the Bus Master Enable bit clear, so a function
-    /// whose BAR is mapped but whose bus-master bit is clear can never
-    /// issue the upstream memory transactions its DMA rings depend on.
-    /// A driver that programs a device for DMA calls this once before
-    /// it expects the controller to touch host memory.
+    /// Turn on decoding of function `bdf`'s memory BARs (Memory Space
+    /// Enable, PCI Local Bus 3.0 §6.2.2), leaving every other command bit
+    /// as it was. A BAR, and an MSI-X table inside one, answers only once
+    /// this is on.
     ///
     /// The status half of the command/status register is RW1C, so the
-    /// implementation must preserve the low command bits, write the
-    /// high status bits as zero, and OR in the two enable bits.
+    /// implementation writes it as zero.
     ///
     /// # Errors
     ///
     /// * [`DriverError::DeviceFault`] if the configuration write cannot
     ///   be completed by the bus transport.
-    fn enable_bus_master(&self, bdf: u64) -> Result<(), DriverError>;
+    fn enable_memory_space(&self, bdf: u64) -> Result<(), DriverError>;
+
+    /// Let function `bdf` issue upstream memory requests — DMA, and the
+    /// writes that deliver its MSIs — or stop it (Bus Master Enable, PCI
+    /// Local Bus 3.0 §6.2.2), leaving every other command bit as it was.
+    ///
+    /// Only the owner of the function's configuration space calls this,
+    /// and only when it hands the function over or takes it back: behind a
+    /// DMA translation unit a function masters only once its owner's
+    /// domain is attached (`plans/IOMMU.md` IOM7). Nothing else turns it on.
+    ///
+    /// The status half of the command/status register is RW1C, so the
+    /// implementation writes it as zero.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::DeviceFault`] if the configuration write cannot
+    ///   be completed by the bus transport.
+    fn set_bus_master(&self, bdf: u64, master: bool) -> Result<(), DriverError>;
 
     /// Assign a memory base to the BAR at `bar_index` on function
     /// `bdf` if it is currently **unassigned**, placing it inside the
@@ -226,7 +251,9 @@ pub trait PciBus: Bus {
     /// it into the capability's Message-Address/Message-Data registers, then
     /// sets MSI Enable with Multiple-Message-Enable cleared (exactly one
     /// vector). Unlike `route_msix` it needs no [`MmioMapper`] — the MSI
-    /// capability lives entirely in configuration space.
+    /// capability lives entirely in configuration space. Bus mastering is
+    /// left as it was: the message is delivered only once the function is
+    /// a bus master ([`set_bus_master`](Self::set_bus_master)).
     ///
     /// The default implementation returns [`DriverError::Unsupported`], the
     /// correct shape for a bus seam that does not provision MSI (a test
@@ -316,7 +343,8 @@ mod tests {
     struct FakeBus {
         bar_base: u64,
         bar_size: u64,
-        master_enabled: Cell<bool>,
+        decoding: Cell<bool>,
+        mastering: Cell<bool>,
     }
 
     impl Bus for FakeBus {
@@ -354,8 +382,13 @@ mod tests {
                 .map_err(MmioMapError::as_driver_error)
         }
 
-        fn enable_bus_master(&self, _bdf: u64) -> Result<(), DriverError> {
-            self.master_enabled.set(true);
+        fn enable_memory_space(&self, _bdf: u64) -> Result<(), DriverError> {
+            self.decoding.set(true);
+            Ok(())
+        }
+
+        fn set_bus_master(&self, _bdf: u64, master: bool) -> Result<(), DriverError> {
+            self.mastering.set(master);
             Ok(())
         }
 
@@ -403,12 +436,13 @@ mod tests {
         FakeBus {
             bar_base: 0x6000_0000,
             bar_size: 0x40,
-            master_enabled: Cell::new(false),
+            decoding: Cell::new(false),
+            mastering: Cell::new(false),
         }
     }
 
     #[test]
-    fn trait_object_maps_the_bar_and_enables_mastering() {
+    fn trait_object_maps_the_bar_and_turns_decoding_and_mastering_on_and_off() {
         let bus = bus();
         let dyn_bus: &dyn PciBus = &bus;
         let mapper = FakeMapper {
@@ -416,14 +450,19 @@ mod tests {
             last: Cell::new(None),
         };
         dyn_bus
-            .enable_bus_master(0x0001_0000)
-            .expect("bus master enable");
+            .enable_memory_space(0x0001_0000)
+            .expect("memory decoding");
         let window = dyn_bus
             .map_bar_window(0x0001_0000, 0, &mapper)
             .expect("bar window");
         assert_eq!(window.len(), 0x40);
         assert_eq!(mapper.last.get(), Some((0x6000_0000, 0x40)));
-        assert!(bus.master_enabled.get());
+        assert!(bus.decoding.get());
+        assert!(!bus.mastering.get(), "decoding makes no bus master");
+        dyn_bus.set_bus_master(0x0001_0000, true).expect("master");
+        assert!(bus.mastering.get());
+        dyn_bus.set_bus_master(0x0001_0000, false).expect("stop");
+        assert!(!bus.mastering.get());
     }
 
     #[test]

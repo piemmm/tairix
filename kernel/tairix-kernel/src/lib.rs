@@ -22,7 +22,7 @@
 //! | `dispatch_core` | Arch-neutral syscall-dispatch helpers shared by every port (host-tested).         |
 //! | `fatal_bridge` | The one panic/kernel-fault bridge into `kernel_core`'s fatal-report path.         |
 //! | `spawn_layout` | Shared user-space layout constants for every port's spawn seam/producer. |
-//! | `x86_64`        | The x86_64 port: `arch_wrapper`, `dispatch`, `boot`, `init_spawn`, `spawn_producer`, `ioapic_controller`, `virtio_boot`, `driver_host`, `panic_ctx`, `serial_sink`. |
+//! | `x86_64`        | The x86_64 port: `arch_wrapper`, `dispatch`, `boot`, `init_spawn`, `spawn_producer`, `ioapic_controller`, `msi`, `root_unlock`, `panic_ctx`, `serial_sink`. |
 //! | `aarch64`       | The aarch64 (Raspberry Pi 4) port: `arch_wrapper`, `dispatch`, `boot`, `init_spawn`, `spawn_producer` (`plans/PI.md` P1). |
 //! | `riscv64`       | The riscv64 (QEMU `virt` / SiFive) port: `dispatch`, `boot`, `init_spawn`, `spawn_producer` (`plans/PI.md` RV-P1). |
 //! | `mem_map`       | aarch64 `/memory` → `BootMemoryMap` builder (host-tested; `plans/PI.md` P6c-1).    |
@@ -183,6 +183,12 @@ pub mod hwdiscovery;
 // assembles the tree and runs the virtio-MMIO probe.
 #[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64", kernel_isa = "riscv64"))]
 pub mod hwtree_node_ids;
+
+// The PCI configuration space the kernel owns where it enumerates PCI itself:
+// the one bus every kernel access takes, and the bus mastering of the
+// functions it hands over (`plans/IOMMU.md` IOM7). Host-tested.
+#[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64", kernel_isa = "riscv64"))]
+pub mod pci_host;
 
 // The boot-display publication step (`plans/DISPLAY.md` D7d): turns the
 // architecture port's discovered framebuffer-boot-console scan-out facts
@@ -605,10 +611,6 @@ pub use aarch64::arch_wrapper::{Aarch64BinArch, UartConsole, UART_CONSOLE};
 pub use x86_64::arch_wrapper::BinArch;
 #[cfg(kernel_isa = "x86_64")]
 pub use x86_64::dispatch::{production_dispatch, DISPATCH_SLOT};
-#[cfg(kernel_isa = "x86_64")]
-pub use x86_64::driver_host::{run_with_driver_host, DriverHostConfig};
-#[cfg(kernel_isa = "x86_64")]
-pub use x86_64::virtio_boot::{provision_and_run, VirtioBootConfig};
 // The architecture-neutral virtio factory and provisioning walks now
 // live in `tairix-kernel-virtio` so every architecture port can reuse
 // them; re-exported here to keep this crate's public

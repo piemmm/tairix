@@ -261,4 +261,4 @@ confirmed by S0.
 | S3 | A driver for the machine's internal storage (no NVMe, AHCI or SDHCI driver exists in `drivers/storage`) | planned |
 | S4 | The ACPI namespace: the AML bus driver, power-off, the power button, the i8042 (`PNP0303`), and ACPI-enumerated I2C/HID devices (`plans/ACPI.md`); the battery | planned |
 | S5 | Real-silicon hardening and robustness: `plans/ARCHSUPPORT.md` A8 (KPTI, speculation barriers), `plans/OPEN-DEFECTS.md` D85 (spurious LAPIC interrupt), D3 (hard-lockup watchdog) | planned |
-| S6 | Every PCI function the ECAM walk finds published into the hardware tree with its BAR, interrupt and DMA-stream grants, bus mastering left to the bound driver (`plans/IOMMU.md` IOM7, IOM9) | planned |
+| S6 | Every PCI function the ECAM walk finds published into the hardware tree with its BAR, interrupt and DMA-stream grants, its bus mastering following its owner as the kernel's PCI host holds it (`plans/IOMMU.md` IOM7, IOM9) | planned |

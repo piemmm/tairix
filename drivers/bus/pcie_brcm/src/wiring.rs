@@ -283,10 +283,12 @@ pub fn emit_vl805_node(
     publish_usb_function(host, &bus, &bringup.windows)
 }
 
-/// Enumerate the USB host controller on the trained `bus`, assign/enable/map
+/// Enumerate the USB host controller on the trained `bus`, assign/decode/map
 /// its register BAR, and publish it as a bindable child [`HwNode`] carrying
 /// exactly the two device-resource grant *requests* the matched downstream
-/// xHCI driver needs and no more.
+/// xHCI driver needs and no more. This driver owns the function's
+/// configuration space, so it makes the function a bus master as it hands
+/// it over, and stops it again if the publish is refused.
 ///
 /// Split out from [`emit_vl805_node`] so the post-link logic — the part QEMU
 /// can model (the link training itself is metal-only) — is
@@ -332,9 +334,8 @@ pub fn publish_usb_function(
     let bdf = find_function_by_class(bus, USB_CONTROLLER_CLASS)?;
     let mapper: &dyn MmioMapper = host.mmio_mapper().ok_or(DriverError::Unsupported)?;
 
-    // Assign (when firmware left it unassigned), enable bus-mastering on, and
-    // map the controller's BAR — the shared `lib/pci` primitive both this
-    // driver and the xHCI driver use. The map is a
+    // Assign (when firmware left it unassigned), decode, and map the
+    // controller's BAR — the shared `lib/pci` primitive. The map is a
     // transient probe: `phys_base` is the BAR's assigned base in the address
     // space the mapper maps (PCIe-bus space, since the bridge mapper
     // translates) and `len` its probed size.
@@ -397,6 +398,24 @@ pub fn publish_usb_function(
         }
     }
 
-    host.emit_node(node)?;
+    hand_over(host, bus, bdf, &node)?;
     Ok(node)
+}
+
+/// Make function `bdf` a bus master and publish `node` for it. A function no
+/// driver was handed does not master: a refused publish stops it again.
+fn hand_over(
+    host: &dyn DriverHost,
+    bus: &dyn PciBus,
+    bdf: u64,
+    node: &HwNode,
+) -> Result<(), DriverError> {
+    bus.set_bus_master(bdf, true)?;
+    match host.emit_node(*node) {
+        Ok(()) => Ok(()),
+        Err(refused) => {
+            bus.set_bus_master(bdf, false)?;
+            Err(refused)
+        }
+    }
 }

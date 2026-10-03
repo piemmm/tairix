@@ -9,6 +9,7 @@
 //! external timeouts.
 
 use tairix_abi::driver::bus::BusDevice;
+use tairix_abi::driver::pci::{BUS_MASTER_ENABLE, COMMAND_OFFSET, MEMORY_SPACE_ENABLE};
 use tairix_abi::driver::virtio_pci::{
     common, VIRTIO_PCI_CFG_COMMON, VIRTIO_PCI_CFG_NOTIFY, VIRTIO_PCI_CFG_PCI,
 };
@@ -55,16 +56,16 @@ const MSIX_CTRL_ENABLE: u32 = 1 << 31;
 /// entries deliver.
 const MSIX_CTRL_FUNCTION_MASK: u32 = 1 << 30;
 
-/// PCI Command register "Memory Space Enable" bit (PCI Local Bus 3.0
-/// §6.2.2). Set so the function decodes accesses to its memory BARs —
-/// required to reach the virtio register windows and the MSI-X table.
-const CMD_MEMORY_SPACE: u32 = 1 << 1;
+/// The RW1C status half of the command/status dword, written as zero so no
+/// latched status bit is cleared.
+const COMMAND_BITS: u32 = 0xFFFF;
 
-/// PCI Command register "Bus Master Enable" bit (PCI Local Bus 3.0
-/// §6.2.2). Set so the function may issue upstream memory transactions
-/// — required both for virtqueue DMA and for MSI-X message delivery
-/// (an MSI-X interrupt is itself an upstream memory write).
-const CMD_BUS_MASTER: u32 = 1 << 2;
+/// [`COMMAND_OFFSET`] as the byte offset a configuration address takes.
+const COMMAND_REGISTER: u8 = {
+    let [low, high] = COMMAND_OFFSET.to_le_bytes();
+    assert!(high == 0, "the command register lies in the header");
+    low
+};
 
 /// MSI Message Control "MSI Enable" bit (PCI Local Bus 3.0 §6.8.1.3, MC bit 0).
 const MSI_MC_ENABLE: u16 = 1 << 0;
@@ -364,29 +365,34 @@ impl<C: ConfigSpace> Pci<C> {
             .map_err(MmioMapError::as_driver_error)
     }
 
-    /// Enable memory-space decoding and bus-mastering on function
-    /// `bdf` (PCI Local Bus 3.0 §6.2.2).
-    ///
-    /// Firmware leaves the Bus Master Enable bit clear, so a function
-    /// whose register block is mapped but whose bus-master bit is clear
-    /// can never issue the upstream memory transactions its DMA rings
-    /// depend on. A DMA-driving driver (virtio, xHCI) calls this once
-    /// before programming the device. [`route_msix`](Self::route_msix)
-    /// folds the same activation into its own hand-off, so the two
-    /// share one definition.
+    /// Turn on decoding of function `bdf`'s memory BARs, leaving every
+    /// other command bit as it was.
     ///
     /// The in-tree [`ConfigSpace`] backends' accesses are infallible,
     /// so this cannot fail; the [`PciBus`](tairix_abi::driver::pci::PciBus)
     /// trait method wraps the result in `Ok` and reserves the error
     /// arm for a future fallible transport.
-    pub fn enable_bus_master(&self, bdf: u64) {
-        let cmd_addr = addr_with_reg(unpack_bdf(bdf, 0), 1);
-        let command = self.config.read32(cmd_addr);
-        // Preserve the low-16 command bits, drop the high-16 status
-        // bits to 0 (RW1C: a 0 write never clears a status bit), then
-        // OR in memory-space + bus-master enable.
-        let command = (command & 0xFFFF) | CMD_MEMORY_SPACE | CMD_BUS_MASTER;
-        self.config.write32(cmd_addr, command);
+    pub fn enable_memory_space(&self, bdf: u64) {
+        self.update_command(bdf, MEMORY_SPACE_ENABLE, true);
+    }
+
+    /// Let function `bdf` master upstream memory requests, or stop it,
+    /// leaving every other command bit as it was. Infallible for the same
+    /// reason as [`enable_memory_space`](Self::enable_memory_space).
+    pub fn set_bus_master(&self, bdf: u64, master: bool) {
+        self.update_command(bdf, BUS_MASTER_ENABLE, master);
+    }
+
+    /// A command write a device acts on even when nothing changes — a
+    /// virtio function written with Bus Master Enable clear disables
+    /// itself — so an unchanged bit is not written.
+    fn update_command(&self, bdf: u64, bit: u32, on: bool) {
+        let cmd_addr = addr_with_byte_offset(unpack_bdf(bdf, 0), COMMAND_REGISTER);
+        let command = self.config.read32(cmd_addr) & COMMAND_BITS;
+        let updated = if on { command | bit } else { command & !bit };
+        if updated != command {
+            self.config.write32(cmd_addr, updated);
+        }
     }
 
     /// Read the configuration-space dword at byte `offset` of function
@@ -677,7 +683,9 @@ impl<C: ConfigSpace> Pci<C> {
     /// bus driver writes it into the device's table and flips the
     /// enable bit. The driver never synthesises a pointer — the table
     /// write goes through a kernel-mapped [`RegisterWindow`] obtained
-    /// from `mapper`.
+    /// from `mapper`. Memory decoding is turned on, since the table lives
+    /// in a BAR; bus mastering is left as it was, so the message is
+    /// delivered only once the function's owner makes it a bus master.
     ///
     /// # Errors
     ///
@@ -707,15 +715,6 @@ impl<C: ConfigSpace> Pci<C> {
         message: MsiMessage,
         mapper: &dyn MmioMapper,
     ) -> Result<(), DriverError> {
-        // Activate the function before touching its MSI-X table: enable
-        // memory-space decoding (so the table BAR responds) and bus
-        // mastering (so both virtqueue DMA and the MSI-X message write
-        // can reach the host bridge). Firmware leaves bus mastering off
-        // by default, so a device whose interrupt was "routed" but whose
-        // bus-master bit is clear would never deliver — fold the enable
-        // into the same activation step (PCI Local Bus 3.0 §6.2.2).
-        self.enable_bus_master(bdf);
-
         let (cap_offset, table_size, table_bar, table_offset) = self.find_msix(bdf)?;
         if entry >= table_size {
             return Err(DriverError::OutOfRange);
@@ -739,6 +738,7 @@ impl<C: ConfigSpace> Pci<C> {
             .base
             .checked_add(entry_off)
             .ok_or(DriverError::OutOfRange)?;
+        self.enable_memory_space(bdf);
         let window = mapper
             .map_window(phys, MSIX_ENTRY_LEN)
             .map_err(MmioMapError::as_driver_error)?;
@@ -787,9 +787,9 @@ impl<C: ConfigSpace> Pci<C> {
     /// Unlike [`route_msix`](Self::route_msix) this needs no `MmioMapper`:
     /// the MSI capability lives entirely in configuration space, reached
     /// through the same [`ConfigSpace`] backend, so there is no BAR table
-    /// to map. Bus mastering is enabled first, since an MSI is itself an
-    /// upstream memory write the function cannot issue with the bus-master
-    /// bit clear (PCI Local Bus 3.0 §6.2.2).
+    /// to map. Bus mastering is left as it was: an MSI is an upstream memory
+    /// write, so it is delivered only once the function's owner makes it a
+    /// bus master.
     ///
     /// # Errors
     ///
@@ -799,10 +799,6 @@ impl<C: ConfigSpace> Pci<C> {
     ///   addressing but the capability is 32-bit only (writing the low
     ///   half alone would deliver to the wrong address — fail closed).
     pub fn route_msi(&self, bdf: u64, message: MsiMessage) -> Result<(), DriverError> {
-        // An MSI is an upstream memory write; without bus mastering the
-        // function can never deliver it (PCI Local Bus 3.0 §6.2.2).
-        self.enable_bus_master(bdf);
-
         let (cap_offset, addr64, per_vector_masking) = self.find_msi(bdf)?;
         let base = unpack_bdf(bdf, 0);
         // Message Address (low). Bits 1:0 are reserved and must be written

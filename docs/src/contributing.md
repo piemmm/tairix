@@ -210,6 +210,14 @@ unrepresentable rather than a note each new test has to remember — and the
 `registry_guard` helpers, which serialise a registry's *residents*, do not and
 cannot cover it.
 
+Per-CPU state is the same hazard keyed on a CPU: the preempt latch, the
+published live space, running stack and resume handle, and the watchdog stamps
+share one table, and every unpinned `TestArch` reports CPU 0. A test that pins
+a CPU takes it from `test_boot::claim_cpu`, which never hands a slot out twice,
+and runs on it through `TestArch::on_cpu`. The test publication helpers refuse
+a CPU no test claimed, so a hand-picked one fails every run rather than one in
+thousands.
+
 ## `clippy` lints every target, not just the host
 
 A host-only `cargo clippy --workspace --all-targets` lints almost none of the

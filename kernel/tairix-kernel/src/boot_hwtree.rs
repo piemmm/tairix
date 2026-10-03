@@ -36,6 +36,12 @@ impl CollectingHwNodeSink {
     pub fn into_vec(self) -> Vec<HwNode> {
         self.nodes
     }
+
+    /// The nodes collected so far, in emit order.
+    #[must_use]
+    pub fn nodes(&self) -> &[HwNode] {
+        &self.nodes
+    }
 }
 
 impl Default for CollectingHwNodeSink {

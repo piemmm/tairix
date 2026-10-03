@@ -52,7 +52,8 @@ in all of them applies here without exception.
 - **The boot floor binds by discovery-match, never by assumption (§18.6).**
   The x86_64 root storage path is the existing in-kernel
   `tairix_drv_storage_virtio_blk` floor entry over the virtio-PCI
-  provisioning seam (`kernel/tairix-kernel/src/x86_64/virtio_boot.rs`),
+  provisioning seam (`kernel/tairix-kernel/src/x86_64/root_unlock.rs`,
+  through the kernel's PCI host),
   bound because the ACPI/PCI-enumerated hardware tree matched its bind
   table through the shared `lib/devmatch` policy — no compile-time device
   address, no `cfg` fork outside the port (§2.20).

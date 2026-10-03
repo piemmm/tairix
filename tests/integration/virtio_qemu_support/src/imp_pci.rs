@@ -2,14 +2,15 @@
 //!
 //! The device-agnostic lifecycle and the per-device tails live in
 //! [`crate::common`]; this module owns only the x86_64-specific bring-up
-//! that produces a [`PciTransport`] and an interrupt path: the
-//! `mechanism_one(x86_port_io())` PCI walk, the four virtio register-window maps
-//! through the `CAP_MMIO_MAP`-gated [`KernelMmioMapper`], MSI-X routing
-//! off the boot-assigned vector, and the `sti; hlt; cli` IRQ park.
+//! that produces a [`PciTransport`] and an interrupt path: the PCI walk
+//! through the kernel's one owner of configuration space, the four virtio
+//! register-window maps through the `CAP_MMIO_MAP`-gated
+//! [`KernelMmioMapper`], MSI-X routing off the boot-assigned vector, the
+//! hand-over that makes the function a bus master, and the `sti; hlt; cli`
+//! IRQ park.
 
 use tairix_abi::CapabilityId;
 use tairix_arch_x86_64::irq::{global_routing, msi_message};
-use tairix_arch_x86_64::pio::x86_port_io;
 use tairix_arch_x86_64::qemu_exit;
 use tairix_arch_x86_64::smp::bsp_lapic_id;
 use tairix_caps::CapabilitySet;
@@ -25,7 +26,6 @@ use tairix_kernel_sec::captable::{ProcessId, TaskCapabilities};
 use tairix_kernel_sec::identity::UserId;
 use tairix_kernel_virtio::{KernelMmioMapper, KernelVirtioHost};
 use tairix_log::{Event, EventId, Level, Sink};
-use tairix_pci::mechanism_one;
 use tairix_virtio::{PoolId, VirtioHost, VirtioHostFactory};
 
 use crate::common::{
@@ -214,8 +214,6 @@ pub fn run_virtio_pci_scenario<F>(device_id: u16, cfg: &ScenarioConfig<'_>, body
 where
     F: FnOnce(&dyn QemuEnv, PciTransport, &dyn VirtioHost) -> Result<(), &'static str>,
 {
-    use tairix_abi::driver::msix::MsixBus;
-
     let env = PciEnv;
     env.log(cfg.start_msg);
 
@@ -259,10 +257,12 @@ where
     };
     let msi = msi_message(vector, bsp_lapic_id());
 
-    // 4. Walk PCI, map the four virtio register windows, route MSI-X.
-    //    The x86_64 architecture port supplies the `PortIo` backend the
-    //    bus driver drives through the `tairix_abi::PortIo` seam.
-    let bus = mechanism_one(x86_port_io());
+    // 4. Walk PCI, map the four virtio register windows, route MSI-X, and
+    //    hand the function over a bus master, through the kernel's one owner
+    //    of the configuration space the boot probe enumerated.
+    let Some(pci) = tairix_kernel::x86_64::boot::pci_host() else {
+        env.fail("no PCI host");
+    };
     let Ok(mut mmio) = MmioMap::new(
         AddressSpace::new(HostPageTable::new()),
         VirtAddr::new(MMIO_VBASE),
@@ -273,17 +273,22 @@ where
     };
     let mut transport = {
         let mapper = KernelMmioMapper::new(&mut mmio, &caller, &SERIAL_SINK);
-        let Ok(prov) =
-            tairix_kernel::provision_virtio_pci(&bus, device_id, &mapper, PciTransport::new)
-        else {
-            env.fail("virtio-PCI provisioning walk");
-        };
-        if bus.route_msix(prov.bdf, MSIX_ENTRY, msi, &mapper).is_err() {
-            env.fail("route MSI-X");
+        let provisioned = pci.with(|bus| {
+            let prov =
+                tairix_kernel::provision_virtio_pci(bus, device_id, &mapper, PciTransport::new)
+                    .map_err(|_| "virtio-PCI provisioning walk")?;
+            bus.route_msix(prov.bdf, MSIX_ENTRY, msi, &mapper)
+                .map_err(|_| "route MSI-X")?;
+            bus.set_bus_master(prov.bdf, true)
+                .map_err(|_| "hand the function over")?;
+            Ok::<_, &'static str>(prov.transport)
+        });
+        match provisioned {
+            Ok(transport) => transport,
+            Err(step) => env.fail(step),
         }
-        prov.transport
     };
-    env.log("virtio-qemu: transport provisioned, MSI-X routed");
+    env.log("virtio-qemu: transport provisioned, MSI-X routed, bus master");
 
     // 5. Mint the per-device DMA host the driver allocates through.
     let space = AddressSpace::new(HostPageTable::new());

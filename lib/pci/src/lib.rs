@@ -63,6 +63,7 @@ mod tests;
 pub use locate::{
     assign_and_map_bar, bus_to_cpu_phys, find_function_by_class, USB_CONTROLLER_CLASS,
 };
+pub use mech_one::reaches_config_ports;
 
 // --- Real-hardware construction seam --------------------------------------
 
@@ -88,6 +89,12 @@ pub use locate::{
 /// bridge has been probed. Configuration access happens lazily on the
 /// trait methods, each of which drives the [`PortIo`] backend against
 /// the two legacy configuration ports.
+///
+/// Every access is an address write to one port followed by a data access
+/// to the other, and the pair is one machine-wide resource: two accesses
+/// interleaved from different CPUs reach the wrong register. The caller
+/// serialises every user of the machine's ports, as the x86_64 port's one
+/// configuration-space owner does.
 ///
 /// # Platform
 ///
@@ -237,7 +244,8 @@ impl<C: ConfigSpace> MsixBus for Pci<C> {
 
 // The `abi-v1` generic-PCI transport seam: the surface
 // a non-virtio, DMA-driving device driver (xHCI) consumes to map one of
-// the controller's BARs and enable bus mastering, reached through
+// the controller's BARs, and its configuration-space owner drives to turn
+// decoding and bus mastering on, reached through
 // `&dyn PciBus` so the device driver never names this concrete crate. Both methods forward to the inherent
 // enumeration core; the inherent methods win method resolution, so the
 // forward is not recursive.
@@ -251,8 +259,13 @@ impl<C: ConfigSpace> PciBus for Pci<C> {
         Pci::map_bar_window(self, bdf, bar_index, mapper)
     }
 
-    fn enable_bus_master(&self, bdf: u64) -> Result<(), DriverError> {
-        Pci::enable_bus_master(self, bdf);
+    fn enable_memory_space(&self, bdf: u64) -> Result<(), DriverError> {
+        Pci::enable_memory_space(self, bdf);
+        Ok(())
+    }
+
+    fn set_bus_master(&self, bdf: u64, master: bool) -> Result<(), DriverError> {
+        Pci::set_bus_master(self, bdf, master);
         Ok(())
     }
 

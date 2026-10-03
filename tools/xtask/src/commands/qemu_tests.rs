@@ -2836,7 +2836,7 @@ static TESTS: &[QemuTest] = &[
     // `WaitStep::Ready`, then drains and decodes the resulting press
     // then release into platform-neutral `InputEvent`s through the
     // driver's `poll`. Any deviation flips `qemu_exit::exit_failure`.
-    // The default `q35` machine exposes the i8042 and a 24-pin
+    // The default `pc` machine exposes the i8042 and a 24-pin
     // IO-APIC, so no extra QEMU device is needed. Single CPU suffices
     // and the 60-second budget matches the other Stage-3/4
     // boot-then-do-fixed-work tests.

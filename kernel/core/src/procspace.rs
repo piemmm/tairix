@@ -266,21 +266,19 @@ mod tests {
     /// what the former unique `&mut` publication could not express.
     #[test]
     fn two_published_cpus_reach_one_space() {
-        // CPU indices used by no other test in this crate, so parallel runs
-        // never share the global per-CPU slots.
-        const FIRST_CPU: u32 = 43;
-        const SECOND_CPU: u32 = 44;
+        let first_cpu = crate::test_boot::claim_cpu();
+        let second_cpu = crate::test_boot::claim_cpu();
 
         let shared = Arc::new(ProcessSpace::for_test(host_test_space!()));
-        let _first = crate::kthread::publish_live_space_for_test(FIRST_CPU, Arc::clone(&shared));
-        let _second = crate::kthread::publish_live_space_for_test(SECOND_CPU, shared);
+        let _first = crate::kthread::publish_live_space_for_test(first_cpu, Arc::clone(&shared));
+        let _second = crate::kthread::publish_live_space_for_test(second_cpu, shared);
 
         let from_first =
-            crate::kthread::with_current_live_space(FIRST_CPU, |space| space.reserve_anonymous(2))
+            crate::kthread::with_current_live_space(first_cpu, |space| space.reserve_anonymous(2))
                 .expect("the slot is published")
                 .expect("reservation fits the window");
         let from_second =
-            crate::kthread::with_current_live_space(SECOND_CPU, |space| space.reserve_anonymous(2))
+            crate::kthread::with_current_live_space(second_cpu, |space| space.reserve_anonymous(2))
                 .expect("the slot is published")
                 .expect("reservation fits the window");
         assert_ne!(
@@ -301,12 +299,10 @@ mod tests {
     /// right allocation.
     #[test]
     fn the_published_handle_is_what_a_reconstruction_shares() {
-        // A CPU no other test in this crate publishes on, so the global
-        // per-CPU slot is unshared under a parallel run.
-        const CPU: u32 = 47;
+        let cpu = crate::test_boot::claim_cpu();
 
         let shared = Arc::new(ProcessSpace::for_test(host_test_space!()));
-        let published = crate::kthread::publish_live_space_for_test(CPU, Arc::clone(&shared));
+        let published = crate::kthread::publish_live_space_for_test(cpu, Arc::clone(&shared));
         assert_eq!(
             Arc::strong_count(&shared),
             2,
@@ -314,7 +310,7 @@ mod tests {
         );
 
         let reconstructed =
-            crate::kthread::current_process_space(CPU).expect("the slot is published");
+            crate::kthread::current_process_space(cpu).expect("the slot is published");
         assert!(
             Arc::ptr_eq(&shared, &reconstructed),
             "the reconstruction names the published allocation"
@@ -334,7 +330,7 @@ mod tests {
 
         drop(published);
         assert!(
-            crate::kthread::current_process_space(CPU).is_none(),
+            crate::kthread::current_process_space(cpu).is_none(),
             "a cleared slot fails closed rather than handing out a stale space"
         );
         assert_eq!(Arc::strong_count(&shared), 1);

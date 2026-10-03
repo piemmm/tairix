@@ -971,35 +971,70 @@ fn route_msix_programs_entry_and_enables_function() {
     assert_eq!(enable.map(|(_, v)| *v), Some(0x8003_0011));
 }
 
+/// The q35 fixture with the virtio function `00:03.0`'s command half
+/// reading `command`.
+fn with_virtio_command(command: u16) -> MockConfigSpace {
+    let mut config = q35_fixture();
+    let function = config
+        .funcs
+        .iter_mut()
+        .find(|f| f.bus == 0 && f.device == 3 && f.function == 0)
+        .expect("q35 virtio function");
+    let register = function
+        .regs
+        .iter_mut()
+        .find(|(register, _)| *register == 1)
+        .expect("command/status dword");
+    register.1 = (register.1 & 0xFFFF_0000) | u32::from(command);
+    config
+}
+
+/// Every value written to device `device`'s command/status dword on bus 0.
+fn command_writes(state: &MockState, device: u8) -> Vec<u32> {
+    state
+        .writes
+        .iter()
+        .filter(|(a, _)| a.bus == 0 && a.device == device && a.function == 0 && a.register == 1)
+        .map(|(_, v)| *v)
+        .collect()
+}
+
 #[test]
-fn route_msix_enables_memory_space_and_bus_master() {
-    let config = q35_fixture();
-    let state = config.shared_state();
-    let pci = Pci::new(config);
-    let mapper = MockMapper::new(true);
+fn route_msix_turns_decoding_on_and_leaves_bus_mastering_as_it_was() {
     let message = MsiMessage {
         address: 0xFEE0_1000,
         data: 0x0000_0030,
     };
+    // Decoding off, mastering off; mastering on but decoding off; both
+    // already as wanted. The status half is written as zero (RW1C).
+    for (command, written) in [
+        (0x0000, Some(0x0002)),
+        (0x0004, Some(0x0006)),
+        (0x0002, None),
+    ] {
+        let config = with_virtio_command(command);
+        let state = config.shared_state();
+        let pci = Pci::new(config);
+        pci.route_msix(virtio_bdf(), 0, message, &MockMapper::new(true))
+            .expect("routes entry 0");
+        assert_eq!(
+            command_writes(&state.borrow(), 3).last().copied(),
+            written,
+            "command {command:#06x}"
+        );
+    }
+}
 
-    pci.route_msix(virtio_bdf(), 0, message, &mapper)
-        .expect("routes entry 0");
-
-    // The function's Command register (dword 1) was written with
-    // Memory Space Enable (bit 1) and Bus Master Enable (bit 2) set:
-    // without bus mastering the device could neither DMA the
-    // virtqueues nor deliver the MSI-X message it was just handed.
-    let st = state.borrow();
-    let command = st
-        .writes
-        .iter()
-        .rev()
-        .find(|(a, _)| a.bus == 0 && a.device == 3 && a.function == 0 && a.register == 1)
-        .map(|(_, v)| *v)
-        .expect("command register written");
-    assert_eq!(command & 0b110, 0b110, "memory-space + bus-master enabled");
-    // The high-16 status bits were not re-asserted (RW1C safety).
-    assert_eq!(command >> 16, 0, "status half written as zero");
+#[test]
+fn an_unchanged_command_bit_is_not_written() {
+    let config = with_virtio_command(0x0006);
+    let state = config.shared_state();
+    let pci = Pci::new(config);
+    pci.set_bus_master(virtio_bdf(), true);
+    pci.enable_memory_space(virtio_bdf());
+    assert!(command_writes(&state.borrow(), 3).is_empty());
+    pci.set_bus_master(virtio_bdf(), false);
+    assert_eq!(command_writes(&state.borrow(), 3), [0x0002]);
 }
 
 #[test]
@@ -1027,7 +1062,9 @@ fn route_msix_reports_not_found_without_msix_capability() {
 
 #[test]
 fn route_msix_rejects_entry_beyond_table() {
-    let pci = Pci::new(q35_fixture());
+    let config = q35_fixture();
+    let state = config.shared_state();
+    let pci = Pci::new(config);
     let mapper = MockMapper::new(true);
     let message = MsiMessage {
         address: 0xFEE0_0000,
@@ -1038,6 +1075,10 @@ fn route_msix_rejects_entry_beyond_table() {
         pci.route_msix(virtio_bdf(), 4, message, &mapper)
             .unwrap_err(),
         DriverError::OutOfRange
+    );
+    assert!(
+        command_writes(&state.borrow(), 3).is_empty(),
+        "a refused route changes nothing"
     );
 }
 
@@ -1150,9 +1191,7 @@ fn route_msi_programs_address_data_and_enables_single_vector() {
     assert_eq!(header & (1 << 16), 1 << 16, "MSI Enable set");
     assert_eq!(header & (0x7 << 20), 0, "Multiple Message Enable cleared");
     assert_eq!(header & 0xFF, 0x05, "cap_id preserved");
-    // Bus mastering was enabled (an MSI is an upstream memory write).
-    let command = find(1).expect("command written");
-    assert_eq!(command & 0b100, 0b100, "bus-master enabled");
+    assert_eq!(find(1), None, "bus mastering is the function's owner's");
 }
 
 #[test]
@@ -1437,12 +1476,10 @@ fn mechanism_ecam_exposes_the_pci_bus_seam() {
     assert_pci_bus(&bus);
 }
 
-/// `enable_bus_master` sets the command register's Memory Space Enable
-/// and Bus Master Enable bits on the VL805 while leaving the RW1C
-/// status half untouched (the same activation
-/// `route_msix` performs).
+/// Decoding and bus mastering each change only their own command bit on
+/// the VL805, the RW1C status half written as zero.
 #[test]
-fn pci_bus_enable_bus_master_sets_command_bits() {
+fn pci_bus_decoding_and_bus_mastering_change_only_their_own_bits() {
     use tairix_abi::driver::pci::PciBus;
 
     let (backing, window) = vl805_ecam_region();
@@ -1454,13 +1491,6 @@ fn pci_bus_enable_bus_master_sets_command_bits() {
     }
     .pack_bdf()
     .unwrap();
-    let pci = crate::mechanism_ecam(window);
-    (&pci as &dyn PciBus)
-        .enable_bus_master(vl805)
-        .expect("enable bus master");
-    // Re-read the command/status dword (register 1) straight from the
-    // backing: bits 1 (memory space) and 2 (bus master) set, status
-    // half (high 16) still zero.
     let off = ConfigAddress {
         bus: 1,
         device: 0,
@@ -1469,9 +1499,14 @@ fn pci_bus_enable_bus_master_sets_command_bits() {
     }
     .ecam_offset()
     .expect("address in range");
-    let command = backing[off / 4];
-    assert_eq!(command & 0x6, 0x6);
-    assert_eq!(command >> 16, 0);
+    let pci = crate::mechanism_ecam(window);
+    let bus: &dyn PciBus = &pci;
+    bus.enable_memory_space(vl805).expect("decode");
+    assert_eq!(backing[off / 4], 0x2);
+    bus.set_bus_master(vl805, true).expect("master");
+    assert_eq!(backing[off / 4], 0x6);
+    bus.set_bus_master(vl805, false).expect("stop");
+    assert_eq!(backing[off / 4], 0x2);
 }
 
 /// `map_bar_window` resolves the VL805's memory BAR0 and routes the

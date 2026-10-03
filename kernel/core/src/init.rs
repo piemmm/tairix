@@ -408,7 +408,8 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
         let spawner = match state.dma_translation {
             Some(translation) => spawner.with_dma_translation(translation),
             None => spawner,
-        };
+        }
+        .with_mastering(state.mastering);
         let ctx: &'static (dyn InitSpawnCtx + Sync) = Box::leak(Box::new(spawner));
         init.spawn_init(ctx);
     }
@@ -1102,6 +1103,9 @@ pub struct KernelInitSpawner<'a, A: KernelArch> {
     /// The DMA translation a driver's node is checked against at admission,
     /// and the one a kernel service maps its own device's DMA through.
     dma_translation: Option<&'static crate::iommu::Translation>,
+    /// The bus mastering a driver's function follows, and a kernel service
+    /// hands its own device over through.
+    mastering: Option<crate::iommu::Mastering>,
 }
 
 impl<'a, A: KernelArch> KernelInitSpawner<'a, A> {
@@ -1144,6 +1148,7 @@ impl<'a, A: KernelArch> KernelInitSpawner<'a, A> {
             shared_mem_facility,
             tlb_shootdown,
             dma_translation: None,
+            mastering: None,
         }
     }
 
@@ -1152,6 +1157,14 @@ impl<'a, A: KernelArch> KernelInitSpawner<'a, A> {
     #[must_use]
     pub fn with_dma_translation(mut self, translation: &'static crate::iommu::Translation) -> Self {
         self.dma_translation = Some(translation);
+        self
+    }
+
+    /// End drivers, and hand kernel services their devices, through
+    /// `mastering`.
+    #[must_use]
+    pub fn with_mastering(mut self, mastering: crate::iommu::Mastering) -> Self {
+        self.mastering = Some(mastering);
         self
     }
 }
@@ -1798,6 +1811,10 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         self.dma_translation
     }
 
+    fn bus_mastering(&self) -> Option<crate::iommu::Mastering> {
+        self.mastering
+    }
+
     fn spawn_driver_process(
         &self,
         path: &str,
@@ -1979,12 +1996,7 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // An orderly unload leaves its node's quarantine to the next instance
         // and audits none of the driver's DMA memory, regions included. A
         // translated device loses every carve first, so they free instead.
-        let _ = crate::syscalls::revoke_driver_dma(
-            self.dma_translation,
-            self.aspaces,
-            self.audit,
-            sec_id,
-        );
+        crate::syscalls::end_driver_dma(self.dma_translation, self.mastering, self.aspaces, sec_id);
         let _ = crate::sharedreg::reclaim_process(self.shared_mem_facility, sec_id);
 
         // Destroy every synchronous call endpoint the driver served before
@@ -2237,7 +2249,9 @@ fn run_phases<A: KernelArch>(
 
     // Before any driver can be admitted, so no admitted driver's device
     // reaches memory its domain does not map.
-    let dma_translation = build_dma_translation(&arch, frame_allocator, hw_tree, audit_sink);
+    let mastering = crate::iommu::Mastering::new(arch.bus_mastering(), audit_sink);
+    let dma_translation =
+        build_dma_translation(&arch, frame_allocator, hw_tree, audit_sink, mastering);
 
     // Assemble `KernelState` and lift it to `'static` so the
     // `Phase::Syscall` step can publish a `&'static dyn DispatchHook`
@@ -2267,6 +2281,7 @@ fn run_phases<A: KernelArch>(
         irq: irq_table,
         irq_controller,
         dma_translation,
+        mastering,
     }));
 
     // Derive the per-boot resource-limit default from the discovered
@@ -2649,7 +2664,8 @@ fn run_phases<A: KernelArch>(
     let hook = match state.dma_translation {
         Some(translation) => hook.with_dma_translation(translation),
         None => hook,
-    };
+    }
+    .with_mastering(state.mastering);
     // Install the on-disk application store when the boot path provided one
     // (`plans/APPS.md` deliverable 8): the `spawn` syscall then verifies and
     // launches `…/<Name>.app/Run` bundles from the mounted volume. With none
@@ -2798,6 +2814,7 @@ fn build_dma_translation<A: KernelArch + 'static>(
     frames: &'static FrameAllocator,
     tree: &'static (dyn crate::hwtree::HwTreeSource + 'static),
     audit: &'static (dyn Sink + Sync),
+    mastering: crate::iommu::Mastering,
 ) -> Option<&'static crate::iommu::Translation> {
     let snapshot = tree.snapshot().ok()?;
     let mut nodes = alloc::vec::Vec::new();
@@ -2842,10 +2859,13 @@ fn build_dma_translation<A: KernelArch + 'static>(
             }
         }
     }
-    let (translation, outcomes) = crate::iommu::Translation::start(taken, guarded, tree, audit);
+    let (translation, outcomes) =
+        crate::iommu::Translation::start(taken, guarded, tree, audit, mastering);
     for (node, outcome) in outcomes {
-        let outcome = outcome.map_or_else(unit_refusal, |()| "translating");
-        audit_translation_unit(audit, node, outcome);
+        match outcome {
+            Ok(masters) => audit_unit_translating(audit, node, masters),
+            Err(err) => audit_translation_unit(audit, node, unit_refusal(err)),
+        }
     }
     Some(Box::leak(Box::new(translation)))
 }
@@ -2928,11 +2948,7 @@ fn unit_refusal(err: tairix_kernel_iommu_api::IommuError) -> &'static str {
 fn audit_translation_unit(audit: &(dyn Sink + Sync), node: u32, outcome: &'static str) {
     emit(
         audit,
-        if outcome == "translating" {
-            Level::Info
-        } else {
-            Level::Warn
-        },
+        Level::Warn,
         AuditEvent::DmaTranslationUnit,
         &[
             Field {
@@ -2942,6 +2958,32 @@ fn audit_translation_unit(audit: &(dyn Sink + Sync), node: u32, outcome: &'stati
             Field {
                 key: "outcome",
                 value: tairix_log::FieldValue::Str(outcome),
+            },
+        ],
+    );
+}
+
+/// The unit at `node` translates; `masters` functions behind it were found
+/// mastering DMA as it took over though firmware keeps no window for them.
+fn audit_unit_translating(audit: &(dyn Sink + Sync), node: u32, masters: usize) {
+    emit(
+        audit,
+        Level::Info,
+        AuditEvent::DmaTranslationUnit,
+        &[
+            Field {
+                key: "node",
+                value: tairix_log::FieldValue::UnsignedInt(u64::from(node)),
+            },
+            Field {
+                key: "outcome",
+                value: tairix_log::FieldValue::Str("translating"),
+            },
+            Field {
+                key: "masters",
+                value: tairix_log::FieldValue::UnsignedInt(
+                    u64::try_from(masters).unwrap_or(u64::MAX),
+                ),
             },
         ],
     );
@@ -3075,6 +3117,8 @@ pub(crate) struct KernelState<A: KernelArch> {
     /// The DMA translation boot started, when a unit discovery reported
     /// translates.
     pub(crate) dma_translation: Option<&'static crate::iommu::Translation>,
+    /// The bus mastering each DMA owner's function follows.
+    pub(crate) mastering: crate::iommu::Mastering,
 }
 
 fn phase_started(sink: &(dyn Sink + Sync), phase: Phase) {
@@ -3492,23 +3536,20 @@ mod tests {
 
     #[test]
     fn dispatch_loop_clears_a_stale_tick_before_policy_dispatch() {
-        // A CPU index no other test latches, so parallel test threads
-        // never observe each other through the process-wide slots.
-        const CPU: CpuId = 60;
-        let arch = Arc::new(TestArch::with_cpus(CPU + 1));
-        arch.set_current_cpu(CPU);
-        let scheduler = Scheduler::new(SchedulerConfig::defaults_for(CPU + 1), Arc::clone(&arch))
+        let cpu = crate::test_boot::claim_cpu();
+        let arch = Arc::new(TestArch::on_cpu(cpu));
+        let scheduler = Scheduler::new(SchedulerConfig::defaults_for(cpu + 1), Arc::clone(&arch))
             .expect("scheduler builds");
         scheduler
-            .spawn(CPU, Priority::Normal, |_| {
+            .spawn(cpu, Priority::Normal, |_| {
                 tairix_kernel_sched_api::TaskAction::Exit
             })
             .expect("task admitted");
 
-        crate::preempt::note_preempt_tick(CPU);
-        run_dispatch_loop(&scheduler, arch.as_ref(), CPU, DispatchRole::Boot);
+        crate::preempt::note_preempt_tick(cpu);
+        run_dispatch_loop(&scheduler, arch.as_ref(), cpu, DispatchRole::Boot);
 
-        assert!(!crate::preempt::take_preempt_pending(CPU));
+        assert!(!crate::preempt::take_preempt_pending(cpu));
     }
 
     #[test]

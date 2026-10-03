@@ -552,14 +552,8 @@ mod tests {
 
     /// A `TestArch` reporting `cpu`, leaked to the `'static` shape the
     /// producers hold (mirroring the boot-global arch handle).
-    ///
-    /// Each test uses a **distinct** `cpu` so the global per-CPU
-    /// [`with_current_live_space`] slot is never shared between tests running
-    /// in parallel (no flaky tests).
     fn arch_at(cpu: u32) -> &'static TestArch {
-        let arch = Box::leak(Box::new(TestArch::with_cpus(cpu + 1)));
-        arch.set_current_cpu(cpu);
-        arch
+        Box::leak(Box::new(TestArch::on_cpu(cpu)))
     }
 
     /// Wrap `fake` in the refcounted [`ProcessSpace`]
@@ -584,10 +578,11 @@ mod tests {
 
     #[test]
     fn mem_map_routes_a_fixed_request_to_the_current_live_space() {
+        let cpu = crate::test_boot::claim_cpu();
         let (fake, ptr) = shared_fake();
-        let _guard = publish_live_space_for_test(1, fake);
+        let _guard = publish_live_space_for_test(cpu, fake);
 
-        let producer = LiveMemMap::new(arch_at(1));
+        let producer = LiveMemMap::new(arch_at(cpu));
         let base = 0x4000;
         let got = producer.map(2 * PAGE, MapFlags::FIXED, base);
         assert_eq!(got, Ok(base));
@@ -600,10 +595,11 @@ mod tests {
 
     #[test]
     fn mem_map_unmap_routes_to_the_current_live_space() {
+        let cpu = crate::test_boot::claim_cpu();
         let (fake, ptr) = shared_fake();
-        let _guard = publish_live_space_for_test(2, fake);
+        let _guard = publish_live_space_for_test(cpu, fake);
 
-        let producer = LiveMemMap::new(arch_at(2));
+        let producer = LiveMemMap::new(arch_at(cpu));
         assert_eq!(producer.unmap(0x4000, PAGE, &mut Unpublished), Ok(()));
         // SAFETY: see above.
         let recorded = unsafe { &*ptr };
@@ -612,10 +608,11 @@ mod tests {
 
     #[test]
     fn mem_map_non_fixed_routes_to_the_placement_allocator() {
+        let cpu = crate::test_boot::claim_cpu();
         let (fake, ptr) = shared_fake();
-        let _guard = publish_live_space_for_test(3, fake);
+        let _guard = publish_live_space_for_test(cpu, fake);
 
-        let producer = LiveMemMap::new(arch_at(3));
+        let producer = LiveMemMap::new(arch_at(cpu));
         // A non-`FIXED` request asks the live space to choose the base; the
         // `addr_hint` is ignored, and the placed base flows back unchanged.
         let got = producer.map(2 * PAGE, MapFlags::empty(), 0xDEAD_0000);
@@ -630,10 +627,11 @@ mod tests {
 
     #[test]
     fn mem_map_reserve_non_fixed_routes_to_the_placement_reservation() {
+        let cpu = crate::test_boot::claim_cpu();
         let (fake, ptr) = shared_fake();
-        let _guard = publish_live_space_for_test(9, fake);
+        let _guard = publish_live_space_for_test(cpu, fake);
 
-        let producer = LiveMemMap::new(arch_at(9));
+        let producer = LiveMemMap::new(arch_at(cpu));
         // A non-`FIXED` `mem_map` reserves address space only (no eager
         // commit); the placed base flows back unchanged.
         let got = MemMap::reserve(&producer, 2 * PAGE, MapFlags::empty(), 0xDEAD_0000);
@@ -648,10 +646,11 @@ mod tests {
 
     #[test]
     fn mem_map_reserve_fixed_routes_to_the_placed_reservation() {
+        let cpu = crate::test_boot::claim_cpu();
         let (fake, ptr) = shared_fake();
-        let _guard = publish_live_space_for_test(10, fake);
+        let _guard = publish_live_space_for_test(cpu, fake);
 
-        let producer = LiveMemMap::new(arch_at(10));
+        let producer = LiveMemMap::new(arch_at(cpu));
         let base = 0x4000;
         let got = MemMap::reserve(&producer, 2 * PAGE, MapFlags::FIXED, base);
         assert_eq!(got, Ok(base));
@@ -663,9 +662,10 @@ mod tests {
 
     #[test]
     fn mem_map_with_no_published_space_fails_closed_for_a_non_fixed_request() {
+        let cpu = crate::test_boot::claim_cpu();
         // No live space published on this CPU: a non-`FIXED` placement must
         // also fail closed rather than fabricating a base.
-        let producer = LiveMemMap::new(arch_at(11));
+        let producer = LiveMemMap::new(arch_at(cpu));
         assert_eq!(
             producer.map(PAGE, MapFlags::empty(), 0),
             Err(Errno::NotImplemented)
@@ -674,9 +674,10 @@ mod tests {
 
     #[test]
     fn mem_map_with_no_published_space_fails_closed() {
+        let cpu = crate::test_boot::claim_cpu();
         // No live space published on this CPU: the producer must not map
         // anything (a task spawned without a retained space).
-        let producer = LiveMemMap::new(arch_at(4));
+        let producer = LiveMemMap::new(arch_at(cpu));
         assert_eq!(
             producer.map(PAGE, MapFlags::FIXED, 0x4000),
             Err(Errno::NotImplemented)
@@ -685,13 +686,14 @@ mod tests {
 
     #[test]
     fn mem_map_folds_an_out_of_memory_error() {
+        let cpu = crate::test_boot::claim_cpu();
         let (fake, _ptr) = shared_fake_with(FakeLive {
             next: Some(LiveSpaceError::Anon(AnonError::OutOfMemory)),
             ..FakeLive::default()
         });
-        let _guard = publish_live_space_for_test(5, fake);
+        let _guard = publish_live_space_for_test(cpu, fake);
 
-        let producer = LiveMemMap::new(arch_at(5));
+        let producer = LiveMemMap::new(arch_at(cpu));
         assert_eq!(
             producer.map(PAGE, MapFlags::FIXED, 0x4000),
             Err(Errno::OutOfMemory)
@@ -700,10 +702,11 @@ mod tests {
 
     #[test]
     fn file_map_reserve_routes_to_the_current_live_space() {
+        let cpu = crate::test_boot::claim_cpu();
         let (fake, ptr) = shared_fake();
-        let _guard = publish_live_space_for_test(12, fake);
+        let _guard = publish_live_space_for_test(cpu, fake);
 
-        let producer = LiveMemMap::new(arch_at(12));
+        let producer = LiveMemMap::new(arch_at(cpu));
         // The byte length rounds up to whole pages; the reserved base flows
         // back unchanged.
         assert_eq!(FileMap::reserve(&producer, PAGE as u64 + 1), Ok(FILE_BASE));
@@ -714,10 +717,11 @@ mod tests {
 
     #[test]
     fn file_map_page_and_release_route_to_the_current_live_space() {
+        let cpu = crate::test_boot::claim_cpu();
         let (fake, ptr) = shared_fake();
-        let _guard = publish_live_space_for_test(13, fake);
+        let _guard = publish_live_space_for_test(cpu, fake);
 
-        let producer = LiveMemMap::new(arch_at(13));
+        let producer = LiveMemMap::new(arch_at(cpu));
         assert_eq!(producer.map_page(FILE_BASE, &[7; 12]), Ok(()));
         assert_eq!(
             producer.release(FILE_BASE, 4 * PAGE as u64, &mut Unpublished),
@@ -731,11 +735,12 @@ mod tests {
 
     #[test]
     fn file_map_with_no_published_space_fails_closed() {
+        let cpu = crate::test_boot::claim_cpu();
         // No live space published on this CPU: every file-mapping operation
         // announces the inert interface rather than pretending anything was
         // reserved, backed, or freed. A zero length is refused before the
         // space is even consulted.
-        let producer = LiveMemMap::new(arch_at(14));
+        let producer = LiveMemMap::new(arch_at(cpu));
         assert_eq!(
             FileMap::reserve(&producer, PAGE as u64),
             Err(Errno::NotImplemented)
@@ -753,10 +758,11 @@ mod tests {
 
     #[test]
     fn mmio_map_routes_a_granted_window_to_the_current_live_space() {
+        let cpu = crate::test_boot::claim_cpu();
         let (fake, ptr) = shared_fake();
-        let _guard = publish_live_space_for_test(6, fake);
+        let _guard = publish_live_space_for_test(cpu, fake);
 
-        let producer = LiveMmioMap::new(arch_at(6));
+        let producer = LiveMmioMap::new(arch_at(cpu));
         let va = producer.map_window(0xFE98_0000, 0x4000, MmioMemoryKind::Device);
         assert_eq!(va, Ok(0x9000_1000));
         // SAFETY: see above.
@@ -768,10 +774,11 @@ mod tests {
 
     #[test]
     fn mmio_map_routes_a_write_combining_framebuffer_to_the_scanout_path() {
+        let cpu = crate::test_boot::claim_cpu();
         let (fake, ptr) = shared_fake();
-        let _guard = publish_live_space_for_test(15, fake);
+        let _guard = publish_live_space_for_test(cpu, fake);
 
-        let producer = LiveMmioMap::new(arch_at(15));
+        let producer = LiveMmioMap::new(arch_at(cpu));
         let va = producer.map_window(
             0x8000_0000,
             0x30_0000,
@@ -791,7 +798,8 @@ mod tests {
 
     #[test]
     fn mmio_map_with_no_published_space_fails_closed() {
-        let producer = LiveMmioMap::new(arch_at(7));
+        let cpu = crate::test_boot::claim_cpu();
+        let producer = LiveMmioMap::new(arch_at(cpu));
         assert_eq!(
             producer.map_window(0xFE98_0000, 0x4000, MmioMemoryKind::Device),
             Err(Errno::NotImplemented)
@@ -800,13 +808,14 @@ mod tests {
 
     #[test]
     fn mmio_map_folds_a_no_virtual_space_error() {
+        let cpu = crate::test_boot::claim_cpu();
         let (fake, _ptr) = shared_fake_with(FakeLive {
             next: Some(LiveSpaceError::Mmio(MmioError::NoVirtualSpace)),
             ..FakeLive::default()
         });
-        let _guard = publish_live_space_for_test(8, fake);
+        let _guard = publish_live_space_for_test(cpu, fake);
 
-        let producer = LiveMmioMap::new(arch_at(8));
+        let producer = LiveMmioMap::new(arch_at(cpu));
         assert_eq!(
             producer.map_window(0xFE98_0000, 0x4000, MmioMemoryKind::Device),
             Err(Errno::OutOfMemory)
@@ -815,10 +824,11 @@ mod tests {
 
     #[test]
     fn dma_alloc_routes_a_carve_to_the_current_live_space() {
+        let cpu = crate::test_boot::claim_cpu();
         let (fake, ptr) = shared_fake();
-        let _guard = publish_live_space_for_test(16, fake);
+        let _guard = publish_live_space_for_test(cpu, fake);
 
-        let producer = LiveDmaAlloc::new(arch_at(16));
+        let producer = LiveDmaAlloc::new(arch_at(cpu));
         let carve = producer.alloc(2 * PAGE, 0x4000_0000, test_custodian());
         // The CPU VA, the physical-base-as-device-address and the backing
         // length flow back from the live space unchanged.
@@ -853,7 +863,7 @@ mod tests {
             }
         }
         const LIVE_NODE: u32 = TEST_NODE + 1;
-        const CPU: u32 = 39;
+        let cpu = crate::test_boot::claim_cpu();
 
         let base = PhysAddr::new(16 * PAGE as u64);
         let mut map = BootMemoryMap::new();
@@ -869,10 +879,10 @@ mod tests {
             crate::dmaquarantine::DmaQuarantine::new(frames, physmap, &OneNodeTree),
         ));
         let _guard = publish_live_space_for_test(
-            CPU,
+            cpu,
             Arc::new(ProcessSpace::for_test(crate::procspace::host_test_space!())),
         );
-        let producer = LiveDmaAlloc::new(arch_at(CPU));
+        let producer = LiveDmaAlloc::new(arch_at(cpu));
         let custodian = |node| DmaCustodian {
             node,
             generation: TEST_GENERATION,
@@ -893,7 +903,8 @@ mod tests {
 
     #[test]
     fn dma_alloc_with_no_published_space_fails_closed() {
-        let producer = LiveDmaAlloc::new(arch_at(17));
+        let cpu = crate::test_boot::claim_cpu();
+        let producer = LiveDmaAlloc::new(arch_at(cpu));
         assert_eq!(
             producer.alloc(PAGE, 0, test_custodian()),
             Err(Errno::NotImplemented)
@@ -902,6 +913,7 @@ mod tests {
 
     #[test]
     fn dma_alloc_folds_an_unreachable_or_exhausted_limit_as_the_allocator_does() {
+        let cpu = crate::test_boot::claim_cpu();
         for (refusal, errno) in [
             (AllocError::OutOfRange, Errno::OutOfRange),
             (AllocError::OutOfMemory, Errno::OutOfMemory),
@@ -910,9 +922,9 @@ mod tests {
                 next: Some(LiveSpaceError::Dma(DmaError::Alloc(refusal))),
                 ..FakeLive::default()
             });
-            let _guard = publish_live_space_for_test(18, fake);
+            let _guard = publish_live_space_for_test(cpu, fake);
 
-            let producer = LiveDmaAlloc::new(arch_at(18));
+            let producer = LiveDmaAlloc::new(arch_at(cpu));
             assert_eq!(
                 producer.alloc(PAGE, 0x1000, test_custodian()),
                 Err(errno),

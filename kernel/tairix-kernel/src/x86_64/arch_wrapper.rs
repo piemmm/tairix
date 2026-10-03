@@ -337,6 +337,10 @@ impl tairix_kernel_core::PortIoFacility for X86PortIoFacility {
             PortValue::Dword(v) => X86PortIo.write32(port, v),
         }
     }
+
+    fn kernel_owned(&self, port: u16, width: PortWidth) -> bool {
+        tairix_pci::reaches_config_ports(port, width.bytes())
+    }
 }
 
 /// The one producer instance the boot path publishes.
@@ -649,6 +653,22 @@ impl KernelArch for BinArch {
         #[cfg(all(freestanding, kernel_isa = "x86_64"))]
         {
             Some(&crate::x86_64::msi::KERNEL_MSI)
+        }
+        #[cfg(not(all(freestanding, kernel_isa = "x86_64")))]
+        {
+            None
+        }
+    }
+
+    fn bus_mastering(
+        &self,
+    ) -> Option<&'static (dyn tairix_kernel_core::iommu::BusMastering + 'static)> {
+        // The boot probe owns the PCI configuration space it enumerated.
+        #[cfg(all(freestanding, kernel_isa = "x86_64"))]
+        {
+            crate::x86_64::boot::pci_host().map(|host| {
+                host as &'static (dyn tairix_kernel_core::iommu::BusMastering + 'static)
+            })
         }
         #[cfg(not(all(freestanding, kernel_isa = "x86_64")))]
         {

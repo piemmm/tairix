@@ -339,6 +339,12 @@ pub trait PortIoFacility: Sync {
     /// Write `value` — already exactly as wide as the instruction to issue —
     /// to I/O port `port`.
     fn write(&self, port: u16, value: PortValue);
+
+    /// Whether a `width` transfer at `port` reaches a port the kernel keeps
+    /// for itself, which no grant opens: the PCI configuration space it owns
+    /// is reached through such ports, and a process able to write them could
+    /// make any function a bus master.
+    fn kernel_owned(&self, port: u16, width: PortWidth) -> bool;
 }
 
 /// Number of addresses in the architectural I/O port space.

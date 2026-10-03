@@ -1470,6 +1470,8 @@ mod tests {
                 Ok(())
             }
         }
+
+        fn end(&self, _node: u32, _generation: u64) {}
     }
 
     fn translated(

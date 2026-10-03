@@ -169,6 +169,38 @@ fn claim() -> Claim {
     claim
 }
 
+/// The first CPU [`claim_cpu`] hands out. Slot 0 is the CPU every unpinned
+/// `TestArch` reports, so state published there would reach every such test.
+pub(crate) const CLAIMED_CPU_BASE: CpuId = 64;
+
+/// The next CPU [`claim_cpu`] hands out.
+static NEXT_CPU: AtomicU32 = AtomicU32::new(CLAIMED_CPU_BASE);
+
+/// A CPU of the shared per-CPU state table for the calling test alone.
+///
+/// Per-CPU state is process-wide and keyed by CPU id alone, so two tests
+/// naming one CPU observe each other's ticks, live spaces and stacks. A
+/// claimed slot is handed to no other test and never handed out twice, so
+/// the claimant finds it as no test has left it. Each call answers a fresh
+/// slot, so a test pinning several CPUs claims each.
+///
+/// # Panics
+///
+/// Once the suite has claimed every slot of the table, rather than share one.
+pub(crate) fn claim_cpu() -> CpuId {
+    let cpu = NEXT_CPU.fetch_add(1, Ordering::Relaxed);
+    assert!(
+        usize::try_from(cpu).is_ok_and(|cpu| cpu < crate::cpu_state::TEST_CPUS),
+        "the suite claimed more CPUs than the test state table holds"
+    );
+    cpu
+}
+
+/// Whether [`claim_cpu`] has handed `cpu` out.
+pub(crate) fn is_claimed_cpu(cpu: CpuId) -> bool {
+    (CLAIMED_CPU_BASE..NEXT_CPU.load(Ordering::Relaxed)).contains(&cpu)
+}
+
 /// The calling test's claimed hook, or `None` while it has claimed none —
 /// which is what every test that never asks for one sees, exactly as before
 /// any boot publication. Read by [`crate::waitq::wait_arch`].
@@ -212,7 +244,27 @@ impl WaitQueueArch for HostWaitArch {
 
 #[cfg(test)]
 mod tests {
-    use super::{advance_clock, claim_peer_task, claim_scheduler, claim_task, publish_hash_key};
+    use super::{
+        advance_clock, claim_cpu, claim_peer_task, claim_scheduler, claim_task, is_claimed_cpu,
+        publish_hash_key, CLAIMED_CPU_BASE,
+    };
+
+    #[test]
+    fn a_claimed_cpu_is_one_no_other_claim_and_no_unpinned_test_names() {
+        let first = claim_cpu();
+        let second = claim_cpu();
+        assert_ne!(first, second, "each claim is a slot of its own");
+        for cpu in [first, second] {
+            assert!(
+                cpu >= CLAIMED_CPU_BASE,
+                "above every unpinned or spelled id"
+            );
+            assert!(crate::cpu_state::get(cpu).is_some(), "inside the table");
+            assert!(is_claimed_cpu(cpu));
+        }
+        assert!(!is_claimed_cpu(0));
+        assert!(!is_claimed_cpu(CLAIMED_CPU_BASE - 1));
+    }
 
     #[test]
     fn an_unclaimed_test_sees_no_wait_hook() {

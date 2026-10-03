@@ -312,6 +312,13 @@ pub trait DeviceTranslation: Sync {
     /// must then never be reused.
     fn unmap(&self, node: u32, generation: u64, iova: u64, block: DmaBlock)
         -> Result<(), DmaError>;
+
+    /// End the domain of `node`'s owner admitted as `generation`, if it still
+    /// stands: the device stops mastering and loses every carve at once,
+    /// under one confirmed invalidation, so each later [`unmap`](Self::unmap)
+    /// of the owner's carves answers without waiting on the unit. An end the
+    /// unit cannot confirm leaves those unmaps unconfirmed.
+    fn end(&self, node: u32, generation: u64);
 }
 
 /// The domain a translated carve maps into: the owner it belongs to and the
@@ -700,7 +707,8 @@ impl DmaWindowMap {
     }
 
     /// Release **every** live DMA buffer as its owner ends: each block's pages
-    /// leave `space` and it is zeroed and cleaned to memory. A block whose
+    /// leave `space` and it is zeroed and cleaned to memory. A translated
+    /// owner is ended first ([`DeviceTranslation::end`]). A block whose
     /// translated device is confirmed to have lost its reach returns to
     /// `frames`; every other block passes, still allocated, to the custodian,
     /// since its device may still master it.
@@ -717,6 +725,11 @@ impl DmaWindowMap {
         phys: &dyn PhysMap,
         custodian: &DmaCustodian,
     ) {
+        // One end stops the device before anything is released, and takes its
+        // reach to every carve under one confirmed invalidation, not one each.
+        if let Some(translation) = custodian.translation {
+            translation.end(custodian.node, custodian.generation);
+        }
         for record in self.allocations.values() {
             let first_data_slot = record.leading_guard_slot + 1;
             for i in 0..record.data_pages {

@@ -16,6 +16,21 @@ use crate::config::{ConfigAddress, ConfigSpace};
 const PCI_CONFIG_ADDRESS_PORT: u16 = 0xCF8;
 const PCI_CONFIG_DATA_PORT: u16 = 0xCFC;
 
+/// The I/O ports mechanism #1 reaches configuration space through: the
+/// address dword at `0xCF8` and the data dword at `0xCFC`.
+const CONFIG_PORTS: core::ops::Range<u32> =
+    PCI_CONFIG_ADDRESS_PORT as u32..PCI_CONFIG_DATA_PORT as u32 + 4;
+
+/// Whether an I/O transfer of `len` bytes at `port` reaches the configuration
+/// ports: whoever can write them reaches every function's configuration
+/// space.
+#[must_use]
+pub fn reaches_config_ports(port: u16, len: u64) -> bool {
+    let start = u64::from(port);
+    let end = start.saturating_add(len);
+    start < u64::from(CONFIG_PORTS.end) && u64::from(CONFIG_PORTS.start) < end
+}
+
 /// Concrete [`ConfigSpace`] using a [`PortIo`] backend.
 ///
 /// The bridge is parameterised on `P: PortIo` so the test suite
@@ -78,6 +93,24 @@ mod tests {
         fn write32(&self, port: u16, value: u32) {
             self.log.borrow_mut().push((port, value, "write"));
         }
+    }
+
+    #[test]
+    fn a_transfer_reaching_either_configuration_port_is_named() {
+        assert!(reaches_config_ports(0xCF8, 4));
+        assert!(reaches_config_ports(0xCFC, 1));
+        assert!(reaches_config_ports(0xCFF, 1));
+        assert!(
+            reaches_config_ports(0xCF6, 4),
+            "a dword overlapping the address port"
+        );
+        assert!(!reaches_config_ports(0xCF4, 4));
+        assert!(!reaches_config_ports(0xD00, 4));
+        assert!(!reaches_config_ports(0x70, 2), "the CMOS clock");
+        assert!(
+            !reaches_config_ports(0xCF8, 0),
+            "an empty transfer reaches nothing"
+        );
     }
 
     #[test]

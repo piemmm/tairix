@@ -150,13 +150,16 @@ pub(crate) use custody;
 pub(crate) struct TranslationRecord {
     /// Every mapping handed out: its IOVA, block and the limit asked for.
     pub(crate) mapped: Vec<(u64, DmaBlock, u64)>,
-    /// Every unmap confirmed: its IOVA and block.
+    /// Every unmap confirmed by the unit: its IOVA and block.
     pub(crate) unmapped: Vec<(u64, DmaBlock)>,
+    /// Every owner ended: its node and generation.
+    pub(crate) ended: Vec<(u32, u64)>,
 }
 
 /// A [`DeviceTranslation`] that hands out IOVAs from a fixed base and records
-/// every call, refusing maps with `refuse_map` and leaving every unmap
-/// unconfirmed when `unconfirmed_unmap`.
+/// every call, refusing maps with `refuse_map` and leaving every unmap and end
+/// unconfirmed when `unconfirmed_unmap`. Once an owner is ended its unmaps
+/// answer without reaching the unit, as the facility's do.
 pub(crate) struct RecordingTranslation {
     refuse_map: Option<DmaError>,
     unconfirmed_unmap: bool,
@@ -175,6 +178,7 @@ impl RecordingTranslation {
             record: SpinLock::new(TranslationRecord {
                 mapped: Vec::new(),
                 unmapped: Vec::new(),
+                ended: Vec::new(),
             }),
         }
     }
@@ -204,16 +208,23 @@ impl DeviceTranslation for RecordingTranslation {
 
     fn unmap(
         &self,
-        _node: u32,
-        _generation: u64,
+        node: u32,
+        generation: u64,
         iova: u64,
         block: DmaBlock,
     ) -> Result<(), DmaError> {
         if self.unconfirmed_unmap {
             return Err(DmaError::Unconfirmed);
         }
-        self.record.lock().unmapped.push((iova, block));
+        let mut record = self.record.lock();
+        if !record.ended.contains(&(node, generation)) {
+            record.unmapped.push((iova, block));
+        }
         Ok(())
+    }
+
+    fn end(&self, node: u32, generation: u64) {
+        self.record.lock().ended.push((node, generation));
     }
 }
 

@@ -517,6 +517,20 @@ pub trait KernelArch: SchedulerArch {
         None
     }
 
+    /// The port's ownership of PCI configuration space, through which the
+    /// kernel turns each function's bus mastering on and off as its owner
+    /// begins and ends (`plans/IOMMU.md` IOM7).
+    ///
+    /// # Default
+    ///
+    /// [`None`]: the kernel owns no function's configuration space, and
+    /// whoever does (a bus driver) sets bus mastering when it hands the
+    /// function over.
+    #[must_use]
+    fn bus_mastering(&self) -> Option<&'static (dyn crate::iommu::BusMastering + 'static)> {
+        None
+    }
+
     /// The write-back a translation unit whose table walker does not snoop
     /// the CPU's caches needs before it may walk what the kernel wrote.
     ///

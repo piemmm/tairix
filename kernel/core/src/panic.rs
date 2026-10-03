@@ -979,7 +979,7 @@ mod tests {
     static QUIESCE_ACK: [AtomicBool; 1] = [AtomicBool::new(false)];
     use crate::test_arch::{TestArch, HALT_SENTINEL};
     use crate::test_sink::TestSink;
-    use alloc::string::String;
+    use alloc::string::{String, ToString};
     use core::panic::Location;
     use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -1009,7 +1009,11 @@ mod tests {
 
     fn drive_panic_dump<F>(
         make_location: F,
-    ) -> (TestArch, alloc::vec::Vec<crate::test_sink::CapturedEvent>)
+    ) -> (
+        TestArch,
+        CpuId,
+        alloc::vec::Vec<crate::test_sink::CapturedEvent>,
+    )
     where
         F: FnOnce() -> &'static Location<'static>,
     {
@@ -1017,8 +1021,8 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         reset_panic_guard();
-        let arch = TestArch::with_cpus(2);
-        arch.set_current_cpu(1);
+        let cpu = crate::test_boot::claim_cpu();
+        let arch = TestArch::on_cpu(cpu);
         let sink = &TestSink::new();
         let loc = make_location();
         let result = catch_unwind(AssertUnwindSafe(|| {
@@ -1033,7 +1037,7 @@ mod tests {
             .unwrap_or("");
         assert!(msg.contains(HALT_SENTINEL), "halt sentinel missing: {msg}");
         let records = sink.snapshot();
-        (arch, records)
+        (arch, cpu, records)
     }
 
     #[track_caller]
@@ -1043,7 +1047,7 @@ mod tests {
 
     #[test]
     fn panic_dump_emits_one_record_with_documented_fields() {
-        let (arch, events) = drive_panic_dump(caller_location);
+        let (arch, cpu, events) = drive_panic_dump(caller_location);
 
         assert_eq!(events.len(), 1, "expected exactly one panic record");
         let ev = &events[0];
@@ -1056,7 +1060,7 @@ mod tests {
                 .find(|(k, _)| k == key)
                 .map(|(_, v)| v.as_str())
         };
-        assert_eq!(field("cpu"), Some("1"));
+        assert_eq!(field("cpu"), Some(cpu.to_string().as_str()));
         // `track_caller` propagates through `drive_panic_dump`'s
         // `make_location()` call, so the file is whichever source
         // contains the `make_location` invocation. Asserting on a
@@ -1246,7 +1250,7 @@ mod tests {
     #[test]
     fn panic_dump_unwinds_a_kthread_stack_the_dispatcher_published() {
         const RET1: u64 = 0xffff_8000_0000_3333;
-        const CPU: CpuId = 0;
+        let cpu = crate::test_boot::claim_cpu();
         let _serial = TEST_SERIAL
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1265,10 +1269,9 @@ mod tests {
             fp: base,
             boot_stack: None,
         };
-        let _published = crate::kthread::publish_running_stack_for_test(CPU, region);
+        let _published = crate::kthread::publish_running_stack_for_test(cpu, region);
 
-        let arch = TestArch::with_cpus(1);
-        arch.set_current_cpu(CPU);
+        let arch = TestArch::on_cpu(cpu);
         let sink = &TestSink::new();
         let cap_ref: &dyn CpuStateCapture = &cap;
         let result = catch_unwind(AssertUnwindSafe(|| {
@@ -1298,7 +1301,7 @@ mod tests {
     /// vouches for.
     #[test]
     fn panic_dump_emits_no_chain_when_no_stack_is_vouched_for() {
-        const CPU: CpuId = 1;
+        let cpu = crate::test_boot::claim_cpu();
         let _serial = TEST_SERIAL
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1316,8 +1319,7 @@ mod tests {
             boot_stack: None,
         };
 
-        let arch = TestArch::with_cpus(2);
-        arch.set_current_cpu(CPU);
+        let arch = TestArch::on_cpu(cpu);
         let sink = &TestSink::new();
         let cap_ref: &dyn CpuStateCapture = &cap;
         let result = catch_unwind(AssertUnwindSafe(|| {
@@ -1506,8 +1508,8 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         reset_panic_guard();
 
-        let arch = TestArch::with_cpus(4);
-        arch.set_current_cpu(3);
+        let cpu = crate::test_boot::claim_cpu();
+        let arch = TestArch::on_cpu(cpu);
         let sink = &TestSink::new();
         let result = catch_unwind(AssertUnwindSafe(|| {
             let ctx = PanicContext::new(&arch, sink);
@@ -1536,7 +1538,7 @@ mod tests {
                 .find(|(k, _)| k == key)
                 .map(|(_, v)| v.as_str())
         };
-        assert_eq!(field("cpu"), Some("3"));
+        assert_eq!(field("cpu"), Some(cpu.to_string().as_str()));
         assert_eq!(field("syndrome"), Some("0x0000000096000045"));
         assert_eq!(field("fault_addr"), Some("0xffff0000deadbeef"));
         assert_eq!(field("fault_pc"), Some("0x0000000080101234"));
@@ -1801,9 +1803,9 @@ mod tests {
     /// "absent" and whose walk then produced a valid descriptor for the same
     /// address cost a diagnosis this way.
     ///
-    /// This reporter is cpu 2 — no other test in this process reports as
-    /// anything but cpu 0 — and `quiesce_stop_requested(2)` is false only once
-    /// *this* stop has latched itself as the requester. That keeps the
+    /// The reporter's CPU is claimed, so no other test reports as it, and
+    /// `quiesce_stop_requested` is false for it only once *this* stop has
+    /// latched itself as the requester. That keeps the
     /// assertion honest whatever order the process ran its panics in: the
     /// stop request itself is a set-once global, so merely observing it
     /// latched would pass vacuously after any earlier panic test.
@@ -1812,26 +1814,26 @@ mod tests {
         /// Records, at each reading, whether this reporter had already
         /// latched the stop.
         struct WhenRead {
+            /// The reporting CPU.
+            reporter: CpuId,
+            /// Any other CPU, to read the request apart from who owns it.
+            peer: CpuId,
             probe_after_stop: AtomicBool,
             walk_after_stop: AtomicBool,
         }
 
-        /// The reporter's cpu, unique to this test among the process's panics.
-        const REPORTER: u32 = 2;
-
-        /// Any other cpu, used to read the request itself apart from who owns
-        /// it.
-        const PEER: u32 = 1;
-
-        /// `true` once [`REPORTER`] is the CPU holding the stop request.
-        ///
-        /// The request is a set-once global, so "is it latched" alone would
-        /// pass vacuously after any earlier panic test in this process, and
-        /// "should REPORTER stop" alone passes vacuously before any. Read
-        /// together they name the owner: latched, and exempting REPORTER.
-        fn reporter_holds_the_stop() -> bool {
-            tairix_arch_api::quiesce_stop_requested(PEER)
-                && !tairix_arch_api::quiesce_stop_requested(REPORTER)
+        impl WhenRead {
+            /// `true` once the reporter is the CPU holding the stop request.
+            ///
+            /// The request is a set-once global, so "is it latched" alone
+            /// would pass vacuously after any earlier panic test in this
+            /// process, and "should the reporter stop" alone passes vacuously
+            /// before any. Read together they name the owner: latched, and
+            /// exempting the reporter.
+            fn reporter_holds_the_stop(&self) -> bool {
+                tairix_arch_api::quiesce_stop_requested(self.peer)
+                    && !tairix_arch_api::quiesce_stop_requested(self.reporter)
+            }
         }
 
         impl CpuStateCapture for WhenRead {
@@ -1855,12 +1857,12 @@ mod tests {
             }
             fn translation(&self, _addr: u64, _write: bool) -> Translation {
                 self.probe_after_stop
-                    .store(reporter_holds_the_stop(), Ordering::SeqCst);
+                    .store(self.reporter_holds_the_stop(), Ordering::SeqCst);
                 Translation::Unmapped { status: 0x080d }
             }
             fn table_path(&self, _addr: u64, out: &mut [u64; MAX_TABLE_LEVELS]) -> usize {
                 self.walk_after_stop
-                    .store(reporter_holds_the_stop(), Ordering::SeqCst);
+                    .store(self.reporter_holds_the_stop(), Ordering::SeqCst);
                 out[0] = 0x0454_1003;
                 1
             }
@@ -1876,10 +1878,12 @@ mod tests {
         // publisher here and leaves no peer online to poke or wait for.
         let _ = tairix_arch_api::quiesce_publish_tables(&QUIESCE_ONLINE, &QUIESCE_ACK);
 
-        let arch = TestArch::with_cpus(4);
-        arch.set_current_cpu(REPORTER);
+        let reporter = crate::test_boot::claim_cpu();
+        let arch = TestArch::on_cpu(reporter);
         let sink = &TestSink::new();
         let read = &WhenRead {
+            reporter,
+            peer: crate::test_boot::claim_cpu(),
             probe_after_stop: AtomicBool::new(false),
             walk_after_stop: AtomicBool::new(false),
         };
@@ -2068,7 +2072,7 @@ mod tests {
         published: bool,
         report: impl FnOnce(&PanicContext<'_, TestArch>, u64),
     ) -> (Option<std::string::String>, Option<std::string::String>) {
-        const CPU: CpuId = 0;
+        let cpu = crate::test_boot::claim_cpu();
         let guard_bytes = tairix_memguard::CANARY_BYTES * 2;
         let mut words: alloc::vec::Vec<u64> = alloc::vec![
             u64::from_ne_bytes([tairix_memguard::GUARD_BYTE; 8]);
@@ -2092,9 +2096,8 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         reset_panic_guard();
         let _published =
-            published.then(|| crate::kthread::publish_running_stack_for_test(CPU, capture.stack));
-        let arch = TestArch::with_cpus(1);
-        arch.set_current_cpu(CPU);
+            published.then(|| crate::kthread::publish_running_stack_for_test(cpu, capture.stack));
+        let arch = TestArch::on_cpu(cpu);
         let sink = &TestSink::new();
         let result = catch_unwind(AssertUnwindSafe(|| {
             let ctx = PanicContext::new(&arch, sink).with_backtrace(handle);
@@ -2169,7 +2172,7 @@ mod tests {
     /// a reader guessing whether the machine was stopped.
     #[test]
     fn a_report_states_the_stop_outcome_even_with_no_peers() {
-        let (_arch, events) = drive_panic_dump(caller_location);
+        let (_arch, _cpu, events) = drive_panic_dump(caller_location);
         let ev = &events[0];
         let field = |key: &str| {
             ev.fields

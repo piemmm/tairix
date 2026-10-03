@@ -16,7 +16,7 @@ use super::device::{
     PeriodicShape, SerialNumber, StringHeader, UsbDevice, BULK_BUF_LEN, BULK_SLOTS,
     DMA_CHUNK_ALIGN, EVENT_RING_SEGMENT_MIN_TRBS, INT_ARM_DEPTH, INT_TRANSFER_MAX, MAX_HUB_DEPTH,
     PORT_RESET_POLLS, PORT_RESET_POLL_US, PORT_RESET_SETTLE_US, REPORT_QUEUE_CAP, RING_TRBS,
-    SPEED_FULL, SPEED_HIGH, SPEED_SUPER,
+    SPEED_FULL, SPEED_HIGH, SPEED_LOW, SPEED_SUPER,
 };
 use super::ring::{EventRingCursor, ProducerRing};
 use super::transport::{drive_urb, UrbEngine, UrbScope};
@@ -1101,6 +1101,9 @@ struct MockXhci {
     /// addressed keyboard never typed. The mock gates
     /// [`Self::process_int_ring`] on it being non-zero.
     int_max_esit: u32,
+    /// The Max Packet Size the interrupt-IN Configure Endpoint carried
+    /// (§6.2.3 dword 1 bits 16:31).
+    int_max_packet: u32,
     /// The **Interval** exponent the interrupt-IN Configure Endpoint carried
     /// in the endpoint context (§6.2.3.6 dword 0 bits 16:23): the xHCI poll
     /// period is `2^Interval · 125µs`. Captured so a test can assert a mouse's
@@ -1512,6 +1515,7 @@ impl MockXhci {
             hub_ctx_num_ports: 0,
             hub_ctx_tt_think_time: 0,
             int_max_esit: 0,
+            int_max_packet: 0,
             int_interval: 0,
             int_armed_len: 0,
             keyboard_config: &MOCK_CONFIG_DESCRIPTOR,
@@ -2536,6 +2540,7 @@ impl MockXhci {
             // Max ESIT Payload Lo (§6.2.3.8 dword 4 bits 16:31): the
             // periodic scheduler reserves no bandwidth when it is zero.
             self.int_max_esit = (int_ctx[4] >> 16) & 0xFFFF;
+            self.int_max_packet = (int_ctx[1] >> 16) & 0xFFFF;
             // Interval exponent (§6.2.3.6 dword 0 bits 16:23).
             self.int_interval = (int_ctx[0] >> 16) & 0xFF;
             self.int_base = self.ep_ctx_dequeue(ep_ctx_off);
@@ -5757,6 +5762,59 @@ fn a_periodic_endpoint_moves_what_its_speed_and_descriptors_allow() {
         }
         .payload(SPEED_SUPER),
         (0, 1024)
+    );
+}
+
+#[test]
+fn a_periodic_endpoint_claiming_more_than_its_speed_allows_is_held_to_it() {
+    let oversized = PeriodicShape {
+        max_packet: 0x7FF,
+        transactions: 2,
+        companion: None,
+    };
+    assert_eq!(oversized.max_packet_at(SPEED_HIGH), 1024);
+    assert_eq!(oversized.payload(SPEED_HIGH), (2, 3072));
+    assert_eq!(oversized.payload(SPEED_FULL), (0, 64));
+    assert_eq!(oversized.payload(SPEED_LOW), (0, 8));
+    assert_eq!(oversized.payload(SPEED_SUPER), (0, 1024));
+    assert_eq!(
+        PeriodicShape::default().payload(SPEED_SUPER),
+        (0, 1),
+        "a degenerate shape is answered, not a panic"
+    );
+}
+
+/// A high-speed interrupt endpoint claiming more than the speed allows:
+/// 2047-byte packets, three a microframe.
+static MOCK_OVERSIZED_INTERRUPT_CONFIG_DESCRIPTOR: [u8; 25] = [
+    0x09, 0x02, 0x19, 0x00, 0x01, 0x01, 0x00, 0xA0, 0x32, //
+    0x09, 0x04, 0x00, 0x00, 0x01, 0x03, 0x01, 0x02, 0x00, //
+    0x07, 0x05, 0x81, 0x03, 0xFF, 0x17, 0x01,
+];
+
+#[test]
+fn an_oversized_interrupt_endpoint_is_armed_inside_its_transfer_buffer() {
+    let mem = shared_mem();
+    let mut mock = MockXhci::with_device(&mem);
+    mock.keyboard_config = &MOCK_OVERSIZED_INTERRUPT_CONFIG_DESCRIPTOR;
+    let mut device = started_device(mock, &mem);
+    device
+        .bring_up(&TestDelay::default())
+        .expect("the device enumerates");
+    let model = device.host_mut().model_mut();
+    assert_eq!(
+        model.int_max_packet, 1024,
+        "the controller holds it to 1024"
+    );
+    assert_eq!(model.int_max_esit, 3072);
+    let mut buf = [0u8; INT_TRANSFER_MAX];
+    assert_eq!(device.next_report(0, 8, &mut buf), Ok(None));
+    let model = device.host_mut().model_mut();
+    model.pending_reports.push_back(alloc::vec![1; 8]);
+    model.process_int_ring();
+    assert_eq!(
+        model.int_armed_len, 3072,
+        "one interval's payload, inside one transfer buffer"
     );
 }
 

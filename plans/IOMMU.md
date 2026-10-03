@@ -30,7 +30,7 @@ layering), §18 (discovery and the floor), §19 (threat model), §24 and §26
 | IOM4 | DMA through domains: the device-DMA facility; `dma_alloc`, `shm_create_dma` and the kernel floor pools map each carve into its node's domain and return a device address; `VIRTIO_F_ACCESS_PLATFORM`; device addresses named as such in the ABI | done |
 | IOM5 | Revocation instead of quarantine on translated nodes: a driver's death blocks its streams and frees every carve at once; an orderly removal frees (D241); the quarantine confined to untranslated nodes | done |
 | IOM6 | Faults: drained in thread context from each unit's interrupt, stable audit events, a per-unit budget, a storm silences the stream and marks the node `Offline`. Host-proven against the register-level VT-d model, and a live QEMU vertical provokes one real fault delivered through the fault-event MSI, attributed to the device's node, canary untouched (§12). The storm stays host-proven — not live (§12) | done |
-| IOM7 | Default-deny from the first bus-master enable: units enabled before TAIRiX sets Bus Master Enable on any function; bus mastering follows ownership | planned |
+| IOM7 | Default-deny from the first bus-master enable: units enabled before TAIRiX sets Bus Master Enable on any function; bus mastering follows ownership | done |
 | IOM8 | Isolation groups: requester-ID aliasing, ACS on the upstream path, multi-function devices without ACS, shared platform stream ids; the group is the unit of domain ownership | planned |
 | IOM9 | PCI identity and extended configuration space: every function a node carrying its segment:BDF, the 0x100+ capability walk (ACS, ATS, PRI, PASID, SR-IOV), segment-aware ECAM. Includes discriminating `PciFunction::admit`'s `VIRTIO_F_ACCESS_PLATFORM` gate to virtio functions by vendor id, so a non-virtio translated master is published with its stream rather than refused — latent until non-virtio PCI discovery exists (`plans/OPEN-DEFECTS.md`) | planned |
 | IOM10 | ATS, PRI and PASID policy: ATS off at the device and refused at the unit; untrusted external-facing ports | planned |
@@ -158,14 +158,15 @@ These are settled. A change that contradicts one stops and asks (§15.7).
 | A compromised driver points its device at another process's memory | open | closed: the device reaches only its node's domain | closed |
 | A malicious device DMAs where it likes (Thunderclap, CWE-1257) | open | closed for translated streams | closed |
 | A dead driver's device keeps writing into freed memory | held off by quarantine | closed: revoked before free | closed |
-| DMA before the unit is enabled | open | open for functions TAIRiX made bus masters at boot | closed (IOM7) |
+| DMA before the unit is enabled | open | closed (IOM7): no function TAIRiX takes from firmware masters before its owner's domain is attached | closed |
 | Two functions behind one non-ACS switch reach each other peer-to-peer | open | open | closed (IOM8) |
 | A device forges an MSI | open | open | closed on x86_64 (IOM11); IOM18 elsewhere |
 | A device presents a pre-translated address (ATS) | n/a | refused: ATS never enabled | closed (IOM10) |
 
 Residual, and named: a bug in a unit's family code (the TCB grew by it); a
-unit erratum a family must work around; a platform with no unit; physical
-attacks (§19.9).
+unit erratum a family must work around; a platform with no unit; the moments
+between firmware's hand-off and the boot probe, which only firmware's own
+protected memory regions cover; physical attacks (§19.9).
 
 ## 1. IOM1 — topology in the hardware tree
 
@@ -328,11 +329,70 @@ Scalable mode (for units that lack legacy mode, and for PASID) is IOM10's.
 
 ## 6. IOM7 — no window
 
-The unit comes up before the first function TAIRiX makes a bus master, and
-Bus Master Enable follows ownership: set when a node's owner attaches its
-domain, cleared when the owner ends. The PCI routing helpers stop enabling bus
-mastering as a side effect; the owner of a function's configuration space
-enables it explicitly when it hands the function over.
+No routing or mapping helper makes a function a bus master: `route_msix`
+turns memory decoding on, `route_msi` neither. Only the owner of a function's
+configuration space sets Bus Master Enable, as it hands the function to an
+owner, and clears it as it takes the function back.
+
+- **The kernel's PCI host.** Where the kernel enumerates PCI itself (x86_64),
+  one owner (`kernel/tairix-kernel/src/pci_host.rs`, published by the boot
+  probe) holds the probe's own bus behind one lock: ECAM on the MCFG segment,
+  else mechanism #1. It also holds the record of the functions it handed
+  over, built from the probe's own emission and never from a node's
+  descriptive address, which any publisher sets. Every kernel configuration
+  access goes through it. The port-I/O gate refuses mechanism #1's ports to
+  every process (`PortIoFacility::kernel_owned`).
+- **Before take-over.** The probe stops these functions mastering:
+  - every function behind a unit, whose stream the unit will block anyway,
+    except a bridge or one a unit keeps a firmware window for (decision 4);
+  - every virtio function it publishes or refuses.
+
+  A function behind no unit that TAIRiX does not drive is left as firmware
+  left it (decision 12). At each unit's enable, the facility reads every
+  recorded function behind it. The ones still mastering without a firmware
+  window are reported as `masters` on the unit's `DmaTranslationUnit`
+  record.
+- **Translated owners.** The facility grants bus mastering once an owner's
+  domain is attached, at its first carve.
+  - It names the owner's streams, so a bus-published child of a device
+    masters through its parent's function (decision 8).
+  - It withdraws bus mastering in the retirement's live arm, before the
+    domain is destroyed, so a device stops before its revocation instead of
+    being faulted by it.
+  - The exception is a stream firmware keeps a window for, which firmware
+    masters again.
+  - Only the live arm withdraws, so a second retirer cannot stop what a
+    successor was granted since.
+  - An unconfirmed end stays withdrawn: no successor attaches to grant it
+    again.
+- **Every death path ends first.** A translated space's teardown ends its
+  owner before it releases a block (`DeviceTranslation::end`). Whichever
+  context drops the space, the order is: withdraw, block, one confirmed
+  invalidation, free.
+- **Changes carry their owner's generation.** The host keeps, for each
+  function, the generation of the latest owner that changed it, and ignores
+  a change from an earlier one. Owners are admitted in generation order, so
+  an owner whose end lands after its successor began never stops the
+  successor's function.
+- **Untranslated owners.** On x86_64 with no unit, the kernel still owns
+  configuration space. A driver's function masters from its first carve
+  (`dma_alloc`, `shm_create_dma`; the floor disk at its hand-over) until the
+  driver ends. That narrows the window but confines nothing; the quarantine
+  stays (decisions 7, 12).
+- **The Pi.** `drivers/bus/pcie_brcm` owns the VL805's configuration space.
+  - It makes the function a bus master as it publishes it, and stops it if
+    the publish is refused.
+  - Nothing tells it when the xHCI driver two nodes down ends, and the
+    platform has no unit (decision 12).
+  - The root port's own Bus Master Enable forwards for the whole subtree and
+    originates no DMA. It must be set after the link trains, and it stays on
+    for the bridge's life.
+- **Never on a live device.** A virtio function written with Bus Master
+  Enable clear disables itself and drops DRIVER_OK. So the grant lands
+  before a driver sets DRIVER_OK (its first carve precedes it), and a
+  command bit that already holds the asked value is never written.
+- **Audit.** Each change the kernel makes is recorded with what the
+  function reads back (`DmaBusMaster`, 4147).
 
 ## 7. IOM8–IOM11 — isolation groups, identity, ATS, interrupt remapping
 
@@ -376,7 +436,12 @@ enables it explicitly when it hands the function over.
 Mapping happens at carve time, so a driver's steady-state rings cost nothing
 per I/O. Leaves are the largest the alignments allow, because a buddy carve is
 naturally aligned and its IOVA is allocated at its own alignment. Teardown is
-one confirmed sync per domain, not one per carve. Domain lookup per carve is a
+one confirmed sync per domain, not one per carve, in every death path: a
+space's teardown ends its owner before it releases a block. Bus mastering costs
+one configuration read-modify-write and a read-back at an owner's attach and
+its end, off every hot path; an untranslated function is handed over once, at
+its owner's first carve, so later carves touch no configuration space. Domain
+lookup per carve is a
 hash probe under a per-facility lock, off every hot path. Neither
 facility-wide lock is held across a wait on a unit: an owner's first carve
 retires a predecessor and adopts its streams under that owner's own state,
@@ -438,6 +503,32 @@ whose updates are logarithmic rather than a sorted vector's linear moves.
   and raises its fault-event MSI, which the per-unit fault service drains into a
   `DmaTranslationFault` attributed to the device's node, with a canary page the
   write never reached — the MSI delivery the host model cannot exercise.
+- **IOM7:**
+  - **lib/pci host tests:** routing turns decoding on and leaves bus
+    mastering as it was; a refused route writes nothing; an unchanged bit
+    is not written; each helper changes only its own bit.
+  - **Facility tests** over the reference model unit, with a fake port that
+    records the stream's attachment at each change. They cover:
+    - a grant only once the domain holds the stream;
+    - a withdraw while it still does, before the block;
+    - a predecessor's withdraw before its successor's grant;
+    - `forget`, an unconfirmed end, a failed adoption and a firmware window;
+    - a node removed while its first carve is made;
+    - the take-over count.
+  - **kernel/mem:** teardown ends a translated owner once, first.
+  - **Syscall-layer tests:** an untranslated driver masters from its carve to
+    its end; a refused carve grants nothing; a translated one follows its
+    domain; a kernel-owned port opens to no grant.
+  - **The PCI host and the probe's quiesce rule** are host-tested.
+  - **Live:** `tairix-test-dma-translation-qemu-x86-64` fails on a unit
+    taking over a mastering function, or on a function granted before
+    translation. It passes only on a key that arrives after the keyboard's
+    node was granted, since QEMU delivers no MSI from a function that is not
+    a bus master.
+  - **Live:** `tairix-test-dma-fault-qemu-x86-64` ends its owner after the
+    canary and passes only once the function reads back not mastering.
+  - **The untranslated grant** is exercised by every untranslated x86_64
+    virtio vertical: without it the device can neither DMA nor interrupt.
 - **The storm stays host-proven, not live.** QEMU's virtio device calls
   `virtio_error` and breaks on the first refused DMA, and the storm threshold
   sits above any VT-d fault ring, so a live storm would need ~512 device resets

@@ -286,6 +286,14 @@ pub trait InitSpawnCtx {
         None
     }
 
+    /// The bus mastering a kernel service hands its own untranslated device
+    /// over through; a translated one masters once its domain is attached.
+    ///
+    /// The default returns [`None`]: the kernel owns no configuration space.
+    fn bus_mastering(&self) -> Option<crate::iommu::Mastering> {
+        None
+    }
+
     /// Spawn a verified user-space **driver** image into its own,
     /// hardware-isolated process and return its PID.
     ///

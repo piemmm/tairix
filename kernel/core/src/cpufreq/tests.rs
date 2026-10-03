@@ -263,6 +263,7 @@ fn a_quiet_machine_settles_at_the_minimum_and_then_stops_waking() {
 
 #[test]
 fn sustained_work_climbs_to_full_speed() {
+    let cpu = crate::test_boot::claim_cpu();
     // Work that keeps running produces no transition to observe, so the rate
     // has to rise from the waiter looking again on its own cadence. It must
     // reach the ceiling, and get there within about the window the filter
@@ -277,7 +278,7 @@ fn sustained_work_climbs_to_full_speed() {
 
         // One CPU picks up work and keeps it.
         let began = waiter.now_ns() + 1_000;
-        note_active(3, began);
+        note_active(cpu, began);
         let busy = ScriptedWaiter::at(began);
         let mut target = limits.min_hz;
         let mut climbed = false;
@@ -340,6 +341,7 @@ fn climb(handle: u64, waiter: &ScriptedWaiter, limits: &CpuFreqLimits) -> (u64, 
 
 #[test]
 fn work_that_resumes_inside_the_attention_span_is_still_noticed() {
+    let cpu = crate::test_boot::claim_cpu();
     // The hole this guards. A wake inside the attention span is deliberately
     // not flagged, because the waiter is expected to look again by itself. So
     // if the waiter were allowed to park indefinitely while that span stands,
@@ -357,12 +359,12 @@ fn work_that_resumes_inside_the_attention_span_is_still_noticed() {
         // A blip: one CPU wakes and parks again at once, stamping an
         // attention span that will suppress the next wake's flag.
         let blip = quiet.now_ns() + 1_000;
-        note_active(5, blip);
-        note_idle(5, blip + 1_000);
+        note_active(cpu, blip);
+        note_idle(cpu, blip + 1_000);
 
         // Real work starts inside that span and never stops, so no further
         // edge will announce it.
-        note_active(5, blip + 2_000);
+        note_active(cpu, blip + 2_000);
         let busy = ScriptedWaiter::at(blip + 2_000);
         let (target, _) = climb(handle, &busy, &limits);
         assert_eq!(
@@ -374,6 +376,7 @@ fn work_that_resumes_inside_the_attention_span_is_still_noticed() {
 
 #[test]
 fn a_machine_past_half_busy_is_given_the_whole_range() {
+    let cpu = crate::test_boot::claim_cpu();
     // The proportional rate with its headroom only reaches the ceiling at
     // four fifths of a core, which leaves a genuinely busy machine climbing
     // through rates it will not stay at.
@@ -387,7 +390,7 @@ fn a_machine_past_half_busy_is_given_the_whole_range() {
         // Hand one CPU a filter just past half busy, dated now, and let the
         // bind boost lapse so utilisation alone decides.
         let now = quiet.now_ns() + RESPONSE_WINDOW_NS;
-        let state = cpu_state::get(2).expect("a test CPU");
+        let state = cpu_state::get(cpu).expect("a test CPU");
         state.gov_util.store(UTIL_ONE / 2 + 1, Ordering::Relaxed);
         state.gov_folded_ns.store(now, Ordering::Relaxed);
         let waiter = ScriptedWaiter::at(now);
@@ -438,6 +441,7 @@ fn the_ceiling_is_held_before_it_is_given_up() {
 
 #[test]
 fn the_hold_never_delays_a_rise() {
+    let cpu = crate::test_boot::claim_cpu();
     // The hold exists to stop the rate flapping off the top, not to slow it
     // reaching the top: a machine that gets busy while a hold stands on a
     // *lower* rate must not be made to wait.
@@ -450,7 +454,7 @@ fn the_hold_never_delays_a_rise() {
         assert_eq!(settled_at, limits.min_hz);
 
         let busy_at = quiet.now_ns() + 1_000;
-        note_active(4, busy_at);
+        note_active(cpu, busy_at);
         let busy = ScriptedWaiter::at(busy_at);
         let (target, _) = climb(handle, &busy, &limits);
         assert_eq!(target, limits.max_hz);
@@ -464,6 +468,7 @@ fn the_hold_never_delays_a_rise() {
 
 #[test]
 fn a_low_duty_wake_pattern_does_not_pin_the_ceiling() {
+    let cpu = crate::test_boot::claim_cpu();
     // The reported defect. An idle desktop showing a live monitor wakes a CPU
     // many times a second to do almost nothing, and used to sit at its
     // ceiling for ever: every wake re-extended a boost that granted the
@@ -476,9 +481,9 @@ fn a_low_duty_wake_pattern_does_not_pin_the_ceiling() {
         // Twenty wakes a second, each a millisecond of work: about 2% of one
         // core, and far more often than a boost window would have lapsed.
         for _ in 0..40 {
-            note_active(1, now);
+            note_active(cpu, now);
             now += 1_000_000;
-            note_idle(1, now);
+            note_idle(cpu, now);
             now += 49_000_000;
         }
         let waiter = ScriptedWaiter::at(now);
@@ -516,6 +521,7 @@ fn a_program_launch_is_served_at_full_speed_from_an_idle_machine() {
 
 #[test]
 fn sustained_partial_load_settles_below_full_speed() {
+    let cpu = crate::test_boot::claim_cpu();
     // The proportional half: a CPU busy a fifth of the time must not hold the
     // whole machine at its ceiling once the boost has lapsed.
     let limits = pi4();
@@ -525,9 +531,9 @@ fn sustained_partial_load_settles_below_full_speed() {
         // Twenty windows of a 20% duty cycle on one CPU.
         for _ in 0..20 {
             for _ in 0..10 {
-                note_active(1, now);
+                note_active(cpu, now);
                 now += RESPONSE_WINDOW_NS / 50; // 2 ms busy
-                note_idle(1, now);
+                note_idle(cpu, now);
                 now += RESPONSE_WINDOW_NS / 10 - RESPONSE_WINDOW_NS / 50; // 8 ms idle
             }
         }
@@ -551,6 +557,7 @@ fn sustained_partial_load_settles_below_full_speed() {
 
 #[test]
 fn an_unbound_machine_does_no_governor_accounting() {
+    let cpu = crate::test_boot::claim_cpu();
     // Bound to no mechanism but still holding the mechanism lock: the hooks
     // run on every dispatch step of every CPU on every port, so with no
     // frequency driver bound they must do none of the governor's work —
@@ -558,12 +565,12 @@ fn an_unbound_machine_does_no_governor_accounting() {
     // sibling's *bound* machine is what these hooks would see, and the
     // accounting they then do is not this test's to observe.
     super::with_mechanism_lock(|| {
-        let state = cpu_state::get(7).expect("a test CPU");
+        let state = cpu_state::get(cpu).expect("a test CPU");
         state.cpu_active_since.store(0, Ordering::Relaxed);
         state.gov_util.store(0, Ordering::Relaxed);
         state.gov_folded_ns.store(0, Ordering::Relaxed);
-        note_active(7, 5_000_000);
-        note_idle(7, 9_000_000);
+        note_active(cpu, 5_000_000);
+        note_idle(cpu, 9_000_000);
         domain::note_launch(9_000_000);
         assert_eq!(state.gov_util.load(Ordering::Relaxed), 0, "nothing folded");
         assert_eq!(
@@ -586,7 +593,7 @@ fn back_to_back_dispatches_are_one_busy_span() {
     // may do anything: re-stamping per dispatch would chop one busy span into
     // arbitrary slices and hand the filter's non-composability a workload it
     // was never meant to measure.
-    let cpu = 9;
+    let cpu = crate::test_boot::claim_cpu();
     with_mechanism(pi4(), 1_000, |_handle| {
         let state = cpu_state::get(cpu).expect("a test CPU");
         note_active(cpu, 1_000);
@@ -699,7 +706,7 @@ fn an_idle_park_does_not_turn_the_measured_frequency_into_a_duty_cycle() {
     // the Switchboard was showing — which is a different quantity wearing the
     // same units.
     with_scripted_clock(|| {
-        let cpu = 11;
+        let cpu = crate::test_boot::claim_cpu();
         let state = cpu_state::get(cpu).expect("a test CPU");
 
         // Seed a baseline, then run one window that is 40% busy at 1.5 GHz.
@@ -745,7 +752,7 @@ fn the_interrupt_that_ends_a_park_cannot_publish_a_duty_cycle() {
     // publishes a duty cycle wearing hertz — which is what made an idle core
     // look as though its clock had been lowered.
     with_scripted_clock(|| {
-        let cpu = 12;
+        let cpu = crate::test_boot::claim_cpu();
         let state = cpu_state::get(cpu).expect("a test CPU");
         let full_speed = 1_500_000_000;
 

@@ -2247,7 +2247,8 @@ mod tests {
 
     #[test]
     fn progress_after_a_reported_soft_lockup_reports_recovery_once() {
-        let state = reset(40);
+        let cpu = crate::test_boot::claim_cpu();
+        let state = reset(cpu);
         state.last_progress_ns.store(100, Ordering::Relaxed);
         assert_eq!(
             evaluate(100, &state.stall_reported, 200, 10),
@@ -2259,13 +2260,15 @@ mod tests {
 
     #[test]
     fn progress_without_a_reported_soft_lockup_is_silent() {
-        let state = reset(41);
+        let cpu = crate::test_boot::claim_cpu();
+        let state = reset(cpu);
         assert_eq!(record_progress(state, 100), None);
     }
 
     #[test]
     fn a_stamped_heartbeat_is_never_the_unarmed_sentinel() {
-        let state = reset(42);
+        let cpu = crate::test_boot::claim_cpu();
+        let state = reset(cpu);
         record_progress(state, 0);
         assert_ne!(state.last_progress_ns.load(Ordering::Relaxed), 0);
     }
@@ -2274,7 +2277,8 @@ mod tests {
 
     #[test]
     fn liveness_records_context_and_reports_hard_recovery_once() {
-        let state = reset(43);
+        let cpu = crate::test_boot::claim_cpu();
+        let state = reset(cpu);
         let sample = WatchdogSample {
             pc: 0xdead_beef,
             task: 7,
@@ -2296,7 +2300,8 @@ mod tests {
 
     #[test]
     fn alive_refreshes_liveness_without_touching_context() {
-        let state = reset(35);
+        let cpu = crate::test_boot::claim_cpu();
+        let state = reset(cpu);
         // A stale liveness heartbeat and a captured context from an earlier
         // real sample.
         state.last_seen_ns.store(1, Ordering::Relaxed);
@@ -2316,7 +2321,8 @@ mod tests {
 
     #[test]
     fn alive_after_a_reported_hard_lockup_reports_recovery_once() {
-        let state = reset(36);
+        let cpu = crate::test_boot::claim_cpu();
+        let state = reset(cpu);
         state.last_seen_ns.store(1_000, Ordering::Relaxed);
         state.hard_reported.store(true, Ordering::Relaxed);
         // Reaching the dispatcher clears a latched hard episode and reports
@@ -2327,13 +2333,15 @@ mod tests {
 
     #[test]
     fn a_stamped_liveness_heartbeat_is_never_the_unarmed_sentinel() {
-        let state = reset(37);
+        let cpu = crate::test_boot::claim_cpu();
+        let state = reset(cpu);
         record_alive(state, 0);
         assert_ne!(state.last_seen_ns.load(Ordering::Relaxed), 0);
     }
 
     #[test]
     fn a_cpu_returning_from_a_long_idle_park_is_not_hard_locked() {
+        let cpu = crate::test_boot::claim_cpu();
         // The regression: a CPU idle-parked far longer than the hard
         // threshold (its non-maskable sample is not taken while parked)
         // carries a stale liveness heartbeat. When it wakes it must stamp
@@ -2341,7 +2349,7 @@ mod tests {
         // dispatch loop uses (`note_alive` then `set_activity(Active)`) — so
         // the cross-CPU scan never sees it Active with the pre-park
         // heartbeat and never reports a false hard lockup.
-        let state = reset(39);
+        let state = reset(cpu);
         state.wd_ctx_in_kernel.store(true, Ordering::Relaxed);
         // Last real sample was taken before a long idle park.
         state.last_seen_ns.store(1_000, Ordering::Relaxed);
@@ -2365,7 +2373,8 @@ mod tests {
 
     #[test]
     fn a_non_active_cpu_is_never_classified() {
-        let state = reset(44);
+        let cpu = crate::test_boot::claim_cpu();
+        let state = reset(cpu);
         state.last_seen_ns.store(1, Ordering::Relaxed);
         state.last_progress_ns.store(1, Ordering::Relaxed);
         state.wd_ctx_in_kernel.store(true, Ordering::Relaxed);
@@ -2378,7 +2387,8 @@ mod tests {
 
     #[test]
     fn an_active_cpu_that_stops_taking_the_sample_is_hard_locked() {
-        let state = reset(45);
+        let cpu = crate::test_boot::claim_cpu();
+        let state = reset(cpu);
         state
             .wd_activity
             .store(WatchdogActivity::Active as u8, Ordering::Relaxed);
@@ -2394,7 +2404,8 @@ mod tests {
 
     #[test]
     fn hard_lockup_takes_precedence_over_soft() {
-        let state = reset(46);
+        let cpu = crate::test_boot::claim_cpu();
+        let state = reset(cpu);
         state
             .wd_activity
             .store(WatchdogActivity::Active as u8, Ordering::Relaxed);
@@ -2412,7 +2423,8 @@ mod tests {
 
     #[test]
     fn an_active_in_kernel_cpu_that_stops_dispatching_is_soft_locked() {
-        let state = reset(47);
+        let cpu = crate::test_boot::claim_cpu();
+        let state = reset(cpu);
         state
             .wd_activity
             .store(WatchdogActivity::Active as u8, Ordering::Relaxed);
@@ -2429,7 +2441,8 @@ mod tests {
 
     #[test]
     fn a_lone_user_task_is_never_soft_locked() {
-        let state = reset(48);
+        let cpu = crate::test_boot::claim_cpu();
+        let state = reset(cpu);
         state
             .wd_activity
             .store(WatchdogActivity::Active as u8, Ordering::Relaxed);
@@ -2443,7 +2456,8 @@ mod tests {
 
     #[test]
     fn a_healthy_active_cpu_is_quiet() {
-        let state = reset(49);
+        let cpu = crate::test_boot::claim_cpu();
+        let state = reset(cpu);
         state
             .wd_activity
             .store(WatchdogActivity::Active as u8, Ordering::Relaxed);
@@ -2467,14 +2481,15 @@ mod tests {
 
     #[test]
     fn on_watchdog_tick_stamps_liveness_and_context() {
-        let state = reset(38);
+        let cpu = crate::test_boot::claim_cpu();
+        let state = reset(cpu);
         let sample = WatchdogSample {
             pc: 0x1234,
             task: 9,
             aux: 0x2c0,
             in_kernel: true,
         };
-        on_watchdog_tick(38, 5_000, &sample);
+        on_watchdog_tick(cpu, 5_000, &sample);
         assert_ne!(state.last_seen_ns.load(Ordering::Relaxed), 0);
         assert_eq!(state.wd_ctx_pc.load(Ordering::Relaxed), 0x1234);
         assert_eq!(state.wd_ctx_task.load(Ordering::Relaxed), 9);
@@ -2495,7 +2510,8 @@ mod tests {
 
     #[test]
     fn a_lone_user_task_past_the_guard_monopolises() {
-        let state = active_with_progress(50, 1_000);
+        let cpu = crate::test_boot::claim_cpu();
+        let state = active_with_progress(cpu, 1_000);
         let now = 1_000 + DEFAULT_MONOPOLY_YIELD_THRESHOLD_NS;
         assert!(monopolises_cpu(state, now, false));
         // Boundary is inclusive; a hair under is not yet a monopoly.
@@ -2504,7 +2520,8 @@ mod tests {
 
     #[test]
     fn kernel_code_is_never_force_yielded() {
-        let state = active_with_progress(51, 1_000);
+        let cpu = crate::test_boot::claim_cpu();
+        let state = active_with_progress(cpu, 1_000);
         let now = 1_000 + 10 * DEFAULT_MONOPOLY_YIELD_THRESHOLD_NS;
         // The kernel is non-preemptible: a CPU sampled in kernel code is
         // never a monopoly candidate, however long since progress.
@@ -2513,13 +2530,15 @@ mod tests {
 
     #[test]
     fn a_non_active_or_unarmed_cpu_never_monopolises() {
+        let idle_cpu = crate::test_boot::claim_cpu();
+        let fresh_cpu = crate::test_boot::claim_cpu();
         // Not Active (parked/offline): owes no progress, never a monopoly.
-        let idle = reset(52);
+        let idle = reset(idle_cpu);
         idle.last_progress_ns.store(1_000, Ordering::Relaxed);
         let now = 1_000 + 10 * DEFAULT_MONOPOLY_YIELD_THRESHOLD_NS;
         assert!(!monopolises_cpu(idle, now, false));
         // Active but progress never armed (0): fail closed, no phantom yield.
-        let fresh = reset(53);
+        let fresh = reset(fresh_cpu);
         fresh
             .wd_activity
             .store(WatchdogActivity::Active as u8, Ordering::Relaxed);
@@ -2528,7 +2547,8 @@ mod tests {
 
     #[test]
     fn on_watchdog_tick_requests_a_forced_yield_for_a_monopolising_user_cpu() {
-        let state = active_with_progress(54, 1_000);
+        let cpu = crate::test_boot::claim_cpu();
+        let state = active_with_progress(cpu, 1_000);
         state.force_yield.store(false, Ordering::Relaxed);
         let sample = WatchdogSample {
             pc: 0x4000_0000,
@@ -2536,7 +2556,7 @@ mod tests {
             aux: 0x6000_0000,
             in_kernel: false,
         };
-        on_watchdog_tick(54, 1_000 + DEFAULT_MONOPOLY_YIELD_THRESHOLD_NS, &sample);
+        on_watchdog_tick(cpu, 1_000 + DEFAULT_MONOPOLY_YIELD_THRESHOLD_NS, &sample);
         assert!(state.force_yield.load(Ordering::Relaxed));
     }
 
@@ -2547,7 +2567,8 @@ mod tests {
     /// monopolise itself unopposed.
     #[test]
     fn a_stale_in_kernel_reading_does_not_suppress_the_tick_guard() {
-        let state = active_with_progress(24, 1_000);
+        let cpu = crate::test_boot::claim_cpu();
+        let state = active_with_progress(cpu, 1_000);
         state.wd_ctx_in_kernel.store(true, Ordering::Relaxed);
         let now = 1_000 + DEFAULT_MONOPOLY_YIELD_THRESHOLD_NS;
         assert!(progress_overdue(state, now));
@@ -2561,8 +2582,9 @@ mod tests {
     /// it). A sample within the interval is not.
     #[test]
     fn a_context_older_than_the_cadence_is_stale() {
+        let cpu = crate::test_boot::claim_cpu();
         let cadence = tairix_arch_api::WATCHDOG_CADENCE_NS;
-        let state = reset(25);
+        let state = reset(cpu);
         assert!(context_stale(state, 1_000));
         state.last_seen_ns.store(1_000, Ordering::Relaxed);
         assert!(!context_stale(state, 1_000 + cadence));
@@ -2575,8 +2597,9 @@ mod tests {
     /// kernel when it was only running the code it last returned to.
     #[test]
     fn the_same_cpu_stall_report_marks_a_rotted_context_stale() {
+        let cpu = crate::test_boot::claim_cpu();
         let sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
-        let state = active_with_progress(26, 1_000);
+        let state = active_with_progress(cpu, 1_000);
         state.wd_ctx_pc.store(0x4000_0000, Ordering::Relaxed);
         state.wd_ctx_task.store(9, Ordering::Relaxed);
         state.wd_ctx_in_kernel.store(true, Ordering::Relaxed);
@@ -2607,8 +2630,10 @@ mod tests {
 
     #[test]
     fn on_watchdog_tick_does_not_force_yield_a_kernel_or_recent_cpu() {
+        let in_kernel_cpu = crate::test_boot::claim_cpu();
+        let recent_cpu = crate::test_boot::claim_cpu();
         // Sampled in the kernel: never force-yielded.
-        let in_kernel = active_with_progress(55, 1_000);
+        let in_kernel = active_with_progress(in_kernel_cpu, 1_000);
         in_kernel.force_yield.store(false, Ordering::Relaxed);
         let ksample = WatchdogSample {
             pc: 0x1000,
@@ -2617,14 +2642,14 @@ mod tests {
             in_kernel: true,
         };
         on_watchdog_tick(
-            55,
+            in_kernel_cpu,
             1_000 + 10 * DEFAULT_MONOPOLY_YIELD_THRESHOLD_NS,
             &ksample,
         );
         assert!(!in_kernel.force_yield.load(Ordering::Relaxed));
         // A user task that returned to the scheduler recently: not a
         // monopoly, so no forced yield.
-        let recent = active_with_progress(56, 1_000);
+        let recent = active_with_progress(recent_cpu, 1_000);
         recent.force_yield.store(false, Ordering::Relaxed);
         let usample = WatchdogSample {
             pc: 0x4000_0000,
@@ -2632,7 +2657,7 @@ mod tests {
             aux: 0x6000_0000,
             in_kernel: false,
         };
-        on_watchdog_tick(56, 1_500, &usample);
+        on_watchdog_tick(recent_cpu, 1_500, &usample);
         assert!(!recent.force_yield.load(Ordering::Relaxed));
     }
 
@@ -2971,9 +2996,10 @@ mod tests {
     #[cfg(feature = "watchdog-diagnostics")]
     #[test]
     fn the_lock_site_stack_tracks_the_innermost_lock() {
+        let cpu = crate::test_boot::claim_cpu();
         let outer = here();
         let inner = here();
-        let state = reset(60);
+        let state = reset(cpu);
         // No lock held → nothing recorded.
         assert_eq!(Diag::lock_snapshot(state), (None, false, 0));
         // Spin-acquire the outer lock: recorded as acquiring, then promoted
@@ -3008,9 +3034,10 @@ mod tests {
     #[cfg(feature = "watchdog-diagnostics")]
     #[test]
     fn a_spinning_lock_stays_acquiring_across_a_nested_acquire_release() {
+        let cpu = crate::test_boot::claim_cpu();
         let contended = here();
         let nested = here();
-        let state = reset(62);
+        let state = reset(cpu);
         lock_push(state, Some(contended), true);
         assert_eq!(Diag::lock_snapshot(state), (Some(contended), true, 0));
         // An interrupt taken mid-spin takes and releases its own lock.
@@ -3031,9 +3058,10 @@ mod tests {
     #[cfg(feature = "watchdog-diagnostics")]
     #[test]
     fn a_contended_lock_records_its_holder() {
+        let cpu = crate::test_boot::claim_cpu();
         let contended = here();
         let other = here();
-        let state = reset(63);
+        let state = reset(cpu);
         lock_push(state, Some(contended), true);
         assert_eq!(Diag::lock_snapshot(state), (Some(contended), true, 0));
         // The holder stamp is the owning CPU's id plus one.
@@ -3056,7 +3084,8 @@ mod tests {
     #[cfg(feature = "watchdog-diagnostics")]
     #[test]
     fn the_lock_site_stack_survives_nesting_past_the_cap() {
-        let state = reset(61);
+        let cpu = crate::test_boot::claim_cpu();
+        let state = reset(cpu);
         // Push one more than the cap can record. Every entry shares this
         // one site; only the outermost is read back, so they need not differ.
         let site = here();
@@ -3495,7 +3524,8 @@ mod tests {
     #[cfg(feature = "watchdog-diagnostics")]
     #[test]
     fn note_kernel_breadcrumb_publishes_a_snapshot_readable_by_a_buddy() {
-        let state = reset(44);
+        let cpu = crate::test_boot::claim_cpu();
+        let state = reset(cpu);
         // A fresh slot has no breadcrumb; a snapshot renders none.
         let before = Diag::snapshot(state);
         assert_eq!(before.breadcrumb, KernelBreadcrumb::None);
@@ -3503,7 +3533,7 @@ mod tests {
 
         // The CPU publishes the region it enters; the buddy observer's
         // snapshot reads a consistent (site, detail, seq) triple.
-        note_kernel_breadcrumb(44, KernelBreadcrumb::Syscall, 0x2a);
+        note_kernel_breadcrumb(cpu, KernelBreadcrumb::Syscall, 0x2a);
         let first = Diag::snapshot(state);
         assert_eq!(first.breadcrumb, KernelBreadcrumb::Syscall);
         assert_eq!(first.breadcrumb_detail, 0x2a);
@@ -3511,7 +3541,7 @@ mod tests {
 
         // Each write advances the sequence, so two successive reports tell a
         // frozen breadcrumb (stuck here) from an advancing one.
-        note_kernel_breadcrumb(44, KernelBreadcrumb::FaultAnon, 0x1000);
+        note_kernel_breadcrumb(cpu, KernelBreadcrumb::FaultAnon, 0x1000);
         let second = Diag::snapshot(state);
         assert_eq!(second.breadcrumb, KernelBreadcrumb::FaultAnon);
         assert_eq!(second.breadcrumb_detail, 0x1000);
@@ -3530,20 +3560,21 @@ mod tests {
     #[cfg(feature = "watchdog-diagnostics")]
     #[test]
     fn note_watchdog_backtrace_publishes_a_snapshot_readable_by_a_buddy() {
-        let state = reset(45);
+        let cpu = crate::test_boot::claim_cpu();
+        let state = reset(cpu);
         // A fresh slot has no backtrace; a snapshot reads none.
         assert_eq!(Diag::snapshot(state).bt_len, 0);
 
         // The port publishes the interrupted-context frame chain; the buddy
         // observer's snapshot reads a consistent set (length + frames).
-        note_watchdog_backtrace(45, &[0x1111, 0x2222, 0x3333]);
+        note_watchdog_backtrace(cpu, &[0x1111, 0x2222, 0x3333]);
         let snap = Diag::snapshot(state);
         assert_eq!(snap.bt_len, 3);
         assert_eq!(&snap.bt[..3], &[0x1111, 0x2222, 0x3333]);
 
         // A later, shorter capture replaces the previous one wholesale (the
         // published length bounds what a reader trusts).
-        note_watchdog_backtrace(45, &[0xaaaa]);
+        note_watchdog_backtrace(cpu, &[0xaaaa]);
         let snap = Diag::snapshot(state);
         assert_eq!(snap.bt_len, 1);
         assert_eq!(snap.bt[0], 0xaaaa);
@@ -3552,11 +3583,12 @@ mod tests {
     #[cfg(feature = "watchdog-diagnostics")]
     #[test]
     fn note_watchdog_backtrace_caps_depth_and_is_a_fail_closed_no_op_out_of_range() {
-        let state = reset(46);
+        let cpu = crate::test_boot::claim_cpu();
+        let state = reset(cpu);
         // More frames than the fixed diagnostic depth are truncated, never
         // overrunning the fixed per-CPU buffer.
         let deep: [u64; cpu_state::WD_BT_MAX + 4] = core::array::from_fn(|i| i as u64 + 1);
-        note_watchdog_backtrace(46, &deep);
+        note_watchdog_backtrace(cpu, &deep);
         let snap = Diag::snapshot(state);
         assert_eq!(snap.bt_len, cpu_state::WD_BT_MAX);
         assert_eq!(
@@ -3565,7 +3597,7 @@ mod tests {
         );
 
         // An empty capture clears the record (the report then omits it).
-        note_watchdog_backtrace(46, &[]);
+        note_watchdog_backtrace(cpu, &[]);
         assert_eq!(Diag::snapshot(state).bt_len, 0);
 
         // A stray id never panics and never touches a slot it does not own.
