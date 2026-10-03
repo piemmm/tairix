@@ -26,6 +26,8 @@
 //!   never of the language.
 //! * **Content policy** — no document, in any locale, contains a word from
 //!   the closed [`DISALLOWED_WORDS`] screen (§8.1).
+//! * **Encoding** — no document holds U+FFFD, which an encoding fault leaves
+//!   where a character was lost.
 //!
 //! The per-app unit tests still pin `en-US/`'s `OPTIONS` to each program's
 //! *actual* argument parser (§3.1) — only the app crate knows its parser;
@@ -185,6 +187,11 @@ pub fn lint_help_trees(docs: &[LintDoc<'_>]) -> Vec<String> {
                 }
                 if let Ok(text) = core::str::from_utf8(doc.bytes) {
                     violations.extend(content_policy_violations(&at, text));
+                    if text.contains(char::REPLACEMENT_CHARACTER) {
+                        violations.push(format!(
+                            "{at}: holds U+FFFD, where an encoding fault lost a character"
+                        ));
+                    }
                 }
             }
             Err(err) => violations.push(format!("{at}: does not parse: {err}")),
@@ -444,6 +451,17 @@ mod tests {
         let violations = lint_help_trees(&docs);
         assert_eq!(violations.len(), 1, "{violations:?}");
         assert!(violations[0].contains("no en-US/ counterpart"));
+    }
+
+    #[test]
+    fn a_lost_character_is_flagged() {
+        let mut tree = clean_tree(&doc_with_keys(&[]));
+        tree[3].1 = String::from(
+            "## NAME\n\nx \u{fffd}\u{fffd} a tool\n\n## SYNOPSIS\n\n`x`\n\n## DESCRIPTION\n\nDoes x.\n",
+        );
+        let violations = lint_help_trees(&rows(&tree));
+        assert_eq!(violations.len(), 1, "{violations:?}");
+        assert!(violations[0].contains("U+FFFD"), "{violations:?}");
     }
 
     #[test]

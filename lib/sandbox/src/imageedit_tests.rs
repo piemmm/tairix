@@ -6,15 +6,16 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_image::{
-    encode_jpeg, encode_png, encode_sprite_area, DecodeError, IndexDepth, JpegOptions, Picture,
-    Rgba8, SpriteInput, SpriteMode, SpriteName, SpritePalette, Unkept,
+    encode_gif, encode_jpeg, encode_png, encode_sprite_area, encode_tiff, DecodeError, Density,
+    DensityUnit, GifOptions, IndexDepth, JpegOptions, Picture, PictureSource, Rgba8, SpriteInput,
+    SpriteMode, SpriteName, SpritePalette, TiffCompression, TiffOptions, Unkept, Written,
 };
 use tairix_log::Sink;
 
 use super::{
     close_edit, open_edit, read_kept, read_rows, select_entry, EditDocument, EditEntry,
-    EditFailure, EditPicture, EditPixels, EditRefusal, EditSprite, KeptReason, MAX_EDIT_SIDE,
-    OP_EDIT_OPEN, OP_EDIT_ROWS, OP_EDIT_SELECT,
+    EditFailure, EditKind, EditPicture, EditPixels, EditRefusal, EditSprite, KeptReason,
+    MAX_EDIT_SIDE, OP_EDIT_OPEN, OP_EDIT_ROWS, OP_EDIT_SELECT,
 };
 use crate::host::ParserSandbox;
 use crate::imagerender::{
@@ -75,8 +76,13 @@ fn a_paletted_png_arrives_as_its_indices_and_palette() {
     let document = open_edit(&mut sandbox, None).expect("opens");
     assert_eq!(document.format, ViewFormat::Png);
     assert_eq!(
-        (document.sprites, document.count, document.unkept),
-        (false, 1, Unkept::default())
+        (
+            document.kind,
+            document.count,
+            document.unkept,
+            document.written
+        ),
+        (EditKind::Single, 1, Unkept::default(), Written::Plain)
     );
     let entry = picture(select_entry(&mut sandbox, document, 0).expect("selects"));
     assert_eq!((entry.width, entry.height), (6, 4));
@@ -159,7 +165,7 @@ fn a_sprite_area_arrives_sprite_by_sprite_with_its_details() {
     let mut sandbox = sandbox();
     send_document(&mut sandbox, &bytes).expect("uploads");
     let document = open_edit(&mut sandbox, Some(ViewFormat::Sprite)).expect("opens");
-    assert!(document.sprites);
+    assert_eq!(document.kind, EditKind::Sprites);
     assert_eq!(document.count, 3);
 
     let icon = picture(select_entry(&mut sandbox, document, 0).expect("selects"));
@@ -228,9 +234,11 @@ fn every_step_out_of_order_is_refused() {
     );
     let unopened = EditDocument {
         format: ViewFormat::Sprite,
-        sprites: true,
+        kind: EditKind::Sprites,
         count: 3,
         unkept: Unkept::default(),
+        written: Written::Plain,
+        canvas: None,
     };
     assert_eq!(
         select_entry(&mut sandbox, unopened, 0),
@@ -244,6 +252,8 @@ fn every_step_out_of_order_is_refused() {
         height: 2,
         pixels: EditPixels::Rgba,
         sprite: None,
+        density: None,
+        layer: None,
     };
     assert_eq!(
         collect(&mut sandbox, &stranger),
@@ -411,7 +421,7 @@ fn an_entry_is_held_to_the_document_it_belongs_to() {
     send_document(&mut sandbox, &png).expect("uploads");
     let single = open_edit(&mut sandbox, None).expect("opens");
     let claimed_area = EditDocument {
-        sprites: true,
+        kind: EditKind::Sprites,
         format: ViewFormat::Sprite,
         ..single
     };
@@ -426,7 +436,7 @@ fn an_entry_is_held_to_the_document_it_belongs_to() {
     send_document(&mut sandbox, &bytes).expect("uploads");
     let sprites = open_edit(&mut sandbox, Some(ViewFormat::Sprite)).expect("opens");
     let claimed_single = EditDocument {
-        sprites: false,
+        kind: EditKind::Single,
         format: ViewFormat::Png,
         ..sprites
     };
@@ -469,17 +479,21 @@ fn a_file_holding_more_than_its_picture_says_so() {
         assert_eq!(
             document.unkept,
             Unkept {
-                precision: false,
-                extras
+                extras,
+                ..Unkept::default()
             }
         );
     }
 }
 
 /// A loss the document's format cannot have is not believed: a JPEG is
-/// never narrowed, and a sprite area keeps all it holds.
+/// never narrowed, a sprite area keeps all it holds, and a PNG never
+/// restates its colours; nor is a record of how it was written that its
+/// format does not make.
 #[test]
 fn a_loss_its_format_cannot_have_is_not_believed() {
+    // The open reply: its tag, format, kind, count, three losses, and how it
+    // was written.
     let narrowed: fn(Vec<u8>) -> Vec<u8> = |mut reply| {
         reply[7] = 1;
         reply
@@ -488,11 +502,23 @@ fn a_loss_its_format_cannot_have_is_not_believed() {
         reply[8] = 1;
         reply
     };
+    let converted: fn(Vec<u8>) -> Vec<u8> = |mut reply| {
+        reply[9] = 1;
+        reply
+    };
+    let as_gif: fn(Vec<u8>) -> Vec<u8> = |mut reply| {
+        reply[10] = 1;
+        reply.push(0);
+        reply
+    };
     let (plain, _) = jpegs();
     let (area, _) = area();
+    let (png, _) = indexed_png();
     for (bytes, format, tamper) in [
         (plain, ViewFormat::Jpeg, narrowed),
         (area, ViewFormat::Sprite, beside),
+        (png.clone(), ViewFormat::Png, converted),
+        (png, ViewFormat::Png, as_gif),
     ] {
         let mut sandbox = tampering::<ImageRenderService>(OP_EDIT_OPEN, tamper);
         send_document(&mut sandbox, &bytes).expect("uploads");
@@ -598,4 +624,170 @@ fn a_decoders_error_is_told_as_what_it_amounts_to() {
     ] {
         assert_eq!(EditRefusal::of_decode(&err), refusal, "{err:?}");
     }
+}
+
+#[test]
+fn a_gif_arrives_as_its_indices_and_how_it_was_written() {
+    let indices: Vec<u8> = (0..12).map(|i| i % 4).collect();
+    let source =
+        Picture::indexed(4, 3, IndexDepth::Two, palette(4), indices.clone(), None).expect("valid");
+    let gif = encode_gif(&source, GifOptions { interlaced: true }).expect("encodes");
+    let mut sandbox = sandbox();
+    send_document(&mut sandbox, &gif).expect("uploads");
+    let document = open_edit(&mut sandbox, None).expect("opens");
+    assert_eq!(document.format, ViewFormat::Gif);
+    assert_eq!(
+        document.written,
+        Written::Gif(GifOptions { interlaced: true })
+    );
+    let entry = picture(select_entry(&mut sandbox, document, 0).expect("selects"));
+    assert_eq!(collect(&mut sandbox, &entry).expect("rows").0, indices);
+}
+
+#[test]
+fn a_tiff_arrives_page_by_page() {
+    let first = Picture::indexed(
+        3,
+        2,
+        IndexDepth::Four,
+        palette(16),
+        vec![0, 1, 2, 3, 4, 5],
+        None,
+    )
+    .expect("valid");
+    let rgba: Vec<u8> = (0..8u8).flat_map(|i| [i, 9, 9, 255]).collect();
+    let second = Picture::rgba(4, 2, rgba.clone())
+        .expect("valid")
+        .with_density(Density::whole(300, 300, DensityUnit::Inch));
+    let pages: [&dyn PictureSource; 2] = [&first, &second];
+    let tiff = encode_tiff(
+        &pages,
+        TiffOptions {
+            compression: TiffCompression::PackBits,
+        },
+    )
+    .expect("encodes");
+    let mut sandbox = sandbox();
+    send_document(&mut sandbox, &tiff).expect("uploads");
+    let document = open_edit(&mut sandbox, None).expect("opens");
+    assert_eq!(
+        (document.format, document.kind, document.count),
+        (ViewFormat::Tiff, EditKind::Pages, 2)
+    );
+    assert_eq!(
+        document.written,
+        Written::Tiff(TiffOptions {
+            compression: TiffCompression::PackBits
+        })
+    );
+    let page = picture(select_entry(&mut sandbox, document, 0).expect("selects"));
+    assert!(page.sprite().is_none());
+    assert_eq!(
+        collect(&mut sandbox, &page).expect("rows").0,
+        [0, 1, 2, 3, 4, 5]
+    );
+    let page = picture(select_entry(&mut sandbox, document, 1).expect("selects"));
+    assert_eq!(page.density(), Density::whole(300, 300, DensityUnit::Inch));
+    assert_eq!(collect(&mut sandbox, &page).expect("rows").0, rgba);
+    assert_eq!(
+        select_entry(&mut sandbox, document, 2),
+        Err(EditFailure::Refused(EditRefusal::NoSuchEntry))
+    );
+}
+
+#[test]
+fn a_density_with_a_zero_figure_is_not_believed() {
+    let picture = Picture::rgba(1, 1, vec![1, 2, 3, 255])
+        .expect("valid")
+        .with_density(Density::whole(72, 72, DensityUnit::Inch));
+    let png = encode_png(&picture).expect("encodes");
+    // The select reply's density follows the tag, index, kind, geometry,
+    // depth, empty palette, plane and sprite flags, its own flag and unit.
+    let mut sandbox = tampering::<ImageRenderService>(OP_EDIT_SELECT, |mut reply| {
+        reply[23..27].fill(0);
+        reply
+    });
+    send_document(&mut sandbox, &png).expect("uploads");
+    let document = open_edit(&mut sandbox, None).expect("opens");
+    assert_eq!(
+        select_entry(&mut sandbox, document, 0),
+        Err(EditFailure::ReplyMalformed)
+    );
+}
+
+/// A layered document: two layers, the bottom whole and the top a smaller,
+/// offset, faded one, with a name past what the wire carries.
+fn layered() -> Vec<u8> {
+    use tairix_image::{encode_ora, OraLayerSource};
+    let long = "n".repeat(super::MAX_LAYER_NAME + 9);
+    let ground = Picture::rgba(5, 4, vec![10; 80]).expect("valid");
+    let top = Picture::rgba(2, 3, vec![200; 24]).expect("valid");
+    let layers = [
+        OraLayerSource {
+            name: "ground",
+            picture: &ground,
+            at: (0, 0),
+            opacity: 255,
+            visible: true,
+        },
+        OraLayerSource {
+            name: &long,
+            picture: &top,
+            at: (-1, 2),
+            opacity: 100,
+            visible: false,
+        },
+    ];
+    encode_ora((5, 4), &layers, &ground, &ground).expect("encodes")
+}
+
+#[test]
+fn a_layered_document_claiming_more_layers_than_are_read_is_not_believed() {
+    let mut sandbox = tampering::<ImageRenderService>(OP_EDIT_OPEN, |mut reply| {
+        let count = u32::try_from(tairix_image::MOST_ORA_LAYERS + 1).expect("small");
+        reply[3..7].copy_from_slice(&count.to_le_bytes());
+        reply
+    });
+    send_document(&mut sandbox, &layered()).expect("uploads");
+    assert_eq!(
+        open_edit(&mut sandbox, None),
+        Err(EditFailure::ReplyMalformed)
+    );
+}
+
+#[test]
+fn a_layered_document_arrives_layer_by_layer_with_its_canvas() {
+    let mut sandbox = sandbox();
+    send_document(&mut sandbox, &layered()).expect("uploads");
+    let document = open_edit(&mut sandbox, None).expect("opens");
+    assert_eq!(document.format, ViewFormat::OpenRaster);
+    assert_eq!((document.kind, document.count), (EditKind::Layers, 2));
+    assert_eq!(document.canvas, Some((5, 4)));
+    assert!(document.unkept.extras, "the long name is cut on the wire");
+    let ground = picture(select_entry(&mut sandbox, document, 0).expect("selects"));
+    assert_eq!(
+        ground.layer().map(|layer| layer.name.as_str()),
+        Some("ground")
+    );
+    let (samples, _) = collect(&mut sandbox, &ground).expect("rows");
+    assert_eq!(samples, vec![10; 80]);
+    let top = picture(select_entry(&mut sandbox, document, 1).expect("selects"));
+    let layer = top.layer().expect("a layer");
+    assert_eq!(layer.name.len(), super::MAX_LAYER_NAME);
+    assert_eq!(
+        (layer.at, layer.opacity, layer.visible),
+        ((-1, 2), 100, false)
+    );
+    assert_eq!((top.width(), top.height()), (2, 3));
+    let claimed_single = EditDocument {
+        kind: EditKind::Single,
+        format: ViewFormat::Png,
+        canvas: None,
+        ..document
+    };
+    assert_eq!(
+        select_entry(&mut sandbox, claimed_single, 0),
+        Err(EditFailure::ReplyMalformed),
+        "layer details on a single picture"
+    );
 }

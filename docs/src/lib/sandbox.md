@@ -113,11 +113,17 @@ Stability tier: **experimental**.
   whose file is streamed in through `upload_document` rather than held whole,
   read straight into one push frame of at most `MAX_DOCUMENT_CHUNK` bytes and
   no more than the document, and never copied.
-- **`imageedit`** — an editor's document over the same upload: each entry at
-  its own depth, a sprite the decoder cannot read kept as its bytes, every
-  answer held by the caller to `MAX_EDIT_SIDE`, `MAX_EDIT_PIXELS` and
-  `MAX_EDIT_ENTRIES`. `Paint.app` is the consumer, and reads each document
-  through a fresh worker (`ParserSandbox::release`).
+- **`imageedit`** — an editor's document over the same upload: one picture,
+  a TIFF's pages, a sprite area's sprites or an OpenRaster document's layers
+  (`EditKind`), each entry at its own depth with the density its file states,
+  what the file held beside them (`Unkept`) and how it was written
+  (`Written`), a sprite the decoder cannot read kept as its bytes, and a layer
+  with its name, offset, opacity and visibility (`EditLayer`) over the canvas
+  the document declares. Every answer is held by the caller to
+  `MAX_EDIT_SIDE`, `MAX_EDIT_PIXELS` and `MAX_EDIT_ENTRIES`, a layer's name to
+  `MAX_LAYER_NAME` and a stack to `MOST_ORA_LAYERS`. `Paint.app` is the
+  consumer, and reads each document through a fresh worker
+  (`ParserSandbox::release`).
 - **`rt`** (feature `program`, freestanding targets only) — the
   production transport. `RtLauncher` spawns the program's **own binary**
   in a worker role: two fresh pipes wired to the child's fd 0/1 through

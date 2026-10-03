@@ -7,8 +7,9 @@ use crate::canvas::{Canvas, Kind, Sample};
 use crate::colour::Ink;
 use crate::document::{Document, Entry, Picture};
 use crate::history::{Damage, Unapplied};
+use crate::save::{SaveFormat, SaveSettings};
 use crate::shape::{Point, Shape, FX};
-use crate::stroke::{Blend, Layer, Stroke};
+use crate::stroke::{Blend, Coat, Stroke};
 use tairix_image::Unkept;
 
 fn document(width: u32, height: u32) -> Document {
@@ -20,10 +21,11 @@ fn document(width: u32, height: u32) -> Document {
 fn paint(document: &mut Document, x: i64, y: i64, colour: [u8; 4]) {
     document.reserve().expect("room");
     let mut stroke = Stroke::new(
-        Layer {
+        Coat {
             ink: Ink::Colour(colour),
             blend: Blend::Over,
         },
+        None,
         None,
     );
     let canvas = document.canvas_mut().expect("a picture");
@@ -44,7 +46,7 @@ fn paint(document: &mut Document, x: i64, y: i64, colour: [u8; 4]) {
 }
 
 fn colour(document: &Document, x: u32, y: u32) -> Option<[u8; 4]> {
-    document.picture()?.canvas.colour_at(x, y)
+    document.picture()?.canvas().colour_at(x, y)
 }
 
 #[test]
@@ -172,7 +174,13 @@ fn sprite_document(count: usize) -> Document {
             Entry::Picture(Picture::plain(canvas))
         })
         .collect();
-    Document::of(entries, crate::document::Origin::New, Unkept::default()).expect("entries")
+    Document::of(
+        entries,
+        crate::document::Origin::New(SaveFormat::Png),
+        Unkept::default(),
+        SaveSettings::default(),
+    )
+    .expect("entries")
 }
 
 #[test]
@@ -197,7 +205,7 @@ fn removing_inserting_and_moving_entries_undo_in_turn() {
     let shades: Vec<Option<[u8; 4]>> = doc
         .entries()
         .iter()
-        .map(|entry| entry.picture().and_then(|p| p.canvas.colour_at(0, 0)))
+        .map(|entry| entry.picture().and_then(|p| p.canvas().colour_at(0, 0)))
         .collect();
     assert_eq!(
         shades,
@@ -235,10 +243,10 @@ fn a_replaced_picture_comes_back_whole() {
     let mut doc = document(10, 10);
     let smaller = Canvas::new(3, 3, Kind::Rgba, Sample::Rgba([0; 4])).expect("fits");
     doc.replace_picture(Picture::plain(smaller)).expect("room");
-    assert_eq!(doc.picture().map(|p| p.canvas.width()), Some(3));
+    assert_eq!(doc.picture().map(|p| p.canvas().width()), Some(3));
     let applied = doc.undo().expect("undone");
     assert_eq!(applied.damage, Damage::Whole);
-    assert_eq!(doc.picture().map(|p| p.canvas.width()), Some(10));
+    assert_eq!(doc.picture().map(|p| p.canvas().width()), Some(10));
 }
 
 /// A step whose tiles no longer fit their slots is refused whole, every tile
@@ -269,4 +277,85 @@ fn steps_sharing_pixels_are_charged_for_them_and_go_under_pressure() {
     doc.remove(0).expect("one is left");
     doc.adopt_pressure(PressureBand::Severe);
     assert_eq!(doc.undo(), Err(Unapplied::Nothing), "nothing kept");
+}
+
+fn layer(colour: [u8; 4], name: &str) -> crate::document::Layer {
+    let canvas = Canvas::new(10, 10, Kind::Rgba, Sample::Rgba(colour)).expect("fits");
+    crate::document::Layer::new(canvas, alloc::string::String::from(name))
+}
+
+fn names(document: &Document) -> Vec<alloc::string::String> {
+    document
+        .picture()
+        .expect("a picture")
+        .layers()
+        .iter()
+        .map(|layer| layer.name.clone())
+        .collect()
+}
+
+#[test]
+fn layers_added_removed_moved_and_reshown_undo_and_redo() {
+    use crate::document::Shown;
+    let mut doc = document(10, 10);
+    doc.insert_layer(1, layer([1; 4], "Sky")).expect("added");
+    doc.insert_layer(2, layer([2; 4], "Sun")).expect("added");
+    assert_eq!(names(&doc), ["Background", "Sky", "Sun"]);
+    doc.move_layer(2, 0).expect("moved");
+    assert_eq!(names(&doc), ["Sun", "Background", "Sky"]);
+    let shown = Shown {
+        name: alloc::string::String::from("Sunset"),
+        opacity: 40,
+        visible: false,
+    };
+    doc.show_layer(0, shown).expect("reshown");
+    doc.remove_layer(2).expect("removed");
+    assert_eq!(names(&doc), ["Sunset", "Background"]);
+    for _ in 0..2 {
+        let applied = doc.undo().expect("undone");
+        assert_eq!(applied.damage, Damage::Layers);
+    }
+    assert_eq!(names(&doc), ["Sun", "Background", "Sky"]);
+    let sun = &doc.picture().expect("a picture").layers()[0];
+    assert_eq!((sun.opacity, sun.visible), (255, true), "shown as it was");
+    doc.undo().expect("move undone");
+    doc.undo().expect("second added undone");
+    assert_eq!(names(&doc), ["Background", "Sky"]);
+    doc.redo().expect("redone");
+    doc.redo().expect("redone");
+    assert_eq!(names(&doc), ["Sun", "Background", "Sky"]);
+    assert_eq!(
+        doc.picture().map(crate::document::Picture::active),
+        Some(0),
+        "painting on it"
+    );
+}
+
+/// A stroke undone while another layer is painted on goes back where it was
+/// made, and painting moves there with it.
+#[test]
+fn a_stroke_undone_from_another_layer_lands_on_its_own() {
+    let mut doc = document(10, 10);
+    doc.insert_layer(1, layer([0; 4], "Ink")).expect("added");
+    paint(&mut doc, 5, 5, [0, 0, 255, 255]);
+    assert!(doc.select_layer(0));
+    assert_eq!(
+        colour(&doc, 5, 5),
+        Some([255; 4]),
+        "the background holds none of it"
+    );
+    let applied = doc.undo().expect("undone");
+    assert_eq!(applied.damage, Damage::Layers, "painting moved");
+    assert_eq!(doc.picture().map(crate::document::Picture::active), Some(1));
+    assert_eq!(colour(&doc, 5, 5), Some([0; 4]), "taken off the ink layer");
+}
+
+#[test]
+fn a_removed_layer_is_charged_to_the_history_alone() {
+    let mut doc = document(10, 10);
+    doc.insert_layer(1, layer([7; 4], "Gone")).expect("added");
+    let held = doc.bytes();
+    doc.remove_layer(1).expect("removed");
+    assert!(doc.bytes() < held, "the document no longer holds it");
+    assert_eq!(doc.history_depth(), 2);
 }

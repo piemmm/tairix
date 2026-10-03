@@ -1,21 +1,38 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{capsule_cover, line_pixels, Bounds, Point, Shape, Span, FX};
+use super::{line_pixels, Bounds, Point, Shape, ShapeScratch, Span, FX};
 
-/// Every row of `shape`'s bounds, a coverage a pixel.
+/// Every row of `shape`'s bounds within the picture's own quarter of the
+/// plane, a coverage a pixel.
 fn raster(shape: &Shape, aa: bool) -> (Bounds, Vec<Vec<u8>>) {
-    let bounds = shape.bounds();
+    let mut bounds = shape.bounds();
+    bounds.x0 = bounds.x0.max(0);
+    bounds.y0 = bounds.y0.max(0);
     let width = usize::try_from(bounds.x1 - bounds.x0).expect("wide");
-    let rows = (bounds.y0..bounds.y1)
+    let mut scratch = ShapeScratch::default();
+    let rows = shape.rows(aa, &mut scratch).expect("room");
+    let Some(mut rows) = rows else {
+        return (
+            bounds,
+            vec![vec![0; width]; usize::try_from(bounds.y1 - bounds.y0).expect("tall")],
+        );
+    };
+    let x0 = u32::try_from(bounds.x0).expect("on the picture");
+    let lines = (bounds.y0..bounds.y1)
         .map(|y| {
-            let mut row = vec![0u8; width];
-            shape.row(y, bounds.x0, aa, &mut row);
+            let mut row = vec![0xAAu8; width];
+            rows.row(u32::try_from(y).expect("on the picture"), x0, &mut row);
             row
         })
         .collect();
-    (bounds, rows)
+    (bounds, lines)
 }
+
+/// How far a traced curve may stray from its own, and a pixel's half
+/// diagonal: what an edge pixel may be off by in each mode.
+const BAND: i128 = 20;
+const HALF_DIAGONAL: i128 = 182;
 
 fn covered(rows: &[Vec<u8>]) -> u64 {
     rows.iter().flatten().map(|&c| u64::from(c)).sum()
@@ -166,7 +183,13 @@ fn a_ring_is_the_ellipse_less_the_one_inside() {
             } else {
                 0
             };
-            assert_eq!(ring[y][x], whole[y][x].saturating_sub(inner), "({x}, {y})");
+            // One contour less another, rounded once rather than twice.
+            let expected = whole[y][x].saturating_sub(inner);
+            assert!(
+                ring[y][x].abs_diff(expected) <= 1,
+                "({x}, {y}): {} against {expected}",
+                ring[y][x]
+            );
         }
     }
     assert_eq!(ring[40][50], 0, "the middle is open");
@@ -260,10 +283,47 @@ fn bounds_combine_and_clip() {
     assert_eq!(Point { x: -1, y: 300 }.pixel(), (-1, 1));
 }
 
-/// A row measures only the run the capsule can reach, and covers exactly
-/// what measuring every pixel of it would, at every slope and size.
+/// The squared distance from `p` to the segment from `a` to `b`, the
+/// capsule's own definition.
+fn segment_distance2(p: Point, a: Point, b: Point) -> i128 {
+    let (vx, vy) = (i128::from(b.x - a.x), i128::from(b.y - a.y));
+    let (wx, wy) = (i128::from(p.x - a.x), i128::from(p.y - a.y));
+    let length2 = vx * vx + vy * vy;
+    let dot = wx * vx + wy * vy;
+    if length2 == 0 || dot <= 0 {
+        return wx * wx + wy * wy;
+    }
+    if dot >= length2 {
+        let (ex, ey) = (i128::from(p.x - b.x), i128::from(p.y - b.y));
+        return ex * ex + ey * ey;
+    }
+    let cross = wx * vy - wy * vx;
+    cross * cross / length2
+}
+
+/// Whether coverage `cover` agrees with a pixel whose centre lies `d` from a
+/// curve of radius `r`: a centre test exact but within the tracing band,
+/// an area whole well inside and nothing well outside.
+fn agrees(cover: u8, d: i128, r: i128, aa: bool) -> bool {
+    if aa {
+        if d + HALF_DIAGONAL + BAND <= r {
+            return cover == 255;
+        }
+        if d >= r + HALF_DIAGONAL + BAND {
+            return cover == 0;
+        }
+        return true;
+    }
+    if (d - r).abs() <= BAND {
+        return cover == 0 || cover == 255;
+    }
+    cover == if d <= r { 255 } else { 0 }
+}
+
+/// A capsule's rows agree with its own definition at every slope and size,
+/// and their area is the capsule's.
 #[test]
-fn a_capsules_bounded_rows_cover_what_every_pixel_would() {
+fn a_capsules_rows_agree_with_its_definition() {
     let ends = [
         (Point { x: 300, y: 400 }, Point { x: 5000, y: 4100 }),
         (Point { x: 4000, y: 300 }, Point { x: 700, y: 3900 }),
@@ -277,69 +337,38 @@ fn a_capsules_bounded_rows_cover_what_every_pixel_would() {
             for aa in [false, true] {
                 let shape = Shape::Capsule { a, b, radius };
                 let (bounds, rows) = raster(&shape, aa);
-                let width = usize::try_from(bounds.x1 - bounds.x0).expect("wide");
                 for (y, row) in (bounds.y0..).zip(&rows) {
-                    let every: Vec<u8> = (bounds.x0
-                        ..bounds.x0 + i64::try_from(width).expect("wide"))
-                        .map(|x| capsule_cover(a, b, radius, x, y, aa))
-                        .collect();
-                    assert_eq!(row, &every, "{a:?}–{b:?} r{radius} aa {aa} row {y}");
-                }
-            }
-        }
-    }
-}
-
-/// Each pixel of an ellipse or a rectangle by its definition alone: the
-/// centre inside with smoothing off, else the share of its sixteen samples
-/// inside, a ring being its ellipse less the one inside it — what the rows
-/// must match however they skip the work.
-fn by_definition(shape: &Shape, x: i64, y: i64, aa: bool) -> u8 {
-    let cover = |inside: &dyn Fn(Point) -> bool| {
-        if aa {
-            super::sampled(x, y, inside)
-        } else if inside(Point::centre_of(x, y)) {
-            255
-        } else {
-            0
-        }
-    };
-    match *shape {
-        Shape::Ellipse { span, outline } => {
-            let (x0, y0, x1, y1) = span.corners();
-            let oval = |inset: i64| {
-                let (cx, cy) = ((x0 + x1 + 1) * FX / 2, (y0 + y1 + 1) * FX / 2);
-                let rx = (x1 - x0 + 1) * FX / 2 - inset * FX;
-                let ry = (y1 - y0 + 1) * FX / 2 - inset * FX;
-                move |p: Point| {
-                    rx > 0 && ry > 0 && {
-                        let dx = i128::from(p.x - cx) * i128::from(ry);
-                        let dy = i128::from(p.y - cy) * i128::from(rx);
-                        let r = i128::from(rx) * i128::from(ry);
-                        dx * dx + dy * dy <= r * r
+                    for (x, &cover) in (bounds.x0..).zip(row) {
+                        let d2 = segment_distance2(Point::centre_of(x, y), a, b);
+                        let d = d2.isqrt();
+                        assert!(
+                            agrees(cover, d, i128::from(radius), aa),
+                            "{a:?}–{b:?} r{radius} aa {aa} ({x}, {y}): {cover} at {d}"
+                        );
                     }
                 }
-            };
-            let whole = cover(&oval(0));
-            outline.map_or(whole, |w| whole.saturating_sub(cover(&oval(i64::from(w)))))
-        }
-        Shape::Rect { span, outline } => {
-            let (x0, y0, x1, y1) = span.corners();
-            let at = |w: i64| (x0 + w..=x1 - w).contains(&x) && (y0 + w..=y1 - w).contains(&y);
-            if at(0) && !outline.is_some_and(|w| at(i64::from(w))) {
-                255
-            } else {
-                0
+                if aa && bounds.x0 > 0 && bounds.y0 > 0 {
+                    let real = |v: i64| f64::from(i32::try_from(v).expect("small"));
+                    let (r, length) = (
+                        real(radius) / 256.0,
+                        real(b.x - a.x).hypot(real(b.y - a.y)) / 256.0,
+                    );
+                    let exact = core::f64::consts::PI * r * r + 2.0 * r * length;
+                    let area = area_of(&rows);
+                    assert!(
+                        (area - exact).abs() < 0.02 * exact + 0.3,
+                        "{area} against {exact}"
+                    );
+                }
             }
         }
-        Shape::Capsule { .. } => unreachable!("capsules are held to their own definition"),
     }
 }
 
-/// Rectangles and ellipses, filled and ringed, smoothed or not, read as rows
-/// exactly as each pixel's definition says, the row starting anywhere.
+/// Rectangles exactly, and ellipses by their definition but at the curve,
+/// filled and ringed, smoothed or not.
 #[test]
-fn rectangle_and_ellipse_rows_match_each_pixels_definition() {
+fn rectangle_and_ellipse_rows_agree_with_their_definitions() {
     let spans = [
         Span {
             from: (2, 3),
@@ -354,33 +383,118 @@ fn rectangle_and_ellipse_rows_match_each_pixels_definition() {
             to: (6, 6),
         },
         Span {
-            from: (-7, 2),
-            to: (9, 3),
+            from: (20, 2),
+            to: (49, 3),
         },
     ];
     for span in spans {
         for outline in [None, Some(1), Some(3)] {
-            for shape in [
-                Shape::Rect { span, outline },
-                Shape::Ellipse { span, outline },
-            ] {
-                for aa in [false, true] {
-                    let bounds = shape.bounds();
-                    for from in [bounds.x0 - 5, bounds.x0, bounds.x0 + 3] {
-                        for y in (bounds.y0 - 1)..=bounds.y1 {
-                            let mut row = vec![0u8; 40];
-                            shape.row(y, from, aa, &mut row);
-                            let every: Vec<u8> = (from..from + 40)
-                                .map(|x| by_definition(&shape, x, y, aa))
-                                .collect();
-                            assert_eq!(
-                                row, every,
-                                "{span:?} {outline:?} aa {aa} row {y} from {from}"
+            for aa in [false, true] {
+                let rect = Shape::Rect { span, outline };
+                let (bounds, rows) = raster(&rect, aa);
+                let (x0, y0, x1, y1) = span.corners();
+                for (y, row) in (bounds.y0..).zip(&rows) {
+                    for (x, &cover) in (bounds.x0..).zip(row) {
+                        let at = |w: i64| {
+                            (x0 + w..=x1 - w).contains(&x) && (y0 + w..=y1 - w).contains(&y)
+                        };
+                        let inside = at(0) && !outline.is_some_and(|w| at(i64::from(w)));
+                        assert_eq!(
+                            cover,
+                            if inside { 255 } else { 0 },
+                            "rect {span:?} {outline:?} ({x}, {y})"
+                        );
+                    }
+                }
+                let ellipse = Shape::Ellipse { span, outline };
+                let (bounds, rows) = raster(&ellipse, aa);
+                let (cx, cy) = ((x0 + x1 + 1) * FX / 2, (y0 + y1 + 1) * FX / 2);
+                // A pixel centre's distance past an ellipse inset by `inset`,
+                // measured along its shorter radius — never more than the
+                // true distance — and that radius; `None` where it vanishes.
+                let past = |p: Point, inset: i64| {
+                    let rx = i128::from((x1 - x0 + 1) * FX / 2 - inset * FX);
+                    let ry = i128::from((y1 - y0 + 1) * FX / 2 - inset * FX);
+                    (rx > 0 && ry > 0).then(|| {
+                        let (dx, dy) = (i128::from(p.x - cx), i128::from(p.y - cy));
+                        let reach = (dx * dx * ry * ry + dy * dy * rx * rx).isqrt();
+                        let short = rx.min(ry);
+                        (reach * short / (rx * ry), short)
+                    })
+                };
+                for (y, row) in (bounds.y0..).zip(&rows) {
+                    for (x, &cover) in (bounds.x0..).zip(row) {
+                        let p = Point::centre_of(x, y);
+                        let Some((d, r)) = past(p, 0) else {
+                            continue;
+                        };
+                        let hole = outline.and_then(|width| past(p, i64::from(width)));
+                        let margin = if aa { HALF_DIAGONAL + BAND } else { BAND };
+                        let unsure = (d - r).abs() <= margin
+                            || hole.is_some_and(|(dh, rh)| (dh - rh).abs() <= margin);
+                        if unsure {
+                            assert!(
+                                aa || cover == 0 || cover == 255,
+                                "ellipse {span:?} ({x}, {y}): {cover}"
                             );
+                            continue;
                         }
+                        let inside = d < r && hole.is_none_or(|(dh, rh)| dh >= rh);
+                        assert_eq!(
+                            cover,
+                            if inside { 255 } else { 0 },
+                            "ellipse {span:?} {outline:?} aa {aa} ({x}, {y})"
+                        );
                     }
                 }
             }
         }
     }
+}
+
+/// A box with rounded corners covers its box less what each corner's curve
+/// leaves out, symmetric about both its middles, and its border's hollow is
+/// rounded the same less its width.
+#[test]
+fn a_rounded_box_leaves_its_corners_out_symmetrically() {
+    let span = Span {
+        from: (2, 2),
+        to: (41, 31),
+    };
+    let rounded = Shape::Rounded {
+        span,
+        outline: None,
+        radius: 8,
+    };
+    let (_, rows) = raster(&rounded, true);
+    let area = area_of(&rows);
+    let exact = 40.0 * 30.0 - (4.0 - core::f64::consts::PI) * 64.0;
+    assert!((area - exact).abs() < 1.0, "{area} against {exact}");
+    for (top, bottom) in rows.iter().zip(rows.iter().rev()) {
+        assert_eq!(top, bottom, "symmetric top to bottom");
+        let mirrored: Vec<u8> = top.iter().rev().copied().collect();
+        assert_eq!(top, &mirrored, "and side to side");
+    }
+    assert_eq!(rows[0][0], 0, "the corner pixel is left out");
+    assert_eq!(rows[0][20], 255, "the top edge between corners is whole");
+    let (_, hard) = raster(&rounded, false);
+    assert!(hard.iter().flatten().all(|&c| c == 0 || c == 255));
+    let border = Shape::Rounded {
+        span,
+        outline: Some(3),
+        radius: 8,
+    };
+    let (_, ring) = raster(&border, true);
+    assert_eq!(ring[15][20], 0, "hollow in the middle");
+    assert_eq!(ring[15][1], 255, "the border's side is whole");
+    let square = Shape::Rounded {
+        span,
+        outline: None,
+        radius: 0,
+    };
+    let plain = area_of(&raster(&square, true).1);
+    assert!(
+        (plain - 1200.0).abs() < 1e-9,
+        "no radius is the plain box: {plain}"
+    );
 }

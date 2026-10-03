@@ -9,8 +9,9 @@ use alloc::vec::Vec;
 use tairix_util::fallible;
 
 use crate::canvas::{Canvas, OutOfMemory, Planes, Sample};
+use crate::mask::Mask;
 use crate::shape::Bounds;
-use crate::stroke::{Layer, Stroke};
+use crate::stroke::{Coat, Stroke};
 
 /// The pixels a flood reached.
 #[derive(Debug)]
@@ -152,6 +153,54 @@ pub fn region(
     }))
 }
 
+/// Every pixel of `canvas` like pixel `(x, y)`, joined to it or not, or
+/// `None` for a pixel off the canvas: what a fill that is not held to joined
+/// pixels reaches. Each row is read once.
+///
+/// # Errors
+///
+/// [`OutOfMemory`] when the bitmap or a row cannot be had.
+pub fn similar(
+    canvas: &Canvas,
+    x: u32,
+    y: u32,
+    tolerance: u8,
+) -> Result<Option<Region>, OutOfMemory> {
+    let Some(seed) = canvas.sample(x, y) else {
+        return Ok(None);
+    };
+    let (width, height) = (canvas.width() as usize, canvas.height() as usize);
+    let mut reached = fallible::filled((width * height).div_ceil(64), 0u64).ok_or(OutOfMemory)?;
+    let mut row = fallible::filled(width, Sample::Rgba([0; 4])).ok_or(OutOfMemory)?;
+    let planes = canvas.kind().planes();
+    let mut bounds: Option<Bounds> = None;
+    for py in 0..canvas.height() {
+        canvas.row_samples(py, 0, &mut row);
+        let start = py as usize * width;
+        let mut taken: Option<(usize, usize)> = None;
+        for (px, &sample) in row.iter().enumerate() {
+            if alike(seed, sample, tolerance, planes) {
+                set(&mut reached, start + px);
+                taken = Some(taken.map_or((px, px), |(first, _)| (first, px)));
+            }
+        }
+        if let Some((first, last)) = taken {
+            let line = Bounds {
+                x0: i64::try_from(first).unwrap_or(0),
+                y0: i64::from(py),
+                x1: i64::try_from(last + 1).unwrap_or(0),
+                y1: i64::from(py) + 1,
+            };
+            bounds = Some(bounds.map_or(line, |held| held.union(&line)));
+        }
+    }
+    Ok(bounds.map(|bounds| Region {
+        width: canvas.width(),
+        bits: reached,
+        bounds,
+    }))
+}
+
 fn push(pending: &mut Vec<(usize, usize)>, at: (usize, usize)) -> Result<(), OutOfMemory> {
     if pending.len() == pending.capacity() {
         pending
@@ -162,14 +211,20 @@ fn push(pending: &mut Vec<(usize, usize)>, at: (usize, usize)) -> Result<(), Out
     Ok(())
 }
 
-/// Lay `layer` over every pixel of `region` of `canvas`.
+/// Lay `layer` over every pixel of `region` of `canvas`, within `clip`
+/// where a selection is held.
 ///
 /// # Errors
 ///
 /// [`OutOfMemory`] when a tile cannot be copied for writing; the stroke so
 /// far is handed back undone.
-pub fn fill(canvas: &mut Canvas, region: &Region, layer: Layer) -> Result<Stroke, OutOfMemory> {
-    let mut stroke = Stroke::new(layer, None);
+pub fn fill(
+    canvas: &mut Canvas,
+    region: &Region,
+    coat: Coat,
+    clip: Option<Mask>,
+) -> Result<Stroke, OutOfMemory> {
+    let mut stroke = Stroke::new(coat, None, clip);
     let outcome = stroke.cover_rows(canvas, 0, region.bounds, |y, x, out| {
         let (Ok(y), Ok(x)) = (u32::try_from(y), u32::try_from(x)) else {
             return;

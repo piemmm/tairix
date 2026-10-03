@@ -84,7 +84,26 @@ pub enum FillRule {
     EvenOdd,
 }
 
+/// How a pixel an edge crosses is covered.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum Coverage {
+    /// By the exact fraction of its area inside.
+    #[default]
+    Area,
+    /// Wholly or not at all, by whether its centre is inside: what a picture
+    /// that holds no partial coverage is drawn with.
+    Centre,
+}
+
 impl FillRule {
+    /// Whether a point the contours wind around `winding` times is inside.
+    const fn inside(self, winding: i64) -> bool {
+        match self {
+            Self::NonZero => winding != 0,
+            Self::EvenOdd => winding % 2 != 0,
+        }
+    }
+
     /// The alpha a pixel that accumulated `signed` coverage takes.
     ///
     /// A pixel covered twice over accumulates twice [`FULL`]; the rule decides
@@ -157,11 +176,16 @@ impl SampleSpace {
     /// Vertices already in device [`SUBPIXEL`] units, placed from the
     /// drawing's own origin rather than stretched across the surface.
     pub(crate) fn device() -> Self {
+        Self::per_pixel(SUBPIXEL.unsigned_abs())
+    }
+
+    /// Vertices in `units` per pixel, placed from the drawing's own origin.
+    fn per_pixel(units: u32) -> Self {
         Self::new(
             UNIT,
             UNIT,
-            i64::from(SUBPIXEL),
-            (f64::from(SUBPIXEL), f64::from(SUBPIXEL)),
+            i64::from(units),
+            (f64::from(units), f64::from(units)),
             (0, 0),
         )
     }
@@ -421,6 +445,7 @@ pub struct ScanScratch {
     cover: Vec<i64>,
     area: Vec<i64>,
     alphas: Vec<u8>,
+    crossings: Vec<(i64, i32)>,
 }
 
 impl ScanScratch {
@@ -432,7 +457,71 @@ impl ScanScratch {
             cover: Vec::new(),
             area: Vec::new(),
             alphas: Vec::new(),
+            crossings: Vec::new(),
         }
+    }
+
+    /// Scan-convert `contours`, their vertices `units` to a pixel from the
+    /// drawing's origin, for a caller that lays coverage down itself a row
+    /// at a time; `None` where they enclose nothing or their edges cannot be
+    /// held.
+    pub fn coverage_rows<C: AsRef<[(i32, i32)]>>(
+        &mut self,
+        contours: &[C],
+        units: u32,
+        rule: FillRule,
+        coverage: Coverage,
+    ) -> Option<CoverageRows<'_>> {
+        let fill = ScanFill::new(contours, SampleSpace::per_pixel(units), rule, self)?;
+        Some(CoverageRows { fill, coverage })
+    }
+}
+
+/// A shape's coverage, a row at a time: what [`ScanScratch::coverage_rows`]
+/// answers.
+pub struct CoverageRows<'s> {
+    fill: ScanFill<'s>,
+    coverage: Coverage,
+}
+
+impl CoverageRows<'_> {
+    /// The pixels `(x0, x1, y0, y1)`, half open, that can hold any coverage,
+    /// within the `(x, y, width, height)` rectangle `within`; `None` where the
+    /// shape misses it.
+    #[must_use]
+    pub fn bounds(&self, within: (u32, u32, u32, u32)) -> Option<(u32, u32, u32, u32)> {
+        self.fill.bounds(within)
+    }
+
+    /// Write row `y`'s coverage of the pixels from column `x` into `out`, a
+    /// pixel an entry and `255` wholly covered, answering the entries that
+    /// may hold any; every other entry is written nought. A row the allocator
+    /// refuses room for covers nothing rather than aborting.
+    pub fn row(&mut self, y: u32, x: u32, out: &mut [u8]) -> Range<usize> {
+        let covered = match self.coverage {
+            Coverage::Area => {
+                if !self.fill.prepare(out.len()) {
+                    out.fill(0);
+                    return 0..0;
+                }
+                let covered = self.fill.coverage_row(y, x, out.len());
+                if let (Some(from), Some(into)) = (
+                    self.fill.alphas().get(covered.clone()),
+                    out.get_mut(covered.clone()),
+                ) {
+                    into.copy_from_slice(from);
+                }
+                covered
+            }
+            Coverage::Centre => return self.fill.centre_row(y, x, out),
+        };
+        if let Some(before) = out.get_mut(..covered.start) {
+            before.fill(0);
+        }
+        if let Some(after) = out.get_mut(covered.end..) {
+            after.fill(0);
+        }
+        covered
     }
 }
 
@@ -443,6 +532,7 @@ pub(crate) struct ScanFill<'s> {
     cover: &'s mut Vec<i64>,
     area: &'s mut Vec<i64>,
     alphas: &'s mut Vec<u8>,
+    crossings: &'s mut Vec<(i64, i32)>,
     rule: FillRule,
     /// The sub-unit bounding box of every vertex.
     extent: Extent,
@@ -475,6 +565,7 @@ impl<'s> ScanFill<'s> {
             cover,
             area,
             alphas,
+            crossings,
         } = scratch;
         edges.clear();
         let points = contours.iter().fold(0usize, |count, contour| {
@@ -520,9 +611,64 @@ impl<'s> ScanFill<'s> {
             cover,
             area,
             alphas,
+            crossings,
             rule,
             extent,
         })
+    }
+
+    /// Write whole-or-nothing coverage of row `row` into `out`, its first
+    /// entry pixel `first_pixel`: a pixel is covered wholly where its centre
+    /// is inside. The edges crossing the row's centre line are found, ordered
+    /// across it, and walked once, so a row costs its crossings and its
+    /// width; a centre on an edge belongs to the run to its right. Answers
+    /// the entries that hold any coverage.
+    pub(crate) fn centre_row(
+        &mut self,
+        row: u32,
+        first_pixel: u32,
+        out: &mut [u8],
+    ) -> Range<usize> {
+        out.fill(0);
+        let y = i64::from(row) * UNIT + UNIT / 2;
+        self.crossings.clear();
+        if self.crossings.try_reserve(self.edges.len()).is_err() {
+            return 0..0;
+        }
+        for edge in self.edges {
+            if edge.top > y {
+                break;
+            }
+            if y < edge.bottom {
+                self.crossings.push((edge.x_at(y), edge.direction));
+            }
+        }
+        self.crossings.sort_unstable_by_key(|&(x, _)| x);
+        let origin = i64::from(first_pixel) * UNIT;
+        let len = i64::try_from(out.len()).unwrap_or(i64::MAX);
+        // The first pixel whose centre lies at or right of `x`.
+        let column = |x: i64| {
+            usize::try_from(
+                (x - origin - UNIT / 2 + UNIT - 1)
+                    .div_euclid(UNIT)
+                    .clamp(0, len),
+            )
+            .unwrap_or(0)
+        };
+        let mut written: Option<Range<usize>> = None;
+        let mut winding = 0i64;
+        for pair in self.crossings.windows(2) {
+            winding += i64::from(pair[0].1);
+            let (from, to) = (column(pair[0].0), column(pair[1].0));
+            if !self.rule.inside(winding) || from >= to {
+                continue;
+            }
+            if let Some(span) = out.get_mut(from..to) {
+                span.fill(u8::MAX);
+            }
+            written = Some(written.map_or(from..to, |held| held.start.min(from)..held.end.max(to)));
+        }
+        written.unwrap_or(0..0)
     }
 
     /// Size the row buffers for rows `pixels` wide, answering whether they fit.

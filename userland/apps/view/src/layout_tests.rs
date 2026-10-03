@@ -38,7 +38,7 @@ fn layout(width: u32, height: u32, scale: Scale, info: bool) -> Layout {
         theme,
         scale,
         font(theme, scale),
-        tools().natural_width(scale, theme),
+        tools().natural_length(scale, theme),
         info,
     )
 }
@@ -245,7 +245,7 @@ fn the_minimum_client_is_derived_and_still_lays_out() {
             theme,
             scale,
             font(theme, scale),
-            strip.min_width(scale, theme),
+            strip.min_length(scale, theme),
         );
         let least = layout(w, h, scale, false);
         assert!(
@@ -270,7 +270,7 @@ fn the_minimum_client_is_derived_and_still_lays_out() {
                 theme,
                 Scale::ONE,
                 font(theme, Scale::ONE),
-                strip.min_width(Scale::ONE, theme),
+                strip.min_length(Scale::ONE, theme),
             );
             assert!(w > one_w && h > one_h, "the floor is not a pixel constant");
         }
@@ -282,7 +282,7 @@ fn the_tools_keep_their_strip_and_the_slider_gives_way() {
     let registry = ThemeRegistry::with_builtins();
     let theme = registry.active();
     let strip = tools();
-    let needed = strip.natural_width(Scale::ONE, theme);
+    let needed = strip.natural_length(Scale::ONE, theme);
 
     // Wide: both the tools and the slider have room, and they do not overlap.
     let wide = layout(900, 640, Scale::ONE, false);

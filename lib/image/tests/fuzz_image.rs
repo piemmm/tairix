@@ -24,10 +24,12 @@
 //!    driven through the format-naming door, which is both its only way in
 //!    and free coverage from every other format's corpus.
 //! 6. The doors an editor opens a document through agree with the plain
-//!    decode — a native picture flattens to exactly the pixels
-//!    [`decode_as`] answers, a native sprite to its page — and whatever
-//!    opens writes back: to a PNG showing the same picture, to a JPEG of the
-//!    same size, and a sprite area to one that reopens as the same sprites.
+//!    decode — a native picture shows exactly the pixels [`decode_as`]
+//!    answers, a native sprite or TIFF page its page — and whatever opens
+//!    writes back: to a PNG, a BMP and a TIFF showing the same picture, a
+//!    palette picture to a GIF showing it at half opacity's threshold, to a
+//!    JPEG of the same size, and a sprite area to one that reopens as the
+//!    same sprites.
 //!
 //! Every generator, and its chunk/zlib, marker/Huffman, and block/LZW
 //! framing helpers, are deliberately self-contained: this harness only calls
@@ -39,10 +41,12 @@
 
 use tairix_fuzzseed::Prng;
 use tairix_image::{
-    decode, decode_as, decode_fitted, encode_jpeg, encode_png, encode_sprite_area, open_native,
-    probe_as, sniff, DecodeLimits, EncodeError, FitBox, ImageFormat, IndexDepth, JpegOptions,
-    NativeDocument, Picture, PictureKind, PictureSource, Rgba8, Sequence, SequenceKind,
+    decode, decode_as, decode_fitted, encode_bmp, encode_gif, encode_jpeg, encode_ora, encode_png,
+    encode_sprite_area, encode_tiff, open_native, probe_as, sniff, DecodeLimits, EncodeError,
+    FitBox, GifOptions, ImageFormat, IndexDepth, JpegOptions, NativeDocument, OraLayer,
+    OraLayerSource, Picture, PictureKind, PictureSource, Rgba8, Sequence, SequenceKind,
     SpriteAreaReader, SpriteEntry, SpriteInput, SpriteMode, SpriteName, SpritePalette,
+    TiffCompression, TiffOptions, MOST_ORA_LAYERS,
 };
 
 /// Fixed-iteration sweep run when no budget is set.
@@ -2198,13 +2202,55 @@ fn over_background(pixel: [u8; 4]) -> [u8; 3] {
 /// same picture, and to a JPEG of the same size that, for a picture of one
 /// colour, shows that colour.
 fn writes_back(picture: &Picture, flat: &[u8]) {
-    let png = encode_png(picture).expect("a picture that opened writes as a PNG");
-    let back = decode_as(ImageFormat::Png, &png, &limits()).expect("the PNG written reads back");
-    assert_eq!(
-        shown(back.pixels()),
-        shown(flat),
-        "the PNG shows another picture"
+    let lossless = [
+        (ImageFormat::Png, encode_png(picture)),
+        (ImageFormat::Bmp, encode_bmp(picture)),
+        (
+            ImageFormat::Tiff,
+            encode_tiff(&[picture], TiffOptions::default()),
+        ),
+    ];
+    for (format, written) in lossless {
+        let bytes = written.expect("a picture that opened writes losslessly");
+        let back = decode_as(format, &bytes, &limits()).expect("the file written reads back");
+        assert_eq!(
+            shown(back.pixels()),
+            shown(flat),
+            "the {format:?} shows another picture"
+        );
+    }
+    let gif = encode_gif(
+        picture,
+        GifOptions {
+            interlaced: flat.len().is_multiple_of(8),
+        },
     );
+    match (picture.kind(), gif) {
+        (PictureKind::Rgba, written) => assert_eq!(written, Err(EncodeError::NotIndexed)),
+        (PictureKind::Indexed { .. }, Err(EncodeError::GifPaletteFull)) => {}
+        (PictureKind::Indexed { .. }, written) => {
+            let bytes = written.expect("a palette picture writes as a GIF");
+            let back =
+                decode_as(ImageFormat::Gif, &bytes, &limits()).expect("the GIF written reads back");
+            let thresholded: Vec<u8> = flat
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .flat_map(|&[red, green, blue, alpha]| {
+                    if alpha >= 128 {
+                        [red, green, blue, 255]
+                    } else {
+                        [0; 4]
+                    }
+                })
+                .collect();
+            assert_eq!(
+                shown(back.pixels()),
+                thresholded,
+                "the GIF shows another picture"
+            );
+        }
+    }
     let options = JpegOptions::new(75, JPEG_BACKGROUND).expect("a valid quality");
     let jpeg = encode_jpeg(picture, options).expect("a picture that opened writes as a JPEG");
     let back = decode_as(ImageFormat::Jpeg, &jpeg, &limits()).expect("the JPEG written reads back");
@@ -2241,16 +2287,50 @@ fn kind_of(entry: &SpriteEntry) -> String {
 fn native_doors_agree_and_write_back(bytes: &[u8]) {
     let limits = limits();
     if let Some(format) = sniff(bytes) {
-        if let Ok(NativeDocument::Picture { picture, .. }) = open_native(format, bytes, &limits) {
-            assert!(picture.width() <= limits.max_width());
-            assert!(picture.height() <= limits.max_height());
-            let flat = picture
-                .to_rgba()
-                .expect("a picture inside the limits flattens");
-            let plain =
-                decode_as(format, bytes, &limits).expect("the plain decode agrees it opens");
-            assert_eq!(flat, plain.pixels(), "the native picture looks different");
-            writes_back(&picture, &flat);
+        match open_native(format, bytes, &limits) {
+            Ok(NativeDocument::Picture { picture, .. }) => {
+                assert!(picture.width() <= limits.max_width());
+                assert!(picture.height() <= limits.max_height());
+                let flat = picture
+                    .to_rgba()
+                    .expect("a picture inside the limits flattens");
+                let plain =
+                    decode_as(format, bytes, &limits).expect("the plain decode agrees it opens");
+                assert_eq!(
+                    shown(&flat),
+                    shown(plain.pixels()),
+                    "the native picture looks different"
+                );
+                writes_back(&picture, &flat);
+            }
+            Ok(NativeDocument::Pages { mut pages, .. }) => {
+                let mut sequence = Sequence::open_as(format, bytes, &limits)
+                    .expect("the page container agrees it opens");
+                for index in 0..pages.count().min(SEQUENCE_STEPS) {
+                    let (Ok(Some(picture)), Ok(Some(page))) =
+                        (pages.page(index), sequence.page(index))
+                    else {
+                        continue;
+                    };
+                    let flat = picture
+                        .to_rgba()
+                        .expect("a page inside the limits flattens");
+                    assert_eq!(
+                        shown(&flat),
+                        shown(page.pixels()),
+                        "page {index} reads differently natively"
+                    );
+                    writes_back(&picture, &flat);
+                }
+            }
+            Ok(NativeDocument::Layers { document, .. }) => {
+                assert!(document.layers.len() <= MOST_ORA_LAYERS);
+                for layer in &document.layers {
+                    assert!(layer.picture.width() <= limits.max_width());
+                    assert!(layer.picture.height() <= limits.max_height());
+                }
+            }
+            _ => {}
         }
     }
     let Ok(NativeDocument::Sprites(mut reader)) = open_native(ImageFormat::Sprite, bytes, &limits)
@@ -2929,23 +3009,46 @@ fn arbitrary_encoder_inputs_never_panic_and_what_is_written_reads_back() {
         for _ in 0..SMOKE_ITERATIONS {
             let source = ArbitrarySource::draw(&mut rng);
             let writable = source.writable();
-            let png = encode_png(&source);
-            let jpeg = encode_jpeg(&source, options);
-            assert_eq!(
-                png.is_ok(),
-                writable,
-                "PNG writes exactly what may be written"
-            );
-            assert_eq!(
-                jpeg.is_ok(),
-                writable,
-                "JPEG writes exactly what may be written"
-            );
-            for (format, written) in [(ImageFormat::Png, png), (ImageFormat::Jpeg, jpeg)] {
+            let compression = *rng.pick(&TiffCompression::ALL);
+            let written = [
+                (ImageFormat::Png, encode_png(&source)),
+                (ImageFormat::Jpeg, encode_jpeg(&source, options)),
+                (ImageFormat::Bmp, encode_bmp(&source)),
+                (
+                    ImageFormat::Tiff,
+                    encode_tiff(&[&source], TiffOptions { compression }),
+                ),
+            ];
+            for (format, written) in written {
+                assert_eq!(
+                    written.is_ok(),
+                    writable,
+                    "{format:?} writes exactly what may be written"
+                );
                 if let Ok(bytes) = written {
                     let back = decode_as(format, &bytes, &limits).expect("what is written reads");
                     assert_eq!((back.width(), back.height()), (source.width, source.height));
                 }
+            }
+            let gif = encode_gif(
+                &source,
+                GifOptions {
+                    interlaced: rng.below(2) == 0,
+                },
+            );
+            match gif {
+                Ok(bytes) => {
+                    assert!(
+                        writable && source.depth.is_some(),
+                        "a GIF was written from what may not be"
+                    );
+                    let back = decode_as(ImageFormat::Gif, &bytes, &limits)
+                        .expect("the GIF written reads");
+                    assert_eq!((back.width(), back.height()), (source.width, source.height));
+                }
+                Err(EncodeError::NotIndexed) => assert!(source.depth.is_none()),
+                Err(EncodeError::GifPaletteFull) => assert!(writable),
+                Err(_) => assert!(!writable),
             }
             let Some(mode) = arbitrary_mode(&mut rng) else {
                 continue;
@@ -2975,6 +3078,84 @@ fn arbitrary_encoder_inputs_never_panic_and_what_is_written_reads_back() {
         }
         if !tairix_fuzzseed::within_budget(deadline) {
             break;
+        }
+    }
+}
+
+/// A random colour picture `width`×`height`.
+fn random_rgba(rng: &mut Prng, width: u32, height: u32) -> Picture {
+    let mut pixels = vec![0u8; (width * height * 4) as usize];
+    rng.fill(&mut pixels);
+    Picture::rgba(width, height, pixels).expect("valid")
+}
+
+/// A valid OpenRaster document of a few small, offset, faded layers.
+fn build_valid_ora(rng: &mut Prng) -> Vec<u8> {
+    let side = |rng: &mut Prng| u32::try_from(1 + rng.below(6)).expect("small");
+    let (width, height) = (side(rng), side(rng));
+    let layers: Vec<OraLayer> = (0..=rng.below(3))
+        .map(|index| {
+            let (across, down) = (side(rng), side(rng));
+            OraLayer {
+                name: format!("Layer {index}"),
+                picture: random_rgba(rng, across, down),
+                at: (
+                    i32::try_from(rng.below(5)).expect("small") - 2,
+                    i32::try_from(rng.below(5)).expect("small") - 2,
+                ),
+                opacity: rng.next_u8(),
+                visible: rng.below(4) != 0,
+            }
+        })
+        .collect();
+    let sources: Vec<OraLayerSource<'_>> = layers
+        .iter()
+        .map(|layer| OraLayerSource {
+            name: &layer.name,
+            picture: &layer.picture,
+            at: layer.at,
+            opacity: layer.opacity,
+            visible: layer.visible,
+        })
+        .collect();
+    let merged = random_rgba(rng, width, height);
+    encode_ora((width, height), &sources, &merged, &merged).expect("a valid document encodes")
+}
+
+#[test]
+fn mutated_valid_ora_fixtures_never_panic() {
+    let mut rng = Prng::new(tairix_fuzzseed::start(
+        "mutated_valid_ora_fixtures_never_panic",
+        tairix_fuzzseed::FUZZ_SEED_ENV,
+    ));
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
+    loop {
+        for _ in 0..SMOKE_ITERATIONS / 4 {
+            let mut mutated = build_valid_ora(&mut rng);
+            for _ in 0..=rng.below(6) {
+                let at = rng.below(mutated.len());
+                mutated[at] = rng.next_u8();
+            }
+            decode_never_panics_and_respects_limits(&mutated);
+        }
+        if !tairix_fuzzseed::within_budget(deadline) {
+            break;
+        }
+    }
+}
+
+#[test]
+fn the_ora_generator_produces_a_valid_corpus() {
+    let mut rng = Prng::new(tairix_fuzzseed::start(
+        "the_ora_generator_produces_a_valid_corpus",
+        tairix_fuzzseed::FUZZ_SEED_ENV,
+    ));
+    for _ in 0..64 {
+        let bytes = build_valid_ora(&mut rng);
+        assert_eq!(sniff(&bytes), Some(ImageFormat::OpenRaster));
+        match open_native(ImageFormat::OpenRaster, &bytes[..], &limits()) {
+            Ok(NativeDocument::Layers { document, .. }) => assert!(!document.layers.is_empty()),
+            _ => panic!("a pristine document opens as its layers"),
         }
     }
 }

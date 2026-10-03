@@ -336,6 +336,11 @@ pub const TARGETS: &[Target] = &[
         description: "SVG asset decode (untrusted /System/Graphics image bytes)",
     },
     Target {
+        package: "tairix-xml",
+        test: "fuzz_xml",
+        description: "XML element scan (SVG documents, OpenRaster layer stacks)",
+    },
+    Target {
         package: "tairix-image",
         test: "fuzz_image",
         description:

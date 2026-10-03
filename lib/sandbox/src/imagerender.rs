@@ -2457,6 +2457,8 @@ pub enum ViewFormat {
     /// Scalable vector artwork, which has no pixels of its own: a render
     /// rasterises it afresh at whatever extent it asks for.
     Svg,
+    /// OpenRaster: layers, shown composed and edited one by one.
+    OpenRaster,
 }
 
 impl ViewFormat {
@@ -2472,6 +2474,7 @@ impl ViewFormat {
             Self::Sprite => Some(ImageFormat::Sprite),
             Self::Tiff => Some(ImageFormat::Tiff),
             Self::Webp => Some(ImageFormat::Webp),
+            Self::OpenRaster => Some(ImageFormat::OpenRaster),
             Self::Svg => None,
         }
     }
@@ -2492,6 +2495,7 @@ impl ViewFormat {
             ImageFormat::Sprite => Some(Self::Sprite),
             ImageFormat::Tiff => Some(Self::Tiff),
             ImageFormat::Webp => Some(Self::Webp),
+            ImageFormat::OpenRaster => Some(Self::OpenRaster),
             _ => None,
         }
     }
@@ -2509,6 +2513,7 @@ impl ViewFormat {
             Self::Tiff => 7,
             Self::Webp => 8,
             Self::Svg => 9,
+            Self::OpenRaster => 10,
         }
     }
 
@@ -2525,6 +2530,7 @@ impl ViewFormat {
             7 => Some(Self::Tiff),
             8 => Some(Self::Webp),
             9 => Some(Self::Svg),
+            10 => Some(Self::OpenRaster),
             _ => None,
         }
     }

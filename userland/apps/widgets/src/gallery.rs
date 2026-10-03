@@ -47,7 +47,7 @@ pub enum GalleryTab {
     Collections,
     /// Form fields: the settings row and the captioned group it sits in.
     Forms,
-    /// Bars: toolbar and scroll bars.
+    /// Bars: the toolbar across and down, and the scroll bars.
     Bars,
     /// Feedback surfaces: dialog, tooltip, help tip.
     Feedback,

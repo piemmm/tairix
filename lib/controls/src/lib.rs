@@ -136,9 +136,10 @@
 //! or an application's declaration decoded into it.
 //!
 //! The [`toolbar`] module is the toolbar / toolstrip — [`Toolbar`]. It is a
-//! horizontal container of [`IconButton`] / [`SplitButton`] tools grouped with
-//! quiet gutters, marks the active tool with a persistent lower accent seam,
-//! and routes pointer and keyboard input to the tools it owns, emitting a typed
+//! strip of [`IconButton`] / [`SplitButton`] tools grouped with quiet gutters,
+//! across a window or, laid out [`ScrollOrientation::Vertical`], down its side
+//! as a tool box. It marks the active tool with a persistent accent seam and
+//! routes pointer and keyboard input to the tools it owns, emitting a typed
 //! [`ToolbarAction`].
 //!
 //! The [`tabs`] module is the tab strip — [`Tabs`] and [`Tab`]. Tabs select one
@@ -255,9 +256,9 @@
 //! draws nothing at all, since an empty frame would assert a record these
 //! controls cannot know exists.
 //!
-//! The [`rail`] module is the action rail — [`ActionRail`]. It is the vertical
-//! counterpart of [`Toolbar`]: the column of full-width [`Button`] commands a
-//! surface offers about whatever it is showing. It composes the button family
+//! The [`rail`] module is the action rail — [`ActionRail`]: the column of
+//! full-width, labelled [`Button`] commands a surface offers about whatever it
+//! is showing, where a [`Toolbar`] holds icon tools. It composes the button family
 //! rather than restating plate, press, role, disabled, or Authority Mark
 //! rendering, and owns only the stacking geometry, the hover and focus
 //! bookkeeping, and the typed [`RailAction`] it reports.
@@ -397,7 +398,7 @@ pub use state::{
 };
 pub use swatch_grid::{SwatchAction, SwatchGrid, SwatchMark};
 pub use tabs::{Tab, TabGroupAbsence, Tabs, TabsAction, TabsOrientation};
-pub use text::{Keystroke, SearchField, SecretField, TextAction, TextArea, TextField};
+pub use text::{owner_chord, Keystroke, SearchField, SecretField, TextAction, TextArea, TextField};
 pub use toolbar::{ToolActivation, Toolbar, ToolbarAction, ToolbarOutcome};
 pub use value::{Progress, Slider, SliderAction};
 pub use window::{

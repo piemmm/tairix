@@ -49,16 +49,16 @@ under the floor and are unchanged.
 | `metric` | `MetricTile`, `StatusPill`, `CompositionBar` |
 | `block` | the titled block a monitoring surface lays its readings out in: `plate`, `title`, `bare_title`, `titled_content`, `content_rect` |
 | `record` | `FactList`, `Timeline` |
-| `text` | `TextField`, `TextArea`, `SearchField` |
+| `text` | `TextField`, `TextArea`, `SearchField`, and `owner_chord`: the chords a field leaves its owner, every one but Ctrl+A |
 | `number` | `NumberField`: an integer between two bounds, live as digits spell a number in range and invalid while they do not, stepped by Up/Down, Page Up/Down and a focused field's wheel, settled by a step, Enter or the owner's commit as the focus leaves |
 | `colour_picker` | `ColourPicker`: one colour by its hue, saturation and value plane and hue strip, an opacity strip where it has one, a swatch beside the earlier colour a press takes back, a hex field and H/S/V/R/G/B/A number fields, laid beside the plane in wide bounds and beneath it in narrow ones |
-| `menu`, `toolbar`, `tabs`, `combo` | `Menu`/`MenuItem`, `ChainModel`, `plate_rect`, `Toolbar`, `Tab`/`Tabs`, `ComboBox` |
+| `menu`, `toolbar`, `tabs`, `combo` | `Menu`/`MenuItem`, `ChainModel`, `plate_rect`, `Toolbar` (across a window or down it), `Tab`/`Tabs`, `ComboBox` |
 | `disclosure` | `DisclosureSet`, which sections of a list are showing their pages, and `tree_step`, what Right and Left do there |
 | `nav`, `rail` | `Breadcrumb`, `ActionRail` |
 | `collection` | `ListRow`, `TableRow`, `TableCell`, `TableHeader`, `Card`, `Panel` |
 | `form`, `stack` | `FieldRow`, `FieldGroup`, `FlagSet`, and the plate column groups stack down |
 | `picture` | `PictureChoice`, `PictureSection`, `PictureItem`, `Swatch`, `Aspect` |
-| `swatch_grid` | `SwatchGrid`: a grid of colour wells, a primary mark on at most one and an optional secondary one, chosen by pointer or by arrows while it has the keyboard, a translucent well shown over a checker; each mark is black or white by the well's colour as it shows over the surface, focus rings the marked well in its margin, and a disabled grid is veiled and a denied one carries the authority bead |
+| `swatch_grid` | `SwatchGrid`: a grid of colour wells, a primary mark on at most one and an optional secondary one, chosen by pointer or by arrows while it has the keyboard, laid out as many to a row as its owner fits to the room (`set_columns`), a translucent well shown over a checker; each mark is black or white by the well's colour as it shows over the surface, focus rings the marked well in its margin, and a disabled grid is veiled and a denied one carries the authority bead |
 | `checker` | `Checker`: the one checkerboard transparency is shown over, in the theme's surface and that colour lifted, square side scaled |
 | `credential` | `CredentialSheet` |
 | `scroll`, `scrollbar` | the geometry engine and the one `ScrollBar` over it |
@@ -448,7 +448,11 @@ on drop.
   is and is deliberately not activatable, and a trail too long for its bounds
   elides oldest-first through one activatable ellipsis, so the current
   location is never the crumb that gets dropped.
-- `Toolbar` is a horizontal strip of tool controls in groups. A strip with no
+- `Toolbar` is a strip of tool controls in groups, across a window or, laid
+  out `ScrollOrientation::Vertical`, down its side as a tool box: tools
+  stacked and centred across the column, the active tool's seam on its
+  leading edge, Up and Down moving the keyboard, and the overflow affordances
+  at the top and bottom. A strip with no
   room for every tool **scrolls in whole tools** rather than running off its
   own edge: it seats only tools that fit inside the bounds it was given,
   reserves one tool slot at each end for the overflow affordances (reserved
@@ -461,10 +465,13 @@ on drop.
   `Toolbar::repeat` at the cadence `REPEAT_DELAY_NS`/`REPEAT_INTERVAL_NS`
   every press-and-hold stepping control shares, a wheel detent over the strip
   steps it one tool (part of a detent carrying into the next), and a keyboard
-  focus move scrolls the tool it lands on into view. An owner that must never scroll its strip floors its window on
-  `Toolbar::natural_width`; one that may, on `Toolbar::min_width`.
-- `ActionRail` is the vertical counterpart of `Toolbar`: a column of `Button`
-  commands anchored beside content, so plate, role, disabled, and denied
+  focus move scrolls the tool it lands on into view. An owner that must never
+  scroll its strip floors its window on `Toolbar::natural_length`; one that
+  may, on `Toolbar::min_length`; and it sizes the band across the strip from
+  `Toolbar::breadth`, since a tool broader than its band is not seated.
+- `ActionRail` is a column of labelled `Button` commands anchored beside
+  content, where a vertical `Toolbar` is a column of icon tools, so plate,
+  role, disabled, and denied
   rendering are not restated per surface. It lights the Edge Wake described
   below down its own leading edge while the content beside it is scrolled.
   Every item it holds is re-seated `ContentAlign::Leading`, so the icons and

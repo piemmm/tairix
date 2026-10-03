@@ -1,4 +1,5 @@
-//! Writing pictures: PNG, baseline JPEG, and RISC OS sprite areas.
+//! Writing pictures: PNG, baseline JPEG, GIF, BMP, TIFF, and RISC OS sprite
+//! areas.
 //!
 //! Every encoder reads its picture a row at a time through
 //! [`PictureSource`], so a caller holding pixels in tiles never flattens
@@ -9,9 +10,15 @@
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::picture::{IndexDepth, PictureSource, Rgba8};
+use tairix_compress::deflate::Flush;
+use tairix_compress::zlib::Encoder;
+use tairix_util::fallible;
+
+use crate::picture::{flatten_row, IndexDepth, PictureKind, PictureSource, Rgba8};
 use crate::sprite_encode::SpriteInput;
-use crate::{jpeg_encode, png_encode, sprite_encode};
+use crate::{
+    bmp_encode, gif_encode, jpeg_encode, png_encode, sprite_encode, tiff_encode, RGBA_BYTES,
+};
 
 /// Why a picture could not be written.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -45,6 +52,15 @@ pub enum EncodeError {
     SpriteOpaqueMalformed,
     /// A sprite area with no sprites.
     SpriteAreaEmpty,
+    /// A format that holds palette colours alone was given colour.
+    NotIndexed,
+    /// A GIF's palette has every entry on show, leaving none for the
+    /// transparent colour its clear pixels need.
+    GifPaletteFull,
+    /// A TIFF with no pages.
+    NoPages,
+    /// An OpenRaster document with no layers, or more than are written.
+    LayerCount,
 }
 
 impl fmt::Display for EncodeError {
@@ -66,6 +82,12 @@ impl fmt::Display for EncodeError {
             }
             Self::SpriteOpaqueMalformed => "a sprite kept as it was read is malformed",
             Self::SpriteAreaEmpty => "a sprite area needs at least one sprite",
+            Self::NotIndexed => "this format holds palette colours alone",
+            Self::GifPaletteFull => {
+                "every colour of the palette is on show, leaving none for a GIF's transparency"
+            }
+            Self::NoPages => "a TIFF needs at least one page",
+            Self::LayerCount => "an OpenRaster document holds between one and 256 layers",
         })
     }
 }
@@ -110,6 +132,40 @@ impl JpegOptions {
     }
 }
 
+/// How a GIF is written.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct GifOptions {
+    /// Rows in the four interlaced passes, so a reader can show the picture
+    /// coarse before it has all of it.
+    pub interlaced: bool,
+}
+
+/// How a TIFF's strips are compressed.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum TiffCompression {
+    /// Not at all.
+    None,
+    /// `PackBits` run lengths.
+    PackBits,
+    /// LZW.
+    #[default]
+    Lzw,
+    /// DEFLATE, in zlib streams.
+    Deflate,
+}
+
+impl TiffCompression {
+    /// Every compression, in the order a choice lists them.
+    pub const ALL: [Self; 4] = [Self::None, Self::Lzw, Self::Deflate, Self::PackBits];
+}
+
+/// How a TIFF is written.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct TiffOptions {
+    /// How every strip is compressed.
+    pub compression: TiffCompression,
+}
+
 /// Write `picture` as a PNG in the smallest colour type that holds it
 /// exactly: indexed pictures keep their palette and indices, and a
 /// truecolour one drops an alpha channel or colour it does not use.
@@ -135,6 +191,40 @@ pub fn encode_jpeg(
     options: JpegOptions,
 ) -> Result<Vec<u8>, EncodeError> {
     jpeg_encode::encode(picture, options)
+}
+
+/// Write `picture` as a GIF: one frame of its palette indices.
+///
+/// # Errors
+///
+/// [`EncodeError::NotIndexed`] for a colour picture, and see [`EncodeError`].
+pub fn encode_gif(
+    picture: &dyn PictureSource,
+    options: GifOptions,
+) -> Result<Vec<u8>, EncodeError> {
+    gif_encode::encode(picture, options)
+}
+
+/// Write `picture` as a BMP: a palette picture at 1, 4 or 8 bits, opaque
+/// colour at 24, and anything with transparency at 32 with an alpha mask.
+///
+/// # Errors
+///
+/// See [`EncodeError`].
+pub fn encode_bmp(picture: &dyn PictureSource) -> Result<Vec<u8>, EncodeError> {
+    bmp_encode::encode(picture)
+}
+
+/// Write `pages` as a TIFF, one page each, in order.
+///
+/// # Errors
+///
+/// [`EncodeError::NoPages`] for none, and see [`EncodeError`].
+pub fn encode_tiff(
+    pages: &[&dyn PictureSource],
+    options: TiffOptions,
+) -> Result<Vec<u8>, EncodeError> {
+    tiff_encode::encode(pages, options)
 }
 
 /// Write `sprites` as a RISC OS sprite area file, in order.
@@ -174,6 +264,10 @@ impl Output {
         self.push(&value.to_be_bytes())
     }
 
+    pub(crate) fn le_u16(&mut self, value: u16) -> Result<(), EncodeError> {
+        self.push(&value.to_le_bytes())
+    }
+
     pub(crate) fn be_u32(&mut self, value: u32) -> Result<(), EncodeError> {
         self.push(&value.to_be_bytes())
     }
@@ -195,6 +289,62 @@ impl Output {
 
     pub(crate) fn into_bytes(self) -> Vec<u8> {
         self.bytes
+    }
+}
+
+/// A zlib encoder on the heap, where its large state belongs.
+pub(crate) fn zlib_encoder() -> Result<Vec<Encoder>, EncodeError> {
+    let mut encoders = Vec::new();
+    if !fallible::reserve(&mut encoders, 1) {
+        return Err(EncodeError::OutOfMemory);
+    }
+    encoders.push(Encoder::new());
+    Ok(encoders)
+}
+
+/// Compressed bytes a zlib stream has produced and its writer has not yet
+/// framed. The buffer is kept at its high-water length, so compressing into
+/// it zero-fills each byte once rather than once a call.
+pub(crate) struct Deflated {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) filled: usize,
+}
+
+impl Deflated {
+    pub(crate) const fn new() -> Self {
+        Self {
+            bytes: Vec::new(),
+            filled: 0,
+        }
+    }
+
+    /// Compress `input` under `flush` straight onto the end of what waits.
+    pub(crate) fn deflate(
+        &mut self,
+        encoder: &mut Encoder,
+        input: &[u8],
+        flush: Flush,
+    ) -> Result<(), EncodeError> {
+        let end = self
+            .filled
+            .checked_add(encoder.bound(input.len()))
+            .ok_or(EncodeError::OutOfMemory)?;
+        if !fallible::grow_to(&mut self.bytes, end, 0) {
+            return Err(EncodeError::OutOfMemory);
+        }
+        let room = self
+            .bytes
+            .get_mut(self.filled..end)
+            .ok_or(EncodeError::OutOfMemory)?;
+        self.filled += encoder
+            .compress(input, room, flush)
+            .map_err(|_| EncodeError::OutOfMemory)?;
+        Ok(())
+    }
+
+    /// What waits.
+    pub(crate) fn waiting(&self) -> &[u8] {
+        &self.bytes[..self.filled]
     }
 }
 
@@ -222,6 +372,90 @@ pub(crate) fn indices_fit(indices: &[u8], colours: usize) -> Result<(), EncodeEr
     }
 }
 
+/// Validate every index of an indexed picture, answering whether any pixel
+/// shows less than opaque through its entry or its mask.
+pub(crate) fn indexed_translucent(
+    source: &dyn PictureSource,
+    rows: &mut RowBuffers,
+    palette: &[Rgba8],
+    masked: bool,
+) -> Result<bool, EncodeError> {
+    let mut translucent = false;
+    for y in 0..source.height() {
+        rows.read(source, y);
+        indices_fit(&rows.samples, palette.len())?;
+        translucent = translucent
+            || rows.samples.iter().enumerate().any(|(x, &index)| {
+                palette[usize::from(index)][3] != u8::MAX
+                    || (masked && rows.mask.get(x).is_some_and(|&alpha| alpha != u8::MAX))
+            });
+    }
+    Ok(translucent)
+}
+
+/// What every pixel of a picture amounts to once flattened to colour.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Survey {
+    pub(crate) opaque: bool,
+    pub(crate) grey: bool,
+    /// For a grey picture, whether every level is exact at one, two and four
+    /// bits.
+    pub(crate) exact: [bool; 3],
+}
+
+/// Read `source` once and survey its colours; an indexed picture's rows are
+/// flattened through `rgba`, a row of RGBA bytes.
+pub(crate) fn survey(source: &dyn PictureSource, rows: &mut RowBuffers, rgba: &mut [u8]) -> Survey {
+    let kind = source.kind();
+    let mut survey = Survey {
+        opaque: true,
+        grey: true,
+        exact: [true; 3],
+    };
+    for y in 0..source.height() {
+        rows.read(source, y);
+        let pixels = match kind {
+            PictureKind::Rgba => &rows.samples,
+            PictureKind::Indexed { .. } => {
+                flatten_row(kind, &rows.samples, &rows.mask, rgba);
+                &*rgba
+            }
+        };
+        for pixel in pixels.as_chunks::<RGBA_BYTES>().0 {
+            survey.opaque &= pixel[3] == u8::MAX;
+            if survey.grey && (pixel[0] != pixel[1] || pixel[1] != pixel[2]) {
+                survey.grey = false;
+            }
+            if survey.grey {
+                let level = pixel[0];
+                survey.exact[0] &= level == 0 || level == u8::MAX;
+                survey.exact[1] &= level % 85 == 0;
+                survey.exact[2] &= level % 17 == 0;
+            }
+        }
+        if !survey.opaque && !survey.grey {
+            break;
+        }
+    }
+    survey
+}
+
+/// Pack `values`, `bits` wide each, most significant first, into `out`.
+pub(crate) fn pack(values: impl Iterator<Item = u8>, bits: u32, out: &mut [u8]) {
+    out.fill(0);
+    // Counted in `u64`: a row may be wider than a `u32` holds bits for.
+    let mut bit = 0u64;
+    for value in values {
+        let Ok(at) = usize::try_from(bit / 8) else {
+            return;
+        };
+        if let Some(byte) = out.get_mut(at) {
+            *byte |= value << (8 - u64::from(bits) - bit % 8);
+        }
+        bit += u64::from(bits);
+    }
+}
+
 /// The row buffers a picture is read into: its samples and, for a masked
 /// indexed picture, its alpha plane.
 pub(crate) struct RowBuffers {
@@ -234,8 +468,8 @@ impl RowBuffers {
     pub(crate) fn for_source(source: &dyn PictureSource) -> Result<Self, EncodeError> {
         let width = usize::try_from(source.width()).map_err(|_| EncodeError::TooLarge)?;
         let (per_pixel, masked) = match source.kind() {
-            crate::PictureKind::Indexed { masked, .. } => (1, masked),
-            crate::PictureKind::Rgba => (crate::RGBA_BYTES, false),
+            PictureKind::Indexed { masked, .. } => (1, masked),
+            PictureKind::Rgba => (RGBA_BYTES, false),
         };
         Ok(Self {
             samples: scratch(width.checked_mul(per_pixel).ok_or(EncodeError::TooLarge)?)?,

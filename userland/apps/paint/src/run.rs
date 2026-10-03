@@ -34,7 +34,6 @@ mod program {
     use tairix_abi::window_ipc::ClipboardKind;
     use tairix_abi::Errno;
     use tairix_controls::damage;
-    use tairix_font::BitmapFont;
     use tairix_geometry::{Region, Scale};
     use tairix_icon::{
         artwork_cache, ArtworkCache, IconArtworkSource, InlineArtwork, NoArtworkSeam,
@@ -55,14 +54,14 @@ mod program {
     use tairix_rt::work::{Worker, WorkerGuard};
     use tairix_sandbox::imageedit::{
         close_edit, open_edit, read_kept, read_rows, select_entry, EditDocument, EditEntry,
-        EditFailure,
+        EditFailure, EditKind,
     };
     use tairix_sandbox::imagerender::{
         upload_document, ImageRenderService, UploadFailure, ViewFormat, MAX_DOCUMENT_BYTES,
     };
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
     use tairix_sandbox::ParserSandbox;
-    use tairix_theme::{TextRole, Theme};
+    use tairix_theme::Theme;
     use tairix_util::defer::JobQueue;
     use tairix_window::app;
     use tairix_window::docapp::{
@@ -166,20 +165,21 @@ mod program {
         entries: Entries,
     ) -> Result<Document, LoadRefusal> {
         let opened = open_edit(sandbox, format)?;
+        // A layered document's layers are one picture, so all are read.
         let count = match entries {
-            Entries::All => opened.count,
-            Entries::First => opened.count.min(1),
+            Entries::First if opened.kind != EditKind::Layers => opened.count.min(1),
+            _ => opened.count,
         };
         let assembled = EditDocument { count, ..opened };
-        let mut assembly = Assembly::new(assembled, length).map_err(|_| ReadFailure::NoMemory)?;
+        let mut assembly = Assembly::new(assembled, length)?;
         for index in 0..count {
             match select_entry(sandbox, opened, index)? {
                 EditEntry::Picture(picture) => {
-                    let mut built = assembly.canvas_for(&picture)?;
+                    let mut rows = assembly.canvas_for(&picture)?;
                     read_rows(sandbox, &picture, |y, samples, mask| {
-                        built.row(y, samples, mask);
+                        rows.row(y, samples, mask);
                     })?;
-                    assembly.picture(built, &picture);
+                    assembly.picture(rows, &picture)?;
                 }
                 EditEntry::Kept(kept) => {
                     assembly.claim_kept(&kept)?;
@@ -221,7 +221,9 @@ mod program {
         sandbox.release();
         match outcome {
             Ok(document) => match document.into_entries().into_iter().next() {
-                Some(Entry::Picture(picture)) => Ok(picture.canvas),
+                Some(Entry::Picture(picture)) => picture
+                    .flattened()
+                    .map_err(|OutOfMemory| String::from("There is not enough memory to paste")),
                 _ => Err(String::from("The clipboard's picture cannot be pasted")),
             },
             Err(err) => Err(alloc::format!("The clipboard holds no picture: {err}")),
@@ -237,7 +239,7 @@ mod program {
         First,
     }
 
-    /// `bytes`, a picture from the clipboard, decoded and laid out as a layer
+    /// `bytes`, a picture from the clipboard, decoded and laid out to float
     /// over a picture of `kind` — its colours the nearest that picture holds
     /// — on this worker rather than the window's loop.
     fn decode_pasted(
@@ -326,10 +328,13 @@ mod program {
     ) -> Result<Option<&'static str>, SaveFailure> {
         let format = format_for(name, &snapshot.entries, snapshot.origin)
             .map_err(SaveFailure::Unwritable)?;
+        // Found before the file is touched, so a refusal leaves it whole.
+        let lost = lost_in(snapshot, format)
+            .map_err(|OutOfMemory| SaveFailure::Encode(EncodeError::OutOfMemory))?;
         let bytes = encode(snapshot, format, name).map_err(SaveFailure::Encode)?;
         tairix_rt::fs_write_all(file.fd(), 0, &bytes).map_err(SaveFailure::Write)?;
         docapp::commit(file, bytes.len() as u64).map_err(SaveFailure::Write)?;
-        Ok(lost_in(snapshot, format))
+        Ok(lost)
     }
 
     /// The painter's own work on the host's queue, beside its saves.
@@ -403,9 +408,7 @@ mod program {
         }
 
         fn faces(theme: &Theme, scale: Scale) -> Faces {
-            Faces {
-                status: BitmapFont::for_role(theme.fonts(), TextRole::Caption, scale),
-            }
+            Faces::of(theme, scale)
         }
 
         fn damage_sink() -> Region {
@@ -679,12 +682,12 @@ mod program {
         let window = &mut host.windows[index];
         let id = window.id();
         match request {
-            Own::NewWindow(picture) => {
+            Own::NewWindow { picture, format } => {
                 let pristine = window.pristine();
                 match picture.canvas() {
                     Ok(canvas) => {
                         let view = View::new(
-                            Document::new(Picture::plain(canvas)),
+                            Document::new_as(Picture::plain(canvas), format),
                             String::from(UNTITLED),
                             Access::Untitled,
                         );

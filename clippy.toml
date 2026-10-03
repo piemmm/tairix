@@ -15,6 +15,7 @@ disallowed-types = []
 # covers Rust, LLVM, x86, etc.); we add domain terms that belong to TAIRiX.
 doc-valid-idents = [
     "..",
+    "OpenRaster",
     "TAIRiX",
     "RISC",
     "RISC-V",

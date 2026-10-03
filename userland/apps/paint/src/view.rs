@@ -15,41 +15,51 @@ use tairix_abi::window_ipc::{AppMenu, AppMenuItemId, CursorShape, SaveEndings};
 use tairix_browse::vfs::write_document_title;
 use tairix_colour::Rgba;
 use tairix_controls::{
-    ColourPicker, FieldGroup, Keystroke, ScrollAction, ScrollBar, ScrollModel, ScrollOrientation,
-    ScrollRange, SwatchGrid, SwatchMark, Toolbar, REPEAT_DELAY_NS, REPEAT_INTERVAL_NS,
+    ColourPicker, Keystroke, ScrollAction, ScrollBar, ScrollModel, ScrollOrientation, ScrollRange,
+    SwatchGrid, SwatchMark, Toolbar, REPEAT_DELAY_NS, REPEAT_INTERVAL_NS,
 };
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_image::{desktop_palette, IndexDepth, Rgba8};
 use tairix_input::{InputEvent, Modifiers, PointerButton};
 use tairix_raster::Color;
 use tairix_reclaim::PressureBand;
-use tairix_rng::NonCryptoRng;
 use tairix_theme::Theme;
 use tairix_window::docapp::DocumentView;
 use tairix_window::document::{Access, SavedDocument};
 
 use crate::canvas::{Canvas, CanvasError, Kind, OutOfMemory, Tile};
 use crate::colour::{Ink, BLACK, WHITE};
-use crate::dialog::Form;
-use crate::document::{Document, NewPicture, Picture, Snapshot};
+use crate::dialog::{Form, Purpose};
+use crate::document::{Document, Layer, NewPicture, Picture, Snapshot};
 use crate::fill;
-use crate::layout::{Faces, Layout, PanelNeeds};
-use crate::save::{format_for, natural, save_endings, SaveFormat, SaveRefusal};
+use crate::filter::{Filter, FilterError};
+use crate::gradient::Gradient;
+use crate::layout::{Faces, Floor, Layout, Needs};
+use crate::mask::{Combine, Mask, Recipe};
+use crate::save::{format_for, natural, save_endings, survey, Loss, SaveFormat, SaveRefusal};
 use crate::selection::{cut_out, Floating};
 use crate::shape::{Bounds, Point as Fx, Shape, Span, FX};
-use crate::stroke::{Blend, Layer, Stroke};
-use crate::tool::{strip, strip_tip, tool_index, Options, Style, Tool};
+use crate::stroke::{Blend, Coat, Stroke};
+use crate::text::TextEntry;
+use crate::tool::{
+    tool_box, tool_index, view_strip, Marquee, Options, Style, Tool, ViewCommand, VIEW_COMMANDS,
+};
+use crate::tool_controls::ToolControls;
 use crate::transform::{Transform, TransformError};
 use crate::viewport::{Viewport, GRID_FROM, ZOOMS};
 
 /// The application's name, as window titles end.
 pub const APP_TITLE: &str = "Paint";
 
-/// How often a held spray lays more paint.
-pub const SPRAY_INTERVAL_NS: u64 = 25_000_000;
+/// How often a held airbrush lays another dab.
+pub const AIRBRUSH_INTERVAL_NS: u64 = 25_000_000;
 
 /// A new sprite's size to start.
 const SPRITE_SIZE: (u32, u32) = (32, 32);
+
+/// The most wells the palette strip holds: a 256-colour palette and the
+/// clear ink of its mask.
+pub const MOST_WELLS: usize = IndexDepth::Eight.colours() + 1;
 
 /// The Wimp's sixteen colours, as a colour picture's wells offer them, and
 /// nothing after.
@@ -73,12 +83,21 @@ pub enum MenuKind {
 /// Work a worker does for the window.
 #[derive(Debug)]
 pub enum Compute {
-    /// Make a new picture of `canvas`.
+    /// Make each of the picture's layers anew, each by its own transform.
     Transform {
-        /// The picture, as it stood.
-        canvas: Canvas,
-        /// What to make of it.
-        transform: Transform,
+        /// The layers' pixels, as they stood, and what to make of each.
+        layers: Vec<(Canvas, Transform)>,
+    },
+    /// Lay `layers` together onto nothing: a merge, or the picture flattened.
+    Compose {
+        /// The layers, the bottom first, as they stood.
+        layers: Vec<Layer>,
+    },
+    /// Find what each format the document can be written as would not keep
+    /// of it, for the Save As sheet.
+    Survey {
+        /// The document, as it stood.
+        snapshot: Snapshot,
     },
     /// Fill the region of `canvas` joined to `at`.
     Fill {
@@ -89,72 +108,159 @@ pub enum Compute {
         /// How far a colour may differ and still be filled.
         tolerance: u8,
         /// What is put down.
-        layer: Layer,
+        coat: Coat,
+        /// Whether only pixels joined to `at` are filled, rather than every
+        /// pixel like it.
+        contiguous: bool,
+        /// The selection the fill is held to, if one is.
+        clip: Option<Mask>,
+    },
+    /// Run `filter` over `canvas`.
+    Filter {
+        /// The picture, as it stood.
+        canvas: Canvas,
+        /// What is run.
+        filter: Filter,
+        /// The selection it is held to, if one is.
+        clip: Option<Mask>,
+    },
+    /// Lay `gradient` over `canvas`.
+    Gradient {
+        /// The picture, as it stood.
+        canvas: Canvas,
+        /// What is laid.
+        gradient: Gradient,
+        /// The selection it is held to, if one is.
+        clip: Option<Mask>,
     },
     /// Put `floating` down on `canvas`.
     PutDown {
         /// The picture, as it stood.
         canvas: Canvas,
-        /// The layer floating over it.
+        /// The selection floating over it.
         floating: Floating,
     },
-    /// Clear `area` of `canvas` to `ink`, as an eraser would.
+    /// Clear what `chosen` selects of `canvas` to `ink`, as an eraser would.
     Clear {
         /// The picture, as it stood.
         canvas: Canvas,
-        /// What is cleared.
-        area: Bounds,
+        /// What is cleared, and how much of each pixel.
+        chosen: Mask,
         /// What is left there.
         ink: Ink,
+    },
+    /// Make a selection and meet it with the one held.
+    Select {
+        /// What it is made from.
+        recipe: Recipe,
+        /// The selection held, which it meets.
+        before: Option<Mask>,
+        /// How the two meet.
+        combine: Combine,
+        /// How far the new part's edge is softened, in pixels, and whether
+        /// its edges are smoothed.
+        edge: (u32, bool),
+        /// The picture's pixels, which hold it.
+        within: Bounds,
     },
 }
 
 /// What a worker answers.
 #[derive(Debug)]
 pub enum Computed {
-    /// A transform's picture.
-    Picture(Result<Canvas, TransformError>),
+    /// A transform's layers, one a layer asked.
+    Picture(Result<Vec<Canvas>, TransformError>),
+    /// Layers laid together.
+    Composed(Result<Canvas, OutOfMemory>),
+    /// What each format the document can be written as would not keep.
+    Survey(Result<Vec<(SaveFormat, Vec<Loss>)>, OutOfMemory>),
     /// A fill's tiles, each the tile as it now stands.
     Tiles(Result<Vec<(usize, Arc<Tile>)>, OutOfMemory>),
+    /// The selection made, `None` where it chooses nothing.
+    Selection(Result<Option<Mask>, OutOfMemory>),
+    /// A filter's tiles, each the tile as it now stands.
+    Filtered(Result<Vec<(usize, Arc<Tile>)>, FilterError>),
 }
 
 /// Carry out `work`: what the worker runs.
 #[must_use]
 pub fn compute(work: Compute) -> Computed {
     match work {
-        Compute::Transform { canvas, transform } => {
-            Computed::Picture(crate::transform::apply(&canvas, transform))
+        Compute::Transform { layers } => Computed::Picture(transformed(&layers)),
+        Compute::Compose { layers } => Computed::Composed(crate::compose::flatten(&layers)),
+        Compute::Survey { snapshot } => {
+            Computed::Survey(survey(&snapshot.entries, snapshot.current, snapshot.origin))
         }
         Compute::Fill {
             mut canvas,
             at,
             tolerance,
-            layer,
-        } => Computed::Tiles(filled(&mut canvas, at, tolerance, layer)),
+            coat,
+            contiguous,
+            clip,
+        } => Computed::Tiles(filled(
+            &mut canvas,
+            (at, tolerance, contiguous),
+            (coat, clip),
+        )),
+        Compute::Gradient {
+            mut canvas,
+            gradient,
+            clip,
+        } => Computed::Tiles(crate::gradient::lay(&mut canvas, &gradient, clip.as_ref())),
+        Compute::Filter {
+            mut canvas,
+            filter,
+            clip,
+        } => Computed::Filtered(crate::filter::apply(&mut canvas, &filter, clip.as_ref())),
         Compute::PutDown {
             mut canvas,
             floating,
         } => Computed::Tiles(floating.put_down(&mut canvas)),
         Compute::Clear {
             mut canvas,
-            area,
+            chosen,
             ink,
-        } => Computed::Tiles(crate::selection::cleared(&mut canvas, area, ink)),
+        } => Computed::Tiles(crate::selection::cleared(&mut canvas, &chosen, ink)),
+        Compute::Select {
+            recipe,
+            before,
+            combine,
+            edge,
+            within,
+        } => Computed::Selection(crate::mask::select(
+            &recipe,
+            before.as_ref(),
+            combine,
+            edge,
+            within,
+        )),
     }
+}
+
+/// Each of `layers` made anew by its transform.
+fn transformed(layers: &[(Canvas, Transform)]) -> Result<Vec<Canvas>, TransformError> {
+    let mut made = Vec::new();
+    made.try_reserve_exact(layers.len())
+        .map_err(|_| TransformError::OutOfMemory)?;
+    for (canvas, transform) in layers {
+        made.push(crate::transform::apply(canvas, *transform)?);
+    }
+    Ok(made)
 }
 
 /// What a copy takes, as it stood: the pixels are cut out on the queue's
 /// worker, so a copy of a whole picture costs the loop nothing.
 #[derive(Debug)]
 pub enum Clip {
-    /// A floating layer.
+    /// A floating selection.
     Floating(Floating),
-    /// The part `area` of a picture.
+    /// What a selection chooses of a picture.
     Area {
         /// The picture.
         canvas: Canvas,
-        /// The part copied.
-        area: Bounds,
+        /// The selection, and how much of each pixel it chooses.
+        chosen: Mask,
     },
 }
 
@@ -167,21 +273,25 @@ impl Clip {
     pub fn pixels(&self) -> Result<Canvas, CanvasError> {
         match self {
             Self::Floating(floating) => floating.pixels(),
-            Self::Area { canvas, area } => cut_out(canvas, *area),
+            Self::Area { canvas, chosen } => cut_out(canvas, chosen),
         }
     }
 }
 
 fn filled(
     canvas: &mut Canvas,
-    at: (u32, u32),
-    tolerance: u8,
-    layer: Layer,
+    (at, tolerance, contiguous): ((u32, u32), u8, bool),
+    (coat, clip): (Coat, Option<Mask>),
 ) -> Result<Vec<(usize, Arc<Tile>)>, OutOfMemory> {
-    let Some(region) = fill::region(canvas, at.0, at.1, tolerance)? else {
+    let region = if contiguous {
+        fill::region(canvas, at.0, at.1, tolerance)?
+    } else {
+        fill::similar(canvas, at.0, at.1, tolerance)?
+    };
+    let Some(region) = region else {
         return Ok(Vec::new());
     };
-    let stroke = fill::fill(canvas, &region, layer)?;
+    let stroke = fill::fill(canvas, &region, coat, clip)?;
     let written = stroke.finish();
     let mut tiles = Vec::new();
     tiles
@@ -198,8 +308,13 @@ fn filled(
 /// What the window asks of `Run` that only the painter carries out.
 #[derive(Debug)]
 pub enum Own {
-    /// Open a window on a new picture.
-    NewWindow(NewPicture),
+    /// Open a window on a new picture, to be saved as `format`.
+    NewWindow {
+        /// The picture.
+        picture: NewPicture,
+        /// What it is to be saved as.
+        format: SaveFormat,
+    },
     /// Put these pixels on the clipboard.
     Copy(Clip),
     /// Put these pixels on the clipboard, and have a worker clear them,
@@ -212,7 +327,7 @@ pub enum Own {
         /// The clearing.
         work: Compute,
     },
-    /// Paste what the clipboard holds, as a layer over a picture of this
+    /// Paste what the clipboard holds, floating over a picture of this
     /// kind.
     Paste(Kind),
     /// Have a worker do `work`, answering job `job`.
@@ -239,10 +354,8 @@ pub enum Action {
     Open,
     /// Save.
     Save,
-    /// Save somewhere new.
+    /// Save somewhere new, in a format chosen first.
     SaveAs,
-    /// Set the JPEG quality.
-    Quality,
     /// Close the window.
     Close,
     /// Undo.
@@ -261,6 +374,8 @@ pub enum Action {
     Deselect,
     /// Clear what is selected.
     Delete,
+    /// Fill what is selected, or the whole picture, with the primary ink.
+    FillSelection,
     /// Keep only what is selected.
     Crop,
     /// Stretch or shrink the picture.
@@ -291,20 +406,20 @@ pub enum Action {
     EditSecondary,
     /// Swap the primary and secondary colours.
     SwapColours,
-    /// Show the sprite before.
-    PreviousSprite,
-    /// Show the sprite after.
-    NextSprite,
-    /// Add a sprite.
-    NewSprite,
-    /// Add a copy of the sprite showing.
-    DuplicateSprite,
-    /// Remove the sprite showing.
-    DeleteSprite,
-    /// Move the sprite showing up the list.
-    SpriteUp,
+    /// Show the sprite or page before.
+    PreviousEntry,
+    /// Show the one after.
+    NextEntry,
+    /// Add a sprite, or a page to a TIFF's pages.
+    NewEntry,
+    /// Add a copy of the sprite or page showing.
+    DuplicateEntry,
+    /// Remove the one showing.
+    DeleteEntry,
+    /// Move the one showing up the list.
+    EntryUp,
     /// Move it down.
-    SpriteDown,
+    EntryDown,
     /// Magnify more.
     ZoomIn,
     /// Magnify less.
@@ -317,33 +432,59 @@ pub enum Action {
     Grid,
     /// Put a floating selection down.
     PutDown,
-    /// Show the sprite of the name typed.
+    /// Show the sprite of the name typed, or the sprite or page of the
+    /// number.
     GoTo,
     /// Rename the sprite showing.
     Rename,
+    /// Add a clear layer over the one painted on.
+    NewLayer,
+    /// Add a copy of the layer painted on over it.
+    DuplicateLayer,
+    /// Take the layer painted on away.
+    DeleteLayer,
+    /// Paint on the layer above.
+    LayerAbove,
+    /// Paint on the layer below.
+    LayerBelow,
+    /// Paint on the layer of the name typed, or of the number.
+    GoToLayer,
+    /// Move the layer painted on up the stack.
+    RaiseLayer,
+    /// Move it down.
+    LowerLayer,
+    /// Lay the layer painted on over the one beneath, the two as one.
+    MergeDown,
+    /// Lay every layer together as one.
+    Flatten,
+    /// Show the layer painted on, or hide it.
+    ShowLayer,
+    /// Name the layer painted on, and say how much of it shows.
+    LayerProperties,
     /// Choose a tool.
     Tool(Tool),
     /// Magnify to a rung of the ladder.
     Zoom(usize),
+    /// Adjust or filter the picture: an entry of [`Filter::ALL`].
+    Adjust(usize),
 }
 
 impl Action {
-    /// Whether it acts with a floating layer still floating: copying,
+    /// Whether it acts with a floating selection still floating: copying,
     /// clearing or pasting over it, the view and the inks; every other
-    /// action puts the layer down first.
+    /// action puts the selection down first.
     #[must_use]
     pub const fn leaves_floating(self) -> bool {
         matches!(
             self,
             Self::NewPicture
                 | Self::Open
-                | Self::Quality
                 | Self::Close
                 | Self::Cut
                 | Self::Copy
                 | Self::Paste
                 | Self::Delete
-                | Self::DeleteSprite
+                | Self::DeleteEntry
                 | Self::EditPrimary
                 | Self::EditSecondary
                 | Self::SwapColours
@@ -359,14 +500,35 @@ impl Action {
     }
 }
 
+impl Action {
+    /// Whether it leaves what `tool` is in the middle of — a polygon's
+    /// corners, a crop box, text being typed — as it is: the view's own
+    /// actions, the inks, and choosing the tool again; every other action
+    /// finishes or turns it down first.
+    #[must_use]
+    pub fn spares(self, tool: Tool) -> bool {
+        matches!(
+            self,
+            Self::ZoomIn
+                | Self::ZoomOut
+                | Self::Fit
+                | Self::Actual
+                | Self::Grid
+                | Self::Zoom(_)
+                | Self::EditPrimary
+                | Self::EditSecondary
+                | Self::SwapColours
+        ) || self == Self::Tool(tool)
+    }
+}
+
 /// The actions with no argument, by id: an action's position here is its
 /// menu id, less one.
-const PLAIN_ACTIONS: [Action; 43] = [
+const PLAIN_ACTIONS: [Action; 55] = [
     Action::NewPicture,
     Action::Open,
     Action::Save,
     Action::SaveAs,
-    Action::Quality,
     Action::Close,
     Action::Undo,
     Action::Redo,
@@ -391,13 +553,13 @@ const PLAIN_ACTIONS: [Action; 43] = [
     Action::EditPrimary,
     Action::EditSecondary,
     Action::SwapColours,
-    Action::PreviousSprite,
-    Action::NextSprite,
-    Action::NewSprite,
-    Action::DuplicateSprite,
-    Action::DeleteSprite,
-    Action::SpriteUp,
-    Action::SpriteDown,
+    Action::PreviousEntry,
+    Action::NextEntry,
+    Action::NewEntry,
+    Action::DuplicateEntry,
+    Action::DeleteEntry,
+    Action::EntryUp,
+    Action::EntryDown,
     Action::ZoomIn,
     Action::ZoomOut,
     Action::Fit,
@@ -405,6 +567,19 @@ const PLAIN_ACTIONS: [Action; 43] = [
     Action::Grid,
     Action::PutDown,
     Action::GoTo,
+    Action::FillSelection,
+    Action::NewLayer,
+    Action::DuplicateLayer,
+    Action::DeleteLayer,
+    Action::LayerAbove,
+    Action::LayerBelow,
+    Action::GoToLayer,
+    Action::RaiseLayer,
+    Action::LowerLayer,
+    Action::MergeDown,
+    Action::Flatten,
+    Action::ShowLayer,
+    Action::LayerProperties,
 ];
 
 /// Where the argument-carrying families' ids start, and the one entry
@@ -414,6 +589,8 @@ const ZOOM_IDS: u16 = 200;
 const RENAME_ID: u16 = 300;
 const GO_TO_ENTRY: u16 = 301;
 const RENAME_ENTRY: u16 = 302;
+const GO_TO_LAYER: u16 = 303;
+const FILTER_IDS: u16 = 400;
 
 impl Action {
     /// The menu id this action is chosen by.
@@ -424,6 +601,7 @@ impl Action {
         match self {
             Self::Tool(tool) => at(TOOL_IDS, Some(tool_index(tool))),
             Self::Zoom(rung) => at(ZOOM_IDS, Some(rung)),
+            Self::Adjust(index) => at(FILTER_IDS, Some(index)),
             Self::Rename => RENAME_ID,
             plain => at(1, PLAIN_ACTIONS.iter().position(|&a| a == plain)),
         }
@@ -443,6 +621,10 @@ impl Action {
                 (rung < ZOOMS.len()).then_some(Self::Zoom(rung))
             }
             RENAME_ID => Some(Self::Rename),
+            FILTER_IDS.. => {
+                let index = usize::from(id - FILTER_IDS);
+                (index < Filter::ALL.len()).then_some(Self::Adjust(index))
+            }
             _ => None,
         }
     }
@@ -454,12 +636,39 @@ impl From<Action> for u16 {
     }
 }
 
+impl From<ViewCommand> for Action {
+    fn from(command: ViewCommand) -> Self {
+        match command {
+            ViewCommand::ZoomOut => Self::ZoomOut,
+            ViewCommand::ZoomIn => Self::ZoomIn,
+            ViewCommand::Fit => Self::Fit,
+            ViewCommand::Actual => Self::Actual,
+            ViewCommand::Grid => Self::Grid,
+        }
+    }
+}
+
+/// A selection being marked out, as its outline is drawn.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Marking<'a> {
+    /// A rectangle or an ellipse, dragged.
+    Shape(Shape),
+    /// A path through these points, in picture units: a lasso's, or a
+    /// polygon's corners and on to `to`, where the pointer is.
+    Path {
+        /// The points so far.
+        points: &'a [Fx],
+        /// Where the next corner would go.
+        to: Option<Fx>,
+    },
+}
+
 /// A shape being dragged, as it will be laid down: each layer and the shape
 /// it covers, fill first.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Preview {
-    /// The layers.
-    pub layers: [Option<(Layer, Shape)>; 2],
+    /// The coats.
+    pub coats: [Option<(Coat, Shape)>; 2],
     /// Whether edges are smoothed.
     pub smooth: bool,
 }
@@ -467,19 +676,60 @@ pub struct Preview {
 /// A drag in progress on the canvas.
 #[derive(Debug)]
 enum Gesture {
-    /// Paint laid down as the pointer moves.
+    /// Paint laid down as the pointer moves along `path`.
     Stroke {
-        stroke: Stroke,
-        /// Where the pointer was last, in picture units.
-        last: Fx,
+        stroke: alloc::boxed::Box<Stroke>,
+        path: crate::brush::Path,
     },
     /// A shape following the pointer, put down when it lets go.
     Shape { from: Fx, to: Fx, secondary: bool },
-    /// A selection being marked out, from one pixel to another.
-    Marquee { from: (i64, i64) },
-    /// A floating layer being dragged from pixel `from`, the pointer last
+    /// A rectangle or an ellipse being marked out, met with the selection
+    /// held as `combine` says once it lets go.
+    Marquee { from: Fx, to: Fx, combine: Combine },
+    /// A lasso drawn through `points`, met so once it lets go.
+    Lasso { points: Vec<Fx>, combine: Combine },
+    /// A gradient dragged from one picture point to another, its inks
+    /// swapped when `secondary`.
+    Gradient { from: Fx, to: Fx, secondary: bool },
+    /// The view dragged from screen point `from`, scrolled as it was.
+    Pan { from: Point, scroll: (u64, u64) },
+    /// A box dragged on screen to magnify to, or a click to step the zoom,
+    /// out when `out`.
+    ZoomBox { from: Point, to: Point, out: bool },
+    /// A crop box being set out from pixel `from`, the one held before it
+    /// kept to turn the drag down to.
+    CropNew {
+        from: (i64, i64),
+        before: Option<Bounds>,
+    },
+    /// The crop box's edges `grab` takes, dragged from pixel `from`, the box
+    /// `start` as it was.
+    CropAdjust {
+        grab: crate::crop::Grab,
+        from: (i64, i64),
+        start: Bounds,
+    },
+    /// A floating selection being dragged from pixel `from`, the pointer last
     /// over pixel `last`.
     Move { from: (i64, i64), last: (i64, i64) },
+}
+
+/// A polygon being marked out a corner at a time: `to` is where the pointer
+/// last was, which the next corner follows.
+#[derive(Debug)]
+struct Draft {
+    corners: Vec<Fx>,
+    to: Fx,
+    aim: Aim,
+}
+
+/// What a polygon being marked out becomes once it is closed.
+#[derive(Copy, Clone, Debug)]
+enum Aim {
+    /// A selection, met with the one held as it says.
+    Select(Combine),
+    /// A polygon drawn, its inks swapped when `secondary`.
+    Shape { secondary: bool },
 }
 
 /// What becomes of the selection once a worker's answer lands.
@@ -487,14 +737,14 @@ enum Gesture {
 enum Settles {
     /// Nothing of it: a fill or a transform.
     Nothing,
-    /// The floating layer is down, what it covers left selected, and `Then`
+    /// The floating selection is down, what it covers left selected, and `Then`
     /// follows.
     PutDown(Then),
     /// What floated, or was selected, is cleared away.
     Cleared,
 }
 
-/// What follows a floating layer's putting down once it has landed.
+/// What follows a floating selection's putting down once it has landed.
 #[derive(Debug)]
 enum Then {
     /// Nothing more.
@@ -520,16 +770,57 @@ enum Modal {
 #[derive(Debug)]
 struct Pending {
     job: u64,
-    /// The entry it was asked of, and the document's generation then: the
-    /// state its answer is written over.
+    /// The entry it was asked of, the layer painted on, and the document's
+    /// generation then: the state its answer is written over.
     entry: usize,
+    layer: usize,
     generation: u64,
-    /// The transform asked for, whose sprite details its answer refits.
-    transform: Option<Transform>,
-    /// What becomes of the selection once it lands.
-    settles: Settles,
+    /// What its answer lands as.
+    lands: Lands,
     /// What to say if it cannot be done.
     what: &'static str,
+}
+
+/// What a worker's answer becomes once it lands.
+#[derive(Debug)]
+enum Lands {
+    /// Tiles of the layer painted on, after which the selection settles so.
+    Tiles(Settles),
+    /// The selection.
+    Selection,
+    /// Every layer made anew by `Transform`, the sprite details refitted.
+    Transform(Transform),
+    /// The layers in the range laid together as one.
+    Merged(core::ops::Range<usize>),
+    /// The Save As sheet's choices, the window closing once it is saved when
+    /// set.
+    Sheet {
+        /// Whether the save closes the window.
+        then_close: bool,
+    },
+}
+
+/// A filter being previewed while its settings are open: what is shown,
+/// what is being worked out, and what the shown tiles are.
+#[derive(Debug)]
+struct Previewing {
+    /// The settings the preview was last asked for.
+    filter: Filter,
+    /// The job working the preview out, the settings it was asked for, and
+    /// whether they moved since.
+    job: Option<u64>,
+    asked: Option<Filter>,
+    stale: bool,
+    /// The layer and the document's generation the preview was worked from.
+    layer: usize,
+    generation: u64,
+    /// A colour picture as filtered, and the tiles that made it so.
+    canvas: Option<Canvas>,
+    tiles: Option<Vec<(usize, Arc<Tile>)>>,
+    /// The settings `canvas` shows.
+    shown: Option<Filter>,
+    /// A palette picture's kind with its palette adjusted.
+    kind: Option<Kind>,
 }
 
 /// A palette entry being edited live from the colour dock: the palette it
@@ -554,10 +845,12 @@ pub struct View {
     /// The kind the two inks were chosen on, so they are carried across when
     /// the picture's kind changes.
     inks_for: Kind,
-    toolbar: Toolbar,
+    tool_box: Toolbar,
+    /// The view strip: the view's own commands.
+    commands: Toolbar,
+    bar: ToolControls,
     wells: Vec<Ink>,
     swatches: SwatchGrid,
-    settings: FieldGroup,
     /// The colour dock's picker, editing the ink `editing` names.
     picker: ColourPicker,
     editing: SwatchMark,
@@ -567,8 +860,22 @@ pub struct View {
     gesture: Option<Gesture>,
     /// The button that began the drag under way: only its release ends it.
     dragging: Option<PointerButton>,
-    /// The rectangle marked out, in picture pixels.
-    selection: Option<Bounds>,
+    /// The selection held, which painting is held to.
+    selection: Option<Mask>,
+    /// A polygon being marked out.
+    draft: Option<Draft>,
+    /// The crop tool's box, in picture pixels.
+    crop: Option<Bounds>,
+    /// Text being typed.
+    text: Option<TextEntry>,
+    /// Where the clone tool copies from, and once a stroke has begun from
+    /// it, how far that lies from where it paints, in pixels.
+    clone_from: Option<Fx>,
+    clone_offset: Option<(i64, i64)>,
+    /// Whether Space is held, which drags the view whatever the tool.
+    space: bool,
+    /// A filter being previewed.
+    preview: Option<Previewing>,
     held: Option<Floating>,
     grid: bool,
     pointer: Point,
@@ -579,10 +886,12 @@ pub struct View {
     pinch: Option<(Viewport, Point)>,
     message: Option<String>,
     modal: Option<Modal>,
+    /// The format the Save As sheet chose, which the picker that follows
+    /// holds the name to.
+    save_as: Option<SaveFormat>,
     pending: Option<Pending>,
     next_job: u64,
-    spray: NonCryptoRng,
-    spray_due: Option<u64>,
+    airbrush_due: Option<u64>,
     repeat_due: Option<u64>,
     /// The picture pixel under the pointer, which the status band states.
     hover: Option<(u32, u32)>,
@@ -604,7 +913,7 @@ impl SavedDocument for View {
     }
 
     fn snapshot(&mut self) -> Option<(u64, Arc<Snapshot>)> {
-        // Every save puts a floating layer down before it asks for one.
+        // Every save puts a floating selection down before it asks for one.
         if self.held.is_some() {
             return None;
         }
@@ -618,6 +927,7 @@ impl SavedDocument for View {
 
     fn rename(&mut self, name: String) {
         self.name = name;
+        self.save_as = None;
     }
 
     fn set_access(&mut self, access: Access) {
@@ -660,19 +970,33 @@ impl DocumentView for View {
     }
 
     fn asking_to_close(&self) -> bool {
-        matches!(self.modal, Some(Modal::Close(_)))
+        match &self.modal {
+            Some(Modal::Close(_)) => true,
+            Some(Modal::Form(form)) => form.purpose() == Purpose::SaveAs { then_close: true },
+            None => false,
+        }
     }
 
-    /// Busy while a worker has the picture, the cross over the canvas, the
-    /// arrow elsewhere.
+    /// Busy while a worker has the picture; the arrow while a question or an
+    /// open list holds the pointer; text entry over a number field; over the
+    /// canvas, the hand where a press drags the view, text entry for the
+    /// text tool, and the cross otherwise; the arrow elsewhere.
     fn cursor(&self, layout: &Layout, at: Point) -> CursorShape {
-        if self.busy() {
+        let over_canvas = layout.canvas().contains(at);
+        if over_canvas && self.panning() {
+            CursorShape::Pointer
+        } else if self.busy() {
             CursorShape::Busy
-        } else if !self.asking()
-            && self.document.picture().is_some()
-            && layout.canvas().contains(at)
-        {
-            CursorShape::Crosshair
+        } else if self.asking() || self.bar.listing() {
+            CursorShape::Arrow
+        } else if self.bar.text_at(layout.bar(), at) {
+            CursorShape::Text
+        } else if self.document.picture().is_some() && over_canvas {
+            if self.tool == Tool::Text {
+                CursorShape::Text
+            } else {
+                CursorShape::Crosshair
+            }
         } else {
             CursorShape::Arrow
         }
@@ -726,7 +1050,12 @@ impl DocumentView for View {
                 };
                 self.on_key(stroke, layout, scale, theme, damage)
             }
-            InputEvent::KeyReleased { .. } => Outcome::none(),
+            InputEvent::KeyReleased { key, .. } => {
+                if key == tairix_input::Key::Char(' ') {
+                    self.space = false;
+                }
+                Outcome::none()
+            }
             _ => self.on_pointer(input, layout, scale, theme, damage),
         }
     }
@@ -737,13 +1066,26 @@ impl DocumentView for View {
             .map(|refusal| alloc::format!("{refusal}"))
     }
 
+    fn ask_how(
+        &mut self,
+        then_close: bool,
+        layout: &Layout,
+        damage: &mut Region,
+    ) -> Option<Outcome> {
+        Some(self.ask_save_as(then_close, layout, damage))
+    }
+
     fn offered_extension(&self) -> &'static str {
-        natural(self.document.entries(), self.document.origin()).extension()
+        self.save_as
+            .unwrap_or_else(|| natural(self.document.entries(), self.document.origin()))
+            .extension()
     }
 
     fn save_endings(&self) -> Result<SaveEndings, String> {
-        save_endings(self.document.entries(), self.document.origin())
-            .map_err(|refusal| alloc::format!("{refusal}"))
+        let entries = self.document.entries();
+        let origin = self.document.origin();
+        let format = self.save_as.unwrap_or_else(|| natural(entries, origin));
+        save_endings(entries, origin, format).map_err(|refusal| alloc::format!("{refusal}"))
     }
 }
 
@@ -768,10 +1110,11 @@ impl View {
             primary: Ink::Colour(BLACK),
             secondary: Ink::Colour(WHITE),
             inks_for: Kind::Rgba,
-            toolbar: strip(tool),
+            tool_box: tool_box(tool),
+            commands: view_strip(false),
+            bar: ToolControls::new(tool, options, smooth),
             wells: Vec::new(),
-            swatches: SwatchGrid::new(8, Vec::new()),
-            settings: options.panel(tool, smooth),
+            swatches: SwatchGrid::new(1, Vec::new()),
             picker: ColourPicker::new(Rgba::from_array(BLACK)),
             editing: SwatchMark::Primary,
             palette_edit: None,
@@ -780,6 +1123,13 @@ impl View {
             gesture: None,
             dragging: None,
             selection: None,
+            draft: None,
+            crop: None,
+            text: None,
+            clone_from: None,
+            clone_offset: None,
+            space: false,
+            preview: None,
             held: None,
             grid: false,
             pointer: Point::new(-1, -1),
@@ -788,10 +1138,10 @@ impl View {
             pinch: None,
             message: None,
             modal: None,
+            save_as: None,
             pending: None,
             next_job: 1,
-            spray: NonCryptoRng::seed_from_u64(0x5eed_5eed),
-            spray_due: None,
+            airbrush_due: None,
             repeat_due: None,
             hover: None,
         };
@@ -871,13 +1221,49 @@ impl View {
                 >= GRID_FROM
     }
 
-    /// The selection marked out, in picture pixels.
+    /// The selection held, which painting is held to.
     #[must_use]
-    pub const fn selection(&self) -> Option<Bounds> {
-        self.selection
+    pub const fn selection(&self) -> Option<&Mask> {
+        self.selection.as_ref()
     }
 
-    /// The layer floating over the picture.
+    /// The selection being marked out, if one is.
+    #[must_use]
+    pub fn marking(&self) -> Option<Marking<'_>> {
+        if let Some(draft) = &self.draft {
+            return Some(Marking::Path {
+                points: &draft.corners,
+                to: Some(draft.to),
+            });
+        }
+        match &self.gesture {
+            Some(Gesture::Marquee { from, to, .. }) => {
+                Some(Marking::Shape(self.marquee_shape(*from, *to)))
+            }
+            Some(Gesture::Lasso { points, .. }) => Some(Marking::Path { points, to: None }),
+            _ => None,
+        }
+    }
+
+    /// The shape the select tool marks out dragged from `from` to `to`.
+    fn marquee_shape(&self, from: Fx, to: Fx) -> Shape {
+        let span = Span {
+            from: from.pixel(),
+            to: to.pixel(),
+        };
+        match self.options.marquee {
+            Marquee::Ellipse => Shape::Ellipse {
+                span,
+                outline: None,
+            },
+            _ => Shape::Rect {
+                span,
+                outline: None,
+            },
+        }
+    }
+
+    /// The selection floating over the picture.
     #[must_use]
     pub fn floating(&self) -> Option<&Floating> {
         self.held.as_ref()
@@ -896,7 +1282,7 @@ impl View {
         };
         let kind = picture_kind(&self.document);
         Some(Preview {
-            layers: self.shape_layers(*from, *to, *secondary, kind),
+            coats: self.shape_coats(*from, *to, *secondary, kind),
             smooth: self.smooth(kind),
         })
     }
@@ -921,16 +1307,15 @@ impl View {
 
     /// The controls, for the painter.
     #[must_use]
-    pub(crate) const fn controls(
-        &self,
-    ) -> (&Toolbar, &SwatchGrid, &FieldGroup, &ScrollBar, &ScrollBar) {
-        (
-            &self.toolbar,
-            &self.swatches,
-            &self.settings,
-            &self.vertical,
-            &self.horizontal,
-        )
+    pub(crate) const fn controls(&self) -> Controls<'_> {
+        Controls {
+            tool_box: &self.tool_box,
+            commands: &self.commands,
+            bar: &self.bar,
+            swatches: &self.swatches,
+            vertical: &self.vertical,
+            horizontal: &self.horizontal,
+        }
     }
 
     /// The modal question showing, if any: a close question or a form.
@@ -959,29 +1344,47 @@ impl View {
         scale: Scale,
         faces: Faces,
     ) -> Layout {
-        let inner = Layout::panel_inner_width(theme, scale);
-        let settings = if self.settings.is_empty() {
-            0
-        } else {
-            let column = self.settings.slot_column(inner, scale, theme);
-            self.settings.measured_height(inner, column, scale, theme)
-        };
         let dock = Layout::dock_inner_width(theme, scale);
-        let needs = PanelNeeds {
-            swatches: self.swatches.height_for_width(inner),
-            settings,
+        let view_strip = self.commands.natural_length(scale, theme);
+        let controls = Layout::controls_width(width, view_strip, theme, scale);
+        let needs = Needs {
+            wells: self.wells.len(),
             picker: self.picker.measured_height(dock, scale, theme),
+            tool_box: self.tool_box.breadth(scale, theme),
+            view_strip,
+            // As many rows as any tool's bar takes, so the canvas stays put
+            // whichever tool is chosen.
+            bar_rows: ToolControls::most_rows(controls, faces, scale, theme),
         };
-        Layout::for_window(width, height, theme, scale, faces, needs)
+        let mut layout = Layout::for_window(width, height, theme, scale, faces, needs);
+        let placement = self
+            .bar
+            .place(layout.controls(), layout.window(), faces, scale, theme);
+        layout.seat_bar(placement);
+        layout
     }
 
-    /// The smallest window worth laying out.
+    /// The smallest window worth laying out: one that seats every setting
+    /// of every tool's bar and the largest palette, whatever document it is
+    /// given.
     #[must_use]
     pub fn min_size(&self, theme: &Theme, scale: Scale, faces: Faces) -> (u32, u32) {
-        Layout::min_size(theme, scale, faces, &self.toolbar)
+        let floor = Floor {
+            controls: ToolControls::least_width(faces, scale, theme),
+            view_strip: self.commands.natural_length(scale, theme),
+            tool_box: (
+                self.tool_box.breadth(scale, theme),
+                self.tool_box.min_length(scale, theme),
+            ),
+            wells: MOST_WELLS,
+        };
+        Layout::min_size(theme, scale, faces, floor, |width| {
+            ToolControls::most_rows(width, faces, scale, theme)
+        })
     }
 
-    /// The tip for the tool the pointer is over, with its rectangle.
+    /// The tip for what the pointer is over — a tool, a view command or a
+    /// setting — with its rectangle.
     #[must_use]
     pub fn tool_tip(
         &self,
@@ -990,19 +1393,34 @@ impl View {
         theme: &Theme,
     ) -> Option<(Rect, &'static str)> {
         let tools = layout.tools();
-        let index = self.toolbar.tool_at(tools, scale, theme, self.pointer)?;
-        let rect = self.toolbar.tool_rect(index, tools, scale, theme)?;
-        Some((rect, strip_tip(index)?))
+        if let Some(index) = self.tool_box.tool_at(tools, scale, theme, self.pointer) {
+            let rect = self.tool_box.tool_rect(index, tools, scale, theme)?;
+            return Some((rect, Tool::ALL.get(index)?.label()));
+        }
+        let commands = layout.view_strip();
+        if let Some(index) = self.commands.tool_at(commands, scale, theme, self.pointer) {
+            let rect = self.commands.tool_rect(index, commands, scale, theme)?;
+            return Some((rect, VIEW_COMMANDS.get(index)?.2));
+        }
+        self.bar.tip(layout.bar(), self.pointer)
     }
 
     fn picture_size(&self) -> (u32, u32) {
-        self.document.picture().map_or((1, 1), |picture| {
-            (picture.canvas.width(), picture.canvas.height())
-        })
+        self.document.picture().map_or((1, 1), Picture::size)
     }
 
-    /// Bring the scroll and the bars into line with the layout.
+    /// The layer painted on.
+    fn active_layer(&self) -> usize {
+        self.document.picture().map_or(0, Picture::active)
+    }
+
+    /// Bring the scroll, the bars and the palette's rows into line with the
+    /// layout.
     pub fn settle(&mut self, layout: &Layout, damage: &mut Region) {
+        if self.swatches.columns() != layout.columns() {
+            self.swatches.set_columns(layout.columns());
+            damage.add(layout.palette());
+        }
         let size = self.picture_size();
         let area = layout.canvas();
         if self.viewport.settle(size, area) {
@@ -1069,15 +1487,13 @@ impl View {
                 Color::rgba(r, g, b, a)
             })
             .collect();
-        let columns = match self.wells.len() {
-            0..=4 => 4,
-            5..=32 => 8,
-            _ => 16,
-        };
-        self.swatches.adopt_colours(columns, colours);
+        // The rows the wells fill follow the layout, which settles them.
+        self.swatches
+            .adopt_colours(self.swatches.columns(), colours);
         self.mark_wells();
         self.sync_picker();
-        self.settings = self.options.panel(self.tool, kind.sample_bytes() == 4);
+        self.bar
+            .allow_partial(kind.sample_bytes() == 4, self.options);
         let aspect = self
             .document
             .picture()
@@ -1133,6 +1549,12 @@ impl View {
         self.options.smooth && kind.sample_bytes() == 4
     }
 
+    /// Whether edges are smoothed on a picture of `kind`, for the painter.
+    #[must_use]
+    pub(crate) fn smooth_shown(&self, kind: &Kind) -> bool {
+        self.smooth(kind)
+    }
+
     /// The ink `secondary` or the primary would lay on `kind`.
     fn ink(&self, secondary: bool) -> Ink {
         if secondary {
@@ -1152,23 +1574,23 @@ impl View {
         }
     }
 
-    fn layer(ink: Ink, kind: &Kind, smooth: bool) -> Layer {
+    fn coat(ink: Ink, kind: &Kind, smooth: bool) -> Coat {
         let blend = if smooth && kind.sample_bytes() == 4 {
             Blend::Over
         } else {
             Blend::Replace
         };
-        Layer { ink, blend }
+        Coat { ink, blend }
     }
 
-    /// The layers and shapes a shape tool lays from `from` to `to`.
-    fn shape_layers(
+    /// The coats and shapes a shape tool lays from `from` to `to`.
+    fn shape_coats(
         &self,
         from: Fx,
         to: Fx,
         secondary: bool,
         kind: &Kind,
-    ) -> [Option<(Layer, Shape)>; 2] {
+    ) -> [Option<(Coat, Shape)>; 2] {
         let smooth = self.smooth(kind);
         let (front, back) = if secondary {
             (self.secondary, self.primary)
@@ -1183,7 +1605,13 @@ impl View {
         if self.modifiers.shift && self.tool != Tool::Line {
             span = span.squared();
         }
+        let radius = self.options.corners;
         let shape = |outline: Option<u32>| match self.tool {
+            Tool::Rectangle if radius > 0 => Shape::Rounded {
+                span,
+                outline,
+                radius,
+            },
             Tool::Rectangle => Shape::Rect { span, outline },
             _ => Shape::Ellipse { span, outline },
         };
@@ -1199,17 +1627,17 @@ impl View {
                     b: to,
                     radius: i64::from(width) * FX / 2,
                 };
-                [Some((Self::layer(front, kind, smooth), line)), None]
+                [Some((Self::coat(front, kind, smooth), line)), None]
             }
             _ => match self.options.style {
                 Style::Outline => [
-                    Some((Self::layer(front, kind, smooth), shape(Some(width)))),
+                    Some((Self::coat(front, kind, smooth), shape(Some(width)))),
                     None,
                 ],
-                Style::Filled => [Some((Self::layer(front, kind, smooth), shape(None))), None],
+                Style::Filled => [Some((Self::coat(front, kind, smooth), shape(None))), None],
                 Style::Both => [
-                    Some((Self::layer(back, kind, smooth), shape(None))),
-                    Some((Self::layer(front, kind, smooth), shape(Some(width)))),
+                    Some((Self::coat(back, kind, smooth), shape(None))),
+                    Some((Self::coat(front, kind, smooth), shape(Some(width)))),
                 ],
             },
         }
@@ -1236,9 +1664,11 @@ impl View {
         }
     }
 
-    /// The window gained or lost the keyboard; losing it ends any drag.
+    /// The window gained or lost the keyboard; losing it ends any drag, and
+    /// the Space held with it.
     pub fn focus_changed(&mut self, focused: bool, layout: &Layout, damage: &mut Region) {
         if !focused {
+            self.space = false;
             self.end_gesture(layout, damage);
         }
     }
@@ -1251,7 +1681,7 @@ impl View {
     /// When the window next needs waking, if it does.
     #[must_use]
     pub fn deadline_ns(&self) -> Option<u64> {
-        match (self.spray_due, self.repeat_due) {
+        match (self.airbrush_due, self.repeat_due) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (due, None) | (None, due) => due,
         }
@@ -1259,7 +1689,8 @@ impl View {
 
     /// Arm the deadlines the state calls for, now it is `now_ns`.
     pub fn arm_deadline(&mut self, now_ns: u64) {
-        let holding = self.toolbar.is_repeating()
+        let holding = self.tool_box.is_repeating()
+            || self.commands.is_repeating()
             || self.vertical.is_repeating()
             || self.horizontal.is_repeating();
         self.repeat_due = match (holding, self.repeat_due) {
@@ -1267,17 +1698,17 @@ impl View {
             (true, armed) => armed,
             (false, _) => None,
         };
-        let spraying =
-            matches!(self.gesture, Some(Gesture::Stroke { .. })) && self.tool == Tool::Spray;
-        self.spray_due = match (spraying, self.spray_due) {
-            (true, None) => Some(now_ns.saturating_add(SPRAY_INTERVAL_NS)),
+        let airbrushing =
+            matches!(self.gesture, Some(Gesture::Stroke { .. })) && self.tool == Tool::Airbrush;
+        self.airbrush_due = match (airbrushing, self.airbrush_due) {
+            (true, None) => Some(now_ns.saturating_add(AIRBRUSH_INTERVAL_NS)),
             (true, armed) => armed,
             (false, _) => None,
         };
     }
 
-    /// Do what has fallen due by `now_ns`: another burst of spray, another
-    /// step of a held control.
+    /// Do what has fallen due by `now_ns`: another dab of a held airbrush,
+    /// another step of a held control.
     pub fn tick(
         &mut self,
         now_ns: u64,
@@ -1286,16 +1717,15 @@ impl View {
         theme: &Theme,
         damage: &mut Region,
     ) {
-        if self.spray_due.is_some_and(|due| due <= now_ns) {
-            self.spray_due = Some(now_ns.saturating_add(SPRAY_INTERVAL_NS));
-            if let Some(Gesture::Stroke { last, .. }) = &self.gesture {
-                let at = *last;
-                self.spray_at(at, layout, damage);
-            }
+        if self.airbrush_due.is_some_and(|due| due <= now_ns) {
+            self.airbrush_due = Some(now_ns.saturating_add(AIRBRUSH_INTERVAL_NS));
+            self.airbrush(layout, damage);
         }
         if self.repeat_due.is_some_and(|due| due <= now_ns) {
             self.repeat_due = Some(now_ns.saturating_add(REPEAT_INTERVAL_NS));
-            self.toolbar.repeat(layout.tools(), scale, theme, damage);
+            self.tool_box.repeat(layout.tools(), scale, theme, damage);
+            self.commands
+                .repeat(layout.view_strip(), scale, theme, damage);
             if let Some(ScrollAction::ScrollTo { offset }) =
                 self.vertical.repeat(layout.vertical_bar(), damage)
             {
@@ -1346,6 +1776,16 @@ impl View {
     }
 }
 
+/// The window's controls, for the painter.
+pub(crate) struct Controls<'a> {
+    pub(crate) tool_box: &'a Toolbar,
+    pub(crate) commands: &'a Toolbar,
+    pub(crate) bar: &'a ToolControls,
+    pub(crate) swatches: &'a SwatchGrid,
+    pub(crate) vertical: &'a ScrollBar,
+    pub(crate) horizontal: &'a ScrollBar,
+}
+
 /// The pixel `bounds` grown by `by` on every side.
 fn grown(bounds: Bounds, by: i64) -> Bounds {
     Bounds {
@@ -1379,15 +1819,20 @@ fn snapped(from: Fx, to: Fx) -> Fx {
 fn picture_kind(document: &Document) -> &Kind {
     /// What a kept sprite, which has no pixels, is drawn on as.
     static NO_PICTURE: Kind = Kind::Rgba;
-    document
-        .picture()
-        .map_or(&NO_PICTURE, |picture| picture.canvas.kind())
+    document.picture().map_or(&NO_PICTURE, Picture::kind)
 }
 
 #[path = "view_input.rs"]
 mod input;
 
+#[path = "view_tools.rs"]
+mod tools;
+
+#[path = "view_layers.rs"]
+mod layers;
+
 pub(crate) use input::close_rect;
+pub(crate) use tools::{screen_box, CROP_REACH, MARKER};
 
 #[cfg(test)]
 #[path = "view_tests.rs"]

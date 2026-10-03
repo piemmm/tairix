@@ -1947,7 +1947,7 @@ block. A menu holds every row's label, accelerator caption and disabled-row
 reason in that one block rather than a widest-case buffer per row, so both
 the frame and the model in memory cost what the rows actually say. The bounds
 are format bounds a hostile client cannot widen: `APP_MENU_MAX_ROWS` (32)
-rows per plate, `APP_MENU_MAX_TOTAL_ROWS` (64) across the whole menu,
+rows per plate, `APP_MENU_MAX_TOTAL_ROWS` (128) across the whole menu,
 `APP_MENU_MAX_DEPTH` (4) plates in a chain, and `APP_MENU_TEXT_BYTES` (1536)
 of row text in total. Each row's text is taken from the block strictly in row
 order and the block must be consumed exactly, so there is no offset to point

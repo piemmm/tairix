@@ -117,6 +117,7 @@ members = [
     "lib/ssh",
     "lib/supervisor",
     "lib/svg",
+    "lib/xml",
     "lib/sync",
     "lib/syntax",
     "lib/sysconfig",

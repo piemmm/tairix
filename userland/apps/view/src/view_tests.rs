@@ -1497,7 +1497,7 @@ fn the_preferred_client_shrinks_to_a_small_picture_and_leaves_a_big_one_alone() 
         theme,
         scale,
         face,
-        small.toolbar_control().natural_width(scale, theme),
+        small.toolbar_control().natural_length(scale, theme),
         small.info_open(),
     );
     assert_eq!((laid.canvas().width, laid.canvas().height), (320, 240));
@@ -1537,7 +1537,7 @@ fn the_preferred_client_never_falls_below_the_derived_minimum() {
         theme,
         scale,
         face,
-        tiny.toolbar_control().min_width(scale, theme),
+        tiny.toolbar_control().min_length(scale, theme),
     );
     assert!(
         want.0 >= floor.0 && want.1 >= floor.1,

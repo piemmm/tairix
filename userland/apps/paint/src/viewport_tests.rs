@@ -160,3 +160,67 @@ fn a_scroll_by_is_kept_to_the_picture() {
     assert!(view.scroll_by(i64::MAX, i64::MAX, picture, AREA));
     assert_eq!(view.scroll(), (800, 900), "and at the far edge");
 }
+
+#[test]
+fn a_picture_position_falls_in_the_screen_pixel_it_came_from() {
+    let mut view = Viewport::new((1, 1));
+    let picture = (1000, 1000);
+    for rung in [ACTUAL - 3, ACTUAL, ACTUAL + 4] {
+        view.zoom_to(rung, Point::new(10, 20), picture, AREA);
+        for at in [Point::new(10, 20), Point::new(57, 61), Point::new(209, 119)] {
+            let (x, y) = view.to_picture(at, picture, AREA);
+            assert_eq!(
+                view.screen_of((x, y), picture, AREA),
+                (i64::from(at.x), i64::from(at.y)),
+                "at rung {rung}"
+            );
+        }
+    }
+    let small = Viewport::new((1, 1));
+    assert_eq!(
+        small.screen_of((0, 0), (50, 40), AREA),
+        (85, 50),
+        "the picture's corner"
+    );
+}
+
+#[test]
+fn framing_a_part_magnifies_it_to_fill_the_canvas_and_centres_it() {
+    let mut view = Viewport::new((1, 1));
+    let picture = (1000, 1000);
+    let part = Bounds {
+        x0: 100,
+        y0: 100,
+        x1: 150,
+        y1: 125,
+    };
+    assert!(view.frame(part, picture, AREA));
+    assert_eq!(
+        view.zoom(),
+        Zoom::of((4, 1)),
+        "200 across in 50 pixels; 100 down in 25"
+    );
+    let shown = view.to_screen(part, picture, AREA);
+    assert_eq!(shown, AREA, "it fills the canvas");
+    let tiny = Bounds {
+        x0: 10,
+        y0: 10,
+        x1: 11,
+        y1: 11,
+    };
+    view.frame(tiny, picture, AREA);
+    assert_eq!(view.zoom(), Zoom::MOST, "held to the ladder's top");
+    assert!(
+        !view.frame(
+            Bounds {
+                x0: 5,
+                y0: 5,
+                x1: 5,
+                y1: 9
+            },
+            picture,
+            AREA
+        ),
+        "nothing to frame"
+    );
+}

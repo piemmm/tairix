@@ -247,6 +247,7 @@ const fn format_name(format: ViewFormat) -> &'static str {
         ViewFormat::Tiff => "TIFF",
         ViewFormat::Webp => "WEBP",
         ViewFormat::Svg => "SVG",
+        ViewFormat::OpenRaster => "OpenRaster",
     }
 }
 

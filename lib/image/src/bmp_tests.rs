@@ -929,3 +929,109 @@ fn every_prefix_of_a_valid_file_is_refused_rather_than_half_decoded() {
         );
     }
 }
+
+/// `bytes` opened natively.
+fn native(bytes: &[u8]) -> (crate::Picture, crate::Unkept) {
+    let (picture, unkept, _) = crate::encode_fixture::native(ImageFormat::Bmp, bytes, &limits());
+    (picture, unkept)
+}
+
+#[test]
+fn an_indexed_file_opens_as_its_indices_and_colour_table() {
+    let bmp = file(
+        &Header::new(INFO, 3, 2, 4),
+        &quads(16),
+        &indexed_pixels(4, false, &[&[0, 1, 2], &[3, 15, 1]]),
+    );
+    let (picture, unkept) = native(&bmp);
+    assert_eq!(unkept, crate::Unkept::default());
+    let crate::Pixels::Indexed {
+        depth,
+        palette,
+        indices,
+        mask,
+    } = picture.pixels()
+    else {
+        panic!("an indexed file opens indexed");
+    };
+    assert_eq!(*depth, crate::IndexDepth::Four);
+    assert_eq!(indices, &[0, 1, 2, 3, 15, 1]);
+    assert_eq!(palette.len(), 16);
+    assert_eq!(palette[2], colour(2));
+    assert!(mask.is_none());
+}
+
+#[test]
+fn a_run_length_file_masks_what_its_runs_never_cover() {
+    let header = Header::new(INFO, 4, 2, 8).compressed(BI_RLE8);
+    let stream = rle(&[(1, 3)], &[0, 2, 1, 1, 1, 3, 0, 1]);
+    let (picture, _) = native(&file(&header, &quads(256), &stream));
+    let crate::Pixels::Indexed {
+        indices,
+        mask: Some(mask),
+        ..
+    } = picture.pixels()
+    else {
+        panic!("a masked indexed picture");
+    };
+    assert_eq!(mask, &[0, 0, 255, 0, 255, 0, 0, 0]);
+    assert_eq!((indices[2], indices[4]), (3, 3));
+}
+
+#[test]
+fn what_a_bmp_holds_beside_its_picture_is_said_when_it_opens() {
+    let pixel = packed_pixels(4, false, &[&[0x0011_2233]]);
+    assert_eq!(
+        native(&file(&Header::new(INFO, 1, 1, 32), &[], &pixel)).1,
+        crate::Unkept::default()
+    );
+    // The fourth byte of a 32-bit pixel is undefined, and this one is set.
+    let set = packed_pixels(4, false, &[&[0x8011_2233]]);
+    assert!(
+        native(&file(&Header::new(INFO, 1, 1, 32), &[], &set))
+            .1
+            .extras
+    );
+    // A colour table entry's reserved byte, set.
+    let mut table = quads(2);
+    table[3] = 1;
+    let bmp = file(
+        &Header::new(INFO, 1, 1, 1),
+        &table,
+        &indexed_pixels(1, false, &[&[0]]),
+    );
+    assert!(native(&bmp).1.extras);
+    // A calibrated colour space with endpoints.
+    let mut v4 = file(
+        &Header::new(V4, 1, 1, 24),
+        &[],
+        &packed_pixels(3, false, &[&[0x0011_2233]]),
+    );
+    v4[FILE_HEADER + 60] = 1;
+    assert!(native(&v4).1.extras);
+    // A channel wider than eight bits is narrowed.
+    let wide = Header::new(V3, 1, 1, 32)
+        .bitfields(BI_BITFIELDS, [0x3FF0_0000, 0x000F_FC00, 0x0000_03FF, 0]);
+    let held = native(&file(
+        &wide,
+        &[],
+        &packed_pixels(4, false, &[&[0x1234_5678]]),
+    ))
+    .1;
+    assert!(held.precision && !held.extras);
+    // A bit no mask covers, set.
+    let held = native(&file(
+        &wide,
+        &[],
+        &packed_pixels(4, false, &[&[0x8234_5678]]),
+    ))
+    .1;
+    assert!(held.extras);
+    // A 16-bit pixel's top bit, set.
+    let high = packed_pixels(2, false, &[&[0x8000]]);
+    assert!(
+        native(&file(&Header::new(INFO, 1, 1, 16), &[], &high))
+            .1
+            .extras
+    );
+}

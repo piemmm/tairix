@@ -123,6 +123,8 @@ pub enum MediaType {
     ImageWebp,
     /// A TIFF image (`image/tiff`).
     ImageTiff,
+    /// An OpenRaster layered image (`image/openraster`).
+    ImageOpenRaster,
     /// A ZIP archive (`application/zip`).
     ArchiveZip,
     /// A tar archive (`application/x-tar`).
@@ -179,6 +181,7 @@ impl MediaType {
             Self::ImageIcon => "image/vnd.microsoft.icon",
             Self::ImageWebp => "image/webp",
             Self::ImageTiff => "image/tiff",
+            Self::ImageOpenRaster => "image/openraster",
             Self::ArchiveZip => "application/zip",
             Self::ArchiveTar => "application/x-tar",
             Self::ArchiveGzip => "application/gzip",
@@ -251,6 +254,7 @@ impl MediaType {
             | Self::ImageIcon
             | Self::ImageWebp
             | Self::ImageTiff
+            | Self::ImageOpenRaster
             | Self::ArchiveZip
             | Self::ArchiveTar
             | Self::ArchiveGzip
@@ -306,7 +310,11 @@ impl MediaType {
             Self::ImageGif => IconKind::ImageGif,
             Self::ImageSvg => IconKind::ImageSvg,
             Self::ImageSprite => IconKind::ImageSprite,
-            Self::ImageBmp | Self::ImageIcon | Self::ImageWebp | Self::ImageTiff => IconKind::Image,
+            Self::ImageBmp
+            | Self::ImageIcon
+            | Self::ImageWebp
+            | Self::ImageTiff
+            | Self::ImageOpenRaster => IconKind::Image,
             Self::ArchiveZip
             | Self::ArchiveTar
             | Self::ArchiveGzip
@@ -355,6 +363,7 @@ const ALL: &[MediaType] = &[
     MediaType::ImageIcon,
     MediaType::ImageWebp,
     MediaType::ImageTiff,
+    MediaType::ImageOpenRaster,
     MediaType::ArchiveZip,
     MediaType::ArchiveTar,
     MediaType::ArchiveGzip,
@@ -411,6 +420,7 @@ const EXTENSION_TABLE: &[(MediaType, &[&str])] = &[
     (MediaType::ImageIcon, &["ico"]),
     (MediaType::ImageWebp, &["webp"]),
     (MediaType::ImageTiff, &["tiff", "tif"]),
+    (MediaType::ImageOpenRaster, &["ora"]),
     (MediaType::ArchiveZip, &["zip"]),
     (MediaType::ArchiveTar, &["tar"]),
     (MediaType::ArchiveGzip, &["gz", "tgz"]),
@@ -428,6 +438,9 @@ const FILETYPE_TABLE: &[(MediaType, &str)] = &[
     (MediaType::ImageSprite, "ff9"),
     (MediaType::ImagePng, "b60"),
     (MediaType::ImageJpeg, "c85"),
+    (MediaType::ImageGif, "695"),
+    (MediaType::ImageBmp, "69c"),
+    (MediaType::ImageTiff, "ff0"),
     (MediaType::TextPlain, "fff"),
 ];
 

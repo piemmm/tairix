@@ -338,15 +338,23 @@ sandboxes a parse imports it:
   because reading that is part of reading the file.
 - **Document editing** (`imageedit`, the same worker and the same upload):
   an editor needs a document as its file stores it — each entry at its own
-  depth, with its palette and its sprite details — rather than flattened for
-  display. The worker opens the upload, answers how many entries it holds,
-  and decodes one entry at a time, freeing the last before the next; a sprite
+  depth, with its palette, its density and its sprite details — rather than
+  flattened for display. The worker opens the upload and answers what it is
+  (one picture, a TIFF's pages, a sprite area's sprites, or an OpenRaster
+  document's layers over its canvas), how many entries it holds, what the
+  file held that they do not, and how it was written; it
+  decodes one entry at a time, freeing the last before the next, and a sprite
   it cannot read comes back as its bytes and the reason, never half-read. The
   parent (`open_edit`, `select_entry`, `read_rows`, `read_kept`) holds every
-  answer to the edit bounds and checks each index against its palette, each
-  mode word against its pixels, and each row range and length exactly. The
-  editor reads every document through a fresh worker, so a hostile file can
-  reach no other document's decode.
+  answer to the edit bounds and to what its format can state — the kind to
+  the format, a loss to a format whose reading can incur it, a record of how
+  it was written to GIF or TIFF alone, a density to non-zero figures, a
+  canvas to layers alone and a layer's details to a layered document, a
+  stack to the layers the OpenRaster reader takes — and
+  checks each index against its palette, each mode word against its pixels,
+  and each row range and length exactly. The editor reads every document
+  through a fresh worker, so a hostile file can reach no other document's
+  decode.
 
 - **NTP response evaluation** (`timesync`): a network time server's reply
   is evaluated inside the worker (`tairix_net::ntp::evaluate`) because the

@@ -843,3 +843,135 @@ fn coverage_runs_on_to_the_window_where_a_shape_spills_past_it() {
         "wholly right of it"
     );
 }
+
+/// Every row of `contours`, in `units` per pixel, over a `size`×`size`
+/// window, as `coverage` reads it.
+fn coverage_of(
+    contours: &[Vec<(i32, i32)>],
+    units: u32,
+    rule: FillRule,
+    coverage: super::Coverage,
+    size: u32,
+) -> Vec<Vec<u8>> {
+    let mut scratch = super::ScanScratch::new();
+    let Some(mut rows) = scratch.coverage_rows(contours, units, rule, coverage) else {
+        return vec![vec![0; size as usize]; size as usize];
+    };
+    (0..size)
+        .map(|y| {
+            let mut row = vec![0xAA; size as usize];
+            let covered = rows.row(y, 0, &mut row);
+            assert!(row
+                .iter()
+                .enumerate()
+                .all(|(x, &c)| c == 0 || covered.contains(&x)));
+            row
+        })
+        .collect()
+}
+
+/// Whether `point` is inside `polygon` by the even-odd rule, the oracle the
+/// centre-sampled rows are held to.
+fn contains(polygon: &[(f64, f64)], point: (f64, f64)) -> bool {
+    let mut inside = false;
+    for (index, &(x0, y0)) in polygon.iter().enumerate() {
+        let (x1, y1) = polygon[(index + 1) % polygon.len()];
+        if (y0 > point.1) != (y1 > point.1) && point.0 < x0 + (point.1 - y0) * (x1 - x0) / (y1 - y0)
+        {
+            inside = !inside;
+        }
+    }
+    inside
+}
+
+#[test]
+fn coverage_rows_answer_the_exact_area_a_surface_fill_paints() {
+    // From half a pixel to three and a half, in 256ths: its edge pixels are
+    // half covered and its corners a quarter.
+    let shape = vec![square(128, 768)];
+    let rows = coverage_of(&shape, 256, FillRule::NonZero, super::Coverage::Area, 5);
+    assert_eq!(rows[0], [64, 128, 128, 64, 0]);
+    assert_eq!(rows[1], [128, 255, 255, 128, 0]);
+    assert_eq!(rows[3], [64, 128, 128, 64, 0]);
+    assert_eq!(rows[4], [0; 5]);
+    // The same square in eighths reads the same.
+    let eighths = vec![square(4, 24)];
+    assert_eq!(
+        coverage_of(&eighths, 8, FillRule::NonZero, super::Coverage::Area, 5),
+        rows
+    );
+}
+
+#[test]
+fn centre_coverage_is_whole_where_a_pixels_centre_is_inside() {
+    let triangle = vec![(37, 21), (1180, 300), (500, 1210)];
+    let rows = coverage_of(
+        core::slice::from_ref(&triangle),
+        256,
+        FillRule::NonZero,
+        super::Coverage::Centre,
+        6,
+    );
+    let real: Vec<(f64, f64)> = triangle
+        .iter()
+        .map(|&(x, y)| (f64::from(x) / 256.0, f64::from(y) / 256.0))
+        .collect();
+    for (y, row) in (0u32..).zip(&rows) {
+        for (x, &cover) in (0u32..).zip(row) {
+            let centre = (f64::from(x) + 0.5, f64::from(y) + 0.5);
+            assert_eq!(
+                cover == u8::MAX,
+                contains(&real, centre),
+                "pixel ({x}, {y})"
+            );
+            assert!(cover == 0 || cover == u8::MAX);
+        }
+    }
+}
+
+#[test]
+fn centre_coverage_keeps_the_fill_rule_and_the_left_edge() {
+    let ring = vec![square(0, 1536), square(512, 512)];
+    let even_odd = coverage_of(&ring, 256, FillRule::EvenOdd, super::Coverage::Centre, 6);
+    assert_eq!(
+        even_odd[2],
+        [255, 255, 0, 0, 255, 255],
+        "the inner square is a hole"
+    );
+    let non_zero = coverage_of(&ring, 256, FillRule::NonZero, super::Coverage::Centre, 6);
+    assert_eq!(non_zero[2], [255; 6], "wound alike, it is not");
+    // An edge through a column of centres: the run to its right has them.
+    let on_centres = vec![vec![(128, 0), (640, 0), (640, 256), (128, 256)]];
+    assert_eq!(
+        coverage_of(
+            &on_centres,
+            256,
+            FillRule::NonZero,
+            super::Coverage::Centre,
+            3
+        )[0],
+        [255, 255, 0]
+    );
+}
+
+#[test]
+fn coverage_rows_of_a_window_and_of_nothing() {
+    let shape = vec![square(256, 512)];
+    let mut scratch = super::ScanScratch::new();
+    let mut rows = scratch
+        .coverage_rows(&shape, 256, FillRule::NonZero, super::Coverage::Area)
+        .expect("a shape");
+    // Conservative where a vertex sits on a pixel's edge.
+    assert_eq!(rows.bounds((0, 0, 10, 10)), Some((1, 4, 1, 4)));
+    assert_eq!(rows.bounds((5, 5, 3, 3)), None);
+    let mut row = [9u8; 2];
+    let covered = rows.row(1, 2, &mut row);
+    assert_eq!(row, [255, 0], "a window from column two");
+    assert!(covered.contains(&0));
+    assert_eq!(rows.row(7, 0, &mut row), 0..0);
+    assert_eq!(row, [0, 0]);
+    let flat: [Vec<(i32, i32)>; 1] = [vec![(0, 0), (10, 0)]];
+    assert!(scratch
+        .coverage_rows(&flat, 256, FillRule::NonZero, super::Coverage::Area)
+        .is_none());
+}

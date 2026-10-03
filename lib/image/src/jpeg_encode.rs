@@ -14,10 +14,10 @@ use crate::encode::{
 };
 use crate::huffman::{assign, Assigned, MAX_CODE_BITS};
 use crate::jpeg::{
-    descale, APP0, DCT_PASS1_BITS, DCT_SCALE_BITS, DHT, DQT, EOI, FIX_0_298631336, FIX_0_390180644,
-    FIX_0_541196100, FIX_0_765366865, FIX_0_899976223, FIX_1_175875602, FIX_1_501321110,
-    FIX_1_847759065, FIX_1_961570560, FIX_2_053119869, FIX_2_562915447, FIX_3_072711026,
-    JFIF_PAYLOAD, SOF0, SOI, SOS, ZIGZAG,
+    descale, jfif_payload, APP0, DCT_PASS1_BITS, DCT_SCALE_BITS, DHT, DQT, EOI, FIX_0_298631336,
+    FIX_0_390180644, FIX_0_541196100, FIX_0_765366865, FIX_0_899976223, FIX_1_175875602,
+    FIX_1_501321110, FIX_1_847759065, FIX_1_961570560, FIX_2_053119869, FIX_2_562915447,
+    FIX_3_072711026, JFIF_LEN, SOF0, SOI, SOS, ZIGZAG,
 };
 use crate::picture::{flatten_row, PictureKind, PictureSource};
 use crate::RGBA_BYTES;
@@ -28,9 +28,9 @@ const MAX_SIDE: u32 = u16::MAX as u32;
 /// Quality at and above which colour keeps full resolution.
 const FULL_CHROMA_QUALITY: u8 = 90;
 
-/// The `APP0` segment's length field: itself and [`JFIF_PAYLOAD`].
+/// The `APP0` segment's length field: itself and its payload.
 const JFIF_SEGMENT_LEN: u16 = 16;
-const _: () = assert!(JFIF_SEGMENT_LEN as usize == 2 + JFIF_PAYLOAD.len());
+const _: () = assert!(JFIF_SEGMENT_LEN as usize == 2 + JFIF_LEN);
 
 /// Table K.1: the luminance quantisation table, natural order.
 const LUMA_QUANT: [u16; 64] = [
@@ -352,7 +352,7 @@ pub(crate) fn encode(
     let mut out = Output::new();
     out.push(&[0xFF, SOI, 0xFF, APP0])?;
     out.be_u16(JFIF_SEGMENT_LEN)?;
-    out.push(&JFIF_PAYLOAD)?;
+    out.push(&jfif_payload(source.density()))?;
 
     out.push(&[0xFF, DQT])?;
     out.be_u16(2 + 65 * used_tables)?;

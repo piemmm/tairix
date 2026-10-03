@@ -96,8 +96,15 @@ pub enum Request<K, O> {
     Save,
     /// Save, and close the window once it has.
     SaveThenClose,
-    /// Ask where to save the document.
+    /// Ask how and where to save the document.
     SaveAs,
+    /// Ask where to save the document, how having been answered
+    /// ([`DocumentView::ask_how`]); close the window once it is saved when
+    /// `then_close`.
+    SaveWhere {
+        /// Close the window once saved.
+        then_close: bool,
+    },
     /// Ask for a document to open.
     Open,
     /// Close the window: its document is saved or its changes given up.
@@ -216,6 +223,20 @@ pub trait DocumentView: SavedDocument {
     /// Why the document cannot be saved as `name`, when it cannot: a save
     /// refused so never touches the file.
     fn refuse_save(&self, _name: &str) -> Option<String> {
+        None
+    }
+
+    /// Ask how the document is to be saved before the picker asks where,
+    /// closing the window once it is saved when `then_close`: answering
+    /// `Some` puts the question up, or begins what putting it up needs —
+    /// which the host carries out as any outcome — and its answer asks for
+    /// [`Request::SaveWhere`]. By default nothing is asked.
+    fn ask_how(
+        &mut self,
+        _then_close: bool,
+        _layout: &Self::Layout,
+        _damage: &mut Region,
+    ) -> Option<ViewOutcome<Self>> {
         None
     }
 

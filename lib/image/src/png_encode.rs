@@ -18,12 +18,17 @@
 use alloc::vec::Vec;
 
 use tairix_compress::deflate::Flush;
-use tairix_compress::zlib::Encoder;
 use tairix_util::fallible;
 
-use crate::encode::{indices_fit, palette_fits, scratch, EncodeError, Output, RowBuffers};
+use crate::density::{Density, DensityUnit};
+use crate::encode::{
+    indices_fit, pack, palette_fits, scratch, survey, zlib_encoder, Deflated, EncodeError, Output,
+    RowBuffers,
+};
 use crate::picture::{flatten_row, IndexDepth, PictureKind, PictureSource, Rgba8};
-use crate::png::{self, ColourType, IDAT, IEND, IHDR, PLTE, TRNS};
+use crate::png::{
+    self, ColourType, IDAT, IEND, IHDR, PHYS, PHYS_ASPECT, PHYS_LEN, PHYS_METRE, PLTE, TRNS,
+};
 use crate::{PNG_SIGNATURE, RGBA_BYTES};
 
 /// Largest width or height a PNG header's four-byte fields may state.
@@ -112,9 +117,25 @@ pub(crate) fn encode(source: &dyn PictureSource) -> Result<Vec<u8>, EncodeError>
             chunk(&mut out, TRNS, &alphas[..=last])?;
         }
     }
+    if let Some((unit, (across, down))) = source.density().and_then(phys) {
+        let mut payload = [0u8; PHYS_LEN];
+        payload[..4].copy_from_slice(&across.to_be_bytes());
+        payload[4..8].copy_from_slice(&down.to_be_bytes());
+        payload[8] = unit;
+        chunk(&mut out, PHYS, &payload)?;
+    }
     write_image(&mut out, source, &mut rows, &plan)?;
     chunk(&mut out, IEND, &[])?;
     Ok(out.into_bytes())
+}
+
+/// The `pHYs` unit and figures `density` is written as: per metre for a
+/// length, else the bare shape.
+fn phys(density: Density) -> Option<(u8, (u32, u32))> {
+    match density.unit() {
+        DensityUnit::Aspect => Some((PHYS_ASPECT, density.shape()?)),
+        _ => Some((PHYS_METRE, density.whole_in(DensityUnit::Metre)?)),
+    }
 }
 
 /// Append one chunk: its length, type, payload and CRC.
@@ -187,55 +208,18 @@ fn plan_indexed(
 }
 
 fn plan_rgba(source: &dyn PictureSource, rows: &mut RowBuffers) -> Plan {
-    let (mut opaque, mut grey) = (true, true);
-    // Whether every grey level is exact at one, two and four bits.
-    let mut exact = [true; 3];
-    for y in 0..source.height() {
-        rows.read(source, y);
-        for pixel in rows.samples.as_chunks::<RGBA_BYTES>().0 {
-            opaque &= pixel[3] == u8::MAX;
-            if grey && (pixel[0] != pixel[1] || pixel[1] != pixel[2]) {
-                grey = false;
-            }
-            if grey {
-                let level = pixel[0];
-                exact[0] &= level == 0 || level == u8::MAX;
-                exact[1] &= level % 85 == 0;
-                exact[2] &= level % 17 == 0;
-            }
-        }
-        if !opaque && !grey {
-            return Plan::Rgba;
-        }
-    }
-    match (grey, opaque) {
+    let survey = survey(source, rows, &mut []);
+    match (survey.grey, survey.opaque) {
         (true, true) => Plan::Grey {
             bits: [1, 2, 4]
                 .into_iter()
-                .zip(exact)
+                .zip(survey.exact)
                 .find_map(|(bits, exact)| exact.then_some(bits))
                 .unwrap_or(8),
         },
         (true, false) => Plan::GreyAlpha,
         (false, true) => Plan::Rgb,
         (false, false) => Plan::Rgba,
-    }
-}
-
-/// Pack `values`, `bits` wide each, most significant first, into `out`.
-fn pack(values: impl Iterator<Item = u8>, bits: u32, out: &mut [u8]) {
-    out.fill(0);
-    // Counted in `u64`: a row is as wide as `MAX_SIDE`, whose bits a `u32`
-    // does not hold.
-    let mut bit = 0u64;
-    for value in values {
-        let Ok(at) = usize::try_from(bit / 8) else {
-            return;
-        };
-        if let Some(byte) = out.get_mut(at) {
-            *byte |= value << (8 - u64::from(bits) - bit % 8);
-        }
-        bit += u64::from(bits);
     }
 }
 
@@ -333,16 +317,9 @@ fn write_image(
     } else {
         Vec::new()
     };
-    let mut encoders = Vec::new();
-    if !fallible::reserve(&mut encoders, 1) {
-        return Err(EncodeError::OutOfMemory);
-    }
-    encoders.push(Encoder::new());
+    let mut encoders = zlib_encoder()?;
     let encoder = &mut encoders[0];
-    let mut pending = Pending {
-        bytes: Vec::new(),
-        filled: 0,
-    };
+    let mut pending = Deflated::new();
     let kind = source.kind();
     for y in 0..source.height() {
         rows.read(source, y);
@@ -362,62 +339,28 @@ fn write_image(
             best[1..].copy_from_slice(&line);
         }
         pending.deflate(encoder, &best, Flush::None)?;
-        pending.drain(out, IDAT_CHUNK)?;
+        drain(&mut pending, out, IDAT_CHUNK)?;
         core::mem::swap(&mut line, &mut prior);
     }
     pending.deflate(encoder, &[], Flush::Finish)?;
-    pending.drain(out, 1)
+    drain(&mut pending, out, 1)
 }
 
-/// Compressed bytes waiting to be framed as `IDAT` chunks. The buffer is
-/// kept at its high-water length, so compressing into it zero-fills each
-/// byte once rather than once a row.
-struct Pending {
-    bytes: Vec<u8>,
-    filled: usize,
-}
-
-impl Pending {
-    /// Compress `input` under `flush` straight onto the end of what waits.
-    fn deflate(
-        &mut self,
-        encoder: &mut Encoder,
-        input: &[u8],
-        flush: Flush,
-    ) -> Result<(), EncodeError> {
-        let end = self
-            .filled
-            .checked_add(encoder.bound(input.len()))
-            .ok_or(EncodeError::OutOfMemory)?;
-        if !fallible::grow_to(&mut self.bytes, end, 0) {
-            return Err(EncodeError::OutOfMemory);
+/// Frame whole `IDAT_CHUNK`s of `pending` while at least `least` bytes wait,
+/// the last taking whatever is left.
+fn drain(pending: &mut Deflated, out: &mut Output, least: usize) -> Result<(), EncodeError> {
+    let mut start = 0;
+    while pending.filled - start >= least.max(1) {
+        let take = (pending.filled - start).min(IDAT_CHUNK);
+        if take < IDAT_CHUNK && least > 1 {
+            break;
         }
-        let room = self
-            .bytes
-            .get_mut(self.filled..end)
-            .ok_or(EncodeError::OutOfMemory)?;
-        self.filled += encoder
-            .compress(input, room, flush)
-            .map_err(|_| EncodeError::OutOfMemory)?;
-        Ok(())
+        chunk(out, IDAT, &pending.bytes[start..start + take])?;
+        start += take;
     }
-
-    /// Frame whole `IDAT_CHUNK`s while at least `least` bytes wait, the last
-    /// taking whatever is left.
-    fn drain(&mut self, out: &mut Output, least: usize) -> Result<(), EncodeError> {
-        let mut start = 0;
-        while self.filled - start >= least.max(1) {
-            let take = (self.filled - start).min(IDAT_CHUNK);
-            if take < IDAT_CHUNK && least > 1 {
-                break;
-            }
-            chunk(out, IDAT, &self.bytes[start..start + take])?;
-            start += take;
-        }
-        self.bytes.copy_within(start..self.filled, 0);
-        self.filled -= start;
-        Ok(())
-    }
+    pending.bytes.copy_within(start..pending.filled, 0);
+    pending.filled -= start;
+    Ok(())
 }
 
 #[cfg(test)]

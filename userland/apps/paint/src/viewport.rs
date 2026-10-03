@@ -206,6 +206,24 @@ impl Viewport {
         (map(point.x, ox, across), map(point.y, oy, down))
     }
 
+    /// The screen pixel picture position `at`, in 256ths of a picture pixel,
+    /// falls in, for a canvas at `area`.
+    #[must_use]
+    pub fn screen_of(&self, at: (i64, i64), picture: (u32, u32), area: Rect) -> (i64, i64) {
+        let (ox, oy) = self.origin(picture, area);
+        let (across, down, den) = self.span();
+        let map = |at: i64, origin: i64, span: u64| {
+            let scaled =
+                (i128::from(at) * i128::from(span)).div_euclid(i128::from(den) * i128::from(FX));
+            i64::try_from(i128::from(origin) + scaled).unwrap_or(if at < 0 {
+                i64::MIN
+            } else {
+                i64::MAX
+            })
+        };
+        (map(at.0, ox, across), map(at.1, oy, down))
+    }
+
     /// The picture pixel under screen pixel `point`, if it is on the picture.
     #[must_use]
     pub fn pixel_at(&self, point: Point, picture: (u32, u32), area: Rect) -> Option<(u32, u32)> {
@@ -331,6 +349,35 @@ impl Viewport {
         let y = aim(py, down, anchor.y, area.top(), height, area.height);
         self.scroll_to(x, y, picture, area);
         true
+    }
+
+    /// Magnify so picture pixels `bounds` fill `area` as far as they fit,
+    /// held to the ladder's ends, and scroll them to its middle; answers
+    /// whether anything moved.
+    pub fn frame(&mut self, bounds: Bounds, picture: (u32, u32), area: Rect) -> bool {
+        if bounds.is_empty() || area.is_empty() {
+            return false;
+        }
+        let fit = |room: u32, pixels: i64, aspect: u32| {
+            let pixels = u64::try_from(pixels).unwrap_or(1).max(1);
+            u64::from(room) * u64::from(Zoom::UNIT) / (pixels * u64::from(aspect.max(1)))
+        };
+        let zoom = fit(area.width, bounds.x1 - bounds.x0, self.aspect.0).min(fit(
+            area.height,
+            bounds.y1 - bounds.y0,
+            self.aspect.1,
+        ));
+        let before = (self.zoom, self.scroll);
+        self.zoom = Zoom(u32::try_from(zoom).unwrap_or(u32::MAX)).clamp(Zoom::LEAST, Zoom::MOST);
+        let (across, down, den) = self.span();
+        let centre = |low: i64, high: i64, span: u64, room: u32| {
+            let middle = i128::from(low + high) * i128::from(span) / (2 * i128::from(den));
+            u64::try_from((middle - i128::from(room / 2)).max(0)).unwrap_or(0)
+        };
+        let x = centre(bounds.x0, bounds.x1, across, area.width);
+        let y = centre(bounds.y0, bounds.y1, down, area.height);
+        self.scroll_to(x, y, picture, area);
+        (self.zoom, self.scroll) != before
     }
 
     /// The greatest rung at which the whole picture fits `area`, never above

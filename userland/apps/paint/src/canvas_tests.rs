@@ -252,3 +252,44 @@ fn a_row_written_whole_reads_back_across_tiles() {
         "a short row is ignored"
     );
 }
+
+/// A builder kept to an area copies only the tiles it touches, and a row
+/// placed at an offset is cut to the canvas.
+#[test]
+fn a_row_lands_where_it_is_placed_and_no_further() {
+    use crate::shape::Bounds;
+    let area = Bounds {
+        x0: -2,
+        y0: 0,
+        x1: 3,
+        y1: 1,
+    };
+    let mut built =
+        CanvasBuilder::within(200, 70, Kind::Rgba, Sample::Rgba([0; 4]), area).expect("fits");
+    built.row_at((-2, 0), &[1; 20], &[]);
+    built.row_at((-2, 69), &[2; 20], &[]);
+    built.row_at((198, 1), &[3; 20], &[]);
+    built.row_at((0, -1), &[4; 4], &[]);
+    built.row_at((0, 0), &[5; 3], &[]);
+    let canvas = built.finish();
+    assert_eq!(canvas.sample(2, 0), Some(Sample::Rgba([1; 4])));
+    assert_eq!(
+        canvas.sample(3, 0),
+        Some(Sample::Rgba([0; 4])),
+        "past the row"
+    );
+    assert_eq!(
+        canvas.sample(0, 69),
+        Some(Sample::Rgba([0; 4])),
+        "outside the area"
+    );
+    assert_eq!(
+        canvas.sample(199, 1),
+        Some(Sample::Rgba([0; 4])),
+        "outside the area"
+    );
+    assert!(
+        alloc::sync::Arc::ptr_eq(canvas.tile(1), canvas.tile(2)),
+        "tiles the area misses stay one shared tile"
+    );
+}

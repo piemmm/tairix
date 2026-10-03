@@ -1,0 +1,164 @@
+use alloc::vec::Vec;
+
+use super::{falloff, percent, Path, Tip};
+use crate::canvas::{Canvas, Kind, Sample};
+use crate::colour::Ink;
+use crate::shape::{Point, FX};
+use crate::stroke::{Blend, Coat, Stroke};
+
+fn tip(size: u32, hardness: u8, flow: u8) -> Tip {
+    Tip {
+        size,
+        hardness,
+        opacity: 100,
+        flow,
+        spacing: 25,
+    }
+}
+
+fn black() -> Coat {
+    Coat {
+        ink: Ink::Colour([0, 0, 0, 255]),
+        blend: Blend::Over,
+    }
+}
+
+fn alpha(canvas: &Canvas, x: u32, y: u32) -> u8 {
+    match canvas.sample(x, y) {
+        Some(Sample::Rgba([.., a])) => a,
+        other => panic!("a colour pixel, not {other:?}"),
+    }
+}
+
+#[test]
+fn a_falloff_is_whole_inside_none_at_the_rim_and_falls_smoothly_between() {
+    assert_eq!(falloff(0, 100, 400), 255);
+    assert_eq!(falloff(100, 100, 400), 255);
+    assert_eq!(falloff(400, 100, 400), 0);
+    let fall: Vec<u8> = (100..=400)
+        .step_by(10)
+        .map(|d| falloff(d, 100, 400))
+        .collect();
+    assert!(fall.windows(2).all(|pair| pair[0] >= pair[1]), "{fall:?}");
+    assert!(
+        (120..=135).contains(&falloff(250, 100, 400)),
+        "half way: {}",
+        falloff(250, 100, 400)
+    );
+    assert_eq!(percent(100), 255);
+    assert_eq!(percent(0), 0);
+    assert_eq!(percent(250), 255, "held to a whole");
+}
+
+#[test]
+fn dabs_fall_a_step_apart_however_the_path_is_moved() {
+    let mut whole = Vec::new();
+    let mut path = Path::new(Point { x: 0, y: 0 });
+    path.to(Point { x: 1000, y: 0 }, 100, |at| {
+        whole.push(at);
+        Ok(())
+    })
+    .expect("room");
+    let mut pieces = Vec::new();
+    let mut path = Path::new(Point { x: 0, y: 0 });
+    for x in [37, 151, 152, 600, 1000] {
+        path.to(Point { x, y: 0 }, 100, |at| {
+            pieces.push(at);
+            Ok(())
+        })
+        .expect("room");
+    }
+    assert_eq!(whole.len(), 10);
+    assert_eq!(pieces, whole, "carried from one move to the next");
+    assert_eq!(path.last(), Point { x: 1000, y: 0 });
+    let mut none = 0;
+    Path::new(Point { x: 5, y: 5 })
+        .to(Point { x: 5, y: 5 }, 100, |_| {
+            none += 1;
+            Ok(())
+        })
+        .expect("room");
+    assert_eq!(none, 0, "staying put lays nothing");
+}
+
+#[test]
+fn a_hard_dab_covers_its_disc_and_a_soft_one_falls_away_toward_its_rim() {
+    let centre = Point::centre_of(20, 20);
+    let mut canvas = Canvas::new(40, 40, Kind::Rgba, Sample::Rgba([0; 4])).expect("fits");
+    let mut stroke = Stroke::building(black(), 255, None);
+    tip(16, 100, 100)
+        .dab(&mut stroke, &mut canvas, centre, true)
+        .expect("room");
+    assert_eq!(alpha(&canvas, 20, 20), 255);
+    assert_eq!(alpha(&canvas, 26, 20), 255, "inside the rim");
+    assert_eq!(alpha(&canvas, 29, 20), 0, "past it");
+    let mut canvas = Canvas::new(40, 40, Kind::Rgba, Sample::Rgba([0; 4])).expect("fits");
+    let mut stroke = Stroke::building(black(), 255, None);
+    tip(16, 0, 100)
+        .dab(&mut stroke, &mut canvas, centre, true)
+        .expect("room");
+    let across: Vec<u8> = (20..29).map(|x| alpha(&canvas, x, 20)).collect();
+    assert!(across[0] > 240, "{across:?}");
+    assert!(
+        across.windows(2).all(|pair| pair[0] >= pair[1]),
+        "{across:?}"
+    );
+    assert!((1..200).contains(&across[5]), "{across:?}");
+}
+
+#[test]
+fn flow_builds_up_and_opacity_caps_the_stroke() {
+    let centre = Point::centre_of(10, 10);
+    let mut canvas = Canvas::new(20, 20, Kind::Rgba, Sample::Rgba([0; 4])).expect("fits");
+    let mut stroke = Stroke::building(black(), 255, None);
+    let half = tip(6, 100, 50);
+    half.dab(&mut stroke, &mut canvas, centre, true)
+        .expect("room");
+    let once = alpha(&canvas, 10, 10);
+    half.dab(&mut stroke, &mut canvas, centre, true)
+        .expect("room");
+    let twice = alpha(&canvas, 10, 10);
+    assert!((126..=128).contains(&once), "{once}");
+    assert!((189..=192).contains(&twice), "built up: {twice}");
+    let mut canvas = Canvas::new(20, 20, Kind::Rgba, Sample::Rgba([0; 4])).expect("fits");
+    let capped = Tip {
+        opacity: 40,
+        ..tip(6, 100, 100)
+    };
+    let mut stroke = Stroke::building(black(), capped.opacity_255(), None);
+    for _ in 0..5 {
+        capped
+            .dab(&mut stroke, &mut canvas, centre, true)
+            .expect("room");
+    }
+    assert_eq!(alpha(&canvas, 10, 10), 102, "never past the opacity");
+}
+
+#[test]
+fn a_tip_on_whole_pixels_is_hard_and_lays_all_its_paint() {
+    let soft = Tip {
+        size: 9,
+        hardness: 10,
+        opacity: 30,
+        flow: 5,
+        spacing: 40,
+    };
+    let whole = soft.whole();
+    assert_eq!((whole.hardness, whole.opacity, whole.flow), (100, 100, 100));
+    assert_eq!(
+        (whole.size, whole.spacing),
+        (9, 40),
+        "its size and spacing kept"
+    );
+    assert_eq!(soft.step(), 9 * FX * 40 / 100);
+    assert_eq!(
+        Tip {
+            size: 1,
+            spacing: 1,
+            ..soft
+        }
+        .step(),
+        FX / 8,
+        "never nearer than an eighth"
+    );
+}

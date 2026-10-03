@@ -7,6 +7,7 @@ use tairix_sandbox::imagerender::ViewFormat;
 
 use super::{free_name, Document, Entry, Kept, Origin, Picture, SpriteInfo, MAX_ENTRIES};
 use crate::canvas::{Canvas, Kind, Sample};
+use crate::save::{SaveFormat, SaveSettings};
 
 fn plain() -> Picture {
     Picture::plain(Canvas::new(4, 4, Kind::Rgba, Sample::Rgba([0; 4])).expect("fits"))
@@ -30,11 +31,17 @@ fn a_document_is_a_sprite_area_by_what_it_holds_or_was_read_from() {
         vec![Entry::Picture(plain())],
         Origin::Read(ViewFormat::Sprite),
         Unkept::default(),
+        SaveSettings::default(),
     )
     .expect("entries");
     assert!(read.is_sprite_area());
-    let with_name =
-        Document::of(vec![named("icon")], Origin::New, Unkept::default()).expect("entries");
+    let with_name = Document::of(
+        vec![named("icon")],
+        Origin::New(SaveFormat::Png),
+        Unkept::default(),
+        SaveSettings::default(),
+    )
+    .expect("entries");
     assert!(with_name.is_sprite_area());
 }
 
@@ -42,8 +49,9 @@ fn a_document_is_a_sprite_area_by_what_it_holds_or_was_read_from() {
 fn names_are_found_without_regard_to_case() {
     let doc = Document::of(
         vec![named("one"), named("two")],
-        Origin::New,
+        Origin::New(SaveFormat::Png),
         Unkept::default(),
+        SaveSettings::default(),
     )
     .expect("ok");
     let two = SpriteName::from_bytes(b"TWO").expect("a name");
@@ -63,12 +71,18 @@ fn a_snapshot_shares_the_pixels_it_froze() {
     else {
         panic!("a picture each");
     };
-    assert!(Arc::ptr_eq(live.canvas.tile(0), frozen.canvas.tile(0)));
+    assert!(Arc::ptr_eq(live.canvas().tile(0), frozen.canvas().tile(0)));
 }
 
 #[test]
 fn a_document_holds_between_one_and_the_bound_of_entries() {
-    assert!(Document::of(vec![], Origin::New, Unkept::default()).is_none());
+    assert!(Document::of(
+        vec![],
+        Origin::New(SaveFormat::Png),
+        Unkept::default(),
+        SaveSettings::default()
+    )
+    .is_none());
     let kept = Kept {
         name: SpriteName::new("odd").expect("a name"),
         reason: KeptReason::UnsupportedType,
@@ -78,7 +92,13 @@ fn a_document_holds_between_one_and_the_bound_of_entries() {
         .into_iter()
         .map(Entry::Kept)
         .collect();
-    assert!(Document::of(many, Origin::New, Unkept::default()).is_none());
+    assert!(Document::of(
+        many,
+        Origin::New(SaveFormat::Png),
+        Unkept::default(),
+        SaveSettings::default()
+    )
+    .is_none());
 }
 
 #[test]
@@ -102,11 +122,11 @@ fn tiles_of_another_shape_are_not_adopted() {
     let mut document = Document::new(Picture::plain(white(40)));
     let wider = white(70);
     let foreign = vec![(0, Arc::clone(wider.tile(0)))];
-    assert_eq!(document.adopt_tiles(foreign), Ok(false));
+    assert_eq!(document.adopt_tiles(0, foreign), Ok(false));
     assert_eq!(document.generation(), 0, "nothing changed");
     let same = white(40);
     let fitting = vec![(0, Arc::clone(same.tile(0)))];
-    assert_eq!(document.adopt_tiles(fitting), Ok(true));
+    assert_eq!(document.adopt_tiles(0, fitting), Ok(true));
     assert_eq!(document.generation(), 1);
 }
 
@@ -119,7 +139,13 @@ fn a_kept_entry_is_not_replaced() {
         reason: KeptReason::UnsupportedType,
         bytes: Arc::new(vec![0; 44]),
     });
-    let mut document = Document::of(vec![kept], Origin::New, Unkept::default()).expect("entries");
+    let mut document = Document::of(
+        vec![kept],
+        Origin::New(SaveFormat::Png),
+        Unkept::default(),
+        SaveSettings::default(),
+    )
+    .expect("entries");
     assert_eq!(document.replace_picture(plain()), Ok(false));
     assert_eq!(document.generation(), 0);
     assert!(document.picture().is_none());
@@ -214,4 +240,172 @@ fn a_free_name_runs_out_only_past_what_a_document_holds() {
             .map(|number| SpriteName::new(&alloc::format!("s{number}")).expect("a name")),
     );
     assert_eq!(free_name(&base, &over), None);
+}
+
+#[test]
+fn a_tiffs_pages_are_not_a_sprite_area_however_many() {
+    let pages = |origin| {
+        Document::of(
+            vec![Entry::Picture(plain()), Entry::Picture(plain())],
+            origin,
+            Unkept::default(),
+            SaveSettings::default(),
+        )
+        .expect("entries")
+    };
+    let tiff = pages(Origin::Read(ViewFormat::Tiff));
+    assert!(tiff.is_pages() && !tiff.is_sprite_area());
+    let made = pages(Origin::New(SaveFormat::Tiff));
+    assert!(made.is_pages());
+    let png = pages(Origin::Read(ViewFormat::Png));
+    assert!(
+        png.is_sprite_area() && !png.is_pages(),
+        "several pictures of a PNG become sprites"
+    );
+    let named_pages = Document::of(
+        vec![Entry::Picture(plain()), named("icon")],
+        Origin::Read(ViewFormat::Tiff),
+        Unkept::default(),
+        SaveSettings::default(),
+    )
+    .expect("entries");
+    assert!(
+        named_pages.is_sprite_area() && !named_pages.is_pages(),
+        "a name makes sprites"
+    );
+    assert!(Document::new_as(plain(), SaveFormat::Sprites).is_sprite_area());
+}
+
+fn colour_layer(colour: [u8; 4], name: &str) -> super::Layer {
+    let canvas = Canvas::new(4, 4, Kind::Rgba, Sample::Rgba(colour)).expect("fits");
+    super::Layer::new(canvas, alloc::string::String::from(name))
+}
+
+#[test]
+fn a_picture_of_layers_holds_one_or_more_alike() {
+    use super::{Layer, MOST_LAYERS};
+    assert!(Picture::layered(vec![], 0).is_none(), "none");
+    let two = || vec![colour_layer([1; 4], "a"), colour_layer([2; 4], "b")];
+    assert!(
+        Picture::layered(two(), 2).is_none(),
+        "painted on past the last"
+    );
+    let picture = Picture::layered(two(), 1).expect("two alike");
+    assert_eq!((picture.layers().len(), picture.active()), (2, 1));
+    assert_eq!(
+        picture.canvas().colour_at(0, 0),
+        Some([2; 4]),
+        "the one painted on"
+    );
+    let mut wider = two();
+    wider[1].canvas = Canvas::new(5, 4, Kind::Rgba, Sample::Rgba([0; 4])).expect("fits");
+    assert!(Picture::layered(wider, 0).is_none(), "of another size");
+    let palette = || Kind::Indexed {
+        depth: IndexDepth::One,
+        palette: vec![[0, 0, 0, 255], [255; 4]],
+        masked: false,
+    };
+    let ink = |name: &str| {
+        let canvas = Canvas::new(4, 4, palette(), Sample::Index(0, 255)).expect("fits");
+        Layer::new(canvas, alloc::string::String::from(name))
+    };
+    assert!(
+        Picture::layered(vec![ink("a")], 0).is_some(),
+        "a palette picture's one layer"
+    );
+    assert!(
+        Picture::layered(vec![ink("a"), ink("b")], 0).is_none(),
+        "a palette holds one"
+    );
+    let crowd = (0..=MOST_LAYERS)
+        .map(|_| colour_layer([0; 4], "c"))
+        .collect();
+    assert!(Picture::layered(crowd, 0).is_none(), "past the most");
+    let long = "n".repeat(tairix_sandbox::imageedit::MAX_LAYER_NAME + 1);
+    let named = vec![colour_layer([0; 4], &long)];
+    assert!(Picture::layered(named, 0).is_none(), "named too long");
+}
+
+#[test]
+fn layer_changes_are_refused_where_a_picture_cannot_take_them() {
+    use super::{LayerRefusal, Shown, MOST_LAYERS};
+    let mut document = Document::new(plain());
+    assert_eq!(document.remove_layer(0), Err(LayerRefusal::LastLayer));
+    assert_eq!(document.move_layer(0, 1), Err(LayerRefusal::NoSuchLayer));
+    let long = "x".repeat(tairix_sandbox::imageedit::MAX_LAYER_NAME + 1);
+    let shown = Shown {
+        name: long,
+        opacity: 255,
+        visible: true,
+    };
+    assert_eq!(document.show_layer(0, shown), Err(LayerRefusal::Unlike));
+    let other = Canvas::new(5, 4, Kind::Rgba, Sample::Rgba([0; 4])).expect("fits");
+    let unlike = super::Layer::new(other, alloc::string::String::from("wide"));
+    assert_eq!(document.insert_layer(1, unlike), Err(LayerRefusal::Unlike));
+    for _ in 1..MOST_LAYERS {
+        document
+            .insert_layer(1, colour_layer([0; 4], "more"))
+            .expect("room");
+    }
+    assert_eq!(
+        document.insert_layer(1, colour_layer([0; 4], "one more")),
+        Err(LayerRefusal::Full)
+    );
+    let palette = Kind::Indexed {
+        depth: IndexDepth::One,
+        palette: vec![[0, 0, 0, 255], [255; 4]],
+        masked: false,
+    };
+    let mut ink = Document::new(Picture::plain(
+        Canvas::new(4, 4, palette, Sample::Index(0, 255)).expect("fits"),
+    ));
+    assert_eq!(
+        ink.insert_layer(1, colour_layer([0; 4], "over")),
+        Err(LayerRefusal::Palette)
+    );
+    let faded = Shown {
+        name: alloc::string::String::from("Background"),
+        opacity: 100,
+        visible: true,
+    };
+    assert_eq!(
+        ink.show_layer(0, faded),
+        Err(LayerRefusal::Palette),
+        "shown wholly"
+    );
+    assert_eq!(ink.generation(), 0, "nothing changed");
+}
+
+#[test]
+fn a_new_layer_is_named_for_a_number_no_layer_has() {
+    use super::{copy_name, new_layer_name};
+    let layers = [
+        colour_layer([0; 4], "Background"),
+        colour_layer([0; 4], "Layer 3"),
+    ];
+    assert_eq!(new_layer_name(&layers[..1]).expect("room"), "Layer 2");
+    assert_eq!(
+        new_layer_name(&layers).expect("room"),
+        "Layer 4",
+        "3 is taken"
+    );
+    assert_eq!(copy_name("Sky").expect("room"), "Sky copy");
+    let max = tairix_sandbox::imageedit::MAX_LAYER_NAME;
+    let long = "é".repeat(max);
+    let copied = copy_name(&long).expect("room");
+    assert!(
+        copied.len() <= max && copied.ends_with(" copy"),
+        "cut to fit"
+    );
+}
+
+#[test]
+fn a_flattened_picture_of_one_plain_layer_shares_its_pixels() {
+    let picture = plain();
+    let flat = picture.flattened().expect("room");
+    assert!(Arc::ptr_eq(flat.tile(0), picture.canvas().tile(0)));
+    assert!(picture.single());
+    let mut faded = plain();
+    faded.layers_mut()[0].opacity = 128;
+    assert!(!faded.single(), "a faded layer is laid over nothing");
 }

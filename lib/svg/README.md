@@ -20,7 +20,7 @@ trusted computing base does not grow for an asset format.
   every asset is fitted to it, honouring `preserveAspectRatio`, so a consumer
   never rescales between assets),
 - the **artwork** drawn on it (`nodes()`, bottom first): `tairix_raster`
-  `Layer`s, and a `Group` wherever a clip, a mask, or a group opacity
+  `Coat`s, and a `Group` wherever a clip, a mask, or a group opacity
   composites a subtree as a unit, plus
 - the optional pointer **hotspot** (`hotspot()`) and **outline** (`outline()`)
   a cursor asset declares, and the authored design box (`source_extent()`) for

@@ -449,7 +449,7 @@ impl View {
             theme,
             scale,
             font,
-            self.toolbar.natural_width(scale, theme),
+            self.toolbar.natural_length(scale, theme),
             self.info,
         );
         let canvas = (layout.canvas().width, layout.canvas().height);
@@ -490,7 +490,7 @@ impl View {
         let natural = self.natural()?;
         let (want_w, want_h) = Layout::client_for_canvas(natural, theme, scale, font, self.info);
         let (floor_w, floor_h) =
-            Layout::min_client(theme, scale, font, self.toolbar.min_width(scale, theme));
+            Layout::min_client(theme, scale, font, self.toolbar.min_length(scale, theme));
         Some((want_w.max(floor_w), want_h.max(floor_h)))
     }
 
@@ -1451,7 +1451,7 @@ fn tools() -> Toolbar {
 /// canvas without a strip to draw in.
 #[must_use]
 pub fn min_client_size(theme: &Theme, scale: Scale, font: BitmapFont) -> (u32, u32) {
-    Layout::min_client(theme, scale, font, tools().min_width(scale, theme))
+    Layout::min_client(theme, scale, font, tools().min_length(scale, theme))
 }
 
 /// The least a frame is shown for, in nanoseconds.

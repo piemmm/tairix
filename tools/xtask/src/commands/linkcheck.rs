@@ -1,4 +1,4 @@
-//! Minimal Markdown link checker for the TAIRiX mdBook.
+//! Minimal Markdown link and text checker for the TAIRiX mdBook.
 //!
 //! The mdbook preprocessor ecosystem trails the mdBook release schedule by
 //! enough that pinning a working pair becomes a maintenance burden in its
@@ -12,6 +12,8 @@
 //!   mdBook detail we should not duplicate.
 //! - Absolute URLs are accepted without contacting the network so CI does
 //!   not depend on the public internet being reachable.
+//! - No source holds U+FFFD, which an encoding fault leaves where a
+//!   character was lost.
 //!
 //! A failure lists every broken link found in one pass; the caller does
 //! not have to fix and re-run for each individual breakage.
@@ -37,6 +39,12 @@ pub fn run(book_src: &Path) -> Result<(), String> {
                 continue;
             }
         };
+        if text.contains(char::REPLACEMENT_CHARACTER) {
+            broken.push(format!(
+                "{}: holds U+FFFD, where an encoding fault lost a character",
+                display_relative(book_src, file)
+            ));
+        }
         for target in extract_link_targets(&text) {
             if is_external(&target) {
                 continue;
@@ -164,6 +172,16 @@ fn display_relative(base: &Path, path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_lost_character_fails_the_book() {
+        let book = std::env::temp_dir().join(format!("linkcheck-lost-{}", std::process::id()));
+        fs::create_dir_all(&book).expect("a scratch book");
+        fs::write(book.join("page.md"), "all \u{fffd} so it can\n").expect("written");
+        let found = run(&book);
+        let _ = fs::remove_dir_all(&book);
+        assert!(found.is_err_and(|why| why.contains("U+FFFD")));
+    }
 
     #[test]
     fn extracts_inline_links() {

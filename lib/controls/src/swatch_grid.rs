@@ -128,6 +128,13 @@ impl SwatchGrid {
         *self.armed = self.armed.filter(|&(index, _)| index < len);
     }
 
+    /// Lay the wells out `columns` to a row, keeping the colours and the
+    /// marks: what an owner fitting the grid to the room it has does. The
+    /// owner reports the repaint.
+    pub fn set_columns(&mut self, columns: usize) {
+        self.columns = columns.max(1);
+    }
+
     /// The well the primary mark is on, if any is marked.
     #[must_use]
     pub const fn selected(&self) -> Option<usize> {

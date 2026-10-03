@@ -955,8 +955,7 @@ impl<'a> Decoder<'a, '_> {
 
     /// The element a reference attribute names, if the document defines one.
     fn referenced(&self, element: &Element<'_>) -> Option<&'a Element<'a>> {
-        element
-            .href()
+        crate::xml::href(element)
             .and_then(|link| link.strip_prefix('#'))
             .and_then(|id| self.find(id))
     }

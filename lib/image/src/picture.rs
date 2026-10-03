@@ -10,6 +10,7 @@ use core::fmt;
 
 use tairix_util::fallible;
 
+use crate::density::Density;
 use crate::RGBA_BYTES;
 
 /// One straight-alpha palette entry: red, green, blue, alpha.
@@ -132,6 +133,11 @@ pub trait PictureSource {
     /// picture and empty otherwise. An encoder validates what it is given,
     /// so an index past the palette is refused there rather than trusted.
     fn read_row(&self, y: u32, samples: &mut [u8], mask: &mut [u8]);
+    /// How densely the pixels are laid out, where that is stated; an encoder
+    /// whose format can say so writes it.
+    fn density(&self) -> Option<Density> {
+        None
+    }
 }
 
 /// Why a [`Picture`] could not be built from the parts given.
@@ -189,6 +195,7 @@ pub struct Picture {
     width: u32,
     height: u32,
     pixels: Pixels,
+    density: Option<Density>,
 }
 
 /// Pixels in a `width` by `height` picture, refusing a zero side or a count
@@ -218,6 +225,7 @@ impl Picture {
             width,
             height,
             pixels: Pixels::Rgba(rgba),
+            density: None,
         })
     }
 
@@ -262,6 +270,7 @@ impl Picture {
                 indices,
                 mask,
             },
+            density: None,
         })
     }
 
@@ -281,6 +290,19 @@ impl Picture {
     #[must_use]
     pub const fn pixels(&self) -> &Pixels {
         &self.pixels
+    }
+
+    /// How densely its pixels are laid out, where that is stated.
+    #[must_use]
+    pub const fn density(&self) -> Option<Density> {
+        self.density
+    }
+
+    /// This picture laid out at `density`.
+    #[must_use]
+    pub const fn with_density(mut self, density: Option<Density>) -> Self {
+        self.density = density;
+        self
     }
 
     /// Take the pixels.
@@ -362,6 +384,10 @@ impl PictureSource for Picture {
             }
             Pixels::Rgba(rgba) => copy_row(rgba, row, width * RGBA_BYTES, samples),
         }
+    }
+
+    fn density(&self) -> Option<Density> {
+        self.density
     }
 }
 

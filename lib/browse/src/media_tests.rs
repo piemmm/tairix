@@ -79,6 +79,7 @@ const ROWS: &[(&str, MediaType, IconKind)] = &[
     ("hero.webp", MediaType::ImageWebp, IconKind::Image),
     ("plate.tiff", MediaType::ImageTiff, IconKind::Image),
     ("plate.tif", MediaType::ImageTiff, IconKind::Image),
+    ("layers.ora", MediaType::ImageOpenRaster, IconKind::Image),
     ("release.zip", MediaType::ArchiveZip, IconKind::Archive),
     ("backup.tar", MediaType::ArchiveTar, IconKind::Archive),
     ("dump.gz", MediaType::ArchiveGzip, IconKind::Archive),
@@ -153,6 +154,9 @@ fn a_risc_os_file_type_after_a_comma_names_the_media() {
     assert_eq!(media_for_name("Sprites,ff9"), Some(MediaType::ImageSprite));
     assert_eq!(media_for_name("Logo,B60"), Some(MediaType::ImagePng));
     assert_eq!(media_for_name("photo,c85"), Some(MediaType::ImageJpeg));
+    assert_eq!(media_for_name("anim,695"), Some(MediaType::ImageGif));
+    assert_eq!(media_for_name("scan,69C"), Some(MediaType::ImageBmp));
+    assert_eq!(media_for_name("pages,ff0"), Some(MediaType::ImageTiff));
     assert_eq!(media_for_name("ReadMe,fff"), Some(MediaType::TextPlain));
     // A type the registry does not know leaves the extension to say.
     assert_eq!(media_for_name("notes.txt,ffb"), Some(MediaType::TextPlain));
@@ -346,6 +350,7 @@ const PRESERVED: &[(&str, &str)] = &[
     ("hero.webp", "image/webp"),
     ("plate.tiff", "image/tiff"),
     ("plate.tif", "image/tiff"),
+    ("layers.ora", "image/openraster"),
     ("release.zip", "application/zip"),
     ("backup.tar", "application/x-tar"),
     ("dump.gz", "application/gzip"),

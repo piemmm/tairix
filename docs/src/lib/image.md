@@ -2,8 +2,9 @@
 
 `lib/image` turns an untrusted raster-image byte stream into a validated,
 straight-alpha RGBA8 [`RasterImage`], or a typed refusal — never a panic,
-and never more memory than the caller allows — and writes PNG, JPEG and
-RISC OS sprite areas for an editor ([Writing](#writing)). The desktop's sandboxed
+and never more memory than the caller allows — and writes PNG, JPEG, GIF,
+BMP, TIFF, RISC OS sprite areas and OpenRaster for an editor
+([Writing](#writing)). The desktop's sandboxed
 image-rendering service is the reason this crate exists: an application
 bundle's icon artwork (SVG or PNG) and the desktop wallpaper (a shipped
 master, or a photograph the user picked) are each decoded inside a
@@ -20,7 +21,7 @@ SVG (`plans/ICONS.md`), and the wallpaper catalog only its own extensions.
 ## Formats
 
 `ImageFormat` is a deliberately closed enum: `Png`, `Jpeg`, `Gif`, `Bmp`,
-`Ico`, `Sprite`, `Tiff`, and `Webp`. `sniff(bytes) -> Option<ImageFormat>` identifies a format
+`Ico`, `Sprite`, `Tiff`, `Webp`, and `OpenRaster`. `sniff(bytes) -> Option<ImageFormat>` identifies a format
 from its leading signature, and `decode`, `decode_fitted`, and
 `Sequence::open` dispatch on it, refusing an unrecognised signature before any
 format-specific parsing runs. A further format is added only when a real
@@ -486,6 +487,27 @@ acted on: all three are display hints, the last is called informative, and
 applying a smoothing or an upscale would fabricate pixels the file does not
 hold.
 
+### OpenRaster
+
+An OpenRaster document (baseline 0.0.5) is a ZIP of a layer stack and its
+layers, and is recognised by the stored `mimetype` entry it must begin with.
+The archive reader (`zip`, the APPNOTE subset OpenRaster uses) finds entries
+through the central directory, inflates a deflated entry through
+`tairix_compress` and checks every entry against its CRC-32; an encrypted
+entry, a ZIP64 or spanned archive, and any structural damage are refused
+rather than guessed at. The stack is read from `stack.xml` through the shared
+fail-closed scanner (`lib/xml`): the canvas from its `image` element, then its
+layers topmost first, each a PNG at its `x`, `y` offset with its opacity and
+visibility. A nested stack is folded into its layers — hidden with it, as
+opaque as both — and what folding cannot keep exactly, or any blending other
+than plain source-over, is stated as `Unkept::extras`.
+
+`decode` shows what a viewer should: the document's `mergedimage.png` where it
+is the canvas's size, and otherwise the visible layers composed source-over,
+each at its opacity. `probe` reads the canvas alone. `open_native` answers the
+layers themselves (`NativeDocument::Layers`), each as colour, which is how an
+editor reads them.
+
 ## Sequences and pages
 
 Some containers hold more than one picture. `Sequence` is the one shape for
@@ -636,23 +658,48 @@ resampler, exactly as it must to hit any size no JPEG scale lands on.
 ## Writing
 
 An editor reads a picture as its file stores it. `open_native` answers a
-paletted PNG as its indices and palette, a sprite area through
+palette picture — a paletted PNG, a GIF's first frame over its colour table
+with the transparent entry clear, an indexed BMP, a TIFF palette page — as its
+indices and palette; a TIFF through `TiffPages`, each page validated when the
+file opens and decoded when it is asked for; an OpenRaster document as its
+canvas and layers (`OraDocument`); a sprite area through
 `SpriteAreaReader` — each sprite's `SpriteName`, `SpriteMode` (its eigen
 factors, `pixel_aspect` and alpha-mask form) and `SpritePalette` (`Implied`,
 `Stored` exactly as read, or `Full`), a sprite it cannot read handed back as
-its bytes (`OpaqueSprite`) — and every other format as RGBA.
+its bytes (`OpaqueSprite`) — and every other picture as RGBA. A GIF frame
+short of the logical screen, and the pixels a BMP's runs never cover, open
+masked.
 
-A sprite area is written back exactly. A PNG or JPEG may hold what its picture
-does not, and `Unkept` says so, so an editor can refuse to write such a file
-back over itself: `precision` for a 16-bit PNG narrowed to 8, and `extras` for
-data beside the picture — any PNG chunk but the header, palette, transparency
-and image data, and any JPEG application or comment segment but a JFIF header
-that states square pixels and no thumbnail, which is all the encoder writes. A
-format this crate does not write reports neither.
+A picture carries the **density** its file states (`Density`): pixels per
+inch, centimetre or metre, or a bare shape, each figure a ratio kept in the
+file's own terms, so a write back to the same format says exactly what it
+said. Square pixels with no unit are no density at all. A PNG's `pHYs`, a
+JFIF header, a GIF's aspect byte, a BMP's pixels per metre and a TIFF's
+resolution tags are each read into it and written from it, as closely as the
+format can state it: per metre for PNG and BMP, per inch or exactly per
+centimetre for JPEG, a shape alone for GIF, and exactly for TIFF.
 
-`encode_png`, `encode_jpeg` and `encode_sprite_area` read a `PictureSource`
-a row at a time — `Picture` is the one this crate owns — and refuse what their
-format cannot state (`EncodeError`) rather than approximate it:
+What a file held that its picture does not is `Unkept`, so an editor can
+refuse to write such a file back over itself: `precision` for samples narrowed
+to eight bits (a 16-bit PNG or TIFF, a BMP channel wider than eight bits, a
+TIFF colour map finer than eight); `extras` for data beside the picture — any
+PNG chunk but the header, palette, transparency, density and image data; any
+JPEG application or comment segment but one plain JFIF header; a GIF's second
+frame, comment, plain text, other application data, a frame short of the
+screen or a global table its frame replaces (its animation timing is moot for
+one frame); a BMP colour space beyond sRGB or a bit no channel covers, set; a
+TIFF tag outside the ones that describe its picture, a reduced copy, or a
+sample no colour reads — and `converted` for colour the writer restates rather
+than keeps: CMYK, `YCbCr`, signed or floating-point samples, premultiplied
+alpha, a bare mask. `Written` records how a file was written where the writer
+here makes the same choice — a GIF's interlacing, a TIFF's compression — so a
+write back repeats it. A sprite area is written back exactly; a format this
+crate does not write reports nothing.
+
+`encode_png`, `encode_jpeg`, `encode_gif`, `encode_bmp`, `encode_tiff`,
+`encode_sprite_area` and `encode_ora` read a `PictureSource` a row at a time —
+`Picture` is the one this crate owns — and refuse what their format cannot
+state (`EncodeError`) rather than approximate it:
 
 - **PNG** is the smallest colour type that holds the picture exactly: a palette
   kept at the shallowest depth that indexes it, a binary mask as one
@@ -661,6 +708,22 @@ format cannot state (`EncodeError`) rather than approximate it:
 - **JPEG** is baseline JFIF at a quality of 1 to 100 (`JpegOptions`),
   composited over a background, one component for a grey picture and 4:4:4
   chroma from quality 90.
+- **GIF** writes a palette picture alone (`NotIndexed` otherwise) as one frame,
+  interlaced or not (`GifOptions`), LZW coded. A pixel shows where its entry's
+  opacity seen through its mask is at least half; the clear pixels take an
+  entry the picture already keeps clear and no shown pixel uses, else a new
+  one while the palette has room, else any entry no shown pixel uses, and a
+  full palette every entry of which shows is refused (`GifPaletteFull`).
+- **BMP** writes an opaque palette picture at 1, 4 or 8 bits, opaque colour at
+  24, and anything translucent at 32 under a V4 header with an alpha mask; a
+  BMP palette holds no opacity, so a translucent palette picture is written as
+  colour.
+- **TIFF** writes every picture given as a page, little-endian, in strips of
+  about 64 KiB, under one compression (`TiffOptions`: none, PackBits, LZW or
+  DEFLATE). An opaque palette picture keeps its indices and colour map at its
+  depth; colour is written as grey where every pixel is, with an unassociated
+  alpha sample only where a pixel needs one; eight-bit colour under LZW or
+  DEFLATE is differenced along the row first.
 - **A sprite area** writes each sprite in its own mode — indexed at the mode's
   depth with the palette form asked for, `Implied` only where the colours are
   the desktop's, or direct colour in any packing the mode names (1:5:5:5,
@@ -671,6 +734,18 @@ format cannot state (`EncodeError`) rather than approximate it:
   another shape — a numbered mode as the numbered mode or mode word of its
   depth and that shape, a mode word with its resolution fields rewritten — so
   an editor that reshapes a sprite's pixels writes a mode that agrees.
+- **OpenRaster** writes borrowed layer sources (`OraLayerSource`: a name, a
+  `PictureSource`, an offset, an opacity and whether it shows), so an editor's
+  layers are never copied whole to be written: each layer as its PNG, the stack
+  listing them topmost first under plain source-over, the merged picture and a
+  thumbnail the caller supplies. Every entry is stored, since what it carries is
+  PNG and compressed already, and every one is dated 1980-01-01, so the same
+  document always writes the same bytes. No layers, more than
+  `MOST_ORA_LAYERS`, or a canvas with a side of zero are refused.
+
+GIF and TIFF share one LZW coder (`lzw::Coder`) as they share the decoder's
+dictionary: what differs between them — the bit order codes are packed in, and
+when a code widens — is the caller's.
 
 `over(below, above)` is the one straight-alpha source-over, rounded to the
 nearest: a WEBP animation's frames are composited by it, and an editor lays
@@ -707,6 +782,13 @@ the store is allocated; over it, the decode is refused with
 bound, not a growable capacity: the decoder never enlarges it to make a
 stream fit. A caller that decodes only PNG or baseline/extended sequential
 JPEG passes `0`, refusing every progressive stream outright.
+
+OpenRaster carries fixed containment bounds of the same kind: at most 256
+layers (`MOST_ORA_LAYERS`) and 4 096 archive entries, a `stack.xml` of at most
+1 MiB, and a layer's PNG of at most 256 MiB. Each is weighed against the
+archive's own declared sizes before an entry is inflated, an inflated entry
+must come to exactly its declared size, and the stack's canvas is weighed
+against the caller's limits before any layer is read.
 
 A GIF's frame count carries its own **fixed containment bound** of 16 384: a
 frame block costs about ten bytes, so a small file can declare enormous

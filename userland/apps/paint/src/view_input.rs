@@ -8,39 +8,56 @@ use alloc::vec::Vec;
 use tairix_abi::window_ipc::{AppMenu, AppMenuItemId};
 use tairix_colour::Rgba;
 use tairix_controls::{
-    wheel_steps, Dialog, DialogAction, FieldGroupAction, FieldRow, Keystroke, PickerOutcome,
-    SaveChanges, ScrollAction, SwatchAction, SwatchMark, ToolActivation, ToolbarOutcome,
+    wheel_steps, Dialog, DialogAction, Keystroke, PickerOutcome, SaveChanges, ScrollAction,
+    SwatchAction, SwatchMark, ToolActivation, ToolbarOutcome,
 };
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_image::{SpriteMode, SpriteName, SpritePalette};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PinchPhase, PointerButton};
 use tairix_raster::Color;
-use tairix_rng::RandU64;
 use tairix_theme::Theme;
+use tairix_util::fallible;
 use tairix_window::menu::{MenuBuilder, Plate};
 
 use super::{
-    Action, Clip, Compute, Computed, Gesture, MenuKind, Modal, NewPicture, Outcome, Own,
-    PaletteEdit, Pending, Request, Settles, Then, View, APP_TITLE, GO_TO_ENTRY, RENAME_ENTRY,
-    SPRITE_SIZE,
+    Action, Aim, Clip, Compute, Computed, Draft, Gesture, Lands, MenuKind, Modal, NewPicture,
+    Outcome, Own, PaletteEdit, Pending, Request, Settles, Then, View, APP_TITLE, GO_TO_ENTRY,
+    GO_TO_LAYER, RENAME_ENTRY, SPRITE_SIZE,
 };
+use crate::brush::{Path, Tip};
 use crate::canvas::{Canvas, Kind, OutOfMemory, Sample};
 use crate::colour::Ink;
-use crate::dialog::{Answer, Form, Purpose};
-use crate::document::{free_name, Entry, Picture, SpriteInfo, NAME_REFUSAL, SPRITE_STEM};
+use crate::dialog::{Answer, Form, Purpose, SaveChoices};
+use crate::document::{free_name, Entry, Layer, Picture, SpriteInfo, NAME_REFUSAL, SPRITE_STEM};
 use crate::history::{Applied, Damage, Unapplied};
 use crate::layout::Layout;
+use crate::mask::{Combine, Mask, Recipe};
 use crate::render::write_zoom;
-use crate::save::restated;
+use crate::save::{natural, restated, writable_as, SaveFormat};
 use crate::selection::Floating;
 use crate::shape::{line_pixels, Bounds, Point as Fx, Shape, FX};
-use crate::stroke::{Layer, Stroke};
-use crate::tool::{strip_item, tool_index, StripItem, Tool, ViewCommand};
+use crate::stroke::{Coat, Stroke};
+use crate::tool::{mark_grid, tool_index, Marquee, Tool, VIEW_COMMANDS};
+use crate::tool_controls::{BarOutcome, ToolControls};
 use crate::transform::{Depth, Transform, TransformError, Turn};
 use crate::viewport::{Zoom, ACTUAL, ZOOMS};
 
 /// What a clearing is said not to have managed.
 const CLEARING: &str = "clear that";
+
+/// What making a selection is said not to have managed.
+const SELECTING: &str = "select that";
+
+/// How near a press must land to a polygon's first corner to close it, in
+/// logical pixels.
+const CLOSE_REACH: u32 = 6;
+
+/// The least a lasso's pointer moves before its path takes another point:
+/// a quarter of a pixel, past which a mask a pixel fine learns nothing.
+const LASSO_STEP: i64 = FX / 4;
+
+/// Why a selection could not be begun.
+const NO_ROOM_TO_SELECT: &str = "There is not enough memory to select that";
 
 /// Why a sprite kept as its bytes takes no edit.
 const KEPT_UNCHANGED: &str = "This sprite cannot be edited; it is kept, and saved back unchanged";
@@ -57,8 +74,13 @@ impl View {
     ) -> Outcome {
         match event {
             InputEvent::PointerMoved { to } => {
+                let marker = self.clone_offset.and_then(|_| self.clone_marker(layout));
                 self.pointer = *to;
                 self.hovered(layout, damage);
+                if marker.is_some() {
+                    self.damage_marker(marker, layout, damage);
+                    self.damage_marker(self.clone_marker(layout), layout, damage);
+                }
             }
             InputEvent::ModifiersChanged { modifiers } => {
                 // Shift squares a shape being dragged, so its preview moves.
@@ -80,9 +102,14 @@ impl View {
                 .dock_pointer(event, layout, scale, theme, damage)
                 .unwrap_or_else(Outcome::none);
         }
-        let pressed = matches!(event, InputEvent::PointerPressed { .. });
-        if pressed && !layout.dock().contains(self.pointer) {
-            self.release_dock(layout, scale, theme, damage);
+        // An open list owns the pointer wherever it reaches: a press on its
+        // overhang is the list's, never the canvas's beneath.
+        if self.bar.listing() {
+            self.bar_pointer(event, layout, scale, theme, damage);
+            return Outcome::none();
+        }
+        if matches!(event, InputEvent::PointerPressed { .. }) {
+            self.release_elsewhere(layout, scale, theme, damage);
         }
         if let InputEvent::PointerPressed {
             button: PointerButton::Secondary,
@@ -92,7 +119,7 @@ impl View {
                 // The menu takes the pointer, so the release that would have
                 // ended the drag never comes here.
                 self.end_gesture(layout, damage);
-                self.release_dock(layout, scale, theme, damage);
+                self.release_keyboard(layout, scale, theme, damage);
                 return Outcome::asking(Request::Menu {
                     kind: MenuKind::Window,
                     anchor: Rect::new(self.pointer.x, self.pointer.y, 0, 0),
@@ -111,7 +138,7 @@ impl View {
                 return outcome;
             }
         }
-        self.canvas_pointer(event, layout, damage)
+        self.canvas_pointer(event, layout, scale, damage)
     }
 
     /// Note the picture pixel the pointer is over, for the status band.
@@ -150,12 +177,15 @@ impl View {
         };
         Some(match answer {
             Some(answer) => self.answer_modal(answer, layout, damage),
-            None => Outcome::none(),
+            None => self.filter_moved(layout, damage),
         })
     }
 
-    /// The pointer on the window's chrome: the toolbar, the panel, the bars
-    /// and the status band. `None` where it is on none of them.
+    /// The pointer on the window's chrome: the tool box, the view strip, the
+    /// tool-controls bar, the dock, the palette, the bars and the status
+    /// band. Every part sees every event, so a hover leaves and a press held
+    /// on one part ends there wherever the pointer went; `None` where nothing
+    /// asked for more than a repaint.
     fn chrome_pointer(
         &mut self,
         event: &InputEvent,
@@ -164,20 +194,25 @@ impl View {
         theme: &Theme,
         damage: &mut Region,
     ) -> Option<Outcome> {
-        match self
-            .toolbar
-            .on_pointer(event, layout.tools(), scale, theme, damage)
-        {
-            ToolbarOutcome::Activated(action) if action.part == ToolActivation::Primary => {
-                return Some(self.strip_activated(action.index, layout, damage));
-            }
-            ToolbarOutcome::Activated(_) | ToolbarOutcome::Redraw => return Some(Outcome::none()),
-            ToolbarOutcome::Idle => {}
+        let chosen = self
+            .tool_box
+            .on_pointer(event, layout.tools(), scale, theme, damage);
+        if let Some(&tool) = activated(chosen).and_then(|index| Tool::ALL.get(index)) {
+            return Some(self.act(Action::Tool(tool), layout, damage));
         }
+        let commanded = self
+            .commands
+            .on_pointer(event, layout.view_strip(), scale, theme, damage);
+        if let Some(&(_, command, _)) =
+            activated(commanded).and_then(|index| VIEW_COMMANDS.get(index))
+        {
+            return Some(self.act(command.into(), layout, damage));
+        }
+        self.bar_pointer(event, layout, scale, theme, damage);
         if let Some(outcome) = self.dock_pointer(event, layout, scale, theme, damage) {
             return Some(outcome);
         }
-        if let Some(outcome) = self.panel_pointer(event, layout, scale, theme, damage) {
+        if let Some(outcome) = self.palette_pointer(event, layout, damage) {
             return Some(outcome);
         }
         if let Some(ScrollAction::ScrollTo { offset }) =
@@ -209,34 +244,38 @@ impl View {
         None
     }
 
-    /// The pointer on the panel: the palette and the settings.
-    fn panel_pointer(
+    /// The pointer on the tool-controls bar.
+    fn bar_pointer(
         &mut self,
         event: &InputEvent,
         layout: &Layout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
+    ) -> BarOutcome {
+        let outcome = self.bar.on_pointer(
+            event,
+            self.pointer,
+            layout.bar(),
+            &mut self.options,
+            (scale, theme),
+            damage,
+        );
+        if outcome == BarOutcome::Changed && self.text.is_some() {
+            self.reset_text(theme, layout, damage);
+        }
+        outcome
+    }
+
+    /// The pointer on the palette strip: a well chosen by the primary button
+    /// is the primary ink, and one pressed with the middle button the
+    /// secondary.
+    fn palette_pointer(
+        &mut self,
+        event: &InputEvent,
+        layout: &Layout,
+        damage: &mut Region,
     ) -> Option<Outcome> {
-        let settings = self
-            .settings
-            .layout(layout.settings(), layout.window(), scale, theme);
-        let listing = self.settings.rows().iter().any(FieldRow::popup_open);
-        if let Some(FieldGroupAction { row, action }) = self
-            .settings
-            .on_pointer(event, settings, scale, theme, damage)
-        {
-            if let Some(label) = self.options.adopt(self.tool, row, &action) {
-                self.relabel_setting(row, label);
-                damage.add(layout.settings());
-            }
-            return Some(Outcome::none());
-        }
-        // An open list owns the pointer wherever it reaches: a press on its
-        // overhang is the list's, never the canvas's beneath.
-        if listing {
-            return Some(Outcome::none());
-        }
         let middle = matches!(
             event,
             InputEvent::PointerPressed {
@@ -257,17 +296,8 @@ impl View {
                 self.choose_well(mark, index, layout, damage);
                 Some(Outcome::none())
             }
-            None => layout.panel().contains(self.pointer).then(Outcome::none),
+            None => None,
         }
-    }
-
-    /// Give settings row `row` the label `label`.
-    fn relabel_setting(&mut self, row: usize, label: String) {
-        let focus = self.settings.focus();
-        if let Some(held) = self.settings.rows_mut().get_mut(row) {
-            *held = tairix_controls::FieldRow::new(label, held.control().clone());
-        }
-        self.settings.adopt_focus(focus);
     }
 
     /// Make well `index` the `mark` colour.
@@ -385,6 +415,131 @@ impl View {
         if self.picker.state().focus.focused {
             let blurred = self.picker.blur(layout.picker(), scale, theme, damage);
             self.picked(blurred, layout, damage);
+        }
+    }
+
+    /// Settle the tool-controls bar's typing, keeping its keyboard focus.
+    pub(super) fn commit_bar(&mut self, layout: &Layout, damage: &mut Region) {
+        self.bar.commit(layout.bar(), &mut self.options, damage);
+    }
+
+    /// Settle the bar and take the keyboard from it.
+    fn release_bar(&mut self, layout: &Layout, damage: &mut Region) {
+        self.bar.blur(layout.bar(), &mut self.options, damage);
+    }
+
+    /// Take the keyboard from the palette strip.
+    fn release_palette(&mut self, layout: &Layout, damage: &mut Region) {
+        if self.swatches.state().focus.focused {
+            self.swatches.set_focused(false);
+            damage.add(layout.swatches());
+        }
+    }
+
+    /// Settle every part that holds the keyboard and give it back to the
+    /// picture, as a menu or Escape does.
+    fn release_keyboard(
+        &mut self,
+        layout: &Layout,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) {
+        self.release_dock(layout, scale, theme, damage);
+        self.release_bar(layout, damage);
+        self.release_palette(layout, damage);
+    }
+
+    /// A press settles and takes the keyboard from every part it did not land
+    /// on: the bar and the dock keep it only for a press on themselves, and
+    /// the palette, which takes it only from Tab, gives it up to any press.
+    fn release_elsewhere(
+        &mut self,
+        layout: &Layout,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) {
+        if !layout.dock().contains(self.pointer) {
+            self.release_dock(layout, scale, theme, damage);
+        }
+        if !layout.controls().contains(self.pointer) {
+            self.release_bar(layout, damage);
+        }
+        self.release_palette(layout, damage);
+    }
+
+    /// Which part of the window has the keyboard.
+    fn keyboard(&self) -> Keyboard {
+        if self.picker.state().focus.focused || self.picker.is_dragging() {
+            Keyboard::Dock
+        } else if self.bar.focus().is_some() {
+            Keyboard::Bar
+        } else if self.swatches.state().focus.focused {
+            Keyboard::Palette
+        } else {
+            Keyboard::Picture
+        }
+    }
+
+    /// Carry the keyboard on from `from` to the next part that takes it, in
+    /// the order Tab walks — the picture, the bar, the palette, the dock —
+    /// or back the other way; the picture always takes it.
+    fn walk_keyboard(
+        &mut self,
+        from: Keyboard,
+        forward: bool,
+        layout: &Layout,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) {
+        self.release_keyboard(layout, scale, theme, damage);
+        let order = Keyboard::ORDER;
+        let mut at = order.iter().position(|&part| part == from).unwrap_or(0);
+        loop {
+            at = if forward {
+                (at + 1) % order.len()
+            } else {
+                (at + order.len() - 1) % order.len()
+            };
+            if self.enter(order[at], forward, layout, scale, theme, damage) {
+                return;
+            }
+        }
+    }
+
+    /// Give `part` the keyboard, at its first stop or its last when not
+    /// `forward`: `false` where it has none to take it.
+    fn enter(
+        &mut self,
+        part: Keyboard,
+        forward: bool,
+        layout: &Layout,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> bool {
+        match part {
+            Keyboard::Picture => true,
+            Keyboard::Bar => self.bar.enter_focus(forward, layout.bar(), damage),
+            Keyboard::Palette => {
+                if self.swatches.is_empty() || layout.swatches().is_empty() {
+                    return false;
+                }
+                self.swatches.set_focused(true);
+                damage.add(layout.swatches());
+                true
+            }
+            Keyboard::Dock => {
+                if layout.picker().is_empty() || !self.picker.state().is_actionable() {
+                    return false;
+                }
+                self.picker
+                    .enter_focus(forward, layout.picker(), scale, theme);
+                damage.add(layout.picker());
+                true
+            }
         }
     }
 
@@ -520,8 +675,18 @@ impl View {
         damage: &mut Region,
     ) -> Outcome {
         if layout.tools().contains(self.pointer) {
-            self.toolbar
+            self.tool_box
                 .wheel(dx, dy, layout.tools(), scale, theme, damage);
+            return Outcome::none();
+        }
+        if layout.view_strip().contains(self.pointer) {
+            self.commands
+                .wheel(dx, dy, layout.view_strip(), scale, theme, damage);
+            return Outcome::none();
+        }
+        if layout.controls().contains(self.pointer) {
+            let turned = InputEvent::PointerScrolled { dx, dy };
+            self.bar_pointer(&turned, layout, scale, theme, damage);
             return Outcome::none();
         }
         if !layout.canvas().contains(self.pointer) {
@@ -593,44 +758,24 @@ impl View {
         self.settle(layout, damage);
     }
 
-    /// The toolbar's item at `index` was pressed.
-    fn strip_activated(&mut self, index: usize, layout: &Layout, damage: &mut Region) -> Outcome {
-        match strip_item(index) {
-            Some(StripItem::Tool(tool)) => self.act(Action::Tool(tool), layout, damage),
-            Some(StripItem::Command(command)) => {
-                let action = match command {
-                    ViewCommand::ZoomIn => Action::ZoomIn,
-                    ViewCommand::ZoomOut => Action::ZoomOut,
-                    ViewCommand::Fit => Action::Fit,
-                    ViewCommand::Actual => Action::Actual,
-                    ViewCommand::Grid => Action::Grid,
-                };
-                self.act(action, layout, damage)
-            }
-            None => Outcome::none(),
-        }
-    }
-
-    /// Choose `tool`, forgetting the selection when leaving the select tool:
-    /// a floating layer was put down before this was reached.
+    /// Choose `tool`: a floating selection was put down before this was reached,
+    /// and the selection stays, holding what the tool paints.
     fn choose_tool(&mut self, tool: Tool, layout: &Layout, damage: &mut Region) -> Outcome {
         if tool == self.tool {
             return Outcome::none();
         }
-        if tool != Tool::Select {
-            self.drop_selection(layout, damage);
-        }
-        // A settings popup open over the canvas goes with the panel it hung
-        // from, so only then is more than the toolbar and the panel drawn.
-        let popup = self.settings.rows().iter().any(FieldRow::popup_open);
+        // An open list hanging over the canvas goes with the bar it hung
+        // from, so only then is more than the bar and the tool box drawn.
+        let listing = self.bar.listing();
+        self.commit_bar(layout, damage);
         self.tool = tool;
-        self.toolbar.set_active(tool_index(tool));
-        self.settings = self.options.panel(tool, self.kind().sample_bytes() == 4);
-        if popup {
+        self.tool_box.set_active(tool_index(tool));
+        self.bar = ToolControls::new(tool, self.options, self.kind().sample_bytes() == 4);
+        if listing {
             return Outcome::relaid();
         }
-        damage.add(layout.toolbar());
-        damage.add(layout.panel());
+        damage.add(layout.top());
+        damage.add(layout.tool_box());
         Outcome::reshaped()
     }
 
@@ -639,6 +784,7 @@ impl View {
         &mut self,
         event: &InputEvent,
         layout: &Layout,
+        scale: Scale,
         damage: &mut Region,
     ) -> Outcome {
         match event {
@@ -652,7 +798,7 @@ impl View {
                     PointerButton::Middle => true,
                     PointerButton::Secondary => return Outcome::none(),
                 };
-                let outcome = self.press(secondary, layout, damage);
+                let outcome = self.press(secondary, layout, scale, damage);
                 self.dragging = self.gesture.is_some().then_some(*button);
                 outcome
             }
@@ -661,15 +807,14 @@ impl View {
                 Outcome::none()
             }
             InputEvent::PointerReleased { button } if self.dragging == Some(*button) => {
-                self.release(layout, damage);
-                Outcome::none()
+                self.release(layout, damage)
             }
             _ => Outcome::none(),
         }
     }
 
     /// Where the pointer is on the picture, in picture units.
-    fn at(&self, layout: &Layout) -> Fx {
+    pub(super) fn at(&self, layout: &Layout) -> Fx {
         let (x, y) = self
             .viewport
             .to_picture(self.pointer, self.picture_size(), layout.canvas());
@@ -679,7 +824,7 @@ impl View {
     /// Refuse a change to the document, or to the entry showing, while a
     /// worker has the picture, saying why: its answer is written over the
     /// state it was asked of.
-    fn idle(&mut self, layout: &Layout, damage: &mut Region) -> bool {
+    pub(super) fn idle(&mut self, layout: &Layout, damage: &mut Region) -> bool {
         if self.pending.is_none() {
             return true;
         }
@@ -689,7 +834,7 @@ impl View {
 
     /// Refuse an edit while the picture waits on a worker or is not a
     /// picture at all, saying why.
-    fn editable(&mut self, layout: &Layout, damage: &mut Region) -> bool {
+    pub(super) fn editable(&mut self, layout: &Layout, damage: &mut Region) -> bool {
         if !self.idle(layout, damage) {
             return false;
         }
@@ -700,24 +845,61 @@ impl View {
         true
     }
 
-    fn state(&mut self, message: &str, layout: &Layout, damage: &mut Region) {
+    pub(super) fn state(&mut self, message: &str, layout: &Layout, damage: &mut Region) {
         self.message = Some(String::from(message));
         damage.add(layout.message());
     }
 
-    /// A press on the canvas: begin what the tool does.
-    fn press(&mut self, secondary: bool, layout: &Layout, damage: &mut Region) -> Outcome {
+    /// A press on the canvas: begin what the tool does. Alt takes a colour
+    /// with any tool but the select tool, whose Alt takes away from the
+    /// selection.
+    fn press(
+        &mut self,
+        secondary: bool,
+        layout: &Layout,
+        scale: Scale,
+        damage: &mut Region,
+    ) -> Outcome {
+        // The view's own tools, and Space held, act whatever the picture is
+        // doing.
+        if self.panning() {
+            self.begin_pan();
+            return Outcome::none();
+        }
+        if self.tool == Tool::Zoom {
+            self.begin_zoom_box();
+            return Outcome::none();
+        }
         if !self.editable(layout, damage) {
             return Outcome::none();
         }
         let at = self.at(layout);
-        if self.modifiers.alt || self.tool == Tool::Eyedropper {
+        let own_alt = matches!(self.tool, Tool::Select | Tool::Clone);
+        if self.tool == Tool::Eyedropper || self.modifiers.alt && !own_alt {
             self.pick(at, secondary, layout, damage);
             return Outcome::none();
         }
         match self.tool {
-            Tool::Select => self.select_press(at.pixel(), layout, damage),
+            Tool::Select => self.select_press(at, layout, scale, damage),
             Tool::Fill => self.fill_at(at, secondary, layout, damage),
+            Tool::Gradient => {
+                self.begin_gradient(at, secondary);
+                Outcome::none()
+            }
+            Tool::Clone => {
+                self.clone_press(at, layout, damage);
+                Outcome::none()
+            }
+            Tool::Text => {
+                self.text_press(at, layout, damage);
+                Outcome::none()
+            }
+            Tool::Polygon => self.polygon_press(at, secondary, layout, scale, damage),
+            Tool::Crop => {
+                self.crop_press(at, layout, scale, damage);
+                Outcome::none()
+            }
+            Tool::Hand | Tool::Zoom | Tool::Eyedropper => Outcome::none(),
             tool if tool.shaped() => {
                 if self.reserve(layout, damage) {
                     self.gesture = Some(Gesture::Shape {
@@ -737,7 +919,7 @@ impl View {
 
     /// Make room in the history for the change about to be made, saying so
     /// where there is none.
-    fn reserve(&mut self, layout: &Layout, damage: &mut Region) -> bool {
+    pub(super) fn reserve(&mut self, layout: &Layout, damage: &mut Region) -> bool {
         if self.document.reserve().is_ok() {
             return true;
         }
@@ -758,10 +940,16 @@ impl View {
         let Some(picture) = self.document.picture() else {
             return;
         };
-        let Some(sample) = picture.canvas.sample(x, y) else {
+        let Some(sample) = picture.canvas().sample(x, y) else {
             return;
         };
-        let ink = Ink::of_sample(sample, picture.canvas.kind());
+        // A picture of layers gives the colour they show together there.
+        let kind = picture.kind();
+        let ink = if picture.single() {
+            Ink::of_sample(sample, kind)
+        } else {
+            Ink::of_colour(picture.shown_at((x, y), kind.colour(sample)))
+        };
         if secondary {
             self.secondary = ink;
         } else {
@@ -770,65 +958,90 @@ impl View {
         self.inks_changed(layout, damage);
     }
 
-    fn begin_stroke(&mut self, at: Fx, secondary: bool, layout: &Layout, damage: &mut Region) {
+    pub(super) fn begin_stroke(
+        &mut self,
+        at: Fx,
+        secondary: bool,
+        layout: &Layout,
+        damage: &mut Region,
+    ) {
         if !self.reserve(layout, damage) {
             return;
         }
         let kind = self.kind();
-        let smooth = self.smooth(kind) && self.tool != Tool::Pencil && self.tool != Tool::Spray;
         let ink = match self.tool {
             Tool::Eraser => self.eraser_ink(kind),
             _ => self.ink(secondary),
         };
-        let layer = Self::layer(ink, kind, smooth || self.tool == Tool::Spray);
+        let clip = self.selection.clone();
+        // A tip lays its paint over what is there; a pencil sets pixels.
+        let over = Self::coat(ink, kind, true);
+        let stroke = match (self.tip(kind), self.clone_offset) {
+            (Some(tip), Some(offset)) if self.tool == Tool::Clone => {
+                Stroke::cloning(offset, over.blend, tip.opacity_255(), clip)
+            }
+            (Some(_), None) if self.tool == Tool::Clone => return,
+            (Some(tip), _) => Stroke::building(over, tip.opacity_255(), clip),
+            (None, _) => Stroke::new(Self::coat(ink, kind, false), None, clip),
+        };
         // What was said before this stroke is done with; what it says itself
         // stays once it ends.
         if self.message.take().is_some() {
             damage.add(layout.message());
         }
         self.gesture = Some(Gesture::Stroke {
-            stroke: Stroke::new(layer, None),
-            last: at,
+            stroke: Box::new(stroke),
+            path: Path::new(at),
         });
-        self.stroke_to(at, layout, damage);
-    }
-
-    /// Carry the stroke under way on to `to`.
-    fn stroke_to(&mut self, to: Fx, layout: &Layout, damage: &mut Region) {
-        let tool = self.tool;
-        let size = i64::from(self.options.size);
-        let aa = self.smooth(self.kind());
-        if tool == Tool::Spray {
-            if let Some(Gesture::Stroke { last, .. }) = &mut self.gesture {
-                *last = to;
-            }
-            self.spray_at(to, layout, damage);
-            return;
-        }
-        let Some(Gesture::Stroke { stroke, last }) = &mut self.gesture else {
-            return;
-        };
-        let Some(canvas) = self.document.canvas_mut() else {
-            return;
-        };
-        let from = *last;
-        *last = to;
-        let written = if tool == Tool::Pencil {
-            let mut outcome = Ok(());
-            line_pixels(from.pixel(), to.pixel(), |x, y| {
-                if outcome.is_ok() {
-                    outcome = stroke.cover_pixel(canvas, 0, x, y);
+        self.lay(
+            |stroke, canvas, path, tip, aa| {
+                if let Some(tip) = tip {
+                    tip.dab(stroke, canvas, path.last(), aa)
+                } else {
+                    let (x, y) = path.last().pixel();
+                    stroke.cover_pixel(canvas, 0, x, y)
                 }
-            });
-            outcome
+            },
+            layout,
+            damage,
+        );
+    }
+
+    /// The tip the tool in use paints with on `kind`, if it has one: whole on
+    /// a palette picture, which cannot show part of a pixel.
+    pub(super) fn tip(&self, kind: &Kind) -> Option<Tip> {
+        let tip = *self.options.tip(self.tool)?;
+        Some(if kind.sample_bytes() == 4 {
+            tip
         } else {
-            let shape = Shape::Capsule {
-                a: from,
-                b: to,
-                radius: (size * FX / 2).max(FX / 2),
-            };
-            stroke.cover(canvas, 0, &shape, aa)
+            tip.whole()
+        })
+    }
+
+    /// Lay more of the stroke under way through `paint`, handed the stroke,
+    /// the picture, its path, the tip and whether edges are smoothed, then
+    /// report what it changed.
+    fn lay(
+        &mut self,
+        paint: impl FnOnce(
+            &mut Stroke,
+            &mut Canvas,
+            &mut Path,
+            Option<Tip>,
+            bool,
+        ) -> Result<(), OutOfMemory>,
+        layout: &Layout,
+        damage: &mut Region,
+    ) {
+        let kind = self.kind();
+        let (tip, aa) = (self.tip(kind), self.smooth(kind));
+        let Some(Gesture::Stroke { stroke, path }) = &mut self.gesture else {
+            return;
         };
+        let Some(canvas) = self.document.canvas_mut() else {
+            return;
+        };
+        let written = paint(stroke, canvas, path, tip, aa);
         let bounds = stroke.take_damage();
         self.damage_picture(bounds, layout, damage);
         if written.is_err() {
@@ -836,43 +1049,38 @@ impl View {
         }
     }
 
-    /// Scatter one burst of spray about `at`.
-    pub(crate) fn spray_at(&mut self, at: Fx, layout: &Layout, damage: &mut Region) {
-        let radius = i64::from(self.options.size.max(2)) * FX / 2;
-        let area = u64::try_from(radius * radius / (FX * FX))
-            .unwrap_or(1)
-            .max(1);
-        let dots = (area * u64::from(self.options.flow) / 60).clamp(1, 512);
-        let Some(Gesture::Stroke { stroke, .. }) = &mut self.gesture else {
-            return;
-        };
-        let Some(canvas) = self.document.canvas_mut() else {
-            return;
-        };
-        let reach = u64::try_from(radius * 2 + 1).unwrap_or(1);
-        let mut written = Ok(());
-        let mut placed = 0;
-        let mut tries = 0;
-        while placed < dots && tries < dots * 4 && written.is_ok() {
-            tries += 1;
-            let dx = i64::try_from(self.spray.next_u64() % reach).unwrap_or(0) - radius;
-            let dy = i64::try_from(self.spray.next_u64() % reach).unwrap_or(0) - radius;
-            if dx * dx + dy * dy > radius * radius {
-                continue;
-            }
-            placed += 1;
-            let dot = Fx {
-                x: at.x + dx,
-                y: at.y + dy,
-            };
-            let (x, y) = dot.pixel();
-            written = stroke.cover_pixel(canvas, 0, x, y);
-        }
-        let bounds = stroke.take_damage();
-        self.damage_picture(bounds, layout, damage);
-        if written.is_err() {
-            self.state("There is not enough memory to draw more", layout, damage);
-        }
+    /// Carry the stroke under way on to `to`: dabs a spacing apart, or a
+    /// pencil's every pixel.
+    fn stroke_to(&mut self, to: Fx, layout: &Layout, damage: &mut Region) {
+        self.lay(
+            |stroke, canvas, path, tip, aa| {
+                if let Some(tip) = tip {
+                    return path.to(to, tip.step(), |at| tip.dab(stroke, canvas, at, aa));
+                }
+                let from = path.move_to(to);
+                let mut outcome = Ok(());
+                line_pixels(from.pixel(), to.pixel(), |x, y| {
+                    if outcome.is_ok() {
+                        outcome = stroke.cover_pixel(canvas, 0, x, y);
+                    }
+                });
+                outcome
+            },
+            layout,
+            damage,
+        );
+    }
+
+    /// Lay one more dab where the airbrush is held: paint building up the
+    /// longer it stays.
+    pub(crate) fn airbrush(&mut self, layout: &Layout, damage: &mut Region) {
+        self.lay(
+            |stroke, canvas, path, tip, aa| {
+                tip.map_or(Ok(()), |tip| tip.dab(stroke, canvas, path.last(), aa))
+            },
+            layout,
+            damage,
+        );
     }
 
     /// The pointer moved with a drag under way.
@@ -889,33 +1097,78 @@ impl View {
                 self.damage_picture(before, layout, damage);
                 self.damage_picture(after, layout, damage);
             }
-            Some(Gesture::Marquee { from }) => self.mark_out(from, at.pixel(), layout, damage),
+            Some(Gesture::Marquee { from, to, combine }) => {
+                let before = self.marquee_shape(from, to).bounds();
+                self.gesture = Some(Gesture::Marquee {
+                    from,
+                    to: at,
+                    combine,
+                });
+                if at.pixel() != to.pixel() {
+                    self.damage_picture(Some(before), layout, damage);
+                    let after = self.marquee_shape(from, at).bounds();
+                    self.damage_picture(Some(after), layout, damage);
+                }
+            }
+            Some(Gesture::Lasso { .. }) => self.lasso_to(at, layout, damage),
             Some(Gesture::Move { from, last }) => {
                 let now = at.pixel();
                 self.gesture = Some(Gesture::Move { from, last: now });
                 self.shift_floating((now.0 - last.0, now.1 - last.1), layout, damage);
             }
-            None => {}
+            Some(Gesture::Gradient {
+                from, secondary, ..
+            }) => {
+                self.gesture = Some(Gesture::Gradient {
+                    from,
+                    to: at,
+                    secondary,
+                });
+                damage.add(layout.canvas());
+            }
+            Some(Gesture::Pan { from, scroll }) => self.pan_to((from, scroll), layout, damage),
+            Some(Gesture::ZoomBox { .. }) => self.zoom_box_to(layout, damage),
+            Some(Gesture::CropNew { .. } | Gesture::CropAdjust { .. }) => {
+                self.crop_to(at.pixel(), layout, damage);
+            }
+            None => self.follow_draft(at, layout, damage),
         }
     }
 
-    /// Mark the selection out from pixel `from` to pixel `to`.
-    fn mark_out(&mut self, from: (i64, i64), to: (i64, i64), layout: &Layout, damage: &mut Region) {
-        let (width, height) = self.picture_size();
-        let wanted = Bounds {
-            x0: from.0.min(to.0),
-            y0: from.1.min(to.1),
-            x1: from.0.max(to.0) + 1,
-            y1: from.1.max(to.1) + 1,
+    /// Carry the lasso's path on to `at`.
+    fn lasso_to(&mut self, at: Fx, layout: &Layout, damage: &mut Region) {
+        let Some(Gesture::Lasso { points, .. }) = &mut self.gesture else {
+            return;
+        };
+        let Some(&last) = points.last() else {
+            return;
+        };
+        let near = (at.x - last.x).abs() < LASSO_STEP && (at.y - last.y).abs() < LASSO_STEP;
+        // A path that cannot grow keeps the outline it has.
+        if near || !fallible::reserve(points, 1) {
+            return;
         }
-        .intersection(&Bounds::picture(width, height));
-        let before = self.selection;
-        self.selection = (!wanted.is_empty()).then_some(wanted);
-        self.damage_picture(before, layout, damage);
-        self.damage_picture(self.selection, layout, damage);
+        points.push(at);
+        self.damage_picture(Some(segment(last, at)), layout, damage);
     }
 
-    /// Shift the floating layer by `(dx, dy)` pixels.
+    /// The pointer moved with a polygon being marked out: its next edge
+    /// follows.
+    fn follow_draft(&mut self, at: Fx, layout: &Layout, damage: &mut Region) {
+        let Some(draft) = &mut self.draft else {
+            return;
+        };
+        let Some(&last) = draft.corners.last() else {
+            return;
+        };
+        let before = core::mem::replace(&mut draft.to, at);
+        if before.pixel() != at.pixel() {
+            self.damage_picture(Some(segment(last, before)), layout, damage);
+            self.damage_picture(Some(segment(last, at)), layout, damage);
+        }
+    }
+
+    /// Shift the floating selection by `(dx, dy)` pixels.
     fn shift_floating(&mut self, (dx, dy): (i64, i64), layout: &Layout, damage: &mut Region) {
         if (dx, dy) == (0, 0) {
             return;
@@ -933,28 +1186,71 @@ impl View {
     /// The pixels the shape being dragged covers.
     fn preview_bounds(&self) -> Option<Bounds> {
         self.preview()?
-            .layers
+            .coats
             .iter()
             .flatten()
             .map(|(_, shape)| shape.bounds())
             .reduce(|a, b| a.union(&b))
     }
 
-    /// The pointer let go: finish the drag.
-    fn release(&mut self, layout: &Layout, damage: &mut Region) {
-        self.dragging = None;
+    /// The drag's own button let go: finish the drag, marking out the
+    /// selection a marquee or a lasso drew. A click that drew nothing marks
+    /// nothing.
+    fn release(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
         match self.gesture.take() {
-            Some(Gesture::Stroke { stroke, .. }) => {
-                self.document.record_tiles(stroke.finish());
+            Some(Gesture::Marquee { from, to, combine }) => {
+                self.dragging = None;
+                let shape = self.marquee_shape(from, to);
+                self.damage_picture(Some(shape.bounds()), layout, damage);
+                if from == to {
+                    return Outcome::none();
+                }
+                self.select(Recipe::Shape(shape), combine, layout, damage)
             }
-            Some(Gesture::Shape {
-                from,
-                to,
-                secondary,
-            }) => self.put_shape(from, to, secondary, layout, damage),
-            Some(Gesture::Marquee { .. } | Gesture::Move { .. }) | None => {}
+            Some(Gesture::Lasso { points, combine }) => {
+                self.dragging = None;
+                self.damage_picture(path_bounds(&points, None), layout, damage);
+                if points.len() < 3 {
+                    return Outcome::none();
+                }
+                self.select(Recipe::Outline(points), combine, layout, damage)
+            }
+            Some(gesture @ Gesture::Gradient { .. }) => {
+                self.gesture = Some(gesture);
+                let gradient = self.gradient();
+                self.gesture = None;
+                self.dragging = None;
+                match gradient {
+                    Some(gradient) => self.gradient_done(gradient, layout, damage),
+                    None => Outcome::none(),
+                }
+            }
+            Some(Gesture::ZoomBox { from, to, out }) => {
+                self.dragging = None;
+                self.zoom_box_done((from, to, out), layout, damage);
+                Outcome::none()
+            }
+            Some(Gesture::CropNew { from, .. }) => {
+                self.dragging = None;
+                // A click sets nothing out: it lets the box go.
+                let clicked = Bounds {
+                    x0: from.0,
+                    y0: from.1,
+                    x1: from.0 + 1,
+                    y1: from.1 + 1,
+                };
+                if self.crop.is_none_or(|crop| crop == clicked) {
+                    self.crop = None;
+                    damage.add(layout.canvas());
+                }
+                Outcome::none()
+            }
+            gesture => {
+                self.gesture = gesture;
+                self.end_gesture(layout, damage);
+                Outcome::none()
+            }
         }
-        self.spray_due = None;
     }
 
     /// Lay the shape dragged from `from` to `to` down on the picture.
@@ -968,14 +1264,18 @@ impl View {
     ) {
         let kind = self.kind();
         let aa = self.smooth(kind);
-        let [Some((first, first_shape)), second] = self.shape_layers(from, to, secondary, kind)
+        let [Some((first, first_shape)), second] = self.shape_coats(from, to, secondary, kind)
         else {
             return;
         };
         let Some(canvas) = self.document.canvas_mut() else {
             return;
         };
-        let mut stroke = Stroke::new(first, second.map(|(layer, _)| layer));
+        let mut stroke = Stroke::new(
+            first,
+            second.map(|(layer, _)| layer),
+            self.selection.clone(),
+        );
         let mut written = stroke.cover(canvas, 0, &first_shape, aa);
         if let (Ok(()), Some((_, shape))) = (&written, second) {
             written = stroke.cover(canvas, 1, &shape, aa);
@@ -1005,11 +1305,11 @@ impl View {
         let Some(picture) = self.document.picture() else {
             return Outcome::none();
         };
-        if picture.canvas.sample(x, y).is_none() {
+        if picture.canvas().sample(x, y).is_none() {
             return Outcome::none();
         }
         let ink = self.ink(secondary);
-        let layer = Layer {
+        let coat = Coat {
             ink,
             blend: if ink == Ink::Clear {
                 crate::stroke::Blend::Replace
@@ -1017,7 +1317,7 @@ impl View {
                 crate::stroke::Blend::Over
             },
         };
-        let Ok(canvas) = picture.canvas.try_clone() else {
+        let Ok(canvas) = picture.canvas().try_clone() else {
             self.state("There is not enough memory to fill", layout, damage);
             return Outcome::none();
         };
@@ -1027,10 +1327,11 @@ impl View {
                 canvas,
                 at: (x, y),
                 tolerance,
-                layer,
+                coat,
+                contiguous: self.options.contiguous,
+                clip: self.selection.clone(),
             },
-            None,
-            Settles::Nothing,
+            Lands::Tiles(Settles::Nothing),
             "fill",
             layout,
             damage,
@@ -1038,12 +1339,11 @@ impl View {
     }
 
     /// Hand `work` to a worker; the picture takes no edits until it is back,
-    /// and `settles` says what then becomes of the selection.
-    fn begin_work(
+    /// and `lands` says what its answer then becomes.
+    pub(super) fn begin_work(
         &mut self,
         work: Compute,
-        transform: Option<Transform>,
-        settles: Settles,
+        lands: Lands,
         what: &'static str,
         layout: &Layout,
         damage: &mut Region,
@@ -1053,9 +1353,9 @@ impl View {
         self.pending = Some(Pending {
             job,
             entry: self.document.current(),
+            layer: self.active_layer(),
             generation: self.document.generation(),
-            transform,
-            settles,
+            lands,
             what,
         });
         self.sync_picker();
@@ -1072,6 +1372,9 @@ impl View {
         layout: &Layout,
         damage: &mut Region,
     ) -> Outcome {
+        if self.previewing(job) {
+            return self.previewed(answer, layout, damage);
+        }
         let Some(pending) = self.pending.take_if(|pending| pending.job == job) else {
             return Outcome::none();
         };
@@ -1090,64 +1393,146 @@ impl View {
             );
             return Outcome::none();
         }
-        match answer {
-            Computed::Tiles(Ok(tiles)) => {
+        self.land(pending, answer, layout, damage)
+    }
+
+    /// Land a worker's answer to `pending` on the picture it was asked of.
+    fn land(
+        &mut self,
+        pending: Pending,
+        answer: Computed,
+        layout: &Layout,
+        damage: &mut Region,
+    ) -> Outcome {
+        let what = pending.what;
+        match (answer, pending.lands) {
+            (Computed::Filtered(Ok(tiles)) | Computed::Tiles(Ok(tiles)), Lands::Tiles(settles)) => {
                 let filled = self.document.picture().and_then(|picture| {
                     tiles
                         .iter()
-                        .map(|(index, _)| picture.canvas.tile_rect(*index).bounds())
+                        .map(|(index, _)| picture.canvas().tile_rect(*index).bounds())
                         .reduce(|a, b| a.union(&b))
                 });
-                let refusal = match self.document.adopt_tiles(tiles) {
+                let refusal = match self.document.adopt_tiles(pending.layer, tiles) {
                     Ok(true) => {
                         self.damage_picture(filled, layout, damage);
-                        return self.settle_selection(pending.settles, layout, damage);
+                        return self.settle_selection(settles, layout, damage);
                     }
                     Ok(false) => alloc::format!(
-                        "What was asked no longer fits the picture, so it could not {}",
-                        pending.what
+                        "What was asked no longer fits the picture, so it could not {what}"
                     ),
-                    Err(OutOfMemory) => {
-                        alloc::format!("There is not enough memory to {}", pending.what)
-                    }
+                    Err(OutOfMemory) => alloc::format!("There is not enough memory to {what}"),
                 };
                 self.say(refusal);
             }
-            Computed::Tiles(Err(OutOfMemory)) => {
-                let reason = alloc::format!("There is not enough memory to {}", pending.what);
-                self.say(reason);
+            (Computed::Filtered(Err(crate::filter::FilterError::NeedsColour)), _) => {
+                self.say(alloc::format!("This picture cannot {what}"));
             }
-            Computed::Picture(Ok(canvas)) => {
-                let sprite = self.document.picture().and_then(|held| {
-                    let sprite = held.sprite.as_ref()?;
-                    Some(match pending.transform {
-                        Some(transform) => sprite.refit(transform, &canvas),
-                        None => sprite.clone(),
-                    })
-                });
-                match self.document.replace_picture(Picture { canvas, sprite }) {
-                    Ok(true) => {}
-                    Ok(false) => self.say(KEPT_UNCHANGED),
-                    Err(OutOfMemory) => self.say("There is not enough memory to keep the change"),
-                }
-                return self.after_picture_change(layout, damage);
+            (
+                Computed::Filtered(Err(crate::filter::FilterError::OutOfMemory))
+                | Computed::Tiles(Err(OutOfMemory))
+                | Computed::Selection(Err(OutOfMemory))
+                | Computed::Composed(Err(OutOfMemory))
+                | Computed::Survey(Err(OutOfMemory)),
+                _,
+            ) => self.say(alloc::format!("There is not enough memory to {what}")),
+            (Computed::Selection(Ok(marked)), Lands::Selection) => {
+                self.adopt_selection(marked, layout, damage);
             }
-            Computed::Picture(Err(err)) => {
+            (Computed::Picture(Ok(canvases)), Lands::Transform(transform)) => {
+                return self.adopt_transformed(canvases, transform, layout, damage);
+            }
+            (Computed::Composed(Ok(canvas)), Lands::Merged(range)) => {
+                return self.adopt_merged(canvas, range, layout, damage);
+            }
+            (Computed::Survey(Ok(formats)), Lands::Sheet { then_close }) => {
+                self.put_up_save_as(formats, then_close, layout, damage);
+            }
+            (Computed::Picture(Err(err)), _) => {
                 let reason = match err {
                     TransformError::OutOfMemory => {
-                        alloc::format!("There is not enough memory to {}", pending.what)
+                        alloc::format!("There is not enough memory to {what}")
                     }
-                    TransformError::BadSize => alloc::format!(
-                        "The picture cannot {}: it would be too large or empty",
-                        pending.what
-                    ),
-                    TransformError::NotApplicable => {
-                        alloc::format!("This picture cannot {}", pending.what)
+                    TransformError::BadSize => {
+                        alloc::format!("The picture cannot {what}: it would be too large or empty")
                     }
+                    TransformError::NotApplicable => alloc::format!("This picture cannot {what}"),
                 };
                 self.say(reason);
             }
+            // Every job lands as what it was asked for.
+            _ => self.say(alloc::format!("The picture could not {what}")),
         }
+        Outcome::none()
+    }
+
+    /// A transform's layers are in: they replace the picture's, its sprite
+    /// details refitted to what it became.
+    fn adopt_transformed(
+        &mut self,
+        canvases: Vec<Canvas>,
+        transform: Transform,
+        layout: &Layout,
+        damage: &mut Region,
+    ) -> Outcome {
+        let made = self.document.picture().and_then(|held| {
+            let mut picture = held.with_canvases(canvases)?;
+            // A sprite is one layer.
+            picture.sprite = picture
+                .sprite
+                .as_ref()
+                .map(|sprite| sprite.refit(transform, picture.canvas()));
+            Some(picture)
+        });
+        match made.map(|picture| self.document.replace_picture(picture)) {
+            Some(Ok(true)) => {}
+            Some(Ok(false)) | None => self.say(KEPT_UNCHANGED),
+            Some(Err(OutOfMemory)) => self.say("There is not enough memory to keep the change"),
+        }
+        self.after_picture_change(layout, damage)
+    }
+
+    /// Layers `range`, laid together as `canvas`, are in: they become one
+    /// layer, shown wholly under the lowest one's name, and it is painted on.
+    fn adopt_merged(
+        &mut self,
+        canvas: Canvas,
+        range: core::ops::Range<usize>,
+        layout: &Layout,
+        damage: &mut Region,
+    ) -> Outcome {
+        let merged = self.document.picture().and_then(|held| {
+            let mut name = String::new();
+            let lowest = &held.layers().get(range.start)?.name;
+            name.try_reserve_exact(lowest.len()).ok()?;
+            name.push_str(lowest);
+            let mut one = Some(Layer::new(canvas, name));
+            let mut layers = Vec::new();
+            layers
+                .try_reserve_exact(held.layers().len() + 1 - range.len())
+                .ok()?;
+            for (index, layer) in held.layers().iter().enumerate() {
+                if index == range.start {
+                    layers.push(one.take()?);
+                } else if !range.contains(&index) {
+                    layers.push(layer.try_clone().ok()?);
+                }
+            }
+            held.with_layers(layers, range.start)
+        });
+        match merged.map(|picture| self.document.replace_picture(picture)) {
+            Some(Ok(true)) => {}
+            Some(Ok(false)) | None => self.say("There is not enough memory to merge the layers"),
+            Some(Err(OutOfMemory)) => self.say("There is not enough memory to keep the change"),
+        }
+        Self::layers_changed(layout, damage)
+    }
+
+    /// The layers changed, the picture's size and kind kept: what shows, and
+    /// what the status band says of them, is drawn again.
+    pub(super) fn layers_changed(layout: &Layout, damage: &mut Region) -> Outcome {
+        damage.add(layout.canvas());
+        damage.add(layout.status());
         Outcome::none()
     }
 
@@ -1169,8 +1554,9 @@ impl View {
             Settles::PutDown(then) => {
                 if let Some(held) = self.held.take() {
                     let (width, height) = self.picture_size();
-                    let on = held.bounds().intersection(&Bounds::picture(width, height));
-                    self.selection = (!on.is_empty()).then_some(on);
+                    self.selection = held
+                        .selection()
+                        .and_then(|chosen| chosen.within(Bounds::picture(width, height)));
                     self.damage_picture(Some(held.bounds()), layout, damage);
                 }
                 self.carry_on(then, layout, damage)
@@ -1179,54 +1565,276 @@ impl View {
     }
 
     /// The picture showing was replaced, or another shown: carry the inks,
-    /// the panel and the view over to it.
+    /// the palette, the bar and the view over to it.
     fn after_picture_change(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
         self.selection = None;
+        self.draft = None;
+        self.crop = None;
         self.adopt_kind();
         damage.add(layout.window());
         self.settle(layout, damage);
         Outcome::relaid()
     }
 
-    /// A press with the select tool: drag the floating layer, lift the
-    /// selection, put the layer down, or mark a new selection out.
-    fn select_press(&mut self, at: (i64, i64), layout: &Layout, damage: &mut Region) -> Outcome {
-        let inside = |bounds: Bounds| {
-            (bounds.x0..bounds.x1).contains(&at.0) && (bounds.y0..bounds.y1).contains(&at.1)
-        };
+    /// A press with the select tool: place a polygon's next corner, drag
+    /// the floating selection, put it down, lift the selection, or begin
+    /// marking a selection out — which, met with the one held, may begin
+    /// inside it.
+    fn select_press(
+        &mut self,
+        at: Fx,
+        layout: &Layout,
+        scale: Scale,
+        damage: &mut Region,
+    ) -> Outcome {
+        if self.draft.is_some() {
+            return self.place_corner(at, layout, scale, damage);
+        }
+        let pixel = at.pixel();
         if self
             .floating()
-            .is_some_and(|floating| inside(floating.bounds()))
+            .is_some_and(|floating| floating.chooses(pixel.0, pixel.1))
         {
-            self.gesture = Some(Gesture::Move { from: at, last: at });
+            self.gesture = Some(Gesture::Move {
+                from: pixel,
+                last: pixel,
+            });
             return Outcome::none();
         }
         if self.held.is_some() {
             // A press off the layer puts it down; the next marks anew.
             return self.put_down_then(Then::Rest, layout, damage);
         }
-        if self.selection.is_some_and(inside) {
-            if self.lift(layout, damage) {
-                self.gesture = Some(Gesture::Move { from: at, last: at });
+        let combine = self.combine();
+        let inside = self
+            .selection
+            .as_ref()
+            .is_some_and(|chosen| chosen.chooses(pixel.0, pixel.1));
+        if combine == Combine::Replace {
+            if inside {
+                if self.lift(layout, damage) {
+                    self.gesture = Some(Gesture::Move {
+                        from: pixel,
+                        last: pixel,
+                    });
+                }
+                return Outcome::none();
             }
-            return Outcome::none();
+            self.drop_selection(layout, damage);
         }
-        self.drop_selection(layout, damage);
-        self.gesture = Some(Gesture::Marquee { from: at });
+        match self.options.marquee {
+            Marquee::Rectangle | Marquee::Ellipse => {
+                self.gesture = Some(Gesture::Marquee {
+                    from: at,
+                    to: at,
+                    combine,
+                });
+            }
+            Marquee::Lasso => match fallible::collected(1, core::iter::once(at)) {
+                Some(points) => self.gesture = Some(Gesture::Lasso { points, combine }),
+                None => self.state(NO_ROOM_TO_SELECT, layout, damage),
+            },
+            Marquee::Polygon => match fallible::collected(1, core::iter::once(at)) {
+                Some(corners) => {
+                    self.draft = Some(Draft {
+                        corners,
+                        to: at,
+                        aim: Aim::Select(combine),
+                    });
+                    self.damage_picture(Some(segment(at, at)), layout, damage);
+                }
+                None => self.state(NO_ROOM_TO_SELECT, layout, damage),
+            },
+            Marquee::Wand => return self.wand(pixel, combine, layout, damage),
+        }
         Outcome::none()
     }
 
-    /// Lift the selection into a floating layer, leaving what an eraser
-    /// would once it is put down. Nothing is written or copied.
+    /// How a selection marked out now meets the one held: Shift adds, Alt
+    /// takes away, both keep only what both choose, and otherwise the bar's
+    /// setting says.
+    fn combine(&self) -> Combine {
+        match (self.modifiers.shift, self.modifiers.alt) {
+            (true, true) => Combine::Intersect,
+            (true, false) => Combine::Add,
+            (false, true) => Combine::Subtract,
+            (false, false) => self.options.combine,
+        }
+    }
+
+    /// Choose the pixels joined to pixel `at` through colours like it.
+    fn wand(
+        &mut self,
+        (x, y): (i64, i64),
+        combine: Combine,
+        layout: &Layout,
+        damage: &mut Region,
+    ) -> Outcome {
+        let (Ok(x), Ok(y)) = (u32::try_from(x), u32::try_from(y)) else {
+            return Outcome::none();
+        };
+        let Some(picture) = self.document.picture() else {
+            return Outcome::none();
+        };
+        if picture.canvas().sample(x, y).is_none() {
+            return Outcome::none();
+        }
+        let Ok(canvas) = picture.canvas().try_clone() else {
+            self.state(NO_ROOM_TO_SELECT, layout, damage);
+            return Outcome::none();
+        };
+        let recipe = Recipe::Wand {
+            canvas,
+            at: (x, y),
+            tolerance: self.options.tolerance,
+        };
+        self.select(recipe, combine, layout, damage)
+    }
+
+    /// Make the selection `recipe` describes and meet it with the one held
+    /// as `combine` says: a plain rectangle at once, anything whose cost
+    /// grows with the picture on a worker.
+    fn select(
+        &mut self,
+        recipe: Recipe,
+        combine: Combine,
+        layout: &Layout,
+        damage: &mut Region,
+    ) -> Outcome {
+        if !self.idle(layout, damage) {
+            return Outcome::none();
+        }
+        let (width, height) = self.picture_size();
+        let within = Bounds::picture(width, height);
+        let feather = self.options.feather;
+        let before = (combine != Combine::Replace)
+            .then(|| self.selection.clone())
+            .flatten();
+        if let Recipe::Shape(Shape::Rect {
+            span,
+            outline: None,
+        }) = &recipe
+        {
+            let alone = combine == Combine::Replace || combine == Combine::Add && before.is_none();
+            if feather == 0 && alone {
+                let marked = Mask::rect(span.bounds().intersection(&within));
+                self.adopt_selection(marked, layout, damage);
+                return Outcome::none();
+            }
+        }
+        let smooth = self.smooth(self.kind());
+        let work = Compute::Select {
+            recipe,
+            before,
+            combine,
+            edge: (feather, smooth),
+            within,
+        };
+        self.begin_work(work, Lands::Selection, SELECTING, layout, damage)
+    }
+
+    /// Hold `marked` as the selection.
+    fn adopt_selection(&mut self, marked: Option<Mask>, layout: &Layout, damage: &mut Region) {
+        let before = core::mem::replace(&mut self.selection, marked);
+        self.damage_picture(before.as_ref().map(Mask::bounds), layout, damage);
+        self.damage_picture(self.selection.as_ref().map(Mask::bounds), layout, damage);
+    }
+
+    /// A press placing a polygon's next corner at `at`, or closing it where
+    /// the press lands on its first corner.
+    pub(super) fn place_corner(
+        &mut self,
+        at: Fx,
+        layout: &Layout,
+        scale: Scale,
+        damage: &mut Region,
+    ) -> Outcome {
+        let reach = i64::from(scale.scale_length(CLOSE_REACH));
+        let (size, area, pointer) = (self.picture_size(), layout.canvas(), self.pointer);
+        let Some(draft) = &mut self.draft else {
+            return Outcome::none();
+        };
+        let closes = draft.corners.len() >= 3
+            && draft.corners.first().is_some_and(|first| {
+                let (x, y) = self.viewport.screen_of((first.x, first.y), size, area);
+                (x - i64::from(pointer.x)).abs() <= reach
+                    && (y - i64::from(pointer.y)).abs() <= reach
+            });
+        if closes {
+            return self.close_draft(layout, damage);
+        }
+        let Some(&last) = draft.corners.last() else {
+            return Outcome::none();
+        };
+        if last == at {
+            return Outcome::none();
+        }
+        if !fallible::reserve(&mut draft.corners, 1) {
+            self.state(
+                "There is not enough memory for another corner",
+                layout,
+                damage,
+            );
+            return Outcome::none();
+        }
+        draft.corners.push(at);
+        self.damage_picture(Some(segment(last, at)), layout, damage);
+        Outcome::none()
+    }
+
+    /// Take the polygon's last corner back; with none left it is gone.
+    fn unplace_corner(&mut self, layout: &Layout, damage: &mut Region) {
+        let Some(draft) = &mut self.draft else {
+            return;
+        };
+        let bounds = path_bounds(&draft.corners, Some(draft.to));
+        draft.corners.pop();
+        if draft.corners.is_empty() {
+            self.draft = None;
+        }
+        self.damage_picture(bounds, layout, damage);
+    }
+
+    /// Close the polygon being marked out and make the selection it
+    /// encloses; one of fewer than three corners encloses nothing.
+    fn close_draft(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
+        let Some(draft) = self.draft.take() else {
+            return Outcome::none();
+        };
+        self.damage_picture(path_bounds(&draft.corners, Some(draft.to)), layout, damage);
+        if draft.corners.len() < 3 {
+            return Outcome::none();
+        }
+        match draft.aim {
+            Aim::Select(combine) => {
+                self.select(Recipe::Outline(draft.corners), combine, layout, damage)
+            }
+            Aim::Shape { secondary } => {
+                self.put_polygon(&draft.corners, secondary, layout, damage);
+                Outcome::none()
+            }
+        }
+    }
+
+    /// Turn the polygon being marked out down.
+    fn drop_draft(&mut self, layout: &Layout, damage: &mut Region) {
+        if let Some(draft) = self.draft.take() {
+            self.damage_picture(path_bounds(&draft.corners, Some(draft.to)), layout, damage);
+        }
+    }
+
+    /// Lift the selection into a floating selection, leaving what an eraser
+    /// would, as much as it chose, once it is put down. Nothing is written
+    /// or copied.
     fn lift(&mut self, layout: &Layout, damage: &mut Region) -> bool {
-        let Some(area) = self.selection else {
+        let Some(chosen) = self.selection.clone() else {
             return false;
         };
         let left = self.eraser_ink(self.kind());
         let Some(picture) = self.document.picture() else {
             return false;
         };
-        let Ok(floating) = Floating::lift(&picture.canvas, area, left) else {
+        let Ok(floating) = Floating::lift(picture.canvas(), &chosen, left) else {
             self.state(
                 "There is not enough memory to lift the selection",
                 layout,
@@ -1236,13 +1844,13 @@ impl View {
         };
         self.held = Some(floating);
         self.selection = None;
-        self.damage_picture(Some(area), layout, damage);
+        self.damage_picture(Some(chosen.bounds()), layout, damage);
         true
     }
 
-    /// Put the floating layer down on a worker, then carry out `then` once it
+    /// Put the floating selection down on a worker, then carry out `then` once it
     /// has landed; with nothing floating, carry it out now. The picture takes
-    /// no edits until the layer is down.
+    /// no edits until it is down.
     fn put_down_then(&mut self, then: Then, layout: &Layout, damage: &mut Region) -> Outcome {
         if self.held.is_none() {
             return self.carry_on(then, layout, damage);
@@ -1254,7 +1862,7 @@ impl View {
             .document
             .picture()
             .zip(self.held.as_ref())
-            .map(|(picture, held)| (picture.canvas.try_clone(), held.try_clone()));
+            .map(|(picture, held)| (picture.canvas().try_clone(), held.try_clone()));
         let Some((Ok(canvas), Ok(floating))) = shared else {
             self.state(
                 "There is not enough memory to put the selection down",
@@ -1265,15 +1873,14 @@ impl View {
         };
         self.begin_work(
             Compute::PutDown { canvas, floating },
-            None,
-            Settles::PutDown(then),
+            Lands::Tiles(Settles::PutDown(then)),
             "put the selection down",
             layout,
             damage,
         )
     }
 
-    /// Carry out what follows a floating layer's putting down.
+    /// Carry out what follows a floating selection's putting down.
     fn carry_on(&mut self, then: Then, layout: &Layout, damage: &mut Region) -> Outcome {
         match then {
             Then::Rest => Outcome::none(),
@@ -1292,14 +1899,14 @@ impl View {
         self.choose_tool(Tool::Select, layout, damage)
     }
 
-    /// Forget the selection marked out.
+    /// Forget the selection held.
     fn drop_selection(&mut self, layout: &Layout, damage: &mut Region) {
         if let Some(selection) = self.selection.take() {
-            self.damage_picture(Some(selection), layout, damage);
+            self.damage_picture(Some(selection.bounds()), layout, damage);
         }
     }
 
-    /// Turn a floating layer down: one lifted goes back where it was, one
+    /// Turn a floating selection down: one lifted goes back where it was, one
     /// pasted is thrown away. Nothing was written, so nothing is undone.
     fn turn_down_floating(&mut self, layout: &Layout, damage: &mut Region) -> bool {
         if self.held.is_none() {
@@ -1315,10 +1922,41 @@ impl View {
         true
     }
 
-    /// End any drag, as though the pointer had let go.
+    /// End any drag as though the pointer had let go, but a marquee or a
+    /// lasso, which only its own button's release marks: anything else that
+    /// ends one turns it down.
     pub(crate) fn end_gesture(&mut self, layout: &Layout, damage: &mut Region) {
-        if self.gesture.is_some() {
-            self.release(layout, damage);
+        if matches!(
+            self.gesture,
+            Some(Gesture::Marquee { .. } | Gesture::Lasso { .. } | Gesture::Gradient { .. })
+        ) {
+            self.cancel_gesture(layout, damage);
+            return;
+        }
+        self.dragging = None;
+        self.airbrush_due = None;
+        match self.gesture.take() {
+            Some(Gesture::Stroke { stroke, .. }) => {
+                self.document.record_tiles(stroke.finish());
+            }
+            Some(Gesture::Shape {
+                from,
+                to,
+                secondary,
+            }) => self.put_shape(from, to, secondary, layout, damage),
+            Some(Gesture::ZoomBox { from, to, .. }) => {
+                damage.add(super::tools::screen_box(from, to).intersection(&layout.canvas()));
+            }
+            Some(
+                Gesture::Marquee { .. }
+                | Gesture::Lasso { .. }
+                | Gesture::Gradient { .. }
+                | Gesture::Move { .. }
+                | Gesture::Pan { .. }
+                | Gesture::CropNew { .. }
+                | Gesture::CropAdjust { .. },
+            )
+            | None => {}
         }
     }
 
@@ -1328,7 +1966,7 @@ impl View {
     fn cancel_gesture(&mut self, layout: &Layout, damage: &mut Region) {
         let preview = self.preview_bounds();
         self.dragging = None;
-        self.spray_due = None;
+        self.airbrush_due = None;
         match self.gesture.take() {
             Some(Gesture::Stroke { stroke, .. }) => {
                 if let Some(canvas) = self.document.canvas_mut() {
@@ -1336,22 +1974,42 @@ impl View {
                     self.damage_picture(restored, layout, damage);
                 }
             }
-            Some(Gesture::Marquee { .. }) => {
-                let marked = self.selection.take();
-                self.damage_picture(marked, layout, damage);
+            Some(Gesture::Marquee { from, to, .. }) => {
+                let marked = self.marquee_shape(from, to).bounds();
+                self.damage_picture(Some(marked), layout, damage);
+            }
+            Some(Gesture::Lasso { points, .. }) => {
+                self.damage_picture(path_bounds(&points, None), layout, damage);
             }
             Some(Gesture::Move { from, last }) => {
                 self.shift_floating((from.0 - last.0, from.1 - last.1), layout, damage);
+            }
+            Some(Gesture::Gradient { .. }) => damage.add(layout.canvas()),
+            Some(Gesture::Pan { scroll, .. }) => {
+                self.scroll_to(Some(scroll.0), Some(scroll.1), layout, damage);
+            }
+            Some(Gesture::ZoomBox { from, to, .. }) => {
+                damage.add(super::tools::screen_box(from, to).intersection(&layout.canvas()));
+            }
+            Some(Gesture::CropNew { before, .. }) => {
+                self.crop = before;
+                damage.add(layout.canvas());
+            }
+            Some(Gesture::CropAdjust { start, .. }) => {
+                self.crop = Some(start);
+                damage.add(layout.canvas());
             }
             Some(Gesture::Shape { .. }) | None => {}
         }
         self.damage_picture(preview, layout, damage);
     }
 
-    /// The area an edit of the selection acts on: the floating layer's, else
+    /// The area an edit of the selection acts on: the floating selection's, else
     /// the selection's.
     fn selected_area(&self) -> Option<Bounds> {
-        self.floating().map(Floating::bounds).or(self.selection)
+        self.floating()
+            .map(Floating::bounds)
+            .or_else(|| self.selection.as_ref().map(Mask::bounds))
     }
 
     /// What a copy of the selection takes, as it stands: `None` with nothing
@@ -1360,18 +2018,18 @@ impl View {
         if let Some(floating) = &self.held {
             return Some(floating.try_clone().map(Clip::Floating));
         }
-        let area = self.selection?;
+        let chosen = self.selection.clone()?;
         let picture = self.document.picture()?;
         Some(
             picture
-                .canvas
+                .canvas()
                 .try_clone()
-                .map(|canvas| Clip::Area { canvas, area }),
+                .map(|canvas| Clip::Area { canvas, chosen }),
         )
     }
 
     /// The clipboard answered a paste with `pasted`, a picture decoded from
-    /// it as a layer over a picture of the kind it names, or the reason there
+    /// it to float over a picture of the kind it names, or the reason there
     /// is none: float it over the picture's visible top left.
     pub fn pasted(
         &mut self,
@@ -1414,6 +2072,7 @@ impl View {
     /// The user asked to close the window.
     pub fn close_requested(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
         self.end_gesture(layout, damage);
+        self.commit_text(layout, damage);
         if !tairix_window::document::SavedDocument::is_modified(self) {
             return Outcome::asking(Request::Close);
         }
@@ -1439,7 +2098,11 @@ impl View {
             (Some(Modal::Form(form)), ModalAnswer::Form(Answer::Confirmed)) => {
                 self.form_answered(form, layout, damage)
             }
-            _ => Outcome::none(),
+            _ => {
+                // A form turned down takes its preview with it.
+                self.preview = None;
+                Outcome::none()
+            }
         }
     }
 
@@ -1453,7 +2116,27 @@ impl View {
         };
         match form.purpose() {
             Purpose::NewPicture => match form.new_picture_answer() {
-                Ok(picture) => Outcome::asking(Request::Own(Own::NewWindow(picture))),
+                Ok((picture, format)) => {
+                    Outcome::asking(Request::Own(Own::NewWindow { picture, format }))
+                }
+                Err(reason) => refused(self, form, &reason),
+            },
+            Purpose::NewPage => match form.new_page_answer() {
+                Ok(page) => self.add_page(page, layout, damage),
+                Err(reason) => refused(self, form, &reason),
+            },
+            Purpose::SaveAs { then_close } => {
+                let (format, settings) = form.save_as_answer();
+                self.document.set_settings(settings);
+                self.save_as = Some(format);
+                Outcome::asking(Request::SaveWhere { then_close })
+            }
+            Purpose::Filter => match form.filter_answer() {
+                Some(filter) => self.apply_filter(filter, layout, damage),
+                None => Outcome::none(),
+            },
+            Purpose::Layer => match form.layer_answer() {
+                Ok(shown) => self.reshow_layer(shown, layout, damage),
                 Err(reason) => refused(self, form, &reason),
             },
             Purpose::NewSprite => match form.new_sprite_answer() {
@@ -1507,11 +2190,55 @@ impl View {
                     damage,
                 )
             }
-            Purpose::Quality => {
-                self.document.set_jpeg_quality(form.quality_answer());
-                Outcome::none()
-            }
         }
+    }
+
+    /// Take the question of how to save: find, on a worker, what each format
+    /// the document can be written as would not keep, and then put up the
+    /// Save As sheet of them — or say why none is, which asks nothing
+    /// further.
+    pub(crate) fn ask_save_as(
+        &mut self,
+        then_close: bool,
+        layout: &Layout,
+        damage: &mut Region,
+    ) -> Outcome {
+        let entries = self.document.entries();
+        let origin = self.document.origin();
+        let none = SaveFormat::ALL
+            .into_iter()
+            .all(|format| writable_as(Some(format), entries, origin).is_err());
+        if none {
+            let refusal = writable_as(None, entries, origin)
+                .err()
+                .map_or_else(String::new, |refusal| alloc::format!("{refusal}"));
+            self.state(&refusal, layout, damage);
+            return Outcome::none();
+        }
+        if !self.idle(layout, damage) {
+            return Outcome::none();
+        }
+        let Ok(snapshot) = self.document.snapshot() else {
+            self.state("There is not enough memory to save", layout, damage);
+            return Outcome::none();
+        };
+        let lands = Lands::Sheet { then_close };
+        self.begin_work(Compute::Survey { snapshot }, lands, "save", layout, damage)
+    }
+
+    /// The survey of what each format would not keep is in: put up the Save
+    /// As sheet of them, the document's own natural format chosen first.
+    fn put_up_save_as(
+        &mut self,
+        formats: Vec<(SaveFormat, Vec<crate::save::Loss>)>,
+        then_close: bool,
+        layout: &Layout,
+        damage: &mut Region,
+    ) {
+        let natural = natural(self.document.entries(), self.document.origin());
+        let choices = SaveChoices { formats };
+        let form = Form::save_as(choices, natural, self.document.settings(), then_close);
+        self.ask(form, layout, damage);
     }
 
     /// What a new pixel of the canvas is: the secondary colour where the
@@ -1528,7 +2255,12 @@ impl View {
 
     /// Give the palette picture showing `palette`, as one step, its sprite
     /// details restating it.
-    fn change_palette(&mut self, palette: Vec<[u8; 4]>, layout: &Layout, damage: &mut Region) {
+    pub(super) fn change_palette(
+        &mut self,
+        palette: Vec<[u8; 4]>,
+        layout: &Layout,
+        damage: &mut Region,
+    ) {
         if !self.idle(layout, damage) {
             return;
         }
@@ -1557,7 +2289,7 @@ impl View {
     }
 
     /// Put `form` over the window.
-    fn ask(&mut self, form: Form, layout: &Layout, damage: &mut Region) {
+    pub(super) fn ask(&mut self, form: Form, layout: &Layout, damage: &mut Region) {
         // A form answers the picture as it stood when it opened, so none opens
         // while a worker may yet change it.
         if !self.idle(layout, damage) {
@@ -1569,7 +2301,7 @@ impl View {
     }
 
     /// Ask a worker for `transform` of the picture showing.
-    fn transform(
+    pub(super) fn transform(
         &mut self,
         transform: Transform,
         what: &'static str,
@@ -1582,22 +2314,84 @@ impl View {
         let Some(picture) = self.document.picture() else {
             return Outcome::none();
         };
-        let Ok(canvas) = picture.canvas.try_clone() else {
+        let palette = matches!(
+            transform,
+            Transform::Convert {
+                depth: Depth::Indexed(_),
+                ..
+            } | Transform::Mask { .. }
+        );
+        if palette && picture.layers().len() > 1 {
+            self.state(
+                "A palette picture holds one layer: flatten the picture first",
+                layout,
+                damage,
+            );
+            return Outcome::none();
+        }
+        // The canvas a resize adds is filled beneath every layer, and left
+        // clear over it.
+        let for_layer = |index: usize| match transform {
+            Transform::Resize {
+                width,
+                height,
+                anchor,
+                ..
+            } if index > 0 => Transform::Resize {
+                width,
+                height,
+                anchor,
+                fill: Sample::Rgba([0; 4]),
+            },
+            other => other,
+        };
+        let mut layers = Vec::new();
+        let shared = layers.try_reserve_exact(picture.layers().len()).is_ok()
+            && picture.layers().iter().enumerate().all(|(index, layer)| {
+                layer.canvas.try_clone().is_ok_and(|canvas| {
+                    layers.push((canvas, for_layer(index)));
+                    true
+                })
+            });
+        if !shared {
             self.state(
                 &alloc::format!("There is not enough memory to {what}"),
                 layout,
                 damage,
             );
             return Outcome::none();
-        };
+        }
         self.begin_work(
-            Compute::Transform { canvas, transform },
-            Some(transform),
-            Settles::Nothing,
+            Compute::Transform { layers },
+            Lands::Transform(transform),
             what,
             layout,
             damage,
         )
+    }
+
+    /// Add the page `new` describes after the one showing.
+    fn add_page(&mut self, new: NewPicture, layout: &Layout, damage: &mut Region) -> Outcome {
+        if !self.idle(layout, damage) {
+            return Outcome::none();
+        }
+        let Ok(canvas) = new.canvas() else {
+            self.state("There is not enough memory for the page", layout, damage);
+            return Outcome::none();
+        };
+        self.insert_entry(Entry::Picture(Picture::plain(canvas)), layout, damage)
+    }
+
+    /// Put `entry` after the one showing.
+    fn insert_entry(&mut self, entry: Entry, layout: &Layout, damage: &mut Region) -> Outcome {
+        let at = self.document.current() + 1;
+        match self.document.insert(at, entry) {
+            Ok(()) => self.after_picture_change(layout, damage),
+            Err(refusal) => {
+                self.state(&alloc::format!("{refusal}"), layout, damage);
+                Outcome::none()
+            }
+        }
     }
 
     /// Add the sprite `new` describes after the one showing.
@@ -1629,21 +2423,12 @@ impl View {
             palette: SpritePalette::Implied,
             masked: new.masked,
         };
-        let entry = Entry::Picture(Picture {
-            canvas,
-            sprite: Some(sprite),
-        });
-        let at = self.document.current() + 1;
-        match self.document.insert(at, entry) {
-            Ok(()) => self.after_picture_change(layout, damage),
-            Err(refusal) => {
-                self.state(&alloc::format!("{refusal}"), layout, damage);
-                Outcome::none()
-            }
-        }
+        let mut picture = Picture::plain(canvas);
+        picture.sprite = Some(sprite);
+        self.insert_entry(Entry::Picture(picture), layout, damage)
     }
 
-    /// Show entry `index`: a floating layer was put down before this was
+    /// Show entry `index`: a floating selection was put down before this was
     /// reached.
     fn show(&mut self, index: usize, layout: &Layout, damage: &mut Region) -> Outcome {
         if index == self.document.current() || index >= self.document.entries().len() {
@@ -1687,15 +2472,36 @@ impl View {
             };
             return match answer {
                 Some(answer) => self.answer_modal(answer, layout, damage),
-                None => Outcome::none(),
+                None => self.filter_moved(layout, damage),
             };
         }
-        if let Some(outcome) = self.dock_key(stroke, layout, scale, theme, damage) {
+        let claimed = match self.keyboard() {
+            Keyboard::Dock => self.dock_key(stroke, layout, scale, theme, damage),
+            Keyboard::Bar => self.bar_key(stroke, layout, scale, theme, damage),
+            Keyboard::Palette => self.palette_key(stroke, layout, scale, theme, damage),
+            Keyboard::Picture if stroke.key == Key::Named(NamedKey::Tab) => {
+                let forward = !stroke.modifiers.shift;
+                self.walk_keyboard(Keyboard::Picture, forward, layout, scale, theme, damage);
+                Some(Outcome::none())
+            }
+            Keyboard::Picture => None,
+        };
+        if let Some(outcome) = claimed {
             return outcome;
+        }
+        if let Some(outcome) = self.text_key(stroke.key, theme, layout, damage) {
+            return outcome;
+        }
+        let bare = !stroke.modifiers.ctrl && !stroke.modifiers.alt && !stroke.modifiers.meta;
+        if stroke.key == Key::Char(' ') && bare {
+            // Held, it drags the view whatever the tool.
+            self.space = true;
+            return Outcome::none();
         }
         match shortcut(stroke.key, stroke.modifiers) {
             Some(action) => {
                 self.commit_dock(layout, scale, theme, damage);
+                self.commit_bar(layout, damage);
                 self.act(action, layout, damage)
             }
             None => self.plain_key(stroke.key, layout, damage),
@@ -1703,9 +2509,9 @@ impl View {
     }
 
     /// A key for the colour dock: the picker takes every key it has a use
-    /// for while it has the keyboard, and gives it back past its last part or
-    /// on an Escape it has nothing to take back for; Tab gives it the
-    /// keyboard from the picture. `None` where the key is the window's.
+    /// for while it has the keyboard; Tab past either end of it carries the
+    /// keyboard on, and an Escape it has nothing to take back for gives it
+    /// back to the picture. `None` where the key is the window's.
     fn dock_key(
         &mut self,
         stroke: Keystroke,
@@ -1714,17 +2520,6 @@ impl View {
         theme: &Theme,
         damage: &mut Region,
     ) -> Option<Outcome> {
-        let tab = stroke.key == Key::Named(NamedKey::Tab);
-        if !self.picker.state().focus.focused && !self.picker.is_dragging() {
-            if tab {
-                let forward = !stroke.modifiers.shift;
-                self.picker
-                    .enter_focus(forward, layout.picker(), scale, theme);
-                damage.add(layout.picker());
-                return Some(Outcome::none());
-            }
-            return None;
-        }
         let outcome = self.picker.on_key(
             stroke.key,
             stroke.modifiers,
@@ -1735,15 +2530,86 @@ impl View {
         if outcome != PickerOutcome::Ignored {
             return Some(self.picked(outcome, layout, damage));
         }
-        if tab || stroke.key == Key::Named(NamedKey::Escape) {
-            self.release_dock(layout, scale, theme, damage);
-            return Some(Outcome::none());
-        }
-        None
+        self.leave_on(Keyboard::Dock, stroke, layout, scale, theme, damage)
     }
 
-    /// A key no shortcut claims: turn a drag or a selection down, nudge a
-    /// floating layer, or step the palette.
+    /// A key for the tool-controls bar: a setting takes what it has a use for
+    /// — every key a number field can be typed with — and Tab walks the
+    /// settings and off the bar. `None` where the key is the window's.
+    fn bar_key(
+        &mut self,
+        stroke: Keystroke,
+        layout: &Layout,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> Option<Outcome> {
+        let outcome = self.bar.on_key(
+            (stroke.key, stroke.modifiers),
+            layout.bar(),
+            &mut self.options,
+            (scale, theme),
+            damage,
+        );
+        match outcome {
+            BarOutcome::Taken | BarOutcome::Changed => Some(Outcome::none()),
+            BarOutcome::Left { forward } => {
+                self.walk_keyboard(Keyboard::Bar, forward, layout, scale, theme, damage);
+                Some(Outcome::none())
+            }
+            BarOutcome::Ignored => {
+                self.leave_on(Keyboard::Bar, stroke, layout, scale, theme, damage)
+            }
+        }
+    }
+
+    /// A key for the palette strip: the arrows walk its wells, each the
+    /// primary ink as the mark reaches it. `None` where the key is the
+    /// window's.
+    fn palette_key(
+        &mut self,
+        stroke: Keystroke,
+        layout: &Layout,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> Option<Outcome> {
+        if let Some(SwatchAction::Selected { mark, index }) =
+            self.swatches.on_key(stroke.key, layout.swatches(), damage)
+        {
+            self.choose_well(mark, index, layout, damage);
+            return Some(Outcome::none());
+        }
+        self.leave_on(Keyboard::Palette, stroke, layout, scale, theme, damage)
+    }
+
+    /// Tab carries the keyboard on from `part` and Escape gives it back to
+    /// the picture; `None` for any other key, which is the window's.
+    fn leave_on(
+        &mut self,
+        part: Keyboard,
+        stroke: Keystroke,
+        layout: &Layout,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> Option<Outcome> {
+        match stroke.key {
+            Key::Named(NamedKey::Tab) => {
+                let forward = !stroke.modifiers.shift;
+                self.walk_keyboard(part, forward, layout, scale, theme, damage);
+                Some(Outcome::none())
+            }
+            Key::Named(NamedKey::Escape) => {
+                self.release_keyboard(layout, scale, theme, damage);
+                Some(Outcome::none())
+            }
+            _ => None,
+        }
+    }
+
+    /// A key no shortcut claims: turn a drag or a selection down, or nudge a
+    /// floating selection.
     fn plain_key(&mut self, key: Key, layout: &Layout, damage: &mut Region) -> Outcome {
         if key == Key::Named(NamedKey::Escape) {
             self.escape(layout, damage);
@@ -1766,12 +2632,6 @@ impl View {
                 self.damage_picture(Some(before), layout, damage);
                 self.damage_picture(Some(after), layout, damage);
             }
-            return Outcome::none();
-        }
-        if let Some(SwatchAction::Selected { mark, index }) =
-            self.swatches.on_key(key, layout.swatches(), damage)
-        {
-            self.choose_well(mark, index, layout, damage);
         }
         Outcome::none()
     }
@@ -1795,6 +2655,7 @@ impl View {
         self.end_gesture(layout, damage);
         match id.get() {
             GO_TO_ENTRY => self.go_to(text, layout, damage),
+            GO_TO_LAYER => self.go_to_layer(text, layout, damage),
             RENAME_ENTRY => {
                 self.rename(text, layout, damage);
                 Outcome::none()
@@ -1817,7 +2678,12 @@ impl View {
         if let Some(index) = index {
             return self.show(index, layout, damage);
         }
-        self.state("There is no sprite of that name or number", layout, damage);
+        let missing = if self.document.is_pages() {
+            "There is no page of that number"
+        } else {
+            "There is no sprite of that name or number"
+        };
+        self.state(missing, layout, damage);
         Outcome::none()
     }
 
@@ -1842,7 +2708,7 @@ impl View {
             return;
         };
         let sprite = picture.sprite.as_ref().map_or_else(
-            || SpriteInfo::for_canvas(name, &picture.canvas),
+            || SpriteInfo::for_canvas(name, picture.canvas()),
             |sprite| SpriteInfo {
                 name,
                 ..sprite.clone()
@@ -1864,6 +2730,31 @@ impl View {
         // Whatever the action, a drag under way is finished first: none acts
         // on a picture a stroke is still being laid on.
         self.end_gesture(layout, damage);
+        let spared = action.spares(self.tool);
+        if self.draft.is_some() {
+            match action {
+                Action::PutDown => return self.close_draft(layout, damage),
+                Action::Delete => {
+                    self.unplace_corner(layout, damage);
+                    return Outcome::none();
+                }
+                _ if spared => {}
+                _ => self.drop_draft(layout, damage),
+            }
+        }
+        if self.crop.is_some() {
+            match action {
+                Action::PutDown => return self.apply_crop(layout, damage),
+                _ if spared => {}
+                _ => {
+                    self.crop = None;
+                    damage.add(layout.canvas());
+                }
+            }
+        }
+        if !spared {
+            self.commit_text(layout, damage);
+        }
         if self.held.is_some() && !action.leaves_floating() {
             return self.put_down_then(Then::Act(action), layout, damage);
         }
@@ -1875,10 +2766,6 @@ impl View {
             Action::Open => return Outcome::asking(Request::Open),
             Action::Save => return Outcome::asking(Request::Save),
             Action::SaveAs => return Outcome::asking(Request::SaveAs),
-            Action::Quality => {
-                let quality = self.document.jpeg_quality();
-                self.ask(Form::quality(quality), layout, damage);
-            }
             Action::Close => return self.close_requested(layout, damage),
             Action::Undo | Action::Redo => {
                 return self.undo_redo(action == Action::Undo, layout, damage)
@@ -1892,12 +2779,11 @@ impl View {
             }
             Action::SelectAll => {
                 let (width, height) = self.picture_size();
-                self.selection = Some(Bounds::picture(width, height));
-                damage.add(area);
-                return self.choose_tool(Tool::Select, layout, damage);
+                self.adopt_selection(Mask::rect(Bounds::picture(width, height)), layout, damage);
             }
             Action::Deselect => self.drop_selection(layout, damage),
             Action::Delete => return self.delete_selection(layout, damage),
+            Action::FillSelection => return self.fill_selection(layout, damage),
             Action::Crop => return self.crop(layout, damage),
             Action::Resize => {
                 let smooth = *self.kind() == Kind::Rgba;
@@ -1926,7 +2812,7 @@ impl View {
             Action::FlipDown => {
                 return self.transform(Transform::Flip { vertical: true }, "mirror", layout, damage)
             }
-            Action::Invert => return self.invert(layout, damage),
+            Action::Invert => return self.adjust(crate::filter::Filter::Invert, layout, damage),
             Action::Convert => {
                 self.ask(Form::convert(self.kind().depth()), layout, damage);
             }
@@ -1957,25 +2843,28 @@ impl View {
                 core::mem::swap(&mut self.primary, &mut self.secondary);
                 self.inks_changed(layout, damage);
             }
-            Action::PreviousSprite => {
+            Action::PreviousEntry => {
                 let current = self.document.current();
                 return self.show(current.saturating_sub(1), layout, damage);
             }
-            Action::NextSprite => {
+            Action::NextEntry => {
                 let current = self.document.current();
                 return self.show(current + 1, layout, damage);
             }
-            Action::NewSprite => {
+            Action::NewEntry if self.document.is_pages() => {
+                self.ask(Form::new_page(self.picture_size()), layout, damage);
+            }
+            Action::NewEntry => {
                 let name = SpriteName::new(SPRITE_STEM)
                     .and_then(|stem| free_name(&stem, self.document.names()))
                     .map_or_else(String::new, |name| name.to_string());
                 self.ask(Form::new_sprite(&name, SPRITE_SIZE), layout, damage);
             }
-            Action::DuplicateSprite => return self.duplicate(layout, damage),
-            Action::DeleteSprite => return self.delete_sprite(layout, damage),
-            Action::SpriteUp | Action::SpriteDown => {
+            Action::DuplicateEntry => return self.duplicate(layout, damage),
+            Action::DeleteEntry => return self.delete_sprite(layout, damage),
+            Action::EntryUp | Action::EntryDown => {
                 let current = self.document.current();
-                let to = if action == Action::SpriteUp {
+                let to = if action == Action::EntryUp {
                     current.checked_sub(1)
                 } else {
                     Some(current + 1).filter(|&to| to < self.document.entries().len())
@@ -2000,11 +2889,31 @@ impl View {
             Action::Actual => self.zoom_to(ACTUAL, self.pointer, layout, damage),
             Action::Grid => {
                 self.grid = !self.grid;
+                mark_grid(&mut self.commands, self.grid);
                 damage.add(area);
+                damage.add(layout.view_strip());
             }
+            Action::NewLayer => return self.new_layer(layout, damage),
+            Action::DuplicateLayer => return self.duplicate_layer(layout, damage),
+            Action::DeleteLayer => return self.delete_layer(layout, damage),
+            Action::LayerAbove | Action::LayerBelow => {
+                return self.step_layer(action == Action::LayerAbove, layout, damage)
+            }
+            Action::RaiseLayer | Action::LowerLayer => {
+                return self.move_layer(action == Action::RaiseLayer, layout, damage)
+            }
+            Action::MergeDown => return self.merge_down(layout, damage),
+            Action::Flatten => return self.flatten(layout, damage),
+            Action::ShowLayer => return self.toggle_layer(layout, damage),
+            Action::LayerProperties => return self.ask_layer(layout, damage),
             // Put down before this was reached, which is all the action asks.
-            Action::PutDown | Action::GoTo | Action::Rename => {}
+            Action::PutDown | Action::GoTo | Action::GoToLayer | Action::Rename => {}
             Action::Tool(tool) => return self.choose_tool(tool, layout, damage),
+            Action::Adjust(index) => {
+                if let Some(&filter) = crate::filter::Filter::ALL.get(index) {
+                    return self.adjust(filter, layout, damage);
+                }
+            }
         }
         Outcome::none()
     }
@@ -2026,6 +2935,10 @@ impl View {
                 self.damage_picture(Some(bounds), layout, damage);
                 return Outcome::none();
             }
+            Ok(Applied {
+                damage: Damage::Layers,
+                ..
+            }) => return Self::layers_changed(layout, damage),
             Ok(_) => return self.after_picture_change(layout, damage),
             Err(Unapplied::Nothing) => return Outcome::none(),
             Err(Unapplied::NoMemory) => "There is not enough memory for that; nothing changed",
@@ -2059,18 +2972,30 @@ impl View {
         let Some(work) = self.clearing(layout, damage) else {
             return Outcome::asking(Request::Own(Own::Copy(clip)));
         };
-        let cleared = self.begin_work(work, None, Settles::Cleared, CLEARING, layout, damage);
+        let cleared = self.begin_work(
+            work,
+            Lands::Tiles(Settles::Cleared),
+            CLEARING,
+            layout,
+            damage,
+        );
         let Some(Request::Own(Own::Compute { job, work })) = cleared.request else {
             return Outcome::asking(Request::Own(Own::Copy(clip)));
         };
         Outcome::asking(Request::Own(Own::Cut { clip, job, work }))
     }
 
-    /// Clear what is selected, as an eraser would; a floating layer is
+    /// Clear what is selected, as an eraser would; a floating selection is
     /// thrown away, and where it was lifted from keeps what the lift leaves.
     fn delete_selection(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
         match self.clearing(layout, damage) {
-            Some(work) => self.begin_work(work, None, Settles::Cleared, CLEARING, layout, damage),
+            Some(work) => self.begin_work(
+                work,
+                Lands::Tiles(Settles::Cleared),
+                CLEARING,
+                layout,
+                damage,
+            ),
             None => Outcome::none(),
         }
     }
@@ -2082,7 +3007,7 @@ impl View {
         if !self.editable(layout, damage) {
             return None;
         }
-        let (area, ink) = if let Some(held) = &self.held {
+        let (chosen, ink) = if let Some(held) = &self.held {
             let Some(lifted) = held.lifted() else {
                 let bounds = held.bounds();
                 self.held = None;
@@ -2091,21 +3016,30 @@ impl View {
             };
             lifted
         } else {
-            (self.selection?, self.eraser_ink(self.kind()))
+            (self.selection.clone()?, self.eraser_ink(self.kind()))
         };
         let Some(Ok(canvas)) = self
             .document
             .picture()
-            .map(|picture| picture.canvas.try_clone())
+            .map(|picture| picture.canvas().try_clone())
         else {
             self.state("There is not enough memory to clear that", layout, damage);
             return None;
         };
-        Some(Compute::Clear { canvas, area, ink })
+        Some(Compute::Clear {
+            canvas,
+            chosen,
+            ink,
+        })
     }
 
     fn crop(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
-        let Some(area) = self.selection else {
+        let (width, height) = self.picture_size();
+        let Some(area) = self.selection.as_ref().map(|chosen| {
+            chosen
+                .bounds()
+                .intersection(&Bounds::picture(width, height))
+        }) else {
             self.state("Select the part of the picture to keep", layout, damage);
             return Outcome::none();
         };
@@ -2128,25 +3062,6 @@ impl View {
             layout,
             damage,
         )
-    }
-
-    /// Invert a colour picture's pixels, or a palette picture's palette.
-    fn invert(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
-        if self.kind().palette().is_none() {
-            return self.transform(Transform::Invert, "invert", layout, damage);
-        }
-        if !self.editable(layout, damage) {
-            return Outcome::none();
-        }
-        let Some(palette) = self.kind().palette() else {
-            return Outcome::none();
-        };
-        let inverted: Vec<[u8; 4]> = palette
-            .iter()
-            .map(|&[r, g, b, a]| [255 - r, 255 - g, 255 - b, a])
-            .collect();
-        self.change_palette(inverted, layout, damage);
-        Outcome::none()
     }
 
     fn duplicate(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
@@ -2179,14 +3094,7 @@ impl View {
         if let (Some(sprite), Some(name)) = (copy.sprite.as_mut(), name) {
             sprite.name = name;
         }
-        let at = self.document.current() + 1;
-        match self.document.insert(at, Entry::Picture(copy)) {
-            Ok(()) => self.after_picture_change(layout, damage),
-            Err(refusal) => {
-                self.state(&alloc::format!("{refusal}"), layout, damage);
-                Outcome::none()
-            }
-        }
+        self.insert_entry(Entry::Picture(copy), layout, damage)
     }
 
     fn delete_sprite(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
@@ -2196,7 +3104,7 @@ impl View {
         let current = self.document.current();
         match self.document.remove(current) {
             Ok(()) => {
-                // A layer floating over the sprite goes with it, and only then.
+                // A selection floating over the sprite goes with it, and only then.
                 self.held = None;
                 self.after_picture_change(layout, damage)
             }
@@ -2207,11 +3115,19 @@ impl View {
         }
     }
 
-    /// Escape: turn a drag under way down, else a floating layer, else
+    /// Escape: turn a drag under way down, else a floating selection, else
     /// forget the selection.
     fn escape(&mut self, layout: &Layout, damage: &mut Region) {
         if self.gesture.is_some() {
             self.cancel_gesture(layout, damage);
+            return;
+        }
+        if self.draft.is_some() {
+            self.drop_draft(layout, damage);
+            return;
+        }
+        if self.crop.take().is_some() {
+            damage.add(layout.canvas());
             return;
         }
         if !self.turn_down_floating(layout, damage) {
@@ -2275,6 +3191,9 @@ impl View {
         if let Some(image) = menu.submenu("Image", Plate::Root) {
             self.image_rows(menu, image, picture);
         }
+        if let Some(layers) = menu.submenu("Layers", Plate::Root) {
+            self.layer_rows(menu, layers);
+        }
         if let Some(colours) = menu.submenu("Colours", Plate::Root) {
             menu.item(
                 Action::EditPrimary,
@@ -2292,8 +3211,21 @@ impl View {
             );
             menu.item(Action::SwapColours, "Swap colours", "X", true, colours);
         }
-        if let Some(sprites) = menu.submenu("Sprites", Plate::Root) {
-            self.sprite_rows(menu, sprites);
+        if let Some(adjust) = menu.submenu("Adjust", Plate::Root) {
+            let palette = self.kind().palette().is_some();
+            for (index, filter) in crate::filter::Filter::ALL.iter().enumerate() {
+                let label = if filter.parameters().is_empty() {
+                    String::from(filter.label())
+                } else {
+                    alloc::format!("{}\u{2026}", filter.label())
+                };
+                let can = picture && !(palette && filter.neighbourly());
+                menu.item(Action::Adjust(index), &label, "", can, adjust);
+            }
+        }
+        let pages = self.document.is_pages();
+        if let Some(entries) = menu.submenu(if pages { "Pages" } else { "Sprites" }, Plate::Root) {
+            self.entry_rows(menu, entries, pages);
         }
         if let Some(view) = menu.submenu("View", Plate::Root) {
             menu.item(Action::ZoomIn, "Zoom in", "+", true, view);
@@ -2327,6 +3259,13 @@ impl View {
         menu.item(Action::Redo, "Redo", "Ctrl+Shift+Z", redo, plate);
         menu.separator(plate);
         menu.item(Action::Delete, "Clear selection", "Delete", selected, plate);
+        menu.item(
+            Action::FillSelection,
+            "Fill with primary colour",
+            "Alt+Backspace",
+            self.document.picture().is_some(),
+            plate,
+        );
         menu.item(
             Action::Crop,
             "Crop to selection",
@@ -2385,19 +3324,91 @@ impl View {
         );
     }
 
-    fn sprite_rows(&self, menu: &mut MenuBuilder, plate: Plate) {
+    /// The layers' rows: a palette picture holds one layer, shown wholly,
+    /// so it offers none but the layer's own name.
+    fn layer_rows(&self, menu: &mut MenuBuilder, plate: Plate) {
+        let picture = self.document.picture();
+        let colour = picture.is_some_and(|picture| picture.kind().palette().is_none());
+        let (count, active) =
+            picture.map_or((0, 0), |picture| (picture.layers().len(), picture.active()));
+        let shown = picture
+            .and_then(|picture| picture.layers().get(active))
+            .is_some_and(|layer| layer.visible);
+        let below = colour && active > 0;
+        let above = colour && active + 1 < count;
+        menu.item(Action::NewLayer, "New layer", "Ctrl+Shift+N", colour, plate);
+        menu.item(Action::DuplicateLayer, "Duplicate layer", "", colour, plate);
+        menu.item(Action::DeleteLayer, "Delete layer", "", count > 1, plate);
+        menu.separator(plate);
+        menu.item(
+            Action::LayerAbove,
+            "Layer above",
+            "Ctrl+Page Up",
+            above,
+            plate,
+        );
+        menu.item(
+            Action::LayerBelow,
+            "Layer below",
+            "Ctrl+Page Down",
+            below,
+            plate,
+        );
+        menu.entry(
+            Action::GoToLayer,
+            GO_TO_LAYER,
+            "Go to layer\u{2026}",
+            "",
+            plate,
+        );
+        menu.separator(plate);
+        menu.item(
+            Action::RaiseLayer,
+            "Raise layer",
+            "Ctrl+Shift+Page Up",
+            above,
+            plate,
+        );
+        menu.item(
+            Action::LowerLayer,
+            "Lower layer",
+            "Ctrl+Shift+Page Down",
+            below,
+            plate,
+        );
+        menu.item(Action::MergeDown, "Merge down", "Ctrl+E", below, plate);
+        let flat = picture.is_none_or(Picture::single);
+        menu.item(Action::Flatten, "Flatten", "Ctrl+Shift+E", !flat, plate);
+        menu.separator(plate);
+        if colour {
+            menu.mark(Action::ShowLayer, "Show layer", "", shown, plate);
+        } else {
+            menu.item(Action::ShowLayer, "Show layer", "", false, plate);
+        }
+        menu.item(
+            Action::LayerProperties,
+            "Layer properties\u{2026}",
+            "",
+            colour,
+            plate,
+        );
+    }
+
+    /// The sprites' or the pages' rows: a page has no name, so it is gone
+    /// to by number alone and never renamed.
+    fn entry_rows(&self, menu: &mut MenuBuilder, plate: Plate, pages: bool) {
         let count = self.document.entries().len();
         let current = self.document.current();
         let many = count > 1;
         menu.item(
-            Action::PreviousSprite,
+            Action::PreviousEntry,
             "Previous",
             "Page Up",
             current > 0,
             plate,
         );
         menu.item(
-            Action::NextSprite,
+            Action::NextEntry,
             "Next",
             "Page Down",
             current + 1 < count,
@@ -2405,24 +3416,31 @@ impl View {
         );
         menu.entry(Action::GoTo, GO_TO_ENTRY, "Go to\u{2026}", "", plate);
         menu.separator(plate);
-        menu.item(Action::NewSprite, "New sprite\u{2026}", "", true, plate);
+        let new = if pages {
+            "New page\u{2026}"
+        } else {
+            "New sprite\u{2026}"
+        };
+        menu.item(Action::NewEntry, new, "", true, plate);
         menu.item(
-            Action::DuplicateSprite,
+            Action::DuplicateEntry,
             "Duplicate",
             "",
             self.document.picture().is_some(),
             plate,
         );
-        let name = self
-            .document
-            .entry()
-            .name()
-            .map_or_else(String::new, ToString::to_string);
-        menu.entry(Action::Rename, RENAME_ENTRY, "Rename\u{2026}", &name, plate);
-        menu.item(Action::DeleteSprite, "Delete", "", many, plate);
-        menu.item(Action::SpriteUp, "Move up", "", current > 0, plate);
+        if !pages {
+            let name = self
+                .document
+                .entry()
+                .name()
+                .map_or_else(String::new, ToString::to_string);
+            menu.entry(Action::Rename, RENAME_ENTRY, "Rename\u{2026}", &name, plate);
+        }
+        menu.item(Action::DeleteEntry, "Delete", "", many, plate);
+        menu.item(Action::EntryUp, "Move up", "", current > 0, plate);
         menu.item(
-            Action::SpriteDown,
+            Action::EntryDown,
             "Move down",
             "",
             current + 1 < count,
@@ -2465,9 +3483,36 @@ fn file_rows(menu: &mut MenuBuilder, plate: Plate) {
         true,
         plate,
     );
-    menu.item(Action::Quality, "JPEG quality\u{2026}", "", true, plate);
     menu.separator(plate);
     menu.item(Action::Close, "Close", "Ctrl+W", true, plate);
+}
+
+/// A part of the window the keyboard can be in.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Keyboard {
+    /// The picture: tools' and commands' keys, nudges.
+    Picture,
+    /// The tool-controls bar's settings.
+    Bar,
+    /// The palette strip's wells.
+    Palette,
+    /// The colour dock's picker.
+    Dock,
+}
+
+impl Keyboard {
+    /// The order Tab walks.
+    const ORDER: [Self; 4] = [Self::Picture, Self::Bar, Self::Palette, Self::Dock];
+}
+
+/// The tool a strip's primary activation chose.
+fn activated(outcome: ToolbarOutcome) -> Option<usize> {
+    match outcome {
+        ToolbarOutcome::Activated(action) if action.part == ToolActivation::Primary => {
+            Some(action.index)
+        }
+        _ => None,
+    }
 }
 
 /// How a modal question was answered.
@@ -2480,6 +3525,27 @@ enum ModalAnswer {
 }
 
 /// Where the close question is drawn in `window`.
+/// The pixels a straight edge from `a` to `b` may cross.
+pub(super) fn segment(a: Fx, b: Fx) -> Bounds {
+    let (ax, ay) = a.pixel();
+    let (bx, by) = b.pixel();
+    Bounds {
+        x0: ax.min(bx),
+        y0: ay.min(by),
+        x1: ax.max(bx) + 1,
+        y1: ay.max(by) + 1,
+    }
+}
+
+/// The pixels a path through `points`, and on to `to`, may cross.
+fn path_bounds(points: &[Fx], to: Option<Fx>) -> Option<Bounds> {
+    points
+        .iter()
+        .chain(to.as_ref())
+        .map(|&point| segment(point, point))
+        .reduce(|a, b| a.union(&b))
+}
+
 pub(crate) fn close_rect(dialog: &Dialog, window: Rect, scale: Scale, theme: &Theme) -> Rect {
     let width = scale.scale_length(Dialog::QUESTION_WIDTH);
     dialog.placed_over(window, width, 0, scale, theme)
@@ -2491,11 +3557,24 @@ pub(super) fn shortcut(key: Key, modifiers: Modifiers) -> Option<Action> {
     let bare = !modifiers.ctrl && !modifiers.alt && !modifiers.meta;
     match key {
         Key::Named(NamedKey::Enter) => Some(Action::PutDown),
+        Key::Named(NamedKey::Backspace) if modifiers.alt => Some(Action::FillSelection),
         Key::Named(NamedKey::Delete | NamedKey::Backspace) => Some(Action::Delete),
-        Key::Named(NamedKey::PageUp) => Some(Action::PreviousSprite),
-        Key::Named(NamedKey::PageDown) => Some(Action::NextSprite),
+        Key::Named(named @ (NamedKey::PageUp | NamedKey::PageDown)) if ctrl => {
+            let up = named == NamedKey::PageUp;
+            Some(match (up, modifiers.shift) {
+                (true, true) => Action::RaiseLayer,
+                (false, true) => Action::LowerLayer,
+                (true, false) => Action::LayerAbove,
+                (false, false) => Action::LayerBelow,
+            })
+        }
+        Key::Named(NamedKey::PageUp) => Some(Action::PreviousEntry),
+        Key::Named(NamedKey::PageDown) => Some(Action::NextEntry),
         Key::Char(ch) if ctrl => match (ch.to_ascii_lowercase(), modifiers.shift) {
-            ('n', _) => Some(Action::NewPicture),
+            ('n', true) => Some(Action::NewLayer),
+            ('n', false) => Some(Action::NewPicture),
+            ('e', true) => Some(Action::Flatten),
+            ('e', false) => Some(Action::MergeDown),
             ('o', _) => Some(Action::Open),
             ('s', true) => Some(Action::SaveAs),
             ('s', false) => Some(Action::Save),

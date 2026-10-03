@@ -229,7 +229,7 @@ heaps, slabs and per-task kernel stacks), `Dma` (device DMA buffers) and
 sum over live processes of the pages each one *maps*. It is a count of
 mappings, not of RAM — a frame shared between two address spaces counts once
 per space, and a user driver's MMIO window counts although it is no RAM at
-all ��� so it can exceed `total_bytes` and is **not** a share of physical
+all — so it can exceed `total_bytes` and is **not** a share of physical
 memory. A consumer drawing where the RAM went reads `class_bytes`; one
 answering "how much address space does this process hold" reads the per-process
 figure.

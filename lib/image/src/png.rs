@@ -25,6 +25,7 @@ use alloc::vec::Vec;
 
 use tairix_util::fallible;
 
+use crate::density::{Density, DensityUnit, Stated};
 use crate::picture::{IndexDepth, Picture};
 use crate::{DecodeError, DecodeLimits, RasterImage, Unkept, PROBE_LIMITS, RGBA_BYTES};
 
@@ -45,6 +46,14 @@ pub(crate) const PLTE: [u8; 4] = *b"PLTE";
 pub(crate) const IDAT: [u8; 4] = *b"IDAT";
 pub(crate) const IEND: [u8; 4] = *b"IEND";
 pub(crate) const TRNS: [u8; 4] = *b"tRNS";
+pub(crate) const PHYS: [u8; 4] = *b"pHYs";
+
+/// A `pHYs` payload: two four-byte figures and a unit.
+pub(crate) const PHYS_LEN: usize = 9;
+
+/// `pHYs` units: none, so a bare shape, and per metre.
+pub(crate) const PHYS_ASPECT: u8 = 0;
+pub(crate) const PHYS_METRE: u8 = 1;
 
 /// The `IHDR` payload length (W3C PNG §"IHDR Image header"): four fields of
 /// 4 bytes plus five of 1 byte.
@@ -276,6 +285,49 @@ struct Parsed {
     trns: Option<Trns>,
     idat: Vec<u8>,
     extras: bool,
+    density: Option<Density>,
+}
+
+/// What the ancillary chunks said beside the picture.
+#[derive(Default)]
+struct Held {
+    extras: bool,
+    density: Option<Density>,
+    phys_seen: bool,
+}
+
+impl Held {
+    /// Take an ancillary chunk: the first `pHYs` before the image data is the
+    /// picture's density, and every other chunk, whose CRC has already
+    /// checked out, is skipped and noted as held beside the picture.
+    fn ancillary(&mut self, kind: [u8; 4], payload: &[u8], seen_idat: bool) {
+        if kind == PHYS && !self.phys_seen && !seen_idat {
+            self.phys_seen = true;
+            if let Stated::Kept(density) = read_phys(payload) {
+                self.density = density;
+                return;
+            }
+        }
+        self.extras = true;
+    }
+}
+
+/// What a `pHYs` payload states.
+fn read_phys(payload: &[u8]) -> Stated {
+    let (Some(across), Some(down), [.., unit]) = (
+        crate::be_u32(payload, 0),
+        crate::be_u32(payload, 4),
+        payload,
+    ) else {
+        return Stated::Unkept;
+    };
+    let unit = match *unit {
+        _ if payload.len() != PHYS_LEN => None,
+        PHYS_ASPECT => Some(DensityUnit::Aspect),
+        PHYS_METRE => Some(DensityUnit::Metre),
+        _ => None,
+    };
+    Stated::of((across, 1), (down, 1), unit)
 }
 
 /// Validate a complete PNG file's chunk stream, decompressing nothing.
@@ -293,7 +345,7 @@ fn parse(bytes: &[u8], limits: &DecodeLimits) -> Result<Parsed, DecodeError> {
     let mut idat_finished = false;
     let mut seen_iend = false;
     let mut first_chunk = true;
-    let mut extras = false;
+    let mut held = Held::default();
 
     while pos < rest.len() {
         if seen_iend {
@@ -350,15 +402,8 @@ fn parse(bytes: &[u8], limits: &DecodeLimits) -> Result<Parsed, DecodeError> {
                 }
                 seen_iend = true;
             }
-            other => {
-                if is_critical(other) {
-                    return Err(DecodeError::UnknownCriticalChunk);
-                }
-                // A recognised-but-unhandled or wholly unknown ancillary
-                // chunk: its CRC already checked out above, so it is
-                // skipped, and noted as held beside the picture.
-                extras = true;
-            }
+            other if is_critical(other) => return Err(DecodeError::UnknownCriticalChunk),
+            other => held.ancillary(other, payload, seen_idat),
         }
 
         // Any chunk other than IDAT that follows at least one IDAT closes
@@ -384,7 +429,8 @@ fn parse(bytes: &[u8], limits: &DecodeLimits) -> Result<Parsed, DecodeError> {
         palette,
         trns,
         idat,
-        extras,
+        extras: held.extras,
+        density: held.density,
     })
 }
 
@@ -432,12 +478,14 @@ pub(crate) fn decode_native(
     let unkept = Unkept {
         precision: ihdr.bit_depth == 16,
         extras: parsed.extras,
+        converted: false,
     };
+    let density = parsed.density;
     let geometry = |_| DecodeError::DimensionsOverflow;
     if ihdr.colour_type != ColourType::Indexed {
         let pixels = rgba_pixels(&parsed)?;
         return Picture::rgba(ihdr.width, ihdr.height, pixels)
-            .map(|picture| (picture, unkept))
+            .map(|picture| (picture.with_density(density), unkept))
             .map_err(geometry);
     }
     let depth =
@@ -471,7 +519,7 @@ pub(crate) fn decode_native(
     )
     .ok_or(DecodeError::OutOfMemory)?;
     Picture::indexed(ihdr.width, ihdr.height, depth, palette, indices, None)
-        .map(|picture| (picture, unkept))
+        .map(|picture| (picture.with_density(density), unkept))
         .map_err(geometry)
 }
 

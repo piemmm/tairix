@@ -1,9 +1,10 @@
 //! The sandboxed decode an image editor opens a document through.
 //!
 //! A viewer needs what a picture looks like; an editor needs what its file
-//! stores — a paletted PNG's indices and palette, and every sprite of a
-//! sprite area with its name, mode, palette and mask — at full resolution,
-//! so that saving writes back what was read. This is that decode, served by
+//! stores — a palette picture's indices and palette, every page of a TIFF,
+//! every sprite of a sprite area with its name, mode, palette and mask, and
+//! the density each states — at full resolution, so that saving writes back
+//! what was read. This is that decode, served by
 //! the same worker ([`crate::imagerender::ImageRenderService`]) over the same
 //! one upload path ([`crate::imagerender::upload_document`] and
 //! [`crate::imagerender::send_document`]), so there is still exactly one way
@@ -17,12 +18,14 @@
 //! index to the palette, every mode word to one the decoder reads and to the
 //! pixels it describes, and every echoed row range and length exactly.
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_image::{
-    open_native, sniff, DecodeError, DecodeLimits, IndexDepth, NativeDocument, Picture, Pixels,
-    Rgba8, SpriteAreaReader, SpriteEntry, SpriteLayout, SpriteMode, SpriteName, SpritePalette,
-    Unkept, SPRITE_HEADER_LEN,
+    open_native, sniff, DecodeError, DecodeLimits, Density, DensityUnit, GifOptions, IndexDepth,
+    NativeDocument, OraDocument, Picture, Pixels, Rgba8, SpriteAreaReader, SpriteEntry,
+    SpriteLayout, SpriteMode, SpriteName, SpritePalette, TiffCompression, TiffOptions, TiffPages,
+    Unkept, Written, MOST_ORA_LAYERS, SPRITE_HEADER_LEN,
 };
 
 use crate::host::{Launcher, ParserSandbox, SandboxError, Unbelieved};
@@ -222,18 +225,74 @@ impl core::fmt::Display for EditFailure {
     }
 }
 
+/// What an opened document's entries are.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum EditKind {
+    /// One picture.
+    Single,
+    /// A TIFF's pages, each a picture.
+    Pages,
+    /// A sprite area's sprites.
+    Sprites,
+    /// An OpenRaster document's layers, the bottom first.
+    Layers,
+}
+
+impl EditKind {
+    /// The kind a document of `format` opens as.
+    #[must_use]
+    pub const fn of(format: ViewFormat) -> Self {
+        match format {
+            ViewFormat::Sprite => Self::Sprites,
+            ViewFormat::Tiff => Self::Pages,
+            ViewFormat::OpenRaster => Self::Layers,
+            _ => Self::Single,
+        }
+    }
+
+    const fn to_wire(self) -> u8 {
+        match self {
+            Self::Single => 0,
+            Self::Pages => 1,
+            Self::Sprites => 2,
+            Self::Layers => 3,
+        }
+    }
+}
+
+/// The longest a layer's name crosses the wire, in bytes: a longer one is
+/// cut at a character's boundary, and the document says something was not
+/// kept.
+pub const MAX_LAYER_NAME: usize = 255;
+
 /// What an opened document is.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct EditDocument {
     /// The format it was read as.
     pub format: ViewFormat,
-    /// Whether it is a sprite area, whose entries are sprites; otherwise it
-    /// holds one picture.
-    pub sprites: bool,
+    /// What its entries are.
+    pub kind: EditKind,
     /// How many entries it holds.
     pub count: u32,
     /// What the file held that its entries do not.
     pub unkept: Unkept,
+    /// How the file was written.
+    pub written: Written,
+    /// The canvas a layered document's layers lie on; `None` for any other.
+    pub canvas: Option<(u32, u32)>,
+}
+
+/// What a layer says about itself beyond its pixels.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EditLayer {
+    /// What it is called: no longer than [`MAX_LAYER_NAME`] bytes.
+    pub name: String,
+    /// Where its top left lies on the canvas.
+    pub at: (i32, i32),
+    /// How much of it shows, out of 255.
+    pub opacity: u8,
+    /// Whether it shows at all.
+    pub visible: bool,
 }
 
 /// How a picture's pixels arrive.
@@ -293,6 +352,8 @@ pub struct EditPicture {
     height: u32,
     pixels: EditPixels,
     sprite: Option<EditSprite>,
+    density: Option<Density>,
+    layer: Option<EditLayer>,
 }
 
 impl EditPicture {
@@ -342,7 +403,42 @@ impl EditPicture {
             height,
             pixels,
             sprite,
+            density: None,
+            layer: None,
         })
+    }
+
+    /// This picture as a layer `layer` describes; `None` for one whose
+    /// pixels are not colour or whose name is past [`MAX_LAYER_NAME`].
+    #[must_use]
+    pub fn with_layer(mut self, layer: EditLayer) -> Option<Self> {
+        if self.pixels != EditPixels::Rgba
+            || self.sprite.is_some()
+            || layer.name.len() > MAX_LAYER_NAME
+        {
+            return None;
+        }
+        self.layer = Some(layer);
+        Some(self)
+    }
+
+    /// Its layer details, exactly when it is a layer of a layered document.
+    #[must_use]
+    pub const fn layer(&self) -> Option<&EditLayer> {
+        self.layer.as_ref()
+    }
+
+    /// This picture laid out at `density`.
+    #[must_use]
+    pub const fn with_density(mut self, density: Option<Density>) -> Self {
+        self.density = density;
+        self
+    }
+
+    /// How densely its pixels are laid out, where the file states it.
+    #[must_use]
+    pub const fn density(&self) -> Option<Density> {
+        self.density
     }
 
     /// Width, in pixels: at least one.
@@ -455,14 +551,18 @@ pub(crate) struct EditSession {
 
 enum Opened {
     Single(Picture),
+    Pages(TiffPages<Vec<u8>>),
     Sprites(SpriteAreaReader<Vec<u8>>),
+    Layers(OraDocument),
 }
 
-/// The entry selected last. A single-picture document's one entry is the
-/// picture it opened as, which is lent rather than copied.
+/// The entry selected last. A single-picture document's one entry, and a
+/// layered document's layers, are lent from what was opened rather than
+/// copied.
 enum Selected {
     Opened,
-    Sprite(Picture),
+    Layer(usize),
+    Picture(Picture),
     Kept(Vec<u8>),
 }
 
@@ -471,11 +571,26 @@ impl EditSession {
     fn picture(&self) -> Result<&Picture, EditRefusal> {
         match (&self.selected, &self.opened) {
             (Some(Selected::Opened), Opened::Single(picture))
-            | (Some(Selected::Sprite(picture)), _) => Ok(picture),
+            | (Some(Selected::Picture(picture)), _) => Ok(picture),
+            (Some(Selected::Layer(index)), Opened::Layers(document)) => document
+                .layers
+                .get(*index)
+                .map(|layer| &layer.picture)
+                .ok_or(EditRefusal::NoEntry),
             (Some(Selected::Kept(_)), _) => Err(EditRefusal::WrongKind),
-            (None | Some(Selected::Opened), _) => Err(EditRefusal::NoEntry),
+            (None | Some(Selected::Opened | Selected::Layer(_)), _) => Err(EditRefusal::NoEntry),
         }
     }
+}
+
+/// `name` no longer than [`MAX_LAYER_NAME`] bytes, cut at a character's
+/// boundary.
+fn layer_name(name: &str) -> &str {
+    let mut end = name.len().min(MAX_LAYER_NAME);
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    &name[..end]
 }
 
 fn edit_limits() -> DecodeLimits {
@@ -537,22 +652,53 @@ fn open(
             .ok_or(EditRefusal::UnsupportedFormat)?,
     };
     let wire_format = ViewFormat::from_raster(format).ok_or(EditRefusal::UnsupportedFormat)?;
-    let (opened, unkept) = match open_native(format, bytes, &edit_limits()) {
+    let (opened, unkept, written) = match open_native(format, bytes, &edit_limits()) {
         Ok(NativeDocument::Picture {
-            picture, unkept, ..
-        }) => (Opened::Single(picture), unkept),
+            picture,
+            unkept,
+            written,
+            ..
+        }) => (Opened::Single(picture), unkept, written),
+        Ok(NativeDocument::Pages {
+            pages,
+            unkept,
+            written,
+        }) => (Opened::Pages(pages), unkept, written),
         Ok(NativeDocument::Sprites(reader)) => {
-            if reader.count() > MAX_EDIT_ENTRIES {
-                return Err(EditRefusal::TooLarge);
+            (Opened::Sprites(reader), Unkept::default(), Written::Plain)
+        }
+        Ok(NativeDocument::Layers {
+            document,
+            mut unkept,
+        }) => {
+            // A name the wire cuts short is not kept as the file held it.
+            if document
+                .layers
+                .iter()
+                .any(|layer| layer.name.len() > MAX_LAYER_NAME)
+            {
+                unkept.extras = true;
             }
-            (Opened::Sprites(reader), Unkept::default())
+            (Opened::Layers(document), unkept, Written::Plain)
         }
         Err(err) => return Err(EditRefusal::of_decode(&err)),
     };
-    let (sprites, count) = match &opened {
-        Opened::Single(_) => (false, 1),
-        Opened::Sprites(reader) => (true, reader.count()),
+    let (kind, count) = match &opened {
+        Opened::Single(_) => (EditKind::Single, 1),
+        Opened::Pages(pages) => (EditKind::Pages, pages.count()),
+        Opened::Sprites(reader) => (EditKind::Sprites, reader.count()),
+        Opened::Layers(document) => (
+            EditKind::Layers,
+            u32::try_from(document.layers.len()).map_err(|_| EditRefusal::TooLarge)?,
+        ),
     };
+    let canvas = match &opened {
+        Opened::Layers(document) => Some((document.width, document.height)),
+        _ => None,
+    };
+    if count > MAX_EDIT_ENTRIES {
+        return Err(EditRefusal::TooLarge);
+    }
     *session = Some(EditSession {
         opened,
         selected: None,
@@ -560,11 +706,69 @@ fn open(
     let mut w = Writer::new();
     w.u8(REPLY_EDIT_OPENED);
     w.u8(wire_format.to_wire());
-    w.u8(u8::from(sprites));
+    w.u8(kind.to_wire());
     w.u32(count);
     w.u8(u8::from(unkept.precision));
     w.u8(u8::from(unkept.extras));
+    w.u8(u8::from(unkept.converted));
+    match written {
+        Written::Plain => w.u8(0),
+        Written::Gif(options) => {
+            w.u8(1);
+            w.u8(u8::from(options.interlaced));
+        }
+        Written::Tiff(options) => {
+            w.u8(2);
+            w.u8(compression_to_wire(options.compression));
+        }
+    }
+    match canvas {
+        None => w.u8(0),
+        Some((width, height)) => {
+            w.u8(1);
+            w.u32(width);
+            w.u32(height);
+        }
+    }
     Ok(w.finish())
+}
+
+const fn compression_to_wire(compression: TiffCompression) -> u8 {
+    match compression {
+        TiffCompression::None => 0,
+        TiffCompression::PackBits => 1,
+        TiffCompression::Lzw => 2,
+        TiffCompression::Deflate => 3,
+    }
+}
+
+const fn compression_from_wire(raw: u8) -> Option<TiffCompression> {
+    Some(match raw {
+        0 => TiffCompression::None,
+        1 => TiffCompression::PackBits,
+        2 => TiffCompression::Lzw,
+        3 => TiffCompression::Deflate,
+        _ => return None,
+    })
+}
+
+const fn unit_to_wire(unit: DensityUnit) -> u8 {
+    match unit {
+        DensityUnit::Aspect => 0,
+        DensityUnit::Inch => 1,
+        DensityUnit::Centimetre => 2,
+        DensityUnit::Metre => 3,
+    }
+}
+
+const fn unit_from_wire(raw: u8) -> Option<DensityUnit> {
+    Some(match raw {
+        0 => DensityUnit::Aspect,
+        1 => DensityUnit::Inch,
+        2 => DensityUnit::Centimetre,
+        3 => DensityUnit::Metre,
+        _ => return None,
+    })
 }
 
 /// `OP_EDIT_SELECT`: decode entry `index` and describe it.
@@ -586,8 +790,30 @@ fn select(r: &mut Reader<'_>, session: &mut Option<EditSession>) -> Result<Vec<u
                 return Err(EditRefusal::NoSuchEntry);
             }
             write_picture(&mut w, picture, None);
+            w.u8(0);
             Selected::Opened
         }
+        Opened::Layers(document) => {
+            let at = usize::try_from(index).map_err(|_| EditRefusal::NoSuchEntry)?;
+            let layer = document.layers.get(at).ok_or(EditRefusal::NoSuchEntry)?;
+            write_picture(&mut w, &layer.picture, None);
+            w.u8(1);
+            w.bytes(layer_name(&layer.name).as_bytes());
+            w.u32(layer.at.0.cast_unsigned());
+            w.u32(layer.at.1.cast_unsigned());
+            w.u8(layer.opacity);
+            w.u8(u8::from(layer.visible));
+            Selected::Layer(at)
+        }
+        Opened::Pages(pages) => match pages.page(index) {
+            Ok(Some(picture)) => {
+                write_picture(&mut w, &picture, None);
+                w.u8(0);
+                Selected::Picture(picture)
+            }
+            Ok(None) => return Err(EditRefusal::NoSuchEntry),
+            Err(err) => return Err(EditRefusal::of_decode(&err)),
+        },
         Opened::Sprites(reader) => match reader.sprite(index) {
             Ok(Some(SpriteEntry::Picture(sprite))) => {
                 let details = EditSprite {
@@ -597,7 +823,8 @@ fn select(r: &mut Reader<'_>, session: &mut Option<EditSession>) -> Result<Vec<u
                     palette: sprite.palette,
                 };
                 write_picture(&mut w, &sprite.picture, Some(&details));
-                Selected::Sprite(sprite.picture)
+                w.u8(0);
+                Selected::Picture(sprite.picture)
             }
             Ok(Some(SpriteEntry::Opaque(kept))) => {
                 w.u8(1);
@@ -651,6 +878,17 @@ fn write_picture(w: &mut Writer, picture: &Picture, sprite: Option<&EditSprite>)
                     w.bytes(raw);
                 }
                 SpritePalette::Full => w.u8(2),
+            }
+        }
+    }
+    match picture.density() {
+        None => w.u8(0),
+        Some(density) => {
+            w.u8(1);
+            w.u8(unit_to_wire(density.unit()));
+            for (numerator, denominator) in [density.across(), density.down()] {
+                w.u32(numerator);
+                w.u32(denominator);
             }
         }
     }
@@ -756,30 +994,81 @@ pub fn open_edit<L: Launcher, S: tairix_log::Sink>(
             .filter(|format| format.raster().is_some())
             .filter(|format| asked.is_none_or(|asked| asked == *format))
             .ok_or(EditFailure::ReplyMalformed)?;
-        let sprites = EditFailure::flag(&mut r)?;
+        // The kind is the format's, and is stated as well so a reply whose
+        // two disagree is refused here rather than at the first entry.
+        let kind = EditKind::of(format);
+        if r.u8().map_err(malformed)? != kind.to_wire() {
+            return Err(EditFailure::ReplyMalformed);
+        }
         let count = r.u32().map_err(malformed)?;
         let unkept = Unkept {
             precision: EditFailure::flag(&mut r)?,
             extras: EditFailure::flag(&mut r)?,
+            converted: EditFailure::flag(&mut r)?,
         };
-        // Only a PNG is narrowed, and only a PNG or a JPEG holds what its
-        // picture does not.
-        let consistent = sprites == (format == ViewFormat::Sprite)
-            && if sprites {
-                (1..=MAX_EDIT_ENTRIES).contains(&count)
-            } else {
-                count == 1
+        let written = match r.u8().map_err(malformed)? {
+            0 => Written::Plain,
+            1 => Written::Gif(GifOptions {
+                interlaced: EditFailure::flag(&mut r)?,
+            }),
+            2 => Written::Tiff(TiffOptions {
+                compression: r
+                    .u8()
+                    .ok()
+                    .and_then(compression_from_wire)
+                    .ok_or(EditFailure::ReplyMalformed)?,
+            }),
+            _ => return Err(EditFailure::ReplyMalformed),
+        };
+        let canvas = if EditFailure::flag(&mut r)? {
+            let (width, height) = (r.u32().map_err(malformed)?, r.u32().map_err(malformed)?);
+            let sides =
+                (1..=MAX_EDIT_SIDE).contains(&width) && (1..=MAX_EDIT_SIDE).contains(&height);
+            if !sides || u64::from(width) * u64::from(height) > MAX_EDIT_PIXELS {
+                return Err(EditFailure::ReplyMalformed);
             }
-            && (!unkept.precision || format == ViewFormat::Png)
-            && (!unkept.extras || matches!(format, ViewFormat::Png | ViewFormat::Jpeg));
+            Some((width, height))
+        } else {
+            None
+        };
+        // Only a format whose reading can narrow, hold more, or restate
+        // colour says it did, only GIF and TIFF record how they were
+        // written, and only layers lie on a canvas of their own.
+        let consistent = match kind {
+            EditKind::Single => count == 1,
+            EditKind::Pages | EditKind::Sprites => (1..=MAX_EDIT_ENTRIES).contains(&count),
+            EditKind::Layers => {
+                usize::try_from(count).is_ok_and(|count| (1..=MOST_ORA_LAYERS).contains(&count))
+            }
+        } && canvas.is_some() == (kind == EditKind::Layers)
+            && (!unkept.precision
+                || matches!(format, ViewFormat::Png | ViewFormat::Bmp | ViewFormat::Tiff))
+            && (!unkept.extras
+                || matches!(
+                    format,
+                    ViewFormat::Png
+                        | ViewFormat::Jpeg
+                        | ViewFormat::Gif
+                        | ViewFormat::Bmp
+                        | ViewFormat::Tiff
+                        | ViewFormat::OpenRaster
+                ))
+            && (!unkept.converted || matches!(format, ViewFormat::Jpeg | ViewFormat::Tiff))
+            && match written {
+                Written::Plain => !matches!(format, ViewFormat::Gif | ViewFormat::Tiff),
+                Written::Gif(_) => format == ViewFormat::Gif,
+                Written::Tiff(_) => format == ViewFormat::Tiff,
+            };
         if !r.is_exhausted() || !consistent {
             return Err(EditFailure::ReplyMalformed);
         }
         Ok(EditDocument {
             format,
-            sprites,
+            kind,
             count,
             unkept,
+            written,
+            canvas,
         })
     })
 }
@@ -811,13 +1100,35 @@ pub fn select_entry<L: Launcher, S: tairix_log::Sink>(
         }
         let entry = match r.u8().map_err(malformed)? {
             0 => {
-                let picture = read_picture(&mut r)?;
-                if picture.sprite.is_some() != document.sprites {
+                let mut picture = read_picture(&mut r)?;
+                if EditFailure::flag(&mut r)? {
+                    let read = r.bytes(MAX_LAYER_NAME).map_err(malformed)?;
+                    let read = core::str::from_utf8(read).map_err(malformed)?;
+                    let mut name = String::new();
+                    name.try_reserve_exact(read.len())
+                        .map_err(|_| OUT_OF_MEMORY)?;
+                    name.push_str(read);
+                    let layer = EditLayer {
+                        name,
+                        at: (
+                            r.u32().map_err(malformed)?.cast_signed(),
+                            r.u32().map_err(malformed)?.cast_signed(),
+                        ),
+                        opacity: r.u8().map_err(malformed)?,
+                        visible: EditFailure::flag(&mut r)?,
+                    };
+                    picture = picture
+                        .with_layer(layer)
+                        .ok_or(EditFailure::ReplyMalformed)?;
+                }
+                let agrees = picture.sprite.is_some() == (document.kind == EditKind::Sprites)
+                    && picture.layer.is_some() == (document.kind == EditKind::Layers);
+                if !agrees {
                     return Err(EditFailure::ReplyMalformed);
                 }
                 EditEntry::Picture(picture)
             }
-            1 if document.sprites => {
+            1 if document.kind == EditKind::Sprites => {
                 let name = SpriteName::from_bytes(r.bytes(SpriteName::MAX_LEN).map_err(malformed)?)
                     .ok_or(EditFailure::ReplyMalformed)?;
                 let reason = r
@@ -905,7 +1216,23 @@ fn read_picture(r: &mut Reader<'_>) -> Result<EditPicture, EditFailure> {
     } else {
         None
     };
-    EditPicture::new(width, height, pixels, sprite).ok_or(EditFailure::ReplyMalformed)
+    let density = if EditFailure::flag(r)? {
+        let unit = r
+            .u8()
+            .ok()
+            .and_then(unit_from_wire)
+            .ok_or(EditFailure::ReplyMalformed)?;
+        let mut figure = || -> Result<(u32, u32), EditFailure> {
+            Ok((r.u32().map_err(malformed)?, r.u32().map_err(malformed)?))
+        };
+        let (across, down) = (figure()?, figure()?);
+        Some(Density::new(across, down, unit).ok_or(EditFailure::ReplyMalformed)?)
+    } else {
+        None
+    };
+    EditPicture::new(width, height, pixels, sprite)
+        .map(|picture| picture.with_density(density))
+        .ok_or(EditFailure::ReplyMalformed)
 }
 
 /// Fetch every row of the selected `picture`, handing each to `row` with

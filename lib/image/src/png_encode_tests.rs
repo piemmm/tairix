@@ -5,26 +5,15 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::encode_fixture::{self, rgba, shown, Noise};
 use crate::png_fixture::{build_png, chunk};
 use crate::{
-    decode_as, encode_png, open_native, DecodeLimits, ImageFormat, IndexDepth, NativeDocument,
-    Picture, Pixels, Rgba8, Unkept,
+    decode_as, encode_png, DecodeLimits, Density, DensityUnit, ImageFormat, IndexDepth, Picture,
+    Pixels, Rgba8, Unkept,
 };
 
 fn limits() -> DecodeLimits {
     DecodeLimits::new(4096, 4096, 4096 * 4096, 0)
-}
-
-/// A small deterministic generator, so a noise picture is the same every run.
-struct Noise(u64);
-
-impl Noise {
-    fn next(&mut self) -> u8 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        u8::try_from(self.0 >> 56).expect("the top byte")
-    }
 }
 
 /// The IHDR's bit depth and colour type.
@@ -38,20 +27,7 @@ fn has_chunk(png: &[u8], kind: [u8; 4]) -> bool {
 }
 
 fn native(png: &[u8]) -> Picture {
-    match open_native(ImageFormat::Png, png, &limits()).expect("the file decodes") {
-        NativeDocument::Picture { picture, .. } => picture,
-        NativeDocument::Sprites(_) => panic!("a PNG is one picture"),
-    }
-}
-
-/// `rgba` as it looks: a fully transparent pixel shows nothing, whatever
-/// colour it was left holding.
-fn shown(rgba: &[u8]) -> Vec<u8> {
-    rgba.as_chunks::<4>()
-        .0
-        .iter()
-        .flat_map(|&pixel| if pixel[3] == 0 { [0; 4] } else { pixel })
-        .collect()
+    encode_fixture::native(ImageFormat::Png, png, &limits()).0
 }
 
 /// Encode `picture`, decode the file, and check it looks exactly the same.
@@ -64,16 +40,6 @@ fn round_trip(picture: &Picture) -> Vec<u8> {
         "the file shows a different picture"
     );
     png
-}
-
-fn rgba(width: u32, height: u32, mut pixel: impl FnMut(u32, u32) -> Rgba8) -> Picture {
-    let mut bytes = Vec::new();
-    for y in 0..height {
-        for x in 0..width {
-            bytes.extend_from_slice(&pixel(x, y));
-        }
-    }
-    Picture::rgba(width, height, bytes).expect("valid")
 }
 
 #[test]
@@ -287,10 +253,7 @@ fn the_same_picture_always_encodes_to_the_same_bytes() {
 }
 
 fn unkept(png: &[u8]) -> Unkept {
-    match open_native(ImageFormat::Png, png, &limits()).expect("the file decodes") {
-        NativeDocument::Picture { unkept, .. } => unkept,
-        NativeDocument::Sprites(_) => panic!("a PNG is one picture"),
-    }
+    encode_fixture::native(ImageFormat::Png, png, &limits()).1
 }
 
 /// A PNG holds more than its picture in samples finer than eight bits and
@@ -309,7 +272,7 @@ fn what_a_png_holds_beside_its_picture_is_said_when_it_opens() {
         unkept(&wide),
         Unkept {
             precision: true,
-            extras: false
+            ..Unkept::default()
         }
     );
     // After the signature and the header chunk.
@@ -320,8 +283,50 @@ fn what_a_png_holds_beside_its_picture_is_said_when_it_opens() {
     assert_eq!(
         unkept(&texted),
         Unkept {
-            precision: false,
-            extras: true
+            extras: true,
+            ..Unkept::default()
         }
     );
+}
+
+/// A PNG states a density per metre, or a bare shape, in its `pHYs` chunk,
+/// and a plain one is the picture's own rather than held beside it.
+#[test]
+fn a_png_keeps_its_density() {
+    let read = |density| {
+        let png =
+            encode_png(&rgba(2, 2, |_, _| [1, 2, 3, 255]).with_density(density)).expect("encodes");
+        encode_fixture::native(ImageFormat::Png, &png, &limits())
+    };
+    let metre = Density::whole(2835, 5669, DensityUnit::Metre);
+    let (picture, unkept, _) = read(metre);
+    assert_eq!((picture.density(), unkept), (metre, Unkept::default()));
+    assert_eq!(
+        read(Density::whole(72, 144, DensityUnit::Inch)).0.density(),
+        metre,
+        "rounded per metre"
+    );
+    let shape = Density::whole(1, 2, DensityUnit::Aspect);
+    assert_eq!(read(shape).0.density(), shape);
+    assert_eq!(read(None).0.density(), None);
+    let plain = build_png(1, 1, 8, 2, 0, None, None, &[0, 1, 2, 3]);
+    let (head, tail) = plain.split_at(8 + 25);
+    let with = |payload: &[u8]| {
+        let mut png = head.to_vec();
+        png.extend(chunk(*b"pHYs", payload));
+        png.extend_from_slice(tail);
+        encode_fixture::native(ImageFormat::Png, &png, &limits())
+    };
+    let (picture, unkept, _) = with(&[0, 0, 0, 3, 0, 0, 0, 3, 0]);
+    assert_eq!(
+        (picture.density(), unkept),
+        (None, Unkept::default()),
+        "square pixels"
+    );
+    assert!(with(&[0, 0, 0, 0, 0, 0, 0, 3, 1]).1.extras, "a zero figure");
+    assert!(
+        with(&[0, 0, 0, 3, 0, 0, 0, 3, 7]).1.extras,
+        "an unknown unit"
+    );
+    assert!(with(&[0, 0, 0, 3, 0, 0, 0, 3]).1.extras, "a short chunk");
 }

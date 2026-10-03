@@ -161,13 +161,6 @@ fn a_crop_keeps_its_rectangle_and_refuses_one_off_the_picture() {
     assert_eq!(off, Err(TransformError::BadSize));
 }
 
-#[test]
-fn inverting_turns_colours_over_and_leaves_opacity() {
-    let picture = Canvas::new(2, 2, Kind::Rgba, Sample::Rgba([10, 20, 30, 40])).expect("fits");
-    let inverted = apply(&picture, Transform::Invert).expect("inverts");
-    assert_eq!(at(&inverted, 1, 1), [245, 235, 225, 40]);
-}
-
 fn palette_picture(masked: bool) -> Canvas {
     let kind = Kind::Indexed {
         depth: IndexDepth::Two,

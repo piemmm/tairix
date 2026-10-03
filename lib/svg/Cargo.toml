@@ -24,6 +24,9 @@ tairix-colour = { path = "../colour", version = "=0.0.0" }
 # here, and no external libm enters the trusted computing base.
 tairix-util = { path = "../util", version = "=0.0.0" }
 
+# The shared XML element scanner the document is read through.
+tairix-xml = { path = "../xml", version = "=0.0.0" }
+
 [lints]
 workspace = true
 

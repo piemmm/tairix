@@ -31,22 +31,24 @@ use alloc::vec::Vec;
 use tairix_util::fallible;
 
 use crate::channel::{Channel, Sampler};
-use crate::{DecodeError, DecodeLimits, RasterImage, PROBE_LIMITS, RGBA_BYTES};
+use crate::density::{Density, DensityUnit};
+use crate::picture::{IndexDepth, Picture};
+use crate::{DecodeError, DecodeLimits, RasterImage, Unkept, PROBE_LIMITS, RGBA_BYTES};
 
 /// The two magic bytes every BMP file opens with.
 pub(crate) const MAGIC: [u8; 2] = *b"BM";
 
 /// `BITMAPFILEHEADER`'s fixed length, and the offset within it of the
 /// `bfOffBits` field naming where the pixel array starts.
-const FILE_HEADER_LEN: usize = 14;
+pub(crate) const FILE_HEADER_LEN: usize = 14;
 const FILE_HEADER_PIXEL_OFFSET_AT: usize = 10;
 
 /// The DIB header lengths this decoder claims, by name.
 const CORE_HEADER_LEN: u32 = 12;
-const INFO_HEADER_LEN: u32 = 40;
+pub(crate) const INFO_HEADER_LEN: u32 = 40;
 const V2_HEADER_LEN: u32 = 52;
 const V3_HEADER_LEN: u32 = 56;
-const V4_HEADER_LEN: u32 = 108;
+pub(crate) const V4_HEADER_LEN: u32 = 108;
 const V5_HEADER_LEN: u32 = 124;
 
 /// Where the channel masks sit, whether as fields of the header (from
@@ -55,11 +57,26 @@ const V5_HEADER_LEN: u32 = 124;
 const MASK_AT: [usize; RGBA_BYTES] = [40, 44, 48, 52];
 
 /// Pixel-array encodings, as `biCompression` spells them.
-const BI_RGB: u32 = 0;
+pub(crate) const BI_RGB: u32 = 0;
 const BI_RLE8: u32 = 1;
 const BI_RLE4: u32 = 2;
-const BI_BITFIELDS: u32 = 3;
+pub(crate) const BI_BITFIELDS: u32 = 3;
 const BI_ALPHABITFIELDS: u32 = 6;
+
+/// Where a `BITMAPINFOHEADER`'s density figures sit: pixels per metre across
+/// and down.
+const DENSITY_AT: [usize; 2] = [24, 28];
+
+/// Where a `BITMAPV4HEADER` states its colour space, and the span of the
+/// endpoints and gamma a calibrated one carries after it.
+const COLOUR_SPACE_AT: usize = 56;
+const CALIBRATION: core::ops::Range<usize> = 60..108;
+
+/// `bV4CSType`: calibrated by the endpoints that follow, sRGB, and the
+/// system's own space.
+const LCS_CALIBRATED_RGB: u32 = 0;
+pub(crate) const LCS_SRGB: u32 = 0x7352_4742;
+const LCS_WINDOWS_COLOR_SPACE: u32 = 0x5769_6E20;
 
 /// The escapes a run-length-encoded array uses in place of a run length.
 const RLE_END_OF_LINE: u8 = 0;
@@ -403,22 +420,16 @@ fn read_masks(
     ])
 }
 
-/// Where an RLE run writes: the output buffer and the geometry it is shaped
-/// as. Run-length encoding is bottom-up only, so row `y` counts back from
-/// the last output row.
+/// The output an indexed pixel array's colours are written to, row `y`
+/// counting from the top.
 struct Canvas<'a> {
     out: &'a mut [u8],
-    width: u32,
-    rows: u32,
     row_bytes: usize,
 }
 
 impl Canvas<'_> {
     fn put(&mut self, x: u32, y: u32, rgba: [u8; RGBA_BYTES]) -> Result<(), DecodeError> {
-        if x >= self.width || y >= self.rows {
-            return Err(DecodeError::BmpRleOutOfBounds);
-        }
-        let at = usize::try_from(self.rows - 1 - y)
+        let at = usize::try_from(y)
             .ok()
             .and_then(|row| row.checked_mul(self.row_bytes))
             .and_then(|row| row.checked_add(usize::try_from(x).ok()?.checked_mul(RGBA_BYTES)?))
@@ -459,90 +470,111 @@ pub(crate) fn decode_pixels(
         .and_then(|rows| rows.checked_mul(row_bytes))
         .ok_or(DecodeError::DimensionsOverflow)?;
     let mut out = fallible::filled(out_len, 0u8).ok_or(DecodeError::OutOfMemory)?;
-    let palette = Palette {
-        entries: palette,
-        count: dib.palette_entries,
-        entry_len: dib.palette_entry_len,
-    };
-    let consumed = match dib.compression {
-        Compression::Rle8 | Compression::Rle4 => read_rle(
-            matches!(dib.compression, Compression::Rle4),
-            &palette,
-            data,
-            &mut Canvas {
+    let consumed = match dib.packing {
+        Packing::Indexed { .. } => {
+            let palette = Palette {
+                entries: palette,
+                count: dib.palette_entries,
+                entry_len: dib.palette_entry_len,
+            };
+            let mut canvas = Canvas {
                 out: &mut out,
-                width: dib.width,
-                rows,
                 row_bytes,
-            },
-        )?,
-        Compression::Rgb | Compression::Bitfields => {
-            read_rows(dib, &palette, data, rows, row_bytes, &mut out)?
+            };
+            walk_indices(dib, data, rows, |x, y, index| {
+                canvas.put(x, y, palette.rgba(index)?)
+            })?
         }
+        Packing::Packed { bytes } => read_packed(dib, bytes, data, rows, row_bytes, &mut out)?,
     };
     Ok((out, consumed))
 }
 
-/// Expand an uncompressed pixel array, answering the bytes it occupied.
-fn read_rows(
+/// The uncompressed rows of a pixel array of `rows` rows, top first, and the
+/// bytes they occupy.
+fn uncompressed_rows<'d>(
     dib: &Dib,
-    palette: &Palette<'_>,
-    data: &[u8],
+    data: &'d [u8],
     rows: u32,
-    row_bytes: usize,
-    out: &mut [u8],
-) -> Result<usize, DecodeError> {
+) -> Result<(impl Iterator<Item = (u32, &'d [u8])> + use<'d>, usize), DecodeError> {
     let stride = stride(dib.width, dib.bits())?;
     let needed = usize::try_from(rows)
         .ok()
         .and_then(|rows| rows.checked_mul(stride))
         .ok_or(DecodeError::DimensionsOverflow)?;
-    if data.len() < needed {
-        return Err(DecodeError::BmpPixelDataTruncated);
-    }
+    let data = data
+        .get(..needed)
+        .ok_or(DecodeError::BmpPixelDataTruncated)?;
+    let top_down = dib.top_down;
+    let lines = (0..rows)
+        .zip(data.chunks_exact(stride.max(1)))
+        .map(move |(stored, line)| (if top_down { stored } else { rows - 1 - stored }, line));
+    Ok((lines, needed))
+}
+
+/// Expand an uncompressed array of packed pixels, answering the bytes it
+/// occupied.
+fn read_packed(
+    dib: &Dib,
+    bytes: u32,
+    data: &[u8],
+    rows: u32,
+    row_bytes: usize,
+    out: &mut [u8],
+) -> Result<usize, DecodeError> {
+    let (lines, needed) = uncompressed_rows(dib, data, rows)?;
     let samplers = dib.channels.map(Sampler::new);
-    for row in 0..rows {
-        let source = if dib.top_down { row } else { rows - 1 - row };
-        let (Some(src), Some(dst)) = (
-            usize::try_from(source)
-                .ok()
-                .and_then(|source| source.checked_mul(stride))
-                .and_then(|at| data.get(at..at.checked_add(stride)?)),
-            usize::try_from(row)
-                .ok()
-                .and_then(|row| row.checked_mul(row_bytes))
-                .and_then(|at| out.get_mut(at..at.checked_add(row_bytes)?)),
-        ) else {
-            return Err(DecodeError::BmpPixelDataTruncated);
-        };
-        match dib.packing {
-            Packing::Indexed { bits } => expand_indexed(bits, dib.width, palette, src, dst)?,
-            Packing::Packed { bytes } => expand_packed(bytes, dib.width, &samplers, src, dst)?,
-        }
+    for (row, src) in lines {
+        let dst = usize::try_from(row)
+            .ok()
+            .and_then(|row| row.checked_mul(row_bytes))
+            .and_then(|at| out.get_mut(at..at.checked_add(row_bytes)?))
+            .ok_or(DecodeError::BmpPixelDataTruncated)?;
+        expand_packed(bytes, dib.width, &samplers, src, dst)?;
     }
     Ok(needed)
 }
 
-/// Expand one row of colour-table indices.
-fn expand_indexed(
-    bits: u32,
-    width: u32,
-    palette: &Palette<'_>,
-    src: &[u8],
-    dst: &mut [u8],
-) -> Result<(), DecodeError> {
-    let per_byte = 8 / bits;
-    let mask = u32::MAX >> (u32::BITS - bits);
-    for (x, pixel) in (0..width).zip(dst.as_chunks_mut::<RGBA_BYTES>().0) {
-        let at = usize::try_from(x / per_byte).unwrap_or(usize::MAX);
-        let byte = src
-            .get(at)
-            .copied()
-            .ok_or(DecodeError::BmpPixelDataTruncated)?;
-        let index = u32::from(byte) >> (8 - bits * (x % per_byte + 1)) & mask;
-        *pixel = palette.rgba(index)?;
+/// Hand every pixel of an indexed pixel array of `rows` rows to `put` as its
+/// column, its row from the top, and its colour-table index; answers the
+/// bytes the array occupied. A run-length array's pixels are handed over in
+/// whatever order the runs cover them, and one it never covers not at all.
+fn walk_indices(
+    dib: &Dib,
+    data: &[u8],
+    rows: u32,
+    mut put: impl FnMut(u32, u32, u32) -> Result<(), DecodeError>,
+) -> Result<usize, DecodeError> {
+    let bits = dib.bits();
+    match dib.compression {
+        Compression::Rle8 | Compression::Rle4 => read_rle(
+            matches!(dib.compression, Compression::Rle4),
+            data,
+            dib.width,
+            rows,
+            put,
+        ),
+        Compression::Rgb | Compression::Bitfields => {
+            let (lines, needed) = uncompressed_rows(dib, data, rows)?;
+            let per_byte = 8 / bits;
+            let mask = u32::MAX >> (u32::BITS - bits);
+            for (row, src) in lines {
+                for x in 0..dib.width {
+                    let at = usize::try_from(x / per_byte).unwrap_or(usize::MAX);
+                    let byte = src
+                        .get(at)
+                        .copied()
+                        .ok_or(DecodeError::BmpPixelDataTruncated)?;
+                    put(
+                        x,
+                        row,
+                        u32::from(byte) >> (8 - bits * (x % per_byte + 1)) & mask,
+                    )?;
+                }
+            }
+            Ok(needed)
+        }
     }
-    Ok(())
 }
 
 /// Expand one row of packed pixels through the channel masks.
@@ -577,17 +609,27 @@ fn expand_packed(
     Ok(())
 }
 
-/// Expand a run-length-encoded pixel array, answering the bytes it occupied.
+/// Walk a run-length-encoded pixel array of `width` by `rows`, handing each
+/// pixel it covers to `put` as its column, its row from the top, and its
+/// index; answers the bytes it occupied.
 ///
 /// Each step consumes at least two bytes, so the walk always terminates.
-/// Every write is placed against the canvas's own bounds, so a run, delta, or
-/// line reaching outside the picture is refused rather than clipped.
+/// Every pixel is placed against the picture's own bounds, so a run, delta,
+/// or line reaching outside it is refused rather than clipped. The array is
+/// bottom-up, so its row `y` is the picture's row `rows - 1 - y`.
 fn read_rle(
     four_bit: bool,
-    palette: &Palette<'_>,
     data: &[u8],
-    canvas: &mut Canvas<'_>,
+    width: u32,
+    rows: u32,
+    mut put: impl FnMut(u32, u32, u32) -> Result<(), DecodeError>,
 ) -> Result<usize, DecodeError> {
+    let mut place = |x: u32, y: u32, index: u32| {
+        if x >= width || y >= rows {
+            return Err(DecodeError::BmpRleOutOfBounds);
+        }
+        put(x, rows - 1 - y, index)
+    };
     let mut x = 0u32;
     let mut y = 0u32;
     let mut pos = 0usize;
@@ -595,7 +637,7 @@ fn read_rle(
         let Some(&[count, value]) = data.get(pos..).and_then(<[u8]>::first_chunk::<2>) else {
             // A stream stopping once every row is covered simply omitted its
             // end-of-bitmap escape; one stopping earlier is truncated.
-            return if y >= canvas.rows {
+            return if y >= rows {
                 Ok(pos)
             } else {
                 Err(DecodeError::BmpRleTruncated)
@@ -614,7 +656,7 @@ fn read_rle(
                     u32::from(value)
                 };
                 let column = x.checked_add(step).ok_or(DecodeError::BmpRleOutOfBounds)?;
-                canvas.put(column, y, palette.rgba(index)?)?;
+                place(column, y, index)?;
             }
             x = x
                 .checked_add(u32::from(count))
@@ -663,7 +705,7 @@ fn read_rle(
                         u32::from(byte)
                     };
                     let column = x.checked_add(step).ok_or(DecodeError::BmpRleOutOfBounds)?;
-                    canvas.put(column, y, palette.rgba(index)?)?;
+                    place(column, y, index)?;
                 }
                 x = x
                     .checked_add(u32::from(literal))
@@ -721,6 +763,145 @@ fn parts(bytes: &[u8]) -> Result<(Dib, &[u8], &[u8]), DecodeError> {
         .get(pixel_offset..)
         .ok_or(DecodeError::BmpInvalidPixelOffset)?;
     Ok((dib, palette, pixels))
+}
+
+/// Read a BMP file as the picture it stores: an indexed one as its indices
+/// and colour table, any other as RGBA, with the density its header states.
+///
+/// A colour space beyond sRGB, a colour-table entry's reserved byte, and a
+/// 32-bit pixel's undefined fourth byte, where any is set, are held beside
+/// the picture; a channel wider than eight bits is narrowed.
+pub(crate) fn decode_native(
+    bytes: &[u8],
+    limits: &DecodeLimits,
+) -> Result<(Picture, Unkept), DecodeError> {
+    let (dib, palette, pixels) = parts(bytes)?;
+    let header = bytes
+        .get(FILE_HEADER_LEN..)
+        .ok_or(DecodeError::BmpTruncated)?;
+    let size = read_u32(header, 0)?;
+    let mut extras = colour_space_held(header, size)?;
+    let precision = dib.channels.iter().any(|channel| channel.width() > 8);
+    let geometry = |_| DecodeError::DimensionsOverflow;
+    let picture = if let Packing::Indexed { bits } = dib.packing {
+        limits.check(dib.width, dib.height)?;
+        let len = usize::try_from(u64::from(dib.width) * u64::from(dib.height))
+            .map_err(|_| DecodeError::DimensionsOverflow)?;
+        let mut indices = fallible::filled(len, 0u8).ok_or(DecodeError::OutOfMemory)?;
+        let runs = matches!(dib.compression, Compression::Rle8 | Compression::Rle4);
+        let mut covered = if runs {
+            fallible::filled(len, 0u8).ok_or(DecodeError::OutOfMemory)?
+        } else {
+            Vec::new()
+        };
+        let width = dib.width as usize;
+        walk_indices(&dib, pixels, dib.height, |x, y, index| {
+            let index = u8::try_from(index)
+                .ok()
+                .filter(|&index| u32::from(index) < dib.palette_entries)
+                .ok_or(DecodeError::BmpPaletteIndexOutOfRange)?;
+            let at = y as usize * width + x as usize;
+            *indices.get_mut(at).ok_or(DecodeError::BmpRleOutOfBounds)? = index;
+            if let Some(shown) = covered.get_mut(at) {
+                *shown = u8::MAX;
+            }
+            Ok(())
+        })?;
+        let table = Palette {
+            entries: palette,
+            count: dib.palette_entries,
+            entry_len: dib.palette_entry_len,
+        };
+        let entries =
+            usize::try_from(dib.palette_entries).map_err(|_| DecodeError::DimensionsOverflow)?;
+        let mut colours =
+            fallible::filled(entries, [0u8; RGBA_BYTES]).ok_or(DecodeError::OutOfMemory)?;
+        for (index, colour) in (0..).zip(colours.iter_mut()) {
+            *colour = table.rgba(index)?;
+        }
+        if dib.palette_entry_len == PALETTE_ENTRY_LEN {
+            extras |= palette.as_chunks::<4>().0.iter().any(|entry| entry[3] != 0);
+        }
+        let depth = IndexDepth::from_bits(bits).ok_or(DecodeError::BmpUnsupportedBitCount)?;
+        let mask = (runs && covered.contains(&0)).then_some(covered);
+        Picture::indexed(dib.width, dib.height, depth, colours, indices, mask).map_err(geometry)?
+    } else {
+        let (rgba, _) = decode_pixels(&dib, palette, pixels, dib.height, limits)?;
+        extras |= uncovered_bits_set(&dib, pixels)?;
+        Picture::rgba(dib.width, dib.height, rgba).map_err(geometry)?
+    };
+    let unkept = Unkept {
+        precision,
+        extras,
+        converted: false,
+    };
+    Ok((picture.with_density(density(header, size)), unkept))
+}
+
+/// Whether any packed pixel sets a bit no channel covers: the undefined
+/// fourth byte of a 32-bit `BI_RGB` pixel, the top bit of a 16-bit one, or
+/// what a set of masks leaves out.
+fn uncovered_bits_set(dib: &Dib, data: &[u8]) -> Result<bool, DecodeError> {
+    let Packing::Packed { bytes } = dib.packing else {
+        return Ok(false);
+    };
+    let covered = dib
+        .channels
+        .iter()
+        .fold(0, |union, channel| union | channel.mask());
+    let uncovered = !covered & (u32::MAX >> (u32::BITS - bytes * 8));
+    if uncovered == 0 {
+        return Ok(false);
+    }
+    let (lines, _) = uncompressed_rows(dib, data, dib.height)?;
+    let width = usize::try_from(bytes).unwrap_or(usize::MAX);
+    let span = dib.width as usize * width;
+    for (_, line) in lines {
+        let set = line.get(..span).is_some_and(|row| {
+            row.chunks_exact(width).any(|field| {
+                let raw = field
+                    .iter()
+                    .rev()
+                    .fold(0u32, |raw, &byte| raw << 8 | u32::from(byte));
+                raw & uncovered != 0
+            })
+        });
+        if set {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The density a header of `size` bytes states, where it states one: both
+/// figures positive pixels per metre.
+fn density(header: &[u8], size: u32) -> Option<Density> {
+    if size < INFO_HEADER_LEN {
+        return None;
+    }
+    let [across, down] = DENSITY_AT.map(|at| {
+        read_i32(header, at)
+            .ok()
+            .and_then(|value| u32::try_from(value).ok())
+    });
+    Density::whole(across?, down?, DensityUnit::Metre)
+}
+
+/// Whether a header of `size` bytes states a colour space beyond sRGB: a
+/// calibrated one with endpoints or gamma, a profile, or one not defined.
+fn colour_space_held(header: &[u8], size: u32) -> Result<bool, DecodeError> {
+    if size < V4_HEADER_LEN {
+        return Ok(false);
+    }
+    Ok(match read_u32(header, COLOUR_SPACE_AT)? {
+        LCS_SRGB | LCS_WINDOWS_COLOR_SPACE => false,
+        LCS_CALIBRATED_RGB => header
+            .get(CALIBRATION)
+            .ok_or(DecodeError::BmpTruncated)?
+            .iter()
+            .any(|&byte| byte != 0),
+        _ => true,
+    })
 }
 
 /// Read a BMP file's declared geometry from its header alone.

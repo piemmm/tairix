@@ -59,7 +59,9 @@ pub const REPEAT_DELAY_NS: u64 = 400_000_000;
 /// nanoseconds (see [`REPEAT_DELAY_NS`]).
 pub const REPEAT_INTERVAL_NS: u64 = 60_000_000;
 
-/// Which axis a scrollbar lays out along.
+/// Which axis a scrolling control lays out along: a scrollbar, or a
+/// [`Toolbar`](crate::toolbar::Toolbar), whose tools scroll when they
+/// overflow it.
 ///
 /// The behaviour is identical on both axes; orientation only decides how the
 /// owning viewport maps the computed one-dimensional [`ThumbSpan`] onto a

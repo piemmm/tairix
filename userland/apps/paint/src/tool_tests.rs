@@ -1,18 +1,9 @@
-use tairix_controls::{FieldAction, FieldControl};
+use tairix_controls::ScrollOrientation;
 
 use super::{
-    from_permille, permille, strip, strip_item, strip_tip, Options, StripItem, Style, Tool,
-    ViewCommand, MAX_SIZE,
+    mark_grid, tool_box, view_strip, Options, Setting, Style, Tool, ViewCommand, MAX_SIZE,
+    MOST_SETTINGS, VIEW_COMMANDS,
 };
-
-#[test]
-fn a_slider_reaches_every_whole_size_and_back() {
-    for size in 1..=MAX_SIZE {
-        assert_eq!(from_permille(permille(size, MAX_SIZE), MAX_SIZE), size);
-    }
-    assert_eq!(from_permille(0, MAX_SIZE), 1);
-    assert_eq!(from_permille(1000, MAX_SIZE), MAX_SIZE);
-}
 
 #[test]
 fn each_key_chooses_its_tool_and_names_itself_in_its_label() {
@@ -24,49 +15,162 @@ fn each_key_chooses_its_tool_and_names_itself_in_its_label() {
             .expect("a key");
         assert_eq!(Tool::for_key(key), Some(tool));
     }
-    assert_eq!(Tool::for_key('z'), None);
+    assert_eq!(Tool::for_key('q'), None);
 }
 
 #[test]
-fn the_strip_is_the_tools_then_the_commands() {
-    let toolbar = strip(Tool::Brush);
-    assert_eq!(toolbar.len(), Tool::ALL.len() + 5);
-    assert!(toolbar.is_active(2));
-    assert_eq!(strip_item(0), Some(StripItem::Tool(Tool::Select)));
+fn the_tool_box_is_every_tool_down_a_column_the_one_in_use_marked() {
+    let tools = tool_box(Tool::Brush);
+    assert_eq!(tools.len(), Tool::ALL.len());
+    assert_eq!(tools.orientation(), ScrollOrientation::Vertical);
+    assert!(tools.is_active(2));
     assert_eq!(
-        strip_item(Tool::ALL.len()),
-        Some(StripItem::Command(ViewCommand::ZoomOut))
+        (0..tools.len()).filter(|&at| tools.is_active(at)).count(),
+        1
     );
-    assert_eq!(strip_item(Tool::ALL.len() + 5), None);
-    assert_eq!(strip_tip(Tool::ALL.len() + 4), Some("Pixel grid (G)"));
 }
 
 #[test]
-fn a_panel_offers_the_settings_its_tool_uses_and_adopts_their_values() {
+fn the_view_strip_marks_the_grid_while_it_shows() {
+    let mut strip = view_strip(false);
+    assert_eq!(strip.len(), VIEW_COMMANDS.len());
+    assert!((0..strip.len()).all(|at| !strip.is_active(at)));
+    mark_grid(&mut strip, true);
+    let grid = VIEW_COMMANDS
+        .iter()
+        .position(|&(_, command, _)| command == ViewCommand::Grid)
+        .expect("a grid command");
+    assert!(strip.is_active(grid));
+    assert_eq!(strip, view_strip(true));
+    mark_grid(&mut strip, false);
+    assert_eq!(strip, view_strip(false));
+}
+
+#[test]
+fn the_most_settings_is_what_the_busiest_tool_offers() {
+    let busiest = Tool::ALL
+        .iter()
+        .map(|tool| tool.settings().len())
+        .max()
+        .expect("tools");
+    assert_eq!(MOST_SETTINGS, busiest);
+    assert_eq!(Tool::Ellipse.settings().len(), 3);
+    assert!(Tool::Eyedropper.settings().is_empty());
+}
+
+#[test]
+fn a_number_setting_is_held_to_its_bounds() {
     let mut options = Options::default();
-    assert!(options.panel(Tool::Eyedropper, true).is_empty());
-    let panel = options.panel(Tool::Ellipse, true);
-    assert_eq!(panel.len(), 3);
-    let label = options.adopt(Tool::Ellipse, 0, &FieldAction::Settled { permille: 1000 });
+    options.set_number(Tool::Line, Setting::Size, 0);
+    assert_eq!(options.size, 1);
+    options.set_number(Tool::Line, Setting::Size, 1000);
     assert_eq!(options.size, MAX_SIZE);
-    assert_eq!(label.as_deref(), Some("Size: 64 px"));
-    options.adopt(Tool::Ellipse, 1, &FieldAction::Selected { index: 2 });
-    assert_eq!(options.style, Style::Both);
-    options.adopt(Tool::Ellipse, 2, &FieldAction::Set { on: false });
-    assert!(!options.smooth);
-    assert!(options
-        .adopt(Tool::Ellipse, 9, &FieldAction::Set { on: true })
-        .is_none());
+    options.set_number(Tool::Fill, Setting::Tolerance, -5);
+    assert_eq!(options.tolerance, 0);
+    options.set_number(Tool::Fill, Setting::Tolerance, 400);
+    assert_eq!(options.tolerance, u8::MAX);
+    options.set_number(Tool::Airbrush, Setting::Flow, 0);
+    assert_eq!(options.airbrush.flow, 1);
+    options.set_number(Tool::Airbrush, Setting::Flow, 55);
+    assert_eq!(options.number(Tool::Airbrush, Setting::Flow), Some(55));
+    let before = options;
+    options.set_number(Tool::Rectangle, Setting::Style, 2);
+    options.set_number(Tool::Brush, Setting::Smooth, 0);
+    options.set_number(Tool::Line, Setting::Hardness, 3);
+    assert_eq!(
+        options, before,
+        "a choice, a switch and a tool with no tip hold no such number"
+    );
+    assert_eq!(options.number(Tool::Rectangle, Setting::Style), None);
+    assert_eq!(options.number(Tool::Line, Setting::Flow), None);
 }
 
 #[test]
-fn smoothing_is_offered_but_held_off_on_a_palette_picture() {
+fn every_number_setting_has_bounds_holding_its_default_and_steps() {
     let options = Options::default();
-    let panel = options.panel(Tool::Brush, false);
-    let row = &panel.rows()[1];
-    assert!(!row.state().is_actionable());
-    let FieldControl::Toggle(toggle) = row.control() else {
-        panic!("a toggle");
-    };
-    assert!(!toggle.is_on());
+    for tool in Tool::ALL {
+        for &setting in tool.settings() {
+            let Some((least, most)) = setting.bounds() else {
+                continue;
+            };
+            let value = options.number(tool, setting).expect("a number");
+            assert!((least..=most).contains(&value), "{tool:?} {setting:?}");
+        }
+    }
+    for setting in [
+        Setting::Size,
+        Setting::Tolerance,
+        Setting::Hardness,
+        Setting::Opacity,
+        Setting::Flow,
+        Setting::Spacing,
+        Setting::Feather,
+    ] {
+        let (line, page) = setting.steps();
+        assert!(line > 0 && page > line, "{setting:?}");
+        assert!(!setting.tip().is_empty());
+    }
+    for setting in [Setting::Style, Setting::Smooth] {
+        assert_eq!(setting.bounds(), None);
+        assert_eq!(setting.unit(), "");
+    }
+    assert_eq!(Style::ALL.len(), 3);
+}
+
+#[test]
+fn a_choice_setting_lists_its_choices_and_holds_one() {
+    use super::Marquee;
+    use crate::mask::Combine;
+    let mut options = Options::default();
+    for (setting, count) in [
+        (Setting::Style, 3),
+        (Setting::Marquee, 5),
+        (Setting::Combine, 4),
+    ] {
+        assert_eq!(setting.choices().len(), count);
+        assert_eq!(
+            options.choice(setting),
+            Some(0),
+            "{setting:?} starts on its first"
+        );
+        assert_eq!(setting.bounds(), None, "a choice is not a number");
+    }
+    assert!(options.set_choice(Setting::Marquee, 4));
+    assert_eq!(options.marquee, Marquee::Wand);
+    assert_eq!(Setting::Marquee.choices()[4], Marquee::Wand.label());
+    assert!(!options.set_choice(Setting::Marquee, 4), "already held");
+    assert!(
+        !options.set_choice(Setting::Combine, 4),
+        "one past its choices"
+    );
+    assert!(options.set_choice(Setting::Combine, 2));
+    assert_eq!(options.combine, Combine::Subtract);
+    assert_eq!(Setting::Size.choices(), &[] as &[&str]);
+    assert_eq!(options.choice(Setting::Size), None);
+    assert!(Tool::Select.settings().contains(&Setting::Feather));
+    assert_eq!(Setting::Feather.bounds(), Some((0, 100)));
+}
+
+#[test]
+fn each_tipped_tool_keeps_a_tip_of_its_own() {
+    let mut options = Options::default();
+    options.set_number(Tool::Brush, Setting::Size, 30);
+    options.set_number(Tool::Eraser, Setting::Hardness, 20);
+    assert_eq!(options.brush.size, 30);
+    assert_eq!(
+        options.number(Tool::Airbrush, Setting::Size),
+        Some(16),
+        "its own"
+    );
+    assert_eq!(
+        options.number(Tool::Line, Setting::Size),
+        Some(4),
+        "a line's width apart"
+    );
+    assert_eq!(options.eraser.hardness, 20);
+    assert_eq!(options.number(Tool::Brush, Setting::Hardness), Some(100));
+    for tool in Tool::ALL {
+        assert_eq!(options.tip(tool).is_some(), tool.tipped(), "{tool:?}");
+    }
+    assert!(Setting::Opacity.lays_part() && !Setting::Spacing.lays_part());
 }

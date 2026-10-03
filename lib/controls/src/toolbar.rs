@@ -1,17 +1,19 @@
 //! The toolbar / toolstrip: [`Toolbar`] (spec §11.11).
 //!
-//! A toolbar is a horizontal container for tool controls — [`IconButton`]s and
-//! [`SplitButton`]s — arranged in groups. It draws the toolstrip background and
-//! the quiet vertical gutter between groups, positions each tool, marks the
-//! *active* tool with a persistent lower accent seam, and routes pointer and
-//! keyboard input to the tool controls it owns (each tool's own Heat Seam,
-//! Signal Bead, and pressure rail come from that tool's [`crate::button`]
-//! state, so background work shows on the tool, not across the whole strip).
-//! Activation is reported as a typed [`ToolbarAction`]; the toolbar enforces no
-//! authority. Every metric resolves from the active
+//! A toolbar is a strip of tool controls — [`IconButton`]s and
+//! [`SplitButton`]s — arranged in groups along one axis: across a window, or,
+//! laid out [`ScrollOrientation::Vertical`], down its side as a tool box. It
+//! draws the strip's background and the quiet divider between groups,
+//! positions each tool, marks the *active* tool with a persistent accent seam —
+//! beneath it across a window, along its leading edge down one — and routes
+//! pointer and keyboard input to the tool controls it owns (each tool's own
+//! Heat Seam, Signal Bead, and pressure rail come from that tool's
+//! [`crate::button`] state, so background work shows on the tool, not across
+//! the whole strip). Activation is reported as a typed [`ToolbarAction`]; the
+//! toolbar enforces no authority. Every metric resolves from the active
 //! [`Theme`] and [`Scale`].
 //!
-//! A strip too narrow for its tools **scrolls** rather than running off its
+//! A strip too short for its tools **scrolls** rather than running off its
 //! own edge: it seats whole tools only, reserves one slot at each end for the
 //! overflow affordances, and offsets in whole tools through the shared
 //! [`crate::scroll`] engine. Nothing is ever painted or hit-tested outside the
@@ -31,7 +33,7 @@ use crate::paint::{
     grab_after, heavy_contrast, paint_chevron, plate_border, route_pointer, surface_rect, to_i32,
     withheld, ChevronDir,
 };
-use crate::scroll::{wheel_steps, ScrollModel, ScrollRange};
+use crate::scroll::{wheel_steps, ScrollModel, ScrollOrientation, ScrollRange};
 use crate::state::{ControlState, RenderInvariant};
 
 /// Which region of a tool an activation came from.
@@ -108,14 +110,14 @@ struct Entry {
     active: bool,
 }
 
-/// A horizontal container for tool controls arranged in groups (spec §11.11).
+/// A strip of tool controls arranged in groups along one axis (spec §11.11).
 ///
 /// Tools are added with [`Toolbar::with_icon`] / [`Toolbar::with_split`], each
 /// tagged with a `u16` group id; adjacent tools with different group ids are
 /// separated by a quiet gutter and divider. The active tool (set with
-/// [`Toolbar::set_active`]) carries a persistent lower accent seam. Keyboard
-/// focus moves between tools with Left/Right (Home/End to the ends) and
-/// Enter/Space activates the focused tool.
+/// [`Toolbar::set_active`]) carries a persistent accent seam. Keyboard focus
+/// moves between tools with the arrow keys along the strip's axis (Home/End
+/// to the ends), and Enter/Space activates the focused tool.
 ///
 /// A strip with no room for every tool scrolls in whole tools: the offset is
 /// held here and clamped through the shared [`ScrollModel`], and the two
@@ -124,16 +126,17 @@ struct Entry {
 ///
 /// Equal toolbars draw the same pixels, so a host may use `==` as its repaint
 /// gate: the tools with their own hover/press/active state, their group ids,
-/// the keyboard focus index, and the scroll offset all compare. The pointer
-/// coordinate does not — the strip only forwards it to the tool it lands on,
-/// and no render path reads it.
-#[derive(Clone, Debug, Eq, PartialEq, Default)]
+/// the orientation, the keyboard focus index, and the scroll offset all
+/// compare. The pointer coordinate does not — the strip only forwards it to
+/// the tool it lands on, and no render path reads it.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Toolbar {
     entries: Vec<Entry>,
+    orientation: ScrollOrientation,
     focus: Option<usize>,
     /// The first tool the strip shows — drawn, so it compares. Clamped on
     /// every layout against the tools the current bounds can seat, so a
-    /// narrowed strip never holds an offset past its own end.
+    /// shortened strip never holds an offset past its own end.
     offset: u64,
     /// The last pointer position, forwarded to the tool it falls on —
     /// hit-testing input, never drawn.
@@ -154,11 +157,41 @@ pub struct Toolbar {
     wheel_carry: RenderInvariant<i64>,
 }
 
+impl Default for Toolbar {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Toolbar {
-    /// An empty toolbar.
+    /// An empty toolbar across a window.
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            entries: Vec::new(),
+            orientation: ScrollOrientation::Horizontal,
+            focus: None,
+            offset: 0,
+            pointer: RenderInvariant::new(Point::ORIGIN),
+            hovered: RenderInvariant::new(None),
+            armed: RenderInvariant::new(None),
+            held: RenderInvariant::new(None),
+            wheel_carry: RenderInvariant::new(0),
+        }
+    }
+
+    /// This toolbar laid out along `orientation`: across a window, the
+    /// default, or down its side as a tool box.
+    #[must_use]
+    pub fn with_orientation(mut self, orientation: ScrollOrientation) -> Self {
+        self.orientation = orientation;
+        self
+    }
+
+    /// The axis the tools are seated and scrolled along.
+    #[must_use]
+    pub const fn orientation(&self) -> ScrollOrientation {
+        self.orientation
     }
 
     /// This toolbar with an icon-button tool appended to `group`.
@@ -246,7 +279,7 @@ impl Toolbar {
     ///
     /// The nearest offset that shows it: its own index when it sits before
     /// the band, and the first offset forward whose band reaches it
-    /// otherwise. The seating depends on the widths in between, so the walk
+    /// otherwise. The seating depends on the lengths in between, so the walk
     /// asks the seating rather than subtracting a tool count that is not
     /// constant. A tool the strip already shows moves nothing.
     fn reveal(
@@ -290,22 +323,27 @@ impl Toolbar {
         }
     }
 
-    /// Each tool's own width and the gutter charged before it when it follows
-    /// a tool of another group.
+    /// Each tool's own extent along and across the strip and the gutter
+    /// charged before it when it follows a tool of another group.
     ///
-    /// Every width the strip reasons about — what it needs, what one band can
-    /// seat, where each seated tool sits — is summed from this one list, so
-    /// the natural width and the seating can never measure a strip
-    /// differently.
+    /// Every length the strip reasons about — what it needs, what one band
+    /// can seat, where each seated tool sits — is summed from this one list,
+    /// so the natural length and the seating can never measure a strip
+    /// differently. A split keeps its two regions side by side, so it is two
+    /// slots along a strip across a window and two slots across a column.
     fn spans(&self, slot: u32, gap: u32) -> Vec<Span> {
+        let double = slot.saturating_mul(2);
         let mut spans = Vec::with_capacity(self.entries.len());
         let mut prev: Option<u16> = None;
         for entry in &self.entries {
+            let (length, breadth) = match (&entry.tool, self.orientation) {
+                (Tool::Icon(_), _) => (slot, slot),
+                (Tool::Split(_), ScrollOrientation::Horizontal) => (double, slot),
+                (Tool::Split(_), ScrollOrientation::Vertical) => (slot, double),
+            };
             spans.push(Span {
-                width: match entry.tool {
-                    Tool::Icon(_) => slot,
-                    Tool::Split(_) => slot.saturating_mul(2),
-                },
+                length,
+                breadth,
                 gutter: if prev.is_some_and(|group| group != entry.group) {
                     gap
                 } else {
@@ -317,36 +355,53 @@ impl Toolbar {
         spans
     }
 
-    /// The width the strip needs to seat **every** tool: the leading gap, each
-    /// tool with the gap that follows it, and a gutter at each group boundary.
+    /// The length along its axis the strip needs to seat **every** tool: the
+    /// leading gap, each tool with the gap that follows it, and a gutter at
+    /// each group boundary.
     ///
     /// What an owner floors a window on when its strip must never scroll, so
     /// the room the tools need is derived rather than hand-picked.
     #[must_use]
-    pub fn natural_width(&self, scale: Scale, theme: &Theme) -> u32 {
+    pub fn natural_length(&self, scale: Scale, theme: &Theme) -> u32 {
         let (slot, gap) = slot_metrics(scale, theme);
         let spans = self.spans(slot, gap);
         span_of(&spans, 0, spans.len(), gap)
     }
 
-    /// The narrowest strip that can still show something: the two reserved
-    /// overflow slots plus the widest single tool in its own band.
+    /// The shortest strip that can still show something: the two reserved
+    /// overflow slots plus the longest single tool in its own band.
     ///
     /// What an owner floors a window on when its strip is allowed to scroll —
     /// below this the affordances leave no room for a tool and the strip shows
     /// nothing at all.
     #[must_use]
-    pub fn min_width(&self, scale: Scale, theme: &Theme) -> u32 {
+    pub fn min_length(&self, scale: Scale, theme: &Theme) -> u32 {
         let (slot, gap) = slot_metrics(scale, theme);
-        let widest = self
+        let longest = self
             .spans(slot, gap)
             .iter()
-            .map(|span| span.width)
+            .map(|span| span.length)
             .max()
             .unwrap_or(slot);
         slot.saturating_mul(2)
             .saturating_add(gap)
-            .saturating_add(widest)
+            .saturating_add(longest)
+    }
+
+    /// The breadth across its axis the strip needs: its broadest tool, or one
+    /// slot for a strip of none.
+    ///
+    /// What an owner sizes the band the strip sits in from; a tool broader
+    /// than the bounds it is given is not seated, rather than drawn past the
+    /// strip's edge.
+    #[must_use]
+    pub fn breadth(&self, scale: Scale, theme: &Theme) -> u32 {
+        let (slot, gap) = slot_metrics(scale, theme);
+        self.spans(slot, gap)
+            .iter()
+            .map(|span| span.breadth)
+            .max()
+            .unwrap_or(slot)
     }
 
     /// The scroll model over the tools for a strip drawn at `bounds`: how many
@@ -370,39 +425,40 @@ impl Toolbar {
         let (slot, gap) = slot_metrics(scale, theme);
         let spans = self.spans(slot, gap);
         let count = spans.len();
-        let tool_y = bounds.top() + to_i32(bounds.height.saturating_sub(slot)) / 2;
-        if span_of(&spans, 0, count, gap) <= bounds.width {
+        let ((start, length), (across, breadth)) = axes(self.orientation, bounds);
+        let whole = Band {
+            orientation: self.orientation,
+            start,
+            length,
+            across,
+            breadth,
+            slot,
+            gap,
+        };
+        if span_of(&spans, 0, count, gap) <= length {
             return Measure {
                 spans,
-                band: Band {
-                    x: bounds.left(),
-                    width: bounds.width,
-                    tool_y,
-                    slot,
-                    gap,
-                },
+                band: whole,
                 model: fixed_model(count),
                 reserved: false,
             };
         }
         let band = Band {
-            x: bounds.left().saturating_add(to_i32(slot)),
-            width: bounds.width.saturating_sub(slot.saturating_mul(2)),
-            tool_y,
-            slot,
-            gap,
+            start: start.saturating_add(to_i32(slot)),
+            length: length.saturating_sub(slot.saturating_mul(2)),
+            ..whole
         };
         // The least offset whose window still reaches the last tool. Each
-        // tool added at the front costs its own width and leading gap plus
+        // tool added at the front costs its own length and leading gap plus
         // the gutter the tool it now precedes no longer starts a run with.
         let mut first = count;
         let mut span = 0u32;
         while let Some(added) = first.checked_sub(1).and_then(|i| {
             let grown = span
                 .saturating_add(gap)
-                .saturating_add(spans.get(i)?.width)
+                .saturating_add(spans.get(i)?.length)
                 .saturating_add(spans.get(first).map_or(0, |next| next.gutter));
-            (grown <= band.width).then_some((i, grown))
+            (grown <= band.length).then_some((i, grown))
         }) {
             (first, span) = added;
         }
@@ -432,9 +488,12 @@ impl Toolbar {
         let count = measured.spans.len();
         let scrollable = measured.reserved && measured.model.range().is_scrollable();
         let last_seated = seats.iter().rposition(Option::is_some);
-        let back = (scrollable && offset > 0).then(|| measured.band.leading_slot());
+        let back = (scrollable && offset > 0)
+            .then(|| measured.band.leading_slot())
+            .flatten();
         let forward = (scrollable && last_seated.is_none_or(|last| last + 1 < count))
-            .then(|| measured.band.trailing_slot());
+            .then(|| measured.band.trailing_slot())
+            .flatten();
         Strip {
             seats,
             dividers,
@@ -504,23 +563,19 @@ impl Toolbar {
         }
 
         let strip = self.strip(bounds, scale, theme);
-        let border = plate_border(theme, scale);
-
-        // Group gutters: a quiet vertical divider between groups.
-        if let Some((_, y, _, h)) = surface_rect(bounds) {
-            let pad = scale.scale_length(theme.metrics().control_inset).max(1);
-            let inner_h = h.saturating_sub(pad.saturating_mul(2));
-            for &dx in &strip.dividers {
-                if let Ok(dxu) = u32::try_from(dx) {
-                    if inner_h > 0 {
-                        surface.fill_rect(
-                            dxu,
-                            y + pad,
-                            border.max(1),
-                            inner_h,
-                            Color::from(palette.border),
-                        );
-                    }
+        let border = plate_border(theme, scale).max(1);
+        let pad = scale.scale_length(theme.metrics().control_inset).max(1);
+        let (_, (across, breadth)) = axes(self.orientation, bounds);
+        let inner = breadth.saturating_sub(pad.saturating_mul(2));
+        let across = across.saturating_add(to_i32(pad));
+        for &at in &strip.dividers {
+            let line = match self.orientation {
+                ScrollOrientation::Horizontal => Rect::new(at, across, border, inner),
+                ScrollOrientation::Vertical => Rect::new(across, at, inner, border),
+            };
+            if let Some((x, y, w, h)) = surface_rect(line) {
+                if w > 0 && h > 0 {
+                    surface.fill_rect(x, y, w, h, Color::from(palette.border));
                 }
             }
         }
@@ -540,43 +595,45 @@ impl Toolbar {
                 Tool::Split(b) => b.render(surface, rect, scale, theme),
             }
             if entry.active {
-                Self::paint_active_seam(surface, rect, scale, theme);
+                self.paint_active_seam(surface, rect, scale, theme);
             }
         }
 
         // The overflow chevrons — the same glyph the scrollbar's end buttons
         // draw, never a second icon — in the reserved slot each occupies.
         let chevron = Color::from(palette.on_surface_muted);
-        for (rect, dir) in [
-            (strip.back, ChevronDir::Left),
-            (strip.forward, ChevronDir::Right),
-        ] {
+        let (back, forward) = match self.orientation {
+            ScrollOrientation::Horizontal => (ChevronDir::Left, ChevronDir::Right),
+            ScrollOrientation::Vertical => (ChevronDir::Up, ChevronDir::Down),
+        };
+        for (rect, dir) in [(strip.back, back), (strip.forward, forward)] {
             if let Some(rect) = rect {
                 paint_chevron(surface, rect, dir, chevron);
             }
         }
     }
 
-    /// Paint the persistent active-tool lower accent seam under `rect`.
-    fn paint_active_seam(surface: &mut Surface, rect: Rect, scale: Scale, theme: &Theme) {
+    /// Paint the persistent active-tool accent seam on `rect`: along its
+    /// lower edge across a window, its leading edge down one.
+    fn paint_active_seam(&self, surface: &mut Surface, rect: Rect, scale: Scale, theme: &Theme) {
         let Some((x, y, w, h)) = surface_rect(rect) else {
             return;
         };
         if w == 0 || h == 0 {
             return;
         }
-        let seam_h = scale
+        let thickness = scale
             .scale_length(theme.metrics().seam_thickness)
             .max(1)
-            .saturating_mul(if heavy_contrast(theme) { 2 } else { 1 })
-            .min(h);
-        surface.fill_rect(
-            x,
-            y + h - seam_h,
-            w,
-            seam_h,
-            Color::from(theme.palette().accent),
-        );
+            .saturating_mul(if heavy_contrast(theme) { 2 } else { 1 });
+        let (x, y, w, h) = match self.orientation {
+            ScrollOrientation::Horizontal => {
+                let seam = thickness.min(h);
+                (x, y + h - seam, w, seam)
+            }
+            ScrollOrientation::Vertical => (x, y, thickness.min(w), h),
+        };
+        surface.fill_rect(x, y, w, h, Color::from(theme.palette().accent));
     }
 
     /// Route a pointer event to the tools and affordances it concerns, and
@@ -675,9 +732,13 @@ impl Toolbar {
         theme: &Theme,
         damage: &mut Region,
     ) -> bool {
-        // A horizontal strip answers a horizontal wheel first and a vertical
-        // one where the pointer has no sideways axis to offer.
-        let units = if dx != 0 { dx } else { dy };
+        // A strip answers the wheel along its own axis first, and the other
+        // one where the pointer offers nothing along it.
+        let (along, other) = match self.orientation {
+            ScrollOrientation::Horizontal => (dx, dy),
+            ScrollOrientation::Vertical => (dy, dx),
+        };
+        let units = if along != 0 { along } else { other };
         let tools = wheel_steps(units, 1, &mut self.wheel_carry);
         if tools == 0 {
             return false;
@@ -793,11 +854,13 @@ impl Toolbar {
         }
     }
 
-    /// Feed a key event: Left/Right move focus between tools (wrapping),
-    /// Home/End jump to the ends, and Enter/Space activate the focused tool.
+    /// Feed a key event: the arrow keys along the strip's axis move focus
+    /// between tools (wrapping) — Left and Right across a window, Up and Down
+    /// down one — Home/End jump to the ends, and Enter/Space activate the
+    /// focused tool.
     ///
     /// A focus move scrolls the tool it lands on into view, so the keyboard
-    /// reaches every tool however narrow the strip is.
+    /// reaches every tool however short the strip is.
     pub fn on_key(
         &mut self,
         key: Key,
@@ -810,12 +873,16 @@ impl Toolbar {
             return ToolbarOutcome::Idle;
         }
         let last = self.entries.len() - 1;
+        let (backward, forward) = match self.orientation {
+            ScrollOrientation::Horizontal => (NamedKey::Left, NamedKey::Right),
+            ScrollOrientation::Vertical => (NamedKey::Up, NamedKey::Down),
+        };
         let moved_to = match key {
-            Key::Named(NamedKey::Right) => Some(match self.focus {
+            Key::Named(named) if named == forward => Some(match self.focus {
                 Some(i) if i < last => i + 1,
                 _ => 0,
             }),
-            Key::Named(NamedKey::Left) => Some(match self.focus {
+            Key::Named(named) if named == backward => Some(match self.focus {
                 Some(0) | None => last,
                 Some(i) => i - 1,
             }),
@@ -849,45 +916,72 @@ impl Toolbar {
     }
 }
 
-/// One tool's contribution to the strip's width.
+/// One tool's contribution to the strip.
 #[derive(Copy, Clone)]
 struct Span {
-    /// The tool's own width: one slot for an icon, two for a split.
-    width: u32,
+    /// The tool's own extent along the strip.
+    length: u32,
+    /// Its extent across the strip.
+    breadth: u32,
     /// The extra gap charged before it when it follows a tool of another
     /// group, and where a divider is drawn.
     gutter: u32,
 }
 
-/// A run of the strip tools are seated into, and the placement they share.
+/// The run of the strip tools are seated into, and the placement they share.
+#[derive(Copy, Clone)]
 struct Band {
-    x: i32,
-    width: u32,
-    tool_y: i32,
+    orientation: ScrollOrientation,
+    /// Where the run starts along the strip's axis.
+    start: i32,
+    length: u32,
+    /// Where the strip starts across its axis, and how broad it is.
+    across: i32,
+    breadth: u32,
     slot: u32,
     gap: u32,
 }
 
 impl Band {
+    /// The rectangle `length` along and `breadth` across from `along`,
+    /// centred across the strip, or `None` where the strip is too narrow
+    /// for it.
+    fn rect(&self, along: i32, length: u32, breadth: u32) -> Option<Rect> {
+        let room = self.breadth.checked_sub(breadth)?;
+        let across = self.across.saturating_add(to_i32(room / 2));
+        Some(match self.orientation {
+            ScrollOrientation::Horizontal => Rect::new(along, across, length, breadth),
+            ScrollOrientation::Vertical => Rect::new(across, along, breadth, length),
+        })
+    }
+
     /// The reserved slot before the band — where the leading affordance is
     /// drawn and pressed.
-    fn leading_slot(&self) -> Rect {
-        Rect::new(
-            self.x.saturating_sub(to_i32(self.slot)),
-            self.tool_y,
+    fn leading_slot(&self) -> Option<Rect> {
+        self.rect(
+            self.start.saturating_sub(to_i32(self.slot)),
             self.slot,
             self.slot,
         )
     }
 
     /// The reserved slot after the band.
-    fn trailing_slot(&self) -> Rect {
-        Rect::new(
-            self.x.saturating_add(to_i32(self.width)),
-            self.tool_y,
+    fn trailing_slot(&self) -> Option<Rect> {
+        self.rect(
+            self.start.saturating_add(to_i32(self.length)),
             self.slot,
             self.slot,
         )
+    }
+}
+
+/// `bounds` as `((start, length), (start, breadth))` along and across
+/// `orientation`.
+fn axes(orientation: ScrollOrientation, bounds: Rect) -> ((i32, u32), (i32, u32)) {
+    let across_window = ((bounds.left(), bounds.width), (bounds.top(), bounds.height));
+    match orientation {
+        ScrollOrientation::Horizontal => across_window,
+        ScrollOrientation::Vertical => (across_window.1, across_window.0),
     }
 }
 
@@ -921,6 +1015,7 @@ impl Measure {
 struct Strip {
     /// One entry per tool, `None` for a tool the strip had no room to seat.
     seats: Vec<Option<Rect>>,
+    /// Where each divider falls along the strip.
     dividers: Vec<i32>,
     back: Option<Rect>,
     forward: Option<Rect>,
@@ -955,7 +1050,7 @@ fn slot_metrics(scale: Scale, theme: &Theme) -> (u32, u32) {
     )
 }
 
-/// The width the tools `start..end` claim from a band's leading edge: the
+/// The length the tools `start..end` claim from a band's leading edge: the
 /// leading gap, each tool with the gap before the next, and a gutter wherever
 /// the group changes inside the run. Zero for an empty run.
 fn span_of(spans: &[Span], start: usize, end: usize, gap: u32) -> u32 {
@@ -968,37 +1063,38 @@ fn span_of(spans: &[Span], start: usize, end: usize, gap: u32) -> u32 {
         if offset > 0 {
             total = total.saturating_add(span.gutter);
         }
-        total = total.saturating_add(span.width);
+        total = total.saturating_add(span.length);
     }
     total
 }
 
 /// Seat the tools from `start` into `band`, in order, stopping at the first
-/// one that would not fit whole. Answers the surface-x of each divider drawn
-/// between two seated tools of different groups.
+/// one that would not fit whole along it; one too broad for the band keeps
+/// its place and is not seated. Answers where along the strip each divider
+/// between two seated tools of different groups falls.
 fn seat(spans: &[Span], band: &Band, start: usize, seats: &mut [Option<Rect>]) -> Vec<i32> {
     let mut dividers = Vec::new();
     let Some(run) = spans.get(start..) else {
         return dividers;
     };
-    let right = band.x.saturating_add(to_i32(band.width));
-    let mut x = band.x.saturating_add(to_i32(band.gap));
+    let end = band.start.saturating_add(to_i32(band.length));
+    let mut along = band.start.saturating_add(to_i32(band.gap));
     for (offset, span) in run.iter().enumerate() {
         // The first seated tool starts its own run, so it is charged no
         // gutter however its group compares with the tool scrolled past.
         let gutter = if offset == 0 { 0 } else { span.gutter };
-        let at = x.saturating_add(to_i32(gutter));
-        if at.saturating_add(to_i32(span.width)) > right {
+        let at = along.saturating_add(to_i32(gutter));
+        if at.saturating_add(to_i32(span.length)) > end {
             break;
         }
         if gutter > 0 {
-            dividers.push(x.saturating_add(to_i32(band.gap) / 2));
+            dividers.push(along.saturating_add(to_i32(band.gap) / 2));
         }
         if let Some(seat) = seats.get_mut(start.saturating_add(offset)) {
-            *seat = Some(Rect::new(at, band.tool_y, span.width, band.slot));
+            *seat = band.rect(at, span.length, span.breadth);
         }
-        x = at
-            .saturating_add(to_i32(span.width))
+        along = at
+            .saturating_add(to_i32(span.length))
             .saturating_add(to_i32(band.gap));
     }
     dividers

@@ -45,6 +45,16 @@ impl Channel {
         self.width != 0
     }
 
+    /// Bits the channel occupies.
+    pub(crate) const fn width(self) -> u32 {
+        self.width
+    }
+
+    /// The channel's bits within the pixel.
+    pub(crate) const fn mask(self) -> u32 {
+        self.mask
+    }
+
     /// `value`, eight bits wide, narrowed to this channel's width with
     /// rounding and moved into place: the inverse of what a [`Sampler`]
     /// reads, so a narrowed value widens back to exactly itself whenever it

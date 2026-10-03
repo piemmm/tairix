@@ -40,7 +40,9 @@ its own.
 
 ### Formats, and what "supported" means
 
-JPEG, PNG, SVG, GIF, TIFF, WEBP, BMP, ICO, RISC OS Sprite, and PDF.
+JPEG, PNG, SVG, GIF, TIFF, WEBP, BMP, ICO, RISC OS Sprite, OpenRaster, and
+PDF. OpenRaster is shown as its merged picture where that fits the canvas, and
+otherwise as its visible layers composed (`plans/PAINT.md` PT14).
 
 Every format the app claims is supported **completely** — every bit depth,
 compression, colour space, and structural variant the format defines — not the
@@ -431,7 +433,7 @@ size. A picture larger than the default window re-maps nothing at all
 
 **The declared window floor is derived, not hand-picked.** What the viewer
 tells the window manager at create is `min_client_size(theme, scale, font)`:
-the toolbar's own `Toolbar::min_width` across (a tool plus both overflow
+the toolbar's own `Toolbar::min_length` across (a tool plus both overflow
 affordances) and the toolbar, status line, scrollbar and one control-height of
 canvas down, resolved at the desktop's density and declared in **physical**
 pixels, which is what the `WindowSizing::Resizable` fields are in. The viewer

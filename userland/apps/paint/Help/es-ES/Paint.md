@@ -8,87 +8,142 @@ Paint — editor gráfico de imágenes y sprites
 
 ## DESCRIPTION
 
-Pinta y edita imágenes en una ventana de escritorio, píxel a píxel o con
-pinceles y formas. Iniciado con un documento — desde el gestor de archivos,
+Pinta y edita imágenes en una ventana del escritorio, píxel a píxel o con
+pinceles y formas. Lanzado con un documento — desde el gestor de archivos,
 desde el escritorio o soltando un archivo sobre su icono en la barra de
-iconos — abre una ventana sobre él. Iniciado por sí solo, abre una imagen
-nueva en blanco. Cada documento es una ventana del único programa; cerrar
-la última lo deja en la barra de iconos, y la fila Salir de su menú de
-icono lo termina.
+iconos — abre una ventana sobre él. Lanzado solo, abre una imagen nueva en
+blanco. Cada documento es una ventana del único programa; cerrar la última
+lo deja en la barra de iconos, y la fila Salir de su menú de icono lo
+termina.
 
 Abre todos los formatos de imagen que lee el sistema: PNG, JPEG, GIF, BMP,
-TIFF, WebP, iconos de Windows y archivos de sprites de RISC OS. Escribe
-PNG, JPEG y archivos de sprites; una imagen leída de cualquier otro formato
-se guarda como un archivo nuevo. Un PNG conserva su paleta, y un JPEG se
-escribe con la calidad fijada en Calidad JPEG del menú Archivo.
+TIFF, WebP, iconos de Windows, archivos de sprites de RISC OS y OpenRaster.
+Escribe PNG, JPEG, GIF, BMP, TIFF, archivos de sprites y OpenRaster; una
+imagen leída de cualquier otro formato, o de un archivo que guarda más que
+su imagen, como un perfil de color, se guarda como archivo nuevo. Imagen
+nueva pregunta primero para qué formato es la imagen y ofrece los colores
+que ese formato admite. Guardar como pregunta el formato y sus propios
+ajustes — la calidad de un JPEG, si un GIF va entrelazado, la compresión de
+un TIFF — y dice lo que el formato no puede conservar, antes de preguntar
+dónde. Una paleta se conserva allí donde el formato la admite, y también la
+densidad de una imagen.
 
-Un archivo de sprites contiene cualquier número de sprites, cada uno con su
+Una imagen puede estar hecha de capas, la de abajo primero, cada una con un
+nombre, una opacidad y si se muestra; se pinta en una capa cada vez, y la
+ventana las muestra superpuestas. OpenRaster conserva las capas; cualquier
+otro formato las recibe superpuestas. El menú Capas añade, copia, elimina,
+sube y baja capas, combina una con la de debajo y acopla la imagen, y sus
+Propiedades de capa cambian el nombre de una capa y fijan cuánto se ve de
+ella. Los ajustes, rellenos y trazos cambian la capa en que se pinta; los
+giros, volteos, cambios de tamaño y recortes cambian todas las capas. Una
+imagen con paleta tiene una sola capa.
+
+Un archivo de sprites guarda cualquier número de sprites, cada uno con su
 nombre, modo de pantalla, paleta y máscara. Cada profundidad se edita tal
-como se almacena: 2, 4, 16 y 256 colores y millones de colores. Un sprite
-sin paleta propia muestra los colores del escritorio de RISC OS — con 16
-colores, el color n es el color Wimp n; con 2 colores, los colores Wimp 0
-y 7; con 4 colores, los colores Wimp 0, 2, 4 y 7; con 256 colores, la
+como se guarda: 2, 4, 16 y 256 colores y millones de colores. Un sprite sin
+paleta propia muestra los colores del escritorio de RISC OS — con 16
+colores, el color n es el color Wimp n; con 2 colores, los colores Wimp 0 y
+7; con 4 colores, los colores Wimp 0, 2, 4 y 7; con 256 colores, la
 disposición de tintes de RISC OS — nunca una paleta de PC. Un sprite cuyos
 píxeles son más altos que anchos, como en el modo 12, se muestra así. Un
-sprite que este editor no sabe leer, como uno CMYK, se conserva tal cual y
-se vuelve a guardar sin cambios. El menú Sprites va a un sprite, añade,
-copia, cambia el nombre, borra y reordena sprites.
+sprite que este editor no puede leer, como uno CMYK, se conserva tal cual y
+se vuelve a escribir sin cambios. El menú Sprites va a sprites, los añade,
+copia, renombra, elimina y reordena. Un TIFF guarda cualquier número de
+páginas, y para él el menú Páginas va a páginas, las añade, copia, elimina y
+reordena.
 
 El botón principal (izquierdo) pinta con el color principal y el botón
 central con el color secundario; manteniendo Alt se toma un color en su
-lugar. Las herramientas son selección, lápiz, pincel, aerógrafo, goma,
-relleno, cuentagotas, línea, rectángulo y elipse; el panel junto a la
-imagen contiene la paleta de la imagen o los colores del escritorio y los
-ajustes de la herramienta en uso. El panel de color de la derecha contiene
-los colores principal y secundario y un selector de color para el que se
-elija: pulse un color para elegirlo y ajústelo por tono, saturación y
-valor, por rojo, verde y azul, por su notación hexadecimal y, donde la
-imagen admite transparencia, por su opacidad. A su lado queda el color que
-tenía, y un clic lo recupera. En una imagen con paleta los colores son sus
-entradas, así que el selector edita la paleta, y cada edición es un cambio
-que se puede deshacer. Manteniendo Mayús se dibuja un cuadrado, un círculo o una línea en
-múltiplos de 45 grados.
+lugar, tal como lo muestran las capas. Las herramientas de la caja de
+herramientas de la izquierda son selección, lápiz, pincel, aerógrafo, goma,
+clonar, relleno, degradado, cuentagotas, texto, línea, rectángulo, elipse,
+polígono, recortar, mano y zoom. La barra de arriba nombra la herramienta en
+uso y guarda sus ajustes — el tamaño, la dureza, la opacidad, el flujo y el
+espaciado de un pincel, la tolerancia de un relleno, la forma de un
+degradado, el tamaño del texto, las esquinas de un rectángulo — tecleados o
+ajustados con las flechas, y los botones que amplían y muestran la
+cuadrícula de píxeles; la tira de paleta bajo la imagen guarda la paleta de
+la imagen, o los colores del escritorio. El aerógrafo sigue rociando
+mientras se mantiene quieto. Manteniendo Mayús se dibuja un cuadrado, un
+círculo o una línea en un múltiplo de 45 grados.
 
-Con la herramienta de selección, arrastre para marcar parte de la imagen y
-luego arrastre la selección para moverla; flota hasta que se deposita, y
-moverla es un único cambio que deshacer. Las imágenes copiadas viajan por
-el portapapeles como PNG, y lo pegado flota hasta que se deposita.
+La herramienta de selección marca un rectángulo, una elipse, un lazo a mano
+alzada, un polígono pulsado esquina a esquina o, con la varita mágica, los
+píxeles unidos a uno por colores parecidos. Mayús añade a la selección, Alt
+le quita, y ambas conservan solo lo que comparten; Difuminar suaviza su
+borde. Mientras hay una selección, toda herramienta, relleno y ajuste se
+limita a ella. Arrastrar dentro la levanta y la mueve: flota hasta que se
+deposita, y moverla es un solo cambio que deshacer. Las imágenes copiadas
+viajan por el portapapeles como PNG, y lo que se pega flota hasta que se
+deposita.
 
-El programa no tiene ninguna capacidad sobre el sistema de archivos. Solo
+La herramienta de clonar pinta lo que hay en otro lugar de la imagen: Alt y
+clic donde copiar, y luego pintar. La herramienta de degradado funde el
+color principal en el secundario a lo largo de un arrastre, en bandas o en
+anillos. La herramienta de texto pone las palabras tecleadas donde se pulsa;
+Intro empieza una línea nueva, otro clic u otra herramienta las deposita, y
+Escape las descarta. Las esquinas de la herramienta de polígono se pulsan
+por turno, y un clic en la primera o Intro lo cierra. La herramienta de
+recortar marca la parte que queda, sus tiradores mueven sus bordes, e Intro
+recorta. La mano arrastra la imagen por la ventana, como Espacio con
+cualquier herramienta; el zoom amplía con un clic, o con Alt reduce, y un
+recuadro arrastrado llena la ventana.
+
+El menú Ajustes cambia el brillo y el contraste, el tono y la saturación y
+los niveles, posteriza, aplica un umbral, desatura, desenfoca, enfoca,
+pixela, añade ruido y busca bordes; cada ajuste se ve en la imagen mientras
+se mueven sus valores y solo se conserva al aplicarlo. En una imagen con
+paleta, un ajuste cambia su paleta, y no se ofrecen los que necesitan
+colores vecinos.
+
+El panel de color a la derecha guarda los colores principal y secundario y
+un selector de color para el que esté elegido: un clic en un color lo
+elige, y luego se ajusta por tono, saturación y valor, por rojo, verde y
+azul, por su notación hexadecimal y, donde la imagen admite transparencia,
+por su opacidad. El color que tenía está a su lado, y un clic lo recupera.
+En una imagen con paleta los colores son sus entradas, así que el selector
+edita la paleta, y cada edición es un solo cambio que deshacer.
+
+El programa no tiene ningún permiso sobre el sistema de archivos. Solo
 edita el archivo que se le entregó. Un archivo que el usuario puede cambiar
-se entrega con permiso de escritura, y Guardar lo reescribe; cualquier otro
-es de solo lectura, y Guardar pregunta dónde guardar una copia. Las
-imágenes, también las pegadas desde el portapapeles, se decodifican en un
-proceso de trabajo aparte sin ningún alcance, y cada documento recibe uno
-nuevo: un archivo hostil no puede tocar nada de lo que el programa puede.
+se entrega con escritura, y Guardar lo reescribe; cualquier otro es de solo
+lectura, y Guardar pregunta dónde guardar una copia. Las imágenes, y las
+pegadas desde el portapapeles, se descodifican en un proceso de trabajo
+aparte sin ningún alcance, y cada documento recibe uno nuevo: un archivo
+hostil no puede tocar nada de lo que alcanza el programa.
 
 Pulsar el botón secundario (derecho) del ratón en cualquier parte de la
 ventana abre su menú: Cortar, Copiar, Pegar, Seleccionar todo y
-Deseleccionar, y luego Archivo, Edición, Imagen, Colores, Sprites, Vista y
-Herramientas, cada uno con su submenú. La ventana no tiene barra de menús.
-Cerrar una ventana o salir con cambios sin guardar pregunta primero.
+Deseleccionar, y después Archivo, Edición, Imagen, Capas, Colores, Ajustes,
+Sprites o Páginas, Ver y Herramientas, cada uno con su propio submenú. La
+ventana no tiene barra de menús. Cerrar una ventana o salir con cambios sin
+guardar pregunta primero.
 
 * `Ctrl+N` — una imagen nueva; `Ctrl+O` — abrir un archivo
 * `Ctrl+S` — guardar; `Ctrl+Shift+S` — guardar como
 * `Ctrl+W` — cerrar la ventana
 * `Ctrl+Z` — deshacer; `Ctrl+Shift+Z` o `Ctrl+Y` — rehacer
 * `Ctrl+X`, `Ctrl+C`, `Ctrl+V` — cortar, copiar, pegar
-* `Ctrl+A` — seleccionarlo todo; `Ctrl+D` — deseleccionar
-* `Enter` — depositar una selección flotante; `Escape` — devolverla
-* `Delete` — borrar la selección
+* `Ctrl+A` — seleccionar todo; `Ctrl+D` — deseleccionar
+* `Enter` — depositar una selección flotante, cerrar un polígono o recortar; `Escape` — echarse atrás
+* `Delete` — borrar la selección; `Alt+Backspace` — rellenarla con el color principal
 * `Ctrl+Shift+X` — recortar a la selección
 * `Ctrl+R` — cambiar el tamaño; `Ctrl+Shift+R` — tamaño del lienzo
 * `Ctrl+[` / `Ctrl+]` — girar a la izquierda o a la derecha
 * `Ctrl+I` — invertir los colores
-* `S`, `P`, `B`, `A`, `E`, `F`, `I`, `L`, `R`, `O` — las herramientas, en orden
+* `Ctrl+Shift+N` — una capa nueva; `Ctrl+E` — combinar hacia abajo; `Ctrl+Shift+E` — acoplar
+* `Ctrl+Page Up` / `Ctrl+Page Down` — pintar en la capa de arriba o de abajo
+* `Ctrl+Shift+Page Up` / `Ctrl+Shift+Page Down` — subir o bajar la capa
+* `S`, `P`, `B`, `A`, `E`, `C`, `F`, `D`, `I`, `T`, `L`, `R`, `O`, `Y`, `K`, `H`, `Z` — las herramientas, en orden
+* `Space` — mantenido, arrastrar la imagen con cualquier herramienta
 * `X` — intercambiar los colores principal y secundario
-* `Tab` — al panel de color y por sus partes; `Escape` — de vuelta a la imagen
+* `Tab` — por los ajustes de la herramienta, la tira de paleta y el panel de color; `Shift+Tab` — hacia atrás; `Escape` — de vuelta a la imagen
 * `+` / `-` — acercar o alejar; `1` — tamaño real; `Ctrl+0` — ajustar
 * `Ctrl` + rueda — acercar o alejar en torno al puntero
 * Pellizcar con dos dedos — acercar o alejar con suavidad; en una pantalla táctil la imagen sigue a los dedos
 * `G` — mostrar u ocultar la cuadrícula entre píxeles
-* `Page Up` / `Page Down` — el sprite anterior o siguiente
-* teclas de flecha — mover una selección flotante un píxel; con `Shift`, diez
+* `Page Up` / `Page Down` — el sprite o la página anterior o siguiente
+* teclas de flecha — mover una selección flotante un píxel; con `Shift`, diez; en la tira de paleta, recorrer sus colores
 
 ## OPTIONS
 
@@ -97,6 +152,6 @@ Cerrar una ventana o salir con cambios sin guardar pregunta primero.
 
 ## EXIT STATUS
 
-Cero tras Salir. Distinto de cero cuando se rechazó el canal de ventana,
-el buzón de eventos o la sesión de escritorio; el motivo se indica en la
+Cero tras Salir. Distinto de cero cuando se rechazó el canal de ventana, el
+buzón de eventos o la sesión del escritorio; el motivo se indica en la
 salida de error estándar.

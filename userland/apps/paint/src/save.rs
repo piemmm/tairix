@@ -1,9 +1,12 @@
 //! Writing a document out: the format a file's name asks for, whether the
-//! document can be written as it, and the encoding itself.
+//! document can be written as it, what that format cannot keep of it, and the
+//! encoding itself.
 //!
-//! A PNG or a JPEG holds one picture, so a document of several is written as
-//! a sprite area or not at all: writing one of its pictures under the
-//! document's name would lose the rest without a word. A picture that is to
+//! A PNG, a JPEG, a GIF, a BMP or an OpenRaster file holds one picture, so a
+//! document of several is written as a TIFF's pages or a sprite area or not
+//! at all: writing one of its pictures under the document's name would lose
+//! the rest without a word. OpenRaster alone keeps a picture's layers; every
+//! other format is written the layers laid together. A picture that is to
 //! become a sprite and has no sprite details of its own is given them from
 //! what it is.
 
@@ -13,19 +16,26 @@ use alloc::vec::Vec;
 use tairix_abi::window_ipc::SaveEndings;
 use tairix_browse::media::{media_for_name, name_endings, Ending, MediaType};
 use tairix_image::{
-    desktop_palette, encode_jpeg, encode_png, encode_sprite_area, opaque_sprite_writes_back,
-    EncodeError, IndexDepth, JpegOptions, PictureKind, PictureSource, Rgba8, SpriteInput,
-    SpriteLayout, SpriteName, SpritePalette,
+    desktop_palette, encode_bmp, encode_gif, encode_jpeg, encode_ora, encode_png,
+    encode_sprite_area, encode_tiff, opaque_sprite_writes_back, Density, DensityUnit, EncodeError,
+    GifOptions, IndexDepth, JpegOptions, OraLayerSource, PictureKind, PictureSource, Rgba8,
+    SpriteInput, SpriteLayout, SpriteName, SpritePalette, TiffOptions, Written,
 };
 use tairix_sandbox::imagerender::ViewFormat;
 
-use crate::canvas::{Canvas, Kind};
+use crate::canvas::{Canvas, Kind, OutOfMemory};
 use crate::document::{
     free_name, sprite_area, Document, Entry, Origin, Picture, Snapshot, SpriteInfo,
 };
+use crate::quantize::palette_for;
+use crate::transform::{apply, indexed, Transform, TransformError};
 
 /// What transparency is written over in a format with none: white paper.
 const JPEG_BACKGROUND: [u8; 3] = [255, 255, 255];
+
+/// The longest side of an OpenRaster file's thumbnail, as its specification
+/// bounds it.
+const THUMBNAIL_SIDE: u32 = 256;
 
 /// A format Paint writes.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -34,13 +44,29 @@ pub enum SaveFormat {
     Png,
     /// JPEG.
     Jpeg,
+    /// Graphics Interchange Format.
+    Gif,
+    /// Windows bitmap.
+    Bmp,
+    /// Tag Image File Format: any number of pages.
+    Tiff,
     /// A RISC OS sprite area.
     Sprites,
+    /// OpenRaster: one picture, its layers kept.
+    OpenRaster,
 }
 
 impl SaveFormat {
-    /// Every format Paint writes.
-    pub const ALL: [Self; 3] = [Self::Png, Self::Jpeg, Self::Sprites];
+    /// Every format Paint writes, in the order a choice lists them.
+    pub const ALL: [Self; 7] = [
+        Self::Png,
+        Self::Jpeg,
+        Self::Gif,
+        Self::Bmp,
+        Self::Tiff,
+        Self::Sprites,
+        Self::OpenRaster,
+    ];
 
     /// What the format is in the desktop's one media registry.
     #[must_use]
@@ -48,8 +74,50 @@ impl SaveFormat {
         match self {
             Self::Png => MediaType::ImagePng,
             Self::Jpeg => MediaType::ImageJpeg,
+            Self::Gif => MediaType::ImageGif,
+            Self::Bmp => MediaType::ImageBmp,
+            Self::Tiff => MediaType::ImageTiff,
             Self::Sprites => MediaType::ImageSprite,
+            Self::OpenRaster => MediaType::ImageOpenRaster,
         }
+    }
+
+    /// The format as a choice names it.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Png => "PNG",
+            Self::Jpeg => "JPEG",
+            Self::Gif => "GIF",
+            Self::Bmp => "BMP",
+            Self::Tiff => "TIFF",
+            Self::Sprites => "Sprite file",
+            Self::OpenRaster => "OpenRaster",
+        }
+    }
+
+    /// Whether it holds any number of pictures rather than one.
+    #[must_use]
+    pub const fn holds_several(self) -> bool {
+        matches!(self, Self::Tiff | Self::Sprites)
+    }
+
+    /// Whether a picture made for it may be stored at `depth`, `None` being
+    /// colour: a JPEG and OpenRaster's layers have no palette and a GIF
+    /// nothing else.
+    #[must_use]
+    pub const fn admits(self, depth: Option<IndexDepth>) -> bool {
+        match self {
+            Self::Jpeg | Self::OpenRaster => depth.is_none(),
+            Self::Gif => depth.is_some(),
+            _ => true,
+        }
+    }
+
+    /// Whether a picture made for it may have a clear background.
+    #[must_use]
+    pub const fn holds_transparency(self) -> bool {
+        !matches!(self, Self::Jpeg)
     }
 
     /// The extension a new file of this format is given: the registry's
@@ -68,8 +136,94 @@ impl SaveFormat {
         match format {
             ViewFormat::Png => Some(Self::Png),
             ViewFormat::Jpeg => Some(Self::Jpeg),
+            ViewFormat::Gif => Some(Self::Gif),
+            ViewFormat::Bmp => Some(Self::Bmp),
+            ViewFormat::Tiff => Some(Self::Tiff),
             ViewFormat::Sprite => Some(Self::Sprites),
+            ViewFormat::OpenRaster => Some(Self::OpenRaster),
             _ => None,
+        }
+    }
+}
+
+/// How a document is written in each format that offers a choice.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SaveSettings {
+    /// The JPEG quality, `1..=100`.
+    pub jpeg_quality: u8,
+    /// How a GIF is written.
+    pub gif: GifOptions,
+    /// How a TIFF is written.
+    pub tiff: TiffOptions,
+}
+
+impl Default for SaveSettings {
+    fn default() -> Self {
+        Self {
+            jpeg_quality: JpegOptions::DEFAULT_QUALITY,
+            gif: GifOptions::default(),
+            tiff: TiffOptions::default(),
+        }
+    }
+}
+
+impl SaveSettings {
+    /// The settings that write a file again as `written` says it was.
+    #[must_use]
+    pub fn as_written(written: Written) -> Self {
+        let mut settings = Self::default();
+        match written {
+            Written::Plain => {}
+            Written::Gif(gif) => settings.gif = gif,
+            Written::Tiff(tiff) => settings.tiff = tiff,
+        }
+        settings
+    }
+}
+
+/// Something a format cannot keep of a document, said with a save.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Loss {
+    /// Only OpenRaster holds layers: any other format is written them laid
+    /// together.
+    Layers,
+    /// A JPEG holds no transparency.
+    Transparency,
+    /// A GIF shows each pixel or hides it.
+    PartialTransparency,
+    /// A GIF holds 256 colours at most.
+    Colours,
+    /// An OpenRaster file's layers are read back as colour.
+    Palette,
+    /// Only a sprite holds pixels other than square.
+    PixelShape,
+    /// The format cannot state the picture's density.
+    Density,
+    /// Only a sprite file holds a sprite's name and mode.
+    SpriteDetails,
+}
+
+impl Loss {
+    /// What the loss means for the document, as a person reads it.
+    #[must_use]
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::Layers => "This format holds one layer, so the layers are laid together",
+            Self::Transparency => "A JPEG holds no transparency, so the picture is laid over white",
+            Self::PartialTransparency => {
+                "A GIF holds no partial transparency, so each pixel is shown or clear"
+            }
+            Self::Colours => {
+                "A GIF holds 256 colours at most, so the picture's are reduced to that"
+            }
+            Self::Palette => "OpenRaster reads its layers as colour, so the palette is not kept",
+            Self::PixelShape => {
+                "This format holds square pixels alone, so the pixels' shape is not kept"
+            }
+            Self::Density => "This format cannot state the picture's density, so it is not kept",
+            Self::SpriteDetails => {
+                "This format holds no sprite names or modes, so they are not kept"
+            }
         }
     }
 }
@@ -81,8 +235,8 @@ pub enum SaveRefusal {
     Unwritable(String),
     /// The format holds one picture and the document has this many entries.
     SeveralPictures(usize),
-    /// The format holds a picture and the document's one entry is a sprite
-    /// kept as its bytes.
+    /// The format holds pictures and the document holds a sprite kept as its
+    /// bytes.
     KeptSprite,
     /// A sprite kept as its bytes is not a whole number of words, so no
     /// sprite after it could be written where RISC OS reads it.
@@ -97,15 +251,17 @@ impl core::fmt::Display for SaveRefusal {
         match self {
             Self::Unwritable(suffix) => write!(
                 f,
-                "Paint cannot write {suffix} files: give the name .png, .jpg or .spr"
+                "Paint cannot write {suffix} files: give the name .png, .jpg, .gif, .bmp, .tif, \
+                 .ora or .spr"
             ),
             Self::SeveralPictures(count) => write!(
                 f,
-                "The {count} sprites can only be saved together as a sprite file: give the name .spr"
+                "The {count} pictures can only be saved together, as a TIFF or a sprite file: \
+                 give the name .tif or .spr"
             ),
-            Self::KeptSprite => f.write_str(
-                "This sprite cannot be edited, so it can only be saved in a sprite file",
-            ),
+            Self::KeptSprite => {
+                f.write_str("A sprite that cannot be edited can only be saved in a sprite file")
+            }
             Self::KeptSpriteOffWord(name) => write!(
                 f,
                 "The sprite {name} is damaged and cannot be written back: delete it to save"
@@ -154,64 +310,64 @@ pub fn format_for(
 }
 
 /// The endings a document of `entries`, read from `origin`, may be saved
-/// under — every name ending of each format that can hold it, the format it
-/// is first, so a name given none takes that.
+/// under as `format`: every name ending of it, so a name given none takes
+/// the first.
 ///
 /// # Errors
 ///
-/// The refusal of a save in that format, where no format can hold it.
-pub fn save_endings(entries: &[Entry], origin: Origin) -> Result<SaveEndings, SaveRefusal> {
-    let own = natural(entries, origin);
-    let formats =
-        core::iter::once(own).chain(SaveFormat::ALL.into_iter().filter(|&format| format != own));
+/// The refusal of a save in that format, where it cannot hold the document.
+pub fn save_endings(
+    entries: &[Entry],
+    origin: Origin,
+    format: SaveFormat,
+) -> Result<SaveEndings, SaveRefusal> {
+    writable_as(Some(format), entries, origin)?;
     let mut endings = SaveEndings::ANY;
-    let mut refused = None;
-    for format in formats {
-        match writable_as(Some(format), entries, origin) {
-            Ok(_) => {
-                for (separator, code) in name_endings(format.media()) {
-                    // An ending past the table's bound is left out, so the
-                    // picker refuses it: narrower than the save, never wider.
-                    let _ = endings.push(separator, code);
-                }
-            }
-            Err(refusal) => {
-                refused.get_or_insert(refusal);
-            }
-        }
+    for (separator, code) in name_endings(format.media()) {
+        // An ending past the table's bound is left out, so the picker
+        // refuses it: narrower than the save, never wider.
+        let _ = endings.push(separator, code);
     }
-    match refused {
-        Some(refusal) if endings.is_any() => Err(refusal),
-        _ => Ok(endings),
-    }
+    Ok(endings)
 }
 
 /// The format a document of `entries`, read from `origin`, is written in as
 /// `named` asks, else as what it is.
-fn writable_as(
+///
+/// # Errors
+///
+/// [`SaveRefusal`] where it cannot be written so.
+pub fn writable_as(
     named: Option<SaveFormat>,
     entries: &[Entry],
     origin: Origin,
 ) -> Result<SaveFormat, SaveRefusal> {
     let format = named.unwrap_or_else(|| natural(entries, origin));
-    if format == SaveFormat::Sprites {
-        // A sprite area carries no signature, so its name is how it is known.
-        if named.is_none() {
-            return Err(SaveRefusal::SpritesUnnamed);
+    match format {
+        SaveFormat::Sprites => {
+            // A sprite area carries no signature, so its name is how it is
+            // known.
+            if named.is_none() {
+                return Err(SaveRefusal::SpritesUnnamed);
+            }
+            let damaged = entries.iter().find_map(|entry| match entry {
+                Entry::Kept(kept) if !opaque_sprite_writes_back(&kept.bytes) => Some(kept.name),
+                _ => None,
+            });
+            if let Some(name) = damaged {
+                return Err(SaveRefusal::KeptSpriteOffWord(name));
+            }
         }
-        let damaged = entries.iter().find_map(|entry| match entry {
-            Entry::Kept(kept) if !opaque_sprite_writes_back(&kept.bytes) => Some(kept.name),
-            _ => None,
-        });
-        if let Some(name) = damaged {
-            return Err(SaveRefusal::KeptSpriteOffWord(name));
+        SaveFormat::Tiff => {
+            if entries.iter().any(|entry| matches!(entry, Entry::Kept(_))) {
+                return Err(SaveRefusal::KeptSprite);
+            }
         }
-    } else {
-        match entries {
+        _ => match entries {
             [Entry::Picture(_)] => {}
             [Entry::Kept(_)] => return Err(SaveRefusal::KeptSprite),
             many => return Err(SaveRefusal::SeveralPictures(many.len())),
-        }
+        },
     }
     Ok(format)
 }
@@ -226,6 +382,8 @@ pub enum NotWrittenBack {
     /// It held more than its picture: a colour profile, text, metadata, an
     /// animation's further frames.
     Extras,
+    /// Its colours were stated in a form Paint restates rather than keeps.
+    Converted,
     /// Its name asks for another format than the one it holds.
     Misnamed,
     /// A save under its own name would be refused.
@@ -241,6 +399,10 @@ impl core::fmt::Display for NotWrittenBack {
             ),
             Self::Extras => f.write_str(
                 "This file holds more than its picture, such as a colour profile or text, so \
+                 Paint does not write it back",
+            ),
+            Self::Converted => f.write_str(
+                "This file's colours are stated in a form Paint does not keep, such as CMYK, so \
                  Paint does not write it back",
             ),
             Self::Misnamed => f.write_str(
@@ -270,6 +432,9 @@ pub fn write_back(name: &str, document: &Document) -> Result<(), NotWrittenBack>
     if unkept.extras {
         return Err(NotWrittenBack::Extras);
     }
+    if unkept.converted {
+        return Err(NotWrittenBack::Converted);
+    }
     match format_for(name, document.entries(), document.origin()) {
         Ok(written) if written == own => Ok(()),
         Ok(_) => Err(NotWrittenBack::Misnamed),
@@ -278,7 +443,8 @@ pub fn write_back(name: &str, document: &Document) -> Result<(), NotWrittenBack>
 }
 
 /// What a document of `entries`, read from `origin`, is written as when its
-/// name does not say: what it is.
+/// name does not say: what it is — a sprite area, else the format it was read
+/// as or made for.
 #[must_use]
 pub fn natural(entries: &[Entry], origin: Origin) -> SaveFormat {
     if sprite_area(entries, origin) {
@@ -286,7 +452,7 @@ pub fn natural(entries: &[Entry], origin: Origin) -> SaveFormat {
     }
     match origin {
         Origin::Read(format) => SaveFormat::of(format).unwrap_or(SaveFormat::Png),
-        Origin::New => SaveFormat::Png,
+        Origin::New(format) => format,
     }
 }
 
@@ -297,49 +463,335 @@ pub fn natural(entries: &[Entry], origin: Origin) -> SaveFormat {
 ///
 /// [`EncodeError`] as the encoder states it.
 pub fn encode(snapshot: &Snapshot, format: SaveFormat, name: &str) -> Result<Vec<u8>, EncodeError> {
+    let settings = snapshot.settings;
     match format {
-        SaveFormat::Png | SaveFormat::Jpeg => {
+        SaveFormat::Sprites => encode_sprites(&snapshot.entries, name),
+        SaveFormat::Tiff => {
+            let mut pages: Vec<Stated> = Vec::new();
+            pages
+                .try_reserve_exact(snapshot.entries.len())
+                .map_err(|_| EncodeError::OutOfMemory)?;
+            for entry in &snapshot.entries {
+                let Entry::Picture(picture) = entry else {
+                    return Err(EncodeError::SpriteAreaEmpty);
+                };
+                pages.push(Stated::flat(picture)?);
+            }
+            let sources = tairix_util::fallible::collected(
+                pages.len(),
+                pages.iter().map(|page| page as &dyn PictureSource),
+            )
+            .ok_or(EncodeError::OutOfMemory)?;
+            encode_tiff(&sources, settings.tiff)
+        }
+        SaveFormat::Png
+        | SaveFormat::Jpeg
+        | SaveFormat::Gif
+        | SaveFormat::Bmp
+        | SaveFormat::OpenRaster => {
             let Some(Entry::Picture(picture)) = snapshot.entries.get(snapshot.current) else {
                 return Err(EncodeError::SpriteAreaEmpty);
             };
-            if format == SaveFormat::Png {
-                encode_png(&picture.canvas)
-            } else {
-                let options = JpegOptions::new(snapshot.jpeg_quality, JPEG_BACKGROUND)?;
-                encode_jpeg(&picture.canvas, options)
+            let source = Stated::flat(picture)?;
+            match format {
+                SaveFormat::Png => encode_png(&source),
+                SaveFormat::Jpeg => {
+                    let options = JpegOptions::new(settings.jpeg_quality, JPEG_BACKGROUND)?;
+                    encode_jpeg(&source, options)
+                }
+                SaveFormat::Bmp => encode_bmp(&source),
+                SaveFormat::OpenRaster => encode_layers(picture, &source),
+                _ => encode_as_gif(&source, settings.gif),
             }
         }
-        SaveFormat::Sprites => encode_sprites(&snapshot.entries, name),
     }
 }
 
-/// What `snapshot` written as `format` cannot keep, said with the save: a
-/// JPEG holds no transparency, so a picture with any is laid over white, and
-/// neither a PNG nor a JPEG holds a sprite's pixels other than square.
-#[must_use]
-pub fn lost_in(snapshot: &Snapshot, format: SaveFormat) -> Option<&'static str> {
-    let Some(Entry::Picture(picture)) = snapshot.entries.get(snapshot.current) else {
-        return None;
+/// `picture`, whose layers laid together are `merged`, written as
+/// OpenRaster: each layer whole on the canvas, and a thumbnail of the whole.
+fn encode_layers(picture: &Picture, merged: &Stated) -> Result<Vec<u8>, EncodeError> {
+    let layers = tairix_util::fallible::collected(
+        picture.layers().len(),
+        picture.layers().iter().map(|layer| OraLayerSource {
+            name: &layer.name,
+            picture: &layer.canvas,
+            at: (0, 0),
+            opacity: layer.opacity,
+            visible: layer.visible,
+        }),
+    )
+    .ok_or(EncodeError::OutOfMemory)?;
+    let thumbnail = thumbnail(&merged.canvas)?;
+    encode_ora(
+        picture.size(),
+        &layers,
+        merged,
+        thumbnail.as_ref().unwrap_or(&merged.canvas),
+    )
+}
+
+/// `canvas` shrunk smoothly to fit a thumbnail, its shape kept; `None` where
+/// it already fits.
+fn thumbnail(canvas: &Canvas) -> Result<Option<Canvas>, EncodeError> {
+    let (width, height) = (canvas.width(), canvas.height());
+    let longest = width.max(height);
+    if longest <= THUMBNAIL_SIDE {
+        return Ok(None);
+    }
+    let fit = |side: u32| {
+        let scaled = u64::from(side) * u64::from(THUMBNAIL_SIDE) / u64::from(longest);
+        u32::try_from(scaled).unwrap_or(THUMBNAIL_SIDE).max(1)
     };
-    let shaped = format != SaveFormat::Sprites && picture.pixel_aspect() != (1, 1);
-    let clear = format == SaveFormat::Jpeg && picture.canvas.has_transparency();
-    match (clear, shaped) {
-        (true, true) => Some(
-            "A JPEG holds no transparency and square pixels alone, so the picture was laid \
-             over white and its pixels' shape not kept",
-        ),
-        (true, false) => Some("A JPEG holds no transparency, so the picture was laid over white"),
-        (false, true) => {
-            Some("This format holds square pixels alone, so the pixels' shape was not kept")
+    let transform = Transform::Scale {
+        width: fit(width),
+        height: fit(height),
+        smooth: true,
+    };
+    apply(canvas, transform).map(Some).map_err(|err| match err {
+        TransformError::OutOfMemory => EncodeError::OutOfMemory,
+        TransformError::BadSize | TransformError::NotApplicable => EncodeError::TooLarge,
+    })
+}
+
+/// `source` written as a GIF: a colour picture reduced to the colours a GIF
+/// holds first, with room left for a clear entry where it has transparency.
+fn encode_as_gif(source: &Stated, options: GifOptions) -> Result<Vec<u8>, EncodeError> {
+    let canvas = &source.canvas;
+    if canvas.kind().palette().is_some() {
+        return encode_gif(source, options);
+    }
+    let colours = if canvas.has_transparency() { 255 } else { 256 };
+    let palette = palette_for(canvas, colours).map_err(|_| EncodeError::OutOfMemory)?;
+    let reduced = indexed(canvas, IndexDepth::Eight, &palette, true).map_err(|err| match err {
+        TransformError::OutOfMemory => EncodeError::OutOfMemory,
+        _ => EncodeError::InvalidPalette,
+    })?;
+    let reduced = Stated {
+        canvas: reduced,
+        density: source.density,
+    };
+    encode_gif(&reduced, options)
+}
+
+/// What `snapshot` written as `format` cannot keep, most telling first.
+///
+/// # Errors
+///
+/// [`OutOfMemory`] when the list cannot be held, or a picture of layers
+/// cannot be laid together to see what it shows.
+pub fn losses(snapshot: &Snapshot, format: SaveFormat) -> Result<Vec<Loss>, OutOfMemory> {
+    losses_of(&snapshot.entries, snapshot.current, format)
+}
+
+/// What `entries`, `current` showing, written as `format` cannot keep, most
+/// telling first.
+///
+/// # Errors
+///
+/// [`OutOfMemory`] when the list cannot be held, or a picture of layers
+/// cannot be laid together to see what it shows.
+pub fn losses_of(
+    entries: &[Entry],
+    current: usize,
+    format: SaveFormat,
+) -> Result<Vec<Loss>, OutOfMemory> {
+    let mut alpha = Alpha::unread(entries.len())?;
+    losses_noted(entries, current, format, &mut alpha)
+}
+
+/// What a picture written shows of transparency, its layers laid together:
+/// read once a picture however many formats ask.
+#[derive(Copy, Clone)]
+struct Alpha {
+    any: bool,
+    partial: bool,
+}
+
+impl Alpha {
+    /// Room for what each of `count` entries holds, none read yet.
+    fn unread(count: usize) -> Result<Vec<Option<Self>>, OutOfMemory> {
+        tairix_util::fallible::filled(count, None).ok_or(OutOfMemory)
+    }
+
+    fn of(picture: &Picture) -> Result<Self, OutOfMemory> {
+        let laid;
+        let canvas = if picture.single() {
+            picture.canvas()
+        } else {
+            laid = picture.flattened()?;
+            &laid
+        };
+        Ok(Self {
+            any: canvas.has_transparency(),
+            partial: canvas.has_partial_alpha(),
+        })
+    }
+}
+
+/// [`losses_of`], what each entry shows of transparency read into `alpha`
+/// the first time a format asks.
+fn losses_noted(
+    entries: &[Entry],
+    current: usize,
+    format: SaveFormat,
+    alpha: &mut [Option<Alpha>],
+) -> Result<Vec<Loss>, OutOfMemory> {
+    let mut found = Vec::new();
+    let written = if format.holds_several() {
+        0..entries.len()
+    } else {
+        current..(current + 1).min(entries.len())
+    };
+    let mut note = |loss: Loss| {
+        if !found.contains(&loss) {
+            found.try_reserve(1).map_err(|_| OutOfMemory)?;
+            found.push(loss);
         }
-        (false, false) => None,
+        Ok::<(), OutOfMemory>(())
+    };
+    for index in written {
+        let Some(picture) = entries[index].picture() else {
+            continue;
+        };
+        if !picture.single() && format != SaveFormat::OpenRaster {
+            note(Loss::Layers)?;
+        }
+        let mut shown = || -> Result<Alpha, OutOfMemory> {
+            if let Some(read) = alpha.get(index).copied().flatten() {
+                return Ok(read);
+            }
+            let read = Alpha::of(picture)?;
+            if let Some(slot) = alpha.get_mut(index) {
+                *slot = Some(read);
+            }
+            Ok(read)
+        };
+        match format {
+            SaveFormat::Jpeg if shown()?.any => note(Loss::Transparency)?,
+            SaveFormat::Gif => {
+                if picture.kind().palette().is_none() {
+                    note(Loss::Colours)?;
+                }
+                if shown()?.partial {
+                    note(Loss::PartialTransparency)?;
+                }
+            }
+            SaveFormat::OpenRaster if picture.kind().palette().is_some() => {
+                note(Loss::Palette)?;
+            }
+            _ => {}
+        }
+        if format != SaveFormat::Sprites && picture.pixel_aspect() != (1, 1) {
+            note(Loss::PixelShape)?;
+        }
+        if format != SaveFormat::Sprites && picture.sprite.is_some() {
+            note(Loss::SpriteDetails)?;
+        }
+        if picture
+            .density
+            .is_some_and(|density| !states_density(format, density))
+        {
+            note(Loss::Density)?;
+        }
+    }
+    Ok(found)
+}
+
+/// Every format a document of `entries`, `current` showing and read from
+/// `origin`, can be written as, each with what it would not keep: what the
+/// Save As sheet offers, worked out on a worker since finding a loss reads
+/// every pixel, each picture's pixels read once for every format.
+///
+/// # Errors
+///
+/// [`OutOfMemory`], as [`losses_of`].
+pub fn survey(
+    entries: &[Entry],
+    current: usize,
+    origin: Origin,
+) -> Result<Vec<(SaveFormat, Vec<Loss>)>, OutOfMemory> {
+    let mut offered = Vec::new();
+    offered
+        .try_reserve_exact(SaveFormat::ALL.len())
+        .map_err(|_| OutOfMemory)?;
+    let mut alpha = Alpha::unread(entries.len())?;
+    for format in SaveFormat::ALL {
+        if writable_as(Some(format), entries, origin).is_ok() {
+            offered.push((format, losses_noted(entries, current, format, &mut alpha)?));
+        }
+    }
+    Ok(offered)
+}
+
+/// Whether `format` can state `density` at all: a GIF only a shape, a BMP
+/// only a length, a sprite and OpenRaster neither.
+fn states_density(format: SaveFormat, density: Density) -> bool {
+    let shape = density.unit() == DensityUnit::Aspect;
+    match format {
+        SaveFormat::Png | SaveFormat::Jpeg | SaveFormat::Tiff => true,
+        SaveFormat::Gif => shape,
+        SaveFormat::Bmp => !shape,
+        SaveFormat::Sprites | SaveFormat::OpenRaster => false,
+    }
+}
+
+/// The most telling of what `snapshot` written as `format` cannot keep,
+/// said with the save.
+///
+/// # Errors
+///
+/// [`OutOfMemory`], as [`losses`].
+pub fn lost_in(
+    snapshot: &Snapshot,
+    format: SaveFormat,
+) -> Result<Option<&'static str>, OutOfMemory> {
+    Ok(losses(snapshot, format)?.first().map(|loss| loss.message()))
+}
+
+/// A picture as one canvas — its layers laid together — with the density
+/// the document holds for it, which is how every encoder reads one.
+struct Stated {
+    canvas: Canvas,
+    density: Option<Density>,
+}
+
+impl Stated {
+    fn flat(picture: &Picture) -> Result<Self, EncodeError> {
+        Ok(Self {
+            canvas: picture
+                .flattened()
+                .map_err(|OutOfMemory| EncodeError::OutOfMemory)?,
+            density: picture.density,
+        })
+    }
+}
+
+impl PictureSource for Stated {
+    fn width(&self) -> u32 {
+        self.canvas.width()
+    }
+
+    fn height(&self) -> u32 {
+        self.canvas.height()
+    }
+
+    fn kind(&self) -> PictureKind<'_> {
+        PictureSource::kind(&self.canvas)
+    }
+
+    fn read_row(&self, y: u32, samples: &mut [u8], mask: &mut [u8]) {
+        self.canvas.read_row(y, samples, mask);
+    }
+
+    fn density(&self) -> Option<Density> {
+        self.density
     }
 }
 
 /// What one entry is written as: the sprite details it is written under and
 /// the pixels, seen through [`OpaquePalette`] where its palette holds what a
 /// sprite palette cannot.
-enum Written<'a> {
+enum Writing<'a> {
     Picture {
         sprite: SpriteInfo,
         source: Source<'a>,
@@ -367,29 +819,44 @@ fn encode_sprites(entries: &[Entry], name: &str) -> Result<Vec<u8>, EncodeError>
         entries.iter().filter_map(Entry::name).copied(),
     )
     .ok_or(EncodeError::OutOfMemory)?;
-    let mut written: Vec<Written<'_>> = Vec::new();
+    // Each picture is written as its layers show together.
+    let mut flat: Vec<Option<Canvas>> = Vec::new();
+    flat.try_reserve_exact(entries.len())
+        .map_err(|_| EncodeError::OutOfMemory)?;
+    for entry in entries {
+        flat.push(match entry {
+            Entry::Kept(_) => None,
+            Entry::Picture(picture) => Some(
+                picture
+                    .flattened()
+                    .map_err(|OutOfMemory| EncodeError::OutOfMemory)?,
+            ),
+        });
+    }
+    let mut written: Vec<Writing<'_>> = Vec::new();
     written
         .try_reserve_exact(entries.len())
         .map_err(|_| EncodeError::OutOfMemory)?;
-    for entry in entries {
-        written.push(match entry {
-            Entry::Kept(kept) => Written::Kept(&kept.bytes),
-            Entry::Picture(picture) => {
-                let sprite = sprite_details(picture, name, &mut taken)?;
-                let source = if needs_opaque_palette(&picture.canvas) {
-                    Source::Opaque(OpaquePalette::new(&picture.canvas)?)
+    for (entry, canvas) in entries.iter().zip(&flat) {
+        written.push(match (entry, canvas) {
+            (Entry::Picture(picture), Some(canvas)) => {
+                let sprite = sprite_details(canvas, picture.sprite.as_ref(), name, &mut taken)?;
+                let source = if needs_opaque_palette(canvas) {
+                    Source::Opaque(OpaquePalette::new(canvas)?)
                 } else {
-                    Source::Canvas(&picture.canvas)
+                    Source::Canvas(canvas)
                 };
-                Written::Picture { sprite, source }
+                Writing::Picture { sprite, source }
             }
+            (Entry::Kept(kept), _) => Writing::Kept(&kept.bytes),
+            (Entry::Picture(_), None) => return Err(EncodeError::OutOfMemory),
         });
     }
     let inputs = tairix_util::fallible::collected(
         written.len(),
         written.iter().map(|written| match written {
-            Written::Kept(bytes) => SpriteInput::Opaque(bytes),
-            Written::Picture { sprite, source } => SpriteInput::Picture {
+            Writing::Kept(bytes) => SpriteInput::Opaque(bytes),
+            Writing::Picture { sprite, source } => SpriteInput::Picture {
                 name: sprite.name,
                 mode: sprite.mode,
                 palette: &sprite.palette,
@@ -411,17 +878,18 @@ fn needs_opaque_palette(canvas: &Canvas) -> bool {
         .is_some_and(|palette| palette.iter().any(|entry| entry[3] != u8::MAX))
 }
 
-/// The details `picture` is written as a sprite under: its own, made to fit
-/// what its pixels have become, or ones made from what it is.
+/// The details a picture shown as `canvas` is written as a sprite under:
+/// its own `held`, made to fit what its pixels have become, or ones made
+/// from what it is.
 fn sprite_details(
-    picture: &Picture,
+    canvas: &Canvas,
+    held: Option<&SpriteInfo>,
     name: &str,
     taken: &mut Vec<SpriteName>,
 ) -> Result<SpriteInfo, EncodeError> {
-    let canvas = &picture.canvas;
     let partial = canvas.has_partial_alpha();
     let transparent = canvas.has_transparency();
-    let mut sprite = if let Some(sprite) = &picture.sprite {
+    let mut sprite = if let Some(sprite) = held {
         sprite.clone()
     } else {
         let name = unique_name(name, taken).ok_or(EncodeError::TooLarge)?;

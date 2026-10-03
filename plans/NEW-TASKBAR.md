@@ -799,7 +799,7 @@ What now stands:
 - **The menu model** is `AppMenu`: row kinds `Item(AppMenuItem)`,
   `Separator`, `Submenu { label, enabled }`, and `Info`, nested through a
   parent index, bounded by `APP_MENU_MAX_ROWS` (32) rows a plate,
-  `APP_MENU_MAX_TOTAL_ROWS` (64) in all, `APP_MENU_MAX_DEPTH` (4) plates of
+  `APP_MENU_MAX_TOTAL_ROWS` (128) in all, `APP_MENU_MAX_DEPTH` (4) plates of
   chain, and `APP_MENU_TEXT_BYTES` (1536) of row text held in one block
   rather than a widest-case buffer per row. An item states a label
   (`APP_MENU_LABEL_MAX`, 36), an accelerator caption

@@ -9,21 +9,29 @@
 
 extern crate alloc;
 
+pub mod brush;
 pub mod canvas;
 pub mod colour;
+pub mod compose;
+pub mod crop;
 pub mod dialog;
 pub mod document;
 pub mod fill;
+pub mod filter;
+pub mod gradient;
 pub mod history;
 pub mod layout;
 pub mod load;
+pub mod mask;
 pub mod quantize;
 pub mod render;
 pub mod save;
 pub mod selection;
 pub mod shape;
 pub mod stroke;
+pub mod text;
 pub mod tool;
+pub mod tool_controls;
 pub mod transform;
 pub mod view;
 pub mod viewport;

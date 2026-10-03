@@ -56,8 +56,9 @@ last-resort mark for the always-trailing account capsule — an account with a
 name draws its circular identity disc instead, see below),
 the viewer's playback marks `Pause` and `Resume`, the painter's tools
 (`ToolSelect`, `ToolPencil`, `ToolBrush`, `ToolSpray`, `ToolEraser`,
-`ToolFill`, `ToolEyedropper`, `ToolLine`, `ToolRectangle`, `ToolEllipse`) and its
-`PixelGrid`, the settings categories each sidebar
+`ToolFill`, `ToolGradient`, `ToolEyedropper`, `ToolClone`, `ToolText`,
+`ToolLine`, `ToolRectangle`, `ToolEllipse`, `ToolPolygon`, `ToolCrop`,
+`ToolHand`, `ToolZoom`) and its `PixelGrid`, the settings categories each sidebar
 row of [Settings](settings.md) is found by without reading — `Settings` (a
 cog), `Appearance`, `Wallpaper`, `Display`, `LockScreen`, `Screensaver`,
 `Power`, `Networking` (a globe, beside the tray's `Network` bars), `Bluetooth`,

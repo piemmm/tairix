@@ -11,6 +11,8 @@ use alloc::vec::Vec;
 use tairix_image::{flatten_row, masked_colour, IndexDepth, PictureKind, PictureSource, Rgba8};
 use tairix_util::fallible;
 
+use crate::shape::Bounds;
+
 /// Side of a tile, in pixels.
 pub const TILE: u32 = 64;
 
@@ -306,8 +308,8 @@ pub struct TileRect {
 impl TileRect {
     /// The pixels the tile covers.
     #[must_use]
-    pub fn bounds(&self) -> crate::shape::Bounds {
-        crate::shape::Bounds {
+    pub fn bounds(&self) -> Bounds {
+        Bounds {
             x0: i64::from(self.x),
             y0: i64::from(self.y),
             x1: i64::from(self.x + self.width),
@@ -779,6 +781,8 @@ impl PictureSource for Canvas {
 #[derive(Debug)]
 pub struct CanvasBuilder {
     canvas: Canvas,
+    /// Where rows may land: the picture, or the part of it built within.
+    area: Bounds,
 }
 
 impl CanvasBuilder {
@@ -789,12 +793,38 @@ impl CanvasBuilder {
     ///
     /// [`CanvasError`], as [`Canvas::new`].
     pub fn new(width: u32, height: u32, kind: Kind, fill: Sample) -> Result<Self, CanvasError> {
+        Self::within(width, height, kind, fill, Bounds::picture(width, height))
+    }
+
+    /// A builder as [`new`](Self::new) whose rows land within `area` alone:
+    /// the tiles beyond it stay one shared `fill`, so a layer smaller than its
+    /// picture costs what it covers.
+    ///
+    /// # Errors
+    ///
+    /// [`CanvasError`], as [`Canvas::new`].
+    pub fn within(
+        width: u32,
+        height: u32,
+        kind: Kind,
+        fill: Sample,
+        area: Bounds,
+    ) -> Result<Self, CanvasError> {
         let mut canvas = Canvas::new(width, height, kind, fill)?;
-        // Every tile gets its own pixels now, so writing rows never copies.
+        let area = area.intersection(&Bounds::picture(width, height));
+        // Every tile written gets its own pixels now, so writing rows never
+        // copies.
         for index in 0..canvas.tile_count() {
-            canvas.tile_mut(index)?;
+            if !canvas
+                .tile_rect(index)
+                .bounds()
+                .intersection(&area)
+                .is_empty()
+            {
+                canvas.tile_mut(index)?;
+            }
         }
-        Ok(Self { canvas })
+        Ok(Self { canvas, area })
     }
 
     /// The kind being built.
@@ -807,31 +837,50 @@ impl CanvasBuilder {
     /// and `mask` one opacity a pixel for a masked kind. A row off the canvas,
     /// or planes of the wrong length, is ignored.
     pub fn row(&mut self, y: u32, samples: &[u8], mask: &[u8]) {
+        if samples.len() == self.canvas.width as usize * self.canvas.kind.sample_bytes() {
+            self.row_at((0, i64::from(y)), samples, mask);
+        }
+    }
+
+    /// Write a row laid out as [`row`](Self::row) takes one, of any width,
+    /// its first pixel at `(x, y)`: what falls off the canvas, or outside the
+    /// area it was built [`within`](Self::within), is dropped, and planes
+    /// that disagree in length are ignored.
+    pub fn row_at(&mut self, (x, y): (i64, i64), samples: &[u8], mask: &[u8]) {
         let canvas = &mut self.canvas;
-        let width = canvas.width as usize;
+        let area = self.area;
         let bytes = canvas.kind.sample_bytes();
-        let masked = canvas.kind.masked();
-        if y >= canvas.height
-            || samples.len() != width * bytes
-            || mask.len() != if masked { width } else { 0 }
-        {
+        let width = samples.len() / bytes;
+        let planes_agree = samples.len().is_multiple_of(bytes)
+            && mask.len() == if canvas.kind.masked() { width } else { 0 };
+        if !planes_agree || !(area.y0..area.y1).contains(&y) {
             return;
         }
-        let mut column = 0;
-        while column < canvas.width {
+        let run_end = x.saturating_add(i64::try_from(width).unwrap_or(i64::MAX));
+        let (Ok(y), Ok(mut column), Ok(end)) = (
+            u32::try_from(y),
+            u32::try_from(x.max(area.x0)),
+            u32::try_from(run_end.min(area.x1)),
+        ) else {
+            return;
+        };
+        while column < end {
             let index = canvas.tile_index(column, y);
             let rect = canvas.tile_rect(index);
-            let start = ((y - rect.y) * rect.width) as usize;
-            let run = rect.width as usize;
-            let at = column as usize;
-            if let Some(tile) = Arc::get_mut(&mut canvas.tiles[index]) {
-                tile.samples[start * bytes..(start + run) * bytes]
-                    .copy_from_slice(&samples[at * bytes..(at + run) * bytes]);
-                if masked {
-                    tile.mask[start..start + run].copy_from_slice(&mask[at..at + run]);
+            let stop = (rect.x + rect.width).min(end);
+            let run = (stop - column) as usize;
+            let into = ((y - rect.y) * rect.width + (column - rect.x)) as usize;
+            let from = usize::try_from(i64::from(column) - x).unwrap_or(usize::MAX);
+            if let (Some(tile), Some(source)) = (
+                Arc::get_mut(&mut canvas.tiles[index]),
+                samples.get(from * bytes..(from + run) * bytes),
+            ) {
+                tile.samples[into * bytes..(into + run) * bytes].copy_from_slice(source);
+                if let Some(source) = mask.get(from..from + run).filter(|_| !tile.mask.is_empty()) {
+                    tile.mask[into..into + run].copy_from_slice(source);
                 }
             }
-            column += rect.width;
+            column = stop;
         }
     }
 

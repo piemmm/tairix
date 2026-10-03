@@ -24,6 +24,9 @@ tairix-crc32 = { path = "../crc32", version = "=0.0.0" }
 # memory refuses one and the decode reports that rather than aborting.
 tairix-util = { path = "../util", version = "=0.0.0" }
 
+# The shared XML element scanner OpenRaster's layer stack is read through.
+tairix-xml = { path = "../xml", version = "=0.0.0" }
+
 [dev-dependencies]
 # The fuzz harness draws its inputs through the shared seed/budget
 # seam: one place picks the per-run seed, logs it, and bounds the smoke/soak

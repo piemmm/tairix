@@ -555,11 +555,12 @@ pub const APP_MENU_MAX_ROWS: usize = 32;
 /// [`APP_MENU_MAX_ROWS`] and [`APP_MENU_MAX_DEPTH`], which is not a bound at
 /// all: it is what holds the one frame a whole menu crosses in, and so the
 /// receive ceiling every window client's buffer is sized to
-/// ([`WINDOW_MAX_REQUEST`]). Three times the per-plate bound, because a
+/// ([`WINDOW_MAX_REQUEST`]). Four times the per-plate bound, because a
 /// window with no menu bar carries all of its menus in the one a secondary
-/// press opens — a plate naming them, a plate of commands under each, and a
-/// long choice under one of those — while the per-plate bound still bites.
-pub const APP_MENU_MAX_TOTAL_ROWS: usize = 96;
+/// press opens — a plate naming them and a plate of commands under each,
+/// which for an editor of ten such menus runs past a hundred rows — while
+/// the per-plate bound still bites.
+pub const APP_MENU_MAX_TOTAL_ROWS: usize = 128;
 
 /// Deepest chain of plates a menu may describe: the root plate is depth 1,
 /// so four permits a root and three levels of submenu beneath it.
@@ -575,8 +576,9 @@ pub const APP_MENU_MAX_DEPTH: usize = 4;
 /// A **format** bound on the total size of the model, which is what keeps a
 /// menu's frame — and the model held in memory — bounded without paying the
 /// widest label, shortcut and reason for every row a menu does not have.
-/// Enough for every row of a full menu to carry a sixteen-byte label, or for
-/// fewer rows to carry the widest of all three fields.
+/// Enough for every row of a full menu to carry a twelve-byte label and
+/// caption, or for fewer rows to carry the widest of all three fields; held
+/// there so a decoded request stays within a page.
 pub const APP_MENU_TEXT_BYTES: usize = 1536;
 
 /// Maximum encoded length, in bytes, of one menu row's label.

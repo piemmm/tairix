@@ -15,13 +15,17 @@ use tairix_controls::{
     Toggle,
 };
 use tairix_geometry::{Rect, Region, Scale};
-use tairix_image::{IndexDepth, SpriteName};
+use tairix_image::{IndexDepth, SpriteName, TiffCompression};
 use tairix_input::{InputEvent, Key, NamedKey};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
 
+use tairix_sandbox::imageedit::MAX_LAYER_NAME;
+
 use crate::canvas::{admissible, MAX_PIXELS, MAX_SIDE};
-use crate::document::{NewPicture, NAME_REFUSAL};
+use crate::document::{NewPicture, Shown, NAME_REFUSAL};
+use crate::filter::{Filter, Parameter};
+use crate::save::{Loss, SaveFormat, SaveSettings};
 use crate::transform::{Anchor, PaletteChoice};
 
 /// A form's width, in logical pixels.
@@ -66,11 +70,21 @@ const PALETTES: [(PaletteChoice, &str); 2] = [
     ),
 ];
 
+/// The compressions a TIFF may be written under, as their choices read.
+const COMPRESSIONS: [(TiffCompression, &str); 4] = [
+    (TiffCompression::None, "None"),
+    (TiffCompression::Lzw, "LZW"),
+    (TiffCompression::Deflate, "Deflate"),
+    (TiffCompression::PackBits, "PackBits"),
+];
+
 /// What a form asks for.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Purpose {
     /// A new picture in a new window.
     NewPicture,
+    /// A new page in this document.
+    NewPage,
     /// A new sprite in this document.
     NewSprite,
     /// Stretch or shrink the picture.
@@ -79,8 +93,31 @@ pub enum Purpose {
     Canvas,
     /// Store the picture at another depth.
     Convert,
-    /// The JPEG quality to save at.
-    Quality,
+    /// The format to save as and its settings, before the picker asks where;
+    /// the window closes once it is saved when `then_close`.
+    SaveAs {
+        /// Close the window once saved.
+        then_close: bool,
+    },
+    /// An adjustment or a filter's settings, previewed as they move.
+    Filter,
+    /// A layer's name, how much of it shows, and whether it shows.
+    Layer,
+}
+
+/// The layer form's opacity slider, in percent.
+const OPACITY: Parameter = Parameter {
+    label: "Opacity",
+    least: 0,
+    most: 100,
+};
+
+/// What a Save As sheet offers: each format the document can be written as,
+/// with what that format would not keep of it.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SaveChoices {
+    /// The formats, and the losses each states.
+    pub formats: Vec<(SaveFormat, Vec<Loss>)>,
 }
 
 /// How a form was answered.
@@ -100,6 +137,18 @@ pub struct Form {
     group: FieldGroup,
     /// The picture's size, which a scale keeping its proportions follows.
     proportions: (u32, u32),
+    /// The formats a format row offers, in its order, with what each would
+    /// not keep; and the one chosen.
+    formats: Vec<(SaveFormat, Vec<Loss>)>,
+    format: SaveFormat,
+    /// The settings a Save As sheet is answered with, kept as its rows come
+    /// and go with the format.
+    settings: SaveSettings,
+    /// The filter a filter form sets, as its sliders stand.
+    filter: Option<Filter>,
+    /// The opacity a layer form sets, out of 255: exactly the layer's own
+    /// until its slider moves.
+    opacity: u8,
 }
 
 fn text_row(label: &str, text: &str, len: usize) -> FieldRow {
@@ -139,15 +188,93 @@ impl Form {
             dialog,
             group,
             proportions: (1, 1),
+            formats: Vec::new(),
+            format: SaveFormat::Png,
+            settings: SaveSettings::default(),
+            filter: None,
+            opacity: u8::MAX,
         }
     }
 
-    /// The form for a new picture, sized as `size` to start.
+    /// The form setting `filter`, a slider for each of its numbers.
+    #[must_use]
+    pub fn filter(filter: Filter) -> Self {
+        let rows = filter
+            .parameters()
+            .iter()
+            .enumerate()
+            .map(|(index, parameter)| {
+                let value = filter.value(index);
+                slider_row(slider_label(parameter, value), parameter, value)
+            })
+            .collect();
+        let mut form = Self::new(Purpose::Filter, filter.label(), "Apply", rows);
+        form.filter = Some(filter);
+        form
+    }
+
+    /// The filter a filter form sets, as its sliders stand.
+    #[must_use]
+    pub const fn filter_answer(&self) -> Option<Filter> {
+        self.filter
+    }
+
+    /// The form showing a layer as `shown` says.
+    #[must_use]
+    pub fn layer(shown: &Shown) -> Self {
+        let percent = percent_of(shown.opacity);
+        let rows = vec![
+            text_row("Name", &shown.name, MAX_LAYER_NAME),
+            slider_row(opacity_label(percent), &OPACITY, percent),
+            toggle_row("Shown", shown.visible),
+        ];
+        let mut form = Self::new(Purpose::Layer, "Layer", "Change", rows);
+        form.opacity = shown.opacity;
+        form
+    }
+
+    /// How the layer is to show.
+    ///
+    /// # Errors
+    ///
+    /// The reason, where the name is empty or longer than a layer's may be.
+    pub fn layer_answer(&self) -> Result<Shown, String> {
+        let typed = self.text(0).trim();
+        if typed.is_empty() || typed.len() > MAX_LAYER_NAME {
+            return Err(alloc::format!(
+                "A layer's name is from 1 to {MAX_LAYER_NAME} bytes"
+            ));
+        }
+        let mut name = String::new();
+        name.try_reserve_exact(typed.len())
+            .map_err(|_| String::from("There is not enough memory to rename the layer"))?;
+        name.push_str(typed);
+        Ok(Shown {
+            name,
+            opacity: self.opacity,
+            visible: self.on(2),
+        })
+    }
+
+    /// The form for a new picture, sized as `size` to start: the format it is
+    /// to be saved as, and the colours and background that format holds.
     #[must_use]
     pub fn new_picture(size: (u32, u32)) -> Self {
+        let mut form = Self::new(Purpose::NewPicture, "New picture", "Create", Vec::new());
+        form.formats = SaveFormat::ALL
+            .into_iter()
+            .map(|format| (format, Vec::new()))
+            .collect();
+        form.rebuild(&size.0.to_string(), &size.1.to_string(), None, false);
+        form
+    }
+
+    /// The form for a new page, sized as `size` to start.
+    #[must_use]
+    pub fn new_page(size: (u32, u32)) -> Self {
         Self::new(
-            Purpose::NewPicture,
-            "New picture",
+            Purpose::NewPage,
+            "New page",
             "Create",
             vec![
                 text_row("Width", &size.0.to_string(), NUMBER_LEN),
@@ -156,6 +283,136 @@ impl Form {
                 toggle_row("Transparent background", false),
             ],
         )
+    }
+
+    /// The Save As sheet: the format among `choices`, `format` to start, and
+    /// that format's own settings, from `settings`.
+    #[must_use]
+    pub fn save_as(
+        choices: SaveChoices,
+        format: SaveFormat,
+        settings: SaveSettings,
+        then_close: bool,
+    ) -> Self {
+        let mut form = Self::new(
+            Purpose::SaveAs { then_close },
+            "Save as",
+            "Choose name",
+            Vec::new(),
+        );
+        form.formats = choices.formats;
+        form.format = form
+            .formats
+            .iter()
+            .any(|(offered, _)| *offered == format)
+            .then_some(format)
+            .or_else(|| form.formats.first().map(|(first, _)| *first))
+            .unwrap_or(format);
+        form.settings = settings;
+        form.rebuild_save_as();
+        form
+    }
+
+    /// The format row's choice labels and the one chosen.
+    fn format_row(&self) -> FieldRow {
+        let labels: Vec<&str> = self
+            .formats
+            .iter()
+            .map(|(format, _)| format.label())
+            .collect();
+        let chosen = self
+            .formats
+            .iter()
+            .position(|(format, _)| *format == self.format)
+            .unwrap_or(0);
+        choice_row("Format", &labels, chosen)
+    }
+
+    /// Lay the new-picture form out again for the format chosen, keeping the
+    /// size typed, the colours `depth` names where the format holds them, and
+    /// the background where it can be clear.
+    fn rebuild(&mut self, width: &str, height: &str, depth: Option<IndexDepth>, clear: bool) {
+        let format = self.format;
+        let offered: Vec<(Option<IndexDepth>, &str)> = DEPTHS
+            .into_iter()
+            .filter(|(depth, _)| format.admits(*depth))
+            .collect();
+        let chosen = offered
+            .iter()
+            .position(|(offered, _)| *offered == depth)
+            .unwrap_or(0);
+        let labels: Vec<&str> = offered.iter().map(|(_, label)| *label).collect();
+        let mut rows = vec![
+            self.format_row(),
+            text_row("Width", width, NUMBER_LEN),
+            text_row("Height", height, NUMBER_LEN),
+            choice_row("Colours", &labels, chosen),
+        ];
+        if format.holds_transparency() {
+            rows.push(toggle_row("Transparent background", clear));
+        }
+        self.replace_rows(rows);
+    }
+
+    /// Lay the Save As sheet out again for the format chosen: its own
+    /// settings, and what it would not keep in the message.
+    fn rebuild_save_as(&mut self) {
+        let mut rows = vec![self.format_row()];
+        match self.format {
+            SaveFormat::Jpeg => {
+                let quality = self.settings.jpeg_quality;
+                rows.push(FieldRow::new(
+                    quality_label(quality),
+                    FieldControl::Slider(
+                        Slider::new(quality_permille(quality))
+                            .with_stops(100)
+                            .with_steps(11, 101),
+                    ),
+                ));
+            }
+            SaveFormat::Gif => rows.push(toggle_row("Interlaced", self.settings.gif.interlaced)),
+            SaveFormat::Tiff => {
+                let chosen = COMPRESSIONS
+                    .iter()
+                    .position(|(compression, _)| *compression == self.settings.tiff.compression)
+                    .unwrap_or(0);
+                rows.push(choice_row(
+                    "Compression",
+                    &COMPRESSIONS.map(|(_, label)| label),
+                    chosen,
+                ));
+            }
+            SaveFormat::Png | SaveFormat::Bmp | SaveFormat::Sprites | SaveFormat::OpenRaster => {}
+        }
+        let notes = self
+            .formats
+            .iter()
+            .find(|(format, _)| *format == self.format)
+            .map(|(_, losses)| {
+                let mut notes = String::new();
+                for loss in losses {
+                    if !notes.is_empty() {
+                        notes.push_str(". ");
+                    }
+                    notes.push_str(loss.message());
+                }
+                notes
+            })
+            .unwrap_or_default();
+        let dialog = Dialog::new(self.dialog.title()).with_actions(self.dialog.actions().to_vec());
+        self.dialog = if notes.is_empty() {
+            dialog
+        } else {
+            dialog.with_message(notes)
+        };
+        self.replace_rows(rows);
+    }
+
+    /// Put `rows` in the form, the keyboard staying on the row it was on.
+    fn replace_rows(&mut self, rows: Vec<FieldRow>) {
+        let focus = self.group.focus().filter(|&row| row < rows.len());
+        self.group = FieldGroup::new("", rows);
+        self.group.adopt_focus(focus.or(Some(0)));
     }
 
     /// The form for a new sprite called `name` to start, sized `size`.
@@ -224,24 +481,6 @@ impl Form {
                 choice_row("Palette", &PALETTES.map(|(_, label)| label), 1),
                 toggle_row("Dither", true),
             ],
-        )
-    }
-
-    /// The form setting the JPEG quality, at `quality` to start.
-    #[must_use]
-    pub fn quality(quality: u8) -> Self {
-        Self::new(
-            Purpose::Quality,
-            "JPEG quality",
-            "Set",
-            vec![FieldRow::new(
-                quality_label(quality),
-                FieldControl::Slider(
-                    Slider::new(quality_permille(quality))
-                        .with_stops(100)
-                        .with_steps(11, 101),
-                ),
-            )],
         )
     }
 
@@ -349,19 +588,103 @@ impl Form {
         if let FieldAction::Text(TextAction::Cancelled) = acted.action {
             return Some(Answer::Cancelled);
         }
+        // The sheet may change size, so what it covered is repainted too.
+        damage.add(self.rect(window, scale, theme));
         match self.purpose {
             Purpose::Scale => self.follow_proportions(acted),
-            Purpose::Quality => {
-                if let FieldAction::SetValue { permille } | FieldAction::Settled { permille } =
-                    acted.action
-                {
-                    self.relabel(0, quality_label(quality_of(permille)));
-                }
-            }
+            Purpose::NewPicture => self.follow_new_picture(acted),
+            Purpose::SaveAs { .. } => self.follow_save_as(acted),
+            Purpose::Filter => self.follow_filter(acted),
+            Purpose::Layer => self.follow_opacity(acted),
             _ => {}
         }
         damage.add(self.rect(window, scale, theme));
         None
+    }
+
+    /// The format chosen at `index` of the format row.
+    fn chosen_format(&self, index: usize) -> SaveFormat {
+        self.formats
+            .get(index)
+            .map_or(self.format, |(format, _)| *format)
+    }
+
+    fn follow_new_picture(&mut self, acted: &FieldGroupAction) {
+        let FieldAction::Selected { index } = acted.action else {
+            return;
+        };
+        if acted.row != 0 || self.chosen_format(index) == self.format {
+            return;
+        }
+        let (width, height) = (String::from(self.text(1)), String::from(self.text(2)));
+        let depth = self.new_depth();
+        let clear = self.on(4);
+        self.format = self.chosen_format(index);
+        self.rebuild(&width, &height, depth, clear);
+    }
+
+    fn follow_save_as(&mut self, acted: &FieldGroupAction) {
+        match (acted.row, &acted.action) {
+            (0, FieldAction::Selected { index }) => {
+                let format = self.chosen_format(*index);
+                if format != self.format {
+                    self.format = format;
+                    self.rebuild_save_as();
+                }
+            }
+            (1, FieldAction::SetValue { permille } | FieldAction::Settled { permille })
+                if self.format == SaveFormat::Jpeg =>
+            {
+                self.settings.jpeg_quality = quality_of(*permille);
+                self.relabel(1, quality_label(self.settings.jpeg_quality));
+            }
+            (1, FieldAction::Set { on }) if self.format == SaveFormat::Gif => {
+                self.settings.gif.interlaced = *on;
+            }
+            (1, FieldAction::Selected { index }) if self.format == SaveFormat::Tiff => {
+                if let Some((compression, _)) = COMPRESSIONS.get(*index) {
+                    self.settings.tiff.compression = *compression;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The depth the new-picture form's colours row names.
+    fn new_depth(&self) -> Option<IndexDepth> {
+        DEPTHS
+            .into_iter()
+            .filter(|(depth, _)| self.format.admits(*depth))
+            .nth(self.choice(3))
+            .and_then(|(depth, _)| depth)
+    }
+
+    fn follow_filter(&mut self, acted: &FieldGroupAction) {
+        let (FieldAction::SetValue { permille } | FieldAction::Settled { permille }) = acted.action
+        else {
+            return;
+        };
+        let Some(filter) = &mut self.filter else {
+            return;
+        };
+        let Some(&parameter) = filter.parameters().get(acted.row) else {
+            return;
+        };
+        filter.set(acted.row, value_of(&parameter, permille));
+        let value = filter.value(acted.row);
+        self.relabel(acted.row, slider_label(&parameter, value));
+    }
+
+    fn follow_opacity(&mut self, acted: &FieldGroupAction) {
+        let (1, FieldAction::SetValue { permille } | FieldAction::Settled { permille }) =
+            (acted.row, &acted.action)
+        else {
+            return;
+        };
+        let permille = *permille;
+        let percent = value_of(&OPACITY, permille);
+        self.opacity = u8::try_from((percent * 255 + 50) / 100).unwrap_or(u8::MAX);
+        self.relabel(1, opacity_label(percent));
     }
 
     /// Give row `index` the label `label`, its control and the keyboard
@@ -423,13 +746,6 @@ impl Form {
         )
     }
 
-    fn permille(&self, row: usize) -> u16 {
-        match self.group.rows().get(row).map(FieldRow::control) {
-            Some(FieldControl::Slider(slider)) => slider.value(),
-            _ => 0,
-        }
-    }
-
     /// State `reason` on the dialog: an answer that could not be taken.
     pub fn refuse(&mut self, reason: &str) {
         self.dialog = self.dialog.clone().with_reason(reason);
@@ -446,12 +762,26 @@ impl Form {
         }
     }
 
-    /// The new picture asked for.
+    /// The new picture asked for, and the format it is to be saved as.
     ///
     /// # Errors
     ///
     /// The reason, where the size is not one a picture may have.
-    pub fn new_picture_answer(&self) -> Result<NewPicture, String> {
+    pub fn new_picture_answer(&self) -> Result<(NewPicture, SaveFormat), String> {
+        let picture = NewPicture {
+            size: self.size(1)?,
+            depth: self.new_depth(),
+            transparent: self.format.holds_transparency() && self.on(4),
+        };
+        Ok((picture, self.format))
+    }
+
+    /// The new page asked for.
+    ///
+    /// # Errors
+    ///
+    /// The reason, where the size is not one a picture may have.
+    pub fn new_page_answer(&self) -> Result<NewPicture, String> {
         Ok(NewPicture {
             size: self.size(0)?,
             depth: DEPTHS[self.choice(2).min(DEPTHS.len() - 1)].0,
@@ -510,10 +840,11 @@ impl Form {
         )
     }
 
-    /// The JPEG quality chosen.
+    /// The format chosen and the settings it, and every other, is written
+    /// with.
     #[must_use]
-    pub fn quality_answer(&self) -> u8 {
-        quality_of(self.permille(0))
+    pub const fn save_as_answer(&self) -> (SaveFormat, SaveSettings) {
+        (self.format, self.settings)
     }
 }
 
@@ -530,6 +861,52 @@ pub struct NewSprite {
     pub eig: (u8, u8),
     /// Whether it has a mask.
     pub masked: bool,
+}
+
+/// A row of a slider labelled `label`, setting `parameter` from `value`; a
+/// key moves the number by at least one.
+fn slider_row(label: String, parameter: &Parameter, value: i32) -> FieldRow {
+    let span = u16::try_from(parameter.most - parameter.least)
+        .unwrap_or(1)
+        .max(1);
+    let line = 1000u16.div_ceil(span);
+    FieldRow::new(
+        label,
+        FieldControl::Slider(
+            Slider::new(permille_of(parameter, value))
+                .with_steps(line, line.saturating_mul(10).min(1000)),
+        ),
+    )
+}
+
+/// What a filter's slider says: its number's name and value.
+fn slider_label(parameter: &Parameter, value: i32) -> String {
+    alloc::format!("{}: {value}", parameter.label)
+}
+
+/// `opacity`, out of 255, in percent to the nearest.
+fn percent_of(opacity: u8) -> i32 {
+    (i32::from(opacity) * 100 + 127) / 255
+}
+
+/// What the opacity slider says.
+fn opacity_label(percent: i32) -> String {
+    alloc::format!("{}: {percent}%", OPACITY.label)
+}
+
+/// Where `value` lies along `parameter`'s slider, in thousandths.
+fn permille_of(parameter: &Parameter, value: i32) -> u16 {
+    let span = i64::from(parameter.most - parameter.least).max(1);
+    let along = i64::from(value.clamp(parameter.least, parameter.most) - parameter.least);
+    u16::try_from(along * 1000 / span).unwrap_or(1000)
+}
+
+/// The value `permille` thousandths along `parameter`'s slider, to the
+/// nearest.
+fn value_of(parameter: &Parameter, permille: u16) -> i32 {
+    let span = i64::from(parameter.most - parameter.least);
+    let along = (i64::from(permille.min(1000)) * span + 500) / 1000;
+    i32::try_from(i64::from(parameter.least) + along).unwrap_or(parameter.least)
 }
 
 fn quality_label(quality: u8) -> String {

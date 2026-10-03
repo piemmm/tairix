@@ -1303,6 +1303,17 @@ impl TextField {
     }
 }
 
+/// Whether `key` with `modifiers` is a chord a text field has no use for —
+/// any but Ctrl+A, which selects its text — so the field's owner takes it
+/// as a shortcut while the field still claims every plain key.
+#[must_use]
+pub fn owner_chord(key: Key, modifiers: Modifiers) -> bool {
+    let chord = modifiers.ctrl || modifiers.alt || modifiers.meta;
+    let select_all =
+        modifiers.ctrl && !modifiers.alt && !modifiers.meta && matches!(key, Key::Char('a' | 'A'));
+    chord && !select_all
+}
+
 /// One key press as a control that times its own feedback takes it: the key,
 /// the modifiers held, and when its owner took it on the monotonic clock the
 /// owner parks by.

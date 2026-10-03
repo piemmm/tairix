@@ -3,33 +3,37 @@ use alloc::vec;
 use alloc::vec::Vec;
 use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
 
-use tairix_abi::window_ipc::{AppMenuItemId, AppMenuRowView};
-use tairix_controls::{FieldLayout, Keystroke};
-use tairix_font::BitmapFont;
-use tairix_geometry::{Point, Region, Scale};
+use tairix_abi::window_ipc::{AppMenuItemId, AppMenuRowView, CursorShape};
+use tairix_controls::Keystroke;
+use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_image::{IndexDepth, SpriteMode, SpriteName, SpritePalette, Unkept};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
-use tairix_theme::{TextRole, Theme, ThemeRegistry};
+use tairix_theme::{Theme, ThemeRegistry};
 use tairix_window::docapp::{DocumentView, Relayout};
 use tairix_window::document::{Access, SavedDocument};
 
 use super::input::shortcut;
 use super::{
-    compute, Action, Computed, MenuKind, Outcome, Own, Request, View, GO_TO_ENTRY, RENAME_ENTRY,
+    compute, Action, Computed, Marking, MenuKind, Outcome, Own, Request, View, GO_TO_ENTRY,
+    GO_TO_LAYER, RENAME_ENTRY,
 };
 use crate::canvas::{Canvas, Kind, OutOfMemory, Sample};
 use crate::colour::Ink;
 use crate::document::{Document, Entry, NewPicture, Origin, Picture, SpriteInfo};
 use crate::layout::{Faces, Layout};
+use crate::mask::Mask;
 use crate::save::SaveRefusal;
-use crate::tool::Tool;
+use crate::save::{SaveFormat, SaveSettings};
+use crate::shape::{Bounds, Point as Fx};
+use crate::tool::{
+    tool_index, Marquee, Setting, Tool, ViewCommand, MAX_SIZE, VIEW_COMMANDS, WHOLE_PIXELS,
+};
+use crate::tool_controls::ToolControls;
 
 const WINDOW: (u32, u32) = (900, 640);
 
 fn faces(theme: &Theme) -> Faces {
-    Faces {
-        status: BitmapFont::for_role(theme.fonts(), TextRole::Caption, Scale::ONE),
-    }
+    Faces::of(theme, Scale::ONE)
 }
 
 /// A window on `document`, laid out, with the theme it is drawn in.
@@ -135,6 +139,40 @@ impl Window {
         outcome
     }
 
+    /// Click setting `index` of the tool-controls bar.
+    fn click_setting(&mut self, index: usize) {
+        let at = self
+            .layout
+            .bar()
+            .control(index)
+            .expect("the setting is seated")
+            .center();
+        self.move_to(at);
+        self.press(PointerButton::Primary);
+        self.release(PointerButton::Primary);
+    }
+
+    /// Open the shape tools' style list, answering where it hangs.
+    fn open_style_list(&mut self) -> Rect {
+        self.click_setting(1);
+        assert!(self.view.bar.listing(), "the style list is open");
+        let theme = self.registry.active();
+        self.view
+            .bar
+            .popup_rect(self.layout.bar(), Scale::ONE, theme)
+    }
+
+    /// Tab from the picture until the dock has the keyboard.
+    fn tab_into_dock(&mut self) {
+        for _ in 0..16 {
+            if self.view.picker.state().focus.focused {
+                return;
+            }
+            self.key(Key::Named(NamedKey::Tab), plain());
+        }
+        panic!("Tab never reached the dock");
+    }
+
     /// The screen point at the centre of picture pixel `(x, y)`.
     fn screen_of(&self, (x, y): (u32, u32)) -> Point {
         let size = self.size();
@@ -152,14 +190,14 @@ impl Window {
 
     fn size(&self) -> (u32, u32) {
         let picture = self.view.document().picture().expect("a picture");
-        (picture.canvas.width(), picture.canvas.height())
+        (picture.canvas().width(), picture.canvas().height())
     }
 
     fn colour(&self, x: u32, y: u32) -> [u8; 4] {
         self.view
             .document()
             .picture()
-            .and_then(|picture| picture.canvas.colour_at(x, y))
+            .and_then(|picture| picture.canvas().colour_at(x, y))
             .expect("on the picture")
     }
 
@@ -189,13 +227,13 @@ impl Window {
         self.view
             .document()
             .picture()
-            .and_then(|picture| picture.canvas.kind().palette())
+            .and_then(|picture| picture.canvas().kind().palette())
             .expect("a palette picture")
             .to_vec()
     }
 
     /// Mark out picture pixels `from` to `to` with the select tool and drag
-    /// them by `by`, lifting them into a floating layer.
+    /// them by `by`, lifting them into a floating selection.
     fn lift(&mut self, from: (u32, u32), to: (u32, u32), by: (u32, u32)) {
         self.act(Action::Tool(Tool::Select));
         self.drag(from, to);
@@ -304,7 +342,7 @@ fn an_answer_to_another_job_is_not_taken() {
     let canvas = Canvas::new(3, 3, Kind::Rgba, Sample::Rgba([1; 4])).expect("fits");
     window.view.computed(
         99,
-        Computed::Picture(Ok(canvas)),
+        Computed::Picture(Ok(vec![canvas])),
         &window.layout,
         &mut Region::new(),
     );
@@ -378,10 +416,11 @@ fn escape_mid_drag_keeps_nothing_the_drag_did() {
     window.move_to(window.screen_of((2, 2)));
     window.press(PointerButton::Primary);
     window.move_to(window.screen_of((8, 8)));
-    assert!(window.view.selection.is_some(), "marked while dragged");
+    assert!(window.view.marking().is_some(), "outlined while dragged");
     window.key(Key::Named(NamedKey::Escape), plain());
     window.release(PointerButton::Primary);
     assert_eq!(window.view.selection, None);
+    assert_eq!(window.view.marking(), None);
     window.lift((4, 4), (6, 6), (10, 0));
     let at = |window: &Window| {
         window
@@ -426,27 +465,22 @@ fn the_eraser_clears_a_picture_that_can_be_clear() {
 }
 
 #[test]
-fn spray_lays_more_paint_while_held_still() {
+fn the_airbrush_lays_more_paint_while_held_still() {
     let mut window = Window::white(80, 80);
-    window.act(Action::Tool(Tool::Spray));
+    window.act(Action::Tool(Tool::Airbrush));
     let at = window.screen_of((40, 40));
     window.move_to(at);
     window.press(PointerButton::Primary);
-    let painted = |window: &Window| {
-        (30..50)
-            .flat_map(|y| (30..50).map(move |x| (x, y)))
-            .filter(|&(x, y)| window.colour(x, y) != [255; 4])
-            .count()
-    };
-    let first = painted(&window);
-    assert!(first > 0);
+    let middle = |window: &Window| window.colour(40, 40)[0];
+    let first = middle(&window);
+    assert!(first < 255, "the first dab lands at once");
     window.view.arm_deadline(window.now);
-    let due = window.view.deadline_ns().expect("a spray tick is due");
+    let due = window.view.deadline_ns().expect("an airbrush tick is due");
     let theme = window.registry.active();
     window
         .view
         .tick(due, &window.layout, Scale::ONE, theme, &mut Region::new());
-    assert!(painted(&window) > first, "the tick sprayed more");
+    assert!(middle(&window) < first, "the tick built more up");
     window.release(PointerButton::Primary);
     window.view.arm_deadline(window.now);
     assert_eq!(
@@ -529,7 +563,7 @@ fn every_action_is_chosen_by_its_own_id() {
 }
 
 #[test]
-fn the_window_menu_offers_the_sprite_rows_with_their_fields() {
+fn the_window_menu_offers_the_layer_and_sprite_rows_with_their_fields() {
     let window = Window::white(10, 10);
     let menu = window.view.menu(MenuKind::Window);
     let fields: vec::Vec<u16> = menu
@@ -539,9 +573,33 @@ fn the_window_menu_offers_the_sprite_rows_with_their_fields() {
             _ => None,
         })
         .collect();
-    assert_eq!(fields, [GO_TO_ENTRY, RENAME_ENTRY]);
+    assert_eq!(fields, [GO_TO_LAYER, GO_TO_ENTRY, RENAME_ENTRY]);
     let zoom = window.view.menu(MenuKind::Zoom);
     assert_eq!(zoom.rows().count(), crate::viewport::ZOOMS.len());
+}
+
+/// Nothing the window menu offers is left out for want of room in the
+/// bounds a menu is carried in.
+#[test]
+fn the_window_menu_holds_every_command() {
+    let window = Window::white(10, 10);
+    let menu = window.view.menu(MenuKind::Window);
+    assert!(menu.len() < tairix_abi::window_ipc::APP_MENU_MAX_TOTAL_ROWS);
+    let ids: Vec<u16> = menu
+        .rows()
+        .filter_map(|(row, _)| match row {
+            AppMenuRowView::Item(item) => Some(item.id.get()),
+            _ => None,
+        })
+        .collect();
+    let offered = super::PLAIN_ACTIONS
+        .into_iter()
+        .chain(Tool::ALL.map(Action::Tool))
+        .chain((0..crate::filter::Filter::ALL.len()).map(Action::Adjust))
+        .chain([Action::Rename]);
+    for action in offered {
+        assert!(ids.contains(&action.id()), "{action:?} is offered");
+    }
 }
 
 fn sprite(name: &str, shade: u8) -> Entry {
@@ -550,28 +608,27 @@ fn sprite(name: &str, shade: u8) -> Entry {
         palette: vec![[shade, 0, 0, 255], [255, 255, 255, 255]],
         masked: false,
     };
-    Entry::Picture(Picture {
-        canvas: Canvas::new(8, 8, kind, Sample::Index(0, 255)).expect("fits"),
-        sprite: Some(SpriteInfo {
-            name: SpriteName::new(name).expect("a name"),
-            mode: SpriteMode::indexed(IndexDepth::Four, (1, 1), false),
-            palette: SpritePalette::Full,
-            masked: false,
-        }),
-    })
+    let mut picture = Picture::plain(Canvas::new(8, 8, kind, Sample::Index(0, 255)).expect("fits"));
+    picture.sprite = Some(SpriteInfo {
+        name: SpriteName::new(name).expect("a name"),
+        mode: SpriteMode::indexed(IndexDepth::Four, (1, 1), false),
+        palette: SpritePalette::Full,
+        masked: false,
+    });
+    Entry::Picture(picture)
 }
 
 /// A white truecolour sprite called `name`.
 fn colour_sprite(name: &str) -> Entry {
-    Entry::Picture(Picture {
-        canvas: Canvas::new(8, 8, Kind::Rgba, Sample::Rgba([255; 4])).expect("fits"),
-        sprite: Some(SpriteInfo {
-            name: SpriteName::new(name).expect("a name"),
-            mode: SpriteMode::truecolour((1, 1), false),
-            palette: SpritePalette::Implied,
-            masked: false,
-        }),
-    })
+    let canvas = Canvas::new(8, 8, Kind::Rgba, Sample::Rgba([255; 4])).expect("fits");
+    let mut picture = Picture::plain(canvas);
+    picture.sprite = Some(SpriteInfo {
+        name: SpriteName::new(name).expect("a name"),
+        mode: SpriteMode::truecolour((1, 1), false),
+        palette: SpritePalette::Implied,
+        masked: false,
+    });
+    Entry::Picture(picture)
 }
 
 fn colour_sprites() -> Window {
@@ -579,6 +636,7 @@ fn colour_sprites() -> Window {
         vec![colour_sprite("one"), colour_sprite("two")],
         Origin::Read(tairix_sandbox::imagerender::ViewFormat::Sprite),
         Unkept::default(),
+        SaveSettings::default(),
     )
     .expect("entries");
     Window::new(document)
@@ -589,6 +647,7 @@ fn sprites() -> Window {
         vec![sprite("one", 10), sprite("two", 20)],
         Origin::Read(tairix_sandbox::imagerender::ViewFormat::Sprite),
         Unkept::default(),
+        SaveSettings::default(),
     )
     .expect("entries");
     Window::new(document)
@@ -599,10 +658,10 @@ fn sprites() -> Window {
 #[test]
 fn a_copied_sprite_takes_a_name_of_its_own() {
     let mut window = sprites();
-    window.act(Action::DuplicateSprite);
+    window.act(Action::DuplicateEntry);
     assert_eq!(window.view.document().current(), 1, "the copy shows");
-    window.act(Action::PreviousSprite);
-    window.act(Action::DuplicateSprite);
+    window.act(Action::PreviousEntry);
+    window.act(Action::DuplicateEntry);
     let names: vec::Vec<String> = window
         .view
         .document()
@@ -610,7 +669,7 @@ fn a_copied_sprite_takes_a_name_of_its_own() {
         .map(|name| alloc::format!("{name}"))
         .collect();
     assert_eq!(names, ["one", "one2", "one1", "two"]);
-    window.act(Action::NewSprite);
+    window.act(Action::NewEntry);
     let Some(super::Modal::Form(form)) = &window.view.modal else {
         panic!("the new sprite form shows");
     };
@@ -660,7 +719,7 @@ fn a_palette_picture_paints_in_its_entries_and_offers_them_as_wells() {
         .view
         .document()
         .picture()
-        .and_then(|picture| picture.canvas.sample(4, 4));
+        .and_then(|picture| picture.canvas().sample(4, 4));
     assert!(matches!(sample, Some(Sample::Index(_, 255))));
 }
 
@@ -726,7 +785,7 @@ fn a_new_picture_asked_for_is_handed_to_run() {
     window.act(Action::NewPicture);
     assert!(window.view.asking());
     let outcome = window.key(Key::Named(NamedKey::Enter), plain());
-    let Some(Request::Own(Own::NewWindow(picture))) = outcome.request else {
+    let Some(Request::Own(Own::NewWindow { picture, format })) = outcome.request else {
         panic!("a new window");
     };
     assert_eq!(
@@ -736,6 +795,28 @@ fn a_new_picture_asked_for_is_handed_to_run() {
             ..NewPicture::DEFAULT
         }
     );
+    assert_eq!(format, SaveFormat::Png);
+}
+
+#[test]
+fn save_as_asks_how_first_and_then_where_in_the_format_chosen() {
+    let mut window = Window::white(10, 10);
+    let mut damage = Region::new();
+    let surveying = window.view.ask_how(false, &window.layout, &mut damage);
+    window.run_worker(surveying.expect("asked"));
+    assert!(window.view.asking());
+    assert!(!window.view.asking_to_close());
+    let outcome = window.key(Key::Named(NamedKey::Enter), plain());
+    assert!(matches!(
+        outcome.request,
+        Some(Request::SaveWhere { then_close: false })
+    ));
+    assert_eq!(window.view.offered_extension(), "png");
+    let surveying = window.view.ask_how(true, &window.layout, &mut damage);
+    window.run_worker(surveying.expect("asked"));
+    assert!(window.view.asking_to_close(), "a quit waits on the sheet");
+    window.key(Key::Named(NamedKey::Escape), plain());
+    assert!(!window.view.asking() && !window.view.asking_to_close());
 }
 
 #[test]
@@ -905,7 +986,7 @@ fn stroke_held(window: &mut Window, from: (u32, u32), to: (u32, u32)) {
 fn a_stroke_stays_on_its_own_sprite_when_another_is_shown() {
     let mut window = colour_sprites();
     stroke_held(&mut window, (1, 1), (3, 1));
-    window.act(Action::NextSprite);
+    window.act(Action::NextEntry);
     assert_eq!(window.view.document().current(), 1);
     window.move_to(window.screen_of((5, 5)));
     window.release(PointerButton::Primary);
@@ -914,7 +995,7 @@ fn a_stroke_stays_on_its_own_sprite_when_another_is_shown() {
         [255; 4],
         "the drag ended with the stroke"
     );
-    window.act(Action::PreviousSprite);
+    window.act(Action::PreviousEntry);
     assert_eq!(
         window.colour(2, 1),
         [0, 0, 0, 255],
@@ -978,18 +1059,18 @@ fn a_worker_answer_lands_on_the_sprite_it_was_asked_of() {
     window.move_to(window.screen_of((2, 2)));
     let outcome = window.press(PointerButton::Primary);
     assert!(window.view.busy());
-    window.act(Action::NextSprite);
+    window.act(Action::NextEntry);
     assert_eq!(window.view.document().current(), 0, "the sprite stays");
     assert_eq!(
         window.view.message(),
         Some("Wait: the picture is being worked on")
     );
-    window.act(Action::DeleteSprite);
-    window.act(Action::DuplicateSprite);
+    window.act(Action::DeleteEntry);
+    window.act(Action::DuplicateEntry);
     assert_eq!(window.view.document().entries().len(), 2);
     window.run_worker(outcome);
     assert_eq!(window.colour(7, 7), [0, 0, 0, 255], "filled where asked");
-    window.act(Action::NextSprite);
+    window.act(Action::NextEntry);
     assert_eq!(window.colour(7, 7), [255; 4], "and nowhere else");
 }
 
@@ -1011,10 +1092,10 @@ fn a_transform_asked_mid_stroke_takes_the_stroke_with_it() {
     assert_eq!(window.colour(5, 5), [255; 4]);
 }
 
-/// A tool change repaints the toolbar and the panel its settings sit in,
+/// A tool change repaints the tool box and the bar its settings sit in,
 /// never the canvas.
 #[test]
-fn a_tool_change_repaints_the_toolbar_and_panel_not_the_canvas() {
+fn a_tool_change_repaints_the_tool_box_and_bar_not_the_canvas() {
     let window = Window::white(40, 40);
     let mut view = window.view;
     let mut damage = Region::new();
@@ -1037,28 +1118,7 @@ fn a_tool_change_repaints_the_toolbar_and_panel_not_the_canvas() {
 fn a_tool_change_with_a_list_open_repaints_the_window() {
     let mut window = Window::white(40, 40);
     window.act(Action::Tool(Tool::Rectangle));
-    let theme = window.registry.active();
-    let bounds = window.layout.settings();
-    let settings = window
-        .view
-        .settings
-        .layout(bounds, window.layout.window(), Scale::ONE, theme);
-    let style = 1;
-    let row = window
-        .view
-        .settings
-        .row_rect(style, settings, Scale::ONE, theme)
-        .expect("the style row is laid out");
-    let slot = window.view.settings.rows()[style]
-        .control_rect(FieldLayout::new(row, settings.column), Scale::ONE, theme)
-        .expect("the style slot is laid out");
-    window.move_to(slot.center());
-    window.press(PointerButton::Primary);
-    window.release(PointerButton::Primary);
-    assert!(
-        window.view.settings.rows()[style].popup_open(),
-        "the style list is open"
-    );
+    window.open_style_list();
     let mut damage = Region::new();
     let outcome = window
         .view
@@ -1121,11 +1181,11 @@ fn a_modifier_change_mid_shape_repaints_the_preview() {
     assert!(!damage.is_empty(), "the squared preview is drawn");
 }
 
-/// An action that needs the floating layer down waits for it: the layer is
-/// put down on a worker first, and only once that lands does the action
-/// follow. A put-down refused leaves the layer floating and does nothing.
+/// An action that needs the floating selection down waits for it: the
+/// selection is put down on a worker first, and only once that lands does the
+/// action follow. A put-down refused leaves the selection floating and does nothing.
 #[test]
-fn an_action_waits_for_the_floating_layer_to_be_put_down() {
+fn an_action_waits_for_the_floating_selection_to_be_put_down() {
     let mut window = Window::white(60, 60);
     window.act(Action::Tool(Tool::Pencil));
     window.drag((10, 10), (10, 10));
@@ -1199,30 +1259,8 @@ fn a_paste_adapted_to_another_kind_is_refused() {
 fn a_press_on_a_list_over_the_canvas_draws_nothing() {
     let mut window = Window::white(40, 40);
     window.act(Action::Tool(Tool::Rectangle));
-    let theme = window.registry.active();
-    let bounds = window.layout.settings();
-    let settings = window
-        .view
-        .settings
-        .layout(bounds, window.layout.window(), Scale::ONE, theme);
-    let style = 1;
-    let row = window
-        .view
-        .settings
-        .row_rect(style, settings, Scale::ONE, theme)
-        .expect("the style row is laid out");
-    let slot = window.view.settings.rows()[style]
-        .control_rect(FieldLayout::new(row, settings.column), Scale::ONE, theme)
-        .expect("the style slot is laid out");
-    window.move_to(slot.center());
-    window.press(PointerButton::Primary);
-    window.release(PointerButton::Primary);
-    let theme = window.registry.active();
-    let open = window
-        .view
-        .settings
-        .layout(bounds, window.layout.window(), Scale::ONE, theme);
-    let over = open.popup.intersection(&window.layout.canvas());
+    let popup = window.open_style_list();
+    let over = popup.intersection(&window.layout.canvas());
     assert!(!over.is_empty(), "the list hangs over the canvas");
     window.move_to(over.center());
     window.press(PointerButton::Primary);
@@ -1438,7 +1476,7 @@ fn the_palettes_mark_leaves_a_well_the_ink_no_longer_is() {
 fn tab_takes_the_keyboard_into_the_dock_and_typing_there_is_not_a_shortcut() {
     let mut window = Window::white(16, 16);
     let tool = window.view.tool();
-    window.key(Key::Named(NamedKey::Tab), plain());
+    window.tab_into_dock();
     assert!(window.view.picker.state().focus.focused);
     for _ in 0..4 {
         window.key(Key::Named(NamedKey::Tab), plain());
@@ -1477,7 +1515,8 @@ fn a_worker_landing_leaves_a_colour_typed_to_no_alpha_as_typed() {
     let fill = window.press(PointerButton::Primary);
     window.release(PointerButton::Primary);
     assert!(window.view.busy());
-    for _ in 0..5 {
+    window.tab_into_dock();
+    for _ in 0..4 {
         window.key(Key::Named(NamedKey::Tab), plain());
     }
     window.key(Key::Char('a'), ctrl());
@@ -1552,12 +1591,12 @@ fn a_new_stroke_clears_what_was_said_before_it() {
     window.release(PointerButton::Primary);
 }
 
-/// A sprite whose removal is refused keeps the layer floating over it.
+/// A sprite whose removal is refused keeps the selection floating over it.
 #[test]
-fn a_refused_sprite_removal_keeps_its_floating_layer() {
+fn a_refused_sprite_removal_keeps_its_floating_selection() {
     let mut window = Window::white(40, 40);
     window.lift((4, 4), (8, 8), (10, 10));
-    window.act(Action::DeleteSprite);
+    window.act(Action::DeleteEntry);
     assert!(
         window.view.floating().is_some(),
         "the only sprite stays, and so does its layer"
@@ -1574,4 +1613,1403 @@ fn no_form_opens_while_the_picture_is_worked_on() {
     assert!(fill.request.is_some(), "a fill for a worker");
     window.act(Action::Resize);
     assert!(window.view.modal.is_none());
+}
+
+/// Press and release the primary button over `rect`'s centre.
+fn click_on(window: &mut Window, rect: Rect) -> Outcome {
+    window.move_to(rect.center());
+    window.press(PointerButton::Primary);
+    window.release(PointerButton::Primary)
+}
+
+fn tool_rect(window: &Window, tool: Tool) -> Rect {
+    let theme = window.registry.active();
+    window
+        .view
+        .tool_box
+        .tool_rect(tool_index(tool), window.layout.tools(), Scale::ONE, theme)
+        .expect("the tool is seated")
+}
+
+fn command_rect(window: &Window, command: ViewCommand) -> Rect {
+    let theme = window.registry.active();
+    let index = VIEW_COMMANDS
+        .iter()
+        .position(|&(_, held, _)| held == command)
+        .expect("a command");
+    window
+        .view
+        .commands
+        .tool_rect(index, window.layout.view_strip(), Scale::ONE, theme)
+        .expect("the command is seated")
+}
+
+fn well_rect(window: &Window, index: usize) -> Rect {
+    window
+        .view
+        .swatches
+        .cell_rect(window.layout.swatches(), index)
+        .expect("a well")
+}
+
+/// A press on a tool in the tool box chooses it, and the bar becomes that
+/// tool's, placed anew.
+#[test]
+fn a_tool_chosen_in_the_tool_box_brings_its_own_bar() {
+    let mut window = Window::white(40, 40);
+    let fill = tool_rect(&window, Tool::Fill);
+    let outcome = click_on(&mut window, fill);
+    assert_eq!(window.view.tool(), Tool::Fill);
+    assert_eq!(outcome.relayout, Relayout::Reported);
+    assert!(window.view.tool_box.is_active(tool_index(Tool::Fill)));
+    assert_eq!(
+        window.view.bar.settings().collect::<Vec<_>>(),
+        [Setting::Tolerance, Setting::Contiguous]
+    );
+    assert!(window.layout.bar().control(0).is_some(), "and placed");
+}
+
+/// The view strip zooms, and marks the grid while it shows; the key and
+/// the strip agree.
+#[test]
+fn the_view_strip_zooms_and_marks_the_grid() {
+    let mut window = Window::white(40, 40);
+    let zoom = window.view.viewport().zoom();
+    let zoom_in = command_rect(&window, ViewCommand::ZoomIn);
+    click_on(&mut window, zoom_in);
+    assert!(window.view.viewport().zoom() > zoom);
+    let grid = command_rect(&window, ViewCommand::Grid);
+    click_on(&mut window, grid);
+    assert!(window.view.grid);
+    let index = VIEW_COMMANDS.len() - 1;
+    assert!(
+        window.view.commands.is_active(index),
+        "the grid's command is marked"
+    );
+    window.key(Key::Char('g'), plain());
+    assert!(!window.view.grid);
+    assert!(!window.view.commands.is_active(index));
+}
+
+/// A press held on one strip and let go over another chooses nothing on
+/// either, and leaves neither holding the press.
+#[test]
+fn a_press_carried_from_one_strip_to_another_chooses_nothing() {
+    let mut window = Window::white(40, 40);
+    let zoom = window.view.viewport().zoom();
+    let zoom_in = command_rect(&window, ViewCommand::ZoomIn);
+    let fill = tool_rect(&window, Tool::Fill);
+    window.move_to(zoom_in.center());
+    window.press(PointerButton::Primary);
+    window.move_to(fill.center());
+    window.release(PointerButton::Primary);
+    assert_eq!(window.view.viewport().zoom(), zoom);
+    assert_eq!(window.view.tool(), Tool::Brush);
+    click_on(&mut window, zoom_in);
+    assert!(
+        window.view.viewport().zoom() > zoom,
+        "the strip let the carried press go"
+    );
+}
+
+/// A size typed into the bar is the width the next stroke is painted at.
+#[test]
+fn a_size_typed_in_the_bar_is_the_width_the_brush_paints() {
+    let mut window = Window::white(60, 60);
+    window.click_setting(0);
+    assert!(window.view.bar.focus().is_some());
+    window.key(Key::Char('a'), ctrl());
+    window.key(Key::Char('9'), plain());
+    assert_eq!(window.view.options.brush.size, 9, "live as it is typed");
+    window.drag((30, 30), (30, 30));
+    assert!(
+        window.view.bar.focus().is_none(),
+        "the press took the keyboard back"
+    );
+    assert_eq!(
+        window.colour(33, 30),
+        [0, 0, 0, 255],
+        "inside a nine-pixel dab"
+    );
+    assert_eq!(window.colour(36, 30), [255; 4], "and no further");
+}
+
+/// Tab walks the picture, the bar's settings, the palette and the dock and
+/// back to the picture, and Shift+Tab the other way.
+#[test]
+fn tab_walks_the_bar_the_palette_and_the_dock_and_back() {
+    let mut window = Window::white(16, 16);
+    window.act(Action::Tool(Tool::Line));
+    let tab = |window: &mut Window, modifiers| {
+        window.key(Key::Named(NamedKey::Tab), modifiers);
+    };
+    let shift = Modifiers {
+        shift: true,
+        ..Modifiers::default()
+    };
+    tab(&mut window, plain());
+    assert_eq!(window.view.bar.focus(), Some(0), "the size first");
+    tab(&mut window, plain());
+    assert_eq!(window.view.bar.focus(), Some(1));
+    tab(&mut window, plain());
+    assert!(
+        window.view.swatches.state().focus.focused,
+        "then the palette"
+    );
+    assert!(window.view.bar.focus().is_none());
+    tab(&mut window, plain());
+    assert!(window.view.picker.state().focus.focused, "then the dock");
+    assert!(!window.view.swatches.state().focus.focused);
+    for _ in 0..20 {
+        if !window.view.picker.state().focus.focused {
+            break;
+        }
+        tab(&mut window, plain());
+    }
+    assert!(
+        !window.view.picker.state().focus.focused,
+        "and back to the picture"
+    );
+    assert!(window.view.bar.focus().is_none() && !window.view.swatches.state().focus.focused);
+
+    tab(&mut window, shift);
+    assert!(
+        window.view.picker.state().focus.focused,
+        "backward into the dock"
+    );
+    for _ in 0..20 {
+        if !window.view.picker.state().focus.focused {
+            break;
+        }
+        tab(&mut window, shift);
+    }
+    assert!(
+        window.view.swatches.state().focus.focused,
+        "the palette before it"
+    );
+    tab(&mut window, shift);
+    assert_eq!(
+        window.view.bar.focus(),
+        Some(1),
+        "the bar from its last setting"
+    );
+    tab(&mut window, shift);
+    tab(&mut window, shift);
+    assert!(
+        window.view.bar.focus().is_none(),
+        "and the picture before that"
+    );
+}
+
+/// A tool with no settings leaves the bar out of the walk.
+#[test]
+fn tab_passes_a_bar_with_no_settings() {
+    let mut window = Window::white(16, 16);
+    window.act(Action::Tool(Tool::Pencil));
+    window.key(Key::Named(NamedKey::Tab), plain());
+    assert!(window.view.swatches.state().focus.focused);
+}
+
+/// A letter typed into a number field is typing, never a tool's key, and
+/// Escape gives the keyboard back to the picture.
+#[test]
+fn typing_in_the_bar_is_not_a_shortcut_and_escape_gives_the_keyboard_back() {
+    let mut window = Window::white(16, 16);
+    window.click_setting(0);
+    window.key(Key::Char('e'), plain());
+    assert_eq!(window.view.tool(), Tool::Brush);
+    window.key(Key::Named(NamedKey::Escape), plain());
+    assert!(window.view.bar.focus().is_none());
+    window.key(Key::Char('e'), plain());
+    assert_eq!(window.view.tool(), Tool::Eraser, "the window's key again");
+}
+
+/// A chord from a field is the window's, and what the field was typed
+/// lands before the window acts.
+#[test]
+fn a_chord_from_the_bar_settles_the_field_first() {
+    let mut window = Window::white(16, 16);
+    window.click_setting(0);
+    window.key(Key::Char('a'), ctrl());
+    window.key(Key::Char('9'), plain());
+    window.key(Key::Char('9'), plain());
+    assert_eq!(
+        window.view.options.brush.size, 9,
+        "99 is past a brush's widest"
+    );
+    let outcome = window.key(Key::Char('s'), ctrl());
+    assert!(matches!(outcome.request, Some(Request::Save)));
+    assert_eq!(
+        window.view.options.brush.size, MAX_SIZE,
+        "settled to the bound first"
+    );
+}
+
+/// A press anywhere else in the window settles the field and takes its
+/// keyboard; the menu does too.
+#[test]
+fn a_press_elsewhere_or_the_menu_takes_the_bars_keyboard() {
+    let mut window = Window::white(16, 16);
+    window.click_setting(0);
+    window.key(Key::Char('a'), ctrl());
+    window.key(Key::Char('7'), plain());
+    window.key(Key::Char('7'), plain());
+    let status = window.layout.message();
+    click_on(&mut window, status);
+    assert!(window.view.bar.focus().is_none());
+    assert_eq!(window.view.options.brush.size, MAX_SIZE);
+
+    window.click_setting(0);
+    window.move_to(window.screen_of((4, 4)));
+    let outcome = window.press(PointerButton::Secondary);
+    assert!(matches!(
+        outcome.request,
+        Some(Request::Menu {
+            kind: MenuKind::Window,
+            ..
+        })
+    ));
+    assert!(window.view.bar.focus().is_none());
+}
+
+/// A well of the palette strip pressed is the primary ink, and one pressed
+/// with the middle button the secondary.
+#[test]
+fn the_palette_strip_sets_both_inks() {
+    let mut window = Window::white(16, 16);
+    let red = well_rect(&window, 11);
+    click_on(&mut window, red);
+    assert_eq!(window.view.inks().0, window.view.wells[11]);
+    let blue = well_rect(&window, 8);
+    window.move_to(blue.center());
+    window.press(PointerButton::Middle);
+    window.release(PointerButton::Middle);
+    assert_eq!(window.view.inks().1, window.view.wells[8]);
+    assert_eq!(window.view.swatches.secondary(), Some(8));
+}
+
+/// The arrows walk the palette while it has the keyboard; on the picture,
+/// with nothing floating, they move no ink.
+#[test]
+fn the_arrows_walk_the_palette_only_while_it_has_the_keyboard() {
+    let mut window = Window::white(16, 16);
+    let inks = window.view.inks();
+    window.key(Key::Named(NamedKey::Right), plain());
+    assert_eq!(window.view.inks(), inks);
+    let black = window
+        .view
+        .swatches
+        .selected()
+        .expect("black is a Wimp colour");
+    window.act(Action::Tool(Tool::Pencil));
+    window.key(Key::Named(NamedKey::Tab), plain());
+    assert!(window.view.swatches.state().focus.focused);
+    window.key(Key::Named(NamedKey::Right), plain());
+    assert_eq!(window.view.inks().0, window.view.wells[black + 1]);
+    window.key(Key::Char('b'), plain());
+    assert_eq!(
+        window.view.tool(),
+        Tool::Brush,
+        "a key the palette has no use for is the window's"
+    );
+}
+
+/// The palette's rows follow the window it is laid out in.
+#[test]
+fn the_palettes_rows_follow_the_layout() {
+    let kind = Kind::Indexed {
+        depth: IndexDepth::Eight,
+        palette: tairix_image::desktop_palette(IndexDepth::Eight)
+            .iter()
+            .map(|&[r, g, b]| [r, g, b, 255])
+            .collect(),
+        masked: false,
+    };
+    let canvas = Canvas::new(8, 8, kind, Sample::Index(0, 255)).expect("fits");
+    let window = Window::new(Document::new(Picture::plain(canvas)));
+    assert_eq!(window.view.wells.len(), 256);
+    assert_eq!(window.view.swatches.columns(), window.layout.columns());
+    assert!(window.view.swatches.rows() > 1);
+    let last = window
+        .view
+        .swatches
+        .cell_rect(window.layout.swatches(), 255)
+        .expect("the last entry has a well");
+    assert_eq!(
+        last.intersection(&window.layout.palette()),
+        last,
+        "inside the strip"
+    );
+}
+
+/// The tool box, the view strip and the bar each carry their tips.
+#[test]
+fn tips_name_tools_commands_and_settings() {
+    let mut window = Window::white(16, 16);
+    let tip = |window: &Window| {
+        let theme = window.registry.active();
+        window
+            .view
+            .tool_tip(&window.layout, Scale::ONE, theme)
+            .map(|(_, text)| text)
+    };
+    window.move_to(tool_rect(&window, Tool::Fill).center());
+    assert_eq!(tip(&window), Some("Fill (F)"));
+    window.move_to(command_rect(&window, ViewCommand::Grid).center());
+    assert_eq!(tip(&window), Some("Pixel grid (G)"));
+    let size = window.layout.bar().control(0).expect("seated");
+    window.move_to(size.center());
+    assert_eq!(tip(&window), Some(Setting::Size.tip()));
+}
+
+/// The pointer shows text entry over a number field and the arrow while a
+/// list holds it.
+#[test]
+fn the_pointer_shows_text_entry_over_a_number_field() {
+    let mut window = Window::white(16, 16);
+    let size = window.layout.bar().control(0).expect("seated").center();
+    let canvas = window.screen_of((4, 4));
+    let cursor = |window: &Window, at| DocumentView::cursor(&window.view, &window.layout, at);
+    assert_eq!(cursor(&window, size), CursorShape::Text);
+    assert_eq!(cursor(&window, canvas), CursorShape::Crosshair);
+    window.act(Action::Tool(Tool::Rectangle));
+    window.open_style_list();
+    assert_eq!(cursor(&window, canvas), CursorShape::Arrow);
+}
+
+/// A palette picture holds smoothing off in the bar, and its tip says why.
+#[test]
+fn a_palette_picture_holds_smoothing_off_in_the_bar() {
+    let mut window = four_colours();
+    let smooth = window.layout.bar().control(1).expect("seated");
+    window.move_to(smooth.center());
+    let theme = window.registry.active();
+    let tip = window.view.tool_tip(&window.layout, Scale::ONE, theme);
+    assert_eq!(tip.map(|(_, text)| text), Some(WHOLE_PIXELS));
+    click_on(&mut window, smooth);
+    assert!(window.view.options.smooth, "the switch flips nothing");
+}
+
+/// The least window seats every tool's bar whole beside the view strip.
+#[test]
+fn the_least_window_seats_every_tools_bar() {
+    let mut window = Window::white(16, 16);
+    let theme = window.registry.active();
+    let (width, height) = window.view.min_size(theme, Scale::ONE, faces(theme));
+    let least = ToolControls::least_width(faces(theme), Scale::ONE, theme);
+    assert!(width >= least + window.view.commands.natural_length(Scale::ONE, theme));
+    for tool in Tool::ALL {
+        window.act(Action::Tool(tool));
+        let theme = window.registry.active();
+        let least = window
+            .view
+            .layout(width, height, theme, Scale::ONE, faces(theme));
+        for index in 0..tool.settings().len() {
+            assert!(
+                least.bar().control(index).is_some(),
+                "{tool:?}'s setting {index} is seated"
+            );
+        }
+        assert!(!least.canvas().is_empty());
+    }
+}
+
+/// Choosing a tool moves the tool box's mark and nothing else: a tool box
+/// scrolled down its column stays where it was.
+#[test]
+fn choosing_a_tool_keeps_where_a_short_tool_box_is_scrolled() {
+    let mut window = Window::white(16, 16);
+    let theme = window.registry.active();
+    window.layout = window
+        .view
+        .layout(900, 300, theme, Scale::ONE, faces(theme));
+    window.view.settle(&window.layout, &mut Region::new());
+    let tools = window.layout.tools();
+    let offset = |window: &Window| {
+        let theme = window.registry.active();
+        window
+            .view
+            .tool_box
+            .scroll_model(window.layout.tools(), Scale::ONE, theme)
+            .offset()
+    };
+    assert!(
+        window
+            .view
+            .tool_box
+            .scroll_model(tools, Scale::ONE, theme)
+            .range()
+            .is_scrollable(),
+        "a short window's tool box scrolls"
+    );
+    window.move_to(tools.center());
+    window.pointer(InputEvent::PointerScrolled {
+        dx: 0,
+        dy: SCROLL_UNITS_PER_DETENT,
+    });
+    let scrolled = offset(&window);
+    assert!(scrolled > 0);
+    let theme = window.registry.active();
+    let stroke = Keystroke {
+        key: Key::Char('e'),
+        modifiers: plain(),
+        at_ns: window.now,
+    };
+    let outcome = window.view.on_key(
+        stroke,
+        &window.layout,
+        Scale::ONE,
+        theme,
+        &mut Region::new(),
+    );
+    assert_eq!(outcome.relayout, Relayout::Reported);
+    window.layout = window
+        .view
+        .layout(900, 300, theme, Scale::ONE, faces(theme));
+    window.view.settle(&window.layout, &mut Region::new());
+    assert_eq!(window.view.tool(), Tool::Eraser);
+    assert_eq!(offset(&window), scrolled, "the column did not jump back");
+}
+
+/// On a palette picture, Tab passes what the bar holds off: a tip's
+/// hardness, opacity and flow, and smoothing.
+#[test]
+fn tab_passes_what_a_palette_picture_holds_off() {
+    let mut window = four_colours();
+    window.key(Key::Named(NamedKey::Tab), plain());
+    assert_eq!(window.view.bar.focus(), Some(0), "the size");
+    window.key(Key::Named(NamedKey::Tab), plain());
+    assert_eq!(window.view.bar.focus(), Some(4), "the spacing next");
+    window.key(Key::Named(NamedKey::Tab), plain());
+    assert!(
+        window.view.swatches.state().focus.focused,
+        "past smoothing, straight to the palette"
+    );
+}
+
+/// A TIFF's pages take a new page, unnamed, through the form a page asks;
+/// the document stays pages and its menu says so.
+#[test]
+fn a_new_page_joins_a_tiffs_pages_unnamed() {
+    let page = || {
+        Entry::Picture(Picture::plain(
+            Canvas::new(6, 4, Kind::Rgba, Sample::Rgba([255; 4])).expect("fits"),
+        ))
+    };
+    let document = Document::of(
+        vec![page()],
+        Origin::Read(tairix_sandbox::imagerender::ViewFormat::Tiff),
+        Unkept::default(),
+        SaveSettings::default(),
+    )
+    .expect("entries");
+    let mut window = Window::new(document);
+    assert!(window.view.document().is_pages());
+    window.act(Action::NewEntry);
+    assert!(window.view.asking());
+    window.key(Key::Named(NamedKey::Enter), plain());
+    let document = window.view.document();
+    assert_eq!(document.entries().len(), 2);
+    assert_eq!(document.current(), 1, "the new page shows");
+    assert!(document
+        .entries()
+        .iter()
+        .all(|entry| entry.name().is_none()));
+    assert!(document.is_pages() && !document.is_sprite_area());
+    let picture = document.picture().expect("a picture");
+    assert_eq!(
+        (picture.canvas().width(), picture.canvas().height()),
+        (6, 4),
+        "the size it was offered"
+    );
+}
+
+/// Take up the select tool marking out `marquee`.
+fn marking_with(window: &mut Window, marquee: Marquee) {
+    window.act(Action::Tool(Tool::Select));
+    window.view.options.marquee = marquee;
+}
+
+/// Hold `modifiers` down.
+fn hold(window: &mut Window, modifiers: Modifiers) {
+    window.pointer(InputEvent::ModifiersChanged { modifiers });
+}
+
+/// Click picture pixel `at` with the primary button, answering what asked
+/// for more: the press or the release.
+fn click(window: &mut Window, at: (u32, u32)) -> Outcome {
+    let point = window.screen_of(at);
+    window.move_to(point);
+    let pressed = window.press(PointerButton::Primary);
+    let released = window.release(PointerButton::Primary);
+    if pressed.request.is_some() {
+        pressed
+    } else {
+        released
+    }
+}
+
+#[test]
+fn an_ellipse_selection_is_made_on_a_worker_and_chooses_its_inside() {
+    let mut window = Window::white(40, 30);
+    marking_with(&mut window, Marquee::Ellipse);
+    let outcome = window.drag((5, 5), (24, 14));
+    assert!(window.view.busy(), "traced off the loop");
+    window.run_worker(outcome);
+    let chosen = window.view.selection().expect("selected");
+    assert!(!chosen.is_rect());
+    assert!(chosen.chooses(15, 10));
+    assert!(!chosen.chooses(5, 5), "the corner the ellipse leaves out");
+}
+
+#[test]
+fn a_plain_rectangle_is_selected_at_once_and_a_click_selects_nothing() {
+    let mut window = Window::white(40, 30);
+    marking_with(&mut window, Marquee::Rectangle);
+    let outcome = window.drag((5, 5), (9, 8));
+    assert!(
+        outcome.request.is_none() && !window.view.busy(),
+        "no worker"
+    );
+    let chosen = window.view.selection().expect("selected");
+    assert!(chosen.is_rect());
+    assert_eq!(
+        chosen.bounds(),
+        Bounds {
+            x0: 5,
+            y0: 5,
+            x1: 10,
+            y1: 9
+        }
+    );
+    click(&mut window, (30, 20));
+    assert!(
+        window.view.selection().is_none(),
+        "a click outside deselects"
+    );
+}
+
+#[test]
+fn a_lasso_selects_what_its_path_encloses() {
+    let mut window = Window::white(40, 40);
+    marking_with(&mut window, Marquee::Lasso);
+    window.move_to(window.screen_of((4, 4)));
+    window.press(PointerButton::Primary);
+    for corner in [(30, 4), (30, 30), (4, 30)] {
+        window.move_to(window.screen_of(corner));
+        assert!(matches!(
+            window.view.marking(),
+            Some(Marking::Path { to: None, .. })
+        ));
+    }
+    let outcome = window.release(PointerButton::Primary);
+    window.run_worker(outcome);
+    let chosen = window.view.selection().expect("selected");
+    assert!(chosen.chooses(15, 15));
+    assert!(!chosen.chooses(35, 35));
+    assert_eq!(window.view.marking(), None);
+}
+
+#[test]
+fn a_polygon_is_marked_a_corner_at_a_time_and_closed_on_its_first() {
+    let mut window = Window::white(40, 40);
+    marking_with(&mut window, Marquee::Polygon);
+    for corner in [(2, 2), (20, 2), (20, 20), (2, 20)] {
+        assert!(click(&mut window, corner).request.is_none());
+    }
+    window.move_to(window.screen_of((10, 30)));
+    let Some(Marking::Path { points, to }) = window.view.marking() else {
+        panic!("a polygon being marked out");
+    };
+    assert_eq!(points.len(), 4);
+    assert_eq!(to.map(Fx::pixel), Some((10, 30)), "the next edge follows");
+    let outcome = click(&mut window, (2, 2));
+    window.run_worker(outcome);
+    let chosen = window.view.selection().expect("closed and selected");
+    assert!(chosen.chooses(10, 10));
+    assert!(!chosen.chooses(25, 25));
+    assert_eq!(window.view.marking(), None);
+}
+
+#[test]
+fn enter_closes_a_polygon_backspace_takes_a_corner_back_and_escape_turns_it_down() {
+    let mut window = Window::white(40, 40);
+    marking_with(&mut window, Marquee::Polygon);
+    for corner in [(2, 2), (20, 2), (20, 20), (30, 30)] {
+        click(&mut window, corner);
+    }
+    window.key(Key::Named(NamedKey::Backspace), plain());
+    let Some(Marking::Path { points, .. }) = window.view.marking() else {
+        panic!("still being marked out");
+    };
+    assert_eq!(points.len(), 3, "the last corner is taken back");
+    let outcome = window.key(Key::Named(NamedKey::Enter), plain());
+    window.run_worker(outcome);
+    let chosen = window.view.selection().expect("closed");
+    assert!(chosen.chooses(15, 8) && !chosen.chooses(28, 28));
+    click(&mut window, (35, 35));
+    click(&mut window, (38, 35));
+    window.key(Key::Named(NamedKey::Escape), plain());
+    assert_eq!(window.view.marking(), None, "turned down");
+    assert!(
+        window.view.selection().is_none(),
+        "the first corner let the old one go"
+    );
+}
+
+#[test]
+fn the_wand_chooses_the_pixels_joined_through_like_colours() {
+    let mut window = Window::white(40, 30);
+    window.act(Action::Tool(Tool::Pencil));
+    window.drag((20, 0), (20, 29));
+    marking_with(&mut window, Marquee::Wand);
+    let outcome = click(&mut window, (3, 3));
+    window.run_worker(outcome);
+    let chosen = window.view.selection().expect("selected");
+    assert!(chosen.chooses(19, 29) && chosen.chooses(0, 0));
+    assert!(!chosen.chooses(20, 5), "the line stops the flood");
+    assert!(!chosen.chooses(30, 5));
+}
+
+#[test]
+fn shift_adds_alt_takes_away_and_both_keep_what_both_choose() {
+    let mut window = Window::white(40, 40);
+    marking_with(&mut window, Marquee::Rectangle);
+    window.drag((2, 2), (11, 11));
+    let modified = |shift, alt| Modifiers {
+        shift,
+        alt,
+        ..Modifiers::default()
+    };
+    hold(&mut window, modified(true, false));
+    let outcome = window.drag((8, 8), (17, 17));
+    window.run_worker(outcome);
+    let added = window.view.selection().expect("added").clone();
+    assert!(added.chooses(3, 3) && added.chooses(16, 16) && !added.chooses(16, 3));
+    hold(&mut window, modified(false, true));
+    let outcome = window.drag((0, 0), (5, 5));
+    window.run_worker(outcome);
+    let taken = window.view.selection().expect("taken from").clone();
+    assert!(!taken.chooses(3, 3) && taken.chooses(9, 9));
+    hold(&mut window, modified(true, true));
+    let outcome = window.drag((9, 9), (30, 30));
+    window.run_worker(outcome);
+    let both = window.view.selection().expect("kept").clone();
+    assert!(both.chooses(12, 12) && !both.chooses(7, 7) && !both.chooses(25, 25));
+    hold(&mut window, plain());
+}
+
+#[test]
+fn alt_with_the_select_tool_takes_away_rather_than_taking_a_colour() {
+    let mut window = Window::white(20, 20);
+    marking_with(&mut window, Marquee::Rectangle);
+    window.drag((2, 2), (10, 10));
+    hold(
+        &mut window,
+        Modifiers {
+            alt: true,
+            ..Modifiers::default()
+        },
+    );
+    let outcome = window.drag((2, 2), (5, 5));
+    window.run_worker(outcome);
+    assert_eq!(
+        window.view.inks().0,
+        Ink::Colour([0, 0, 0, 255]),
+        "no colour was taken"
+    );
+    assert!(!window.view.selection().expect("held").chooses(3, 3));
+}
+
+#[test]
+fn a_feathered_selection_is_soft_at_its_edge() {
+    let mut window = Window::white(40, 40);
+    marking_with(&mut window, Marquee::Rectangle);
+    window.view.options.feather = 3;
+    let outcome = window.drag((10, 10), (29, 29));
+    window.run_worker(outcome);
+    let chosen = window.view.selection().expect("selected");
+    assert!(!chosen.is_rect());
+    assert_eq!(chosen.at(20, 20), 255);
+    assert!(
+        (1..255).contains(&chosen.at(10, 20)),
+        "{}",
+        chosen.at(10, 20)
+    );
+}
+
+#[test]
+fn painting_and_filling_are_held_to_the_selection_across_tools() {
+    let mut window = Window::white(30, 30);
+    marking_with(&mut window, Marquee::Rectangle);
+    window.drag((5, 5), (10, 10));
+    window.act(Action::Tool(Tool::Pencil));
+    assert!(window.view.selection().is_some(), "the selection stays");
+    window.drag((0, 7), (20, 7));
+    assert_eq!(window.colour(5, 7), [0, 0, 0, 255]);
+    assert_eq!(window.colour(10, 7), [0, 0, 0, 255]);
+    assert_eq!(window.colour(4, 7), [255; 4], "outside the selection");
+    assert_eq!(window.colour(11, 7), [255; 4]);
+    window.act(Action::Tool(Tool::Fill));
+    let outcome = click(&mut window, (20, 20));
+    window.run_worker(outcome);
+    assert_eq!(
+        window.colour(20, 20),
+        [255; 4],
+        "outside, nothing is filled"
+    );
+    assert_eq!(window.colour(6, 6), [0, 0, 0, 255], "inside it is");
+}
+
+#[test]
+fn select_all_selects_the_picture_and_keeps_the_tool() {
+    let mut window = Window::white(30, 20);
+    window.act(Action::Tool(Tool::Brush));
+    window.act(Action::SelectAll);
+    assert_eq!(window.view.tool(), Tool::Brush);
+    assert_eq!(
+        window.view.selection().map(Mask::bounds),
+        Some(Bounds::picture(30, 20))
+    );
+}
+
+#[test]
+fn deleting_a_soft_selection_erases_in_proportion() {
+    let mut window = Window::white(40, 40);
+    marking_with(&mut window, Marquee::Ellipse);
+    let outcome = window.drag((4, 4), (35, 35));
+    window.run_worker(outcome);
+    let edge = (4..20)
+        .find(|&x| (1..255).contains(&window.view.selection().expect("held").at(x, 20)))
+        .expect("a soft edge");
+    let outcome = window.act(Action::Delete);
+    window.run_worker(outcome);
+    assert_eq!(window.colour(20, 20), [0; 4]);
+    assert_eq!(window.colour(4, 4), [255; 4], "left out");
+    let [.., alpha] = window.colour(u32::try_from(edge).expect("on it"), 20);
+    assert!(alpha > 0 && alpha < 255, "{alpha}");
+}
+
+#[test]
+fn the_hand_drags_the_view_and_escape_puts_it_back() {
+    let mut window = Window::white(2000, 2000);
+    window.act(Action::Tool(Tool::Hand));
+    let start = window.view.viewport().scroll();
+    let at = window.layout.canvas().center();
+    window.move_to(at);
+    window.press(PointerButton::Primary);
+    window.move_to(Point::new(at.x - 50, at.y - 30));
+    assert_eq!(
+        window.view.viewport().scroll(),
+        (start.0 + 50, start.1 + 30)
+    );
+    window.key(Key::Named(NamedKey::Escape), plain());
+    assert_eq!(window.view.viewport().scroll(), start, "turned down");
+    window.release(PointerButton::Primary);
+    assert_eq!(
+        window.view.document().history_depth(),
+        0,
+        "nothing was painted"
+    );
+}
+
+#[test]
+fn space_held_drags_the_view_whatever_the_tool() {
+    let mut window = Window::white(2000, 2000);
+    window.act(Action::Tool(Tool::Pencil));
+    window.key(Key::Char(' '), plain());
+    let start = window.view.viewport().scroll();
+    let at = window.layout.canvas().center();
+    window.move_to(at);
+    window.press(PointerButton::Primary);
+    window.move_to(Point::new(at.x - 40, at.y));
+    window.release(PointerButton::Primary);
+    assert_eq!(window.view.viewport().scroll().0, start.0 + 40);
+    assert_eq!(
+        window.view.document().history_depth(),
+        0,
+        "the pencil drew nothing"
+    );
+    let theme = window.registry.active();
+    DocumentView::input(
+        &mut window.view,
+        &InputEvent::KeyReleased {
+            key: Key::Char(' '),
+            modifiers: plain(),
+        },
+        window.now,
+        &window.layout,
+        Scale::ONE,
+        theme,
+        &mut Region::new(),
+    );
+    window.drag((100, 100), (103, 100));
+    assert_eq!(
+        window.view.document().history_depth(),
+        1,
+        "let go, the pencil draws"
+    );
+}
+
+#[test]
+fn the_zoom_tool_steps_by_a_click_and_frames_a_dragged_box() {
+    let mut window = Window::white(400, 300);
+    window.act(Action::Tool(Tool::Zoom));
+    let zoom = window.view.viewport().zoom();
+    click(&mut window, (100, 100));
+    assert!(window.view.viewport().zoom() > zoom, "a click magnifies");
+    hold(
+        &mut window,
+        Modifiers {
+            alt: true,
+            ..Modifiers::default()
+        },
+    );
+    click(&mut window, (100, 100));
+    assert_eq!(window.view.viewport().zoom(), zoom, "and with Alt, reduces");
+    hold(&mut window, plain());
+    window.drag((10, 10), (29, 19));
+    let area = window.layout.canvas();
+    let shown = window.view.viewport().to_screen(
+        Bounds {
+            x0: 10,
+            y0: 10,
+            x1: 30,
+            y1: 20,
+        },
+        (400, 300),
+        area,
+    );
+    assert!(
+        shown.width + 4 >= area.width || shown.height + 4 >= area.height,
+        "the box fills the canvas: {shown:?} in {area:?}"
+    );
+}
+
+#[test]
+fn the_crop_box_is_set_out_adjusted_and_applied_with_enter() {
+    let mut window = Window::white(60, 40);
+    window.act(Action::Tool(Tool::Crop));
+    window.drag((10, 5), (29, 24));
+    assert_eq!(
+        window.view.crop_box(),
+        Some(Bounds {
+            x0: 10,
+            y0: 5,
+            x1: 30,
+            y1: 25
+        })
+    );
+    // The right edge, dragged out.
+    let edge = window.layout.canvas();
+    let size = window.size();
+    let right =
+        window
+            .view
+            .viewport()
+            .screen_span(window.view.crop_box().expect("a box"), size, edge);
+    let grab = Point::new(
+        i32::try_from(right.x1 - 1).expect("on screen"),
+        window.screen_of((20, 15)).y,
+    );
+    window.move_to(grab);
+    window.press(PointerButton::Primary);
+    window.move_to(window.screen_of((39, 15)));
+    window.release(PointerButton::Primary);
+    assert_eq!(window.view.crop_box().map(|b| b.x1), Some(40), "widened");
+    let outcome = window.key(Key::Named(NamedKey::Enter), plain());
+    window.run_worker(outcome);
+    assert_eq!(window.size(), (30, 20), "cut down to the box");
+    assert_eq!(window.view.crop_box(), None);
+    window.drag((2, 2), (6, 6));
+    window.key(Key::Named(NamedKey::Escape), plain());
+    assert_eq!(window.view.crop_box(), None, "Escape lets it go");
+    window.drag((2, 2), (6, 6));
+    window.act(Action::Tool(Tool::Brush));
+    assert_eq!(window.view.crop_box(), None, "and so does another tool");
+}
+
+#[test]
+fn a_fill_not_held_to_joined_pixels_reaches_every_like_pixel() {
+    let mut window = Window::white(30, 10);
+    window.act(Action::Tool(Tool::Pencil));
+    window.drag((10, 0), (10, 9));
+    window.act(Action::Tool(Tool::Fill));
+    window.view.options.contiguous = false;
+    window.act(Action::SwapColours);
+    window.act(Action::SwapColours);
+    window.view.secondary = Ink::Colour([255; 4]);
+    window.view.primary = Ink::Colour([0, 0, 255, 255]);
+    let outcome = click(&mut window, (2, 2));
+    window.run_worker(outcome);
+    assert_eq!(window.colour(2, 2), [0, 0, 255, 255]);
+    assert_eq!(
+        window.colour(25, 5),
+        [0, 0, 255, 255],
+        "beyond the wall too"
+    );
+    assert_eq!(
+        window.colour(10, 5),
+        [0, 0, 0, 255],
+        "the wall is not like it"
+    );
+}
+
+#[test]
+fn alt_backspace_fills_the_selection_with_the_primary_colour() {
+    let mut window = Window::white(20, 20);
+    marking_with(&mut window, Marquee::Rectangle);
+    window.drag((5, 5), (9, 9));
+    let outcome = window.key(
+        Key::Named(NamedKey::Backspace),
+        Modifiers {
+            alt: true,
+            ..Modifiers::default()
+        },
+    );
+    window.run_worker(outcome);
+    assert_eq!(window.colour(7, 7), [0, 0, 0, 255]);
+    assert_eq!(window.colour(3, 3), [255; 4], "outside the selection");
+}
+
+#[test]
+fn a_gradient_is_previewed_while_dragged_and_laid_by_a_worker() {
+    let mut window = Window::white(40, 10);
+    window.act(Action::Tool(Tool::Gradient));
+    window.move_to(window.screen_of((0, 5)));
+    window.press(PointerButton::Primary);
+    window.move_to(window.screen_of((39, 5)));
+    assert!(window.view.gradient().is_some(), "previewed");
+    assert_eq!(window.colour(20, 5), [255; 4], "nothing laid yet");
+    let outcome = window.release(PointerButton::Primary);
+    window.run_worker(outcome);
+    assert_eq!(window.colour(0, 5), [0, 0, 0, 255]);
+    assert_eq!(window.colour(39, 5), [255; 4]);
+    let [mid, ..] = window.colour(20, 5);
+    assert!(mid > 100 && mid < 160, "half way: {mid}");
+    let outcome = click(&mut window, (5, 5));
+    assert!(outcome.request.is_none(), "a click lays nothing");
+}
+
+#[test]
+fn the_clone_tool_copies_from_where_alt_clicked_at_a_fixed_distance() {
+    let mut window = Window::white(40, 20);
+    window.act(Action::Tool(Tool::Pencil));
+    window.drag((5, 5), (5, 5));
+    window.act(Action::Tool(Tool::Clone));
+    window.view.options.clone.size = 3;
+    window.view.options.clone.hardness = 100;
+    click(&mut window, (25, 5));
+    assert!(window
+        .view
+        .message()
+        .is_some_and(|said| said.contains("Alt-click")));
+    assert_eq!(window.colour(25, 5), [255; 4], "nothing to copy from yet");
+    hold(
+        &mut window,
+        Modifiers {
+            alt: true,
+            ..Modifiers::default()
+        },
+    );
+    click(&mut window, (5, 5));
+    hold(&mut window, plain());
+    click(&mut window, (25, 5));
+    assert_eq!(
+        window.colour(25, 5),
+        [0, 0, 0, 255],
+        "copied from twenty to the left"
+    );
+    click(&mut window, (26, 5));
+    assert_eq!(
+        window.colour(26, 5),
+        [255; 4],
+        "the same distance holds: white lies there"
+    );
+}
+
+#[test]
+fn text_is_typed_where_clicked_and_set_down_as_one_step() {
+    let mut window = Window::white(200, 80);
+    window.act(Action::Tool(Tool::Text));
+    window.view.options.text_size = 20;
+    click(&mut window, (10, 10));
+    for ch in "Hi".chars() {
+        window.key(Key::Char(ch), plain());
+    }
+    let entry = window.view.text().expect("being typed");
+    assert_eq!(entry.text(), "Hi");
+    let bounds = entry.bounds();
+    assert!(!bounds.is_empty());
+    assert_eq!(
+        window.view.document().history_depth(),
+        0,
+        "nothing set down yet"
+    );
+    window.act(Action::Tool(Tool::Brush));
+    assert!(window.view.text().is_none());
+    assert_eq!(
+        window.view.document().history_depth(),
+        1,
+        "set down as one step"
+    );
+    let inked = (bounds.y0..bounds.y1).any(|y| {
+        (bounds.x0..bounds.x1).any(|x| {
+            window.colour(u32::try_from(x).expect("on"), u32::try_from(y).expect("on")) != [255; 4]
+        })
+    });
+    assert!(inked, "its glyphs are on the picture");
+    window.act(Action::Tool(Tool::Text));
+    click(&mut window, (50, 40));
+    window.key(Key::Char('x'), plain());
+    window.key(Key::Named(NamedKey::Escape), plain());
+    assert!(window.view.text().is_none(), "Escape turns it down");
+    assert_eq!(window.view.document().history_depth(), 1);
+}
+
+#[test]
+fn a_polygon_is_drawn_a_corner_at_a_time() {
+    let mut window = Window::white(40, 40);
+    window.act(Action::Tool(Tool::Polygon));
+    window.view.options.style = crate::tool::Style::Filled;
+    for corner in [(5, 5), (30, 5), (30, 30), (5, 30)] {
+        click(&mut window, corner);
+    }
+    assert_eq!(window.colour(15, 15), [255; 4], "nothing until it closes");
+    window.key(Key::Named(NamedKey::Enter), plain());
+    assert_eq!(window.colour(15, 15), [0, 0, 0, 255]);
+    assert_eq!(window.colour(35, 35), [255; 4]);
+    assert_eq!(window.view.document().history_depth(), 1);
+}
+
+#[test]
+fn a_rectangle_with_round_corners_leaves_its_corners_out() {
+    let mut window = Window::white(40, 40);
+    window.act(Action::Tool(Tool::Rectangle));
+    window.view.options.style = crate::tool::Style::Filled;
+    window.view.options.corners = 8;
+    window.drag((5, 5), (30, 30));
+    assert_eq!(window.colour(5, 5), [255; 4], "the corner is rounded off");
+    assert_eq!(
+        window.colour(17, 5),
+        [0, 0, 0, 255],
+        "the edge between is drawn"
+    );
+    assert_eq!(window.colour(17, 17), [0, 0, 0, 255]);
+}
+
+fn filter_index(label: &str) -> usize {
+    crate::filter::Filter::ALL
+        .iter()
+        .position(|filter| filter.label() == label)
+        .expect("a filter")
+}
+
+#[test]
+fn a_filter_is_previewed_as_it_is_set_and_applied_as_one_step() {
+    let mut window = Window::white(30, 30);
+    window.act(Action::Tool(Tool::Pencil));
+    window.drag((15, 0), (15, 29));
+    let before = window.colour(14, 10);
+    let outcome = window.act(Action::Adjust(filter_index("Blur")));
+    assert!(window.view.asking(), "its settings are open");
+    window.run_worker(outcome);
+    assert!(window.view.preview_canvas().is_some(), "previewed");
+    assert_eq!(
+        window.colour(14, 10),
+        before,
+        "the picture itself untouched"
+    );
+    assert_eq!(window.view.document().history_depth(), 1);
+    let moved = window.key(Key::Named(NamedKey::Right), plain());
+    assert!(
+        matches!(moved.request, Some(Request::Own(Own::Compute { .. }))),
+        "a moved setting asks for its preview"
+    );
+    let still = window.key(Key::Named(NamedKey::Right), plain());
+    assert!(still.request.is_none(), "one at a time");
+    let again = window.run_worker(moved);
+    assert!(
+        matches!(again.request, Some(Request::Own(Own::Compute { .. }))),
+        "the settings moved meanwhile are asked once it lands"
+    );
+    window.run_worker(again);
+    let applied = window.key(Key::Named(NamedKey::Enter), plain());
+    assert!(applied.request.is_none(), "the preview's own tiles land");
+    assert!(!window.view.asking());
+    assert!(window.view.preview_canvas().is_none());
+    assert_eq!(window.view.document().history_depth(), 2, "as one step");
+    assert_ne!(
+        window.colour(14, 10),
+        before,
+        "the line blurred onto its neighbour"
+    );
+}
+
+#[test]
+fn a_filter_turned_down_leaves_the_picture_as_it_was() {
+    let mut window = Window::white(20, 20);
+    let outcome = window.act(Action::Adjust(filter_index("Brightness and contrast")));
+    window.run_worker(outcome);
+    window.key(Key::Named(NamedKey::Escape), plain());
+    assert!(!window.view.asking());
+    assert!(window.view.preview_canvas().is_none());
+    assert_eq!(window.view.document().history_depth(), 0);
+}
+
+#[test]
+fn a_palette_picture_is_adjusted_through_its_palette_and_refuses_a_filter() {
+    let mut window = four_colours();
+    let palette = window.palette();
+    window.act(Action::Adjust(filter_index("Desaturate")));
+    let grey = window.palette();
+    assert_ne!(grey, palette);
+    assert!(
+        grey.iter().all(|&[r, g, b, _]| r == g && g == b),
+        "each entry its grey"
+    );
+    assert_eq!(window.view.document().history_depth(), 1);
+    window.act(Action::Adjust(filter_index("Blur")));
+    assert!(!window.view.asking(), "no settings open");
+    assert!(window
+        .view
+        .message()
+        .is_some_and(|said| said.contains("colour picture")));
+    let outcome = window.act(Action::Adjust(filter_index("Brightness and contrast")));
+    assert!(outcome.request.is_none(), "a palette is previewed at once");
+    window.key(Key::Named(NamedKey::Right), plain());
+    assert!(window.view.preview_kind().is_some());
+    assert_eq!(
+        window.palette(),
+        grey,
+        "the palette itself untouched until applied"
+    );
+    window.key(Key::Named(NamedKey::Enter), plain());
+    assert_ne!(window.palette(), grey, "applied");
+}
+
+/// A window on a 10×10 picture of a layer of each colour and opacity, the
+/// bottom first, painting on layer `active`.
+fn layered(layers: &[([u8; 4], u8)], active: usize) -> Window {
+    let layers = layers
+        .iter()
+        .map(|&(colour, opacity)| {
+            let canvas = Canvas::new(10, 10, Kind::Rgba, Sample::Rgba(colour)).expect("fits");
+            let mut layer = crate::document::Layer::new(canvas, String::from("layer"));
+            layer.opacity = opacity;
+            layer
+        })
+        .collect();
+    Window::new(Document::new(
+        Picture::layered(layers, active).expect("alike"),
+    ))
+}
+
+fn ctrl_shift() -> Modifiers {
+    Modifiers {
+        ctrl: true,
+        shift: true,
+        ..Modifiers::default()
+    }
+}
+
+fn layers_of(window: &Window) -> &[crate::document::Layer] {
+    window
+        .view
+        .document()
+        .picture()
+        .expect("a picture")
+        .layers()
+}
+
+fn painted_on(window: &Window) -> usize {
+    window
+        .view
+        .document()
+        .picture()
+        .expect("a picture")
+        .active()
+}
+
+fn near(a: [u8; 4], b: [u8; 4]) -> bool {
+    a.iter().zip(&b).all(|(&p, &q)| p.abs_diff(q) <= 1)
+}
+
+#[test]
+fn a_new_layer_is_painted_on_and_the_one_beneath_kept_as_it_was() {
+    let mut window = Window::white(10, 10);
+    window.key(Key::Char('N'), ctrl_shift());
+    assert_eq!((layers_of(&window).len(), painted_on(&window)), (2, 1));
+    assert_eq!(layers_of(&window)[1].name, "Layer 2");
+    window.act(Action::Tool(Tool::Pencil));
+    window.drag((2, 2), (2, 2));
+    assert_ne!(window.colour(2, 2), [0; 4], "drawn on the new layer");
+    assert_eq!(layers_of(&window)[0].canvas.colour_at(2, 2), Some([255; 4]));
+    window.key(Key::Char('z'), ctrl());
+    window.key(Key::Char('z'), ctrl());
+    assert_eq!(
+        layers_of(&window).len(),
+        1,
+        "the layer undone with what was drawn on it"
+    );
+}
+
+#[test]
+fn the_keyboard_steps_through_the_layers_and_moves_them() {
+    let mut window = layered(&[([1; 4], 255), ([2; 4], 255), ([3; 4], 255)], 0);
+    window.key(Key::Named(NamedKey::PageUp), ctrl());
+    assert_eq!(painted_on(&window), 1);
+    window.key(Key::Named(NamedKey::PageUp), ctrl_shift());
+    assert_eq!(painted_on(&window), 2, "raised, and still painted on");
+    assert_eq!(layers_of(&window)[2].canvas.colour_at(0, 0), Some([2; 4]));
+    window.key(Key::Named(NamedKey::PageDown), ctrl());
+    assert_eq!(painted_on(&window), 1);
+    let mut said = String::new();
+    crate::render::write_shape(
+        &mut said,
+        window.view.document().picture().expect("a picture"),
+    );
+    assert!(said.ends_with("layer 2 of 3: layer"), "{said}");
+    window.act(Action::DeleteLayer);
+    window.act(Action::DeleteLayer);
+    window.act(Action::DeleteLayer);
+    assert_eq!(layers_of(&window).len(), 1, "the last is kept");
+    assert_eq!(
+        window.view.message(),
+        Some("A picture keeps at least one layer")
+    );
+}
+
+#[test]
+fn layers_merge_and_flatten_on_a_worker_keeping_the_look() {
+    let mut window = layered(&[([0, 0, 255, 255], 255), ([255, 0, 0, 255], 128)], 1);
+    let asked = window.key(Key::Char('e'), ctrl());
+    window.run_worker(asked);
+    assert_eq!(layers_of(&window).len(), 1);
+    assert!(
+        near(window.colour(4, 4), [128, 0, 127, 255]),
+        "{:?}",
+        window.colour(4, 4)
+    );
+    assert_eq!(layers_of(&window)[0].opacity, 255);
+    window.key(Key::Char('z'), ctrl());
+    assert_eq!(layers_of(&window).len(), 2, "the merge undone whole");
+    window.act(Action::NewLayer);
+    let asked = window.key(Key::Char('E'), ctrl_shift());
+    window.run_worker(asked);
+    assert_eq!(layers_of(&window).len(), 1, "flattened");
+}
+
+#[test]
+fn a_palette_picture_holds_one_layer() {
+    let kind = Kind::Indexed {
+        depth: IndexDepth::One,
+        palette: vec![[0, 0, 0, 255], [255; 4]],
+        masked: false,
+    };
+    let canvas = Canvas::new(8, 8, kind, Sample::Index(0, 255)).expect("fits");
+    let mut window = Window::new(Document::new(Picture::plain(canvas)));
+    window.act(Action::NewLayer);
+    assert_eq!(layers_of(&window).len(), 1);
+    assert!(window
+        .view
+        .message()
+        .is_some_and(|said| said.starts_with("A palette picture holds one layer")));
+}
+
+#[test]
+fn a_picture_of_layers_is_not_made_a_palette_picture() {
+    use crate::transform::{Depth, PaletteChoice, Transform};
+    let mut window = layered(&[([255; 4], 255), ([0; 4], 255)], 1);
+    let outcome = window.view.transform(
+        Transform::Convert {
+            depth: Depth::Indexed(IndexDepth::Four),
+            palette: PaletteChoice::Desktop,
+            dither: false,
+        },
+        "change its colours",
+        &window.layout,
+        &mut Region::new(),
+    );
+    assert!(outcome.request.is_none(), "no worker asked");
+    assert_eq!(
+        window.view.message(),
+        Some("A palette picture holds one layer: flatten the picture first")
+    );
+}
+
+#[test]
+fn a_turn_turns_every_layer_and_a_new_canvas_is_filled_beneath_them_alone() {
+    use crate::transform::{Anchor, Transform};
+    let mut window = layered(&[([255; 4], 255), ([0; 4], 255)], 1);
+    window.act(Action::Tool(Tool::Pencil));
+    window.drag((0, 0), (0, 0));
+    let asked = window.act(Action::RotateRight);
+    window.run_worker(asked);
+    assert_ne!(
+        window.colour(9, 0),
+        [0; 4],
+        "the top layer's dot turned with it"
+    );
+    assert_eq!(layers_of(&window)[0].canvas.colour_at(9, 0), Some([255; 4]));
+    let asked = window.view.transform(
+        Transform::Resize {
+            width: 12,
+            height: 10,
+            anchor: Anchor::TopLeft,
+            fill: Sample::Rgba([9, 9, 9, 255]),
+        },
+        "resize the canvas",
+        &window.layout,
+        &mut Region::new(),
+    );
+    window.run_worker(asked);
+    assert_eq!(
+        layers_of(&window)[0].canvas.colour_at(11, 5),
+        Some([9, 9, 9, 255])
+    );
+    assert_eq!(
+        layers_of(&window)[1].canvas.colour_at(11, 5),
+        Some([0; 4]),
+        "left clear"
+    );
+}
+
+#[test]
+fn an_adjustment_runs_on_the_layer_painted_on_alone() {
+    let mut window = layered(&[([10, 20, 30, 255], 255), ([0; 4], 255)], 0);
+    let asked = window.act(Action::Invert);
+    window.run_worker(asked);
+    assert_eq!(window.colour(3, 3), [245, 235, 225, 255]);
+    assert_eq!(layers_of(&window)[1].canvas.colour_at(3, 3), Some([0; 4]));
+}
+
+#[test]
+fn the_eyedropper_takes_what_the_layers_show_together() {
+    let mut window = layered(&[([0, 0, 255, 255], 255), ([255, 0, 0, 255], 128)], 1);
+    window.act(Action::Tool(Tool::Eyedropper));
+    window.drag((4, 4), (4, 4));
+    let (primary, _) = window.view.inks();
+    let Ink::Colour(taken) = primary else {
+        panic!("a colour, not {primary:?}");
+    };
+    assert!(near(taken, [128, 0, 127, 255]), "{taken:?}");
+}
+
+#[test]
+fn a_layer_is_renamed_and_faded_through_its_form_and_undone_whole() {
+    let mut window = layered(&[([255; 4], 255), ([0; 4], 255)], 1);
+    window.act(Action::LayerProperties);
+    assert!(window.view.asking());
+    for _ in 0.."layer".len() {
+        window.key(Key::Named(NamedKey::Backspace), plain());
+    }
+    for ch in "Sky".chars() {
+        window.key(Key::Char(ch), plain());
+    }
+    window.key(Key::Named(NamedKey::Enter), plain());
+    assert!(!window.view.asking());
+    assert_eq!(layers_of(&window)[1].name, "Sky");
+    window.key(Key::Char('z'), ctrl());
+    assert_eq!(layers_of(&window)[1].name, "layer");
 }

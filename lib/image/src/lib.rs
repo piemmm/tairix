@@ -118,19 +118,22 @@
 //!
 //! # Pictures as their files store them
 //!
-//! An editor needs more than what a picture looks like: a paletted PNG's
-//! indices and palette, a sprite area's every sprite with its name, mode,
-//! palette and mask. [`open_native`] answers that [`Picture`] form — for a
-//! sprite area through [`SpriteAreaReader`], which keeps a sprite it cannot
-//! read as its exact bytes — and every other format as the RGBA picture
-//! [`decode_as`] answers.
+//! An editor needs more than what a picture looks like: a palette picture's
+//! indices and palette, a TIFF's every page, a sprite area's every sprite
+//! with its name, mode, palette and mask. [`open_native`] answers that
+//! [`Picture`] form — a TIFF through [`TiffPages`] and a sprite area through
+//! [`SpriteAreaReader`], which keeps a sprite it cannot read as its exact
+//! bytes — with the pixel [`Density`] the file states, what it held that the
+//! picture does not ([`Unkept`]), and how it was [`Written`].
 //!
 //! # Writing
 //!
-//! [`encode_png`], [`encode_jpeg`] and [`encode_sprite_area`] write the
-//! three formats an editor saves, each reading its picture a row at a time
-//! through [`PictureSource`] and refusing, with an [`EncodeError`], a
-//! picture its format cannot state rather than writing something else.
+//! [`encode_png`], [`encode_jpeg`], [`encode_gif`], [`encode_bmp`],
+//! [`encode_tiff`] and [`encode_sprite_area`] write the formats an editor
+//! saves, each reading its picture a row at a time through [`PictureSource`],
+//! stating its density where the format can, and refusing, with an
+//! [`EncodeError`], a picture its format cannot state rather than writing
+//! something else.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -141,16 +144,22 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 mod bmp;
+mod bmp_encode;
 mod ccitt;
 mod channel;
+mod density;
 mod encode;
+#[cfg(test)]
+mod encode_fixture;
 mod frames;
 mod gif;
+mod gif_encode;
 mod huffman;
 mod ico;
 mod jpeg;
 mod jpeg_encode;
 mod lzw;
+mod ora;
 mod orientation;
 mod pages;
 mod picture;
@@ -161,11 +170,18 @@ mod png_fixture;
 mod sprite;
 mod sprite_encode;
 mod tiff;
+mod tiff_encode;
 mod vp8;
 mod vp8l;
 mod webp;
+mod zip;
 
-pub use encode::{encode_jpeg, encode_png, encode_sprite_area, EncodeError, JpegOptions};
+pub use density::{Density, DensityUnit};
+pub use encode::{
+    encode_bmp, encode_gif, encode_jpeg, encode_png, encode_sprite_area, encode_tiff, EncodeError,
+    GifOptions, JpegOptions, TiffCompression, TiffOptions,
+};
+pub use ora::{encode_ora, OraDocument, OraLayer, OraLayerSource, MOST_LAYERS as MOST_ORA_LAYERS};
 pub use picture::{
     flatten_row, masked_colour, over, IndexDepth, Picture, PictureError, PictureKind,
     PictureSource, Pixels, Rgba8,
@@ -701,6 +717,21 @@ pub enum DecodeError {
     /// A lossless stream declared a zero-sided picture, or one a transform
     /// cannot cover.
     WebpLosslessInvalidGeometry,
+    /// The OpenRaster file is not a ZIP archive this reader can follow: its
+    /// directory is damaged, or an entry fails its CRC-32.
+    OraBadArchive,
+    /// The OpenRaster archive is encrypted, spans disks, is ZIP64, or holds
+    /// an entry in a compression other than stored or deflated.
+    OraUnsupportedArchive,
+    /// The archive does not name itself OpenRaster.
+    OraBadMimetype,
+    /// The archive carries no `stack.xml`, or it is not one this reader can
+    /// follow.
+    OraBadStack,
+    /// A layer names an image the archive does not hold.
+    OraMissingLayer,
+    /// The stack holds more layers than are read.
+    OraTooManyLayers,
 }
 
 impl DecodeError {
@@ -934,6 +965,14 @@ impl DecodeError {
                 "WEBP lossless reference reaches outside the picture"
             }
             Self::WebpLosslessInvalidGeometry => "WEBP lossless stream declares an invalid size",
+            Self::OraBadArchive => "OpenRaster archive is damaged",
+            Self::OraUnsupportedArchive => {
+                "OpenRaster archive is encrypted, spanned, ZIP64 or compressed in an unknown way"
+            }
+            Self::OraBadMimetype => "archive does not name itself OpenRaster",
+            Self::OraBadStack => "OpenRaster layer stack is missing or malformed",
+            Self::OraMissingLayer => "OpenRaster layer names an image the archive does not hold",
+            Self::OraTooManyLayers => "OpenRaster stack holds more layers than are read",
         }
     }
 }
@@ -1151,6 +1190,9 @@ pub enum ImageFormat {
     /// A WEBP file: a RIFF form over the `VP8 ` lossy and `VP8L` lossless
     /// bitstreams, the container's own alpha plane, and its animation.
     Webp,
+    /// An OpenRaster document: a ZIP of layers, each a PNG, stacked as its
+    /// `stack.xml` lists them.
+    OpenRaster,
 }
 
 /// The 8-byte PNG file signature (W3C PNG §"PNG file signature").
@@ -1205,6 +1247,9 @@ pub fn sniff(bytes: &[u8]) -> Option<ImageFormat> {
     // answers this rather than `lib.rs` matching one constant.
     if webp::has_signature(bytes) {
         return Some(ImageFormat::Webp);
+    }
+    if ora::has_signature(bytes) {
+        return Some(ImageFormat::OpenRaster);
     }
     None
 }
@@ -1284,6 +1329,7 @@ pub fn probe_as(format: ImageFormat, bytes: &[u8]) -> Result<ImageInfo, DecodeEr
         ImageFormat::Sprite => sprite::probe(bytes)?,
         ImageFormat::Tiff => tiff::probe(bytes)?,
         ImageFormat::Webp => webp::probe(bytes)?,
+        ImageFormat::OpenRaster => ora::probe(bytes)?,
     };
     Ok(ImageInfo {
         format,
@@ -1369,6 +1415,7 @@ pub fn decode_as(
         ImageFormat::Sprite => sprite::decode(bytes, limits),
         ImageFormat::Tiff => tiff::decode(bytes, limits),
         ImageFormat::Webp => webp::decode(bytes, limits),
+        ImageFormat::OpenRaster => ora::decode(bytes, limits),
     }
 }
 
@@ -1441,16 +1488,42 @@ pub fn decode_fitted(
 /// What a file held that the picture opened from it does not, so writing
 /// the picture back as that format would not reproduce the file.
 ///
-/// Reported for the formats this crate writes, PNG and JPEG, so a writer
-/// can tell whether a write-back keeps everything; every other format opens
-/// through [`decode_as`], which reports neither.
+/// Reported for every format this crate writes, so a writer can tell whether
+/// a write-back keeps everything; every other format opens through
+/// [`decode_as`], which reports nothing.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct Unkept {
-    /// Its samples were narrowed from sixteen bits to eight.
+    /// Its samples were narrowed to eight bits.
     pub precision: bool,
-    /// It held data beside the picture: a colour profile, a pixel density,
-    /// text, metadata, an animation's further frames.
+    /// It held data beside the picture: a colour profile, text, metadata, an
+    /// animation's further frames, a thumbnail.
     pub extras: bool,
+    /// Its colours were stated in a form the writer here restates rather than
+    /// keeps: CMYK inks, `YCbCr`, signed or floating-point samples,
+    /// premultiplied alpha, a bare mask.
+    pub converted: bool,
+}
+
+impl Unkept {
+    /// Whether the file held anything at all the picture does not.
+    #[must_use]
+    pub const fn any(&self) -> bool {
+        self.precision || self.extras || self.converted
+    }
+}
+
+/// How a file was written, where its format offers a choice the writer here
+/// makes too, so that writing it back repeats it.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum Written {
+    /// Nothing to repeat.
+    #[default]
+    Plain,
+    /// A GIF, interlaced or not.
+    Gif(GifOptions),
+    /// A TIFF, under its first page's compression where that is one written
+    /// here.
+    Tiff(TiffOptions),
 }
 
 /// A document opened in the representation its file stores: what an
@@ -1464,16 +1537,35 @@ pub enum NativeDocument<B> {
         picture: Picture,
         /// What the file held that the picture does not.
         unkept: Unkept,
+        /// How it was written.
+        written: Written,
+    },
+    /// A TIFF's pages, read one page at a time.
+    Pages {
+        /// The pages.
+        pages: TiffPages<B>,
+        /// What the file held that its pages do not.
+        unkept: Unkept,
+        /// How it was written.
+        written: Written,
     },
     /// A RISC OS sprite area, read one sprite at a time.
     Sprites(SpriteAreaReader<B>),
+    /// An OpenRaster document's layers.
+    Layers {
+        /// The canvas and its layers, the bottom first.
+        document: OraDocument,
+        /// What the file held that its layers do not.
+        unkept: Unkept,
+    },
 }
 
 /// Open `bytes` as `format` in the representation its file stores.
 ///
-/// A PNG with a palette opens as its indices and palette and a sprite area
-/// as its sprites; every other format opens as the picture [`decode_as`]
-/// answers, in RGBA.
+/// A palette picture — PNG, GIF, BMP, a TIFF page — opens as its indices and
+/// palette, a TIFF as its pages, and a sprite area as its sprites; every
+/// other picture opens as RGBA, with its pixel density where the file
+/// states one.
 ///
 /// # Errors
 ///
@@ -1483,34 +1575,99 @@ pub fn open_native<B: AsRef<[u8]>>(
     bytes: B,
     limits: &DecodeLimits,
 ) -> Result<NativeDocument<B>, DecodeError> {
-    let rgba = |image: RasterImage| {
-        let (width, height) = (image.width(), image.height());
-        Picture::rgba(width, height, image.into_pixels())
-            .map_err(|_| DecodeError::DimensionsOverflow)
-    };
-    let (picture, unkept) = match format {
+    let (picture, unkept, written) = match format {
         ImageFormat::Sprite => {
             return SpriteAreaReader::open(bytes, limits).map(NativeDocument::Sprites);
         }
-        ImageFormat::Png => png::decode_native(bytes.as_ref(), limits)?,
+        ImageFormat::OpenRaster => {
+            let (document, unkept) = ora::decode_native(bytes.as_ref(), limits)?;
+            return Ok(NativeDocument::Layers { document, unkept });
+        }
+        ImageFormat::Tiff => {
+            let (pages, unkept, written) = TiffPages::open(bytes, limits)?;
+            return Ok(NativeDocument::Pages {
+                pages,
+                unkept,
+                written,
+            });
+        }
+        ImageFormat::Png => {
+            let (picture, unkept) = png::decode_native(bytes.as_ref(), limits)?;
+            (picture, unkept, Written::Plain)
+        }
         ImageFormat::Jpeg => {
-            let (image, extras) = jpeg::decode_native(bytes.as_ref(), limits)?;
-            let unkept = Unkept {
-                precision: false,
-                extras,
-            };
-            (rgba(image)?, unkept)
+            let (image, unkept, density) = jpeg::decode_native(bytes.as_ref(), limits)?;
+            (
+                rgba_picture(image)?.with_density(density),
+                unkept,
+                Written::Plain,
+            )
+        }
+        ImageFormat::Gif => {
+            let (picture, unkept, options) = gif::decode_native(bytes.as_ref(), limits)?;
+            (picture, unkept, Written::Gif(options))
+        }
+        ImageFormat::Bmp => {
+            let (picture, unkept) = bmp::decode_native(bytes.as_ref(), limits)?;
+            (picture, unkept, Written::Plain)
         }
         other => (
-            rgba(decode_as(other, bytes.as_ref(), limits)?)?,
+            rgba_picture(decode_as(other, bytes.as_ref(), limits)?)?,
             Unkept::default(),
+            Written::Plain,
         ),
     };
     Ok(NativeDocument::Picture {
         format,
         picture,
         unkept,
+        written,
     })
+}
+
+/// A decoded image as the RGBA picture it is.
+pub(crate) fn rgba_picture(image: RasterImage) -> Result<Picture, DecodeError> {
+    let (width, height) = (image.width(), image.height());
+    Picture::rgba(width, height, image.into_pixels()).map_err(|_| DecodeError::DimensionsOverflow)
+}
+
+/// A TIFF's pages, each opened as the picture it stores.
+pub struct TiffPages<B> {
+    bytes: B,
+    pages: tiff::NativePages,
+    limits: DecodeLimits,
+}
+
+impl<B: AsRef<[u8]>> TiffPages<B> {
+    /// Validate every page's directory and learn what the file holds beyond
+    /// its pages, decoding no pixels.
+    fn open(bytes: B, limits: &DecodeLimits) -> Result<(Self, Unkept, Written), DecodeError> {
+        let (pages, unkept, written) = tiff::NativePages::open(bytes.as_ref())?;
+        Ok((
+            Self {
+                bytes,
+                pages,
+                limits: *limits,
+            },
+            unkept,
+            Written::Tiff(written),
+        ))
+    }
+
+    /// How many pages the file holds: at least one.
+    #[must_use]
+    pub fn count(&self) -> u32 {
+        self.pages.count()
+    }
+
+    /// Decode page `index`, or `None` past the last.
+    ///
+    /// # Errors
+    ///
+    /// See [`DecodeError`].
+    pub fn page(&mut self, index: u32) -> Result<Option<Picture>, DecodeError> {
+        self.pages.page(self.bytes.as_ref(), index, &self.limits)
+    }
 }
 
 /// What a container's entries are, which is what decides whether they are
@@ -1754,6 +1911,11 @@ impl<B: AsRef<[u8]>> Sequence<B> {
             ImageFormat::Bmp => {
                 let geometry = bmp::probe(read)?;
                 Self::still(ImageFormat::Bmp, geometry, bytes, limits)
+            }
+            // Its layers composed: what a viewer shows of it.
+            ImageFormat::OpenRaster => {
+                let geometry = ora::probe(read)?;
+                Self::still(ImageFormat::OpenRaster, geometry, bytes, limits)
             }
             // The one format that is either kind, and says which.
             ImageFormat::Webp => match webp::open(read, limits)? {

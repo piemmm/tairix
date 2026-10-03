@@ -54,9 +54,10 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::density::{Density, DensityUnit, Stated};
 use crate::huffman::{Canonical, MAX_CODE_BITS};
 use crate::orientation::{self, Orientation};
-use crate::{DecodeError, DecodeLimits, FitBox, RasterImage, RGBA_BYTES};
+use crate::{DecodeError, DecodeLimits, FitBox, RasterImage, Unkept, RGBA_BYTES};
 
 // ---------------------------------------------------------------------
 // Marker codes (ITU-T T.81 Table B.1)
@@ -93,17 +94,57 @@ const APP14: u8 = 0xEE;
 const APP15: u8 = 0xEF;
 const COM: u8 = 0xFE;
 
-/// The `APP0` payload the encoder opens with: JFIF 1.01, a density of one by
-/// one with no unit, so square pixels, and no thumbnail.
-pub(crate) const JFIF_PAYLOAD: [u8; 14] = *b"JFIF\0\x01\x01\x00\x00\x01\x00\x01\x00\x00";
+/// A JFIF `APP0` payload with no thumbnail: the identifier, the version, the
+/// density unit, the two figures and the thumbnail's zero size.
+pub(crate) const JFIF_LEN: usize = 14;
+const JFIF_ID: [u8; 5] = *b"JFIF\0";
 
-/// Whether an `APP0` payload says no more than the encoder's own: a JFIF
-/// header of any version, square pixels and no thumbnail.
-fn plain_jfif(payload: &[u8]) -> bool {
-    fn all_but_version(bytes: &[u8]) -> (Option<&[u8]>, Option<&[u8]>) {
-        (bytes.get(..5), bytes.get(7..))
+/// JFIF's density units, by their code.
+const JFIF_UNITS: [DensityUnit; 3] = [
+    DensityUnit::Aspect,
+    DensityUnit::Inch,
+    DensityUnit::Centimetre,
+];
+
+/// The `APP0` payload stating `density` in JFIF 1.01's terms: per inch, or
+/// per centimetre where that is exact, or a bare shape. Square pixels and a
+/// figure past sixteen bits are stated as one by one with no unit.
+pub(crate) fn jfif_payload(density: Option<Density>) -> [u8; JFIF_LEN] {
+    let stated = density.and_then(|density| {
+        let (unit, figures) = match density.unit() {
+            DensityUnit::Aspect => (0, density.shape()?),
+            _ => match density.exact_in(DensityUnit::Centimetre) {
+                Some(exact) if exact.across().1 == 1 && exact.down().1 == 1 => {
+                    (2, (exact.across().0, exact.down().0))
+                }
+                _ => (1, density.whole_in(DensityUnit::Inch)?),
+            },
+        };
+        Some((
+            unit,
+            u16::try_from(figures.0).ok()?,
+            u16::try_from(figures.1).ok()?,
+        ))
+    });
+    let (unit, across, down) = stated.unwrap_or((0, 1, 1));
+    let mut payload = [0; JFIF_LEN];
+    payload[..5].copy_from_slice(&JFIF_ID);
+    payload[5..7].copy_from_slice(&[1, 1]);
+    payload[7] = unit;
+    payload[8..10].copy_from_slice(&across.to_be_bytes());
+    payload[10..12].copy_from_slice(&down.to_be_bytes());
+    payload
+}
+
+/// What a JFIF `APP0` payload states; one holding a thumbnail holds more
+/// than the picture.
+fn read_jfif(payload: &[u8]) -> Stated {
+    if payload.len() != JFIF_LEN || payload[..5] != JFIF_ID || payload[12..] != [0, 0] {
+        return Stated::Unkept;
     }
-    all_but_version(payload) == all_but_version(&JFIF_PAYLOAD)
+    let figure = |at: usize| u32::from(u16::from_be_bytes([payload[at], payload[at + 1]]));
+    let unit = JFIF_UNITS.get(usize::from(payload[7])).copied();
+    Stated::of((figure(8), 1), (figure(10), 1), unit)
 }
 
 /// Whether `marker` is a `RSTn` restart marker, and if so its cyclic
@@ -1040,13 +1081,20 @@ pub(crate) fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage,
     decode_inner(bytes, limits, None).map(|(image, _)| image)
 }
 
-/// Decode `bytes` at natural size, saying whether the file held more than
-/// the picture in its application and comment segments.
+/// What a decode found beside the picture.
+struct Held {
+    unkept: Unkept,
+    density: Option<Density>,
+}
+
+/// Decode `bytes` at natural size, saying what the file held that the
+/// picture does not and the density its JFIF header states.
 pub(crate) fn decode_native(
     bytes: &[u8],
     limits: &DecodeLimits,
-) -> Result<(RasterImage, bool), DecodeError> {
-    decode_inner(bytes, limits, None)
+) -> Result<(RasterImage, Unkept, Option<Density>), DecodeError> {
+    let (image, held) = decode_inner(bytes, limits, None)?;
+    Ok((image, held.unkept, held.density))
 }
 
 /// Decode `bytes` at the smallest DCT scale that still covers `fit`, or at
@@ -1070,8 +1118,11 @@ struct Decoder<'a> {
     restart_interval: u32,
     adobe_transform: Option<u8>,
     /// Whether an application or comment segment held what the picture does
-    /// not: metadata, a colour profile, a pixel density, text.
+    /// not: metadata, a colour profile, text.
     extras: bool,
+    /// The density the first JFIF header stated.
+    density: Option<Density>,
+    jfif_seen: bool,
     /// The orientation the first EXIF `APP1` block states, if one does.
     /// Read before the frame header a well-formed file puts after it, so
     /// the decode scale and the output buffer are both sized to the
@@ -1112,7 +1163,7 @@ fn decode_inner(
     bytes: &[u8],
     limits: &DecodeLimits,
     fit: Option<FitBox>,
-) -> Result<(RasterImage, bool), DecodeError> {
+) -> Result<(RasterImage, Held), DecodeError> {
     if !bytes.starts_with(&crate::JPEG_SIGNATURE[..2]) {
         return Err(DecodeError::JpegBadSignature);
     }
@@ -1125,6 +1176,8 @@ fn decode_inner(
         restart_interval: 0,
         adobe_transform: None,
         extras: false,
+        density: None,
+        jfif_seen: false,
         orientation: None,
         frame: None,
         scale: Scale::Full,
@@ -1133,7 +1186,22 @@ fn decode_inner(
         eobrun: 0,
     };
     let image = decoder.run(bytes)?;
-    Ok((image, decoder.extras))
+    // Four components are inks, which the writer restates as colour.
+    let converted = decoder
+        .frame
+        .as_ref()
+        .is_some_and(|frame| frame.components.len() == 4);
+    Ok((
+        image,
+        Held {
+            unkept: Unkept {
+                precision: false,
+                extras: decoder.extras,
+                converted,
+            },
+            density: decoder.density,
+        },
+    ))
 }
 
 impl Decoder<'_> {
@@ -1201,20 +1269,6 @@ impl Decoder<'_> {
                     return Err(DecodeError::JpegArithmeticCodingUnsupported);
                 }
                 DNL => return Err(DecodeError::JpegDnlUnsupported),
-                APP1 => {
-                    let (payload, after) = read_segment(bytes, pos)?;
-                    pos = after;
-                    // The orientation is applied, but the block holds more.
-                    self.extras = true;
-                    if self.orientation.is_none() {
-                        self.orientation = orientation::from_exif(payload);
-                    }
-                }
-                APP14 => {
-                    let (payload, after) = read_segment(bytes, pos)?;
-                    pos = after;
-                    self.adobe_transform = parse_adobe_transform(payload);
-                }
                 SOS => {
                     let progressive = self
                         .frame
@@ -1228,10 +1282,34 @@ impl Decoder<'_> {
                 marker if (APP0..=APP15).contains(&marker) || marker == COM => {
                     let (payload, after) = read_segment(bytes, pos)?;
                     pos = after;
-                    self.extras |= marker != APP0 || !plain_jfif(payload);
+                    self.segment(marker, payload);
                 }
                 _ => return Err(DecodeError::JpegUnknownMarker),
             }
+        }
+    }
+
+    /// Take what an application or comment segment says: the first JFIF
+    /// header's density, EXIF's orientation, Adobe's colour transform, and
+    /// whether it holds more than the picture.
+    fn segment(&mut self, marker: u8, payload: &[u8]) {
+        match marker {
+            APP0 if !self.jfif_seen => {
+                self.jfif_seen = true;
+                match read_jfif(payload) {
+                    Stated::Kept(density) => self.density = density,
+                    Stated::Unkept => self.extras = true,
+                }
+            }
+            APP1 => {
+                // The orientation is applied, but the block holds more.
+                self.extras = true;
+                if self.orientation.is_none() {
+                    self.orientation = orientation::from_exif(payload);
+                }
+            }
+            APP14 => self.adobe_transform = parse_adobe_transform(payload),
+            _ => self.extras = true,
         }
     }
 

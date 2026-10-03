@@ -1,18 +1,19 @@
-//! The LZW dictionary and expansion loop.
+//! The LZW dictionary, its expansion loop, and the coder that writes it.
 //!
 //! GIF and TIFF both code their pixels with LZW over a dictionary of at most
 //! 4096 entries whose first `1 << root_bits` codes are the literals, whose
 //! next code clears the table and whose next again ends the stream. What
 //! differs is only how codes are packed into bytes and when a new entry
 //! widens the code that follows it, so those are the caller's
-//! ([`CodeSource`], [`Widen`]) and everything else — the dictionary, the
-//! string walk, the entry a code defines for itself, and the deferred clear
-//! real encoders rely on — is defined once here.
+//! ([`CodeSource`], [`CodeSink`], [`Widen`]) and everything else — the
+//! dictionary, the string walk, the entry a code defines for itself, and the
+//! deferred clear real encoders rely on — is defined once here.
 
 use alloc::vec::Vec;
 
 use tairix_util::fallible;
 
+use crate::encode::EncodeError;
 use crate::DecodeError;
 
 /// The widest code either dialect reaches, and the resulting table size.
@@ -186,5 +187,143 @@ impl Lzw {
             previous = Some(code);
         }
         Ok(written)
+    }
+}
+
+/// Where a coder's codes go.
+///
+/// The packing is the caller's for the same reason [`CodeSource`] is: GIF
+/// packs least-significant bit first into data sub-blocks, TIFF most
+/// significant first into a flat run.
+pub(crate) trait CodeSink {
+    /// Pack `code`, `width` bits wide.
+    fn put(&mut self, code: u16, width: u32) -> Result<(), EncodeError>;
+}
+
+/// Slots the coder's dictionary is hashed into: twice the codes, so a probe
+/// stays short however full the table gets.
+const HASH_BITS: u32 = MAX_CODE_BITS + 1;
+const HASH_SLOTS: usize = 1 << HASH_BITS;
+
+/// A slot no string occupies.
+const VACANT: u16 = u16::MAX;
+
+/// An LZW coder over one dialect.
+///
+/// The dictionary is a hash from a string — its prefix's code and its last
+/// byte — to the code defining it. Every code is written at the width the
+/// decoder reads it at, because the coder keeps the decoder's own count beside
+/// its own: the decoder defines nothing for the first code after a clear, so
+/// it runs one entry behind, and widens on [`Widen`]'s schedule over that
+/// count rather than the coder's.
+pub(crate) struct Coder {
+    keys: Vec<u32>,
+    codes: Vec<u16>,
+    root_bits: u32,
+    widen: Widen,
+    /// The code at which the table counts as full and is cleared.
+    limit: u16,
+    /// The string matched so far.
+    prefix: Option<u16>,
+    next: u16,
+    decoder_next: u16,
+    width: u32,
+    /// Whether no code has been written since the last clear.
+    fresh: bool,
+}
+
+impl Coder {
+    /// A coder over literals of `root_bits` bits that clears its table on
+    /// reaching `limit` codes; `None` where its tables cannot be held.
+    pub(crate) fn new(root_bits: u32, widen: Widen, limit: u16) -> Option<Self> {
+        let roots = 1u16 << root_bits;
+        Some(Self {
+            keys: fallible::filled(HASH_SLOTS, 0u32)?,
+            codes: fallible::filled(HASH_SLOTS, VACANT)?,
+            root_bits,
+            widen,
+            limit,
+            prefix: None,
+            next: roots + 2,
+            decoder_next: roots + 2,
+            width: root_bits + 1,
+            fresh: true,
+        })
+    }
+
+    const fn clear_code(&self) -> u16 {
+        1 << self.root_bits
+    }
+
+    /// Open a stream with a clear, as both dialects' readers expect; a
+    /// coder that has finished one stream begins the next afresh.
+    pub(crate) fn begin(&mut self, sink: &mut dyn CodeSink) -> Result<(), EncodeError> {
+        self.prefix = None;
+        self.width = self.root_bits + 1;
+        self.clear(sink)
+    }
+
+    /// Code `byte`, the next literal of the stream.
+    pub(crate) fn push(&mut self, byte: u8, sink: &mut dyn CodeSink) -> Result<(), EncodeError> {
+        let Some(prefix) = self.prefix else {
+            self.prefix = Some(u16::from(byte));
+            return Ok(());
+        };
+        let key = (u32::from(prefix) << 8) | u32::from(byte);
+        let slot = self.slot(key);
+        if self.codes[slot] != VACANT {
+            self.prefix = Some(self.codes[slot]);
+            return Ok(());
+        }
+        self.emit(prefix, sink)?;
+        if self.next < self.limit {
+            self.keys[slot] = key;
+            self.codes[slot] = self.next;
+            self.next += 1;
+        } else {
+            self.clear(sink)?;
+        }
+        self.prefix = Some(u16::from(byte));
+        Ok(())
+    }
+
+    /// Write the string still held and end the stream.
+    pub(crate) fn finish(&mut self, sink: &mut dyn CodeSink) -> Result<(), EncodeError> {
+        if let Some(prefix) = self.prefix.take() {
+            self.emit(prefix, sink)?;
+        }
+        sink.put(self.clear_code() + 1, self.width)
+    }
+
+    /// The slot `key` occupies, or the vacant one it would take.
+    fn slot(&self, key: u32) -> usize {
+        let mut slot = (key.wrapping_mul(0x9E37_79B1) >> (u32::BITS - HASH_BITS)) as usize;
+        while self.codes[slot] != VACANT && self.keys[slot] != key {
+            slot = (slot + 1) & (HASH_SLOTS - 1);
+        }
+        slot
+    }
+
+    fn emit(&mut self, code: u16, sink: &mut dyn CodeSink) -> Result<(), EncodeError> {
+        sink.put(code, self.width)?;
+        if self.fresh {
+            self.fresh = false;
+        } else if usize::from(self.decoder_next) < MAX_CODES {
+            self.decoder_next += 1;
+            if self.widen.reached(self.decoder_next, self.width) && self.width < MAX_CODE_BITS {
+                self.width += 1;
+            }
+        }
+        Ok(())
+    }
+
+    fn clear(&mut self, sink: &mut dyn CodeSink) -> Result<(), EncodeError> {
+        sink.put(self.clear_code(), self.width)?;
+        self.codes.fill(VACANT);
+        self.next = self.clear_code() + 2;
+        self.decoder_next = self.next;
+        self.width = self.root_bits + 1;
+        self.fresh = true;
+        Ok(())
     }
 }

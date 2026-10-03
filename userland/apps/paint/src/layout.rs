@@ -3,47 +3,45 @@
 //!
 //! ```text
 //! +----------------------------------------------------------------------+
-//! | [tools ....................] | [zoom] [grid]                         |
-//! +-----------+--------------------------------------+---+--------------+
-//! | palette   |                                      | ^ | [#][#] which |
-//! | tool      |            the picture               | | | [plane  ]|H||
-//! | settings  |                                      |   | [#] #ff00aa  |
-//! |           |                                      |   | H S V  R G B |
-//! +-----------+--------------------------------------+---+              |
-//! |           |======================================|   |              |
-//! +----------------------------------------------------------------------+
-//! | 640 × 480, 256 colours  (12, 34) #ff00aa   sprite  100%               |
+//! | Brush  Size [ 4 ] px  [x] Smooth edges                 [-][+][F][1]|#|
+//! +----+-------------------------------------------+---+---------------+
+//! | S  |                                           | ^ | [#][#] which  |
+//! | P  |               the picture                 | | | [plane  ]|H|  |
+//! |=B  |                                           |   | [#] #ff00aa   |
+//! | :  |                                           |   | H S V  R G B  |
+//! |    +-------------------------------------------+---+               |
+//! |    |===========================================|   |               |
+//! |    +-----------------------------------------------+               |
+//! |    | [][][][][][][][][][][][][][][][][]            |               |
+//! +----+-----------------------------------------------+---------------+
+//! | (12, 34) #ff00aa   640 × 480, 256 colours         1 of 3: sprite  100% |
 //! +----------------------------------------------------------------------+
 //! ```
 //!
-//! The panel down the left holds the palette and the tool's settings; the
-//! colour dock down the right holds the two colour wells and the picker
-//! editing the one chosen.
+//! The tool-controls bar runs across the top, the view's commands at its
+//! end; the tool box runs down the left and the colour dock down the right;
+//! the palette strip lies beneath the canvas and its bars.
 //!
 //! Every extent comes from the theme's metrics at the desktop scale and the
-//! face's own measures. Bands are claimed from the edges inward, so however
+//! faces' own measures. Bands are claimed from the edges inward, so however
 //! small the window only the canvas gives up room; a region with no room is
 //! an empty rectangle, which every painter and hit-test treats as absent.
 
 use alloc::string::String;
 
-use tairix_controls::Toolbar;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Rect, Scale};
 use tairix_image::SpriteName;
-use tairix_theme::Theme;
+use tairix_theme::{TextRole, Theme};
 
 use crate::canvas::MAX_SIDE;
 use crate::document::MAX_ENTRIES;
 use crate::render::{write_position, write_sprite, write_zoom};
+use crate::tool_controls::Placement;
 use crate::viewport::{Zoom, ZOOMS};
 
 /// The client area a new window opens at, in logical pixels.
 pub const WINDOW_SIZE: (u32, u32) = (900, 640);
-
-/// The panel's width, in logical pixels: room for sixteen wells a row of a
-/// full palette, each large enough to hit.
-const PANEL_WIDTH: u32 = 200;
 
 /// The colour dock's width, in logical pixels: room for the picker with its
 /// fields stacked beneath its plane.
@@ -55,35 +53,78 @@ const WELLS_HEIGHT: u32 = 52;
 /// The least canvas the smallest window keeps, in logical pixels.
 const MIN_CANVAS: u32 = 96;
 
-/// What the layout is resolved from beyond the window's size.
+/// The least a palette well is across, in logical pixels: what a 256-colour
+/// palette is set at in a few rows.
+const LEAST_WELL: u32 = 14;
+
+/// The most a palette well is across, in logical pixels: what a palette of a
+/// few colours is set at in one row.
+const MOST_WELL: u32 = 24;
+
+/// What the layout's text is set in.
 #[derive(Copy, Clone, Debug)]
 pub struct Faces {
-    /// The face the status band and the wells' captions are set in.
+    /// The status band and the wells' caption.
     pub status: BitmapFont,
+    /// A tool setting's label and unit.
+    pub label: BitmapFont,
+    /// The name of the tool heading the tool-controls bar.
+    pub heading: BitmapFont,
 }
 
-/// How much of the panel and the dock their content needs, measured for
-/// their inner widths ([`Layout::panel_inner_width`],
-/// [`Layout::dock_inner_width`]).
+impl Faces {
+    /// The faces `theme` sets the window's text in at `scale`.
+    #[must_use]
+    pub fn of(theme: &Theme, scale: Scale) -> Self {
+        let face = |role| BitmapFont::for_role(theme.fonts(), role, scale);
+        Self {
+            status: face(TextRole::Caption),
+            label: face(TextRole::Body),
+            heading: face(TextRole::SectionHeader),
+        }
+    }
+}
+
+/// What the layout is resolved from beyond the window's size and faces.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub struct PanelNeeds {
-    /// The palette grid's height.
-    pub swatches: u32,
-    /// The tool settings' height.
-    pub settings: u32,
-    /// The colour picker's height.
+pub struct Needs {
+    /// The wells the palette strip holds.
+    pub wells: usize,
+    /// The colour picker's height across the dock's inner width
+    /// ([`Layout::dock_inner_width`]).
     pub picker: u32,
+    /// How broad the tool box's tools are.
+    pub tool_box: u32,
+    /// How long the view strip's commands are.
+    pub view_strip: u32,
+    /// The rows the top band holds for the tool-controls bar across
+    /// [`Layout::controls_width`].
+    pub bar_rows: u32,
+}
+
+/// What the smallest window is floored on beyond the faces.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct Floor {
+    /// The least width every tool's tool-controls bar seats each of its
+    /// settings in.
+    pub controls: u32,
+    /// How long the view strip is: it is given all its commands.
+    pub view_strip: u32,
+    /// How broad the tool box is, and the shortest it still shows a tool at.
+    pub tool_box: (u32, u32),
+    /// The most wells a palette strip holds.
+    pub wells: usize,
 }
 
 /// The window's resolved geometry.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Layout {
     window: Rect,
-    toolbar: Rect,
+    top: Rect,
+    controls: Rect,
+    view_strip: Rect,
+    tool_box: Rect,
     tools: Rect,
-    panel: Rect,
-    swatches: Rect,
-    settings: Rect,
     dock: Rect,
     wells: Rect,
     picker: Rect,
@@ -91,16 +132,21 @@ pub struct Layout {
     vertical_bar: Rect,
     horizontal_bar: Rect,
     corner: Rect,
+    palette: Rect,
+    swatches: Rect,
+    columns: usize,
     status: Rect,
     position: Rect,
     message: Rect,
     sprite: Rect,
     zoom: Rect,
+    bar: Placement,
 }
 
 impl Layout {
-    /// The geometry of a `width`×`height` client area whose panel and dock
-    /// hold what `needs` states.
+    /// The geometry of a `width`×`height` client area holding what `needs`
+    /// states; the tool-controls bar is placed into it by
+    /// [`seat_bar`](Self::seat_bar).
     #[must_use]
     pub fn for_window(
         width: u32,
@@ -108,22 +154,43 @@ impl Layout {
         theme: &Theme,
         scale: Scale,
         faces: Faces,
-        needs: PanelNeeds,
+        needs: Needs,
     ) -> Self {
         let gap = gap(theme, scale);
         let bar = scale.scale_length(theme.metrics().scrollbar_breadth).max(1);
         let window = Rect::new(0, 0, width, height);
         let mut rest = window;
-        let strip_height = strip_height(theme, scale);
-        let toolbar_band = rest.take_top(strip_height + gap * 2);
-        let tools = toolbar_band.inset(gap);
+        let row = strip_height(theme, scale);
+        let top = rest.take_top(top_height(needs.bar_rows, row, gap));
+        let mut across = top.inset(gap);
+        let view_strip = Rect::new(
+            across
+                .right()
+                .saturating_sub_unsigned(needs.view_strip.min(across.width)),
+            across.top(),
+            needs.view_strip.min(across.width),
+            row.min(across.height),
+        );
+        let _ = across.take_right(needs.view_strip + gap);
+        let controls = across;
         let status = rest.take_bottom(status_height(faces, gap));
         let (position, message, sprite, zoom) = status_slots(status, faces.status, gap);
-        let panel_width = scale.scale_length(PANEL_WIDTH).min(rest.width / 2);
-        let panel = rest.take_left(panel_width);
-        let (swatches, settings) = panel_slots(panel, gap, needs);
+        let tool_box = rest.take_left((needs.tool_box + gap * 2).min(rest.width / 2));
         let dock = rest.take_right(scale.scale_length(DOCK_WIDTH).min(rest.width / 2));
         let (wells, picker) = dock_slots(dock, gap, scale, needs);
+        let grid = palette_grid(needs.wells, rest.width.saturating_sub(gap * 2), scale);
+        let palette = rest.take_bottom(if grid.height == 0 {
+            0
+        } else {
+            grid.height + gap * 2
+        });
+        let swatches = Rect::new(
+            palette.left().saturating_add_unsigned(gap),
+            palette.top().saturating_add_unsigned(gap),
+            grid.width,
+            grid.height,
+        )
+        .intersection(&palette.inset(gap));
         let under = rest.take_bottom(bar);
         let vertical_bar = rest.take_right(bar);
         let corner = if under.is_empty() || vertical_bar.is_empty() {
@@ -139,11 +206,11 @@ impl Layout {
         let horizontal_bar = Rect::new(rest.left(), under.top(), rest.width, under.height);
         Self {
             window,
-            toolbar: toolbar_band,
-            tools,
-            panel,
-            swatches,
-            settings,
+            top,
+            controls,
+            view_strip,
+            tool_box,
+            tools: tool_box.inset(gap),
             dock,
             wells,
             picker,
@@ -151,20 +218,29 @@ impl Layout {
             vertical_bar,
             horizontal_bar,
             corner,
+            palette,
+            swatches,
+            columns: grid.columns,
             status,
             position,
             message,
             sprite,
             zoom,
+            bar: Placement::default(),
         }
     }
 
-    /// The width the panel's content is laid out across.
+    /// Seat the tool-controls bar as `placement` places it in
+    /// [`controls`](Self::controls).
+    pub fn seat_bar(&mut self, placement: Placement) {
+        self.bar = placement;
+    }
+
+    /// The width the tool-controls bar is laid out across in a window
+    /// `width` wide whose view strip is `view_strip` long.
     #[must_use]
-    pub fn panel_inner_width(theme: &Theme, scale: Scale) -> u32 {
-        scale
-            .scale_length(PANEL_WIDTH)
-            .saturating_sub(gap(theme, scale) * 2)
+    pub fn controls_width(width: u32, view_strip: u32, theme: &Theme, scale: Scale) -> u32 {
+        width.saturating_sub(gap(theme, scale) * 3 + view_strip)
     }
 
     /// The width the dock's content is laid out across.
@@ -175,21 +251,36 @@ impl Layout {
             .saturating_sub(gap(theme, scale) * 2)
     }
 
-    /// The smallest client area worth laying out: the bands around a canvas
-    /// of a few dozen pixels, the toolbar able to show at least one tool.
+    /// The smallest client area worth laying out: every tool's bar with
+    /// each of its settings seated, in the most rows `bar_rows` says any bar
+    /// takes across the width it is given, beside the whole view strip; and
+    /// around a canvas of a few dozen pixels the tool box showing a tool, the
+    /// dock at its width, and the largest palette strip.
     #[must_use]
-    pub fn min_size(theme: &Theme, scale: Scale, faces: Faces, toolbar: &Toolbar) -> (u32, u32) {
+    pub fn min_size(
+        theme: &Theme,
+        scale: Scale,
+        faces: Faces,
+        floor: Floor,
+        bar_rows: impl FnOnce(u32) -> u32,
+    ) -> (u32, u32) {
         let gap = gap(theme, scale);
         let bar = scale.scale_length(theme.metrics().scrollbar_breadth).max(1);
         let canvas = scale.scale_length(MIN_CANVAS);
-        let width =
-            (scale.scale_length(PANEL_WIDTH) + canvas + bar + scale.scale_length(DOCK_WIDTH))
-                .max(toolbar.min_width(scale, theme) + gap * 2);
-        let height = strip_height(theme, scale)
-            + gap * 2
+        let dock = scale.scale_length(DOCK_WIDTH);
+        let (tool_box, tool_box_least) = floor.tool_box;
+        let left = tool_box + gap * 2;
+        // The dock is never wider than the canvas's side of the window.
+        let width = (left + (canvas + bar).max(dock) + dock)
+            .max(floor.controls + floor.view_strip + gap * 3);
+        let middle = width - left - dock;
+        let palette = palette_grid(floor.wells, middle.saturating_sub(gap * 2), scale).height;
+        let rows = bar_rows(Self::controls_width(width, floor.view_strip, theme, scale));
+        let height = top_height(rows, strip_height(theme, scale), gap)
             + status_height(faces, gap)
-            + canvas.max(scale.scale_length(WELLS_HEIGHT) * 2)
-            + bar;
+            + (canvas + bar + palette + gap * 2)
+                .max(tool_box_least + gap * 2)
+                .max(scale.scale_length(WELLS_HEIGHT) * 2);
         (width, height)
     }
 
@@ -199,22 +290,40 @@ impl Layout {
         self.window
     }
 
-    /// The toolbar band.
+    /// The band across the top: the tool-controls bar and the view strip.
     #[must_use]
-    pub const fn toolbar(&self) -> Rect {
-        self.toolbar
+    pub const fn top(&self) -> Rect {
+        self.top
     }
 
-    /// Where the toolbar's tools are seated.
+    /// Where the tool-controls bar is laid out.
+    #[must_use]
+    pub const fn controls(&self) -> Rect {
+        self.controls
+    }
+
+    /// The tool-controls bar's parts, as placed.
+    #[must_use]
+    pub const fn bar(&self) -> &Placement {
+        &self.bar
+    }
+
+    /// Where the view strip's commands are seated.
+    #[must_use]
+    pub const fn view_strip(&self) -> Rect {
+        self.view_strip
+    }
+
+    /// The tool box's band down the left.
+    #[must_use]
+    pub const fn tool_box(&self) -> Rect {
+        self.tool_box
+    }
+
+    /// Where the tool box's tools are seated.
     #[must_use]
     pub const fn tools(&self) -> Rect {
         self.tools
-    }
-
-    /// The panel beside the canvas.
-    #[must_use]
-    pub const fn panel(&self) -> Rect {
-        self.panel
     }
 
     /// The colour dock on the canvas's other side.
@@ -274,18 +383,6 @@ impl Layout {
         (self.wells.height * 2 / 3).min(self.wells.width / 3)
     }
 
-    /// The palette grid.
-    #[must_use]
-    pub const fn swatches(&self) -> Rect {
-        self.swatches
-    }
-
-    /// The tool's settings.
-    #[must_use]
-    pub const fn settings(&self) -> Rect {
-        self.settings
-    }
-
     /// Where the picture is shown.
     #[must_use]
     pub const fn canvas(&self) -> Rect {
@@ -308,6 +405,24 @@ impl Layout {
     #[must_use]
     pub const fn corner(&self) -> Rect {
         self.corner
+    }
+
+    /// The palette strip's band beneath the canvas.
+    #[must_use]
+    pub const fn palette(&self) -> Rect {
+        self.palette
+    }
+
+    /// Where the palette's wells are drawn.
+    #[must_use]
+    pub const fn swatches(&self) -> Rect {
+        self.swatches
+    }
+
+    /// The palette's wells to a row.
+    #[must_use]
+    pub const fn columns(&self) -> usize {
+        self.columns
     }
 
     /// The status band.
@@ -345,9 +460,16 @@ fn gap(theme: &Theme, scale: Scale) -> u32 {
     scale.scale_length(theme.metrics().control_gap).max(1)
 }
 
-/// The toolbar's tool height: a button's.
+/// One row of the top band, inside its gaps: a control's height.
 fn strip_height(theme: &Theme, scale: Scale) -> u32 {
     tairix_controls::Button::height(scale, theme)
+}
+
+/// The top band's height for `rows` rows of the bar, each `row` high, a gap
+/// apart and a gap from either edge.
+fn top_height(rows: u32, row: u32, gap: u32) -> u32 {
+    let rows = rows.max(1);
+    row * rows + gap * (rows - 1) + gap * 2
 }
 
 /// The status band's height: a line of its face and a gap above and below.
@@ -355,19 +477,41 @@ fn status_height(faces: Faces, gap: u32) -> u32 {
     faces.status.line_height().max(1) + gap * 2
 }
 
-/// The panel's palette and settings, top to bottom, a gap between.
-fn panel_slots(panel: Rect, gap: u32, needs: PanelNeeds) -> (Rect, Rect) {
-    let mut rest = panel.inset(gap);
-    let swatches = rest.take_top(needs.swatches);
-    let _ = rest.take_top(gap);
-    let settings = rest.take_top(needs.settings);
-    (swatches, settings)
+/// The palette's wells as the strip sets them out.
+struct PaletteGrid {
+    columns: usize,
+    width: u32,
+    height: u32,
+}
+
+/// How the palette strip sets `wells` across `width`: in as few rows as hold
+/// every well at least [`LEAST_WELL`] across, the rows evened out, each well
+/// as broad as its row allows up to [`MOST_WELL`].
+fn palette_grid(wells: usize, width: u32, scale: Scale) -> PaletteGrid {
+    let least = scale.scale_length(LEAST_WELL).max(1);
+    let most = scale.scale_length(MOST_WELL).max(least);
+    let count = u32::try_from(wells).unwrap_or(u32::MAX);
+    if count == 0 || width < least {
+        return PaletteGrid {
+            columns: 1,
+            width: 0,
+            height: 0,
+        };
+    }
+    let rows = count.div_ceil(width / least);
+    let columns = count.div_ceil(rows);
+    let side = (width / columns).min(most);
+    PaletteGrid {
+        columns: usize::try_from(columns).unwrap_or(1),
+        width: columns.saturating_mul(side),
+        height: rows.saturating_mul(side),
+    }
 }
 
 /// The dock's wells and picker, top to bottom, a gap between: a dock too
 /// short for the whole picker gives it what is left, which it lays out by
 /// giving up its fields before its plane.
-fn dock_slots(dock: Rect, gap: u32, scale: Scale, needs: PanelNeeds) -> (Rect, Rect) {
+fn dock_slots(dock: Rect, gap: u32, scale: Scale, needs: Needs) -> (Rect, Rect) {
     let mut rest = dock.inset(gap);
     let wells = rest.take_top(scale.scale_length(WELLS_HEIGHT));
     let _ = rest.take_top(gap);

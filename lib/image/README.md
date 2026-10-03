@@ -3,10 +3,11 @@
 Stability tier: **experimental**.
 
 First-party TAIRiX raster images: complete, fail-closed PNG, JPEG, GIF, BMP,
-ICO/CUR, RISC OS sprite, TIFF and WEBP decoders that turn untrusted artwork
-into a validated, straight-alpha RGBA8 pixel buffer, or a typed refusal —
-never a panic, and never more memory than the caller allows — and the PNG,
-JPEG and sprite-area encoders an editor saves with.
+ICO/CUR, RISC OS sprite, TIFF, WEBP and OpenRaster decoders that turn
+untrusted artwork into a validated, straight-alpha RGBA8 pixel buffer, or a
+typed refusal — never a panic, and never more memory than the caller allows —
+and the PNG, JPEG, GIF, BMP, TIFF, sprite-area and OpenRaster encoders an
+editor saves with.
 
 ## Consumers
 
@@ -39,6 +40,13 @@ only when a real consumer needs it — never speculatively.
 
 - **PNG** (`ImageFormat::Png`, W3C PNG): every colour type and bit depth,
   interlaced or not.
+- **OpenRaster** (`ImageFormat::OpenRaster`, baseline 0.0.5): a ZIP — stored
+  or deflated entries, each checked against its CRC-32; encryption, ZIP64 and
+  spanning refused — whose stored `mimetype` entry is its signature, its stack
+  read from `stack.xml` through `lib/xml`, nested stacks folded into their
+  layers, and each layer a PNG placed on the canvas. `decode` shows the
+  `mergedimage.png` where it fits the canvas, else the visible layers
+  composed; `open_native` answers the layers themselves.
 - **JPEG** (`ImageFormat::Jpeg`, ITU-T T.81): baseline sequential (`SOF0`),
   extended sequential (`SOF1`), and progressive (`SOF2`) DCT frames with
   Huffman coding at 8-bit precision; 1-component greyscale and 3-component
@@ -133,9 +141,14 @@ EXIF metadata or an animation's further frames.
 
 ## Writing
 
-`encode_png`, `encode_jpeg` and `encode_sprite_area` read a `PictureSource`
-a row at a time — `Picture` is the one this crate owns — and refuse anything
-their format cannot state (`EncodeError`) rather than approximate it. PNG is
+`encode_png`, `encode_jpeg`, `encode_gif`, `encode_bmp`, `encode_tiff`,
+`encode_sprite_area` and `encode_ora` read a `PictureSource` a row at a time —
+`Picture` is the one this crate owns — and refuse anything their format cannot
+state (`EncodeError`) rather than approximate it. OpenRaster writes borrowed
+layer sources (`OraLayerSource`), so an editor's layers are never copied whole
+to be written, each stored as its PNG beside the stack, the merged picture and
+a thumbnail; every entry is stored, since PNG is compressed already, and dated
+1980 so the same document always writes the same bytes. PNG is
 the smallest colour type that holds the picture exactly: a palette is kept at
 the shallowest depth that indexes it, a binary mask becomes one transparent
 entry, and an unused alpha channel or an all-grey picture is dropped to what
@@ -437,6 +450,12 @@ numbers of them, and no viewer has use for an animation longer than that. It
 bounds the count the structural pass accepts, and nothing is allocated per
 frame.
 
+OpenRaster carries fixed bounds of the same kind: at most 256 layers
+(`MOST_ORA_LAYERS`) and 4 096 archive entries, a stack of at most 1 MiB, and
+a layer's PNG of at most 256 MiB, each weighed against the archive's own
+declared sizes before an entry is inflated, and the stack's canvas weighed
+against the caller's limits before any layer is read.
+
 TIFF carries two of the same kind: a page count, because a directory costs
 six bytes and a chain that loops revisits one for ever, and a bits-per-pixel
 ceiling, because the limits bound the *picture* and without it a page could
@@ -451,10 +470,11 @@ returns a typed `DecodeError`, never a panic, and every size/offset
 computation over untrusted values uses checked, saturating, or widened
 integer arithmetic so a crafted input cannot provoke an overflow panic
 even in a debug build. The crate is `no_std` + `alloc`,
-`#![forbid(unsafe_code)]`, and has no dependency beyond `tairix-compress`
-(PNG's `IDAT` stream is zlib/DEFLATE, so the `inflate`/`zlib` modules there
-are reused rather than re-implemented — the whole-buffer entry points, since
-the concatenated `IDAT` chunks are the whole stream).
+`#![forbid(unsafe_code)]`, and depends only on first-party crates:
+`tairix-compress` (PNG's `IDAT` stream and a ZIP entry are DEFLATE, so the
+`inflate`/`zlib` modules there are reused rather than re-implemented),
+`tairix-crc32` (PNG chunks and ZIP entries), `tairix-xml` (the OpenRaster
+stack) and `tairix-util` (fallible reservation).
 
 This crate performs no I/O and holds no authority of its own: it is meant
 to run inside the image pipeline's parser sandbox, which supplies the

@@ -971,7 +971,7 @@ pub fn toolbar_natural_width(scale: Scale, theme: &Theme) -> u32 {
         chrome::MANAGER_TOOLS,
         ManagerToolModel::new(true),
     )
-    .natural_width(scale, theme)
+    .natural_length(scale, theme)
 }
 
 /// Draw the command toolbar in the top strip: [`chrome::TOOLBAR_COMMANDS`] then

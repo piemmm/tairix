@@ -43,7 +43,7 @@ capabilities = ["CAP_CONSOLE_WRITE", "CAP_SHM", "CAP_SANDBOX_SPAWN", "CAP_LOG_EM
 # so `application/pdf` is absent until `lib/pdf` lands behind the page source
 # (plans/VIEW.md). Text belongs to TextEdit. A display hint only — the
 # signed load gate still verifies and capability-checks the launch.
-associations = ["image/jpeg", "image/png", "image/svg+xml", "image/gif", "image/tiff", "image/webp", "image/bmp", "image/vnd.microsoft.icon", "image/x-riscos-sprite"]
+associations = ["image/jpeg", "image/png", "image/svg+xml", "image/gif", "image/tiff", "image/webp", "image/bmp", "image/vnd.microsoft.icon", "image/x-riscos-sprite", "image/openraster"]
 # A windowed, user-facing application: list it in the desktop's program
 # library beside the other graphical tools (plans/NEW-TASKBAR.md T3).
 library = "Graphics"

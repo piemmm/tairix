@@ -411,7 +411,22 @@ fn bars() -> Vec<DemoItem> {
             DemoWidget::ScrollBar(ScrollBar::new(ScrollOrientation::Horizontal, model)),
             24,
         ),
+        DemoItem::new("Tool box", DemoWidget::Toolbar(tool_box()), 170).with_width(44),
     ]
+}
+
+/// A toolbar turned on its side: an image editor's tools down a column, the
+/// one in use marked.
+fn tool_box() -> Toolbar {
+    let tool = |icon| IconButton::new(icon, ControlRole::Neutral);
+    let mut tools = Toolbar::new()
+        .with_orientation(ScrollOrientation::Vertical)
+        .with_icon(tool(IconKind::ToolSelect), 0)
+        .with_icon(tool(IconKind::ToolPencil), 0)
+        .with_icon(tool(IconKind::ToolBrush), 0)
+        .with_icon(tool(IconKind::ToolFill), 1);
+    tools.set_active(2);
+    tools
 }
 
 fn feedback() -> Vec<DemoItem> {

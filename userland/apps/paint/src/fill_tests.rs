@@ -5,7 +5,7 @@ use tairix_image::IndexDepth;
 use super::{fill, region};
 use crate::canvas::{Canvas, CanvasBuilder, Kind, Sample};
 use crate::colour::Ink;
-use crate::stroke::{Blend, Layer};
+use crate::stroke::{Blend, Coat};
 
 /// A 200×100 white canvas split by a black wall down column 100 with a gap
 /// at the bottom row.
@@ -99,11 +99,11 @@ fn filling_writes_the_region_and_records_what_it_replaced() {
     let mut canvas = walled();
     let original = canvas.try_clone().expect("room");
     let found = region(&canvas, 150, 5, 0).expect("room").expect("on");
-    let layer = Layer {
+    let layer = Coat {
         ink: Ink::Colour([0, 200, 0, 255]),
         blend: Blend::Over,
     };
-    let stroke = fill(&mut canvas, &found, layer).expect("room");
+    let stroke = fill(&mut canvas, &found, layer, None).expect("room");
     assert_eq!(canvas.sample(0, 0), Some(Sample::Rgba([0, 200, 0, 255])));
     assert_eq!(canvas.sample(100, 0), Some(Sample::Rgba([0, 0, 0, 255])));
     for (index, tile) in stroke.finish() {
@@ -161,4 +161,32 @@ fn a_flood_reaches_exactly_the_joined_pixels() {
             assert_eq!(found.contains(x, y), joined[at(x, y)], "({x}, {y})");
         }
     }
+}
+
+#[test]
+fn a_fill_not_held_to_joined_pixels_reaches_every_pixel_like_the_one_pressed() {
+    let mut built = crate::canvas::CanvasBuilder::new(30, 10, Kind::Rgba, Sample::Rgba([255; 4]))
+        .expect("fits");
+    for y in 0..10 {
+        built.set(10, y, Sample::Rgba([0, 0, 0, 255]));
+        built.set(20, y, Sample::Rgba([0, 0, 0, 255]));
+    }
+    let canvas = built.finish();
+    let joined = super::region(&canvas, 2, 2, 0)
+        .expect("room")
+        .expect("on it");
+    assert!(!joined.contains(15, 2), "a wall stops the flood");
+    let all = super::similar(&canvas, 2, 2, 0)
+        .expect("room")
+        .expect("on it");
+    assert!(all.contains(15, 2) && all.contains(25, 9) && all.contains(0, 0));
+    assert!(
+        !all.contains(10, 4) && !all.contains(20, 4),
+        "the walls are not like it"
+    );
+    assert_eq!(all.bounds(), crate::shape::Bounds::picture(30, 10));
+    assert!(
+        super::similar(&canvas, 40, 2, 0).expect("room").is_none(),
+        "off the picture"
+    );
 }

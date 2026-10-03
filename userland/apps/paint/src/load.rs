@@ -2,15 +2,20 @@
 //!
 //! Every answer has already been held to the edit decode's bounds by the
 //! seam that received it; this turns them into canvases and entries, and
-//! refuses a document whose answers do not add up.
+//! refuses a document whose answers do not add up. A layered document's
+//! layers become the layers of its one picture, each laid on a canvas of the
+//! picture's size where the file placed it.
 
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use tairix_sandbox::imageedit::{EditDocument, EditKept, EditPicture, EditPixels};
+use tairix_sandbox::imageedit::{EditDocument, EditKept, EditKind, EditPicture, EditPixels};
 
-use crate::canvas::{CanvasBuilder, CanvasError, Kind, OutOfMemory, Sample};
-use crate::document::{Document, Entry, Kept, Origin, Picture, SpriteInfo};
+use crate::canvas::{CanvasBuilder, CanvasError, Kind, Sample};
+use crate::document::{Document, Entry, Kept, Layer, Origin, Picture, SpriteInfo, MOST_LAYERS};
+use crate::save::SaveSettings;
+use crate::shape::Bounds;
 
 /// Why an entry could not join the document.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -22,10 +27,33 @@ pub enum Refusal {
     Unbelieved,
 }
 
+/// A picture's rows being written into its canvas: where they land, and how
+/// long each must be.
+#[derive(Debug)]
+pub struct Rows {
+    built: CanvasBuilder,
+    at: (i64, i64),
+    width: usize,
+}
+
+impl Rows {
+    /// Write the picture's row `y`, as [`CanvasBuilder::row`] takes one: a
+    /// row of another length is ignored.
+    pub fn row(&mut self, y: u32, samples: &[u8], mask: &[u8]) {
+        if samples.len() == self.width {
+            self.built
+                .row_at((self.at.0, self.at.1 + i64::from(y)), samples, mask);
+        }
+    }
+}
+
 /// A document being put together, one entry at a time.
 #[derive(Debug)]
 pub struct Assembly {
     entries: Vec<Entry>,
+    /// A layered document's layers so far, the bottom first: its one entry
+    /// once they are all in.
+    layers: Vec<Layer>,
     opened: EditDocument,
     /// Bytes of the file the entries so far have not been charged. A sprite
     /// area's sprites lie end to end within its file, so one that would need
@@ -40,14 +68,26 @@ impl Assembly {
     ///
     /// # Errors
     ///
-    /// [`OutOfMemory`] when the room is refused.
-    pub fn new(opened: EditDocument, length: usize) -> Result<Self, OutOfMemory> {
-        let mut entries = Vec::new();
-        entries
-            .try_reserve_exact(opened.count as usize)
-            .map_err(|_| OutOfMemory)?;
+    /// [`Refusal`]: the room is refused, or a layered document has more
+    /// layers than a picture holds or no canvas to lay them on.
+    pub fn new(opened: EditDocument, length: usize) -> Result<Self, Refusal> {
+        let count = opened.count as usize;
+        let layered = opened.kind == EditKind::Layers;
+        if layered && (count > MOST_LAYERS || opened.canvas.is_none()) {
+            return Err(Refusal::Unbelieved);
+        }
+        let (mut entries, mut layers) = (Vec::new(), Vec::new());
+        let reserved = if layered {
+            entries
+                .try_reserve_exact(1)
+                .and(layers.try_reserve_exact(count))
+        } else {
+            entries.try_reserve_exact(count)
+        };
+        reserved.map_err(|_| Refusal::NoMemory)?;
         Ok(Self {
             entries,
+            layers,
             opened,
             unclaimed: u64::try_from(length).unwrap_or(u64::MAX),
             overrun: false,
@@ -56,13 +96,22 @@ impl Assembly {
 
     /// A builder for the rows of `picture`, which [`picture`](Self::picture)
     /// takes once they are all in. A sprite is first charged the least of
-    /// the file it could be stored in.
+    /// the file it could be stored in; a layer is laid where its document
+    /// places it on its canvas.
     ///
     /// # Errors
     ///
-    /// [`Refusal`]: the sprite needs more of the file than is left, or the
-    /// picture cannot be held.
-    pub fn canvas_for(&mut self, picture: &EditPicture) -> Result<CanvasBuilder, Refusal> {
+    /// [`Refusal`]: the sprite needs more of the file than is left, a layer
+    /// arrives other than as a layered document's, or the picture cannot be
+    /// held.
+    pub fn canvas_for(&mut self, picture: &EditPicture) -> Result<Rows, Refusal> {
+        let canvas = match (self.opened.canvas, picture.layer()) {
+            (Some(canvas), Some(layer)) if self.opened.kind == EditKind::Layers => {
+                Some((canvas, layer.at))
+            }
+            (None, None) if self.opened.kind != EditKind::Layers => None,
+            _ => return Err(Refusal::Unbelieved),
+        };
         if let Some(sprite) = picture.sprite() {
             let stored = sprite
                 .mode
@@ -90,10 +139,29 @@ impl Assembly {
                 )
             }
         };
-        CanvasBuilder::new(picture.width(), picture.height(), kind, fill).map_err(|err| match err {
+        let refused = |err| match err {
             CanvasError::OutOfMemory => Refusal::NoMemory,
             CanvasError::BadSize | CanvasError::BadPalette => Refusal::Unbelieved,
-        })
+        };
+        let width = picture.width() as usize * picture.pixels().sample_bytes();
+        let Some(((across, down), (x, y))) = canvas else {
+            let built = CanvasBuilder::new(picture.width(), picture.height(), kind, fill)
+                .map_err(refused)?;
+            return Ok(Rows {
+                built,
+                at: (0, 0),
+                width,
+            });
+        };
+        let at = (i64::from(x), i64::from(y));
+        let area = Bounds {
+            x0: at.0,
+            y0: at.1,
+            x1: at.0 + i64::from(picture.width()),
+            y1: at.1 + i64::from(picture.height()),
+        };
+        let built = CanvasBuilder::within(across, down, kind, fill, area).map_err(refused)?;
+        Ok(Rows { built, at, width })
     }
 
     /// Charge the kept sprite `kept` describes, before its bytes are
@@ -114,18 +182,42 @@ impl Assembly {
         Ok(())
     }
 
-    /// Add the picture `built` from `picture`'s rows.
-    pub fn picture(&mut self, built: CanvasBuilder, picture: &EditPicture) {
+    /// Add the picture `rows` were built into from `picture`'s; a layer
+    /// joins those of the document's one picture.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::NoMemory`] when a layer's name cannot be held.
+    pub fn picture(&mut self, rows: Rows, picture: &EditPicture) -> Result<(), Refusal> {
+        let canvas = rows.built.finish();
+        if let Some(layer) = picture.layer() {
+            if self.layers.len() >= self.opened.count as usize {
+                self.overrun = true;
+                return Ok(());
+            }
+            let mut name = String::new();
+            name.try_reserve_exact(layer.name.len())
+                .map_err(|_| Refusal::NoMemory)?;
+            name.push_str(&layer.name);
+            self.layers.push(Layer {
+                canvas,
+                name,
+                opacity: layer.opacity,
+                visible: layer.visible,
+            });
+            return Ok(());
+        }
         let sprite = picture.sprite().map(|sprite| SpriteInfo {
             name: sprite.name,
             mode: sprite.mode,
             palette: sprite.palette.clone(),
             masked: sprite.masked,
         });
-        self.push(Entry::Picture(Picture {
-            canvas: built.finish(),
-            sprite,
-        }));
+        let mut made = Picture::plain(canvas);
+        made.sprite = sprite;
+        made.density = picture.density();
+        self.push(Entry::Picture(made));
+        Ok(())
     }
 
     /// Add the sprite `kept` describes as `bytes`, exactly as the file held
@@ -151,14 +243,23 @@ impl Assembly {
 
     /// The document, once it holds every entry it said it would and no more.
     #[must_use]
-    pub fn finish(self) -> Option<Document> {
-        if self.overrun || self.entries.len() != self.opened.count as usize {
+    pub fn finish(mut self) -> Option<Document> {
+        if self.opened.kind == EditKind::Layers {
+            if self.overrun || self.layers.len() != self.opened.count as usize {
+                return None;
+            }
+            // The topmost layer is the one painted on, as an editor opens one.
+            let top = self.layers.len().checked_sub(1)?;
+            let picture = Picture::layered(core::mem::take(&mut self.layers), top)?;
+            self.entries.push(Entry::Picture(picture));
+        } else if self.overrun || self.entries.len() != self.opened.count as usize {
             return None;
         }
         Document::of(
             self.entries,
             Origin::Read(self.opened.format),
             self.opened.unkept,
+            SaveSettings::as_written(self.opened.written),
         )
     }
 }

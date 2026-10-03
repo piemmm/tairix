@@ -50,7 +50,7 @@ This crate owns:
   rather than a sorted pass per sample row: 175 µs for a 4096-edge contour
   over a 128×128 surface, against 0.3 ms sorting four sample rows per pixel
   row and 409 ms probing every edge for every sub-sample.
-- `Surface::draw_artwork` — draw a whole `artwork` tree: filled `Layer`s
+- `Surface::draw_artwork` — draw a whole `artwork` tree: filled `Coat`s
   bottom first, and a `Group` wherever a clip, a mask, or a group opacity
   composites a subtree as a unit. Those three are one mechanism rather than
   three, because each asks for a subtree to be rendered into its own buffer

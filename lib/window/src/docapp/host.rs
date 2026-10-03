@@ -994,7 +994,8 @@ impl<A: DocumentApp> Host<A> {
         match request {
             Request::Save => self.save(index, None, false),
             Request::SaveThenClose => self.save(index, None, true),
-            Request::SaveAs => self.ask_where(index, false),
+            Request::SaveAs => self.ask_how(index, false),
+            Request::SaveWhere { then_close } => self.ask_where(index, then_close),
             Request::Open => self.ask_pick(index, &PickPurpose::Open, PickFor::Open),
             Request::Close => self.close_window(index),
             Request::Menu { kind, anchor } => self.open_menu(index, kind, anchor),
@@ -1056,7 +1057,7 @@ impl<A: DocumentApp> Host<A> {
                 }
             }
             SaveStep::Queued => window.state("Saving\u{2026}"),
-            SaveStep::AskWhere { then_close } => self.ask_where(index, then_close),
+            SaveStep::AskWhere { then_close } => self.ask_how(index, then_close),
             SaveStep::NoMemory => window.state("There is not enough memory to save"),
         }
     }
@@ -1090,6 +1091,19 @@ impl<A: DocumentApp> Host<A> {
         }
         if landed.close {
             self.close_window(index);
+        }
+    }
+
+    /// Ask window `index` how its document is to be saved, where it asks,
+    /// else go on to ask where.
+    fn ask_how(&mut self, index: usize, then_close: bool) {
+        let window = &mut self.windows[index];
+        match window
+            .view
+            .ask_how(then_close, &window.layout, &mut window.damage)
+        {
+            Some(outcome) => self.apply(index, outcome),
+            None => self.ask_where(index, then_close),
         }
     }
 

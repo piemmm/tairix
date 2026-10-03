@@ -1495,3 +1495,107 @@ fn a_subsampled_page_with_a_fourth_sample_is_refused() {
         .tag(TAG_EXTRA_SAMPLES, SHORT, &[2]);
     assert_eq!(refusal(page), DecodeError::TiffSampleCountMismatch);
 }
+
+/// What `pages` open as natively: what they hold beside their pictures, and
+/// how they were written.
+fn held(pages: &[PageSpec]) -> (crate::Unkept, crate::Written) {
+    let bytes = build(false, pages);
+    match crate::open_native(ImageFormat::Tiff, &bytes[..], &limits()).expect("the file opens") {
+        crate::NativeDocument::Pages {
+            unkept, written, ..
+        } => (unkept, written),
+        _ => panic!("a TIFF opens as its pages"),
+    }
+}
+
+#[test]
+fn what_a_tiff_holds_beside_its_pages_is_said_when_it_opens() {
+    let plain = grey(2, 1, vec![1, 2]);
+    assert_eq!(
+        held(core::slice::from_ref(&plain)).0,
+        crate::Unkept::default()
+    );
+    let software = plain.clone().bytes(305, 2, b"scanner\0".to_vec());
+    assert!(held(&[software]).0.extras, "metadata");
+    let thumbnail = plain.clone().tag(TAG_NEW_SUBFILE_TYPE, LONG, &[1]);
+    assert!(held(&[plain.clone(), thumbnail]).0.extras, "a reduced copy");
+    let page = plain.clone().tag(TAG_NEW_SUBFILE_TYPE, LONG, &[2]);
+    assert_eq!(
+        held(&[page.clone(), page]).0,
+        crate::Unkept::default(),
+        "pages of a document"
+    );
+    let wide = grey(1, 1, vec![0, 1]).tag(TAG_BITS_PER_SAMPLE, SHORT, &[16]);
+    assert!(held(&[wide]).0.precision);
+    let inks = PageSpec::new()
+        .tag(TAG_IMAGE_WIDTH, LONG, &[1])
+        .tag(TAG_IMAGE_LENGTH, LONG, &[1])
+        .tag(TAG_BITS_PER_SAMPLE, SHORT, &[8, 8, 8, 8])
+        .tag(TAG_COMPRESSION, SHORT, &[u32::from(COMPRESSION_NONE)])
+        .tag(TAG_PHOTOMETRIC, SHORT, &[u32::from(PHOTOMETRIC_SEPARATED)])
+        .tag(TAG_SAMPLES_PER_PIXEL, SHORT, &[4])
+        .tag(TAG_ROWS_PER_STRIP, LONG, &[1])
+        .unit(vec![0, 0, 0, 0]);
+    assert!(held(&[inks]).0.converted, "CMYK");
+    let associated = rgb(1, 1, vec![1, 2, 3, 4])
+        .tag(TAG_BITS_PER_SAMPLE, SHORT, &[8, 8, 8, 8])
+        .tag(TAG_SAMPLES_PER_PIXEL, SHORT, &[4])
+        .tag(TAG_EXTRA_SAMPLES, SHORT, &[1]);
+    assert!(held(&[associated]).0.converted, "premultiplied alpha");
+    let unused = rgb(1, 1, vec![1, 2, 3, 4])
+        .tag(TAG_BITS_PER_SAMPLE, SHORT, &[8, 8, 8, 8])
+        .tag(TAG_SAMPLES_PER_PIXEL, SHORT, &[4])
+        .tag(TAG_EXTRA_SAMPLES, SHORT, &[0]);
+    assert!(held(&[unused]).0.extras, "a sample no colour reads");
+}
+
+#[test]
+fn a_palette_page_opens_as_its_indices_and_colour_map() {
+    let page = |map: Vec<u32>| {
+        PageSpec::new()
+            .tag(TAG_IMAGE_WIDTH, LONG, &[4])
+            .tag(TAG_IMAGE_LENGTH, LONG, &[1])
+            .tag(TAG_BITS_PER_SAMPLE, SHORT, &[2])
+            .tag(TAG_COMPRESSION, SHORT, &[u32::from(COMPRESSION_NONE)])
+            .tag(TAG_PHOTOMETRIC, SHORT, &[u32::from(PHOTOMETRIC_PALETTE)])
+            .tag(TAG_SAMPLES_PER_PIXEL, SHORT, &[1])
+            .tag(TAG_ROWS_PER_STRIP, LONG, &[1])
+            .tag(TAG_COLOUR_MAP, SHORT, &map)
+            .unit(vec![0b0001_1011])
+    };
+    let exact: Vec<u32> = (0..12).map(|at| at * 257 * 20).collect();
+    let bytes = build(false, &[page(exact)]);
+    let crate::NativeDocument::Pages {
+        mut pages, unkept, ..
+    } = crate::open_native(ImageFormat::Tiff, &bytes[..], &limits()).expect("opens")
+    else {
+        panic!("pages");
+    };
+    assert_eq!(unkept, crate::Unkept::default());
+    let picture = pages.page(0).expect("decodes").expect("a page");
+    let crate::Pixels::Indexed {
+        depth,
+        palette,
+        indices,
+        ..
+    } = picture.pixels()
+    else {
+        panic!("a palette page opens indexed");
+    };
+    assert_eq!(*depth, crate::IndexDepth::Two);
+    assert_eq!(indices, &[0, 1, 2, 3]);
+    assert_eq!(palette[1], [20, 100, 180, 255]);
+    assert!(pages.page(1).expect("no error").is_none());
+    let fine: Vec<u32> = (0..12).map(|at| at * 1000).collect();
+    assert!(
+        held(&[page(fine)]).0.precision,
+        "a map finer than eight bits"
+    );
+}
+
+#[test]
+fn a_page_that_will_not_validate_refuses_the_document_for_editing() {
+    let bad = grey(2, 1, vec![1, 2]).tag(TAG_BITS_PER_SAMPLE, SHORT, &[3]);
+    let bytes = build(false, &[grey(2, 1, vec![1, 2]), bad]);
+    assert!(crate::open_native(ImageFormat::Tiff, &bytes[..], &limits()).is_err());
+}

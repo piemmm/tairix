@@ -245,8 +245,9 @@ non-cryptographic generator, and the entropy and hardware-RNG seams), the
 allocation-free `lib/inline` beside the heap-backed `lib/collections`,
 `lib/memguard` (the one guard-region sentinel and canary window, shared by the
 slab guard, the kthread stack guard and every port's boot-stack guard),
-`lib/crc32` (the one IEEE CRC-32, which PNG and GPT framing carry), and
-`lib/util`.
+`lib/crc32` (the one IEEE CRC-32, which PNG and GPT framing carry),
+`lib/xml` (the one fail-closed XML element scanner, read by the SVG decoder
+and OpenRaster's layer stack), and `lib/util`.
 
 `lib/util` admits only an item with two or more independent callers, and its
 README requires this file to name them:

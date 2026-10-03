@@ -2121,7 +2121,7 @@ blanking or crashing. The floor is *declared* on the window create
 (`WindowSizing`) and enforced by the window manager, so a drag simply stops
 there. It is **derived**, not hand-picked: `tairix_browse::win_sizing(scale,
 theme)` takes the larger of what a listing still reads at and what the command
-toolbar's own tools need across (`Toolbar::natural_width`), resolved at the
+toolbar's own tools need across (`Toolbar::natural_length`), resolved at the
 desktop's density — the ABI field is *physical* pixels while every desktop
 length is authored in logical ones. That is what keeps the strip from ever
 being handed a band too narrow for its tools: the shared `Toolbar` would then

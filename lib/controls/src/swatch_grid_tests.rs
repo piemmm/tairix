@@ -237,6 +237,24 @@ fn adopting_colours_keeps_the_marks_and_a_press_that_still_name_wells() {
 }
 
 #[test]
+fn refitting_the_columns_keeps_the_colours_and_marks_and_relays_the_wells() {
+    let mut grid = grid();
+    grid.adopt_selected(Some(7));
+    grid.adopt_secondary(Some(19));
+    grid.set_columns(10);
+    assert_eq!((grid.columns(), grid.rows()), (10, 2));
+    assert_eq!((grid.selected(), grid.secondary()), (Some(7), Some(19)));
+    assert_eq!(grid.colour(19), colours(COUNT).get(19).copied());
+    assert_eq!(
+        grid.cell_rect(bounds(), 10),
+        Some(Rect::new(0, 100, 40, 100)),
+        "the eleventh well starts the second row"
+    );
+    grid.set_columns(0);
+    assert_eq!(grid.columns(), 1, "a grid has at least one column");
+}
+
+#[test]
 fn an_out_of_range_mark_marks_nothing() {
     let mut grid = grid();
     grid.adopt_selected(Some(COUNT));

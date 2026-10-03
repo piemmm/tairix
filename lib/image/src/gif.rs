@@ -31,16 +31,19 @@ use core::ops::Range;
 
 use tairix_util::fallible;
 
+use crate::density::{Density, DensityUnit, Stated};
+use crate::encode::GifOptions;
 use crate::frames::{Animation, FrameSource};
 use crate::lzw::{CodeSource, Lzw, Widen};
-use crate::{DecodeError, DecodeLimits, RasterImage, PROBE_LIMITS, RGBA_BYTES};
+use crate::picture::{IndexDepth, Picture, Rgba8};
+use crate::{DecodeError, DecodeLimits, RasterImage, Unkept, PROBE_LIMITS, RGBA_BYTES};
 
 /// The three magic bytes every GIF opens with.
-const MAGIC: [u8; 3] = *b"GIF";
+pub(crate) const MAGIC: [u8; 3] = *b"GIF";
 
 /// The two versions the format defines. `GIF87a` simply carries none of the
 /// `GIF89a` extension blocks, so one parser reads both.
-const VERSIONS: [[u8; 3]; 2] = [*b"87a", *b"89a"];
+pub(crate) const VERSIONS: [[u8; 3]; 2] = [*b"87a", *b"89a"];
 
 /// The Logical Screen Descriptor's fixed length (`GIF89a` §18).
 const SCREEN_DESCRIPTOR_LEN: usize = 7;
@@ -48,16 +51,16 @@ const SCREEN_DESCRIPTOR_LEN: usize = 7;
 /// The Image Descriptor's length after its separator (`GIF89a` §20).
 const IMAGE_DESCRIPTOR_LEN: usize = 9;
 
-const EXTENSION_INTRODUCER: u8 = 0x21;
-const IMAGE_SEPARATOR: u8 = 0x2C;
-const TRAILER: u8 = 0x3B;
+pub(crate) const EXTENSION_INTRODUCER: u8 = 0x21;
+pub(crate) const IMAGE_SEPARATOR: u8 = 0x2C;
+pub(crate) const TRAILER: u8 = 0x3B;
 
 const LABEL_PLAIN_TEXT: u8 = 0x01;
-const LABEL_GRAPHIC_CONTROL: u8 = 0xF9;
+pub(crate) const LABEL_GRAPHIC_CONTROL: u8 = 0xF9;
 const LABEL_APPLICATION: u8 = 0xFF;
 
 /// The Graphic Control Extension's fixed data-sub-block length (`GIF89a` §23).
-const GRAPHIC_CONTROL_LEN: u8 = 4;
+pub(crate) const GRAPHIC_CONTROL_LEN: u8 = 4;
 
 /// The Application Extension's fixed identifier + authentication-code length
 /// (`GIF89a` §26).
@@ -73,8 +76,12 @@ const NETSCAPE_LOOP_SUB_BLOCK: u8 = 0x01;
 /// Bounds on the LZW minimum code size (`GIF89a` Appendix F). A one-bit code
 /// size leaves no room for the clear and end codes the format requires, and
 /// nine would exceed the 256 entries an index byte can address.
-const MIN_CODE_SIZE_MIN: u8 = 2;
+pub(crate) const MIN_CODE_SIZE_MIN: u8 = 2;
 const MIN_CODE_SIZE_MAX: u8 = 8;
+
+/// The pixel aspect ratio's fixed point: a ratio of `(byte + 15) / 64`.
+const ASPECT_SCALE: u32 = 64;
+const ASPECT_BIAS: u32 = 15;
 
 /// Bytes per colour-table entry: one each of red, green, and blue.
 const PALETTE_ENTRY_LEN: usize = 3;
@@ -199,6 +206,8 @@ struct Screen {
     /// Where the global colour table lies in the stream, so a chain can name
     /// it without holding the bytes it walks.
     palette: Option<Range<usize>>,
+    /// The pixel aspect ratio byte: zero for none stated.
+    aspect: u8,
 }
 
 /// Read the signature and Logical Screen Descriptor, answering the screen and
@@ -216,9 +225,9 @@ fn read_screen(bytes: &[u8]) -> Result<(Screen, usize), DecodeError> {
     let width = word(descriptor, 0);
     let height = word(descriptor, 2);
     let packed = descriptor[4];
-    // The background-colour index (byte 5) and pixel aspect ratio (byte 6)
-    // are read and skipped: disposal clears to transparent, and the desktop
-    // scales by its own geometry rather than a stored ratio.
+    // The background-colour index (byte 5) is skipped: disposal clears to
+    // transparent.
+    let aspect = descriptor[6];
     let palette = if packed & 0x80 == 0 {
         None
     } else {
@@ -232,6 +241,7 @@ fn read_screen(bytes: &[u8]) -> Result<(Screen, usize), DecodeError> {
             width,
             height,
             palette,
+            aspect,
         },
         reader.pos,
     ))
@@ -312,6 +322,40 @@ enum Application {
     Loops(Option<u32>),
     /// Any other application's extension, read and skipped.
     Other,
+}
+
+/// The pixel aspect ratio byte `aspect` states — `(aspect + 15) / 64`, a
+/// pixel's width over its height — as the density across and down it means.
+pub(crate) fn aspect_density(aspect: u8) -> Option<Density> {
+    if aspect == 0 {
+        return None;
+    }
+    match Stated::of(
+        (ASPECT_SCALE, 1),
+        (u32::from(aspect) + ASPECT_BIAS, 1),
+        Some(DensityUnit::Aspect),
+    ) {
+        Stated::Kept(density) => density,
+        Stated::Unkept => None,
+    }
+}
+
+/// The pixel aspect ratio byte stating `density`'s shape, rounded to the
+/// nearest the byte holds: zero for square pixels, no density, or a shape
+/// past the byte's range.
+pub(crate) fn aspect_byte(density: Option<Density>) -> u8 {
+    let Some((across, down)) = density.and_then(|density| density.shape()) else {
+        return 0;
+    };
+    let scaled = (u64::from(down) * u64::from(ASPECT_SCALE) * 2 + u64::from(across))
+        / (2 * u64::from(across));
+    match scaled
+        .checked_sub(u64::from(ASPECT_BIAS))
+        .and_then(|byte| u8::try_from(byte).ok())
+    {
+        Some(byte) if u32::from(byte) + ASPECT_BIAS != ASPECT_SCALE => byte,
+        _ => 0,
+    }
 }
 
 /// Read an Application Extension (`GIF89a` §26).
@@ -530,7 +574,7 @@ const INTERLACE_PASSES: [(u32, u32); 4] = [(0, 8), (4, 8), (2, 4), (1, 2)];
 
 /// The frame row the `stream_row`-th row of an interlaced frame's data
 /// belongs to.
-fn interlaced_row(stream_row: u32, height: u32) -> u32 {
+pub(crate) fn interlaced_row(stream_row: u32, height: u32) -> u32 {
     let mut row = stream_row;
     for (start, step) in INTERLACE_PASSES {
         let rows = pass_rows(height, start, step);
@@ -612,6 +656,7 @@ impl Chain {
                         width: self.width,
                         height: self.height,
                         palette: self.global_palette.clone(),
+                        aspect: 0,
                     };
                     let descriptor = read_descriptor(&mut reader, &screen)?;
                     if control.disposal == Disposal::Previous {
@@ -853,6 +898,183 @@ pub(crate) fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage,
     let pixels = fallible::collected(frames.canvas().len(), frames.canvas().iter().copied())
         .ok_or(DecodeError::OutOfMemory)?;
     Ok(RasterImage::from_parts(width, height, pixels))
+}
+
+/// Read a GIF as the palette picture its first frame stores: that frame's
+/// indices over the logical screen, the colour table they select from with
+/// the transparent entry clear, and whether it was interlaced.
+///
+/// Animation timing is moot for a picture of one frame, so it is not counted
+/// as held beside it; a further frame, a comment, plain text, another
+/// application's data, a frame short of the screen, or a global table the
+/// frame's own replaces all are.
+pub(crate) fn decode_native(
+    bytes: &[u8],
+    limits: &DecodeLimits,
+) -> Result<(Picture, Unkept, GifOptions), DecodeError> {
+    let (screen, first_block) = read_screen(bytes)?;
+    limits.check(screen.width, screen.height)?;
+    let mut reader = Reader::new(bytes, first_block);
+    let mut control = Control::DEFAULT;
+    let mut first: Option<(Descriptor<'_>, Control)> = None;
+    let mut frames = 0u32;
+    let mut extras = false;
+    loop {
+        match reader.byte()? {
+            TRAILER => break,
+            IMAGE_SEPARATOR => {
+                let descriptor = read_descriptor(&mut reader, &screen)?;
+                reader.pos = descriptor.data;
+                reader.skip_sub_blocks()?;
+                frames = frames.saturating_add(1);
+                if frames > crate::MAX_ANIMATION_FRAMES {
+                    return Err(DecodeError::GifTooManyFrames);
+                }
+                if first.is_none() {
+                    first = Some((descriptor, control));
+                } else {
+                    extras = true;
+                }
+                control = Control::DEFAULT;
+            }
+            EXTENSION_INTRODUCER => match reader.byte()? {
+                LABEL_GRAPHIC_CONTROL => control = read_graphic_control(&mut reader)?,
+                LABEL_APPLICATION => {
+                    extras |= matches!(read_application(&mut reader)?, Application::Other);
+                }
+                // Rendered text the picture does not hold, which consumes
+                // the control in force exactly as the decoder's walk has it.
+                LABEL_PLAIN_TEXT => {
+                    reader.skip_sub_blocks()?;
+                    control = Control::DEFAULT;
+                    extras = true;
+                }
+                _ => {
+                    reader.skip_sub_blocks()?;
+                    extras = true;
+                }
+            },
+            _ => return Err(DecodeError::GifUnknownBlock),
+        }
+    }
+    let (descriptor, control) = first.ok_or(DecodeError::GifNoFrames)?;
+    let global = screen.palette.clone().and_then(|table| bytes.get(table));
+    extras |= descriptor.palette.is_some() && global.is_some();
+    let table = descriptor
+        .palette
+        .or(global)
+        .ok_or(DecodeError::GifMissingColourTable)?;
+    let (palette, transparent) = native_palette(table, control.transparent)?;
+    // A transparent index past the table names no colour of it, so the
+    // entry it needs is the file's own addition.
+    extras |=
+        transparent.is_some_and(|index| usize::from(index) * PALETTE_ENTRY_LEN >= table.len());
+    let rect = descriptor.rect;
+    let covers = rect.left == 0
+        && rect.top == 0
+        && rect.width == screen.width
+        && rect.height == screen.height;
+    extras |= !covers;
+    let frame_len = usize::try_from(u64::from(rect.width) * u64::from(rect.height))
+        .map_err(|_| DecodeError::DimensionsOverflow)?;
+    let mut frame = fallible::filled(frame_len, 0u8).ok_or(DecodeError::OutOfMemory)?;
+    let mut lzw = Lzw::new().ok_or(DecodeError::OutOfMemory)?;
+    expand(
+        bytes,
+        descriptor.data,
+        descriptor.min_code_size,
+        &mut lzw,
+        &mut frame,
+    )?;
+    let entries = table.len() / PALETTE_ENTRY_LEN;
+    if frame
+        .iter()
+        .any(|&index| usize::from(index) >= entries && Some(index) != transparent)
+    {
+        return Err(DecodeError::GifPaletteIndexOutOfRange);
+    }
+    let (indices, mask) = if covers && !descriptor.interlaced {
+        (frame, None)
+    } else {
+        place_frame(&screen, &descriptor, &frame, covers)?
+    };
+    let depth = IndexDepth::holding(palette.len()).ok_or(DecodeError::GifMissingColourTable)?;
+    let picture = Picture::indexed(screen.width, screen.height, depth, palette, indices, mask)
+        .map_err(|_| DecodeError::GifPaletteIndexOutOfRange)?
+        .with_density(aspect_density(screen.aspect));
+    let unkept = Unkept {
+        precision: false,
+        extras,
+        converted: false,
+    };
+    Ok((
+        picture,
+        unkept,
+        GifOptions {
+            interlaced: descriptor.interlaced,
+        },
+    ))
+}
+
+/// The colour table as straight-alpha entries, the transparent one clear and
+/// added where it lies past the table's end.
+fn native_palette(
+    table: &[u8],
+    transparent: Option<u8>,
+) -> Result<(Vec<Rgba8>, Option<u8>), DecodeError> {
+    let (entries, _) = table.as_chunks::<PALETTE_ENTRY_LEN>();
+    let len = transparent.map_or(entries.len(), |index| {
+        entries.len().max(usize::from(index) + 1)
+    });
+    let mut palette =
+        fallible::filled(len, [0u8, 0, 0, u8::MAX]).ok_or(DecodeError::OutOfMemory)?;
+    for (slot, &[red, green, blue]) in palette.iter_mut().zip(entries) {
+        *slot = [red, green, blue, u8::MAX];
+    }
+    if let Some(index) = transparent {
+        palette[usize::from(index)][3] = 0;
+    }
+    Ok((palette, transparent))
+}
+
+/// A frame's indices placed on the screen in display order, and the mask
+/// that hides what it does not cover.
+fn place_frame(
+    screen: &Screen,
+    descriptor: &Descriptor<'_>,
+    frame: &[u8],
+    covers: bool,
+) -> Result<(Vec<u8>, Option<Vec<u8>>), DecodeError> {
+    let len = usize::try_from(u64::from(screen.width) * u64::from(screen.height))
+        .map_err(|_| DecodeError::DimensionsOverflow)?;
+    let mut indices = fallible::filled(len, 0u8).ok_or(DecodeError::OutOfMemory)?;
+    let mut mask = if covers {
+        None
+    } else {
+        Some(fallible::filled(len, 0u8).ok_or(DecodeError::OutOfMemory)?)
+    };
+    let rect = descriptor.rect;
+    let (stride, screen_width) = (rect.width as usize, screen.width as usize);
+    for stream_row in 0..rect.height {
+        let row = if descriptor.interlaced {
+            interlaced_row(stream_row, rect.height)
+        } else {
+            stream_row
+        };
+        let from = stream_row as usize * stride;
+        let to = (rect.top + row) as usize * screen_width + rect.left as usize;
+        let (Some(source), Some(target)) = (
+            frame.get(from..from + stride),
+            indices.get_mut(to..to + stride),
+        ) else {
+            return Err(DecodeError::GifFrameOutsideScreen);
+        };
+        target.copy_from_slice(source);
+        if let Some(shown) = mask.as_mut().and_then(|mask| mask.get_mut(to..to + stride)) {
+            shown.fill(u8::MAX);
+        }
+    }
+    Ok((indices, mask))
 }
 
 #[cfg(test)]

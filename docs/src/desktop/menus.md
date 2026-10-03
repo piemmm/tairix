@@ -373,14 +373,15 @@ application's and the desktop never interprets one.
 - **TextEdit** (`userland/apps/textedit`) — it has no menu bar: a secondary
   press anywhere in a window opens its one menu, the clipboard rows over
   File, Edit, Find and View as submenus, three plates deep under View's
-  choices. It is why a whole menu may hold three plates' worth of rows
-  (`APP_MENU_MAX_TOTAL_ROWS`). See [TextEdit](./textedit.md).
+  choices. See [TextEdit](./textedit.md).
 - **Paint** (`userland/apps/paint`) — the same shape: a secondary press
   anywhere opens its one menu, the clipboard and selection rows over File,
-  Edit, Image, Colours, Sprites, View and Tools as submenus. Its Sprites menu
-  carries entry fields — a sprite's new name, the one to go to — answered as
-  `MenuOutcome::Entered` and read back with `take_menu_text`. Both editors
-  build their menus with `tairix_window::menu::MenuBuilder`.
+  Edit, Image, Layers, Colours, Adjust, Sprites, View and Tools as submenus,
+  past a hundred rows in all. It is why a whole menu may hold four plates'
+  worth of rows (`APP_MENU_MAX_TOTAL_ROWS`). Its Layers and Sprites menus
+  carry entry fields — the layer or sprite to go to, a sprite's new name —
+  answered as `MenuOutcome::Entered` and read back with `take_menu_text`.
+  Both editors build their menus with `tairix_window::menu::MenuBuilder`.
   See [Paint](./paint.md).
 
 None keeps a menu shell, and none draws a menu pixel.

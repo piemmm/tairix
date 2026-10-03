@@ -29,8 +29,8 @@ use crate::damage::sink;
 use crate::state::{AuthorityState, ControlState, ValidationState};
 use crate::testkit::{control_font, has_pixel, high_contrast, marks_elision, premul};
 use crate::text::{
-    close_gap, debug_buffer_identity, debug_bytes, debug_zeroize, zeroize_range, Keystroke,
-    SearchField, SecretField, TextAction, TextField,
+    close_gap, debug_buffer_identity, debug_bytes, debug_zeroize, owner_chord, zeroize_range,
+    Keystroke, SearchField, SecretField, TextAction, TextField,
 };
 
 const W: u32 = 200;
@@ -1602,4 +1602,26 @@ fn a_paste_the_allocator_cannot_hold_is_refused_rather_than_aborting() {
     let mut field = TextField::new();
     assert!(!crate::text::debug_fits(&mut field, usize::MAX));
     assert!(crate::text::debug_fits(&mut field, 16));
+}
+
+/// A chord is the field's owner's, but Ctrl+A selects the field's own text
+/// and a plain key is typing.
+#[test]
+fn a_field_leaves_its_owner_every_chord_but_select_all() {
+    let held = |ctrl, alt, meta| Modifiers {
+        ctrl,
+        alt,
+        meta,
+        ..Modifiers::default()
+    };
+    assert!(owner_chord(Key::Char('s'), held(true, false, false)));
+    assert!(owner_chord(Key::Char('x'), held(false, true, false)));
+    assert!(owner_chord(
+        Key::Named(NamedKey::Left),
+        held(false, false, true)
+    ));
+    assert!(!owner_chord(Key::Char('a'), held(true, false, false)));
+    assert!(!owner_chord(Key::Char('A'), held(true, false, false)));
+    assert!(owner_chord(Key::Char('a'), held(true, true, false)));
+    assert!(!owner_chord(Key::Char('s'), held(false, false, false)));
 }

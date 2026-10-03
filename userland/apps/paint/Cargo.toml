@@ -1,6 +1,6 @@
 [package]
 name = "tairix-paint"
-description = "TAIRiX Paint: the desktop image editor — pixel editing and painting in truecolour or a palette, reading every picture format TAIRiX decodes and writing PNG, JPEG and RISC OS sprite areas at every depth, holding no filesystem capability and decoding nothing of its documents itself (plans/PAINT.md)."
+description = "TAIRiX Paint: the desktop image editor — pixel editing and painting in truecolour or a palette, reading every picture format TAIRiX decodes and writing PNG, JPEG, GIF, BMP, TIFF and RISC OS sprite areas, holding no filesystem capability and decoding nothing of its documents itself (plans/PAINT.md)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,30 +15,32 @@ workspace = true
 # The `abi-v1` `Errno`, the window-channel menu vocabulary, and the desktop's
 # scroll units the engine speaks.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
-# The shared Reactive Alloy controls the window composes: the toolbar, the
-# scrollbars, the sliders and toggles, the palette's swatch grid, and the
+# The shared Reactive Alloy controls the window composes: the tool box and the
+# view strip, the tool-controls bar's number fields, choice and switch, the
+# scrollbars, the palette strip's swatch grid, the colour picker, and the
 # dialogs.
 tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
 # The colour the dock's picker edits and the hex the status band spells it in.
 tairix-colour = { path = "../../../lib/colour", version = "=0.0.0" }
-# Shared text rasterisation: the status band and the tool panel.
+# Shared text rasterisation: the status band and the tool-controls bar.
 tairix-font = { path = "../../../lib/font", version = "=0.0.0" }
 # The shared integer screen geometry the layout and every hit-test use.
 tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
-# The built-in glyphs the toolbar's tools draw.
+# The built-in glyphs the tool box and the view strip draw.
 tairix-icon = { path = "../../../lib/icon", version = "=0.0.0" }
 # The picture model, the RISC OS sprite model and desktop palettes, and the
-# PNG, JPEG and sprite-area encoders a save runs.
+# encoders a save runs.
 tairix-image = { path = "../../../lib/image", version = "=0.0.0" }
 # The shared desktop input vocabulary and the one click-pairing rule.
 tairix-input = { path = "../../../lib/input", version = "=0.0.0" }
 # Shared software rasterisation: the window picture, and the one resampler a
 # smooth resize goes through.
 tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
+# The fast unkeyed hash the noise filter draws its speckle from, the same
+# wherever the picture is read.
+tairix-hash = { path = "../../../lib/hash", version = "=0.0.0" }
 # The memory-pressure band the undo history is sized for.
 tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
-# The shared non-cryptographic generator the spray scatters paint by.
-tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
 # The edit decode's vocabulary, so the document a load assembles is built
 # from the seam's own checked answers.
 tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0" }

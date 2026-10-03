@@ -9,7 +9,9 @@
 //! each end whose chevron is drawn only where there is something that way, a
 //! press stepping one tool and a held press repeating, the wheel, keyboard
 //! focus scrolling a tool into view, and the offset compared by the repaint
-//! gate while the press latch is not.
+//! gate while the press latch is not. The same strip laid out down a column —
+//! a tool box — is covered for its seating, divider, leading seam, keys,
+//! wheel, overflow, breadth and routing.
 
 use alloc::vec::Vec;
 
@@ -22,6 +24,7 @@ use tairix_theme::Theme;
 
 use crate::button::{ButtonContent, IconButton, SplitButton};
 use crate::damage::sink;
+use crate::scroll::ScrollOrientation;
 use crate::state::ControlRole;
 use crate::testkit::{has_pixel, premul, region_has};
 use crate::toolbar::{ToolActivation, Toolbar, ToolbarAction, ToolbarOutcome};
@@ -502,7 +505,7 @@ fn seated(toolbar: &Toolbar, bounds: Rect, theme: &Theme) -> Vec<(usize, Rect)> 
 fn a_wide_strip_seats_every_tool_and_reserves_nothing() {
     let theme = Theme::dark();
     let toolbar = long_toolbar();
-    let wide = Rect::new(0, 0, toolbar.natural_width(Scale::ONE, &theme), H);
+    let wide = Rect::new(0, 0, toolbar.natural_length(Scale::ONE, &theme), H);
     assert_eq!(
         seated(&toolbar, wide, &theme).len(),
         toolbar.len(),
@@ -602,7 +605,7 @@ fn a_chevron_is_drawn_only_where_there_is_something_that_way() {
     assert!(!chevron_drawn(&toolbar, bounds, &theme, false));
 
     // A strip wide enough for every tool offers neither.
-    let wide = Rect::new(0, 0, toolbar.natural_width(Scale::ONE, &theme), H);
+    let wide = Rect::new(0, 0, toolbar.natural_length(Scale::ONE, &theme), H);
     assert!(!chevron_drawn(&toolbar, wide, &theme, true));
     assert!(!chevron_drawn(&toolbar, wide, &theme, false));
 }
@@ -667,7 +670,7 @@ fn the_wheel_scrolls_the_strip_and_a_full_strip_ignores_it() {
     assert_eq!(toolbar.scroll_model(bounds, Scale::ONE, &theme).offset(), 0);
     assert!(!toolbar.wheel(detents(-1), 0, bounds, Scale::ONE, &theme, &mut sink()));
 
-    let wide = Rect::new(0, 0, toolbar.natural_width(Scale::ONE, &theme), H);
+    let wide = Rect::new(0, 0, toolbar.natural_length(Scale::ONE, &theme), H);
     assert!(!toolbar.wheel(detents(1), 0, wide, Scale::ONE, &theme, &mut sink()));
 }
 
@@ -775,7 +778,7 @@ fn a_strip_with_no_room_for_a_tool_shows_and_offers_nothing() {
         .range()
         .is_scrollable());
     // And the declared minimum is what it takes to show one.
-    let least = toolbar.min_width(Scale::ONE, &theme);
+    let least = toolbar.min_length(Scale::ONE, &theme);
     let floor = Rect::new(0, 0, least, H);
     assert_eq!(seated(&toolbar, floor, &theme).len(), 1);
 }
@@ -807,4 +810,369 @@ fn a_wheel_scroll_moves_the_hover_to_the_tool_now_under_the_pointer() {
         "a scroll must leave the strip as a move onto the same point would"
     );
     assert_ne!(toolbar, hovering, "…and not as it was before the scroll");
+}
+
+// --- A tool box: the strip turned on its side ---------------------------
+
+/// The length a tool box test's column runs down.
+const TALL: u32 = 220;
+
+fn column(toolbar: Toolbar) -> Toolbar {
+    toolbar.with_orientation(ScrollOrientation::Vertical)
+}
+
+/// A column exactly one slot broad, `TALL` long.
+fn column_bounds() -> Rect {
+    Rect::new(0, 0, CH, TALL)
+}
+
+/// The surface-y centre of icon tool `i` down a column (one adjacency run).
+fn icon_centre_y(i: u32) -> i32 {
+    xi(GAP + i * (CH + GAP) + CH / 2)
+}
+
+fn render_in(toolbar: &Toolbar, bounds: Rect, theme: &Theme) -> Surface {
+    let mut surface = Surface::new(bounds.width, bounds.height).expect("surface");
+    toolbar.render(&mut surface, bounds, Scale::ONE, theme, &mut NoArtwork);
+    surface
+}
+
+/// The longest run of consecutive columns in any one row carrying `want`:
+/// the across-the-column twin of [`tallest_column_run`].
+fn widest_row_run(surface: &Surface, want: Pixel) -> u32 {
+    let mut widest = 0;
+    for y in 0..surface.height() {
+        let mut run = 0;
+        for x in 0..surface.width() {
+            run = if surface.get(x, y) == Some(want) {
+                run + 1
+            } else {
+                0
+            };
+            widest = widest.max(run);
+        }
+    }
+    widest
+}
+
+#[test]
+fn a_tool_box_stacks_its_tools_down_the_column() {
+    let theme = Theme::dark();
+    let toolbar = column(grouped_toolbar());
+    let bounds = column_bounds();
+    for (index, top) in [
+        (0, GAP),
+        (1, GAP + CH + GAP),
+        (2, GAP + 2 * (CH + GAP) + GAP),
+    ] {
+        let rect = toolbar
+            .tool_rect(index, bounds, Scale::ONE, &theme)
+            .expect("seated");
+        assert_eq!(
+            rect,
+            Rect::new(0, xi(top), CH, CH),
+            "tool {index}, the last past its group's gutter"
+        );
+        assert_eq!(
+            toolbar.tool_at(bounds, Scale::ONE, &theme, rect.center()),
+            Some(index)
+        );
+    }
+    assert_eq!(
+        toolbar.natural_length(Scale::ONE, &theme),
+        GAP + 2 * (CH + GAP) + GAP + CH,
+        "the natural length runs down the column"
+    );
+}
+
+#[test]
+fn a_tool_box_centres_its_tools_across_a_broader_column() {
+    let theme = Theme::dark();
+    let toolbar = column(grouped_toolbar());
+    let bounds = Rect::new(10, 0, CH + 2 * GAP, TALL);
+    let rect = toolbar
+        .tool_rect(0, bounds, Scale::ONE, &theme)
+        .expect("seated");
+    assert_eq!(rect.left(), 10 + xi(GAP));
+    assert_eq!(rect.width, CH);
+}
+
+#[test]
+fn a_tool_box_draws_its_group_divider_across_the_column() {
+    let theme = Theme::dark();
+    let border = premul(theme.palette().border);
+    let bounds = Rect::new(0, 0, CH + 2 * GAP, TALL);
+    let grouped = render_in(&column(grouped_toolbar()), bounds, &theme);
+    let one_group = render_in(
+        &column(Toolbar::new().with_icon(icon(), 0).with_icon(icon(), 0)),
+        bounds,
+        &theme,
+    );
+    let drawn = widest_row_run(&grouped, border);
+    assert!(
+        drawn > 1,
+        "a group boundary drew no divider across the column"
+    );
+    assert!(
+        widest_row_run(&one_group, border) < drawn,
+        "a single group drew a divider of its own"
+    );
+    assert!(
+        tallest_column_run(&grouped, border) < drawn,
+        "the divider runs across the column, not down it"
+    );
+}
+
+#[test]
+fn a_tool_boxs_active_tool_carries_its_seam_on_the_leading_edge() {
+    let theme = Theme::dark();
+    let mut toolbar = column(grouped_toolbar());
+    toolbar.set_active(1);
+    let surface = render_in(&toolbar, column_bounds(), &theme);
+    let accent = premul(theme.palette().accent);
+    let top = GAP + CH + GAP;
+    assert!(
+        region_has(&surface, (0, 1), (top + 2, top + CH - 2), accent),
+        "the seam runs down the tool's leading edge"
+    );
+    assert!(
+        !region_has(&surface, (CH / 2, CH - 2), (top + CH - 2, top + CH), accent),
+        "and not beneath it"
+    );
+}
+
+#[test]
+fn up_and_down_walk_a_tool_box_and_left_and_right_do_not() {
+    let theme = Theme::dark();
+    let bounds = column_bounds();
+    let mut toolbar = column(grouped_toolbar());
+    let key = |toolbar: &mut Toolbar, named| {
+        toolbar.on_key(Key::Named(named), bounds, Scale::ONE, &theme, &mut sink())
+    };
+    key(&mut toolbar, NamedKey::Down);
+    assert_eq!(toolbar.focused(), Some(0));
+    key(&mut toolbar, NamedKey::Down);
+    assert_eq!(toolbar.focused(), Some(1));
+    key(&mut toolbar, NamedKey::Up);
+    key(&mut toolbar, NamedKey::Up);
+    assert_eq!(toolbar.focused(), Some(2), "Up wraps to the last tool");
+    assert_eq!(key(&mut toolbar, NamedKey::Right), ToolbarOutcome::Idle);
+    assert_eq!(key(&mut toolbar, NamedKey::Left), ToolbarOutcome::Idle);
+    assert_eq!(
+        toolbar.focused(),
+        Some(2),
+        "across the column moves nothing"
+    );
+    assert_eq!(
+        key(&mut toolbar, NamedKey::Enter),
+        ToolbarOutcome::Activated(ToolbarAction {
+            index: 2,
+            part: ToolActivation::Primary
+        })
+    );
+}
+
+/// A column one slot broad and as long as [`narrow`] is wide, so it scrolls
+/// both ways.
+fn short_column() -> Rect {
+    Rect::new(0, 0, CH, narrow().width)
+}
+
+/// Whether a chevron is drawn in the reserved slot at the top or the bottom
+/// of `bounds`.
+fn chevron_down_column(toolbar: &Toolbar, bounds: Rect, theme: &Theme, leading: bool) -> bool {
+    let surface = render_in(toolbar, bounds, theme);
+    let slot = if leading {
+        (0, CH)
+    } else {
+        (bounds.height - CH, bounds.height)
+    };
+    region_has(
+        &surface,
+        (0, bounds.width),
+        slot,
+        premul(theme.palette().on_surface_muted),
+    )
+}
+
+#[test]
+fn a_short_tool_box_seats_whole_tools_and_scrolls_down_its_column() {
+    let theme = Theme::dark();
+    let mut toolbar = column(long_toolbar());
+    let bounds = short_column();
+    let shown = seated(&toolbar, bounds, &theme);
+    assert!(!shown.is_empty() && shown.len() < toolbar.len());
+    for (i, rect) in &shown {
+        assert!(
+            rect.top() >= bounds.top() && rect.bottom() <= bounds.bottom(),
+            "tool {i} at {rect:?} lies outside {bounds:?}"
+        );
+        assert_eq!(rect.height, CH, "a part-tool was seated");
+    }
+    assert!(!chevron_down_column(&toolbar, bounds, &theme, true));
+    assert!(chevron_down_column(&toolbar, bounds, &theme, false));
+
+    let below = Point::new(xi(CH / 2), xi(bounds.height - CH / 2));
+    toolbar.on_pointer(
+        &moved(below.x, below.y),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
+    assert_eq!(
+        toolbar.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &mut sink()),
+        ToolbarOutcome::Redraw
+    );
+    assert_eq!(
+        toolbar.scroll_model(bounds, Scale::ONE, &theme).offset(),
+        1,
+        "the lower affordance steps one tool down"
+    );
+    assert!(chevron_down_column(&toolbar, bounds, &theme, true));
+}
+
+#[test]
+fn a_tool_box_answers_the_vertical_wheel_first() {
+    let theme = Theme::dark();
+    let mut toolbar = column(long_toolbar());
+    let bounds = short_column();
+    let offset = |toolbar: &Toolbar| toolbar.scroll_model(bounds, Scale::ONE, &theme).offset();
+    assert!(toolbar.wheel(0, detents(1), bounds, Scale::ONE, &theme, &mut sink()));
+    assert_eq!(offset(&toolbar), 1);
+    assert!(
+        toolbar.wheel(detents(1), 0, bounds, Scale::ONE, &theme, &mut sink()),
+        "a sideways wheel reaches a column with nothing along it"
+    );
+    assert_eq!(offset(&toolbar), 2);
+    assert!(toolbar.wheel(
+        detents(1),
+        detents(-1),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &mut sink()
+    ));
+    assert_eq!(offset(&toolbar), 1, "the vertical turn wins");
+}
+
+#[test]
+fn keyboard_focus_scrolls_a_tool_box_to_the_tool() {
+    let theme = Theme::dark();
+    let mut toolbar = column(long_toolbar());
+    let bounds = short_column();
+    let last = toolbar.len() - 1;
+    toolbar.on_key(
+        Key::Named(NamedKey::End),
+        bounds,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
+    assert!(toolbar
+        .tool_rect(last, bounds, Scale::ONE, &theme)
+        .is_some());
+}
+
+#[test]
+fn a_tool_box_at_its_least_length_shows_one_tool() {
+    let theme = Theme::dark();
+    let toolbar = column(long_toolbar());
+    let least = toolbar.min_length(Scale::ONE, &theme);
+    assert_eq!(
+        seated(&toolbar, Rect::new(0, 0, CH, least), &theme).len(),
+        1
+    );
+    assert!(seated(&toolbar, Rect::new(0, 0, CH, 2 * CH), &theme).is_empty());
+}
+
+fn split() -> SplitButton {
+    SplitButton::new(ButtonContent::Icon(IconKind::Bell), ControlRole::Neutral)
+}
+
+#[test]
+fn a_split_tool_keeps_its_regions_side_by_side_down_a_column() {
+    let theme = Theme::dark();
+    let strip = Toolbar::new().with_split(split(), 0);
+    let tool_box = column(strip.clone());
+    assert_eq!(strip.breadth(Scale::ONE, &theme), CH);
+    assert_eq!(strip.natural_length(Scale::ONE, &theme), GAP + 2 * CH);
+    assert_eq!(tool_box.breadth(Scale::ONE, &theme), 2 * CH);
+    assert_eq!(tool_box.natural_length(Scale::ONE, &theme), GAP + CH);
+    let bounds = Rect::new(0, 0, 2 * CH, TALL);
+    assert_eq!(
+        tool_box.tool_rect(0, bounds, Scale::ONE, &theme),
+        Some(Rect::new(0, xi(GAP), 2 * CH, CH))
+    );
+}
+
+#[test]
+fn a_tool_broader_than_its_band_is_not_seated() {
+    let theme = Theme::dark();
+    let tool_box = column(
+        Toolbar::new()
+            .with_icon(icon(), 0)
+            .with_split(split(), 0)
+            .with_icon(icon(), 0),
+    );
+    let bounds = column_bounds();
+    assert_eq!(tool_box.tool_rect(1, bounds, Scale::ONE, &theme), None);
+    let after = tool_box
+        .tool_rect(2, bounds, Scale::ONE, &theme)
+        .expect("the tool after it is seated");
+    assert_eq!(
+        after.top(),
+        xi(GAP + 2 * (CH + GAP)),
+        "the broad tool keeps its place down the column"
+    );
+    let gone = Point::new(xi(CH / 2), icon_centre_y(1));
+    assert_eq!(tool_box.tool_at(bounds, Scale::ONE, &theme, gone), None);
+
+    // Across a window too: a strip shorter than a tool seats none.
+    let low = Rect::new(0, 0, W, CH - 1);
+    assert!(seated(&grouped_toolbar(), low, &theme).is_empty());
+    let mut surface = Surface::new(W, CH + 4).expect("surface");
+    let blank = surface.get(0, CH + 3);
+    grouped_toolbar().render(&mut surface, low, Scale::ONE, &theme, &mut NoArtwork);
+    assert!(
+        (0..W).all(|x| (CH - 1..CH + 4).all(|y| surface.get(x, y) == blank)),
+        "nothing is drawn past the strip"
+    );
+}
+
+#[test]
+fn routing_down_a_tool_box_leaves_the_same_state_as_fanning() {
+    let theme = Theme::dark();
+    let bounds = column_bounds();
+    let x = xi(CH / 2);
+    let path = [
+        moved(x, icon_centre_y(0)),
+        moved(x, icon_centre_y(0) + 1),
+        moved(x, icon_centre_y(1)),
+        PRESS,
+        moved(x, icon_centre_y(2) + xi(GAP)),
+        RELEASE,
+        moved(x, icon_centre_y(2) + xi(GAP)),
+        PRESS,
+        RELEASE,
+        moved(x, xi(TALL) - 1),
+    ];
+    let mut routed = column(grouped_toolbar());
+    let mut fanned = column(grouped_toolbar());
+    for event in path {
+        let a = routed.on_pointer(&event, bounds, Scale::ONE, &theme, &mut sink());
+        let b = fanned.fan_pointer(&event, bounds, Scale::ONE, &theme, &mut sink());
+        assert_eq!(a, b, "activation differs after {event:?}");
+        assert_eq!(routed, fanned, "state differs after {event:?}");
+    }
+}
+
+#[test]
+fn the_orientation_is_drawn_so_it_compares() {
+    assert_ne!(grouped_toolbar(), column(grouped_toolbar()));
+    assert_eq!(
+        column(grouped_toolbar()).orientation(),
+        ScrollOrientation::Vertical
+    );
+    assert_eq!(Toolbar::new().orientation(), ScrollOrientation::Horizontal);
 }

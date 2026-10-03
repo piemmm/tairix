@@ -323,7 +323,8 @@ impl<'a> PaintServers<'a> {
         let mut chain = alloc::vec![node];
         let mut current = node;
         while chain.len() < MAX_HREF_DEPTH {
-            let Some(href) = current.href().and_then(|link| link.strip_prefix('#')) else {
+            let Some(href) = crate::xml::href(current).and_then(|link| link.strip_prefix('#'))
+            else {
                 break;
             };
             let Some(next) = self.find(href) else {

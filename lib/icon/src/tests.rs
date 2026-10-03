@@ -178,6 +178,13 @@ fn each_image_editing_glyph_is_its_own_mark() {
         IconKind::ToolRectangle,
         IconKind::ToolEllipse,
         IconKind::PixelGrid,
+        IconKind::ToolGradient,
+        IconKind::ToolClone,
+        IconKind::ToolText,
+        IconKind::ToolPolygon,
+        IconKind::ToolCrop,
+        IconKind::ToolHand,
+        IconKind::ToolZoom,
     ];
     let neighbours = [
         IconKind::Generic,

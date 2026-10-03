@@ -399,11 +399,12 @@ path paying for it: `Present` was one 522-byte frame and is now 36 bytes,
 which is the whole of what it needs.
 
 **M1b — the model (landed).** `APP_MENU_MAX_ROWS` (32) now bounds one
-*plate*, with `APP_MENU_MAX_TOTAL_ROWS` (96) bounding the whole menu — its
+*plate*, with `APP_MENU_MAX_TOTAL_ROWS` (128) bounding the whole menu — its
 own bound rather than the product of the others, because it is what holds the
-one frame a menu crosses in. It is three plates' worth because a window with
+one frame a menu crosses in. It is four plates' worth because a window with
 no menu bar folds every menu it has into the one a secondary press opens:
-TextEdit's is 69 rows (its menus as submenus, the formats a plate of 22). Nesting is bounded by `APP_MENU_MAX_DEPTH` (4)
+TextEdit's is 69 rows (its menus as submenus, the formats a plate of 22), and
+Paint's, ten menus as submenus, past a hundred. Nesting is bounded by `APP_MENU_MAX_DEPTH` (4)
 as a shape check over the existing parent index, so a chain is expressible at
 last (D5) and a submenu on the deepest plate is refused rather than drawn
 opening nothing.

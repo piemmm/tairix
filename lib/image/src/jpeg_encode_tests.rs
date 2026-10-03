@@ -7,10 +7,11 @@ use alloc::vec::Vec;
 use super::{
     scaled_table, AC_CHROMA, AC_LUMA, CHROMA_QUANT, CODES, DC_CHROMA, DC_LUMA, LUMA_QUANT,
 };
+use crate::encode_fixture::{self, rgba};
 use crate::huffman::{Canonical, MAX_CODE_BITS};
 use crate::{
-    decode_as, encode_jpeg, open_native, DecodeLimits, EncodeError, ImageFormat, IndexDepth,
-    JpegOptions, NativeDocument, Picture, PictureKind, PictureSource, Rgba8, Unkept,
+    decode_as, encode_jpeg, DecodeLimits, Density, DensityUnit, EncodeError, ImageFormat,
+    IndexDepth, JpegOptions, Picture, PictureKind, PictureSource, Unkept,
 };
 
 fn limits() -> DecodeLimits {
@@ -19,16 +20,6 @@ fn limits() -> DecodeLimits {
 
 fn options(quality: u8) -> JpegOptions {
     JpegOptions::new(quality, [255, 255, 255]).expect("a valid quality")
-}
-
-fn rgba(width: u32, height: u32, mut pixel: impl FnMut(u32, u32) -> Rgba8) -> Picture {
-    let mut bytes = Vec::new();
-    for y in 0..height {
-        for x in 0..width {
-            bytes.extend_from_slice(&pixel(x, y));
-        }
-    }
-    Picture::rgba(width, height, bytes).expect("valid")
 }
 
 fn decoded(jpeg: &[u8]) -> Vec<u8> {
@@ -266,10 +257,7 @@ fn a_side_past_what_a_frame_header_can_state_is_refused() {
 }
 
 fn unkept(jpeg: &[u8]) -> Unkept {
-    match open_native(ImageFormat::Jpeg, jpeg, &limits()).expect("the file decodes") {
-        NativeDocument::Picture { unkept, .. } => unkept,
-        NativeDocument::Sprites(_) => panic!("a JPEG is one picture"),
-    }
+    encode_fixture::native(ImageFormat::Jpeg, jpeg, &limits()).1
 }
 
 /// `jpeg` with `segment` (marker, then payload) after its start of image.
@@ -284,8 +272,9 @@ fn with_segment(jpeg: &[u8], marker: u8, payload: &[u8]) -> Vec<u8> {
 }
 
 /// A JPEG holds more than its picture in any segment the encoder would not
-/// write back: metadata, a comment, or a JFIF header stating a density.
-/// Framing that only says how the picture is coded is not more.
+/// write back: metadata, a comment, a JFIF header with a thumbnail. Framing
+/// that only says how the picture is coded is not more, and nor is the
+/// density a plain JFIF header states, which the picture keeps.
 #[test]
 fn what_a_jpeg_holds_beside_its_picture_is_said_when_it_opens() {
     let shade = |at: u32| u8::try_from(at * 8).expect("small");
@@ -296,8 +285,8 @@ fn what_a_jpeg_holds_beside_its_picture_is_said_when_it_opens() {
     .expect("encodes");
     assert_eq!(unkept(&jpeg), Unkept::default(), "its own output");
     let beside = Unkept {
-        precision: false,
         extras: true,
+        ..Unkept::default()
     };
     assert_eq!(unkept(&with_segment(&jpeg, 0xFE, b"a note")), beside);
     assert_eq!(unkept(&with_segment(&jpeg, 0xE1, b"Exif\0\0")), beside);
@@ -305,7 +294,18 @@ fn what_a_jpeg_holds_beside_its_picture_is_said_when_it_opens() {
     // The encoder's own header, a 14-byte JFIF segment, given way to another.
     let bare: Vec<u8> = [&jpeg[..2], &jpeg[2 + 4 + 14..]].concat();
     let dpi = *b"JFIF\0\x01\x02\x01\x01\x2C\x01\x2C\x00\x00";
-    assert_eq!(unkept(&with_segment(&bare, 0xE0, &dpi)), beside);
+    let (picture, held, _) = encode_fixture::native(
+        ImageFormat::Jpeg,
+        &with_segment(&bare, 0xE0, &dpi),
+        &limits(),
+    );
+    assert_eq!(held, Unkept::default(), "a density is the picture's own");
+    assert_eq!(
+        picture.density(),
+        Density::whole(300, 300, DensityUnit::Inch)
+    );
+    let thumbnail = *b"JFIF\0\x01\x02\x01\x01\x2C\x01\x2C\x01\x01\x00\x00\x00";
+    assert_eq!(unkept(&with_segment(&bare, 0xE0, &thumbnail)), beside);
     let later = *b"JFIF\0\x01\x02\x00\x00\x01\x00\x01\x00\x00";
     assert_eq!(
         unkept(&with_segment(&bare, 0xE0, &later)),
@@ -316,5 +316,50 @@ fn what_a_jpeg_holds_beside_its_picture_is_said_when_it_opens() {
     assert_eq!(
         unkept(&with_segment(&jpeg, 0xEE, &adobe)),
         Unkept::default()
+    );
+}
+
+/// The JFIF header states a picture's density per inch, per centimetre
+/// where that is exact, or as a bare shape, and reads back as it.
+#[test]
+fn a_jpeg_keeps_its_density() {
+    let picture = |density| {
+        rgba(8, 8, |x, _| {
+            [u8::try_from(x * 30).expect("small"), 0, 0, 255]
+        })
+        .with_density(density)
+    };
+    let read = |density| {
+        let jpeg = encode_jpeg(&picture(density), options(90)).expect("encodes");
+        encode_fixture::native(ImageFormat::Jpeg, &jpeg, &limits())
+            .0
+            .density()
+    };
+    let inch = Density::whole(300, 150, DensityUnit::Inch);
+    assert_eq!(read(inch), inch);
+    let centimetre = Density::whole(118, 118, DensityUnit::Centimetre);
+    assert_eq!(read(centimetre), centimetre);
+    assert_eq!(
+        read(Density::whole(10_000, 5_000, DensityUnit::Metre)),
+        Density::whole(100, 50, DensityUnit::Centimetre),
+        "per metre, exactly per centimetre"
+    );
+    assert_eq!(
+        read(Density::whole(2835, 2835, DensityUnit::Metre)),
+        Density::whole(72, 72, DensityUnit::Inch),
+        "per metre, nearest per inch"
+    );
+    let shape = Density::whole(1, 2, DensityUnit::Aspect);
+    assert_eq!(read(shape), shape);
+    assert_eq!(
+        read(Density::whole(3, 3, DensityUnit::Aspect)),
+        None,
+        "square is no density"
+    );
+    assert_eq!(read(None), None);
+    assert_eq!(
+        read(Density::whole(70_000, 1, DensityUnit::Inch)),
+        None,
+        "past sixteen bits"
     );
 }

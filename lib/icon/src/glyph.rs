@@ -238,7 +238,7 @@ pub enum IconKind {
     ToolPencil,
     /// A paintbrush, for painting soft strokes.
     ToolBrush,
-    /// A spray can and its spray, for scattering paint.
+    /// A spray can and its spray, for airbrushed paint that builds up.
     ToolSpray,
     /// An eraser over the line it rubs out, for clearing paint.
     ToolEraser,
@@ -254,6 +254,20 @@ pub enum IconKind {
     ToolEllipse,
     /// A ruled grid, for showing the boundaries between pixels.
     PixelGrid,
+    /// A frame filled with bars narrowing across it, for laying a gradient.
+    ToolGradient,
+    /// A rubber stamp, for copying one part of a picture onto another.
+    ToolClone,
+    /// A capital letter, for setting text into a picture.
+    ToolText,
+    /// An irregular polygon's outline, for drawing polygons corner by corner.
+    ToolPolygon,
+    /// Two crossed crop marks, for cutting a picture down to a part of it.
+    ToolCrop,
+    /// An open hand, for dragging the view about.
+    ToolHand,
+    /// A magnifier with an empty lens, for magnifying where it is pressed.
+    ToolZoom,
 }
 
 impl IconKind {
@@ -353,6 +367,13 @@ impl IconKind {
             "tool-rectangle" => Self::ToolRectangle,
             "tool-ellipse" => Self::ToolEllipse,
             "pixel-grid" => Self::PixelGrid,
+            "tool-gradient" => Self::ToolGradient,
+            "tool-clone" => Self::ToolClone,
+            "tool-text" => Self::ToolText,
+            "tool-polygon" => Self::ToolPolygon,
+            "tool-crop" => Self::ToolCrop,
+            "tool-hand" => Self::ToolHand,
+            "tool-zoom" => Self::ToolZoom,
             _ => Self::Generic,
         }
     }
@@ -458,6 +479,13 @@ impl IconKind {
             Self::ToolRectangle => 88,
             Self::ToolEllipse => 89,
             Self::PixelGrid => 90,
+            Self::ToolGradient => 91,
+            Self::ToolClone => 92,
+            Self::ToolText => 93,
+            Self::ToolPolygon => 94,
+            Self::ToolCrop => 95,
+            Self::ToolHand => 96,
+            Self::ToolZoom => 97,
         }
     }
 
@@ -562,6 +590,13 @@ impl IconKind {
             Self::ToolRectangle => "tool-rectangle",
             Self::ToolEllipse => "tool-ellipse",
             Self::PixelGrid => "pixel-grid",
+            Self::ToolGradient => "tool-gradient",
+            Self::ToolClone => "tool-clone",
+            Self::ToolText => "tool-text",
+            Self::ToolPolygon => "tool-polygon",
+            Self::ToolCrop => "tool-crop",
+            Self::ToolHand => "tool-hand",
+            Self::ToolZoom => "tool-zoom",
         }
     }
 }
@@ -585,6 +620,10 @@ pub const fn disk_icon(medium: Option<BlkDeviceClass>) -> IconKind {
 /// The returned [`VectorIcon`] is authored on a fixed square design grid; the
 /// caller rasterises it to whatever pixel size the notification slot needs.
 #[must_use]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one arm a kind; splitting it would part the kinds from the one table they are drawn by"
+)]
 pub fn builtin_icon(kind: IconKind, color: Color) -> VectorIcon {
     let layers = match kind {
         IconKind::Network => network(color),
@@ -630,8 +669,8 @@ pub fn builtin_icon(kind: IconKind, color: Color) -> VectorIcon {
         IconKind::Generic => generic(color),
         IconKind::Pause => pause(color),
         IconKind::Resume => resume(color),
-        IconKind::ZoomIn => magnifier(color, true),
-        IconKind::ZoomOut => magnifier(color, false),
+        IconKind::ZoomIn => magnifier(color, Lens::Plus),
+        IconKind::ZoomOut => magnifier(color, Lens::Minus),
         IconKind::ZoomFit => zoom_fit(color),
         IconKind::ZoomActual => zoom_actual(color),
         IconKind::RotateRight => rotate(color, true),
@@ -649,6 +688,13 @@ pub fn builtin_icon(kind: IconKind, color: Color) -> VectorIcon {
         IconKind::ToolRectangle => tool_rectangle(color),
         IconKind::ToolEllipse => tool_ellipse(color),
         IconKind::PixelGrid => pixel_grid(color),
+        IconKind::ToolGradient => tool_gradient(color),
+        IconKind::ToolClone => tool_clone(color),
+        IconKind::ToolText => tool_text(color),
+        IconKind::ToolPolygon => tool_polygon(color),
+        IconKind::ToolCrop => tool_crop(color),
+        IconKind::ToolHand => tool_hand(color),
+        IconKind::ToolZoom => magnifier(color, Lens::Clear),
         // A settings category or pane is drawn with its symbol, the same one
         // its badge carries; one that could not be built is a defect in the
         // compiled-in table, and draws the placeholder rather than nothing.
@@ -1067,13 +1113,21 @@ fn resume(color: Color) -> alloc::vec::Vec<IconLayer> {
     vec![IconLayer::from_points(color, PLAY)]
 }
 
-/// A magnifier over a plus or a minus, for magnifying or reducing what a
-/// window displays.
+/// What a magnifier's lens holds.
+#[derive(Copy, Clone, Eq, PartialEq)]
+enum Lens {
+    Plus,
+    Minus,
+    Clear,
+}
+
+/// A magnifier over a plus, a minus or nothing: for magnifying or reducing
+/// what a window displays, and for the painter's zoom tool.
 ///
-/// One table for both, because the two glyphs differ only in the bar the
-/// lens holds; drawing them as separate coordinate sets would be two lenses
-/// to keep identical.
-fn magnifier(color: Color, magnify: bool) -> alloc::vec::Vec<IconLayer> {
+/// One table for all three, because the glyphs differ only in what the lens
+/// holds; drawing them as separate coordinate sets would be three lenses to
+/// keep identical.
+fn magnifier(color: Color, lens: Lens) -> alloc::vec::Vec<IconLayer> {
     // Lens: an octagonal annulus, outer then inner in one even-odd ring.
     const LENS: &[(i32, i32)] = &[
         (10, 3),
@@ -1099,9 +1153,11 @@ fn magnifier(color: Color, magnify: bool) -> alloc::vec::Vec<IconLayer> {
     let mut layers = alloc::vec![
         IconLayer::from_points(color, LENS),
         IconLayer::from_points(color, HANDLE),
-        IconLayer::from_points(color, BAR),
     ];
-    if magnify {
+    if lens != Lens::Clear {
+        layers.push(IconLayer::from_points(color, BAR));
+    }
+    if lens == Lens::Plus {
         layers.push(IconLayer::from_points(color, STEM));
     }
     layers
@@ -1399,6 +1455,125 @@ fn tool_ellipse(color: Color) -> alloc::vec::Vec<IconLayer> {
         (12, 7),
     ];
     vec![IconLayer::from_points(color, OUTLINE)]
+}
+
+/// A frame filled with three bars, each narrower than the one before: a
+/// blend from one colour to another, told in one colour.
+fn tool_gradient(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const FRAME: &[(i32, i32)] = &[
+        (3, 5),
+        (21, 5),
+        (21, 19),
+        (3, 19),
+        (3, 5),
+        (5, 7),
+        (5, 17),
+        (19, 17),
+        (19, 7),
+        (5, 7),
+    ];
+    const BARS: [&[(i32, i32)]; 3] = [
+        &[(6, 8), (11, 8), (11, 16), (6, 16)],
+        &[(12, 8), (15, 8), (15, 16), (12, 16)],
+        &[(16, 8), (17, 8), (17, 16), (16, 16)],
+    ];
+    core::iter::once(FRAME)
+        .chain(BARS)
+        .map(|part| IconLayer::from_points(color, part))
+        .collect()
+}
+
+/// A rubber stamp: its knob, its stem, its block, and the print beneath.
+fn tool_clone(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const KNOB: &[(i32, i32)] = &[
+        (10, 2),
+        (14, 2),
+        (16, 4),
+        (16, 7),
+        (14, 9),
+        (10, 9),
+        (8, 7),
+        (8, 4),
+    ];
+    const STEM: &[(i32, i32)] = &[(11, 9), (13, 9), (13, 12), (11, 12)];
+    const BLOCK: &[(i32, i32)] = &[(5, 12), (19, 12), (20, 17), (4, 17)];
+    const PRINT: &[(i32, i32)] = &[(4, 19), (20, 19), (20, 21), (4, 21)];
+    vec![
+        IconLayer::from_points(color, KNOB),
+        IconLayer::from_points(color, STEM),
+        IconLayer::from_points(color, BLOCK),
+        IconLayer::from_points(color, PRINT),
+    ]
+}
+
+/// A serifed capital T.
+fn tool_text(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const LETTER: &[(i32, i32)] = &[
+        (4, 3),
+        (20, 3),
+        (20, 8),
+        (18, 8),
+        (18, 6),
+        (13, 6),
+        (13, 18),
+        (16, 18),
+        (16, 21),
+        (8, 21),
+        (8, 18),
+        (11, 18),
+        (11, 6),
+        (6, 6),
+        (6, 8),
+        (4, 8),
+    ];
+    vec![IconLayer::from_points(color, LETTER)]
+}
+
+/// An irregular pentagon's outline, its corners the points a polygon is
+/// drawn through.
+fn tool_polygon(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const OUTLINE: &[(i32, i32)] = &[
+        (11, 2),
+        (22, 9),
+        (18, 21),
+        (5, 19),
+        (2, 8),
+        (11, 2),
+        (11, 5),
+        (5, 9),
+        (7, 17),
+        (16, 18),
+        (19, 10),
+        (11, 5),
+    ];
+    vec![IconLayer::from_points(color, OUTLINE)]
+}
+
+/// Two crop marks, each an L, crossing at opposite corners of the part kept.
+fn tool_crop(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const UPPER: &[(i32, i32)] = &[(6, 2), (9, 2), (9, 15), (22, 15), (22, 18), (6, 18)];
+    const LOWER: &[(i32, i32)] = &[(2, 6), (18, 6), (18, 22), (15, 22), (15, 9), (2, 9)];
+    vec![
+        IconLayer::from_points(color, UPPER),
+        IconLayer::from_points(color, LOWER),
+    ]
+}
+
+/// An open hand: its palm, four fingers and the thumb held out.
+fn tool_hand(color: Color) -> alloc::vec::Vec<IconLayer> {
+    const PALM: &[(i32, i32)] = &[(7, 11), (19, 11), (19, 16), (16, 21), (10, 21), (7, 18)];
+    const FINGERS: [&[(i32, i32)]; 4] = [
+        &[(7, 6), (9, 6), (9, 12), (7, 12)],
+        &[(10, 3), (12, 3), (12, 12), (10, 12)],
+        &[(13, 4), (15, 4), (15, 12), (13, 12)],
+        &[(16, 6), (18, 6), (18, 12), (16, 12)],
+    ];
+    const THUMB: &[(i32, i32)] = &[(2, 12), (4, 10), (9, 15), (7, 17)];
+    core::iter::once(PALM)
+        .chain(FINGERS)
+        .chain(core::iter::once(THUMB))
+        .map(|part| IconLayer::from_points(color, part))
+        .collect()
 }
 
 /// A frame ruled into three by three cells: the lines between pixels, drawn

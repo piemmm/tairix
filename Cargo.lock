@@ -2406,6 +2406,7 @@ dependencies = [
  "tairix-crc32",
  "tairix-fuzzseed",
  "tairix-util",
+ "tairix-xml",
 ]
 
 [[package]]
@@ -3017,13 +3018,13 @@ dependencies = [
  "tairix-controls",
  "tairix-font",
  "tairix-geometry",
+ "tairix-hash",
  "tairix-help",
  "tairix-icon",
  "tairix-image",
  "tairix-input",
  "tairix-raster",
  "tairix-reclaim",
- "tairix-rng",
  "tairix-rt",
  "tairix-sandbox",
  "tairix-theme",
@@ -3469,6 +3470,7 @@ dependencies = [
  "tairix-fuzzseed",
  "tairix-raster",
  "tairix-util",
+ "tairix-xml",
 ]
 
 [[package]]
@@ -7446,6 +7448,13 @@ dependencies = [
  "tairix-reclaim",
  "tairix-theme",
  "tairix-util",
+]
+
+[[package]]
+name = "tairix-xml"
+version = "0.0.0"
+dependencies = [
+ "tairix-fuzzseed",
 ]
 
 [[package]]

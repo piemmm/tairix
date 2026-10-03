@@ -29,8 +29,9 @@
 
 use tairix_fuzzseed::Prng;
 use tairix_image::{
-    encode_png, encode_sprite_area, IndexDepth, Picture, SpriteInput, SpriteMode, SpriteName,
-    SpritePalette,
+    encode_bmp, encode_gif, encode_png, encode_sprite_area, encode_tiff, Density, DensityUnit,
+    GifOptions, IndexDepth, Picture, PictureSource, SpriteInput, SpriteMode, SpriteName,
+    SpritePalette, TiffOptions,
 };
 use tairix_raster::Region;
 use tairix_sandbox::decode::{
@@ -40,7 +41,7 @@ use tairix_sandbox::helpdoc::{render_help, HelpService, RenderMode, Styling};
 use tairix_sandbox::host::{Launcher, ParserSandbox};
 use tairix_sandbox::imageedit::{
     close_edit, open_edit, read_kept, read_rows, select_entry, EditDocument, EditEntry, EditKept,
-    EditPicture, EditPixels, KeptReason,
+    EditKind, EditPicture, EditPixels, KeptReason,
 };
 use tairix_sandbox::imagerender::{
     close_view, open_view, rasterise_icon, render_page, render_wallpaper, select_page,
@@ -485,7 +486,7 @@ fn fuzz_view_iteration(honest: &mut HonestIconSandbox, noise: &[u8], rng: &mut P
 
 /// A small paletted PNG and a sprite area of a masked paletted sprite and a
 /// truecolour one: the documents the edit leg mutates.
-fn edit_templates() -> [Vec<u8>; 2] {
+fn edit_templates() -> [Vec<u8>; 6] {
     let palette: Vec<[u8; 4]> = (0..16u8).map(|i| [i * 16, 255 - i, i, 255]).collect();
     let indices: Vec<u8> = (0..12).map(|i| i % 16).collect();
     let paletted = Picture::indexed(
@@ -526,26 +527,46 @@ fn edit_templates() -> [Vec<u8>; 2] {
         },
     ])
     .unwrap_or_default();
-    [png, area]
+    let dense = truecolour
+        .clone()
+        .with_density(Density::whole(300, 150, DensityUnit::Inch));
+    let gif = encode_gif(&unmasked, GifOptions { interlaced: true }).unwrap_or_default();
+    let bmp = encode_bmp(&dense).unwrap_or_default();
+    let pages: [&dyn PictureSource; 3] = [&paletted, &unmasked, &dense];
+    let tiff = encode_tiff(&pages, TiffOptions::default()).unwrap_or_default();
+    let layer = tairix_image::OraLayerSource {
+        name: "layer",
+        picture: &truecolour,
+        at: (0, 0),
+        opacity: 200,
+        visible: true,
+    };
+    let ora =
+        tairix_image::encode_ora((2, 2), &[layer], &truecolour, &truecolour).unwrap_or_default();
+    [png, area, gif, bmp, tiff, ora]
 }
 
 /// The formats an edit open may be asked to read a document as.
-const EDIT_FORMATS: [Option<ViewFormat>; 4] = [
+const EDIT_FORMATS: [Option<ViewFormat>; 8] = [
     None,
     Some(ViewFormat::Png),
     Some(ViewFormat::Sprite),
+    Some(ViewFormat::Gif),
+    Some(ViewFormat::Bmp),
+    Some(ViewFormat::Tiff),
     Some(ViewFormat::Svg),
+    Some(ViewFormat::OpenRaster),
 ];
 
 /// Fuzz one iteration of the edit decode: out-of-order requests first, then
-/// a mutated paletted PNG and sprite area, their truncations and `noise`,
+/// a mutated paletted PNG, sprite area, GIF, BMP, TIFF and OpenRaster
+/// document, their truncations and `noise`,
 /// each opened, every entry selected, and every row or kept byte fetched.
 /// A row handed on must be exactly the width its description promised.
 fn fuzz_edit_iteration(honest: &mut HonestIconSandbox, noise: &[u8], rng: &mut Prng) {
     let _ = select_entry(honest, stray_document(), 0);
     let _ = read_rows(honest, &stray_picture(), |_, _, _| {});
-    let [png, area] = edit_templates();
-    for template in [png, area] {
+    for template in edit_templates() {
         let mut mutated = template;
         for _ in 0..rng.at_most(4) {
             if !mutated.is_empty() {
@@ -637,12 +658,15 @@ fn stray_picture() -> EditPicture {
 const fn stray_document() -> EditDocument {
     EditDocument {
         format: ViewFormat::Sprite,
-        sprites: true,
+        kind: EditKind::Sprites,
         count: 1,
         unkept: tairix_image::Unkept {
             precision: false,
             extras: false,
+            converted: false,
         },
+        written: tairix_image::Written::Plain,
+        canvas: None,
     }
 }
 

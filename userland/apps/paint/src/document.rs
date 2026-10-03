@@ -1,25 +1,28 @@
 //! A document: the pictures one file holds, and what the file says about
 //! them.
 //!
-//! A PNG or a JPEG holds one picture; a RISC OS sprite area holds any number,
-//! each with its name, mode and palette, and keeps the sprites no editor here
-//! can read as their exact bytes so that saving writes them back unchanged.
-//! Every change goes through here, so each is recorded as a step of the
-//! history.
+//! A PNG, a JPEG, a GIF or a BMP holds one picture; an OpenRaster file one
+//! picture of layers; a TIFF holds any number of pages; a RISC OS sprite area
+//! holds any number of sprites, each with its name, mode and palette, and
+//! keeps the sprites no editor here can read as their exact bytes so that
+//! saving writes them back unchanged. Every change goes through here, so each
+//! is recorded as a step of the history.
 
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use tairix_image::{
-    desktop_palette, IndexDepth, Rgba8, SpriteMode, SpriteName, SpritePalette, Unkept,
+    desktop_palette, Density, IndexDepth, Rgba8, SpriteMode, SpriteName, SpritePalette, Unkept,
 };
 use tairix_reclaim::PressureBand;
-use tairix_sandbox::imageedit::KeptReason;
+use tairix_sandbox::imageedit::{KeptReason, MAX_LAYER_NAME};
 use tairix_sandbox::imagerender::ViewFormat;
 
 use crate::canvas::{Canvas, CanvasError, Kind, OutOfMemory, Sample, Tile};
 use crate::colour::{nearest, WHITE};
 use crate::history::{Applied, Damage, History, Step, Unapplied};
+use crate::save::{SaveFormat, SaveSettings};
 
 /// A picture to begin.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -141,22 +144,35 @@ impl SpriteInfo {
     }
 }
 
-/// One picture of a document.
+/// The most layers one picture holds: what OpenRaster is read with.
+pub const MOST_LAYERS: usize = tairix_image::MOST_ORA_LAYERS;
+
+/// What a picture's first layer is called.
+pub const BACKGROUND: &str = "Background";
+
+/// One layer of a picture: its pixels, what it is called, and how it lies
+/// over the layers beneath it.
 #[derive(Debug, Eq, PartialEq)]
-pub struct Picture {
+pub struct Layer {
     /// Its pixels.
     pub canvas: Canvas,
-    /// Its sprite details, when it is, or is to be, a sprite.
-    pub sprite: Option<SpriteInfo>,
+    /// What it is called.
+    pub name: String,
+    /// How much of it shows, out of 255.
+    pub opacity: u8,
+    /// Whether it shows at all.
+    pub visible: bool,
 }
 
-impl Picture {
-    /// A picture of `canvas` that is not a sprite.
+impl Layer {
+    /// A layer of `canvas` called `name`, wholly showing.
     #[must_use]
-    pub const fn plain(canvas: Canvas) -> Self {
+    pub const fn new(canvas: Canvas, name: String) -> Self {
         Self {
             canvas,
-            sprite: None,
+            name,
+            opacity: u8::MAX,
+            visible: true,
         }
     }
 
@@ -166,10 +182,205 @@ impl Picture {
     ///
     /// [`OutOfMemory`] when the room is refused.
     pub fn try_clone(&self) -> Result<Self, OutOfMemory> {
+        let mut name = String::new();
+        name.try_reserve_exact(self.name.len())
+            .map_err(|_| OutOfMemory)?;
+        name.push_str(&self.name);
         Ok(Self {
             canvas: self.canvas.try_clone()?,
-            sprite: self.sprite.clone(),
+            name,
+            opacity: self.opacity,
+            visible: self.visible,
         })
+    }
+
+    /// Whether it lays nothing over what is beneath and changes nothing it
+    /// covers: shown wholly, its own pixels all that show.
+    fn plain(&self) -> bool {
+        self.visible && self.opacity == u8::MAX
+    }
+}
+
+/// One picture of a document: one layer or more, the bottom first, one of
+/// them the layer painting lands on.
+///
+/// Every layer is the picture's size and kind; a palette picture, whose
+/// pixels are entries of one palette, holds one.
+#[derive(Debug, Eq, PartialEq)]
+pub struct Picture {
+    layers: Vec<Layer>,
+    active: usize,
+    /// Its sprite details, when it is, or is to be, a sprite.
+    pub sprite: Option<SpriteInfo>,
+    /// How densely its pixels are laid out, where its file stated it.
+    pub density: Option<Density>,
+}
+
+impl Picture {
+    /// A picture of one layer, `canvas`, that is not a sprite.
+    #[must_use]
+    pub fn plain(canvas: Canvas) -> Self {
+        Self {
+            layers: alloc::vec![Layer::new(canvas, String::from(BACKGROUND))],
+            active: 0,
+            sprite: None,
+            density: None,
+        }
+    }
+
+    /// A picture of `layers`, the bottom first, painting landing on layer
+    /// `active`; `None` for none, more than [`MOST_LAYERS`], layers of
+    /// different sizes or kinds or named past `MAX_LAYER_NAME`, more than one
+    /// of a palette, or an active layer past the last.
+    #[must_use]
+    pub fn layered(layers: Vec<Layer>, active: usize) -> Option<Self> {
+        let first = layers.first()?;
+        let shape = (
+            first.canvas.width(),
+            first.canvas.height(),
+            first.canvas.kind(),
+        );
+        let alike = layers.iter().all(|layer| {
+            let own = (
+                layer.canvas.width(),
+                layer.canvas.height(),
+                layer.canvas.kind(),
+            );
+            own == shape && layer.name.len() <= MAX_LAYER_NAME
+        });
+        let palette = shape.2.palette().is_some();
+        let fits = layers.len() <= MOST_LAYERS && (!palette || layers.len() == 1);
+        (alike && fits && active < layers.len()).then_some(Self {
+            layers,
+            active,
+            sprite: None,
+            density: None,
+        })
+    }
+
+    /// The pixels painting lands on: the active layer's.
+    #[must_use]
+    pub fn canvas(&self) -> &Canvas {
+        &self.layers[self.active].canvas
+    }
+
+    /// The pixels painting lands on, to write.
+    pub fn canvas_mut(&mut self) -> &mut Canvas {
+        &mut self.layers[self.active].canvas
+    }
+
+    /// The layers, the bottom first.
+    #[must_use]
+    pub fn layers(&self) -> &[Layer] {
+        &self.layers
+    }
+
+    /// The layers, to change their pixels or how they show.
+    pub(crate) fn layers_mut(&mut self) -> &mut [Layer] {
+        &mut self.layers
+    }
+
+    /// Which layer painting lands on.
+    #[must_use]
+    pub const fn active(&self) -> usize {
+        self.active
+    }
+
+    /// Paint on layer `index`, answering whether it exists.
+    pub fn set_active(&mut self, index: usize) -> bool {
+        let exists = index < self.layers.len();
+        if exists {
+            self.active = index;
+        }
+        exists
+    }
+
+    /// The picture's size.
+    #[must_use]
+    pub fn size(&self) -> (u32, u32) {
+        (self.canvas().width(), self.canvas().height())
+    }
+
+    /// What its pixels are: every layer's alike.
+    #[must_use]
+    pub fn kind(&self) -> &Kind {
+        self.canvas().kind()
+    }
+
+    /// The same picture's metadata — layer names, how each shows, the active
+    /// layer, sprite details, density — over `canvases`, one a layer;
+    /// `None` where they are not one a layer, alike in size and kind.
+    #[must_use]
+    pub fn with_canvases(&self, canvases: Vec<Canvas>) -> Option<Self> {
+        if canvases.len() != self.layers.len() {
+            return None;
+        }
+        let mut layers = Vec::new();
+        layers.try_reserve_exact(canvases.len()).ok()?;
+        for (canvas, held) in canvases.into_iter().zip(&self.layers) {
+            let mut name = String::new();
+            name.try_reserve_exact(held.name.len()).ok()?;
+            name.push_str(&held.name);
+            layers.push(Layer {
+                canvas,
+                name,
+                opacity: held.opacity,
+                visible: held.visible,
+            });
+        }
+        self.with_layers(layers, self.active)
+    }
+
+    /// The same picture with `layers` in place of its own and layer `active`
+    /// painted on.
+    #[must_use]
+    pub fn with_layers(&self, layers: Vec<Layer>, active: usize) -> Option<Self> {
+        let mut picture = Self::layered(layers, active)?;
+        picture.sprite.clone_from(&self.sprite);
+        picture.density = self.density;
+        Some(picture)
+    }
+
+    /// A copy sharing its pixels until either is written.
+    ///
+    /// # Errors
+    ///
+    /// [`OutOfMemory`] when the room is refused.
+    pub fn try_clone(&self) -> Result<Self, OutOfMemory> {
+        let mut layers = Vec::new();
+        layers
+            .try_reserve_exact(self.layers.len())
+            .map_err(|_| OutOfMemory)?;
+        for layer in &self.layers {
+            layers.push(layer.try_clone()?);
+        }
+        Ok(Self {
+            layers,
+            active: self.active,
+            sprite: self.sprite.clone(),
+            density: self.density,
+        })
+    }
+
+    /// Whether it shows exactly its one layer's pixels, so its layers need
+    /// no composing.
+    #[must_use]
+    pub fn single(&self) -> bool {
+        self.layers.len() == 1 && self.layers[0].plain()
+    }
+
+    /// Bytes its layers are charged: what they share, shared out.
+    pub(crate) fn charged_bytes(&self) -> usize {
+        self.layers
+            .iter()
+            .map(|layer| layer.canvas.charged_bytes())
+            .sum()
+    }
+
+    /// Bytes its layers occupy.
+    #[must_use]
+    pub fn bytes(&self) -> usize {
+        self.layers.iter().map(|layer| layer.canvas.bytes()).sum()
     }
 
     /// A pixel's shape, width to height: square unless the sprite's mode
@@ -180,6 +391,254 @@ impl Picture {
             .as_ref()
             .map_or((1, 1), |sprite| sprite.mode.pixel_aspect())
     }
+
+    /// The colour the layers show together at `(x, y)`, the layer painted
+    /// on showing `active` there.
+    #[must_use]
+    pub fn shown_at(&self, (x, y): (u32, u32), active: Rgba8) -> Rgba8 {
+        if self.single() {
+            return active;
+        }
+        let (mut out, mut scratch) = ([[0; 4]], [[0; 4]]);
+        let shown = Some((self.active, core::slice::from_ref(&active)));
+        crate::compose::compose_run(
+            &self.layers,
+            shown,
+            &mut out,
+            &mut scratch,
+            |canvas, into| {
+                into[0] = canvas.colour_at(x, y).unwrap_or([0; 4]);
+            },
+        );
+        out[0]
+    }
+
+    /// The picture as its layers show together, as one canvas.
+    ///
+    /// # Errors
+    ///
+    /// [`OutOfMemory`] when the canvas cannot be had.
+    pub fn flattened(&self) -> Result<Canvas, OutOfMemory> {
+        crate::compose::flatten(&self.layers)
+    }
+
+    /// Why `layer` could not join the stack at `index`, if it could not.
+    fn refuses(&self, index: usize, layer: &Layer) -> Option<LayerRefusal> {
+        let shape = (self.size(), self.kind());
+        let alike = (
+            (layer.canvas.width(), layer.canvas.height()),
+            layer.canvas.kind(),
+        ) == shape;
+        if index > self.layers.len() {
+            Some(LayerRefusal::NoSuchLayer)
+        } else if self.kind().palette().is_some() {
+            Some(LayerRefusal::Palette)
+        } else if self.layers.len() >= MOST_LAYERS {
+            Some(LayerRefusal::Full)
+        } else if !alike || layer.name.len() > MAX_LAYER_NAME {
+            Some(LayerRefusal::Unlike)
+        } else {
+            None
+        }
+    }
+
+    /// Hold the room one more layer takes, so adding it cannot then fail for
+    /// memory.
+    ///
+    /// # Errors
+    ///
+    /// [`OutOfMemory`] when the room is refused.
+    pub(crate) fn reserve_layer(&mut self) -> Result<(), OutOfMemory> {
+        self.layers.try_reserve(1).map_err(|_| OutOfMemory)
+    }
+
+    /// Add `layer` at `index` and paint on it.
+    ///
+    /// # Errors
+    ///
+    /// The [`LayerRefusal`], `layer` handed back; nothing changed.
+    pub(crate) fn insert_layer(
+        &mut self,
+        index: usize,
+        layer: Layer,
+    ) -> Result<(), (LayerRefusal, Layer)> {
+        if let Some(refusal) = self.refuses(index, &layer) {
+            return Err((refusal, layer));
+        }
+        if self.reserve_layer().is_err() {
+            return Err((LayerRefusal::OutOfMemory, layer));
+        }
+        self.layers.insert(index, layer);
+        self.active = index;
+        Ok(())
+    }
+
+    /// Take layer `index` out, painting on the one that takes its place.
+    ///
+    /// # Errors
+    ///
+    /// [`LayerRefusal`]: no such layer, or the last.
+    pub(crate) fn remove_layer(&mut self, index: usize) -> Result<Layer, LayerRefusal> {
+        if index >= self.layers.len() {
+            return Err(LayerRefusal::NoSuchLayer);
+        }
+        if self.layers.len() == 1 {
+            return Err(LayerRefusal::LastLayer);
+        }
+        let layer = self.layers.remove(index);
+        self.active = index.min(self.layers.len() - 1);
+        Ok(layer)
+    }
+
+    /// Move layer `from` to `to`, painting on it there.
+    ///
+    /// # Errors
+    ///
+    /// [`LayerRefusal::NoSuchLayer`] where either is past the last.
+    pub(crate) fn move_layer(&mut self, from: usize, to: usize) -> Result<(), LayerRefusal> {
+        if from >= self.layers.len() || to >= self.layers.len() {
+            return Err(LayerRefusal::NoSuchLayer);
+        }
+        let layer = self.layers.remove(from);
+        self.layers.insert(to, layer);
+        self.active = to;
+        Ok(())
+    }
+
+    /// Show layer `index` as `shown` says, painting on it, answering how it
+    /// showed before.
+    ///
+    /// # Errors
+    ///
+    /// [`LayerRefusal`]: no such layer, a name too long, or a palette
+    /// picture's layer shown other than wholly.
+    pub(crate) fn show_layer(&mut self, index: usize, shown: Shown) -> Result<Shown, LayerRefusal> {
+        let palette = self.kind().palette().is_some();
+        let layer = self
+            .layers
+            .get_mut(index)
+            .ok_or(LayerRefusal::NoSuchLayer)?;
+        if shown.name.len() > MAX_LAYER_NAME {
+            return Err(LayerRefusal::Unlike);
+        }
+        if palette && (shown.opacity, shown.visible) != (u8::MAX, true) {
+            return Err(LayerRefusal::Palette);
+        }
+        self.active = index;
+        Ok(Shown {
+            name: core::mem::replace(&mut layer.name, shown.name),
+            opacity: core::mem::replace(&mut layer.opacity, shown.opacity),
+            visible: core::mem::replace(&mut layer.visible, shown.visible),
+        })
+    }
+}
+
+/// How a layer shows, beside its pixels.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Shown {
+    /// What it is called.
+    pub name: String,
+    /// How much of it shows, out of 255.
+    pub opacity: u8,
+    /// Whether it shows at all.
+    pub visible: bool,
+}
+
+impl Shown {
+    /// How `layer` shows now.
+    ///
+    /// # Errors
+    ///
+    /// [`OutOfMemory`] when its name cannot be copied.
+    pub fn of(layer: &Layer) -> Result<Self, OutOfMemory> {
+        let mut name = String::new();
+        name.try_reserve_exact(layer.name.len())
+            .map_err(|_| OutOfMemory)?;
+        name.push_str(&layer.name);
+        Ok(Self {
+            name,
+            opacity: layer.opacity,
+            visible: layer.visible,
+        })
+    }
+}
+
+/// Why a picture's layers could not be changed so.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum LayerRefusal {
+    /// A picture always holds one layer.
+    LastLayer,
+    /// There is no such layer.
+    NoSuchLayer,
+    /// A picture holds at most [`MOST_LAYERS`] layers.
+    Full,
+    /// A palette picture holds one layer, shown wholly.
+    Palette,
+    /// The layer is not the picture's size or kind, or its name is longer
+    /// than a layer's may be.
+    Unlike,
+    /// The allocator refused the room.
+    OutOfMemory,
+}
+
+impl core::fmt::Display for LayerRefusal {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::LastLayer => f.write_str("A picture keeps at least one layer"),
+            Self::NoSuchLayer => f.write_str("There is no such layer"),
+            Self::Full => write!(f, "A picture holds at most {MOST_LAYERS} layers"),
+            Self::Palette => f.write_str(
+                "A palette picture holds one layer: convert it to millions of colours first",
+            ),
+            Self::Unlike => write!(f, "A layer's name holds at most {MAX_LAYER_NAME} bytes"),
+            Self::OutOfMemory => f.write_str("There is not enough memory to change the layers"),
+        }
+    }
+}
+
+/// A name no layer of `layers` has: `Layer` and the least number from
+/// their count up that makes it so.
+///
+/// # Errors
+///
+/// [`OutOfMemory`] when the name cannot be held.
+pub fn new_layer_name(layers: &[Layer]) -> Result<String, OutOfMemory> {
+    // Of the count + 1 numbers from there, at most count are taken.
+    let first = layers.len() + 1;
+    let number = (first..=first + layers.len())
+        .find(|&number| {
+            !layers.iter().any(|layer| {
+                layer
+                    .name
+                    .strip_prefix("Layer ")
+                    .is_some_and(|rest| rest.parse() == Ok(number))
+            })
+        })
+        .unwrap_or(first);
+    let mut name = String::new();
+    name.try_reserve_exact(20).map_err(|_| OutOfMemory)?;
+    let _ = core::fmt::write(&mut name, format_args!("Layer {number}"));
+    Ok(name)
+}
+
+/// `name` with ` copy` after it, cut at a character's boundary to the
+/// longest a layer's name may be.
+///
+/// # Errors
+///
+/// [`OutOfMemory`] when the name cannot be held.
+pub fn copy_name(name: &str) -> Result<String, OutOfMemory> {
+    const COPY: &str = " copy";
+    let mut keep = name.len().min(MAX_LAYER_NAME - COPY.len());
+    while !name.is_char_boundary(keep) {
+        keep -= 1;
+    }
+    let mut copy = String::new();
+    copy.try_reserve_exact(keep + COPY.len())
+        .map_err(|_| OutOfMemory)?;
+    copy.push_str(&name[..keep]);
+    copy.push_str(COPY);
+    Ok(copy)
 }
 
 /// A sprite kept as its bytes, because it cannot be edited here.
@@ -219,7 +678,7 @@ impl Entry {
     /// holders.
     pub(crate) fn charged_bytes(&self) -> usize {
         match self {
-            Self::Picture(picture) => picture.canvas.charged_bytes(),
+            Self::Picture(picture) => picture.charged_bytes(),
             Self::Kept(kept) => kept.bytes.len().div_ceil(Arc::strong_count(&kept.bytes)),
         }
     }
@@ -228,7 +687,7 @@ impl Entry {
     #[must_use]
     pub fn bytes(&self) -> usize {
         match self {
-            Self::Picture(picture) => picture.canvas.bytes(),
+            Self::Picture(picture) => picture.bytes(),
             Self::Kept(kept) => kept.bytes.len(),
         }
     }
@@ -252,22 +711,45 @@ impl Entry {
     }
 }
 
-/// Whether `entries`, read from `origin`, are a sprite area: read from one,
-/// or holding anything that only a sprite area can.
+/// Whether `entries`, read from `origin`, are a sprite area: read from or
+/// made as one, holding a sprite's name, or several pictures of a document
+/// that is not a TIFF's pages.
 #[must_use]
 pub fn sprite_area(entries: &[Entry], origin: Origin) -> bool {
-    origin == Origin::Read(ViewFormat::Sprite)
-        || entries.len() > 1
-        || entries.iter().any(|entry| entry.name().is_some())
+    if matches!(
+        origin,
+        Origin::Read(ViewFormat::Sprite) | Origin::New(SaveFormat::Sprites)
+    ) || entries.iter().any(|entry| entry.name().is_some())
+    {
+        return true;
+    }
+    !origin.is_pages() && entries.len() > 1
+}
+
+/// Whether `entries`, read from `origin`, are a TIFF's pages.
+#[must_use]
+pub fn pages(entries: &[Entry], origin: Origin) -> bool {
+    origin.is_pages() && !sprite_area(entries, origin)
 }
 
 /// What a document was read from.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Origin {
-    /// Nothing: it was made here.
-    New,
+    /// Nothing: it was made here, to be saved as this format.
+    New(SaveFormat),
     /// A file of this format.
     Read(ViewFormat),
+}
+
+impl Origin {
+    /// Whether a document of this origin is a TIFF's pages.
+    #[must_use]
+    pub const fn is_pages(self) -> bool {
+        matches!(
+            self,
+            Self::Read(ViewFormat::Tiff) | Self::New(SaveFormat::Tiff)
+        )
+    }
 }
 
 /// A document frozen for a save, sharing its pixels with the live one.
@@ -279,8 +761,8 @@ pub struct Snapshot {
     pub current: usize,
     /// What it was read from.
     pub origin: Origin,
-    /// The JPEG quality a save as JPEG uses.
-    pub jpeg_quality: u8,
+    /// How each format that offers a choice is written.
+    pub settings: SaveSettings,
 }
 
 /// Why a change to the list of entries was refused.
@@ -387,30 +869,42 @@ pub struct Document {
     unkept: Unkept,
     history: History,
     generation: u64,
-    jpeg_quality: u8,
+    settings: SaveSettings,
 }
 
 impl Document {
-    /// A new document of one picture.
+    /// A new document of one picture, to be saved as a PNG.
     #[must_use]
     pub fn new(picture: Picture) -> Self {
+        Self::new_as(picture, SaveFormat::Png)
+    }
+
+    /// A new document of one picture, to be saved as `format`.
+    #[must_use]
+    pub fn new_as(picture: Picture, format: SaveFormat) -> Self {
         Self::built(
             alloc::vec![Entry::Picture(picture)],
-            Origin::New,
+            Origin::New(format),
             Unkept::default(),
+            SaveSettings::default(),
         )
     }
 
     /// A document of `entries` read from a file of `origin`, which held what
-    /// `unkept` says they do not; `None` for no entries or more than a
-    /// document holds.
+    /// `unkept` says they do not and is written again with `settings`; `None`
+    /// for no entries or more than a document holds.
     #[must_use]
-    pub fn of(entries: Vec<Entry>, origin: Origin, unkept: Unkept) -> Option<Self> {
+    pub fn of(
+        entries: Vec<Entry>,
+        origin: Origin,
+        unkept: Unkept,
+        settings: SaveSettings,
+    ) -> Option<Self> {
         (!entries.is_empty() && entries.len() <= MAX_ENTRIES)
-            .then(|| Self::built(entries, origin, unkept))
+            .then(|| Self::built(entries, origin, unkept, settings))
     }
 
-    fn built(entries: Vec<Entry>, origin: Origin, unkept: Unkept) -> Self {
+    fn built(entries: Vec<Entry>, origin: Origin, unkept: Unkept, settings: SaveSettings) -> Self {
         Self {
             entries,
             current: 0,
@@ -418,7 +912,7 @@ impl Document {
             unkept,
             history: History::new(),
             generation: 0,
-            jpeg_quality: tairix_image::JpegOptions::DEFAULT_QUALITY,
+            settings,
         }
     }
 
@@ -456,7 +950,7 @@ impl Document {
     /// [`record_tiles`](Self::record_tiles).
     pub fn canvas_mut(&mut self) -> Option<&mut Canvas> {
         match &mut self.entries[self.current] {
-            Entry::Picture(picture) => Some(&mut picture.canvas),
+            Entry::Picture(picture) => Some(picture.canvas_mut()),
             Entry::Kept(_) => None,
         }
     }
@@ -490,15 +984,21 @@ impl Document {
         sprite_area(&self.entries, self.origin)
     }
 
-    /// The JPEG quality a save as JPEG uses.
+    /// Whether it is a TIFF's pages ([`pages`]).
     #[must_use]
-    pub const fn jpeg_quality(&self) -> u8 {
-        self.jpeg_quality
+    pub fn is_pages(&self) -> bool {
+        pages(&self.entries, self.origin)
     }
 
-    /// Save as JPEG at `quality`, which the caller has checked.
-    pub fn set_jpeg_quality(&mut self, quality: u8) {
-        self.jpeg_quality = quality;
+    /// How each format that offers a choice is written.
+    #[must_use]
+    pub const fn settings(&self) -> SaveSettings {
+        self.settings
+    }
+
+    /// Write it with `settings` from now on, which the caller has checked.
+    pub fn set_settings(&mut self, settings: SaveSettings) {
+        self.settings = settings;
     }
 
     /// The generation: it changes with every change, undo and redo.
@@ -545,7 +1045,7 @@ impl Document {
             entries,
             current: self.current,
             origin: self.origin,
-            jpeg_quality: self.jpeg_quality,
+            settings: self.settings,
         })
     }
 
@@ -581,24 +1081,41 @@ impl Document {
     /// Record that the showing entry's `tiles` were written, each the tile as
     /// it stood before: a change made after [`reserve`](Self::reserve).
     pub fn record_tiles(&mut self, tiles: Vec<(usize, Arc<Tile>)>) {
+        let Some(layer) = self.picture().map(Picture::active) else {
+            return;
+        };
         if !tiles.is_empty() {
             let entry = self.current;
-            self.record(Step::Tiles { entry, tiles });
+            self.record(Step::Tiles {
+                entry,
+                layer,
+                tiles,
+            });
         }
     }
 
-    /// Put the tiles a worker wrote in place in the showing entry, recording
-    /// the step that takes them back out; `false`, changing nothing, for tiles
-    /// of a canvas of another shape.
+    /// Put the tiles a worker wrote in place in layer `layer` of the showing
+    /// entry, recording the step that takes them back out; `false`, changing
+    /// nothing, for tiles of a canvas of another shape or a layer that is
+    /// not there.
     ///
     /// # Errors
     ///
     /// [`OutOfMemory`] when the step cannot be recorded; nothing changed.
-    pub fn adopt_tiles(&mut self, tiles: Vec<(usize, Arc<Tile>)>) -> Result<bool, OutOfMemory> {
+    pub fn adopt_tiles(
+        &mut self,
+        layer: usize,
+        tiles: Vec<(usize, Arc<Tile>)>,
+    ) -> Result<bool, OutOfMemory> {
         self.history.reserve()?;
-        let Some(canvas) = self.canvas_mut() else {
+        let entry = self.current;
+        let Entry::Picture(picture) = &mut self.entries[entry] else {
             return Ok(false);
         };
+        let Some(target) = picture.layers_mut().get_mut(layer) else {
+            return Ok(false);
+        };
+        let canvas = &mut target.canvas;
         if tiles.iter().any(|(index, tile)| !canvas.fits(*index, tile)) {
             return Ok(false);
         }
@@ -609,7 +1126,13 @@ impl Document {
         for (index, tile) in tiles {
             before.push((index, canvas.replace_tile(index, tile)));
         }
-        self.record_tiles(before);
+        if !before.is_empty() {
+            self.record(Step::Tiles {
+                entry,
+                layer,
+                tiles: before,
+            });
+        }
         Ok(true)
     }
 
@@ -633,6 +1156,96 @@ impl Document {
         Ok(true)
     }
 
+    /// The showing entry's picture, to change its layers.
+    fn layered_mut(&mut self) -> Result<(usize, &mut Picture), LayerRefusal> {
+        self.history
+            .reserve()
+            .map_err(|OutOfMemory| LayerRefusal::OutOfMemory)?;
+        let entry = self.current;
+        match &mut self.entries[entry] {
+            Entry::Picture(picture) => Ok((entry, picture)),
+            Entry::Kept(_) => Err(LayerRefusal::NoSuchLayer),
+        }
+    }
+
+    /// Add `layer` to the showing picture at `index`, and paint on it.
+    ///
+    /// # Errors
+    ///
+    /// [`LayerRefusal`]; nothing changed.
+    pub fn insert_layer(&mut self, index: usize, layer: Layer) -> Result<(), LayerRefusal> {
+        let (entry, picture) = self.layered_mut()?;
+        picture
+            .insert_layer(index, layer)
+            .map_err(|(refusal, _)| refusal)?;
+        self.record(Step::LayerInserted {
+            entry,
+            layer: index,
+        });
+        Ok(())
+    }
+
+    /// Take layer `index` out of the showing picture, painting on the one
+    /// that takes its place.
+    ///
+    /// # Errors
+    ///
+    /// [`LayerRefusal`]; nothing changed.
+    pub fn remove_layer(&mut self, index: usize) -> Result<(), LayerRefusal> {
+        let (entry, picture) = self.layered_mut()?;
+        let removed = picture.remove_layer(index)?;
+        self.record(Step::LayerRemoved {
+            entry,
+            layer: index,
+            removed,
+        });
+        Ok(())
+    }
+
+    /// Move the showing picture's layer `from` to `to`, painting on it there.
+    ///
+    /// # Errors
+    ///
+    /// [`LayerRefusal`]; nothing changed.
+    pub fn move_layer(&mut self, from: usize, to: usize) -> Result<(), LayerRefusal> {
+        let (entry, picture) = self.layered_mut()?;
+        picture.move_layer(from, to)?;
+        if from != to {
+            self.record(Step::LayerMoved {
+                entry,
+                from: to,
+                to: from,
+            });
+        }
+        Ok(())
+    }
+
+    /// Show the showing picture's layer `index` as `shown` says, painting on
+    /// it.
+    ///
+    /// # Errors
+    ///
+    /// [`LayerRefusal`]; nothing changed.
+    pub fn show_layer(&mut self, index: usize, shown: Shown) -> Result<(), LayerRefusal> {
+        let (entry, picture) = self.layered_mut()?;
+        let before = picture.show_layer(index, shown)?;
+        self.record(Step::LayerShown {
+            entry,
+            layer: index,
+            shown: before,
+        });
+        Ok(())
+    }
+
+    /// Paint on the showing picture's layer `index`, answering whether it
+    /// exists: where painting lands is not itself a change.
+    pub fn select_layer(&mut self, index: usize) -> bool {
+        match &mut self.entries[self.current] {
+            Entry::Picture(picture) => picture.set_active(index),
+            Entry::Kept(_) => false,
+        }
+    }
+
     /// Give the showing entry `palette`, which must be as long as the one it
     /// has, and `sprite` details; `false`, changing nothing, where the entry
     /// has no such palette.
@@ -651,7 +1264,7 @@ impl Document {
             return Ok(false);
         };
         let palette = match palette {
-            Some(palette) => match held.canvas.swap_palette(palette) {
+            Some(palette) => match held.canvas_mut().swap_palette(palette) {
                 Some(old) => Some(old),
                 None => return Ok(false),
             },

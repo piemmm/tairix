@@ -1,8 +1,8 @@
 //! The action rail: [`ActionRail`].
 //!
 //! An action rail is the vertical column of full-width commands a detail
-//! surface offers about the thing it is showing — the counterpart to the
-//! horizontal [`Toolbar`](crate::toolbar::Toolbar). Each item *is* a
+//! surface offers about the thing it is showing — labelled commands, where a
+//! [`Toolbar`](crate::toolbar::Toolbar) holds icon tools. Each item *is* a
 //! [`Button`], so the rail restates none of a button's plate painting, press
 //! feedback, role emphasis, disabled look, or Authority Mark for a denied
 //! action; it owns only the stacking geometry, which item the pointer is

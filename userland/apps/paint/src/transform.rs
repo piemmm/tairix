@@ -143,8 +143,6 @@ pub enum Transform {
         /// Top to bottom rather than left to right.
         vertical: bool,
     },
-    /// Every colour its opposite; opacity stays.
-    Invert,
     /// Give a palette picture a mask, every pixel opaque; or take it away,
     /// the pixels it hid becoming entry `fill`.
     Mask {
@@ -244,7 +242,6 @@ pub fn apply(canvas: &Canvas, transform: Transform) -> Result<Canvas, TransformE
         }
         Transform::Turn(turn) => turned(canvas, turn),
         Transform::Flip { vertical } => flipped(canvas, vertical),
-        Transform::Invert => inverted(canvas),
         Transform::Mask { on, fill } => masked(canvas, on, fill),
         Transform::Convert {
             depth,
@@ -461,25 +458,6 @@ fn flipped(canvas: &Canvas, vertical: bool) -> Result<Canvas, TransformError> {
     Ok(out.finish())
 }
 
-fn inverted(canvas: &Canvas) -> Result<Canvas, TransformError> {
-    if canvas.kind() != &Kind::Rgba {
-        return Err(TransformError::NotApplicable);
-    }
-    let (width, height) = (canvas.width(), canvas.height());
-    let mut out = CanvasBuilder::new(width, height, Kind::Rgba, Sample::Rgba([0; 4]))?;
-    let (mut row, _) = row_buffers(&Kind::Rgba, width)?;
-    for y in 0..height {
-        canvas.read_row(y, &mut row, &mut []);
-        for pixel in row.as_chunks_mut::<4>().0 {
-            for channel in &mut pixel[..3] {
-                *channel = 255 - *channel;
-            }
-        }
-        out.row(y, &row, &[]);
-    }
-    Ok(out.finish())
-}
-
 fn masked(canvas: &Canvas, on: bool, fill: u8) -> Result<Canvas, TransformError> {
     let Kind::Indexed {
         depth,
@@ -545,12 +523,12 @@ fn converted(
     dither: bool,
 ) -> Result<Canvas, TransformError> {
     let (width, height) = (canvas.width(), canvas.height());
-    let mut colours = alloc::vec::Vec::new();
-    if !fallible::grow_to(&mut colours, width as usize, [0u8; 4]) {
-        return Err(TransformError::OutOfMemory);
-    }
     let depth = match depth {
         Depth::Rgba => {
+            let mut colours = alloc::vec::Vec::new();
+            if !fallible::grow_to(&mut colours, width as usize, [0u8; 4]) {
+                return Err(TransformError::OutOfMemory);
+            }
             let mut out = CanvasBuilder::new(width, height, Kind::Rgba, Sample::Rgba([0; 4]))?;
             for y in 0..height {
                 canvas.row_colours(y, 0, &mut colours);
@@ -560,12 +538,34 @@ fn converted(
         }
         Depth::Indexed(depth) => depth,
     };
-    let palette = palette_of(canvas, depth, choice)?;
+    indexed(canvas, depth, &palette_of(canvas, depth, choice)?, dither)
+}
+
+/// `canvas` stored at `depth` in `palette`, each pixel its nearest entry
+/// and the error that leaves spread to its neighbours when `dither`; a pixel
+/// less than half opaque is masked out.
+///
+/// # Errors
+///
+/// [`TransformError`] where the picture cannot be held, or `palette` is not
+/// one `depth` indexes.
+pub fn indexed(
+    canvas: &Canvas,
+    depth: IndexDepth,
+    palette: &[Rgba8],
+    dither: bool,
+) -> Result<Canvas, TransformError> {
+    let (width, height) = (canvas.width(), canvas.height());
+    let mut colours = alloc::vec::Vec::new();
+    if !fallible::grow_to(&mut colours, width as usize, [0u8; 4]) {
+        return Err(TransformError::OutOfMemory);
+    }
     let masked = canvas.has_transparency();
-    let mut nearest = Nearest::new(&palette).ok_or(TransformError::OutOfMemory)?;
+    let mut nearest = Nearest::new(palette).ok_or(TransformError::OutOfMemory)?;
     let kind = Kind::Indexed {
         depth,
-        palette: palette.clone(),
+        palette: fallible::collected(palette.len(), palette.iter().copied())
+            .ok_or(TransformError::OutOfMemory)?,
         masked,
     };
     let mut out = CanvasBuilder::new(width, height, kind, Sample::Index(0, 255))?;

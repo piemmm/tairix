@@ -74,6 +74,6 @@ pub use reorient::Reorient;
 pub use resample::{resample, resample_window, Region, ResampleError, ResampleScratch, Rgba8Image};
 pub use ring::{Ring, RingInk};
 pub use round::{round_rect_coverage, round_rect_radius};
-pub use scan::{FillRule, ScanScratch, MAX_DRAWING_EXTENT};
+pub use scan::{Coverage, CoverageRows, FillRule, ScanScratch, MAX_DRAWING_EXTENT};
 pub use shape::{Placed, Shape};
 pub use surface::{Canvas, RowBand, RowBands, Surface, MAX_SURFACE_PIXELS, SUBPIXEL};

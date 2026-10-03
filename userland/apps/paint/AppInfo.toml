@@ -22,7 +22,7 @@ capabilities = ["CAP_CONSOLE_WRITE", "CAP_SHM", "CAP_SANDBOX_SPAWN", "CAP_LOG_EM
 # The formats Paint writes back as well as reads: offered for these, a file
 # opens writable and Save writes it. The others it reads open through its own
 # Open…, and save as a new file.
-associations = ["image/png", "image/jpeg", "image/x-riscos-sprite"]
+associations = ["image/png", "image/jpeg", "image/gif", "image/bmp", "image/tiff", "image/x-riscos-sprite", "image/openraster"]
 document-access = "read-write"
 library = "Graphics"
 library-icon = "Paint.png"

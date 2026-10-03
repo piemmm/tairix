@@ -942,10 +942,22 @@ Toolbars are containers for IconButtons, SplitButtons, fields, and grouped actio
   it, and a keyboard focus move scrolls the tool it lands on into view, so the
   keyboard reaches every tool however narrow the strip is.
 - **An owner sizes its window from the strip, not from a guess.**
-  `Toolbar::natural_width` is what seating every tool costs — the floor for an
-  owner whose strip must never scroll — and `Toolbar::min_width` is the two
-  reserved slots plus the widest single tool, the floor for one whose strip
-  may. Neither is a hand-picked constant (§24.1).
+  `Toolbar::natural_length` is what seating every tool costs along the
+  strip — the floor for an owner whose strip must never scroll — and
+  `Toolbar::min_length` is the two reserved slots plus the longest single
+  tool, the floor for one whose strip may. `Toolbar::breadth` is its broadest
+  tool across, which the band the strip sits in is sized from; a tool broader
+  than the band is not seated. None is a hand-picked constant (§24.1).
+- **A tool box is the strip turned on its side.** Laid out
+  `ScrollOrientation::Vertical`, the same toolbar is a column: tools stacked
+  top down and centred across it, a divider across the column between groups,
+  the active tool's seam on its leading edge rather than beneath it, Up and
+  Down for the keyboard where a strip across a window takes Left and Right,
+  the wheel's vertical turn first, and the overflow affordances at the top and
+  bottom with the scrollbar's up and down chevrons. A split tool keeps its two
+  regions side by side, so a column holding one is two slots broad. Seating,
+  scrolling, routing and the repaint gate are one implementation for both
+  axes, so a tool box cannot behave differently from a strip.
 - A held affordance draws the same as an idle one, so the press latch is
   **not** part of the render-equivalence comparison; the offset is.
 
@@ -1843,7 +1855,7 @@ focus, and the elision.
 ### 11.38 ActionRail
 
 The **vertical command column** a detail surface offers about the thing it is
-showing: the counterpart to the horizontal Toolbar (§11.9), stacked so its
+showing: the labelled counterpart to a Toolbar (§11.11), stacked so its
 labels align.
 
 - **Each item *is* a Button (§11.1).** The rail restates none of a button's
@@ -2182,6 +2194,8 @@ row by row — a picture's palette, a terminal scheme's sixteen.
 - **The keyboard walks wells.** Left and Right step a well, Up and Down a row in
   its column, wrapping; with nothing marked, Right and Down mark the first and
   Left and Up the last.
+- **The owner fits the rows.** It sets how many wells go to a row as the room
+  it has changes, and the colours and marks stay as they were.
 
 ### 11.45 NumberField
 
@@ -2202,7 +2216,10 @@ validation.
   line a detent while the field has the keyboard. A commit holds a number past
   a bound to it and replaces text that spells none with the value last held.
 - **Tab is the owner's,** so a field seated in a larger control passes the
-  focus on.
+  focus on, and so is a chord the field has no use for — any but Ctrl+A, which
+  selects its text. That rule is one definition (`owner_chord`) every owner of
+  a field reads, so a letter typed into a field reaches no shortcut while
+  Ctrl+S still saves.
 
 ### 11.46 ColourPicker
 

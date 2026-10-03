@@ -13,16 +13,19 @@ use tairix_image::Rgba8;
 use tairix_reclaim::PressureBand;
 
 use crate::canvas::{charge, OutOfMemory, Tile};
-use crate::document::{Entry, Picture, SpriteInfo};
+use crate::document::{Entry, Layer, Picture, Shown, SpriteInfo};
 use crate::shape::Bounds;
 
 /// One undoable change.
 #[derive(Debug)]
 pub enum Step {
-    /// Tiles of entry `entry` as they stood, each with its index.
+    /// Tiles of layer `layer` of entry `entry` as they stood, each with
+    /// its index.
     Tiles {
         /// The entry written.
         entry: usize,
+        /// The layer of it written.
+        layer: usize,
         /// The tiles to put back.
         tiles: Vec<(usize, Arc<Tile>)>,
     },
@@ -61,6 +64,40 @@ pub enum Step {
         /// Where it went.
         to: usize,
     },
+    /// A layer was added to entry `entry` at `layer`.
+    LayerInserted {
+        /// The entry.
+        entry: usize,
+        /// Where.
+        layer: usize,
+    },
+    /// `removed` was taken from entry `entry`'s layers at `layer`.
+    LayerRemoved {
+        /// The entry.
+        entry: usize,
+        /// Where it was.
+        layer: usize,
+        /// The layer.
+        removed: Layer,
+    },
+    /// Entry `entry`'s layer at `from` was moved to `to`.
+    LayerMoved {
+        /// The entry.
+        entry: usize,
+        /// Where it was.
+        from: usize,
+        /// Where it went.
+        to: usize,
+    },
+    /// How entry `entry`'s layer `layer` showed.
+    LayerShown {
+        /// The entry.
+        entry: usize,
+        /// The layer.
+        layer: usize,
+        /// How it showed.
+        shown: Shown,
+    },
 }
 
 /// What applying a step changed.
@@ -79,6 +116,9 @@ pub enum Damage {
     Area(Bounds),
     /// The whole picture, which may have changed size or kind.
     Whole,
+    /// The layers — how many, their order, how each shows, or which is
+    /// painted on — the picture's size and kind kept.
+    Layers,
     /// The list of entries itself.
     List,
 }
@@ -88,12 +128,19 @@ impl Step {
     fn bytes(&self) -> usize {
         match self {
             Self::Tiles { tiles, .. } => tiles.iter().map(|(_, tile)| charge(tile)).sum(),
-            Self::Picture { picture, .. } => picture.canvas.charged_bytes(),
+            Self::Picture { picture, .. } => picture.charged_bytes(),
             Self::Details { palette, .. } => {
                 palette.as_ref().map_or(0, Vec::len) * core::mem::size_of::<Rgba8>()
             }
             Self::Removed { entry, .. } => entry.charged_bytes(),
-            Self::Inserted { .. } | Self::Moved { .. } => 0,
+            Self::LayerRemoved { removed, .. } => {
+                removed.canvas.charged_bytes() + removed.name.len()
+            }
+            Self::LayerShown { shown, .. } => shown.name.len(),
+            Self::Inserted { .. }
+            | Self::Moved { .. }
+            | Self::LayerInserted { .. }
+            | Self::LayerMoved { .. } => 0,
         }
     }
 
@@ -102,6 +149,10 @@ impl Step {
     fn reserve(&self, entries: &mut Vec<Entry>) -> Result<(), OutOfMemory> {
         match self {
             Self::Removed { .. } => entries.try_reserve(1).map_err(|_| OutOfMemory),
+            Self::LayerRemoved { entry, .. } => match entries.get_mut(*entry) {
+                Some(Entry::Picture(picture)) => picture.reserve_layer(),
+                _ => Ok(()),
+            },
             _ => Ok(()),
         }
     }
@@ -119,11 +170,13 @@ impl Step {
             damage: Damage::List,
         };
         match self {
-            Self::Tiles { entry, tiles } => swap_tiles(entries, entry, tiles),
+            Self::Tiles {
+                entry,
+                layer,
+                tiles,
+            } => swap_tiles(entries, (entry, layer), tiles),
             Self::Picture { entry, picture } => {
-                let Some(Entry::Picture(held)) = entries.get_mut(entry) else {
-                    return None;
-                };
+                let held = picture_of(entries, entry)?;
                 let picture = core::mem::replace(held, picture);
                 Some((Self::Picture { entry, picture }, whole(entry)))
             }
@@ -132,11 +185,9 @@ impl Step {
                 palette,
                 sprite,
             } => {
-                let Some(Entry::Picture(held)) = entries.get_mut(entry) else {
-                    return None;
-                };
+                let held = picture_of(entries, entry)?;
                 let palette = match palette {
-                    Some(palette) => Some(held.canvas.swap_palette(palette)?),
+                    Some(palette) => Some(held.canvas_mut().swap_palette(palette)?),
                     None => None,
                 };
                 let sprite = core::mem::replace(&mut held.sprite, sprite);
@@ -170,7 +221,69 @@ impl Step {
                 entries.insert(to, entry);
                 Some((Self::Moved { from: to, to: from }, list(to)))
             }
+            step => step.apply_to_layers(entries),
         }
+    }
+
+    /// Put this step, one changing a picture's layers, into `entries`, as
+    /// [`apply`](Self::apply) does.
+    fn apply_to_layers(self, entries: &mut [Entry]) -> Option<(Self, Applied)> {
+        let layers = |entry| Applied {
+            entry,
+            damage: Damage::Layers,
+        };
+        match self {
+            Self::LayerInserted { entry, layer } => {
+                let removed = picture_of(entries, entry)?.remove_layer(layer).ok()?;
+                let step = Self::LayerRemoved {
+                    entry,
+                    layer,
+                    removed,
+                };
+                Some((step, layers(entry)))
+            }
+            Self::LayerRemoved {
+                entry,
+                layer,
+                removed,
+            } => {
+                picture_of(entries, entry)?
+                    .insert_layer(layer, removed)
+                    .ok()?;
+                Some((Self::LayerInserted { entry, layer }, layers(entry)))
+            }
+            Self::LayerMoved { entry, from, to } => {
+                picture_of(entries, entry)?.move_layer(from, to).ok()?;
+                let step = Self::LayerMoved {
+                    entry,
+                    from: to,
+                    to: from,
+                };
+                Some((step, layers(entry)))
+            }
+            Self::LayerShown {
+                entry,
+                layer,
+                shown,
+            } => {
+                let shown = picture_of(entries, entry)?.show_layer(layer, shown).ok()?;
+                let step = Self::LayerShown {
+                    entry,
+                    layer,
+                    shown,
+                };
+                Some((step, layers(entry)))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// The picture entry `entry` holds, unless it is kept as its bytes.
+fn picture_of(entries: &mut [Entry], entry: usize) -> Option<&mut Picture> {
+    match entries.get_mut(entry) {
+        Some(Entry::Picture(picture)) => Some(picture),
+        _ => None,
     }
 }
 
@@ -187,19 +300,18 @@ pub enum Unapplied {
     Stale,
 }
 
-/// Swap `tiles` into entry `entry`, each exchanged in place for the tile it
-/// replaces, so the step that takes them back out needs no memory of its
-/// own. Tiles that do not fit their slots, every one checked first, change
-/// nothing.
+/// Swap `tiles` into layer `layer` of entry `entry`, each exchanged in place
+/// for the tile it replaces, so the step that takes them back out needs no
+/// memory of its own. Tiles that do not fit their slots, every one checked
+/// first, change nothing.
 fn swap_tiles(
     entries: &mut [Entry],
-    entry: usize,
+    (entry, layer): (usize, usize),
     mut tiles: Vec<(usize, Arc<Tile>)>,
 ) -> Option<(Step, Applied)> {
-    let Some(Entry::Picture(picture)) = entries.get_mut(entry) else {
-        return None;
-    };
-    let canvas = &mut picture.canvas;
+    let picture = picture_of(entries, entry)?;
+    let painted = picture.active();
+    let canvas = &mut picture.layers_mut().get_mut(layer)?.canvas;
     if !tiles.iter().all(|(index, tile)| canvas.fits(*index, tile)) {
         return None;
     }
@@ -209,8 +321,18 @@ fn swap_tiles(
         bounds = Some(bounds.map_or(area, |held| held.union(&area)));
         *tile = canvas.replace_tile(*index, Arc::clone(tile));
     }
-    let damage = bounds.map_or(Damage::Whole, Damage::Area);
-    Some((Step::Tiles { entry, tiles }, Applied { entry, damage }))
+    // A change to another layer than the one painted on paints on it again.
+    let damage = match bounds {
+        Some(area) if painted == layer => Damage::Area(area),
+        _ => Damage::Layers,
+    };
+    picture.set_active(layer);
+    let step = Step::Tiles {
+        entry,
+        layer,
+        tiles,
+    };
+    Some((step, Applied { entry, damage }))
 }
 
 /// A step and the bytes it was charged when it was made.

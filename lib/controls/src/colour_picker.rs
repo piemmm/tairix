@@ -40,7 +40,7 @@ use crate::paint::{
     surface_rect, withheld,
 };
 use crate::state::{ControlDisposition, ControlState, RenderInvariant, ValidationState};
-use crate::text::{TextAction, TextField};
+use crate::text::{owner_chord, TextAction, TextField};
 
 /// The breadth of the hue and opacity strips, in logical pixels.
 const STRIP: u32 = 16;
@@ -1402,15 +1402,6 @@ impl ColourPicker {
             surface.fill_round_rect(x, y, w, h, 0, veil);
         }
     }
-}
-
-/// Whether `key` with `modifiers` is a chord a field has no use for — any
-/// but Ctrl+A, which selects its text — so the owner's shortcut takes it.
-fn owner_chord(key: Key, modifiers: Modifiers) -> bool {
-    let chord = modifiers.ctrl || modifiers.alt || modifiers.meta;
-    let select_all =
-        modifiers.ctrl && !modifiers.alt && !modifiers.meta && matches!(key, Key::Char('a' | 'A'));
-    chord && !select_all
 }
 
 /// `text` read as a colour the way a person types one: spaces round it, the

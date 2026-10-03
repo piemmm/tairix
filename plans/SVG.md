@@ -88,7 +88,7 @@ on the hot path.
 
 An `SvgImage` is a design grid (`DESIGN_GRID`, 2048 units a side) plus an
 ordered artwork tree, bottom first: `tairix_raster::artwork::Node`s, each
-either a `Layer` (a `Paint`, a `FillRule`, and a list of **contours** in
+either a `Coat` (a `Paint`, a `FillRule`, and a list of **contours** in
 design-grid coordinates) or a `Group` (a subtree composited as a unit through
 an opacity and an optional mask). A `Paint` is a colour, a gradient, or a
 `Pattern` — a tile of artwork and the map into tile space.
@@ -566,7 +566,7 @@ nothing and costs one round.
 
 ### Layout
 
-A run of one style emits **one `Layer`** with `FillRule::NonZero` and all
+A run of one style emits **one `Coat`** with `FillRule::NonZero` and all
 its glyphs' contours together — the TrueType rule S22 settled, so a counter
 is a contour wound against the one enclosing it. White space is collapsed
 across the whole `<text>` before any positioning, because

@@ -1,10 +1,18 @@
 //! Shapes as the share of each pixel they cover.
 //!
 //! Positions are in 256ths of a pixel, so a pointer between pixel centres at
-//! a high zoom lands where it was. A pixel wholly inside or outside a shape is
-//! answered exactly from where its edges lie; one an edge crosses is sampled
-//! sixteen times. Everything is integer arithmetic, so a shape covers the same
-//! pixels on every machine.
+//! a high zoom lands where it was. A shape is traced as closed contours —
+//! a curve to within a sixteenth of a pixel — and its coverage is answered by
+//! `lib/raster`'s one scan converter: the exact share of each pixel's area,
+//! or, without antialiasing, whether the pixel's centre is inside. Paint has
+//! no rasteriser of its own.
+
+use alloc::vec::Vec;
+
+use tairix_raster::{Coverage, CoverageRows, FillRule, ScanScratch};
+use tairix_util::mathf;
+
+use crate::canvas::OutOfMemory;
 
 /// One pixel, in the units positions are given in.
 pub const FX: i64 = 256;
@@ -15,8 +23,15 @@ const HALF: i64 = FX / 2;
 /// than this inside or outside an edge lies wholly on that side.
 const HALF_DIAGONAL: i64 = 182;
 
-/// The offsets of a pixel's sixteen samples from its left or top edge.
-const SAMPLES: [i64; 4] = [32, 96, 160, 224];
+/// How far a traced curve may stray from the true one, in 256ths of a pixel:
+/// a sixty-fourth, so the area a chord cuts off is lost in the rounding.
+const TOLERANCE: f64 = 4.0;
+
+/// The fewest and the most vertices a traced closed curve takes: few enough
+/// that the largest picture's ellipse is cheap, many enough for the
+/// tolerance at that size.
+const FEWEST_VERTICES: usize = 8;
+const MOST_VERTICES: usize = 1 << 14;
 
 /// A position, in 256ths of a pixel.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
@@ -124,6 +139,17 @@ pub enum Shape {
         /// The border's width, or `None` for the whole box.
         outline: Option<u32>,
     },
+    /// A box of pixels with each corner rounded to `radius` pixels, whole
+    /// or as a border `outline` pixels wide.
+    Rounded {
+        /// Pixels the box spans, inclusive.
+        span: Span,
+        /// The border's width, or `None` for the whole box.
+        outline: Option<u32>,
+        /// The corners' radius, in pixels; held to half the box's shorter
+        /// side.
+        radius: u32,
+    },
     /// The ellipse inscribed in a box of pixels, whole or as a ring
     /// `outline` pixels wide.
     Ellipse {
@@ -194,169 +220,318 @@ impl Shape {
                     y1: (a.y.max(b.y) + reach).div_euclid(FX) + 1,
                 }
             }
-            Self::Rect { span, .. } | Self::Ellipse { span, .. } => span.bounds(),
+            Self::Rect { span, .. } | Self::Rounded { span, .. } | Self::Ellipse { span, .. } => {
+                span.bounds()
+            }
         }
     }
 
-    /// Write the coverage of row `y` from column `x` into `out`, a pixel an
-    /// entry, `255` wholly covered. With `aa` off a pixel is covered or not,
-    /// by whether its centre is inside.
-    pub fn row(&self, y: i64, x: i64, aa: bool, out: &mut [u8]) {
+    /// Trace the shape into `scratch` and answer its coverage a row at a
+    /// time: a pixel's exact share when `aa`, else whole where its centre is
+    /// inside. `None` for a shape that covers nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`OutOfMemory`] when the outline cannot be held.
+    pub fn rows<'s>(
+        &self,
+        aa: bool,
+        scratch: &'s mut ShapeScratch,
+    ) -> Result<Option<CoverageRows<'s>>, OutOfMemory> {
+        let ShapeScratch { scan, outer, inner } = scratch;
+        outer.clear();
+        inner.clear();
+        let coverage = if aa { Coverage::Area } else { Coverage::Centre };
         match *self {
-            Self::Capsule { a, b, radius } => capsule_row(a, b, radius, y, x, aa, out),
-            Self::Rect { span, outline } => rect_row(span, outline, y, x, out),
-            Self::Ellipse { span, outline } => ellipse_row(span, outline, y, x, aa, out),
+            Self::Capsule { a, b, radius } => trace_capsule(a, b, radius, coverage, outer)?,
+            Self::Rect { span, outline } => {
+                let (x0, y0, x1, y1) = span.corners();
+                trace_box((x0, y0, x1 + 1, y1 + 1), outer)?;
+                if let Some(width) = outline.map(i64::from) {
+                    if x0 + width <= x1 - width && y0 + width <= y1 - width {
+                        trace_box(
+                            (x0 + width, y0 + width, x1 + 1 - width, y1 + 1 - width),
+                            inner,
+                        )?;
+                    }
+                }
+            }
+            Self::Rounded {
+                span,
+                outline,
+                radius,
+            } => {
+                let (x0, y0, x1, y1) = span.corners();
+                let radius = i64::from(radius) * FX;
+                trace_rounded((x0, y0, x1 + 1, y1 + 1), radius, coverage, outer)?;
+                if let Some(width) = outline.map(i64::from) {
+                    if x0 + width <= x1 - width && y0 + width <= y1 - width {
+                        let hollow = (x0 + width, y0 + width, x1 + 1 - width, y1 + 1 - width);
+                        trace_rounded(hollow, radius - width * FX, coverage, inner)?;
+                    }
+                }
+            }
+            Self::Ellipse { span, outline } => {
+                let Some(oval) = Oval::of(span, 0) else {
+                    return Ok(None);
+                };
+                oval.trace(coverage, outer)?;
+                if let Some(hole) = outline.and_then(|width| Oval::of(span, i64::from(width))) {
+                    hole.trace(coverage, inner)?;
+                }
+            }
         }
+        let units = u32::try_from(FX).map_err(|_| OutOfMemory)?;
+        // A hollow lies inside its outline, so the even-odd rule makes it a
+        // hole however it is wound.
+        let contours: [&[(i32, i32)]; 2] = [outer, inner];
+        Ok(scan.coverage_rows(&contours, units, FillRule::EvenOdd, coverage))
     }
 }
 
-/// The squared distance from `p` to the segment from `a` to `b`.
-fn segment_distance2(p: Point, a: Point, b: Point) -> i128 {
-    let (vx, vy) = (i128::from(b.x - a.x), i128::from(b.y - a.y));
-    let (wx, wy) = (i128::from(p.x - a.x), i128::from(p.y - a.y));
-    let length2 = vx * vx + vy * vy;
-    let dot = wx * vx + wy * vy;
-    if length2 == 0 || dot <= 0 {
-        return wx * wx + wy * wy;
+impl Shape {
+    /// The shape's outer outline as it is traced for its exact area, in
+    /// 256ths of a pixel: what a selection being marked out draws.
+    ///
+    /// # Errors
+    ///
+    /// [`OutOfMemory`] when the outline cannot be held.
+    pub fn outline<'s>(
+        &self,
+        scratch: &'s mut ShapeScratch,
+    ) -> Result<&'s [(i32, i32)], OutOfMemory> {
+        let outer = &mut scratch.outer;
+        outer.clear();
+        match *self {
+            Self::Capsule { a, b, radius } => trace_capsule(a, b, radius, Coverage::Area, outer)?,
+            Self::Rect { span, .. } => {
+                let (x0, y0, x1, y1) = span.corners();
+                trace_box((x0, y0, x1 + 1, y1 + 1), outer)?;
+            }
+            Self::Rounded { span, radius, .. } => {
+                let (x0, y0, x1, y1) = span.corners();
+                let radius = i64::from(radius) * FX;
+                trace_rounded((x0, y0, x1 + 1, y1 + 1), radius, Coverage::Area, outer)?;
+            }
+            Self::Ellipse { span, .. } => {
+                if let Some(oval) = Oval::of(span, 0) {
+                    oval.trace(Coverage::Area, outer)?;
+                }
+            }
+        }
+        Ok(outer)
     }
-    if dot >= length2 {
-        let (ex, ey) = (i128::from(p.x - b.x), i128::from(p.y - b.y));
-        return ex * ex + ey * ey;
-    }
-    let cross = wx * vy - wy * vx;
-    cross * cross / length2
 }
 
-/// The pixels of row `y` whose centres may lie within `reach` of the segment
-/// from `a` to `b`, as `[first, last]`, a pixel wider each side than exact;
-/// `None` for a row the capsule misses. The capsule is convex, so a row meets
-/// it in one run: the hull of where it meets the two end discs and the band
-/// the segment sweeps.
-fn capsule_span(a: Point, b: Point, reach: i64, y: i64) -> Option<(i64, i64)> {
-    let centre = i128::from(y * FX + HALF);
-    let reach = i128::from(reach);
-    let mut hull: Option<(i128, i128)> = None;
-    let mut take = |left: i128, right: i128| {
-        if left <= right {
-            hull = Some(hull.map_or((left, right), |(l, r)| (l.min(left), r.max(right))));
-        }
+/// The coverage of the closed outline through `points`, a lasso's path or
+/// a polygon's corners, and the pixels it may cover: whole where a pixel's
+/// centre is inside unless `aa`. `None` for an outline enclosing nothing.
+///
+/// # Errors
+///
+/// [`OutOfMemory`] when the outline cannot be held.
+pub fn polygon_rows<'s>(
+    points: &[Point],
+    aa: bool,
+    scratch: &'s mut ShapeScratch,
+) -> Result<Option<(CoverageRows<'s>, Bounds)>, OutOfMemory> {
+    let ShapeScratch { scan, outer, inner } = scratch;
+    outer.clear();
+    inner.clear();
+    room(outer, points.len())?;
+    let mut bounds: Option<Bounds> = None;
+    for point in points {
+        outer.push(vertex(real(point.x), real(point.y)));
+        let (x, y) = point.pixel();
+        let pixel = Bounds {
+            x0: x,
+            y0: y,
+            x1: x + 1,
+            y1: y + 1,
+        };
+        bounds = Some(bounds.map_or(pixel, |held| held.union(&pixel)));
+    }
+    let Some(bounds) = bounds else {
+        return Ok(None);
     };
-    for end in [a, b] {
-        let dy = centre - i128::from(end.y);
-        if dy * dy <= reach * reach {
-            let half = (reach * reach - dy * dy).isqrt();
-            take(i128::from(end.x) - half, i128::from(end.x) + half);
-        }
-    }
-    let (vx, vy) = (i128::from(b.x - a.x), i128::from(b.y - a.y));
-    let length2 = vx * vx + vy * vy;
-    if length2 > 0 {
-        // Within the band: |(p - a) × v| ≤ reach·|v|, and 0 ≤ (p - a)·v ≤ |v|²,
-        // each linear in the row's x; the root is rounded up, so the span only
-        // ever widens.
-        let width = reach * (length2.isqrt() + 1);
-        let dy = centre - i128::from(a.y);
-        let across = solve_between(vy, dy * vx - width, dy * vx + width);
-        let along = solve_between(vx, -dy * vy, length2 - dy * vy);
-        if let (Some((l0, r0)), Some((l1, r1))) = (across, along) {
-            let ax = i128::from(a.x);
-            take(ax + l0.max(l1), ax + r0.min(r1));
-        }
-    }
-    let (left, right) = hull?;
-    let pixel = |at: i128| i64::try_from((at - i128::from(HALF)).div_euclid(i128::from(FX))).ok();
-    Some((pixel(left)? - 1, pixel(right)? + 1))
+    let coverage = if aa { Coverage::Area } else { Coverage::Centre };
+    let units = u32::try_from(FX).map_err(|_| OutOfMemory)?;
+    let contours: [&[(i32, i32)]; 1] = [outer];
+    Ok(scan
+        .coverage_rows(&contours, units, FillRule::NonZero, coverage)
+        .map(|rows| (rows, bounds)))
 }
 
-/// The `t` for which `low ≤ t·slope ≤ high`, as an interval: every `t` for a
-/// flat `slope` that already meets it, none for one that cannot.
-fn solve_between(slope: i128, low: i128, high: i128) -> Option<(i128, i128)> {
-    match slope.signum() {
-        0 => (low <= 0 && 0 <= high).then_some((i128::MIN / 4, i128::MAX / 4)),
-        1 => Some((low.div_euclid(slope), high.div_euclid(slope) + 1)),
-        _ => Some(((-high).div_euclid(-slope), (-low).div_euclid(-slope) + 1)),
-    }
+/// What tracing a shape works in: the converter's own buffers and the
+/// outlines, held across shapes so a stroke of many dabs allocates once.
+#[derive(Debug, Default)]
+pub struct ShapeScratch {
+    scan: ScanScratch,
+    outer: Vec<(i32, i32)>,
+    inner: Vec<(i32, i32)>,
 }
 
-fn capsule_row(a: Point, b: Point, radius: i64, y: i64, x: i64, aa: bool, out: &mut [u8]) {
-    let reach = if aa { radius + HALF_DIAGONAL } else { radius };
-    // Only the run the capsule can reach is measured; the rest is uncovered.
-    let Some((first, last)) = capsule_span(a, b, reach, y) else {
-        out.fill(0);
-        return;
+/// A position in 256ths of a pixel as the converter takes one.
+fn vertex(x: f64, y: f64) -> (i32, i32) {
+    (mathf::round_i32(x), mathf::round_i32(y))
+}
+
+/// Room for `count` more vertices in `out`.
+fn room(out: &mut Vec<(i32, i32)>, count: usize) -> Result<(), OutOfMemory> {
+    out.try_reserve(count).map_err(|_| OutOfMemory)
+}
+
+/// The pixels `[x0, x1) × [y0, y1)` as a contour along their edges.
+fn trace_box(
+    (x0, y0, x1, y1): (i64, i64, i64, i64),
+    out: &mut Vec<(i32, i32)>,
+) -> Result<(), OutOfMemory> {
+    room(out, 4)?;
+    let corner = |x: i64, y: i64| {
+        let at = |v: i64| i32::try_from(v * FX).unwrap_or(if v < 0 { i32::MIN } else { i32::MAX });
+        (at(x), at(y))
     };
-    let end = x.saturating_add(i64::try_from(out.len()).unwrap_or(i64::MAX));
-    let from = usize::try_from(first.clamp(x, end) - x).unwrap_or(0);
-    let to = usize::try_from((last + 1).clamp(x, end) - x)
-        .unwrap_or(0)
-        .max(from);
-    out[..from].fill(0);
-    out[to..].fill(0);
-    let x = x + i64::try_from(from).unwrap_or(0);
-    for (at, cover) in (x..).zip(out[from..to].iter_mut()) {
-        *cover = capsule_cover(a, b, radius, at, y, aa);
+    out.extend([
+        corner(x0, y0),
+        corner(x1, y0),
+        corner(x1, y1),
+        corner(x0, y1),
+    ]);
+    Ok(())
+}
+
+/// The pixels `[x0, x1) × [y0, y1)` with each corner rounded to `radius`
+/// 256ths of a pixel — held to half the shorter side — as a contour: a
+/// quarter curve about each corner, all four mirrored from one so the box is
+/// exactly symmetric, joined by the straight sides.
+fn trace_rounded(
+    (x0, y0, x1, y1): (i64, i64, i64, i64),
+    radius: i64,
+    coverage: Coverage,
+    out: &mut Vec<(i32, i32)>,
+) -> Result<(), OutOfMemory> {
+    let (left, top, right, bottom) = (x0 * FX, y0 * FX, x1 * FX, y1 * FX);
+    let radius = radius.min((right - left) / 2).min((bottom - top) / 2);
+    if radius <= 0 {
+        return trace_box((x0, y0, x1, y1), out);
+    }
+    let count = vertices_for(real(radius));
+    let (factor, pad) = placement(count, coverage);
+    let r = real(radius) * factor + pad;
+    let quarter = count / 4;
+    room(out, 4 * (quarter + 1))?;
+    let step = core::f64::consts::FRAC_PI_2 / real_count(quarter);
+    let offset = |index: usize| {
+        let angle = step * real_count(index);
+        (
+            i64::from(mathf::round_i32(r * mathf::cos(angle))),
+            i64::from(mathf::round_i32(r * mathf::sin(angle))),
+        )
+    };
+    let at = |v: i64| i32::try_from(v).unwrap_or(if v < 0 { i32::MIN } else { i32::MAX });
+    let (near_x, far_x) = (left + radius, right - radius);
+    let (near_y, far_y) = (top + radius, bottom - radius);
+    for index in (0..=quarter).rev() {
+        let (dx, dy) = offset(index);
+        out.push((at(far_x + dx), at(near_y - dy)));
+    }
+    for index in 0..=quarter {
+        let (dx, dy) = offset(index);
+        out.push((at(far_x + dx), at(far_y + dy)));
+    }
+    for index in (0..=quarter).rev() {
+        let (dx, dy) = offset(index);
+        out.push((at(near_x - dx), at(far_y + dy)));
+    }
+    for index in 0..=quarter {
+        let (dx, dy) = offset(index);
+        out.push((at(near_x - dx), at(near_y - dy)));
+    }
+    Ok(())
+}
+
+/// Vertices a closed curve of greatest radius `radius` is traced with, each
+/// chord within [`TOLERANCE`] of the curve: a multiple of four, so a curve
+/// symmetric about both axes is traced so.
+fn vertices_for(radius: f64) -> usize {
+    if radius <= TOLERANCE {
+        return FEWEST_VERTICES;
+    }
+    let step = 2.0 * mathf::acos(1.0 - TOLERANCE / radius);
+    let count = mathf::clamp(
+        mathf::ceil(core::f64::consts::TAU / step),
+        real_count(FEWEST_VERTICES),
+        real_count(MOST_VERTICES),
+    );
+    usize::try_from(mathf::round_i32(count))
+        .unwrap_or(FEWEST_VERTICES)
+        .next_multiple_of(4)
+}
+
+/// Where a curve traced with `count` vertices is placed, as a factor of its
+/// radius and a pad in 256ths of a pixel. An area is traced on the curve, so
+/// a shape never leaves its own extent; a centre test a hair past the polygon
+/// circumscribing it, so every pixel centre on or inside the curve is
+/// strictly inside, on either side alike.
+fn placement(count: usize, coverage: Coverage) -> (f64, f64) {
+    match coverage {
+        Coverage::Area => (1.0, 0.0),
+        Coverage::Centre => (
+            1.0 / mathf::cos(core::f64::consts::PI / real_count(count)),
+            1.0,
+        ),
     }
 }
 
-/// The share of pixel `(x, y)` the capsule about the segment from `a` to `b`
-/// covers: whole pixels only unless `aa`.
-fn capsule_cover(a: Point, b: Point, radius: i64, x: i64, y: i64, aa: bool) -> u8 {
-    let r2 = i128::from(radius) * i128::from(radius);
-    let d2 = segment_distance2(Point::centre_of(x, y), a, b);
-    if !aa {
-        return if d2 <= r2 { 255 } else { 0 };
+/// A position in 256ths of a pixel as `f64`, held to what the converter
+/// can place.
+fn real(value: i64) -> f64 {
+    f64::from(i32::try_from(value).unwrap_or(if value < 0 { i32::MIN } else { i32::MAX }))
+}
+
+/// A vertex count as `f64`.
+fn real_count(count: usize) -> f64 {
+    f64::from(u32::try_from(count).unwrap_or(u32::MAX))
+}
+
+/// The stadium a disc of `radius` sweeps from `a` to `b`: a half circle about
+/// each end, facing away from the other, joined by the two straight sides.
+fn trace_capsule(
+    a: Point,
+    b: Point,
+    radius: i64,
+    coverage: Coverage,
+    out: &mut Vec<(i32, i32)>,
+) -> Result<(), OutOfMemory> {
+    if radius <= 0 {
+        return Ok(());
     }
-    let inner = i128::from((radius - HALF_DIAGONAL).max(0));
-    let outer = i128::from(radius + HALF_DIAGONAL);
-    if radius > HALF_DIAGONAL && d2 <= inner * inner {
-        255
-    } else if d2 >= outer * outer {
-        0
+    let (ax, ay, bx, by) = (real(a.x), real(a.y), real(b.x), real(b.y));
+    let count = vertices_for(real(radius));
+    let (factor, pad) = placement(count, coverage);
+    let r = real(radius) * factor + pad;
+    let half = count / 2;
+    room(out, 2 * (half + 1))?;
+    let facing = if a == b {
+        0.0
     } else {
-        sampled(x, y, |p| segment_distance2(p, a, b) <= r2)
-    }
-}
-
-/// The share of pixel `(x, y)` whose sixteen samples `inside` accepts.
-fn sampled(x: i64, y: i64, inside: impl Fn(Point) -> bool) -> u8 {
-    let mut count = 0u32;
-    for dy in SAMPLES {
-        for dx in SAMPLES {
-            count += u32::from(inside(Point {
-                x: x * FX + dx,
-                y: y * FX + dy,
-            }));
-        }
-    }
-    u8::try_from((count * 255 + 8) / 16).unwrap_or(u8::MAX)
-}
-
-/// `out[i]`, column `x + i`, for the columns `from..=to`, clipped to `out`.
-fn columns(out: &mut [u8], x: i64, from: i64, to: i64) -> &mut [u8] {
-    let len = i64::try_from(out.len()).unwrap_or(i64::MAX);
-    let start = from.saturating_sub(x).clamp(0, len);
-    let end = to.saturating_sub(x).saturating_add(1).clamp(start, len);
-    let (Ok(start), Ok(end)) = (usize::try_from(start), usize::try_from(end)) else {
-        return &mut [];
+        mathf::atan2(by - ay, bx - ax)
     };
-    &mut out[start..end]
-}
-
-/// A rectangle's row is whole runs: the span across, or its two walls on a
-/// row its hollow crosses.
-fn rect_row(span: Span, outline: Option<u32>, y: i64, x: i64, out: &mut [u8]) {
-    out.fill(0);
-    let (x0, y0, x1, y1) = span.corners();
-    if !(y0..=y1).contains(&y) {
-        return;
-    }
-    match outline.map(i64::from) {
-        Some(w) if (y0 + w..=y1 - w).contains(&y) => {
-            columns(out, x, x0, (x0 + w - 1).min(x1)).fill(u8::MAX);
-            columns(out, x, (x1 - w + 1).max(x0), x1).fill(u8::MAX);
+    let normal = facing + core::f64::consts::FRAC_PI_2;
+    let step = core::f64::consts::PI / real_count(half);
+    for (centre, from) in [
+        ((bx, by), normal),
+        ((ax, ay), normal - core::f64::consts::PI),
+    ] {
+        for index in 0..=half {
+            let angle = from - step * real_count(index);
+            out.push(vertex(
+                centre.0 + r * mathf::cos(angle),
+                centre.1 + r * mathf::sin(angle),
+            ));
         }
-        _ => columns(out, x, x0, x1).fill(u8::MAX),
     }
+    Ok(())
 }
 
 /// An ellipse's centre and radii, in 256ths of a pixel.
@@ -380,98 +555,43 @@ impl Oval {
         (oval.rx > 0 && oval.ry > 0).then_some(oval)
     }
 
-    fn inside(&self, p: Point) -> bool {
-        let dx = i128::from(p.x - self.cx) * i128::from(self.ry);
-        let dy = i128::from(p.y - self.cy) * i128::from(self.rx);
-        let r = i128::from(self.rx) * i128::from(self.ry);
-        dx * dx + dy * dy <= r * r
-    }
-
-    /// Half the ellipse's width at `dy` from its centre line, rounded down,
-    /// or `None` past its top or bottom.
-    fn half_width(&self, dy: i64) -> Option<i64> {
-        let dy = dy.abs();
-        if dy >= self.ry {
-            return None;
-        }
-        let root = (self.ry * self.ry - dy * dy).isqrt();
-        Some(self.rx * root / self.ry)
-    }
-
-    /// Half the ellipse's width at `dy`, rounded up so it never falls short.
-    fn half_width_up(&self, dy: i64) -> Option<i64> {
-        let dy = dy.abs();
-        if dy >= self.ry {
-            return None;
-        }
-        let root = (self.ry * self.ry - dy * dy).isqrt() + 1;
-        Some(((self.rx * root + self.ry - 1) / self.ry).min(self.rx))
-    }
-
-    /// The coverage of row `y` from column `x`. Only the columns the row
-    /// meets the ellipse in are looked at, and only those its edge crosses
-    /// are tested: the cost is the ellipse's, not the row's.
-    fn row(&self, y: i64, x: i64, aa: bool, out: &mut [u8]) {
-        out.fill(0);
-        let (top, bottom) = (y * FX - self.cy, (y + 1) * FX - self.cy);
-        let within = self.half_width(top).zip(self.half_width(bottom));
-        let inner = within.map(|(a, b)| a.min(b));
-        let outer = if top <= 0 && bottom >= 0 {
-            Some(self.rx)
-        } else {
-            match (self.half_width_up(top), self.half_width_up(bottom)) {
-                (Some(a), Some(b)) => Some(a.max(b)),
-                (one, other) => one.or(other),
-            }
+    /// Trace the ellipse from one quadrant mirrored into the others, so it
+    /// is exactly symmetric about both its axes however the offsets round.
+    fn trace(&self, coverage: Coverage, out: &mut Vec<(i32, i32)>) -> Result<(), OutOfMemory> {
+        let count = vertices_for(real(self.rx.max(self.ry)));
+        let (factor, pad) = placement(count, coverage);
+        let (rx, ry) = (real(self.rx) * factor + pad, real(self.ry) * factor + pad);
+        let quarter = count / 4;
+        room(out, count)?;
+        let step = core::f64::consts::FRAC_PI_2 / real_count(quarter);
+        let offset = |index: usize| {
+            let angle = step * real_count(index);
+            (
+                i64::from(mathf::round_i32(rx * mathf::cos(angle))),
+                i64::from(mathf::round_i32(ry * mathf::sin(angle))),
+            )
         };
-        let Some(outer) = outer else {
-            return;
+        let corner = |dx: i64, dy: i64| {
+            let at = |v: i64| i32::try_from(v).unwrap_or(if v < 0 { i32::MIN } else { i32::MAX });
+            (at(self.cx + dx), at(self.cy + dy))
         };
-        let (first, last) = (
-            (self.cx - outer).div_euclid(FX),
-            (self.cx + outer).div_euclid(FX),
-        );
-        for (at, cover) in (first.max(x)..).zip(columns(out, x, first, last)) {
-            let (left, right) = (at * FX - self.cx, (at + 1) * FX - self.cx);
-            *cover = if inner.is_some_and(|h| -h <= left && right <= h) {
-                255
-            } else if !aa {
-                if self.inside(Point::centre_of(at, y)) {
-                    255
-                } else {
-                    0
-                }
-            } else if right <= -outer || left >= outer {
-                0
-            } else {
-                sampled(at, y, |p| self.inside(p))
-            };
+        for index in 0..quarter {
+            let (dx, dy) = offset(index);
+            out.push(corner(dx, dy));
         }
-    }
-}
-
-fn ellipse_row(span: Span, outline: Option<u32>, y: i64, x: i64, aa: bool, out: &mut [u8]) {
-    let Some(oval) = Oval::of(span, 0) else {
-        out.fill(0);
-        return;
-    };
-    oval.row(y, x, aa, out);
-    let Some(width) = outline else {
-        return;
-    };
-    let Some(hole) = Oval::of(span, i64::from(width)) else {
-        return;
-    };
-    // The ring is the ellipse less the one inside it, pixel by pixel: what
-    // the inner one covers, the outer covers too.
-    let mut inner = [0u8; 64];
-    for (index, chunk) in out.chunks_mut(inner.len()).enumerate() {
-        let start = x + i64::try_from(index * inner.len()).unwrap_or(i64::MAX);
-        let inner = &mut inner[..chunk.len()];
-        hole.row(y, start, aa, inner);
-        for (cover, taken) in chunk.iter_mut().zip(inner.iter()) {
-            *cover = cover.saturating_sub(*taken);
+        for index in 0..quarter {
+            let (dx, dy) = offset(quarter - index);
+            out.push(corner(-dx, dy));
         }
+        for index in 0..quarter {
+            let (dx, dy) = offset(index);
+            out.push(corner(-dx, -dy));
+        }
+        for index in 0..quarter {
+            let (dx, dy) = offset(quarter - index);
+            out.push(corner(dx, -dy));
+        }
+        Ok(())
     }
 }
 

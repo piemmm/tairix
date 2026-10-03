@@ -119,6 +119,7 @@
   - [`tairix-virtio-input`](./lib/virtio_input.md)
   - [`tairix-vt`](./lib/vt.md)
   - [`tairix-wallpaper`](./lib/wallpaper.md)
+  - [`tairix-xml`](./lib/xml.md)
 
 # Drivers
 
