@@ -2595,7 +2595,7 @@ where
     /// the involuntary sibling of the `exit` handler, driven by the
     /// user-fault resolver when an abort is fatal to the task.
     ///
-    /// The exit code is [`FAULT_EXIT_CODE`] (the `128 + SIGSEGV` shell
+    /// The exit code is [`tairix_abi::FAULT_EXIT_STATUS`] (the `128 + SIGSEGV` shell
     /// convention), so a parent reaping the crashed child observes a
     /// crash, not a clean exit. The scheduler reap itself is driven by the
     /// port's `Exit` suspension, exactly as for the `exit` syscall.
@@ -2856,8 +2856,8 @@ where
         // the address space while a sibling still executes on another CPU would
         // free its page-table root from under it.
         self.process_signal
-            .terminate_siblings(process, thread, FAULT_EXIT_CODE);
-        self.land_thread_down(process, thread, Some(FAULT_EXIT_CODE));
+            .terminate_siblings(process, thread, tairix_abi::FAULT_EXIT_STATUS);
+        self.land_thread_down(process, thread, Some(tairix_abi::FAULT_EXIT_STATUS));
     }
 
     /// Render one interactive-surface frame-budget overrun through the
@@ -5246,11 +5246,6 @@ const CONSOLE_READ_MAX: usize = 4096;
 /// than this; a longer request is refused with [`Errno::NotFound`] (it
 /// cannot name any registered program) rather than allocated.
 const SPAWN_PATH_MAX: usize = 1024;
-
-/// Exit status recorded for a task killed by an unresolvable user fault:
-/// the `128 + SIGSEGV (11)` shell convention, so a parent reaping the
-/// crashed child observes a crash, never a clean exit.
-const FAULT_EXIT_CODE: i32 = 139;
 
 /// Map the fault-path's own coarse cause `&str` and [`FaultLocality`] onto
 /// the frozen ABI codes a [`CrashRecord`] carries.
@@ -13320,7 +13315,11 @@ where
         // reserved status on its very first slice.
         if self
             .process_wait
-            .register_child(self.parent, sec_id)
+            .register_child(
+                self.parent,
+                sec_id,
+                crate::procwait::ChildListing::of_spawn(self.sandbox),
+            )
             .is_err()
         {
             self.abandon_admission(task_id, sec_id, services.peer_watch(), None);
@@ -15083,8 +15082,13 @@ mod tests {
         let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
         let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
             Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
-        crate::procwait::ProcessWait::register_child(wait, ProcessId(2), ProcessId(40))
-            .expect("registered");
+        crate::procwait::ProcessWait::register_child(
+            wait,
+            ProcessId(2),
+            ProcessId(40),
+            crate::procwait::ChildListing::Listed,
+        )
+        .expect("registered");
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -15165,8 +15169,13 @@ mod tests {
         let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
         let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
             Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
-        crate::procwait::ProcessWait::register_child(wait, ProcessId(2), ProcessId(44))
-            .expect("registered");
+        crate::procwait::ProcessWait::register_child(
+            wait,
+            ProcessId(2),
+            ProcessId(44),
+            crate::procwait::ChildListing::Listed,
+        )
+        .expect("registered");
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -20636,7 +20645,12 @@ mod tests {
             Err(Errno::NotImplemented)
         }
 
-        fn register_child(&self, _parent: ProcessId, child: ProcessId) -> Result<(), Errno> {
+        fn register_child(
+            &self,
+            _parent: ProcessId,
+            child: ProcessId,
+            _listing: crate::procwait::ChildListing,
+        ) -> Result<(), Errno> {
             let claims = crate::procsignal::claim_group_kill(
                 Some(self.table),
                 crate::procsignal::DeferredTeardown::Exit {
@@ -21042,8 +21056,12 @@ mod tests {
         let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
         let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
             Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
-        wait.register_child(ProcessId(2), ProcessId(40))
-            .expect("registered");
+        wait.register_child(
+            ProcessId(2),
+            ProcessId(40),
+            crate::procwait::ChildListing::Listed,
+        )
+        .expect("registered");
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -21521,8 +21539,12 @@ mod tests {
         let pid = h
             .spawn(&ctx, 0x1000, SPAWN_PATH.len(), 0, 0, 0, 0)
             .expect("spawn succeeds");
-        // The child (its returned PID) was registered against parent 2.
-        assert_eq!(*wait_producer.last_register.lock(), Some((2, pid)));
+        // The child (its returned PID) was registered against parent 2, where
+        // a wait for any child sees it.
+        assert_eq!(
+            *wait_producer.last_register.lock(),
+            Some((2, pid, crate::procwait::ChildListing::Listed))
+        );
     }
 
     /// With no frame allocator threaded the spawn subsystem is unwired, so
@@ -22984,9 +23006,12 @@ mod tests {
                     args: &[],
                 },
             ])))));
+        let wait_producer: &'static RecordingProcessWait =
+            Box::leak(Box::new(RecordingProcessWait::new(Err(Errno::NotFound))));
         let h = spawn_handler(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
-        );
+        )
+        .with_process_wait(wait_producer);
 
         let pid = h
             .spawn(
@@ -23000,6 +23025,12 @@ mod tests {
             )
             .expect("sandbox spawn succeeds");
 
+        // The worker belongs to the seam that spawned it: a wait for any child
+        // of the spawner never sees it.
+        assert_eq!(
+            *wait_producer.last_register.lock(),
+            Some((2, pid, crate::procwait::ChildListing::Private))
+        );
         let guard = table.read();
         let record = guard.caps_for(SecTaskId(pid)).expect("child record");
         assert!(record.is_sandboxed());
@@ -23837,8 +23868,12 @@ mod tests {
         let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
         let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
             Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
-        wait.register_child(ProcessId(2), ProcessId(9))
-            .expect("registered");
+        wait.register_child(
+            ProcessId(2),
+            ProcessId(9),
+            crate::procwait::ChildListing::Listed,
+        )
+        .expect("registered");
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -23895,8 +23930,12 @@ mod tests {
         let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
         let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
             Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
-        wait.register_child(ProcessId(2), ProcessId(9))
-            .expect("registered");
+        wait.register_child(
+            ProcessId(2),
+            ProcessId(9),
+            crate::procwait::ChildListing::Listed,
+        )
+        .expect("registered");
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -23984,10 +24023,18 @@ mod tests {
         let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
         let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
             Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
-        wait.register_child(ProcessId(2), ProcessId(9))
-            .expect("registered");
-        wait.register_child(ProcessId(2), ProcessId(7))
-            .expect("registered");
+        wait.register_child(
+            ProcessId(2),
+            ProcessId(9),
+            crate::procwait::ChildListing::Listed,
+        )
+        .expect("registered");
+        wait.register_child(
+            ProcessId(2),
+            ProcessId(7),
+            crate::procwait::ChildListing::Listed,
+        )
+        .expect("registered");
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -24089,8 +24136,12 @@ mod tests {
         let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
         let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
             Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
-        wait.register_child(ProcessId(shell_task), ProcessId(fg_task))
-            .expect("registered");
+        wait.register_child(
+            ProcessId(shell_task),
+            ProcessId(fg_task),
+            crate::procwait::ChildListing::Listed,
+        )
+        .expect("registered");
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -24113,8 +24164,12 @@ mod tests {
         // its death behind the console's back (a kill that never ran the
         // exit handler), and the next refused reader proves it dead and
         // proceeds instead of being wedged.
-        wait.register_child(ProcessId(shell_task), ProcessId(second_child))
-            .expect("registered");
+        wait.register_child(
+            ProcessId(shell_task),
+            ProcessId(second_child),
+            crate::procwait::ChildListing::Listed,
+        )
+        .expect("registered");
         let second_pid = i64::try_from(second_child).expect("a claimed id fits a pid");
         assert_eq!(h.console_foreground(&shell, STDIN, second_pid), Ok(0));
         wait.record_exit(ProcessId(second_child), 0);
@@ -24157,8 +24212,12 @@ mod tests {
         let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
         let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
             Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
-        wait.register_child(ProcessId(2), ProcessId(9))
-            .expect("registered");
+        wait.register_child(
+            ProcessId(2),
+            ProcessId(9),
+            crate::procwait::ChildListing::Listed,
+        )
+        .expect("registered");
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -24304,8 +24363,12 @@ mod tests {
         let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
         let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
             Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
-        wait.register_child(ProcessId(2), ProcessId(9))
-            .expect("registered");
+        wait.register_child(
+            ProcessId(2),
+            ProcessId(9),
+            crate::procwait::ChildListing::Listed,
+        )
+        .expect("registered");
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -31187,7 +31250,7 @@ mod tests {
         last_poll: tairix_sync::SpinLock<Option<(u64, i64)>>,
         last_flags: tairix_sync::SpinLock<Option<WaitFlags>>,
         last_exit: tairix_sync::SpinLock<Option<(u64, i32)>>,
-        last_register: tairix_sync::SpinLock<Option<(u64, u64)>>,
+        last_register: tairix_sync::SpinLock<Option<(u64, u64, crate::procwait::ChildListing)>>,
         result: Result<crate::procwait::WaitedChild, Errno>,
     }
     impl RecordingProcessWait {
@@ -31233,8 +31296,13 @@ mod tests {
             *self.last_exit.lock() = Some((task.0, code));
             false
         }
-        fn register_child(&self, parent: ProcessId, child: ProcessId) -> Result<(), Errno> {
-            *self.last_register.lock() = Some((parent.0, child.0));
+        fn register_child(
+            &self,
+            parent: ProcessId,
+            child: ProcessId,
+            listing: crate::procwait::ChildListing,
+        ) -> Result<(), Errno> {
+            *self.last_register.lock() = Some((parent.0, child.0, listing));
             Ok(())
         }
     }
@@ -41062,8 +41130,13 @@ mod tests {
             }
         }
 
-        fn register_child(&self, parent: ProcessId, child: ProcessId) -> Result<(), Errno> {
-            self.0.lock().register(parent, child)
+        fn register_child(
+            &self,
+            parent: ProcessId,
+            child: ProcessId,
+            listing: crate::procwait::ChildListing,
+        ) -> Result<(), Errno> {
+            self.0.lock().register(parent, child, listing)
         }
 
         fn record_exit(&self, task: ProcessId, code: i32) -> bool {
@@ -43324,10 +43397,18 @@ mod tests {
 
         // With the producer installed and child 21 registered to the caller.
         let pw = TableWait::leaked();
-        pw.register_child(ProcessId(owner), ProcessId(21))
-            .expect("registered");
-        pw.register_child(ProcessId(0x9999), ProcessId(22))
-            .expect("registered");
+        pw.register_child(
+            ProcessId(owner),
+            ProcessId(21),
+            crate::procwait::ChildListing::Listed,
+        )
+        .expect("registered");
+        pw.register_child(
+            ProcessId(0x9999),
+            ProcessId(22),
+            crate::procwait::ChildListing::Listed,
+        )
+        .expect("registered");
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -43392,8 +43473,12 @@ mod tests {
             caps: &caps,
         };
         let pw = TableWait::leaked();
-        pw.register_child(ProcessId(owner), ProcessId(21))
-            .expect("registered");
+        pw.register_child(
+            ProcessId(owner),
+            ProcessId(21),
+            crate::procwait::ChildListing::Listed,
+        )
+        .expect("registered");
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )

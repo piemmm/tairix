@@ -1629,7 +1629,7 @@ fn every_appearance_axis_asks_for_the_re_theme() {
     // Each of the four is a way the desktop is drawn, so each owes the
     // republish every open application converges on.
     let axes: [fn(&mut DesktopSettings); 4] = [
-        |s| s.appearance = Appearance::Light,
+        |s| s.appearance = Appearance::Dark,
         |s| s.contrast = Contrast::Monochrome,
         |s| s.density = Density::Compact,
         |s| s.motion = Motion::Reduced,

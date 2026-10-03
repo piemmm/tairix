@@ -1485,6 +1485,40 @@ pub fn decode_fitted(
     }
 }
 
+/// An upper bound of the bytes a [`decode_fitted`] of `bytes` to `fit` holds
+/// at once, the decoded picture included, read from its headers before
+/// anything is decoded — so a caller can account a decode before it
+/// allocates.
+///
+/// Each format is costed through its own decoder's sizing: a JPEG at the
+/// scale its decode chooses, an icon by the page it chooses. Where a
+/// decoder's working set is not set by its picture alone — a lossless WebP's
+/// prefix codes, a JPEG-coded TIFF's units — the bound grows with the stream
+/// or the limits instead, and stands far above what an ordinary file needs.
+///
+/// # Errors
+///
+/// What [`decode_fitted`] would refuse from the header: an unknown format, a
+/// malformed header, or a size `limits` do not admit at any scale.
+pub fn decode_peak_bytes(
+    bytes: &[u8],
+    limits: &DecodeLimits,
+    fit: FitBox,
+) -> Result<u64, DecodeError> {
+    match sniff(bytes).ok_or(DecodeError::UnknownFormat)? {
+        ImageFormat::Jpeg => jpeg::decode_peak_bytes(bytes, limits, fit),
+        ImageFormat::Png => png::peak_bytes(bytes, limits),
+        ImageFormat::Gif => gif::peak_bytes(bytes, limits),
+        ImageFormat::Bmp => bmp::peak_bytes(bytes, limits),
+        ImageFormat::Ico => ico::peak_bytes(bytes, limits, fit),
+        ImageFormat::Tiff => tiff::peak_bytes(bytes, limits),
+        ImageFormat::Webp => webp::peak_bytes(bytes, limits),
+        ImageFormat::OpenRaster => ora::peak_bytes(bytes, limits),
+        // Carries no signature, so a fitted decode never reaches one either.
+        ImageFormat::Sprite => Err(DecodeError::UnknownFormat),
+    }
+}
+
 /// What a file held that the picture opened from it does not, so writing
 /// the picture back as that format would not reproduce the file.
 ///

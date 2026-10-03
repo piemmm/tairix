@@ -189,6 +189,13 @@ typedef struct tairix_wait_status {
 #define TAIRIX_LOAD_UNVERIFIED ((int32_t)2136604674)
 #define TAIRIX_LOAD_MALFORMED ((int32_t)2136604675)
 #define TAIRIX_LOAD_OOM ((int32_t)2136604676)
+/* The exit status of a child the kernel killed for a fault it could not
+* resolve: 128 + SIGSEGV, so a reaped crash never reads as a clean exit. */
+#define TAIRIX_FAULT_EXIT_STATUS ((int32_t)139)
+/* The exit status of a program that ended because an allocation it could
+* not do without failed: 128 + SIGABRT, so a parent can tell memory running
+* out from a fault or a bug, and may ask again once memory is freed. */
+#define TAIRIX_OOM_EXIT_STATUS ((int32_t)134)
 
 /* spawn() attach block: the child's credential, base console, and one wire per
 * standard descriptor (fd 0..3). Pass NULL/0 for full inherit. Every wire kind
@@ -199,8 +206,10 @@ typedef struct tairix_wait_status {
 #define TAIRIX_SPAWN_ATTACH_LEN 80u
 /* Attach-block flags. SANDBOX starts the child as a minimum-capability
 * parser sandbox: empty capability set, closed syscall allow-list, and
-* every wire must be CLOSED or HANDLE (nothing ambient flows in). Any
-* reserved flag bit is refused. */
+* every wire must be CLOSED or HANDLE (nothing ambient flows in). A
+* sandbox child is private to its spawner: only a wait naming its pid
+* reaps it, never a wait for any child. Any reserved flag bit is
+* refused. */
 #define TAIRIX_SPAWN_FLAG_SANDBOX 1u
 #define TAIRIX_FD_WIRE_INHERIT 1u
 #define TAIRIX_FD_WIRE_INHERIT_SLOT 2u

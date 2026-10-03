@@ -47,13 +47,67 @@ pub enum ServeEnd {
 }
 
 impl ServeEnd {
-    /// The exit status the worker process ends with: `0` once the
-    /// conversation is over, `1` when its transport failed.
+    /// How the worker process ends.
+    #[must_use]
+    pub const fn exit(&self) -> WorkerExit {
+        match self {
+            Self::Finished | Self::Ended => WorkerExit::Finished,
+            Self::Failed(ProtoError::PeerClosed) => WorkerExit::PeerClosed,
+            Self::Failed(ProtoError::OutOfMemory) => WorkerExit::OutOfMemory,
+            Self::Failed(ProtoError::Oversize) => WorkerExit::Oversize,
+            Self::Failed(ProtoError::Channel(_)) => WorkerExit::Transport,
+        }
+    }
+
+    /// The exit status the worker process ends with.
     #[must_use]
     pub const fn exit_code(&self) -> i32 {
+        self.exit().code()
+    }
+}
+
+/// Why a worker process ended, carried as its exit status.
+///
+/// Once its transport has failed the worker has no other way to say why —
+/// its error and information streams are closed in the sandbox — so the
+/// status is the diagnosis, and the parent's containment log states it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum WorkerExit {
+    /// The parent closed the conversation on a frame boundary.
+    Finished,
+    /// The parent's stream ended inside a frame.
+    PeerClosed,
+    /// The room to receive a request could not be reserved.
+    OutOfMemory,
+    /// The parent declared a request larger than a frame may carry.
+    Oversize,
+    /// The transport failed with an error of its own.
+    Transport,
+}
+
+impl WorkerExit {
+    /// The exit status this ending is carried as.
+    #[must_use]
+    pub const fn code(self) -> i32 {
         match self {
-            Self::Finished | Self::Ended => 0,
-            Self::Failed(_) => 1,
+            Self::Finished => 0,
+            Self::PeerClosed => 1,
+            Self::OutOfMemory => 2,
+            Self::Oversize => 3,
+            Self::Transport => 4,
+        }
+    }
+
+    /// The ending a worker's exit status `code` carries, if it is one.
+    #[must_use]
+    pub const fn from_code(code: i32) -> Option<Self> {
+        match code {
+            0 => Some(Self::Finished),
+            1 => Some(Self::PeerClosed),
+            2 => Some(Self::OutOfMemory),
+            3 => Some(Self::Oversize),
+            4 => Some(Self::Transport),
+            _ => None,
         }
     }
 }
@@ -79,7 +133,7 @@ pub fn serve<C: Channel, S: Service>(chan: &mut C, service: &mut S) -> ServeEnd 
 
 #[cfg(test)]
 mod tests {
-    use super::{serve, ServeEnd, Service};
+    use super::{serve, ServeEnd, Service, WorkerExit};
     use crate::proto::{recv_frame, send_frame, Channel, ProtoError, MAX_FRAME};
     use alloc::vec;
     use alloc::vec::Vec;
@@ -208,6 +262,31 @@ mod tests {
     fn a_worker_exits_cleanly_only_when_its_conversation_closed() {
         assert_eq!(ServeEnd::Finished.exit_code(), 0);
         assert_eq!(ServeEnd::Ended.exit_code(), 0);
-        assert_eq!(ServeEnd::Failed(ProtoError::PeerClosed).exit_code(), 1);
+        assert_ne!(ServeEnd::Failed(ProtoError::PeerClosed).exit_code(), 0);
+    }
+
+    #[test]
+    fn every_transport_failure_exits_with_a_status_that_names_it() {
+        let failures = [
+            (ProtoError::PeerClosed, WorkerExit::PeerClosed),
+            (ProtoError::OutOfMemory, WorkerExit::OutOfMemory),
+            (ProtoError::Oversize, WorkerExit::Oversize),
+            (
+                ProtoError::Channel(Errno::Interrupted),
+                WorkerExit::Transport,
+            ),
+        ];
+        for (failure, exit) in failures {
+            let code = ServeEnd::Failed(failure).exit_code();
+            assert_eq!(WorkerExit::from_code(code), Some(exit), "{failure:?}");
+        }
+        // The loader's reserved band and the signal statuses are never mistaken
+        // for a worker's own diagnosis.
+        assert_eq!(WorkerExit::from_code(tairix_abi::LOAD_OOM), None);
+        assert_eq!(
+            WorkerExit::from_code(tairix_abi::Signal::Kill.termination_status().unwrap_or(0)),
+            None
+        );
+        assert_eq!(WorkerExit::from_code(tairix_abi::FAULT_EXIT_STATUS), None);
     }
 }

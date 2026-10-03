@@ -49,27 +49,39 @@ darkens rather than disappears — and the rest of the outline interpolates. An
 edge keeps the runs it covers rather than their span, because a side is often
 several: an `m`'s top is the left stem's flat and two arch crowns, a `g`'s is
 its bowl's crown and its ear, so the ink test has to be asked where both sides
-really have material and not in the valley between them. Diagonals never
-register as an edge, so they stay straight rather than becoming staircases,
-and monotonicity means a fitted contour cannot fold over itself.
+really have material and not in the valley between them. An edge's segments
+all land on its fitted row, so a slightly slanted side comes out straight
+rather than overhanging the next pixel. A side that wanders just past the edge
+cut-off is still fitted when the side facing it is an edge — the two sides of a
+stroke are parallel, and judging them apart left a slanted bay of `#` half on
+two columns — but never alone. Diagonals never register as an edge, so they
+stay straight rather than becoming staircases, and monotonicity means a fitted
+contour cannot fold over itself.
 
 Rows also snap to the face's own alignment zones — baseline, x-height, cap
 height, ascender, descender, read once at parse from the face's `x`, `o`, `H`,
 `O`, `b`, `p`, `g` — so a line of text agrees on those rows instead of each
 letter rounding alone. A round letter's overshoot is flattened onto its zone
 only while it is worth less than a pixel, which is exactly when drawing it
-would cost a whole row.
+would cost a whole row. A stroke with no zone of its own is centred where its
+design falls between the zone rows, so `E`'s middle bar splits its counter as
+drawn and lands on the rows of `H`'s crossbar; and a bar within 8% of the
+face's standard thickness (its `H` crossbar, measured at parse) is drawn at the
+standard's width, so bars drawn alike are drawn alike.
 
 Columns are snapped only for a fixed cell, where the cell owns the advance and
 moving a stem costs no spacing; the cell path also scales columns so the
 face's uniform advance lands on a whole number of cells rather than rounding
 to them — one for the face the grid was derived from, two for a full-width
-fallback face lending glyphs to a half-width grid. Proportional text is fitted
-along rows alone, because ink snapped sideways would drift out from under the
-unfitted advance that laid the run out.
+fallback face lending glyphs to a half-width grid. A stroke there keeps its
+design distance to the nearest stroke beside it, rounded as a whole, so a
+`#`'s legs stay parallel and an `m`'s stems even, and every stroke is fitted
+inside the cells the glyph occupies. Proportional text is fitted along rows
+alone, because ink snapped sideways would drift out from under the unfitted
+advance that laid the run out.
 
 Measured on the console face at its 8×16 cell, the share of ink at full
-coverage rises from 9% unfitted to 34%, against about 27% for FreeType's
+coverage rises from 9% unfitted to 37%, against about 27% for FreeType's
 autofitter on the same face and size.
 
 ## Line art

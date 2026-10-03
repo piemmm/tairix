@@ -56,8 +56,9 @@ impl WaitSetOp {
 
 /// Sentinel `id` for a [`WaitSourceKind::Child`] member observing **any**
 /// child of the calling task — the wait-set analogue of
-/// [`crate::WAIT_PID_ANY`]. Any other `id` names one specific child by its
-/// PID.
+/// [`crate::WAIT_PID_ANY`], and like it blind to a private parser-sandbox
+/// worker ([`crate::SPAWN_FLAG_SANDBOX`]). Any other `id` names one specific
+/// child by its PID.
 pub const WAITSET_CHILD_ANY: u64 = u64::MAX;
 
 /// `timeout_ns` value meaning "no deadline": park until a member is ready.

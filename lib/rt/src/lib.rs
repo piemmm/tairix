@@ -51,6 +51,7 @@
 //! host-testable syscall-wrapper marshalling is compiled.
 
 #![cfg_attr(not(test), no_std)]
+#![cfg_attr(rt_native, feature(alloc_error_handler))]
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
@@ -3457,14 +3458,22 @@ fn clamp_utf8(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
+/// The first event id of the range `lib/rt` owns.
+pub const RT_RANGE_START: u32 = 26_000;
+/// One past the last event id of the range `lib/rt` owns.
+pub const RT_RANGE_END: u32 = 27_000;
+
 /// The event the runtime records when a program dies in its panic handler.
 ///
 /// The report goes to `stderr` too, but a program whose stderr has no reader —
 /// a service, or a graphical session whose console is the very screen it is
 /// compositing over — would otherwise die leaving nothing but an exit status,
-/// and the reason has to land somewhere a user can find it. `lib/rt` owns the
-/// `7000..8000` event-id range.
-pub const PANIC_REPORTED: tairix_log::EventId = tairix_log::EventId(7000);
+/// and the reason has to land somewhere a user can find it.
+pub const PANIC_REPORTED: tairix_log::EventId = tairix_log::EventId(26_000);
+
+/// The event the runtime records when a program ends because an allocation it
+/// could not do without failed, reported on the same two channels as a panic.
+pub const OUT_OF_MEMORY_REPORTED: tairix_log::EventId = tairix_log::EventId(26_001);
 
 /// A [`tairix_log::Sink`] that marshals each structured event to the kernel's
 /// diagnostic log sink through [`log_emit`].
@@ -6274,6 +6283,15 @@ mod tests {
     /// The negative register the kernel encodes `errno` as.
     fn refusal(errno: Errno) -> u64 {
         u64::from_ne_bytes((-i64::from(errno.as_i32())).to_ne_bytes())
+    }
+
+    #[test]
+    fn the_runtimes_events_are_distinct_and_inside_its_own_range() {
+        let ids = [PANIC_REPORTED.0, OUT_OF_MEMORY_REPORTED.0];
+        assert!(ids
+            .iter()
+            .all(|id| (RT_RANGE_START..RT_RANGE_END).contains(id)));
+        assert_ne!(ids[0], ids[1]);
     }
 
     #[test]

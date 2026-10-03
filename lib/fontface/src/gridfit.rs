@@ -20,17 +20,21 @@
 //! segments never register as an edge, and ordering is preserved so a fitted
 //! outline never turns inside out.
 //!
-//! Rows additionally snap to the face's [`AlignZones`] — its baseline,
+//! Rows additionally snap to the face's [`FitMetrics`] zones — its baseline,
 //! x-height, cap height, ascender and descender, read off the face's own
 //! reference glyphs — so every letter of a line agrees on where those lines
 //! fall instead of each rounding independently. A round letter's overshoot is
 //! flattened onto the zone only while it is worth less than a pixel, which is
-//! exactly when drawing it would cost a whole row.
+//! exactly when drawing it would cost a whole row. A stroke with no zone of
+//! its own is placed between the zone-held ones, and every bar near the face's
+//! standard thickness is drawn at the standard's width, so the bars of a line
+//! agree on their weight as well as their rows.
 //!
 //! Columns are fitted by transposing and running the same routine, so there
 //! is one implementation of the algorithm rather than a mirrored copy.
 //! Columns are snapped only for a fixed cell ([`Axes::RowsAndColumns`]): the
-//! cell owns the advance, so moving a stem costs no spacing. Proportional
+//! cell owns the advance, so moving a stem costs no spacing, and the ink is
+//! kept inside the cells the glyph occupies. Proportional
 //! text is fitted along rows alone ([`Axes::Rows`]), because a snapped column
 //! would move ink out from under the unsnapped advance that laid the run out.
 
@@ -62,8 +66,19 @@ const EDGE_SLOPE: f64 = 0.25;
 /// terms and not merely shallow.
 const EDGE_FUZZ: f64 = 0.35;
 
+/// How far a segment may wander and still be fitted as one side of a stroke
+/// whose other side is firm. The sides of a short slanted stroke — a leg of
+/// `#` between its bars — wander equally, so one cut-off can snap one side and
+/// leave the other a half-covered diagonal; a lone diagonal is never admitted.
+const FACING_EDGE_FUZZ: f64 = 0.5;
+
 /// Pixels either side of an alignment zone within which an edge belongs to it.
 const ZONE_FUZZ: f64 = 0.4;
+
+/// How far, as a fraction of the face's standard bar, a stroke may stray and
+/// still be drawn at the standard's width: enough to catch bars drawn alike,
+/// not enough to darken the lowercase `e`'s deliberately lighter one.
+const STANDARD_FUZZ: f64 = 0.08;
 
 /// Edges along one axis beyond which an outline is filled unfitted.
 ///
@@ -97,17 +112,20 @@ impl Zone {
     }
 }
 
-/// The alignment zones a face's glyphs share, read off its own outlines once
-/// when it is parsed.
+/// What every glyph of a face is fitted against, read off its own outlines
+/// once when it is parsed.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct AlignZones {
+pub(crate) struct FitMetrics {
     zones: Vec<Zone>,
+    /// How thick the face draws its horizontal strokes, in font units.
+    bar: Option<f64>,
 }
 
-impl AlignZones {
-    /// The zones, in no particular order.
-    pub(crate) const fn new(zones: Vec<Zone>) -> Self {
-        Self { zones }
+impl FitMetrics {
+    /// The alignment `zones`, in no particular order, and the `bar` thickness
+    /// the face's horizontal strokes share, when it has one.
+    pub(crate) const fn new(zones: Vec<Zone>, bar: Option<f64>) -> Self {
+        Self { zones, bar }
     }
 
     /// Resolve every zone to the pixel row it snaps to, for an outline whose
@@ -147,7 +165,7 @@ struct Band {
 }
 
 /// Which axes an outline is snapped along.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug)]
 pub(crate) enum Axes {
     /// Rows only. Columns keep their exact positions, so advances and side
     /// bearings are untouched — what proportional text needs, since ink
@@ -156,29 +174,36 @@ pub(crate) enum Axes {
     Rows,
     /// Rows and columns, for a fixed cell: the cell already owns the advance,
     /// so snapping a stem to a column costs no spacing and is what turns it
-    /// into one solid column instead of two grey ones.
-    RowsAndColumns,
+    /// into one solid column instead of two grey ones. `span`, when the face
+    /// fixes one, is the pixel width of the glyph's cells; its ink is kept
+    /// inside them, since anything past their edge lands in the next character.
+    RowsAndColumns { span: Option<f64> },
 }
 
 /// Snap `segments` onto the pixel grid.
 ///
 /// `baseline` is the pixel row the outline's baseline sits on and `scale` the
 /// font-units-to-pixels factor its rows were laid out with, together placing
-/// `zones` in the same space as the segments.
+/// `metrics` in the same space as the segments.
 pub(crate) fn fit(
     segments: &mut [Segment],
     axes: Axes,
-    zones: &AlignZones,
+    metrics: &FitMetrics,
     baseline: f64,
     scale: f64,
 ) {
     if segments.is_empty() {
         return;
     }
-    fit_rows(segments, &zones.bands(baseline, scale));
-    if axes == Axes::RowsAndColumns {
+    fit_rows(
+        segments,
+        &metrics.bands(baseline, scale),
+        metrics.bar.map(|bar| bar * scale),
+        None,
+    );
+    if let Axes::RowsAndColumns { span } = axes {
         transpose(segments);
-        fit_rows(segments, &[]);
+        fit_rows(segments, &[], None, span);
         transpose(segments);
     }
 }
@@ -192,21 +217,32 @@ fn transpose(segments: &mut [Segment]) {
 }
 
 /// Snap the rows of `segments`, holding edges that fall in a `bands` zone to
-/// that zone's row.
-fn fit_rows(segments: &mut [Segment], bands: &[Band]) {
+/// that zone's row, drawing strokes near the `standard` thickness (in pixels)
+/// at its width, and keeping everything within `limit` rows of zero when one
+/// is given.
+fn fit_rows(segments: &mut [Segment], bands: &[Band], standard: Option<f64>, limit: Option<f64>) {
     let edges = edges(segments);
     if edges.is_empty() || edges.len() > MAX_EDGES {
         return;
     }
     let strokes = strokes(&edges, segments);
-    let controls = controls(&edges, &strokes, bands);
+    let controls = controls(&edges, &strokes, bands, standard, limit);
     warp(segments, &controls);
+    if let Some(limit) = limit {
+        for segment in segments {
+            segment.y0 = mathf::fmin(mathf::fmax(segment.y0, 0.0), limit);
+            segment.y1 = mathf::fmin(mathf::fmax(segment.y1, 0.0), limit);
+        }
+    }
 }
 
 /// One near-horizontal segment, before it is clustered into an edge.
 struct Flat {
-    /// The row it lies on.
+    /// The row it lies on: the middle of the rows it wanders across.
     pos: f64,
+    /// The rows it actually occupies, top and bottom.
+    top: f64,
+    bottom: f64,
     /// The columns it spans.
     lo: f64,
     hi: f64,
@@ -239,6 +275,10 @@ struct Edge {
     /// [`EDGE_FUZZ`] — a rule, a light face's hairline — would read as one
     /// edge and be snapped out of existence.
     dir: i32,
+    /// Whether its segments stay within [`EDGE_FUZZ`]. One that only stays
+    /// within [`FACING_EDGE_FUZZ`] is fitted solely as the facing side of a
+    /// stroke whose other side does.
+    firm: bool,
 }
 
 /// Cluster the near-horizontal segments of `segments` into edges, ordered by
@@ -246,46 +286,67 @@ struct Edge {
 ///
 /// A cluster gathers the segments running the same way within [`EDGE_FUZZ`]
 /// of the first row it saw. Segments are visited in row order and a cluster
-/// never reaches back, so the edges come out ordered.
+/// never reaches back, so each pass yields its edges in order. Firm and
+/// merely facing segments are clustered apart, so admitting the second never
+/// changes an edge the first would have formed.
 fn edges(segments: &[Segment]) -> Vec<Edge> {
-    let mut flats: Vec<Flat> = segments
-        .iter()
-        .filter_map(|segment| {
-            let run = segment.x1 - segment.x0;
-            let rise = mathf::fabs(segment.y1 - segment.y0);
-            let flat = run != 0.0 && rise <= mathf::fabs(run) * EDGE_SLOPE && rise <= EDGE_FUZZ;
-            flat.then(|| Flat {
-                pos: f64::midpoint(segment.y0, segment.y1),
-                lo: mathf::fmin(segment.x0, segment.x1),
-                hi: mathf::fmax(segment.x0, segment.x1),
-                dir: if run > 0.0 { 1 } else { -1 },
-            })
-        })
-        .collect();
-    flats.sort_by(|a, b| a.pos.total_cmp(&b.pos));
+    let mut firm: Vec<Flat> = Vec::new();
+    let mut facing: Vec<Flat> = Vec::new();
+    for segment in segments {
+        let run = segment.x1 - segment.x0;
+        let rise = mathf::fabs(segment.y1 - segment.y0);
+        if run == 0.0 || rise > mathf::fabs(run) * EDGE_SLOPE || rise > FACING_EDGE_FUZZ {
+            continue;
+        }
+        let flat = Flat {
+            pos: f64::midpoint(segment.y0, segment.y1),
+            top: mathf::fmin(segment.y0, segment.y1),
+            bottom: mathf::fmax(segment.y0, segment.y1),
+            lo: mathf::fmin(segment.x0, segment.x1),
+            hi: mathf::fmax(segment.x0, segment.x1),
+            dir: if run > 0.0 { 1 } else { -1 },
+        };
+        if rise <= EDGE_FUZZ {
+            firm.push(flat);
+        } else {
+            facing.push(flat);
+        }
+    }
+    let mut edges = cluster(firm, true);
+    edges.extend(cluster(facing, false));
+    edges.sort_by(|a, b| a.pos.total_cmp(&b.pos));
+    edges
+}
 
+/// Cluster `flats` into edges, each marked `firm` or not.
+fn cluster(mut flats: Vec<Flat>, firm: bool) -> Vec<Edge> {
+    flats.sort_by(|a, b| a.pos.total_cmp(&b.pos));
     let mut edges: Vec<Edge> = Vec::new();
+    let mut first = 0.0;
     let mut weighted = 0.0;
     let mut weight = 0.0;
     for flat in flats {
         let run = flat.hi - flat.lo;
         match edges.last_mut() {
-            Some(edge) if edge.dir == flat.dir && flat.pos - edge.begin <= EDGE_FUZZ => {
+            Some(edge) if edge.dir == flat.dir && flat.pos - first <= EDGE_FUZZ => {
                 weighted += flat.pos * run;
                 weight += run;
                 edge.pos = weighted / weight;
-                edge.end = flat.pos;
+                edge.begin = mathf::fmin(edge.begin, flat.top);
+                edge.end = mathf::fmax(edge.end, flat.bottom);
                 edge.runs.push((flat.lo, flat.hi));
             }
             _ => {
+                first = flat.pos;
                 weighted = flat.pos * run;
                 weight = run;
                 edges.push(Edge {
                     pos: flat.pos,
-                    begin: flat.pos,
-                    end: flat.pos,
+                    begin: flat.top,
+                    end: flat.bottom,
                     runs: vec![(flat.lo, flat.hi)],
                     dir: flat.dir,
+                    firm,
                 });
             }
         }
@@ -326,23 +387,39 @@ fn coalesce(runs: &mut Vec<(f64, f64)>) {
 /// close on each other. The widest interval is the one furthest from either
 /// edge's ends, so it is the soundest place to ask.
 fn shared_column(edge: &Edge, other: &Edge) -> Option<f64> {
-    let (mut ours, mut theirs) = (0, 0);
-    let mut widest: Option<(f64, f64)> = None;
-    while let (Some(&(our_lo, our_hi)), Some(&(their_lo, their_hi))) =
-        (edge.runs.get(ours), other.runs.get(theirs))
-    {
-        let lo = mathf::fmax(our_lo, their_lo);
-        let hi = mathf::fmin(our_hi, their_hi);
-        if hi > lo && widest.is_none_or(|(was_lo, was_hi)| hi - lo > was_hi - was_lo) {
-            widest = Some((lo, hi));
+    shared_runs(&edge.runs, &other.runs)
+        .reduce(|widest, run| {
+            if run.1 - run.0 > widest.1 - widest.0 {
+                run
+            } else {
+                widest
+            }
+        })
+        .map(|(lo, hi)| f64::midpoint(lo, hi))
+}
+
+/// The intervals two ascending, disjoint interval lists both cover, in order.
+fn shared_runs<'a>(
+    ours: &'a [(f64, f64)],
+    theirs: &'a [(f64, f64)],
+) -> impl Iterator<Item = (f64, f64)> + 'a {
+    let (mut mine, mut yours) = (0, 0);
+    core::iter::from_fn(move || {
+        while let (Some(&(our_lo, our_hi)), Some(&(their_lo, their_hi))) =
+            (ours.get(mine), theirs.get(yours))
+        {
+            if our_hi < their_hi {
+                mine += 1;
+            } else {
+                yours += 1;
+            }
+            let (lo, hi) = (mathf::fmax(our_lo, their_lo), mathf::fmin(our_hi, their_hi));
+            if hi > lo {
+                return Some((lo, hi));
+            }
         }
-        if our_hi < their_hi {
-            ours += 1;
-        } else {
-            theirs += 1;
-        }
-    }
-    widest.map(|(lo, hi)| f64::midpoint(lo, hi))
+        None
+    })
 }
 
 /// Two edges with the ink of one stroke between them.
@@ -362,25 +439,29 @@ struct Stroke {
 /// edges that do face it, the nearest one it [shares a column](shared_column)
 /// with is the candidate, and only when the outline is actually filled
 /// between them — the counter of an `o` and the gap of an `m` are bounded by
-/// facing edges too, and must not be mistaken for strokes. Narrower
-/// candidates are taken first, so where two pairings compete the tighter
-/// (more certainly a stroke) one wins.
+/// facing edges too, and must not be mistaken for strokes. An edge that is
+/// not [firm](Edge::firm) pairs only with a firm one, so two near-misses never
+/// make a stroke. Narrower candidates are taken first, so where two pairings
+/// compete the tighter (more certainly a stroke) one wins.
 fn strokes(edges: &[Edge], segments: &[Segment]) -> Vec<Stroke> {
     let mut candidates: Vec<(f64, usize, usize)> = Vec::new();
     for (index, edge) in edges.iter().enumerate() {
-        let facing = edges
-            .iter()
-            .enumerate()
-            .skip(index + 1)
-            .filter(|(_, other)| other.dir != edge.dir)
-            .find_map(|(next, other)| {
-                shared_column(edge, other).map(|column| (next, other, column))
-            });
-        let Some((next, other, column)) = facing else {
-            continue;
-        };
-        if winding(segments, column, f64::midpoint(edge.pos, other.pos)) != 0 {
-            candidates.push((other.pos - edge.pos, index, next));
+        let kinds: &[bool] = if edge.firm { &[true, false] } else { &[true] };
+        for &firm in kinds {
+            let facing = edges
+                .iter()
+                .enumerate()
+                .skip(index + 1)
+                .filter(|(_, other)| other.dir != edge.dir && other.firm == firm)
+                .find_map(|(next, other)| {
+                    shared_column(edge, other).map(|column| (next, other, column))
+                });
+            let Some((next, other, column)) = facing else {
+                continue;
+            };
+            if winding(segments, column, f64::midpoint(edge.pos, other.pos)) != 0 {
+                candidates.push((other.pos - edge.pos, index, next));
+            }
         }
     }
     candidates.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -411,52 +492,110 @@ fn winding(segments: &[Segment], column: f64, row: f64) -> i32 {
 
 /// Where each edge is moved to, as `(from, to)` rows ordered by `from`.
 ///
-/// A stroke keeps a whole number of pixels of width, never less than one, so
-/// a hairline darkens to a solid pixel instead of fading to nothing; where an
-/// end of it belongs to an alignment zone that end goes to the zone's row,
-/// and where both do the zones fix the stroke outright.
+/// A stroke keeps a whole number of pixels of width, at least one, and one
+/// near the face's `standard` takes the standard's, so bars drawn alike round
+/// alike. An end in an alignment zone goes to the zone's row. A stroke with no
+/// zone is centred between the zone rows either side, so the middle bars of
+/// `E`, `F` and `H` agree and an `E`'s counters keep the design's proportion.
+/// With no zones — a cell's columns — a stroke keeps its rounded design
+/// distance to the nearest one placed alongside it, so evenly spaced stems (an
+/// `m`'s, a `#`'s legs) stay evenly spaced; one with none alongside takes the
+/// first one's shift.
 ///
-/// Every stroke is placed by the *same* shift, taken from the first one along
-/// the axis. Rounding each stroke's own centre instead lets equal design
-/// spacing round different ways: an `m`'s three stems, evenly spaced to a
-/// fortieth of a pixel, come out at columns 1, 4 and 6. Carrying one shift
-/// keeps the design's spacing, which is what a reader sees.
-///
-/// An edge bounding no stroke takes its zone's row, or is shifted with the
-/// rest and left where it lands. It is deliberately *not* rounded: it has no
-/// width of its own to preserve, and a lone edge rounded onto its neighbour
-/// deletes the ink between the two.
-fn controls(edges: &[Edge], strokes: &[Stroke], bands: &[Band]) -> Vec<(f64, f64)> {
-    let zoned: Vec<Option<f64>> = edges.iter().map(|edge| zone_row(edge.pos, bands)).collect();
+/// An edge bounding no stroke takes its zone's row or moves with the fitted
+/// edges around it, unrounded: rounding it onto a neighbour deletes the ink
+/// between them.
+fn controls(
+    edges: &[Edge],
+    strokes: &[Stroke],
+    bands: &[Band],
+    standard: Option<f64>,
+    limit: Option<f64>,
+) -> Vec<(f64, f64)> {
+    let mut used: Vec<bool> = edges.iter().map(|edge| edge.firm).collect();
+    for stroke in strokes {
+        used[stroke.lo] = true;
+        used[stroke.hi] = true;
+    }
+    let zoned: Vec<Option<f64>> = edges
+        .iter()
+        .zip(&used)
+        .map(|(edge, &used)| {
+            if used {
+                zone_row(edge.pos, bands)
+            } else {
+                None
+            }
+        })
+        .collect();
     let mut ordered: Vec<&Stroke> = strokes.iter().collect();
     ordered.sort_by_key(|stroke| stroke.lo);
 
     let mut to: Vec<Option<f64>> = vec![None; edges.len()];
-    let mut shift: Option<f64> = None;
+    let mut free: Vec<&Stroke> = Vec::new();
     for stroke in ordered {
-        let (from_lo, from_hi) = (edges[stroke.lo].pos, edges[stroke.hi].pos);
-        let width = mathf::fmax(1.0, mathf::round(from_hi - from_lo));
-        let free = f64::midpoint(from_lo, from_hi) - width * 0.5;
+        let width = stroke_width(edges[stroke.hi].pos - edges[stroke.lo].pos, standard);
         let (lo, hi) = match (zoned[stroke.lo], zoned[stroke.hi]) {
             (Some(lo), Some(hi)) => (lo, mathf::fmax(hi, lo + 1.0)),
             (Some(lo), None) => (lo, lo + width),
             (None, Some(hi)) => (hi - width, hi),
             (None, None) => {
-                let lo = mathf::round(free + shift.unwrap_or(0.0));
-                (lo, lo + width)
+                free.push(stroke);
+                continue;
             }
         };
-        // The first stroke placed fixes the shift every later one reuses.
-        shift = shift.or(Some(lo - free));
         to[stroke.lo] = Some(lo);
         to[stroke.hi] = Some(hi);
     }
+    let anchors = decided(edges, zoned.iter().copied());
+
+    let mut shift: Option<f64> = None;
+    let mut beside: Vec<Placed> = Vec::with_capacity(free.len());
+    for stroke in free {
+        let (from_lo, from_hi) = (edges[stroke.lo].pos, edges[stroke.hi].pos);
+        let width = stroke_width(from_hi - from_lo, standard);
+        let centre = f64::midpoint(from_lo, from_hi);
+        let unfitted = centre - width * 0.5;
+        let across: Vec<(f64, f64)> =
+            shared_runs(&edges[stroke.lo].runs, &edges[stroke.hi].runs).collect();
+        let covered = across.iter().map(|(lo, hi)| hi - lo).sum();
+        let lo = if let Some(centre) = follow(&anchors, centre) {
+            mathf::round(centre - width * 0.5)
+        } else if let Some(near) = nearest_alongside(&beside, &across, covered, centre) {
+            near.lo + mathf::round(unfitted - near.unfitted)
+        } else {
+            let lo = mathf::round(unfitted + shift.unwrap_or(0.0));
+            shift = shift.or(Some(lo - unfitted));
+            lo
+        };
+        let lo = limit.map_or(lo, |limit| mathf::fmax(0.0, mathf::fmin(lo, limit - width)));
+        beside.push(Placed {
+            across,
+            covered,
+            centre,
+            unfitted,
+            lo,
+        });
+        to[stroke.lo] = Some(lo);
+        to[stroke.hi] = Some(lo + width);
+    }
     let shift = shift.unwrap_or(0.0);
+    let placed = if anchors.is_empty() {
+        Vec::new()
+    } else {
+        decided(
+            edges,
+            to.iter().zip(&zoned).map(|(placed, zone)| placed.or(*zone)),
+        )
+    };
 
     let mut controls: Vec<(f64, f64)> = Vec::with_capacity(edges.len() * 2);
     let mut floor = f64::NEG_INFINITY;
-    for (index, edge) in edges.iter().enumerate() {
-        let row = to[index].or(zoned[index]).unwrap_or(edge.pos + shift);
+    for (index, edge) in edges.iter().enumerate().filter(|&(index, _)| used[index]) {
+        let row = to[index]
+            .or(zoned[index])
+            .or_else(|| follow(&placed, edge.pos))
+            .unwrap_or(edge.pos + shift);
         // Zones and stroke widths are decided per edge, so hold the running
         // maximum: a warp that reordered two edges would fold the outline
         // over itself.
@@ -485,6 +624,75 @@ fn zone_row(pos: f64, bands: &[Band]) -> Option<f64> {
         .iter()
         .find(|band| pos >= band.lo && pos <= band.hi)
         .map(|band| band.to)
+}
+
+/// A stroke already placed with no anchor to place it by.
+struct Placed {
+    /// The columns both of its edges cover, and how many that is.
+    across: Vec<(f64, f64)>,
+    covered: f64,
+    centre: f64,
+    /// Its low edge's design row for its fitted width.
+    unfitted: f64,
+    lo: f64,
+}
+
+/// The placed stroke nearest `centre` among those sharing at least half the
+/// columns of the shorter of it and `across` (which covers `covered`) — the
+/// strokes beside this one, rather than one merely touching it at a corner.
+fn nearest_alongside<'a>(
+    placed: &'a [Placed],
+    across: &[(f64, f64)],
+    covered: f64,
+    centre: f64,
+) -> Option<&'a Placed> {
+    placed
+        .iter()
+        .filter(|other| {
+            let shared: f64 = shared_runs(across, &other.across)
+                .map(|(lo, hi)| hi - lo)
+                .sum();
+            let shorter = mathf::fmin(covered, other.covered);
+            shorter > 0.0 && shared >= shorter * 0.5
+        })
+        .min_by(|a, b| mathf::fabs(a.centre - centre).total_cmp(&mathf::fabs(b.centre - centre)))
+}
+
+/// The whole number of pixels, never less than one, a stroke `span` pixels
+/// thick is drawn at: the face's `standard` thickness rounded when the stroke
+/// is within [`STANDARD_FUZZ`] of it, its own otherwise.
+fn stroke_width(span: f64, standard: Option<f64>) -> f64 {
+    let thickness = match standard {
+        Some(standard) if mathf::fabs(span - standard) <= standard * STANDARD_FUZZ => standard,
+        _ => span,
+    };
+    mathf::fmax(1.0, mathf::round(thickness))
+}
+
+/// The edges `rows` decides a row for, as `(from, to)` ascending in `from`.
+fn decided(edges: &[Edge], rows: impl Iterator<Item = Option<f64>>) -> Vec<(f64, f64)> {
+    let mut decided: Vec<(f64, f64)> = edges
+        .iter()
+        .zip(rows)
+        .filter_map(|(edge, row)| row.map(|row| (edge.pos, row)))
+        .collect();
+    decided.sort_by(|a, b| a.0.total_cmp(&b.0));
+    decided
+}
+
+/// Where a row at `pos` moves with the `fitted` edges either side of it:
+/// between two it keeps its share of the gap, beyond them all it takes the
+/// nearest one's move. `None` when nothing is fitted.
+fn follow(fitted: &[(f64, f64)], pos: f64) -> Option<f64> {
+    let split = fitted.partition_point(|&(from, _)| from <= pos);
+    let before = split.checked_sub(1).and_then(|index| fitted.get(index));
+    match (before, fitted.get(split)) {
+        (Some(&(lo_from, lo_to)), Some(&(hi_from, hi_to))) => {
+            Some(lo_to + (pos - lo_from) * (hi_to - lo_to) / (hi_from - lo_from))
+        }
+        (Some(&(from, to)), None) | (None, Some(&(from, to))) => Some(pos + (to - from)),
+        (None, None) => None,
+    }
 }
 
 /// Move every segment endpoint through the piecewise-linear map `controls`

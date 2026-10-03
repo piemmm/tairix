@@ -646,7 +646,7 @@ What it guarantees, which no later stage re-derives:
   `BackdropWork` and `AppearanceWork`, and `adopt_appearance` is the one place
   the appearance half is put into effect — re-theme, rescale, republish. The
   session's boot-time settings load drives the very same function, so a stored
-  `appearance = light` is in force before the first frame rather than ignored
+  `appearance = dark` is in force before the first frame rather than ignored
   until the user changed something.
 - **The panes are one row definition seen twice.** `appearance::Setting` holds
   each settable's label, sentence, choices, read and write; Appearance adds
@@ -772,10 +772,12 @@ renderer, and Settings asks it.
     that browses them.
 - **Previews across the cores, and the backdrop first.** The session's
   `WallpaperDesk` takes its own backdrop before any preview, so the picture
-  the user is looking at never waits behind a thumbnail, and renders as many
-  previews at once as the session has preparers — one per online CPU, one
-  while memory is short — with no window holding more than that pending: the
-  bound on how much decoding one client can set going. **A closed window
+  the user is looking at never waits behind a thumbnail, and renders
+  previews on one preparer per online CPU within a memory budget: a render
+  reserves its preparation, then acquires what its worker's plan reports or
+  waits first in the queue until that fits, one render always going on
+  (`plans/PINBOARD.md` §5). No window holds more pending than there are
+  preparers: the bound on how much decoding one client can set going. **A closed window
   costs at most what is under way:** a render a preparer has taken cannot be
   recalled and answers exactly once, freeing its slot; every close is
   recorded in the session's window table, and before its next park the serve
@@ -1462,9 +1464,13 @@ What it guarantees:
   region, until the desktop answers that the window has as many pending as it
   runs at once, and resume as each concludes; every one is waited for even
   across a desktop change, whose answer is let go rather than mistaken for
-  another's. A rebuild carries the pictures it holds
-  across, a refusal is never re-asked, and a landed picture repaints its own
-  tile alone. A question about pictures whose answer cannot have changed is
+  another's. Each request is a round trip to the session's serve loop, so it
+  is carried on a worker of the pane's own, one at a time and each answered
+  before the next — the window never waits on it. A rebuild carries the
+  pictures it holds across, a refusal is never re-asked, a picture the desktop
+  had no memory for is asked again once memory may have been freed (another
+  picture fitting, or the pressure band moving), and a landed picture repaints
+  its own tile alone. A question about pictures whose answer cannot have changed is
   answered without laying the pane out.
 - **The chosen screensaver's own group.** Beneath the chooser, a group named
   for the chosen screensaver holds its options (`SaverOption`: the
@@ -1750,8 +1756,8 @@ system menu and chooses *Settings…*, then photographs the window on General,
 on Lock Screen's composed form, on Bluetooth's stated absence, and on Storage —
 reached past the strip's fold
 by the strip's own scrollbar — before paging the strip back up to Appearance,
-choosing Light,
-and photographing the desktop redrawn light. Its last gesture chooses Compact
+choosing the appearance the desktop did not boot in,
+and photographing the desktop redrawn in it. Its last gesture chooses Compact
 density on the same pane.
 
 What the vertical needed, and now guarantees:
@@ -1766,7 +1772,7 @@ What the vertical needed, and now guarantees:
   first frame drawn in a changed appearance, contrast, density, motion or
   scale, after the reveal. It speaks for the session's surfaces only, because
   each application redraws its own window on its own time — which is why every
-  window dump is taken before the appearance changes, and the light dump reads
+  window dump is taken before the appearance changes, and the restyled dump reads
   only the bar, the furniture and the wallpaper.
 - **The appearance has one route, and it persists.** The Appearance pane is
   the only place the appearance is changed; its choice takes the one
@@ -1774,9 +1780,9 @@ What the vertical needed, and now guarantees:
   through the shell's style generation.
 - **PASS is the guest's own four witnesses, in order:** an `APP_LOADED` naming
   the settings bundle, its window's create reply, and two commits of the
-  desktop's published document — the pane's Light choice, then its Compact
+  desktop's published document — the pane's appearance choice, then its Compact
   density, a key the first did not change so it commits whether or not
-  Settings has adopted the light desktop by then — attributed by the path each
+  Settings has adopted the restyled desktop by then — attributed by the path each
   rename replaced.
 - **Every press is aimed through the production layout.** The host resolves
   each target from the shell's own geometry (`Shell::strip_row_rect`,
@@ -1786,8 +1792,8 @@ What the vertical needed, and now guarantees:
 - **Each dump is read for what its pane draws:** a plate by its top and bottom
   rim, because a plate is filled with the column's own surface; the absence by
   its words on no plate; Storage by a capacity track that is neither empty nor
-  full; the light desktop by its bar and furniture lightening over an
-  unchanged wallpaper.
+  full; the restyled desktop by its bar and furniture moving towards the chosen
+  appearance over an unchanged wallpaper.
 - **Every cut name carries the mark.** Each label, reading, cell, caption and
   title `lib/controls` draws, and the Settings band and statement, are elided
   through the one recipe (`elide_to_width`, then `paint_run`), which the crate

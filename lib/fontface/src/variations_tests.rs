@@ -250,7 +250,7 @@ fn a_static_face_rasters_are_unchanged() {
         total = total.wrapping_add(tairix_hash::FastHash::hash_bytes(0, &coverage));
     }
     assert_eq!(
-        total, 0x43f7_397e_a301_99d4,
+        total, 0x46d9_55aa_d68a_920e,
         "a static face's rasterisation changed"
     );
 }

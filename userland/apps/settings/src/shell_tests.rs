@@ -1762,7 +1762,7 @@ fn choosing_a_value_posts_only_the_appearance_keys() {
     let document = chosen
         .document()
         .expect("choosing a value asks for a document");
-    assert!(document.contains("appearance = light"), "{document}");
+    assert!(document.contains("appearance = dark"), "{document}");
     // The pinboard keys are the chooser's: posting them here would reimpose
     // whatever wallpaper this window happened to read at start-up.
     for key in SettingsKey::PINBOARD {
@@ -1799,12 +1799,12 @@ fn a_press_on_the_reported_rectangles_opens_the_list_and_takes_the_choice() {
         .expect("the pane draws the appearance row");
     click(&mut shell, centre(combo), WIDE, &theme);
 
-    let light = Appearance::ALL
+    let dark = Appearance::ALL
         .iter()
-        .position(|appearance| *appearance == Appearance::Light)
-        .expect("light is offered");
+        .position(|appearance| *appearance == Appearance::Dark)
+        .expect("dark is offered");
     let choice = shell
-        .choice_rect(light, WIDE, Scale::ONE, &theme)
+        .choice_rect(dark, WIDE, Scale::ONE, &theme)
         .expect("the press opened the row's list");
     let mut sink = damage();
     let mut chosen = ShellOutcome::Idle;
@@ -1823,9 +1823,9 @@ fn a_press_on_the_reported_rectangles_opens_the_list_and_takes_the_choice() {
         }
     }
     let document = chosen.document().expect("the choice asks for a document");
-    assert!(document.contains("appearance = light"), "{document}");
+    assert!(document.contains("appearance = dark"), "{document}");
     assert!(
-        shell.choice_rect(light, WIDE, Scale::ONE, &theme).is_none(),
+        shell.choice_rect(dark, WIDE, Scale::ONE, &theme).is_none(),
         "taking the choice closed the list"
     );
     assert!(
@@ -1866,7 +1866,7 @@ fn the_window_is_titled_with_the_pane_on_show() {
 #[test]
 fn the_rows_show_what_the_desktop_holds_not_the_defaults() {
     let settings = DesktopSettings {
-        appearance: Appearance::Light,
+        appearance: Appearance::Dark,
         contrast: Contrast::Monochrome,
         ..DesktopSettings::default()
     };
@@ -1925,13 +1925,13 @@ fn a_refused_apply_reverts_the_row_to_what_the_store_holds() {
     assert!(chosen.document().is_some());
     assert_eq!(
         shell.form_for_test().map(|form| form.settings().appearance),
-        Some(Appearance::Light)
+        Some(Appearance::Dark)
     );
 
     shell.adopt_settings(DesktopSettings::default());
     assert_eq!(
         shell.form_for_test().map(|form| form.settings().appearance),
-        Some(Appearance::Dark)
+        Some(Appearance::Light)
     );
 }
 

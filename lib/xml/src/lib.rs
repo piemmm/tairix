@@ -146,6 +146,42 @@ impl<'a> Element<'a> {
     }
 }
 
+/// An upper bound of the bytes [`parse`] holds at once for an input of
+/// `input_len` bytes.
+///
+/// A document holds at most [`MAX_ELEMENTS`] elements; a text run is at least
+/// a byte between two pieces of markup of three bytes or more, and an
+/// attribute at least four bytes (`a=""`), so both are bounded by the length.
+/// Every vector holds up to twice its length, never fewer than four entries,
+/// and briefly its old allocation beside a new one; entity-decoded text is
+/// never longer than its source.
+#[must_use]
+pub const fn parse_peak_bytes(input_len: usize) -> u64 {
+    use core::mem::size_of;
+    // What `count` entries cost in vectors that grow by doubling, across
+    // `vectors` of them.
+    const fn grown(vectors: u64, count: u64, entry: usize) -> u64 {
+        (4 * vectors + 3 * count).saturating_mul(entry as u64)
+    }
+    let n = input_len as u64;
+    let elements = if (MAX_ELEMENTS as u64) < n / 3 {
+        MAX_ELEMENTS as u64
+    } else {
+        n / 3
+    };
+    let runs = n / 4 + 1;
+    let attributes = n / 4;
+    grown(elements, elements + runs, size_of::<Content<'static>>())
+        .saturating_add(grown(
+            elements,
+            attributes,
+            size_of::<(&str, Cow<'static, str>)>(),
+        ))
+        .saturating_add(grown(1, attributes, size_of::<(&str, &str)>()))
+        .saturating_add(grown(1, MAX_DEPTH as u64, size_of::<Element<'static>>()))
+        .saturating_add(n)
+}
+
 /// Parse `input` into the document's root element, an element whose prefix
 /// is bound to `namespace` named by its local name.
 ///

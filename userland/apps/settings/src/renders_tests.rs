@@ -28,7 +28,8 @@ fn ask(renders: &mut Renders<Region>, index: u16, made: &mut u32) -> Region {
             Some(*made)
         })
         .expect("a region");
-    renders.accepted(wanted(index), region);
+    renders.submitted(wanted(index), region);
+    renders.confirmed();
     region
 }
 
@@ -60,7 +61,7 @@ fn the_asked_set_moves_on_an_acceptance_and_a_conclusion_only() {
     ask(&mut renders, 0, &mut made);
     let asked = renders.changes();
     assert_ne!(asked, start, "an acceptance");
-    assert!(!renders.declined(Errno::LimitExceeded, 9));
+    assert!(!renders.declined(wanted(9), Errno::LimitExceeded));
     renders.restart();
     renders.trim();
     assert_eq!(
@@ -86,8 +87,9 @@ fn a_full_desktop_is_waited_on_never_taken_for_a_refusal() {
     let region = renders
         .region(wanted(1).bytes(), |_| Some(99))
         .expect("a region");
+    renders.submitted(wanted(1), region);
     assert!(
-        !renders.declined(Errno::LimitExceeded, region),
+        !renders.declined(wanted(1), Errno::LimitExceeded),
         "a full desktop refused the picture"
     );
     assert!(
@@ -105,7 +107,7 @@ fn a_full_desktop_is_waited_on_never_taken_for_a_refusal() {
 #[test]
 fn an_answer_this_window_did_not_track_still_frees_a_place() {
     let mut renders: Renders<Region> = Renders::new();
-    assert!(!renders.declined(Errno::LimitExceeded, 1));
+    assert!(!renders.declined(wanted(1), Errno::LimitExceeded));
     assert!(!renders.may_ask());
     let mut landed = false;
     assert!(!renders.concluded(answer(3), |_, _| landed = true));
@@ -119,15 +121,45 @@ fn an_answer_this_window_did_not_track_still_frees_a_place() {
 #[test]
 fn a_duplicate_is_waited_on_too() {
     let mut renders: Renders<Region> = Renders::new();
-    assert!(!renders.declined(Errno::AlreadyExists, 1));
+    assert!(!renders.declined(wanted(1), Errno::AlreadyExists));
     assert!(!renders.may_ask());
 }
 
 #[test]
 fn any_other_refusal_refuses_the_picture_and_asking_goes_on() {
     let mut renders: Renders<Region> = Renders::new();
-    assert!(renders.declined(Errno::NotFound, 1));
+    assert!(renders.declined(wanted(1), Errno::NotFound));
     assert!(renders.may_ask());
+}
+
+/// Asking is handed to a worker, so the desktop's answer comes later; asking
+/// again before it does would ask more of the desktop than it takes.
+#[test]
+fn one_request_waits_for_its_answer_before_the_next_is_asked() {
+    let mut renders = Renders::new();
+    let region = renders
+        .region(wanted(0).bytes(), |_| Some(7))
+        .expect("a region");
+    renders.submitted(wanted(0), region);
+    assert!(
+        !renders.may_ask(),
+        "asked again before the desktop answered"
+    );
+    assert!(renders.asked(PreviewSubject::Wallpaper(0)));
+    renders.confirmed();
+    assert!(renders.may_ask());
+
+    let region = renders
+        .region(wanted(1).bytes(), |_| Some(8))
+        .expect("a region");
+    renders.submitted(wanted(1), region);
+    assert!(renders.declined(wanted(1), Errno::NotFound));
+    assert!(!renders.asked(PreviewSubject::Wallpaper(1)));
+    assert_eq!(
+        renders.region(wanted(2).bytes(), |_| None),
+        Some(8),
+        "the declined render's region was not kept for the next"
+    );
 }
 
 #[test]
@@ -169,7 +201,8 @@ fn regions_of_a_size_no_longer_drawn_are_let_go() {
         .region(larger.bytes(), |_| Some(50))
         .expect("a region");
     assert_eq!(region, 50);
-    renders.accepted(larger, region);
+    renders.submitted(larger, region);
+    renders.confirmed();
     // The old size's render concludes; its region is not kept for the new.
     assert!(renders.concluded(answer(0), |_, _| {}));
     assert_eq!(renders.region(larger.bytes(), |_| Some(51)), Some(51));
@@ -214,5 +247,25 @@ fn trimming_lets_go_of_the_spare_regions_alone() {
     assert!(
         renders.asked(PreviewSubject::Wallpaper(1)),
         "a pending render was let go"
+    );
+}
+
+#[test]
+fn a_request_that_never_reached_the_desktop_is_asked_again_and_not_refused() {
+    let mut renders = Renders::new();
+    let region = renders
+        .region(wanted(0).bytes(), |_| Some(7))
+        .expect("a region");
+    renders.submitted(wanted(0), region);
+    renders.withdraw(wanted(0));
+    assert!(renders.may_ask(), "a withdrawal blocked the next ask");
+    assert!(
+        !renders.asked(PreviewSubject::Wallpaper(0)),
+        "a withdrawn picture still reads as asked for"
+    );
+    assert_eq!(
+        renders.region(wanted(0).bytes(), |_| None),
+        Some(7),
+        "the withdrawn request's region was not kept"
     );
 }

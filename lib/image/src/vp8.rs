@@ -972,17 +972,19 @@ struct Plane {
 const SPARE_COLUMNS: usize = 4;
 
 impl Plane {
+    /// The bytes a plane of `width`×`height` samples holds: one bordering
+    /// row above, and one bordering and the spare columns to each row.
+    fn len(width: usize, height: usize) -> Option<usize> {
+        width
+            .checked_add(1 + SPARE_COLUMNS)?
+            .checked_mul(height.checked_add(1)?)
+    }
+
     fn new(width: usize, height: usize) -> Result<Self, DecodeError> {
         let stride = width
             .checked_add(1 + SPARE_COLUMNS)
             .ok_or(DecodeError::DimensionsOverflow)?;
-        let len = stride
-            .checked_mul(
-                height
-                    .checked_add(1)
-                    .ok_or(DecodeError::DimensionsOverflow)?,
-            )
-            .ok_or(DecodeError::DimensionsOverflow)?;
+        let len = Self::len(width, height).ok_or(DecodeError::DimensionsOverflow)?;
         let mut samples = fallible::filled(len, 0u8).ok_or(DecodeError::OutOfMemory)?;
         // The row above the picture reads 127 and the column to its left
         // reads 129, which is what the format predicts from where a
@@ -1081,6 +1083,34 @@ fn first_partition(bytes: &[u8]) -> Result<usize, DecodeError> {
 /// Read the geometry a lossy bitstream declares, decoding no pixels.
 pub(crate) fn probe(bytes: &[u8]) -> Result<(u32, u32), DecodeError> {
     dimensions(bytes)
+}
+
+/// An upper bound of the bytes decoding a `width`×`height` keyframe holds at
+/// once: its partitions, its three planes and per-macroblock state, and the
+/// RGBA picture it is converted into while they are still held.
+pub(crate) fn peak_bytes(width: u32, height: u32) -> u64 {
+    use core::mem::size_of;
+    let columns = usize::try_from(width.div_ceil(16)).unwrap_or(usize::MAX);
+    let rows = usize::try_from(height.div_ceil(16)).unwrap_or(usize::MAX);
+    let plane = |width: Option<usize>, height: Option<usize>| {
+        width
+            .zip(height)
+            .and_then(|(width, height)| Plane::len(width, height))
+            .map_or(u64::MAX, |len| len as u64)
+    };
+    let planes = [
+        plane(columns.checked_mul(16), rows.checked_mul(16)),
+        plane(columns.checked_mul(8), rows.checked_mul(8)),
+        plane(columns.checked_mul(8), rows.checked_mul(8)),
+    ];
+    let blocks = columns as u64 * rows as u64;
+    let state = [
+        blocks.saturating_mul((size_of::<Macroblock>() + size_of::<bool>()) as u64),
+        columns as u64 * (size_of::<Nonzero>() + 4 * size_of::<usize>()) as u64,
+        (MAX_PARTITIONS * size_of::<Bool<'static>>()) as u64,
+        u64::from(width) * u64::from(height) * RGBA_BYTES as u64,
+    ];
+    planes.into_iter().chain(state).fold(0, u64::saturating_add)
 }
 
 /// Decode a `VP8 ` keyframe into opaque straight-alpha RGBA8.

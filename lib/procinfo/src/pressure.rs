@@ -24,7 +24,7 @@
 //!
 //! # A gauge nobody reports to admits nothing
 //!
-//! [`ReportedPressure`] starts at [`PressureBand::Critical`] so a process that
+//! [`ReportedPressure`](tairix_reclaim::ReportedPressure) starts at [`PressureBand::Critical`] so a process that
 //! never learns the band cannot grow a cache on a machine that may be
 //! starving. That default is only safe while it is *transient*: a program that
 //! never arms the wake leaves every cache in the process permanently unable to
@@ -32,23 +32,26 @@
 //! glyph, a whole IPC round trip per character drawn. Any program with an
 //! event loop and a cache calls `watch` once and `refresh` on the wake.
 
-use tairix_reclaim::{PressureBand, ReportedPressure};
+use tairix_reclaim::PressureBand;
 
-/// Publish band `depth` to `gauge`, returning whether the band actually moved.
+/// Publish band `depth` through `report`, returning whether the band actually
+/// moved.
 ///
 /// A depth outside the known set publishes nothing and reports `false`: the
 /// gauge keeps the band it already had rather than assuming the machine is
 /// comfortable, which costs cache hits and never correctness. An unrecognised
 /// band is never read as a guess in either direction.
 ///
-/// The injectable form, so the policy is exercised without a kernel; the
-/// `program::refresh` binding of it is what a freestanding program calls.
+/// The injectable form, so the policy is exercised without a kernel. A
+/// program reports through `tairix_rt::pressure::report`, never to the gauge
+/// directly: that is where the heap gives back the pages it retains, which a
+/// band that tightened unannounced would leave held.
 #[must_use]
-pub fn publish_depth(depth: u8, gauge: &ReportedPressure) -> bool {
+pub fn publish_depth(depth: u8, report: impl FnOnce(PressureBand) -> bool) -> bool {
     let Some(band) = PressureBand::from_known_depth(depth) else {
         return false;
     };
-    gauge.report(band)
+    report(band)
 }
 
 /// The production bindings: the process gauge `lib/rt` owns, read from the
@@ -88,7 +91,7 @@ mod program {
         else {
             return false;
         };
-        super::publish_depth(band, tairix_rt::pressure::gauge())
+        super::publish_depth(band, tairix_rt::pressure::report)
     }
 
     /// Add the memory-pressure wake to `set` under `token` and prime the
@@ -130,11 +133,24 @@ mod tests {
     };
 
     #[test]
+    fn a_known_band_is_published_through_the_reporter_and_an_unknown_one_is_not() {
+        let mut reported = None;
+        assert!(publish_depth(PressureBand::Mild.depth(), |band| {
+            reported = Some(band);
+            true
+        }));
+        assert_eq!(reported, Some(PressureBand::Mild));
+        assert!(!publish_depth(u8::MAX, |_| unreachable!(
+            "an unknown depth reports nothing"
+        )));
+    }
+
+    #[test]
     fn a_reported_band_reaches_the_gauge_and_is_a_change_only_once() {
         let gauge = ReportedPressure::unknown();
-        assert!(publish_depth(PressureBand::Normal.depth(), &gauge));
+        assert!(publish_depth(PressureBand::Normal.depth(), |band| gauge.report(band)));
         assert_eq!(gauge.band(), PressureBand::Normal);
-        assert!(!publish_depth(PressureBand::Normal.depth(), &gauge));
+        assert!(!publish_depth(PressureBand::Normal.depth(), |band| gauge.report(band)));
     }
 
     #[test]
@@ -145,15 +161,15 @@ mod tests {
         let class = ReclaimClass::CleanFileData;
         let budget = CacheBudget::from_ceiling(1 << 20);
         assert!(!gauge.growth_permitted(class, budget, 1));
-        assert!(publish_depth(PressureBand::Normal.depth(), &gauge));
+        assert!(publish_depth(PressureBand::Normal.depth(), |band| gauge.report(band)));
         assert!(gauge.growth_permitted(class, budget, 1));
     }
 
     #[test]
     fn a_tightening_band_is_reported_as_a_change_and_closes_growth() {
         let gauge = ReportedPressure::unknown();
-        assert!(publish_depth(PressureBand::Normal.depth(), &gauge));
-        assert!(publish_depth(PressureBand::Severe.depth(), &gauge));
+        assert!(publish_depth(PressureBand::Normal.depth(), |band| gauge.report(band)));
+        assert!(publish_depth(PressureBand::Severe.depth(), |band| gauge.report(band)));
         assert_eq!(gauge.band(), PressureBand::Severe);
         // Severe takes every class to zero, so nothing is admitted at all.
         for class in ReclaimClass::ALL {
@@ -167,12 +183,14 @@ mod tests {
     #[test]
     fn a_depth_this_build_does_not_know_is_refused_not_guessed() {
         let gauge = ReportedPressure::unknown();
-        assert!(publish_depth(PressureBand::Normal.depth(), &gauge));
-        assert!(!publish_depth(u8::MAX, &gauge));
+        assert!(publish_depth(PressureBand::Normal.depth(), |band| gauge.report(band)));
+        assert!(!publish_depth(u8::MAX, |band| gauge.report(band)));
         assert_eq!(gauge.band(), PressureBand::Normal);
         // Not clamped to critical either: an unknown depth must not pin
         // every cache in the process shut.
-        assert!(!publish_depth(PressureBand::Critical.depth() + 1, &gauge));
+        assert!(!publish_depth(PressureBand::Critical.depth() + 1, |band| {
+            gauge.report(band)
+        }));
         assert_eq!(gauge.band(), PressureBand::Normal);
     }
 
@@ -180,7 +198,7 @@ mod tests {
     fn every_known_band_round_trips_through_its_depth() {
         let gauge = ReportedPressure::unknown();
         for band in PressureBand::ALL {
-            let _ = publish_depth(band.depth(), &gauge);
+            let _ = publish_depth(band.depth(), |band| gauge.report(band));
             assert_eq!(gauge.band(), band);
         }
     }

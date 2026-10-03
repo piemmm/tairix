@@ -1193,7 +1193,7 @@ an update to this section.
   (correct premultiplied-alpha blending). The taskbar's rounded edges are
   drawn through that same compositor path — there is no second
   rounded-corner implementation (§2.2).
-- Theming: a default dark theme plus a light theme, switchable at runtime,
+- Theming: a default light theme plus a dark theme, switchable at runtime,
   driving colours, corner radii, fonts, and cursors for the WM, taskbar, and
   default apps through one shared theme definition; adding a theme is data,
   not new code.

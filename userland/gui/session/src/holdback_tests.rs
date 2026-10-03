@@ -157,7 +157,7 @@ fn a_held_render_conclusion_is_reported_until_it_goes_out() {
         subject: tairix_abi::window_ipc::PreviewSubject::Wallpaper(0),
         width: 16,
         height: 9,
-        rendered: true,
+        outcome: tairix_abi::window_ipc::PreviewOutcome::Rendered,
     };
     assert!(!held.holds_render(MAILBOX, WINDOW));
     hold(&mut held, resized(WINDOW, 640));

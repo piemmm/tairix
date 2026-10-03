@@ -2,7 +2,7 @@
 //!
 //! A [`Theme`] bundles one [`Palette`], one set of [`Metrics`], one set of
 //! [`Fonts`], and one [`CursorSet`] under a stable [`ThemeId`]. The charter
-//! requires a default dark theme and a light theme switchable at runtime,
+//! requires a default light theme and a dark theme switchable at runtime,
 //! and that "adding a theme is data, not new code": a new
 //! theme is just another [`Theme`] value registered with the
 //! [`ThemeRegistry`](crate::ThemeRegistry).
@@ -26,9 +26,9 @@ use tairix_colour::Rgba;
 pub struct ThemeId(pub u32);
 
 impl ThemeId {
-    /// The id of the built-in dark theme (the default).
+    /// The id of the built-in dark theme.
     pub const DARK: Self = Self(1);
-    /// The id of the built-in light theme.
+    /// The id of the built-in light theme (the default).
     pub const LIGHT: Self = Self(2);
 }
 
@@ -281,7 +281,7 @@ impl Theme {
         }
     }
 
-    /// The built-in **dark** theme — TAIRiX's default.
+    /// The built-in **dark** theme.
     ///
     /// The tokens are the Reactive Alloy design boards (`plans/desktop1.png`,
     /// `plans/desktop2a.png`) measured rather than invented: near-black cool
@@ -356,7 +356,7 @@ impl Theme {
         )
     }
 
-    /// The built-in **light** theme.
+    /// The built-in **light** theme — TAIRiX's default.
     ///
     /// The light board (`plans/desktop1-light.png`) keeps the dark variant's
     /// alloy-orange accent family and semantic vocabulary and re-tunes every

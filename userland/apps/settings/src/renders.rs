@@ -25,6 +25,10 @@ pub struct Renders<R> {
     /// The desktop answered that this window has all the renders pending it
     /// will take, so nothing more is asked until one concludes.
     full: bool,
+    /// A render was asked for and the desktop has not yet said whether it
+    /// takes it, so nothing more is asked until it has: the window never asks
+    /// more of the desktop than it will take.
+    unconfirmed: bool,
     /// Moved on whenever the pictures [`asked`](Self::asked) answers for
     /// change, so a question settled against one set is asked again against
     /// the next.
@@ -54,6 +58,7 @@ impl<R> Renders<R> {
             bytes: 0,
             pending: Vec::new(),
             full: false,
+            unconfirmed: false,
             changes: 0,
         }
     }
@@ -68,7 +73,7 @@ impl<R> Renders<R> {
     /// Whether another render may be asked for now.
     #[must_use]
     pub const fn may_ask(&self) -> bool {
-        !self.full
+        !self.full && !self.unconfirmed
     }
 
     /// Whether nothing is pending.
@@ -98,14 +103,22 @@ impl<R> Renders<R> {
         self.spare.pop().or_else(|| create(bytes))
     }
 
-    /// The desktop accepted a render of `wanted` into `region`.
-    pub fn accepted(&mut self, wanted: PictureWanted, region: R) {
+    /// A render of `wanted` into `region` was asked for. It is pending from
+    /// now, though whether the desktop takes it is learned later
+    /// ([`confirmed`](Self::confirmed), [`declined`](Self::declined)).
+    pub fn submitted(&mut self, wanted: PictureWanted, region: R) {
         self.pending.push(Pending {
             wanted,
             stale: false,
             region,
         });
+        self.unconfirmed = true;
         self.changes = self.changes.wrapping_add(1);
+    }
+
+    /// The desktop took the render last asked for.
+    pub fn confirmed(&mut self) {
+        self.unconfirmed = false;
     }
 
     /// `region` was taken for a render that was never asked for, so it is kept
@@ -114,21 +127,38 @@ impl<R> Renders<R> {
         self.spare.push(region);
     }
 
-    /// The desktop declined a render with `err`, and `region` was never used.
-    /// Answers whether the picture itself is refused.
+    /// The desktop declined the render of `wanted` with `err`, so its region
+    /// was never used. Answers whether the picture itself is refused.
     ///
     /// A window already holding all the renders the desktop runs at once, or
     /// one of this very picture, is waited on rather than refused: the picture
     /// is asked for again once a render concludes. Anything else is a refusal
     /// the picture keeps its placeholder for.
-    pub fn declined(&mut self, err: Errno, region: R) -> bool {
-        self.unused(region);
+    pub fn declined(&mut self, wanted: PictureWanted, err: Errno) -> bool {
+        self.withdraw(wanted);
         match err {
             Errno::LimitExceeded | Errno::AlreadyExists => {
                 self.full = true;
                 false
             }
             _ => true,
+        }
+    }
+
+    /// The request for `wanted` never reached the desktop: it is forgotten and
+    /// its region kept for the next, so it is asked for again in its turn.
+    pub fn withdraw(&mut self, wanted: PictureWanted) {
+        self.unconfirmed = false;
+        if let Some(at) = self
+            .pending
+            .iter()
+            .position(|pending| pending.wanted == wanted)
+        {
+            let pending = self.pending.swap_remove(at);
+            self.changes = self.changes.wrapping_add(1);
+            if pending.wanted.bytes() == self.bytes {
+                self.spare.push(pending.region);
+            }
         }
     }
 

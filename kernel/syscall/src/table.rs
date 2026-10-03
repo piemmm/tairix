@@ -182,10 +182,8 @@ pub type SyscallResult = Result<u64, Errno>;
 /// Methods return a [`SyscallResult`]; the dispatcher converts an
 /// `Err` into the [`AuditEvent::SyscallHandlerRejected`] audit record
 /// for security-relevant calls before returning the same `Err` to the
-/// caller — except the two benign non-rejections, which get their own
-/// below-error records: [`Errno::WouldBlock`] ("nothing yet, retry",
-/// [`AuditEvent::SyscallHandlerWouldBlock`]) and [`Errno::NotFound`]
-/// ("no such object", [`AuditEvent::SyscallHandlerNotFound`]).
+/// caller — except the benign non-rejections, which get their own
+/// below-error records ([`AuditEvent::of_failure`]).
 pub trait SyscallHandlers {
     /// Voluntarily yield the CPU.
     fn yield_now(&self, caller: &CallerContext<'_>) -> SyscallResult;
@@ -3243,33 +3241,8 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
         let outcome = self.invoke(caller, spec, &args);
 
         // step 5: audit emission for security-relevant calls.
-        match &outcome {
-            Ok(_) if spec.audit => self.audit_invoked(caller, spec),
-            // `WouldBlock` is the `abi-v1` "nothing yet, retry" signal, not a
-            // rejection: the capability and argument checks all passed and no
-            // security decision was taken. Record it below the error level so
-            // a caller that legitimately polls while pending (e.g. `login`
-            // reading `users_db_read` while the encrypted root unlocks) cannot
-            // flood the log with errors.
-            Err(Errno::WouldBlock) if spec.audit => self.audit_would_block(caller, spec),
-            // `NotFound` is the "no such object" answer, not a rejection
-            // either: every check passed and the handler answered a
-            // legitimate question (a genuine authorisation refusal is
-            // `PermissionDenied` — the VFS never masks one as `NotFound`).
-            // Record it below the error level so a routine existence probe
-            // (e.g. `login` opening the optional system-configuration store
-            // and the desktop bundle each round) cannot flood the log.
-            Err(Errno::NotFound) if spec.audit => self.audit_not_found(caller, spec),
-            // `NotImplemented` says the subsystem is absent from this build or
-            // not up yet — again every check passed and no security decision
-            // was taken. A layered lookup that tries an optional source before
-            // its fallback (the device manager reading a settings override off
-            // the not-yet-mounted encrypted root, then taking the shipped
-            // default) takes this answer on every boot, so record it below the
-            // error level rather than flooding the boot log.
-            Err(Errno::NotImplemented) if spec.audit => self.audit_unavailable(caller, spec),
-            Err(_) if spec.audit => self.audit_rejected(caller, spec, outcome.as_ref().err()),
-            _ => {}
+        if spec.audit {
+            self.audit_outcome(caller, spec, &outcome);
         }
         outcome
     }
@@ -4294,70 +4267,37 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
         );
     }
 
-    fn audit_invoked(&self, caller: &CallerContext<'_>, spec: &SyscallSpec) {
-        self.audit_with_identity(
-            AuditEvent::SyscallInvoked,
-            caller,
-            &[Field {
-                key: "sc",
-                value: tairix_log::FieldValue::Str(spec.name),
-            }],
-        );
-    }
-
-    fn audit_would_block(&self, caller: &CallerContext<'_>, spec: &SyscallSpec) {
-        self.audit_with_identity(
-            AuditEvent::SyscallHandlerWouldBlock,
-            caller,
-            &[Field {
-                key: "sc",
-                value: tairix_log::FieldValue::Str(spec.name),
-            }],
-        );
-    }
-
-    fn audit_not_found(&self, caller: &CallerContext<'_>, spec: &SyscallSpec) {
-        self.audit_with_identity(
-            AuditEvent::SyscallHandlerNotFound,
-            caller,
-            &[Field {
-                key: "sc",
-                value: tairix_log::FieldValue::Str(spec.name),
-            }],
-        );
-    }
-
-    fn audit_unavailable(&self, caller: &CallerContext<'_>, spec: &SyscallSpec) {
-        self.audit_with_identity(
-            AuditEvent::SyscallHandlerUnavailable,
-            caller,
-            &[Field {
-                key: "sc",
-                value: tairix_log::FieldValue::Str(spec.name),
-            }],
-        );
-    }
-
-    fn audit_rejected(&self, caller: &CallerContext<'_>, spec: &SyscallSpec, err: Option<&Errno>) {
-        let mut e = [0u8; 12];
-        let err_field = match err {
-            Some(e_ref) => format_i32(e_ref.as_i32(), &mut e),
-            None => "?",
+    /// Record a dispatched call's `outcome`. Only a genuine rejection carries
+    /// the handler's errno; a benign failure is recorded as the answer it is
+    /// ([`AuditEvent::of_failure`]).
+    fn audit_outcome(
+        &self,
+        caller: &CallerContext<'_>,
+        spec: &SyscallSpec,
+        outcome: &SyscallResult,
+    ) {
+        let sc = Field {
+            key: "sc",
+            value: tairix_log::FieldValue::Str(spec.name),
         };
-        self.audit_with_identity(
-            AuditEvent::SyscallHandlerRejected,
-            caller,
-            &[
-                Field {
-                    key: "sc",
-                    value: tairix_log::FieldValue::Str(spec.name),
-                },
-                Field {
-                    key: "err",
-                    value: tairix_log::FieldValue::Str(err_field),
-                },
-            ],
-        );
+        let err = match outcome {
+            Ok(_) => {
+                self.audit_with_identity(AuditEvent::SyscallInvoked, caller, &[sc]);
+                return;
+            }
+            Err(err) => *err,
+        };
+        let event = AuditEvent::of_failure(err);
+        if event != AuditEvent::SyscallHandlerRejected {
+            self.audit_with_identity(event, caller, &[sc]);
+            return;
+        }
+        let mut digits = [0u8; 12];
+        let code = Field {
+            key: "err",
+            value: tairix_log::FieldValue::Str(format_i32(err.as_i32(), &mut digits)),
+        };
+        self.audit_with_identity(event, caller, &[sc, code]);
     }
 }
 
@@ -6664,6 +6604,32 @@ mod tests {
             Err(Errno::NotImplemented)
         );
         assert_eq!(sink.ids(), [AuditEvent::SyscallHandlerUnavailable.id().0]);
+    }
+
+    #[test]
+    fn a_broken_pipe_outcome_is_audited_as_peer_closed_not_rejected() {
+        // A supervisor writing to a worker that has just died meets this
+        // routinely; nothing was refused.
+        let sink = RecordingSink::new();
+        let caps = build_caps(&[], &sink);
+        let ctx = CallerContext {
+            task_id: TaskId(7),
+            caps: &caps,
+        };
+        let h = MockHandlers {
+            force_err: Some(Errno::BrokenPipe),
+            ..Default::default()
+        };
+        let d = Dispatcher::new(&h, &sink);
+        let mut args = RawArgs::ZERO;
+        args.0[0] = 1;
+        args.0[1] = 0x2000;
+        args.0[2] = 4;
+        assert_eq!(
+            d.dispatch(&ctx, u64::from(SyscallNumber::IPC_SEND.as_u16()), args),
+            Err(Errno::BrokenPipe)
+        );
+        assert_eq!(sink.ids(), [AuditEvent::SyscallHandlerPeerClosed.id().0]);
     }
 
     #[test]

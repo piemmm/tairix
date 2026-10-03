@@ -22,6 +22,7 @@
 //! Adding a new event takes the next free identifier in this file and a
 //! row in `docs/src/architecture/syscalls.md`.
 
+use tairix_abi::Errno;
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
 
 /// Audit event identifiers used by `kernel/syscall`.
@@ -94,9 +95,31 @@ pub enum AuditEvent {
     ///
     /// [`Errno::NotImplemented`]: tairix_abi::Errno::NotImplemented
     SyscallHandlerUnavailable,
+    /// The other end of the caller's channel is gone ([`Errno::BrokenPipe`]):
+    /// a write to a pipe every reader has closed.
+    ///
+    /// The checks all passed and no security decision was taken: the
+    /// caller learns its peer ended, which a supervisor writing to a worker
+    /// that has just died meets routinely. Recorded at [`Level::Debug`].
+    ///
+    /// [`Errno::BrokenPipe`]: tairix_abi::Errno::BrokenPipe
+    SyscallHandlerPeerClosed,
 }
 
 impl AuditEvent {
+    /// How a handler's refusal `err` is recorded: one of the benign answers
+    /// above, or a genuine rejection.
+    #[must_use]
+    pub const fn of_failure(err: Errno) -> Self {
+        match err {
+            Errno::WouldBlock => Self::SyscallHandlerWouldBlock,
+            Errno::NotFound => Self::SyscallHandlerNotFound,
+            Errno::NotImplemented => Self::SyscallHandlerUnavailable,
+            Errno::BrokenPipe => Self::SyscallHandlerPeerClosed,
+            _ => Self::SyscallHandlerRejected,
+        }
+    }
+
     /// Stable numeric identifier carried by the emitted [`Event`].
     #[must_use]
     pub const fn id(self) -> EventId {
@@ -109,29 +132,26 @@ impl AuditEvent {
             Self::SyscallHandlerWouldBlock => 5005,
             Self::SyscallHandlerNotFound => 5006,
             Self::SyscallHandlerUnavailable => 5007,
+            Self::SyscallHandlerPeerClosed => 5008,
         })
     }
 
     /// Severity at which this event is emitted.
     ///
     /// Refused or failed dispatches are recorded at [`Level::Error`] so
-    /// they surface above a routine info filter. The high-rate benign
-    /// outcomes — a successful dispatch, a would-block retry, and a
-    /// not-found answer — are recorded at [`Level::Debug`] so they cannot
-    /// flood the default `Info` console; lowering the filter recovers them
-    /// for forensics.
+    /// they surface above a routine info filter. The benign outcomes — a
+    /// successful dispatch, a would-block retry, a not-found answer, an
+    /// absent subsystem, and a closed peer — are recorded at
+    /// [`Level::Debug`] so they cannot flood the default `Info` console;
+    /// lowering the filter recovers them for forensics.
     #[must_use]
     pub const fn level(self) -> Level {
         match self {
-            // The benign high-rate outcomes: the continuous allow stream
-            // of a routine workload, the "nothing yet, retry" signal, and
-            // the "no such object" answer a routine existence probe gets.
-            // None is an error, and all are too frequent for the default
-            // console filter.
             Self::SyscallInvoked
             | Self::SyscallHandlerWouldBlock
             | Self::SyscallHandlerNotFound
-            | Self::SyscallHandlerUnavailable => Level::Debug,
+            | Self::SyscallHandlerUnavailable
+            | Self::SyscallHandlerPeerClosed => Level::Debug,
             Self::SyscallPermissionDenied
             | Self::SyscallUnknown
             | Self::SyscallBadArguments
@@ -151,6 +171,7 @@ impl AuditEvent {
             Self::SyscallHandlerWouldBlock => "syscall pending; caller may retry",
             Self::SyscallHandlerNotFound => "syscall target absent",
             Self::SyscallHandlerUnavailable => "syscall subsystem unavailable",
+            Self::SyscallHandlerPeerClosed => "syscall peer closed",
         }
     }
 }
@@ -190,6 +211,8 @@ mod tests {
             AuditEvent::SyscallHandlerRejected,
             AuditEvent::SyscallHandlerWouldBlock,
             AuditEvent::SyscallHandlerNotFound,
+            AuditEvent::SyscallHandlerUnavailable,
+            AuditEvent::SyscallHandlerPeerClosed,
         ] {
             let EventId(raw) = ev.id();
             assert!(
@@ -204,6 +227,14 @@ mod tests {
         assert_eq!(AuditEvent::SyscallHandlerRejected.id(), EventId(5004));
         assert_eq!(AuditEvent::SyscallHandlerWouldBlock.id(), EventId(5005));
         assert_eq!(AuditEvent::SyscallHandlerNotFound.id(), EventId(5006));
+        assert_eq!(AuditEvent::SyscallHandlerUnavailable.id(), EventId(5007));
+        assert_eq!(AuditEvent::SyscallHandlerPeerClosed.id(), EventId(5008));
+    }
+
+    #[test]
+    fn a_closed_peer_is_recorded_below_error() {
+        assert_eq!(AuditEvent::SyscallHandlerPeerClosed.level(), Level::Debug);
+        assert!(AuditEvent::SyscallHandlerPeerClosed.level() < Level::Info);
     }
 
     #[test]

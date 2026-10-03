@@ -477,7 +477,11 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
     let parent_tid = admit(sched, parent_root, parent_entry);
     PARENT_TID.store(parent_tid, Ordering::SeqCst);
     if producer
-        .register_child(ProcessId(parent_tid), ProcessId(child_tid))
+        .register_child(
+            ProcessId(parent_tid),
+            ProcessId(child_tid),
+            tairix_kernel_core::ChildListing::Listed,
+        )
         .is_err()
     {
         qemu_exit::exit_failure(FAIL_SPAWN);

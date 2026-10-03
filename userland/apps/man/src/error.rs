@@ -85,8 +85,12 @@ impl fmt::Display for ManError {
                 HelpRenderFailure::Sandbox(SandboxError::WorkerUnavailable(errno)) => {
                     write!(f, "help renderer unavailable: {errno}")
                 }
-                HelpRenderFailure::Sandbox(SandboxError::WorkerFailed) => {
-                    f.write_str("help renderer failed while rendering the page")
+                HelpRenderFailure::Sandbox(SandboxError::WorkerFailed(end)) => {
+                    write!(
+                        f,
+                        "help renderer failed while rendering the page ({})",
+                        end.reason()
+                    )
                 }
                 HelpRenderFailure::Sandbox(SandboxError::RequestTooLarge)
                 | HelpRenderFailure::Refused(HelpRefusal::MalformedRequest) => {

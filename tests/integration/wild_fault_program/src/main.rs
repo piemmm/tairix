@@ -40,9 +40,7 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(wild_fault_x86_64)]
 mod program {
-    /// Exit code the kernel records for a fault-killed task
-    /// (`128 + SIGSEGV`), which the parent expects from every faulting role.
-    const FAULT_EXIT_CODE: i32 = 139;
+    use tairix_abi::FAULT_EXIT_STATUS;
 
     /// A `static` in the program's own data image, used purely for its
     /// address: the image builder maps data pages No-Execute, so calling
@@ -90,7 +88,7 @@ mod program {
     }
 
     /// Spawn the child registered at `path` and reap it, asserting it exited
-    /// with [`FAULT_EXIT_CODE`]. Returns `0` on success or a code derived
+    /// with [`FAULT_EXIT_STATUS`]. Returns `0` on success or a code derived
     /// from `fail_code` naming which step failed.
     fn run_child(path: &[u8], fail_code: i32) -> i32 {
         let pid = tairix_rt::spawn(path);
@@ -101,7 +99,7 @@ mod program {
         if tairix_rt::wait_exit(pid, &mut code) < 0 {
             return fail_code + 1;
         }
-        if code != FAULT_EXIT_CODE {
+        if code != FAULT_EXIT_STATUS {
             return fail_code + 2;
         }
         0

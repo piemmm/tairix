@@ -1498,7 +1498,13 @@ scheduler reschedule path) until a matching child is reapable, then reaps
 it. The table indexes each parent's own children, so a `wait` never walks
 another parent's; `WAIT_PID_ANY` takes the child that exited first; and an
 exit or a stop wakes only its own parent's waiters, in `wait` or on a
-wait-set's `Child` member. The room an exit or a stop needs is taken when
+wait-set's `Child` member. A child spawned as a parser sandbox
+(`SPAWN_FLAG_SANDBOX`) is **private** to the code that spawned it: only a
+`wait` naming its pid reaps it or reports its stop, and `WAIT_PID_ANY` and
+the wait-set's any-child member neither take it nor become ready for it. A
+process reaping "any child" for its own job control could otherwise reap a
+library's worker first and leave that library unable to learn why the
+worker ended. The room an exit or a stop needs is taken when
 the child is recorded, so neither allocates, and a table that cannot grow
 refuses the `spawn` rather than start a child no parent could reap. A `wait` issued before that install (or by a non-parkable task) fails
 closed with `NotImplemented` through the default `NULL_PROCESS_WAIT`
@@ -2205,6 +2211,7 @@ emit `SYSCALL_INVOKED`; the pre-dispatch refusals (`PERMISSION_DENIED`,
 | 5005  | Debug | `SYSCALL_HANDLER_WOULD_BLOCK` | An audited handler returned `WouldBlock` — the `abi-v1` "nothing yet, retry" signal (not a rejection: every check passed, no security decision was taken). Recorded at `Debug`, below the default `Info` filter, so a caller that legitimately polls while pending cannot flood the log; available for flood/DoS forensics when the level is lowered (`AGENTS.md` §2.1 / §19.4). |
 | 5006  | Debug | `SYSCALL_HANDLER_NOT_FOUND`   | An audited handler returned `NotFound` — the "no such object" answer (not a rejection: every check passed, and a genuine authorisation refusal is `PermissionDenied`, which the secured VFS never masks as `NotFound`). Recorded at `Debug`, below the default `Info` filter, so a routine existence probe — e.g. `login` opening the optional `system.conf` store and the desktop bundle each round — cannot flood the boot log; available for probing/enumeration forensics when the level is lowered (`AGENTS.md` §2.1 / §19.4). |
 | 5007  | Debug | `SYSCALL_HANDLER_UNAVAILABLE` | An audited handler returned `NotImplemented` — the subsystem is absent from this build or not up yet. No security decision was taken: every dispatcher check passed and the handler simply had nothing behind it. Recorded at `Debug`, below the default `Info` filter, so a layered lookup that tries an optional source before its fallback — the device manager reading a settings override off the not-yet-mounted encrypted root, then taking the shipped default — cannot flood the boot log. A genuine authorisation refusal is `PermissionDenied` and stays at `Error`. |
+| 5008  | Debug | `SYSCALL_HANDLER_PEER_CLOSED` | An audited handler returned `BrokenPipe` — the other end of the caller's channel is gone, as when a supervisor writes to a pipe whose only reader, a worker, has just died. No security decision was taken, and the supervisor meets it routinely, so it is recorded at `Debug` rather than reported as a rejection. |
 
 Adding an event takes the next free identifier and a new row in this
 table.

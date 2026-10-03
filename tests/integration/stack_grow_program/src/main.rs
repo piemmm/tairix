@@ -42,14 +42,10 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
-    use tairix_abi::{LimitKind, ResourceLimit};
+    use tairix_abi::{LimitKind, ResourceLimit, FAULT_EXIT_STATUS};
 
     /// Page size shared by every Tier-1 MMU target this fixture runs on.
     const PAGE: u64 = 4096;
-
-    /// Exit code the kernel records for a fault-killed task
-    /// (`128 + SIGSEGV`), which the parent expects from `limit` and `guard`.
-    const FAULT_EXIT_CODE: i32 = 139;
 
     /// Stack bytes one `burn` frame occupies (its buffer; the true frame is
     /// slightly larger with the saved registers, so recursing
@@ -201,11 +197,11 @@ mod program {
         if failed != 0 {
             return failed;
         }
-        let failed = run_child(b"/bin/sg-limit", FAULT_EXIT_CODE, 13);
+        let failed = run_child(b"/bin/sg-limit", FAULT_EXIT_STATUS, 13);
         if failed != 0 {
             return failed;
         }
-        let failed = run_child(b"/bin/sg-guard", FAULT_EXIT_CODE, 16);
+        let failed = run_child(b"/bin/sg-guard", FAULT_EXIT_STATUS, 16);
         if failed != 0 {
             return failed;
         }

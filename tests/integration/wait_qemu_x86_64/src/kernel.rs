@@ -537,7 +537,11 @@ fn run_wait() -> ! {
     let child_tid = admit(sched, child_root, child_entry);
     PARENT_TID.store(parent_tid, Ordering::SeqCst);
     if producer
-        .register_child(ProcessId(parent_tid), ProcessId(child_tid))
+        .register_child(
+            ProcessId(parent_tid),
+            ProcessId(child_tid),
+            tairix_kernel_core::ChildListing::Listed,
+        )
         .is_err()
     {
         note(TEST_FAIL, "X4 test: the child registration was refused");

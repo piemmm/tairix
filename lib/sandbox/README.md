@@ -29,10 +29,11 @@ untrusted work imports this seam; a second per-app copy is forbidden.
   the reply over a worker its `Launcher` started, waiting no longer than the
   production launcher's reply deadline. Any worker failure — crash,
   protocol violation, oversize reply, no answer in time — is contained: the
-  caller receives a typed `SandboxError`, the worker is killed if it still
-  runs, then disposed of and replaced,
-  and the event is logged with a stable `EventId` (this crate owns the
-  `6000..7000` range). A parser crash never takes down the calling program.
+  worker is killed if it still runs and disposed of, the caller receives
+  `SandboxError::WorkerFailed` naming how it ended (its exit status, read as
+  a `WorkerEnd`), and the event is logged with that cause under a stable
+  `EventId` (this crate owns the `6000..7000` range). The next request
+  starts a replacement. A parser crash never takes down the calling program.
 - **The duplex session seam** (`session`): the long-lived counterpart to
   the one-shot pair above, for a worker that serves a *protocol* rather
   than answering a question. `SandboxSession` never blocks: the owner

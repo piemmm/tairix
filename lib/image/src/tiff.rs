@@ -124,6 +124,8 @@ const TAG_REFERENCE_BLACK_WHITE: u16 = 532;
 
 pub(crate) const COMPRESSION_NONE: u16 = 1;
 const COMPRESSION_CCITT_RLE: u16 = 2;
+/// The floating-point predictor, which shuffles each row's bytes aside.
+const PREDICTOR_FLOAT: u32 = 3;
 const COMPRESSION_GROUP3: u16 = 3;
 const COMPRESSION_GROUP4: u16 = 4;
 pub(crate) const COMPRESSION_LZW: u16 = 5;
@@ -580,7 +582,7 @@ impl<'a> Page<'a> {
             // so there is no row for a predictor to run along.
             _ if subsampled => return Err(DecodeError::TiffInvalidPredictor),
             2 if matches!(samples.bits, 8 | 16 | 32) => {}
-            3 if samples.format == SampleFormat::Float => {}
+            PREDICTOR_FLOAT if samples.format == SampleFormat::Float => {}
             _ => return Err(DecodeError::TiffInvalidPredictor),
         }
         let (grid, offsets, counts) = read_grid(&ifd, width, height, &samples, planar)?;
@@ -1447,7 +1449,7 @@ impl Page<'_> {
             let Some(row) = plane.get_mut(from..from + layout.row_bytes) else {
                 return Err(DecodeError::DimensionsOverflow);
             };
-            if self.predictor == 3 {
+            if self.predictor == PREDICTOR_FLOAT {
                 undo_floating_point(row, shuffle, self.ifd.endian, width, stride)?;
             } else {
                 undo_horizontal(row, self.ifd.endian, self.samples.bits, stride, count);
@@ -1886,6 +1888,58 @@ pub(crate) fn probe(bytes: &[u8]) -> Result<(u32, u32), DecodeError> {
 pub(crate) fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage, DecodeError> {
     let (mut chain, measured) = Chain::open(bytes)?;
     chain.decode(bytes, measured.primary, limits)
+}
+
+/// An upper bound of the bytes a [`decode`] of `bytes` holds at once, read
+/// from the page it decodes: the RGBA picture, the widest unit's working
+/// buffer and its float-predictor shuffle, the palette, and the tables the
+/// page's coding builds. A JPEG page's units are each decoded as a JPEG of up
+/// to the size `limits` admit, beside the run its tables and data are joined
+/// in, which a regrowth holds twice.
+///
+/// # Errors
+///
+/// What [`decode`] would refuse before decoding: a malformed directory or
+/// page, or a picture or unit `limits` do not admit.
+pub(crate) fn peak_bytes(bytes: &[u8], limits: &DecodeLimits) -> Result<u64, DecodeError> {
+    // An empty working buffer grows to no fewer bytes than this.
+    const MIN_GROWTH: u64 = 8;
+    let (mut chain, measured) = Chain::open(bytes)?;
+    let at = chain.locate(bytes, measured.primary)?;
+    let page = Page::read(bytes, chain.endian, at)?;
+    let (out_width, out_height) = output_size(&page);
+    limits.check(out_width, out_height)?;
+    let picture = u64::from(out_width) * u64::from(out_height) * RGBA_BYTES as u64;
+    if page.compression == COMPRESSION_JPEG {
+        let joined = 2 * (2 + 2 * bytes.len() as u64);
+        return Ok([joined, jpeg::peak_ceiling(limits)]
+            .into_iter()
+            .fold(picture, u64::saturating_add));
+    }
+    limits.check(page.grid.columns, page.grid.rows)?;
+    let widest = page.layout(page.grid.rows)?;
+    let unit = u64::from(widest.planes)
+        .saturating_mul(widest.plane_bytes as u64)
+        .max(MIN_GROWTH);
+    let shuffle = if page.predictor == PREDICTOR_FLOAT {
+        (widest.row_bytes as u64).max(MIN_GROWTH)
+    } else {
+        0
+    };
+    let palette = match page.colour {
+        Colour::Palette => 3u64 << page.samples.bits,
+        _ => 0,
+    };
+    let codec = match page.compression {
+        COMPRESSION_LZW => crate::lzw::TABLE_BYTES,
+        COMPRESSION_CCITT_RLE | COMPRESSION_GROUP3 | COMPRESSION_GROUP4 => {
+            ccitt::TABLE_BYTES.saturating_add(ccitt::row_bytes(page.grid.columns))
+        }
+        _ => 0,
+    };
+    Ok([unit, shuffle, palette, codec]
+        .into_iter()
+        .fold(picture, u64::saturating_add))
 }
 
 /// Validate the chain and measure its pages, decoding none of them.

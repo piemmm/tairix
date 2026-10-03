@@ -66,12 +66,19 @@ pub(crate) struct Lzw {
     stack: Vec<u8>,
 }
 
+/// The bytes an [`Lzw`] holds: its prefix, suffix and stack tables.
+pub(crate) const TABLE_BYTES: u64 =
+    (MAX_CODES * core::mem::size_of::<u16>() + MAX_CODES + STACK_DEPTH) as u64;
+
+/// One slot deeper than the longest possible string.
+const STACK_DEPTH: usize = MAX_CODES + 1;
+
 impl Lzw {
     pub(crate) fn new() -> Option<Self> {
         Some(Self {
             prefix: fallible::filled(MAX_CODES, NO_PREFIX)?,
             suffix: fallible::filled(MAX_CODES, 0u8)?,
-            stack: fallible::filled(MAX_CODES + 1, 0u8)?,
+            stack: fallible::filled(STACK_DEPTH, 0u8)?,
         })
     }
 

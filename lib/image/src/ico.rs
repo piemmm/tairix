@@ -247,6 +247,28 @@ pub(crate) fn decode_fitted(
     decode_entry(entry(bytes, index)?, limits)
 }
 
+/// An upper bound of the bytes a [`decode_fitted`] of `bytes` to `fit` holds
+/// at once: what the page it chooses costs — a PNG page as a PNG, a DIB page
+/// its RGBA picture, the mask being applied in place.
+///
+/// # Errors
+///
+/// What [`decode_fitted`] would refuse before decoding: a malformed
+/// directory, or no page `limits` admit.
+pub(crate) fn peak_bytes(
+    bytes: &[u8],
+    limits: &DecodeLimits,
+    fit: FitBox,
+) -> Result<u64, DecodeError> {
+    let count = entry_count(bytes)?;
+    let (index, width, height) = select(bytes, count, Some(fit), limits)?;
+    let picture = entry(bytes, index)?;
+    if picture.starts_with(&crate::PNG_SIGNATURE) {
+        return png::peak_bytes(picture, limits);
+    }
+    Ok(area(width, height) * RGBA_BYTES as u64)
+}
+
 /// An icon container's directory, as the pages a walk decodes.
 pub(crate) struct Directory {
     count: u16,

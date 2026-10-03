@@ -3234,6 +3234,25 @@ fn emit_wait_contract(out: &mut String) {
         "#define TAIRIX_LOAD_OOM ((int32_t){})",
         tairix_abi::LOAD_OOM
     );
+    out.push_str(
+        "/* The exit status of a child the kernel killed for a fault it could not\n\
+         * resolve: 128 + SIGSEGV, so a reaped crash never reads as a clean exit. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_FAULT_EXIT_STATUS ((int32_t){})",
+        tairix_abi::FAULT_EXIT_STATUS
+    );
+    out.push_str(
+        "/* The exit status of a program that ended because an allocation it could\n\
+         * not do without failed: 128 + SIGABRT, so a parent can tell memory running\n\
+         * out from a fault or a bug, and may ask again once memory is freed. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_OOM_EXIT_STATUS ((int32_t){})",
+        tairix_abi::OOM_EXIT_STATUS
+    );
     out.push('\n');
 }
 
@@ -3266,8 +3285,10 @@ fn emit_spawn_attach_contract(out: &mut String) {
     out.push_str(
         "/* Attach-block flags. SANDBOX starts the child as a minimum-capability\n\
          * parser sandbox: empty capability set, closed syscall allow-list, and\n\
-         * every wire must be CLOSED or HANDLE (nothing ambient flows in). Any\n\
-         * reserved flag bit is refused. */\n",
+         * every wire must be CLOSED or HANDLE (nothing ambient flows in). A\n\
+         * sandbox child is private to its spawner: only a wait naming its pid\n\
+         * reaps it, never a wait for any child. Any reserved flag bit is\n\
+         * refused. */\n",
     );
     let _ = writeln!(
         out,
@@ -3803,17 +3824,19 @@ mod tests {
         }
     }
 
-    /// The reserved load-failure exit statuses are read from `lib/abi` and
-    /// emitted into the wait contract, never re-typed, so the C view can
-    /// never drift from the source of truth.
+    /// The reserved load-failure and fault exit statuses are read from
+    /// `lib/abi` and emitted into the wait contract, never re-typed, so the C
+    /// view can never drift from the source of truth.
     #[test]
-    fn syscall_header_carries_the_reserved_load_failure_statuses() {
+    fn syscall_header_carries_the_reserved_exit_statuses() {
         let h = body("tairix_syscall.h");
         for (name, value) in [
             ("TAIRIX_LOAD_NOT_FOUND", tairix_abi::LOAD_NOT_FOUND),
             ("TAIRIX_LOAD_UNVERIFIED", tairix_abi::LOAD_UNVERIFIED),
             ("TAIRIX_LOAD_MALFORMED", tairix_abi::LOAD_MALFORMED),
             ("TAIRIX_LOAD_OOM", tairix_abi::LOAD_OOM),
+            ("TAIRIX_FAULT_EXIT_STATUS", tairix_abi::FAULT_EXIT_STATUS),
+            ("TAIRIX_OOM_EXIT_STATUS", tairix_abi::OOM_EXIT_STATUS),
         ] {
             assert!(
                 h.contains(&format!("#define {name} ((int32_t){value})")),

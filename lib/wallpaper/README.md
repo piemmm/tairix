@@ -51,7 +51,7 @@ key's own closed vocabulary:
 | `backdrop`  | `theme`, or six bare hex digits `rrggbb`           | `theme`                                       |
 | `icons`     | `leading` \| `trailing`                            | `leading`                                     |
 | `sort`      | `name` \| `kind` \| `size` \| `date`               | `name`                                        |
-| `appearance`| `dark` \| `light`                                  | `dark`                                        |
+| `appearance`| `dark` \| `light`                                  | `light`                                       |
 | `contrast`  | `normal` \| `high` \| `monochrome`                 | `normal`                                      |
 | `density`   | `compact` \| `normal` \| `comfortable`             | `normal`                                      |
 | `motion`    | `full` \| `reduced`                                | `full`                                        |

@@ -3086,6 +3086,17 @@ impl Form {
         self.pictures.refuse(subject);
     }
 
+    /// Record that the desktop had no memory to render `subject`.
+    pub(crate) fn picture_unavailable(&mut self, subject: PreviewSubject) {
+        self.pictures.unavailable(subject);
+    }
+
+    /// Offer the pictures memory was short for again, answering whether any
+    /// was.
+    pub(crate) fn retry_unavailable_pictures(&mut self) -> bool {
+        self.pictures.retry_unavailable()
+    }
+
     /// Where `chooser`'s picture `index` is drawn in `place`, or `None` when
     /// the form draws no such picture.
     #[must_use]

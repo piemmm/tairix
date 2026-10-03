@@ -405,12 +405,25 @@ Both are of the same posture as `QueryDesktop`: seat-scoped,
 capability-free, describing the caller's own desktop and granting nothing.
 Both are *reads*: the only write is still the §6 apply.
 
-The desktop renders **as many previews at once as it has preparers** — one
-per online CPU, each owning its own sandbox, and one while memory is anything
-but plentiful — and a window may have no more than that pending, so a chooser
-of pictures uses the machine's cores without being able to flood them. It
-always prepares its own backdrop first, so the picture the user is looking at
-never waits behind a thumbnail. The pane asks for the pictures
+The desktop renders previews on its preparers — one per online CPU, each
+owning its own sandbox — **within a memory budget**: the speculative share of
+the machine's memory while it is plentiful, nothing beyond one render
+otherwise, and no render at all at critical pressure. A render reserves what
+it is known to need before its picture is read (the largest source and its
+upload run, `WALLPAPER_PREPARATION_BYTES`), then acquires what its worker's
+header-only plan reports (`plan_wallpaper`, priced by
+`tairix_image::decode_peak_bytes`). A plan that does not fit beside the
+renders under way sends its render back to the head of the queue with its cost
+known, to start once that cost fits; a render with nothing else running always
+goes on, whatever it costs, with nothing started beside it. A render that runs
+out of memory beside others runs again alone; one that runs out alone
+concludes `PreviewOutcome::Unavailable`, which Settings asks for again once
+memory may have been freed. A window may have no more pending than there are
+preparers, so a chooser of pictures uses the machine's cores without being
+able to flood them. The desktop always prepares its own backdrop first, so the
+picture the user is looking at never waits behind a thumbnail, and the
+backdrop and the screensaver's slides hold what their plans report without
+waiting. The pane asks for the pictures
 on screen first and keeps every one it is handed while memory is plentiful,
 only those on screen once it is short (`plans/NEW-DESKTOP-SETTINGS.md` DS19).
 A render a preparer has taken answers exactly once and frees its slot; what a
@@ -478,7 +491,11 @@ nothing in the settings model needs to change.
   taken before a thumbnail, previews rendered no more at once than there
   are slots and in the order asked, one window's pending bounded by the
   slots, a duplicate refused, an answer freeing its slot, an answer to
-  nothing dropped), and the pinboard's gestures against
+  nothing dropped; renders admitted within the memory budget, a plan that
+  does not fit waiting first in the queue, one render always going on, an
+  out-of-memory render retried alone and then concluded unavailable, and a
+  forgotten slide holding its share until it is done), and the pinboard's
+  gestures against
   the existing
   fakes: the backdrop menu's row model (its closed row set, the marks on the
   settings in force, the id↔command inverse, the group breaks, and the rows a

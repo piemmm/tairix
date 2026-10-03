@@ -304,7 +304,7 @@ impl core::fmt::Debug for DesktopShell {
 
 impl DesktopShell {
     /// Build a desktop shell for a taskbar placed by `config`, starting from
-    /// the built-in themes with the default dark theme active.
+    /// the built-in themes with the default light theme active.
     ///
     /// The router starts with the pointer at the screen origin and no focus,
     /// the presenter has placed no window yet, the renderer draws the

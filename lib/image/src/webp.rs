@@ -86,6 +86,11 @@ const FRAME_HEADER: usize = 16;
 /// Bytes an alpha chunk spends on its method and filter declaration.
 const ALPHA_HEADER: usize = 1;
 
+/// The bits of an `ALPH` declaration naming how its plane is stored, and the
+/// value naming a lossless stream.
+const ALPHA_METHOD: u8 = 0x03;
+const ALPHA_LOSSLESS: u8 = 1;
+
 /// The extended header's flag bits this decoder reads. Every other bit is
 /// reserved and refused.
 const FLAG_ANIMATION: u8 = 0x02;
@@ -502,7 +507,7 @@ fn apply_alpha(
     height: u32,
 ) -> Result<(), DecodeError> {
     let declaration = *chunk.first().ok_or(DecodeError::WebpTruncated)?;
-    let method = declaration & 0x03;
+    let method = declaration & ALPHA_METHOD;
     let filter = (declaration >> 2) & 0x03;
     let preprocessing = (declaration >> 4) & 0x03;
     // The pre-processing field is informative — it says what an encoder did,
@@ -564,6 +569,83 @@ pub(crate) fn probe(bytes: &[u8]) -> Result<(u32, u32), DecodeError> {
         } => picture.bitstream.geometry(),
         Layout::Animation { canvas, .. } => Ok(canvas),
     }
+}
+
+/// An upper bound of the bytes a [`decode`] of `bytes` holds at once, read
+/// from its chunks and its bitstreams' headers: the frame list the
+/// container's walk collects, held twice while it regrows, then the picture
+/// — or, for an animation, the canvas and its copy beside the first frame,
+/// decoded at its own size.
+///
+/// # Errors
+///
+/// What [`decode`] would refuse before decoding: a malformed container or
+/// bitstream header, or a size `limits` do not admit.
+pub(crate) fn peak_bytes(bytes: &[u8], limits: &DecodeLimits) -> Result<u64, DecodeError> {
+    let listed = frame_list_bytes(bytes);
+    let held = match layout(bytes)? {
+        Layout::Still { canvas, picture } => {
+            let geometry = picture.bitstream.geometry()?;
+            if let Some(canvas) = canvas {
+                check_canvas(geometry, canvas)?;
+            }
+            limits.check(geometry.0, geometry.1)?;
+            picture_peak(picture, geometry)
+        }
+        Layout::Animation { canvas, frames, .. } => {
+            limits.check(canvas.0, canvas.1)?;
+            let first = frames.first().ok_or(DecodeError::WebpNoFrames)?;
+            let region = bytes
+                .get(first.picture.clone())
+                .ok_or(DecodeError::WebpTruncated)?;
+            let picture = read_picture(region, first.picture.start)?;
+            let geometry = picture.bitstream.geometry()?;
+            limits.check(geometry.0, geometry.1)?;
+            let canvas_bytes = u64::from(canvas.0) * u64::from(canvas.1) * RGBA_BYTES as u64;
+            picture_peak(picture, geometry).saturating_add(2 * canvas_bytes)
+        }
+    };
+    Ok(listed.saturating_add(held))
+}
+
+/// What the frame list a walk of `bytes` collects can hold at once: a record
+/// per frame chunk, twice over while the list regrows by one.
+fn frame_list_bytes(bytes: &[u8]) -> u64 {
+    let Ok(mut chunks) = Chunks::open(bytes) else {
+        return 0;
+    };
+    let mut frames = 0u64;
+    while let Ok(Some(chunk)) = chunks.next() {
+        if chunk.id == ANIMATION_FRAME {
+            frames += 1;
+        }
+    }
+    frames.saturating_mul(2 * core::mem::size_of::<Frame>() as u64)
+}
+
+/// What decoding `picture`, of `width`×`height`, holds at once: its
+/// bitstream's own peak, then its alpha plane, decoded beside the picture
+/// when the plane is a lossless stream.
+fn picture_peak(picture: Picture<'_>, (width, height): (u32, u32)) -> u64 {
+    let pixels = u64::from(width) * u64::from(height);
+    let image = match picture.bitstream {
+        Bitstream::Lossy(_) => crate::vp8::peak_bytes(width, height),
+        // The decoded words, then the RGBA picture converted from them.
+        Bitstream::Lossless(stream) => crate::vp8l::peak_ceiling(width, height, stream.len())
+            .saturating_add(pixels * RGBA_BYTES as u64),
+    };
+    let alpha = picture.alpha.map_or(0, |chunk| {
+        let lossless = chunk
+            .first()
+            .is_some_and(|declaration| declaration & ALPHA_METHOD == ALPHA_LOSSLESS);
+        let decoded = if lossless {
+            crate::vp8l::peak_ceiling(width, height, chunk.len())
+        } else {
+            0
+        };
+        pixels.saturating_add(decoded)
+    });
+    image.saturating_add(alpha)
 }
 
 /// Refuse a picture whose own geometry differs from the rectangle the

@@ -76,15 +76,11 @@ impl ThemeRegistry {
     #[must_use]
     pub fn with_builtins() -> Self {
         let builtins = [Theme::dark(), Theme::light()];
-        let active = Self::builtin_for(Appearance::default());
-        let drawn = match builtins.iter().find(|theme| theme.id() == active) {
-            Some(theme) => theme.clone(),
-            None => builtins[0].clone(),
-        };
+        let drawn = builtins[Self::builtin_index(Appearance::default())].clone();
         Self {
             builtins,
             custom: Vec::new(),
-            active,
+            active: drawn.id(),
             axes: Accessibility::default(),
             drawn,
             floating: OnceCell::new(),
@@ -146,11 +142,7 @@ impl ThemeRegistry {
 
     /// Re-derive the drawn theme from the selection and the axes.
     fn redraw(&mut self) {
-        let selected = match self.get(self.active) {
-            Some(theme) => theme,
-            None => &self.builtins[0],
-        };
-        self.drawn = selected.clone().with_axes(self.axes);
+        self.drawn = self.selected().clone().with_axes(self.axes);
         self.floating = OnceCell::new();
         self.frosted = OnceCell::new();
     }
@@ -171,7 +163,7 @@ impl ThemeRegistry {
     /// A custom theme that happens to be active is replaced by the matching
     /// built-in.
     pub fn set_appearance(&mut self, appearance: Appearance) -> ThemeId {
-        let id = Self::builtin_for(appearance);
+        let id = self.builtin(appearance).id();
         self.active = id;
         self.redraw();
         id
@@ -192,11 +184,17 @@ impl ThemeRegistry {
         self.set_appearance(next)
     }
 
-    /// The id of the built-in theme for an [`Appearance`].
-    const fn builtin_for(appearance: Appearance) -> ThemeId {
+    /// The built-in theme of an [`Appearance`].
+    const fn builtin(&self, appearance: Appearance) -> &Theme {
+        &self.builtins[Self::builtin_index(appearance)]
+    }
+
+    /// Where `appearance`'s built-in sits in [`builtins`](Self::builtins),
+    /// which [`with_builtins`](Self::with_builtins) fills dark then light.
+    const fn builtin_index(appearance: Appearance) -> usize {
         match appearance {
-            Appearance::Dark => ThemeId::DARK,
-            Appearance::Light => ThemeId::LIGHT,
+            Appearance::Dark => 0,
+            Appearance::Light => 1,
         }
     }
 
@@ -246,10 +244,8 @@ impl ThemeRegistry {
     /// theme declares rather than what the current axes already did to it.
     #[must_use]
     pub fn selected(&self) -> &Theme {
-        match self.get(self.active) {
-            Some(theme) => theme,
-            None => &self.builtins[0],
-        }
+        self.get(self.active)
+            .unwrap_or(self.builtin(Appearance::default()))
     }
 
     /// The theme with `id`, if registered.

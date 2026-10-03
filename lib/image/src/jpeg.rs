@@ -58,6 +58,7 @@ use crate::density::{Density, DensityUnit, Stated};
 use crate::huffman::{Canonical, MAX_CODE_BITS};
 use crate::orientation::{self, Orientation};
 use crate::{DecodeError, DecodeLimits, FitBox, RasterImage, Unkept, RGBA_BYTES};
+use tairix_util::fallible;
 
 // ---------------------------------------------------------------------
 // Marker codes (ITU-T T.81 Table B.1)
@@ -1034,6 +1035,98 @@ fn parse_adobe_transform(payload: &[u8]) -> Option<u8> {
 /// and comment segments. Anything else there is a stream a decode would
 /// refuse, so a probe refuses it too rather than guessing its length.
 pub(crate) fn probe(bytes: &[u8]) -> Result<(u32, u32), DecodeError> {
+    let (frame, orientation) = header(bytes)?;
+    Ok(orientation.picture_size(frame.width, frame.height))
+}
+
+/// The bytes a [`decode_fitted`] of `bytes` holds at its peak, read from its
+/// header alone: the sample planes at the scale [`Scale::choose`] picks, a
+/// progressive frame's coefficient store beside them, the RGBA picture, and
+/// the row and upsampling scratch.
+pub(crate) fn decode_peak_bytes(
+    bytes: &[u8],
+    limits: &DecodeLimits,
+    fit: FitBox,
+) -> Result<u64, DecodeError> {
+    let (frame, orientation) = header(bytes)?;
+    let m = Scale::choose(frame.width, frame.height, orientation, fit, limits)?.m();
+    let stored_width = u64::from(output_dimension(frame.width, m));
+    let stored_height = u64::from(output_dimension(frame.height, m));
+    let tap = core::mem::size_of::<Tap>() as u64;
+    let mut peak = stored_width
+        .checked_mul(stored_height)
+        .and_then(|pixels| pixels.checked_mul(RGBA_BYTES as u64))
+        .and_then(|picture| picture.checked_add(stored_width * RGBA_BYTES as u64))
+        .ok_or(DecodeError::DimensionsOverflow)?;
+    for component in &frame.components {
+        let blocks = u64::from(frame.blocks_per_line_padded(component))
+            * u64::from(frame.blocks_per_col_padded(component));
+        let stride = u64::from(frame.blocks_per_line_padded(component)) * u64::from(m);
+        let plane = blocks * u64::from(m) * u64::from(m);
+        let coefficients = if frame.progressive {
+            blocks * 64 * 2
+        } else {
+            0
+        };
+        let upsampling = stored_width * (tap + 1) + stride;
+        peak = [plane, coefficients, upsampling]
+            .into_iter()
+            .try_fold(peak, u64::checked_add)
+            .ok_or(DecodeError::DimensionsOverflow)?;
+    }
+    peak.checked_add(BOOKKEEPING_BYTES)
+        .ok_or(DecodeError::DimensionsOverflow)
+}
+
+/// An upper bound of the bytes a full-scale decode of any frame `limits`
+/// admit holds at once, for a caller decoding frames it has not read: the
+/// terms of [`decode_peak_bytes`] at the widest, tallest and largest frame,
+/// each component's plane padded by up to a whole MCU — at most 32 samples —
+/// along each axis.
+pub(crate) fn peak_ceiling(limits: &DecodeLimits) -> u64 {
+    const MCU: u64 = 32;
+    // A frame header carries sixteen-bit sides.
+    let pixels = limits.max_pixels();
+    let side = |max: u32| u64::from(max.min(u32::from(u16::MAX))).min(pixels);
+    let (width, height) = (side(limits.max_width()), side(limits.max_height()));
+    let padded = (width + height)
+        .saturating_mul(MCU)
+        .saturating_add(MCU * MCU)
+        .saturating_add(pixels);
+    let tap = core::mem::size_of::<Tap>() as u64;
+    [
+        padded.saturating_mul(3),
+        padded
+            .saturating_mul(3 * 2)
+            .min(limits.max_progressive_coefficient_bytes()),
+        width * RGBA_BYTES as u64,
+        3 * (width * (tap + 1) + width + MCU),
+        BOOKKEEPING_BYTES,
+    ]
+    .into_iter()
+    .fold(
+        pixels.saturating_mul(RGBA_BYTES as u64),
+        u64::saturating_add,
+    )
+}
+
+/// What a decode holds beside its image-sized buffers, at its largest: every
+/// Huffman table's symbols with one more being defined to replace one, and
+/// the vectors indexing a frame's three components at most and a scan's four.
+const BOOKKEEPING_BYTES: u64 = {
+    use core::mem::size_of;
+    let huffman = (2 * 4 + 1) * 256;
+    let per_component = size_of::<Component>()
+        + 3 * size_of::<Vec<u8>>()
+        + size_of::<usize>()
+        + size_of::<Upsampler<'static>>();
+    let per_scan_component = size_of::<ScanComponent>() + size_of::<usize>() + size_of::<i32>();
+    (huffman + 3 * per_component + 4 * per_scan_component) as u64
+};
+
+/// Walk `bytes` to its frame header, answering the frame and the orientation
+/// its EXIF segment states.
+fn header(bytes: &[u8]) -> Result<(Frame, Orientation), DecodeError> {
     if !bytes.starts_with(&crate::JPEG_SIGNATURE[..2]) {
         return Err(DecodeError::JpegBadSignature);
     }
@@ -1046,8 +1139,7 @@ pub(crate) fn probe(bytes: &[u8]) -> Result<(u32, u32), DecodeError> {
             SOF0 | SOF1 | SOF2 => {
                 let (payload, _after) = read_segment(bytes, pos)?;
                 let frame = parse_sof(payload, marker == SOF2)?;
-                let orientation = orientation.unwrap_or(Orientation::IDENTITY);
-                return Ok(orientation.picture_size(frame.width, frame.height));
+                return Ok((frame, orientation.unwrap_or(Orientation::IDENTITY)));
             }
             SOF3 | SOF5 | SOF6 | SOF7 | DHP | EXP => {
                 return Err(DecodeError::JpegLosslessOrHierarchicalUnsupported);
@@ -1258,7 +1350,7 @@ impl Decoder<'_> {
                     if progressive {
                         self.allocate_coefficient_store(&frame)?;
                     } else {
-                        self.allocate_sample_planes(&frame);
+                        self.allocate_sample_planes(&frame)?;
                     }
                     self.frame = Some(frame);
                 }
@@ -1344,7 +1436,7 @@ impl Decoder<'_> {
     /// a non-progressive frame, which never needs a persistent
     /// coefficient store: each block is dequantised and inverse-DCT'd the
     /// moment its scan decodes it.
-    fn allocate_sample_planes(&mut self, frame: &Frame) {
+    fn allocate_sample_planes(&mut self, frame: &Frame) -> Result<(), DecodeError> {
         let m = self.scale.m();
         self.sample_planes = frame
             .components
@@ -1354,9 +1446,10 @@ impl Decoder<'_> {
                 let height = frame.blocks_per_col_padded(component).saturating_mul(m);
                 let len = usize::try_from(u64::from(width).saturating_mul(u64::from(height)))
                     .unwrap_or(usize::MAX);
-                vec![0u8; len]
+                fallible::filled(len, 0u8).ok_or(DecodeError::OutOfMemory)
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
+        Ok(())
     }
 
     /// Allocate the progressive coefficient store, refusing before
@@ -1384,7 +1477,10 @@ impl Decoder<'_> {
         if total_bytes > self.limits.max_progressive_coefficient_bytes() {
             return Err(DecodeError::JpegProgressiveCoefficientStoreExceedsLimit);
         }
-        self.coefficients = sizes.into_iter().map(|n| vec![0i16; n]).collect();
+        self.coefficients = sizes
+            .into_iter()
+            .map(|n| fallible::filled(n, 0i16).ok_or(DecodeError::OutOfMemory))
+            .collect::<Result<_, _>>()?;
         Ok(())
     }
 
@@ -1821,7 +1917,7 @@ impl Decoder<'_> {
             let plane_len =
                 usize::try_from(u64::from(plane_width).saturating_mul(u64::from(plane_height)))
                     .unwrap_or(usize::MAX);
-            let mut plane = vec![0u8; plane_len];
+            let mut plane = fallible::filled(plane_len, 0u8).ok_or(DecodeError::OutOfMemory)?;
             let quant = self.quant_tables[usize::from(component.quant_table)]
                 .as_ref()
                 .ok_or(DecodeError::JpegMissingQuantizationTable)?
@@ -1880,13 +1976,20 @@ impl Decoder<'_> {
         let byte_len = pixel_count
             .checked_mul(RGBA_BYTES as u64)
             .ok_or(DecodeError::DimensionsOverflow)?;
-        let mut out =
-            vec![0u8; usize::try_from(byte_len).map_err(|_| DecodeError::DimensionsOverflow)?];
+        let mut out = fallible::filled(
+            usize::try_from(byte_len).map_err(|_| DecodeError::DimensionsOverflow)?,
+            0u8,
+        )
+        .ok_or(DecodeError::OutOfMemory)?;
 
         let use_rgb = frame.components.len() == 3 && self.adobe_transform == Some(0);
         let h_max = frame.h_max().max(1);
         let v_max = frame.v_max().max(1);
-        let mut row = vec![[0u8; RGBA_BYTES]; usize::try_from(stored_width).unwrap_or(usize::MAX)];
+        let mut row = fallible::filled(
+            usize::try_from(stored_width).unwrap_or(usize::MAX),
+            [0u8; RGBA_BYTES],
+        )
+        .ok_or(DecodeError::OutOfMemory)?;
 
         let mut upsamplers: Vec<Upsampler<'_>> = frame
             .components
@@ -1912,7 +2015,7 @@ impl Decoder<'_> {
                     v_max,
                 )
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
 
         for y in 0..stored_height {
             for upsampler in &mut upsamplers {
@@ -2161,35 +2264,39 @@ impl<'a> Upsampler<'a> {
     /// An upsampler for `map` feeding an `output_width`-wide image whose
     /// frame's widest and tallest components carry `h_max` and `v_max`
     /// samples.
-    fn new(map: CompMap<'a>, output_width: u32, h_max: u32, v_max: u32) -> Self {
+    fn new(
+        map: CompMap<'a>,
+        output_width: u32,
+        h_max: u32,
+        v_max: u32,
+    ) -> Result<Self, DecodeError> {
         let width = usize::try_from(output_width).unwrap_or(usize::MAX);
         let horizontal = map.h != h_max;
         let vertical = map.v != v_max;
-        let columns = if horizontal {
-            (0..output_width)
-                .map(|x| axis_tap(x, map.h, h_max, map.x_limit))
-                .collect()
-        } else {
-            Vec::new()
+        let mut columns = Vec::new();
+        if horizontal {
+            if !fallible::reserve(&mut columns, width) {
+                return Err(DecodeError::OutOfMemory);
+            }
+            columns.extend((0..output_width).map(|x| axis_tap(x, map.h, h_max, map.x_limit)));
+        }
+        let scratch = |wanted: bool, len: usize| {
+            if wanted {
+                fallible::filled(len, 0u8).ok_or(DecodeError::OutOfMemory)
+            } else {
+                Ok(Vec::new())
+            }
         };
-        let blended = if vertical {
-            vec![0u8; map.stride]
-        } else {
-            Vec::new()
-        };
-        let upsampled = if horizontal {
-            vec![0u8; width]
-        } else {
-            Vec::new()
-        };
-        Self {
+        let blended = scratch(vertical, map.stride)?;
+        let upsampled = scratch(horizontal, width)?;
+        Ok(Self {
             map,
             v_max,
             columns,
             blended,
             upsampled,
             prepared: Prepared::Plane(0, 0),
-        }
+        })
     }
 
     /// Resolve output row `y` of this component.

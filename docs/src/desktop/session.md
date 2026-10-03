@@ -2651,7 +2651,7 @@ while the session was still coming up, because the kernel reports *changes*.
 
 ## Tests
 
-`cargo test -p tairix-desktop-session` covers: the default dark start with an
+`cargo test -p tairix-desktop-session` covers: the default light start with an
 empty library and a closed popup; `set_theme` relaying the new metrics to the
 taskbar (observed through a custom theme with a distinctive corner radius);
 the fail-closed `UnknownTheme`/`DuplicateId` paths leaving the taskbar

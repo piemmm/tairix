@@ -44,7 +44,7 @@ use tairix_taskbar::{
 };
 use tairix_theme::{
     Appearance, CursorKind, CursorSetId, Metrics, MotionInteraction, SurfaceGround, Theme,
-    ThemeError, ThemeId, Timeline,
+    ThemeError, ThemeId, ThemeRegistry, Timeline,
 };
 use tairix_wm::{
     chrome_cache, cursor_cache, frost_cache, ChromeEpoch, Color, Compositor, Corners, FrostEpoch,
@@ -584,7 +584,8 @@ fn open_library_on(shell: &mut DesktopShell, comp: &mut Compositor) {
     assert!(shell.session().taskbar().library().is_open());
 }
 
-/// A headless 1920×1080 RGBA compositor over an opaque black background.
+/// A headless 1920×1080 RGBA compositor in the desktop's default theme, as
+/// the session builds one.
 pub(crate) fn compositor() -> Compositor {
     let mode = DisplayMode {
         width_px: 1920,
@@ -594,7 +595,7 @@ pub(crate) fn compositor() -> Compositor {
     };
     Compositor::new(
         mode,
-        Theme::dark(),
+        ThemeRegistry::with_builtins().active().clone(),
         test_chrome_cache(),
         test_frost_cache(),
         test_pressure(),
@@ -1198,9 +1199,9 @@ fn custom_dark(id: ThemeId, taskbar_margin: u32) -> Theme {
 }
 
 #[test]
-fn new_starts_dark_with_an_empty_library() {
+fn new_starts_light_with_an_empty_library() {
     let session = session();
-    assert_eq!(session.active_theme().id(), ThemeId::DARK);
+    assert_eq!(session.active_theme().id(), ThemeId::LIGHT);
     assert!(session.taskbar().library().catalog().is_empty());
     assert!(!session.taskbar().library().is_open());
 }
@@ -1241,7 +1242,7 @@ fn set_theme_fails_closed_on_unknown_id() {
         session.set_theme(unknown),
         Err(ThemeError::UnknownTheme(unknown))
     );
-    assert_eq!(session.active_theme().id(), ThemeId::DARK);
+    assert_eq!(session.active_theme().id(), ThemeId::LIGHT);
     assert_eq!(
         session.taskbar().theme().id(),
         before,
@@ -2139,7 +2140,7 @@ fn sync_theme_relays_a_programmatic_switch_to_the_compositor() {
     );
     let before = comp.chrome_epoch();
 
-    shell.session_mut().set_theme(ThemeId::LIGHT).unwrap();
+    shell.session_mut().set_theme(ThemeId::DARK).unwrap();
     assert!(shell.sync_theme(&mut comp));
     // The whole theme, not just its desktop colour: the furniture is drawn
     // from the palette the compositor holds.
@@ -2204,7 +2205,7 @@ fn a_restyle_is_announced_once_by_the_first_frame_after_the_reveal() {
     );
     let mut said = Vec::new();
     let first = shell.style_generation();
-    shell.session_mut().set_appearance(Appearance::Light);
+    shell.session_mut().set_appearance(Appearance::Dark);
     assert!(shell.sync_theme(&mut comp));
     assert_ne!(shell.style_generation(), first);
     shell.report_restyled(false, |appearance| said.push(appearance));
@@ -2214,11 +2215,11 @@ fn a_restyle_is_announced_once_by_the_first_frame_after_the_reveal() {
         "a look adopted before the reveal: {said:?}"
     );
 
-    shell.session_mut().set_appearance(Appearance::Dark);
+    shell.session_mut().set_appearance(Appearance::Light);
     assert!(shell.sync_theme(&mut comp));
     shell.report_restyled(true, |appearance| said.push(appearance));
     shell.report_restyled(true, |appearance| said.push(appearance));
-    assert_eq!(said, [Appearance::Dark], "once, in the look it now has");
+    assert_eq!(said, [Appearance::Light], "once, in the look it now has");
 
     let unchanged = shell.style_generation();
     assert!(!shell.sync_theme(&mut comp), "nothing moved");
@@ -2231,7 +2232,7 @@ fn a_restyle_is_announced_once_by_the_first_frame_after_the_reveal() {
         "a rescale is a restyle"
     );
     shell.report_restyled(true, |appearance| said.push(appearance));
-    assert_eq!(said, [Appearance::Dark, Appearance::Dark]);
+    assert_eq!(said, [Appearance::Light, Appearance::Light]);
 }
 
 #[test]
@@ -9583,7 +9584,7 @@ fn the_prompt_repaints_on_a_theme_switch() {
         .pixels()
         .to_vec();
 
-    shell.session_mut().set_appearance(Appearance::Light);
+    shell.session_mut().set_appearance(Appearance::Dark);
     confirm.repaint(&mut shell, &mut comp);
 
     let after = comp
@@ -9607,21 +9608,21 @@ fn setting_an_appearance_switches_the_theme_and_re_themes_the_bar() {
     let mut session = DesktopSession::new(TaskbarConfig::bottom_bar(640, 480));
     assert_eq!(
         session.active_theme().appearance(),
-        Appearance::Dark,
-        "dark is the default"
-    );
-
-    assert_eq!(session.set_appearance(Appearance::Light), ThemeId::LIGHT);
-    assert_eq!(session.active_theme().appearance(), Appearance::Light);
-    assert_eq!(
-        session.taskbar().theme().id(),
-        ThemeId::LIGHT,
-        "the bar re-themed with the desktop"
+        Appearance::Light,
+        "light is the default"
     );
 
     assert_eq!(session.set_appearance(Appearance::Dark), ThemeId::DARK);
     assert_eq!(session.active_theme().appearance(), Appearance::Dark);
-    assert_eq!(session.taskbar().theme().id(), ThemeId::DARK);
+    assert_eq!(
+        session.taskbar().theme().id(),
+        ThemeId::DARK,
+        "the bar re-themed with the desktop"
+    );
+
+    assert_eq!(session.set_appearance(Appearance::Light), ThemeId::LIGHT);
+    assert_eq!(session.active_theme().appearance(), Appearance::Light);
+    assert_eq!(session.taskbar().theme().id(), ThemeId::LIGHT);
 }
 
 // ---- screen lock ----
@@ -12751,7 +12752,7 @@ fn desktop_info_reports_compositor_state() {
     assert_eq!(info.scale_percent(), 200);
     assert_eq!(info.screen_width_px(), 1920);
     assert_eq!(info.screen_height_px(), 1080);
-    assert_eq!(info.appearance(), Appearance::Dark);
+    assert_eq!(info.appearance(), Appearance::Light);
 
     let mut shell = shell();
     let mut picker = SessionPicker::new(TreeSource::fixture);

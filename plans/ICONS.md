@@ -289,12 +289,12 @@ system shipped one picture for *all* applications. Now:
   §14). The shipped set is one family of 256×256 illustrative raster masters,
   each a picture of what its program works on — the page a text tool reads,
   the folder a directory tool makes, the drive a storage tool inspects — in
-  one material vocabulary (brushed aluminium, charcoal glass, paper, blue
-  folders) lit from the upper left, with one orange accent and a round emblem
-  for the action a tool performs (add, remove, edit, eject, information). A
-  strip of them reads as one system and each tool's function reads at a
-  glance. Cinder's is the deliberate exception: the mascot is an anime-style
-  character portrait.
+  one material vocabulary (brushed aluminium, charcoal glass, paper, varnished
+  wood, blue folders) lit from the upper left, with one orange accent and a
+  round emblem for the action a tool performs (add, remove, edit, eject,
+  information). A strip of them reads as one system and each tool's function
+  reads at a glance. Cinder's is the deliberate exception: the mascot is an
+  anime-style character portrait.
 - `AppInfoHeader` no longer refuses an icon on an unlisted bundle. That rule
   made sense when the program library was the only consumer; the file manager
   and the desktop are consumers too, and neither has anything to do with the

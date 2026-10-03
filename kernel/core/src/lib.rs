@@ -273,7 +273,7 @@ pub use procsignal::{
 };
 pub use procspace::{new_space_tlb, ProcessSpace};
 pub use procwait::{
-    KernelProcessWait, NullProcessWait, ProcessTable, ProcessWait, Reap, WaitedChild,
+    ChildListing, KernelProcessWait, NullProcessWait, ProcessTable, ProcessWait, Reap, WaitedChild,
     NULL_PROCESS_WAIT,
 };
 pub use pty::{

@@ -44,7 +44,8 @@ include!(concat!(env!("OUT_DIR"), "/contract.rs"));
 pub const RENAME_OP: &str = "rename";
 
 /// How many times the script changes the desktop's look through the Settings
-/// Appearance pane: its appearance to light, then its density to compact.
+/// Appearance pane: its appearance to the one it did not boot in, then its
+/// density to compact.
 /// Each is one commit of the published document, and reaching this many is
 /// the guest's PASS.
 pub const APPEARANCE_CHANGES: u32 = 2;

@@ -5,10 +5,16 @@
 //! payload to the sandboxed worker its [`Launcher`] started and returns the
 //! reply payload. Every way the worker can fail — a crash, a protocol
 //! violation, an oversize reply, an exit without replying — is contained
-//! identically: the caller receives a typed [`SandboxError`], the dead
-//! worker is disposed of (reaped) and **replaced**, and the event is logged
-//! with a stable [`EventId`] so a crashing parser is observable. A parser
-//! crash never takes down the calling program.
+//! identically: the caller receives a typed [`SandboxError`] saying what
+//! became of the worker, the dead worker is disposed of (reaped), the event
+//! is logged with a stable [`EventId`] and the cause its exit status carries,
+//! and the next request starts a fresh worker. A parser crash never takes
+//! down the calling program.
+//!
+//! The replacement is deliberately not started at once. A worker that ran out
+//! of memory would be followed by another process spawned into the same
+//! exhausted machine, and a worker killed by its input would buy its sender a
+//! spawn per message, whether or not another request ever comes.
 //!
 //! The worker is treated as hostile from the moment it has parsed a byte:
 //! nothing it sends is trusted beyond the framing bound here, and the typed
@@ -16,12 +22,13 @@
 //! reply one of them cannot believe is a worker that is broken or subverted,
 //! so it is contained as a crash is ([`ParserSandbox::ask`]).
 
-use tairix_abi::{Errno, FieldValue};
+use tairix_abi::{Errno, FieldValue, Signal};
 use tairix_log::{Event, EventId, Field, Level, Sink};
 
 use alloc::vec::Vec;
 
 use crate::proto::{recv_frame, send_frame, Channel, ProtoError, MAX_FRAME};
+use crate::worker::WorkerExit;
 
 /// Stable event id: a sandboxed worker crashed or violated the protocol
 /// mid-request and was disposed of and replaced.
@@ -62,6 +69,61 @@ pub trait Unbelieved {
     fn unbelieved(&self) -> bool;
 }
 
+/// What became of a worker that failed a request, as its exit status tells.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum WorkerEnd {
+    /// It ran out of memory: it could not reserve room for a request, an
+    /// allocation it could not do without failed, or the kernel could not
+    /// load it at all.
+    OutOfMemory,
+    /// The kernel killed it for a fault it could not resolve.
+    Crashed,
+    /// It was still running and was killed: it had not answered in time, or
+    /// what it answered could not be believed.
+    Killed,
+    /// It exited because its transport failed or its parent broke the
+    /// protocol.
+    TransportFailed,
+    /// Its status names no cause this seam knows, or could not be read.
+    Unknown,
+}
+
+impl WorkerEnd {
+    /// The end a disposed worker's exit status `status` records.
+    #[must_use]
+    pub const fn of_status(status: Option<i32>) -> Self {
+        let Some(code) = status else {
+            return Self::Unknown;
+        };
+        match WorkerExit::from_code(code) {
+            Some(WorkerExit::OutOfMemory) => Self::OutOfMemory,
+            Some(WorkerExit::PeerClosed | WorkerExit::Oversize | WorkerExit::Transport) => {
+                Self::TransportFailed
+            }
+            None if code == tairix_abi::LOAD_OOM || code == tairix_abi::OOM_EXIT_STATUS => {
+                Self::OutOfMemory
+            }
+            None if code == tairix_abi::FAULT_EXIT_STATUS => Self::Crashed,
+            None if matches!(Signal::Kill.termination_status(), Some(kill) if kill == code) => {
+                Self::Killed
+            }
+            Some(WorkerExit::Finished) | None => Self::Unknown,
+        }
+    }
+
+    /// A terse human-readable statement of this end.
+    #[must_use]
+    pub const fn reason(self) -> &'static str {
+        match self {
+            Self::OutOfMemory => "out of memory",
+            Self::Crashed => "crashed",
+            Self::Killed => "killed",
+            Self::TransportFailed => "its transport failed",
+            Self::Unknown => "cause unknown",
+        }
+    }
+}
+
 /// Typed failure a [`ParserSandbox::request`] can report.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum SandboxError {
@@ -69,19 +131,34 @@ pub enum SandboxError {
     /// failure.
     WorkerUnavailable(Errno),
     /// The worker crashed, violated the protocol, or did not answer within
-    /// its transport's deadline. It has been disposed of and a replacement
-    /// was started (or its failure to start was itself logged). The request
+    /// its transport's deadline, and ended as the carried [`WorkerEnd`]. It
+    /// has been disposed of; the next request starts a fresh one. The request
     /// was not answered.
-    WorkerFailed,
+    WorkerFailed(WorkerEnd),
     /// The request payload exceeds [`MAX_FRAME`]; nothing was sent.
     RequestTooLarge,
+}
+
+impl SandboxError {
+    /// Whether the request failed for want of memory, and may succeed once
+    /// memory is freed — as opposed to an input or worker that is broken.
+    #[must_use]
+    pub const fn out_of_memory(&self) -> bool {
+        matches!(
+            self,
+            Self::WorkerUnavailable(Errno::OutOfMemory)
+                | Self::WorkerFailed(WorkerEnd::OutOfMemory)
+        )
+    }
 }
 
 impl core::fmt::Display for SandboxError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::WorkerUnavailable(errno) => write!(f, "no parser could be started ({errno})"),
-            Self::WorkerFailed => f.write_str("the parser stopped without answering"),
+            Self::WorkerFailed(end) => {
+                write!(f, "the parser stopped without answering ({})", end.reason())
+            }
             Self::RequestTooLarge => f.write_str("the request is larger than a parser takes"),
         }
     }
@@ -132,17 +209,17 @@ impl<L: Launcher, S: Sink> ParserSandbox<L, S> {
     /// Send one request payload and return the worker's reply payload.
     ///
     /// On any worker failure the error path runs the full containment
-    /// discipline before returning: dispose (reap), log
-    /// [`EVENT_WORKER_CRASHED`] with the exit code when known, and start a
-    /// replacement worker so the *next* request finds a live sandbox (a
-    /// replacement that fails to start is logged as
-    /// [`EVENT_WORKER_UNAVAILABLE`] and retried lazily on the next
-    /// request).
+    /// discipline before returning: dispose (reap) and log
+    /// [`EVENT_WORKER_CRASHED`] with the exit code and the cause it carries.
+    /// A request with no live worker starts one, and a start that fails is
+    /// logged as [`EVENT_WORKER_UNAVAILABLE`].
     ///
     /// # Errors
     ///
     /// [`SandboxError`], as above. The failed request is never retried
-    /// automatically: the caller decides whether the parse mattered.
+    /// automatically: the caller decides whether the parse mattered, and
+    /// [`SandboxError::out_of_memory`] tells it whether trying again later
+    /// could help.
     pub fn request(&mut self, payload: &[u8]) -> Result<Vec<u8>, SandboxError> {
         if payload.len() > MAX_FRAME {
             return Err(SandboxError::RequestTooLarge);
@@ -167,8 +244,7 @@ impl<L: Launcher, S: Sink> ParserSandbox<L, S> {
             // longer be believed.
             Ok(None) | Err(_) => "worker failed mid-request",
         };
-        self.contain_failure(reason);
-        Err(SandboxError::WorkerFailed)
+        Err(SandboxError::WorkerFailed(self.contain_failure(reason)))
     }
 
     /// Run `exchange` — its requests and the decoding of their replies — and
@@ -193,18 +269,14 @@ impl<L: Launcher, S: Sink> ParserSandbox<L, S> {
         answer
     }
 
-    /// Dispose of the failed worker, log why, and start the replacement.
-    fn contain_failure(&mut self, reason: &'static str) {
+    /// Dispose of the failed worker and log why, answering what became of it.
+    fn contain_failure(&mut self, reason: &'static str) -> WorkerEnd {
         self.contained = self.contained.wrapping_add(1);
         let exit_code = self
             .live
             .take()
             .and_then(|channel| self.launcher.dispose(channel));
-        log_worker_crashed(&self.sink, reason, exit_code);
-        match self.launcher.launch() {
-            Ok(channel) => self.live = Some(channel),
-            Err(errno) => self.log_unavailable(errno),
-        }
+        log_worker_crashed(&self.sink, reason, exit_code)
     }
 
     /// Log a failed launch (initial or replacement).
@@ -220,12 +292,18 @@ impl<L: Launcher, S: Sink> Drop for ParserSandbox<L, S> {
 }
 
 /// Emit [`EVENT_WORKER_CRASHED`]: a worker that will be replaced was
-/// disposed of for `reason`, with its exit code when one is known.
+/// disposed of for `reason`, with its exit code when one is known and the
+/// cause that code carries, answering that cause.
 ///
 /// The one emitter of that id, shared by [`ParserSandbox`] and the
 /// supervised session ([`crate::supervise`]) — the two seams whose failed
 /// worker is replaced rather than ended.
-pub fn log_worker_crashed<S: Sink>(sink: &S, reason: &'static str, exit_code: Option<i32>) {
+pub fn log_worker_crashed<S: Sink>(
+    sink: &S,
+    reason: &'static str,
+    exit_code: Option<i32>,
+) -> WorkerEnd {
+    let end = WorkerEnd::of_status(exit_code);
     let exit_field = match exit_code {
         Some(code) => FieldValue::SignedInt(i64::from(code)),
         None => FieldValue::Null,
@@ -242,12 +320,17 @@ pub fn log_worker_crashed<S: Sink>(sink: &S, reason: &'static str, exit_code: Op
                     value: FieldValue::Str(reason),
                 },
                 Field {
+                    key: "cause",
+                    value: FieldValue::Str(end.reason()),
+                },
+                Field {
                     key: "exit_code",
                     value: exit_field,
                 },
             ],
         },
     );
+    end
 }
 
 /// Emit [`EVENT_WORKER_UNAVAILABLE`]: a sandboxed worker could not be
@@ -275,15 +358,16 @@ pub fn log_unavailable<S: Sink>(sink: &S, errno: Errno) {
 #[cfg(test)]
 mod tests {
     use super::{
-        Launcher, ParserSandbox, SandboxError, Unbelieved, EVENT_WORKER_CRASHED,
+        Launcher, ParserSandbox, SandboxError, Unbelieved, WorkerEnd, EVENT_WORKER_CRASHED,
         EVENT_WORKER_UNAVAILABLE,
     };
     use crate::proto::{Channel, MAX_FRAME};
+    use crate::worker::WorkerExit;
     use alloc::rc::Rc;
     use alloc::vec;
     use alloc::vec::Vec;
     use core::cell::RefCell;
-    use tairix_abi::Errno;
+    use tairix_abi::{Errno, Signal};
     use tairix_log::{Event, EventId, Level, Sink};
 
     /// Captures `(id, level)` pairs of every logged event.
@@ -385,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    fn a_dead_worker_is_contained_logged_and_replaced() {
+    fn a_dead_worker_is_contained_logged_and_replaced_by_the_next_request() {
         // First worker answers once then dies; the replacement answers.
         let launcher = ScriptedLauncher {
             scripts: vec![Ok(worker(1)), Ok(worker(1))],
@@ -396,17 +480,22 @@ mod tests {
         let mut sandbox = ParserSandbox::new(launcher, sink.clone());
 
         assert_eq!(sandbox.request(b"one"), Ok(b"ok".to_vec()));
-        // The worker's stream ends before this reply: typed failure...
-        assert_eq!(sandbox.request(b"two"), Err(SandboxError::WorkerFailed));
-        // ...the dead worker was reaped, the crash logged with the stable
-        // id, and a replacement started eagerly.
+        // The worker's stream ends before this reply: a typed failure naming
+        // what its status says became of it...
+        assert_eq!(
+            sandbox.request(b"two"),
+            Err(SandboxError::WorkerFailed(WorkerEnd::Crashed))
+        );
+        // ...the dead worker reaped and the crash logged with the stable id,
+        // and nothing started in its place until something needs it.
         assert_eq!(sandbox.launcher.disposed, 1);
-        assert_eq!(sandbox.launcher.launched, 2);
+        assert_eq!(sandbox.launcher.launched, 1);
+        assert!(!sandbox.is_live());
         assert_eq!(
             sink.events.borrow().as_slice(),
             &[(EVENT_WORKER_CRASHED, Level::Warn)]
         );
-        // The caller survives and the replacement serves the next request.
+        // The caller survives and the next request starts the replacement.
         assert_eq!(sandbox.request(b"three"), Ok(b"ok".to_vec()));
         assert_eq!(sandbox.launcher.launched, 2);
     }
@@ -454,13 +543,13 @@ mod tests {
 
         assert!(sandbox.ask(|s| judged(s, b"two", true)).is_err());
         assert_eq!(sandbox.launcher.disposed, 1);
-        assert_eq!(sandbox.launcher.launched, 2);
         assert_eq!(
             sink.events.borrow().as_slice(),
             &[(EVENT_WORKER_CRASHED, Level::Warn)]
         );
         // The replacement, not the discredited worker, answers next.
         assert_eq!(sandbox.request(b"three"), Ok(b"fresh".to_vec()));
+        assert_eq!(sandbox.launcher.launched, 2);
 
         // The first worker's last answer is never heard: an inner `ask`
         // contains it, and the outer one leaves the replacement alone.
@@ -499,7 +588,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_replacement_is_logged_and_retried_on_the_next_request() {
+    fn a_replacement_that_cannot_start_is_reported_to_the_request_that_needed_it() {
         // One worker that dies immediately; no replacement available; then
         // a later launch succeeds.
         let launcher = ScriptedLauncher {
@@ -510,7 +599,16 @@ mod tests {
         let sink = RecordingSink::default();
         let mut sandbox = ParserSandbox::new(launcher, sink.clone());
 
-        assert_eq!(sandbox.request(b"one"), Err(SandboxError::WorkerFailed));
+        assert_eq!(
+            sandbox.request(b"one"),
+            Err(SandboxError::WorkerFailed(WorkerEnd::Crashed))
+        );
+        let failed = sandbox.request(b"two");
+        assert_eq!(
+            failed,
+            Err(SandboxError::WorkerUnavailable(Errno::OutOfMemory))
+        );
+        assert!(failed.is_err_and(|err| err.out_of_memory()));
         assert_eq!(
             sink.events.borrow().as_slice(),
             &[
@@ -518,8 +616,48 @@ mod tests {
                 (EVENT_WORKER_UNAVAILABLE, Level::Error),
             ]
         );
-        // The lazy retry on the next request finds the working script.
-        assert_eq!(sandbox.request(b"two"), Ok(b"ok".to_vec()));
+        assert_eq!(sandbox.request(b"three"), Ok(b"ok".to_vec()));
+    }
+
+    #[test]
+    fn a_disposed_workers_status_names_what_became_of_it() {
+        let cases = [
+            (Some(WorkerExit::OutOfMemory.code()), WorkerEnd::OutOfMemory),
+            (Some(tairix_abi::LOAD_OOM), WorkerEnd::OutOfMemory),
+            (Some(tairix_abi::OOM_EXIT_STATUS), WorkerEnd::OutOfMemory),
+            (Some(tairix_abi::FAULT_EXIT_STATUS), WorkerEnd::Crashed),
+            (Signal::Kill.termination_status(), WorkerEnd::Killed),
+            (
+                Some(WorkerExit::PeerClosed.code()),
+                WorkerEnd::TransportFailed,
+            ),
+            (
+                Some(WorkerExit::Transport.code()),
+                WorkerEnd::TransportFailed,
+            ),
+            (Some(WorkerExit::Finished.code()), WorkerEnd::Unknown),
+            (Some(tairix_abi::LOAD_UNVERIFIED), WorkerEnd::Unknown),
+            (None, WorkerEnd::Unknown),
+        ];
+        for (status, end) in cases {
+            assert_eq!(WorkerEnd::of_status(status), end, "{status:?}");
+        }
+    }
+
+    #[test]
+    fn only_a_failure_for_want_of_memory_is_worth_asking_again() {
+        assert!(SandboxError::WorkerFailed(WorkerEnd::OutOfMemory).out_of_memory());
+        assert!(SandboxError::WorkerUnavailable(Errno::OutOfMemory).out_of_memory());
+        for broken in [
+            SandboxError::WorkerFailed(WorkerEnd::Crashed),
+            SandboxError::WorkerFailed(WorkerEnd::Killed),
+            SandboxError::WorkerFailed(WorkerEnd::TransportFailed),
+            SandboxError::WorkerFailed(WorkerEnd::Unknown),
+            SandboxError::WorkerUnavailable(Errno::PermissionDenied),
+            SandboxError::RequestTooLarge,
+        ] {
+            assert!(!broken.out_of_memory(), "{broken:?}");
+        }
     }
 
     #[test]

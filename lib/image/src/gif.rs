@@ -644,8 +644,9 @@ impl Chain {
     }
 
     /// Composite the next frame onto the canvas, answering the delay it
-    /// declares.
-    fn composite_next(&mut self, bytes: &[u8]) -> Result<u64, DecodeError> {
+    /// declares. What a restore-to-previous disposal puts back is copied
+    /// aside only when another frame `follows` to restore it.
+    fn composite_next(&mut self, bytes: &[u8], follows: bool) -> Result<u64, DecodeError> {
         self.dispose();
         let mut control = Control::DEFAULT;
         let mut reader = Reader::new(bytes, self.cursor);
@@ -659,7 +660,7 @@ impl Chain {
                         aspect: 0,
                     };
                     let descriptor = read_descriptor(&mut reader, &screen)?;
-                    if control.disposal == Disposal::Previous {
+                    if follows && control.disposal == Disposal::Previous {
                         self.save(descriptor.rect)?;
                     }
                     self.cursor = self.draw(bytes, &descriptor, control)?;
@@ -869,8 +870,8 @@ impl FrameSource for Chain {
         &self.canvas
     }
 
-    fn advance(&mut self, bytes: &[u8], _index: u32) -> Result<u64, DecodeError> {
-        self.composite_next(bytes)
+    fn advance(&mut self, bytes: &[u8], index: u32) -> Result<u64, DecodeError> {
+        self.composite_next(bytes, index.saturating_add(1) < self.count)
     }
 
     fn restart(&mut self) {
@@ -890,14 +891,37 @@ pub(crate) fn frames(bytes: &[u8], limits: &DecodeLimits) -> Result<Animation<Ch
 /// A still consumer — an icon, a wallpaper — wants one picture, and the first
 /// composited frame is the one the format shows first.
 pub(crate) fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage, DecodeError> {
-    let mut frames = frames(bytes, limits)?;
-    if !frames.step(bytes)? {
+    let mut chain = Chain::open(bytes, limits)?;
+    if chain.count == 0 {
         return Err(DecodeError::GifNoFrames);
     }
-    let (width, height) = (frames.width(), frames.height());
-    let pixels = fallible::collected(frames.canvas().len(), frames.canvas().iter().copied())
-        .ok_or(DecodeError::OutOfMemory)?;
-    Ok(RasterImage::from_parts(width, height, pixels))
+    chain.composite_next(bytes, false)?;
+    Ok(RasterImage::from_parts(
+        chain.width,
+        chain.height,
+        chain.canvas,
+    ))
+}
+
+/// An upper bound of the bytes a [`decode`] of `bytes` holds at once, from
+/// its screen descriptor: the canvas, one frame's indices — a frame never
+/// exceeds the screen, and an index buffer is never smaller than eight bytes
+/// — and the LZW tables.
+///
+/// # Errors
+///
+/// What [`decode`] would refuse from the header: a malformed screen
+/// descriptor or a screen `limits` do not admit.
+pub(crate) fn peak_bytes(bytes: &[u8], limits: &DecodeLimits) -> Result<u64, DecodeError> {
+    const MIN_INDICES: u64 = 8;
+    let (screen, _) = read_screen(bytes)?;
+    limits.check(screen.width, screen.height)?;
+    let pixels = u64::from(screen.width) * u64::from(screen.height);
+    pixels
+        .checked_mul(RGBA_BYTES as u64)
+        .and_then(|canvas| canvas.checked_add(pixels.max(MIN_INDICES)))
+        .and_then(|held| held.checked_add(crate::lzw::TABLE_BYTES))
+        .ok_or(DecodeError::DimensionsOverflow)
 }
 
 /// Read a GIF as the palette picture its first frame stores: that frame's

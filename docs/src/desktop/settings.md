@@ -260,9 +260,11 @@ a parser sandbox, and this application requests neither, so the desktop
 session serves both — a catalog page from the listing it took at its own
 bring-up, and each picture rendered into a shared-memory region Settings
 created and granted — as many at once as the desktop renders, each into its
-own region, the pane asking again as each concludes. A render names what it
-shows rather than a path, so it cannot be used to make the session read a file
-the caller chose.
+own region, the pane asking again as each concludes. Each request is a round
+trip to the session's serve loop, so it is carried on a worker thread of the
+pane's own, one at a time and each answered before the next is asked, and the
+window never waits on it. A render names what it shows rather than a path, so
+it cannot be used to make the session read a file the caller chose.
 
 Every picture is requested and never awaited: a paint draws those that have
 come back and a built-in glyph for those that have not, so the pane is usable
@@ -273,7 +275,9 @@ memory is plentiful every one handed over stays for the life of the pane and
 scrolling back to it asks the desktop for nothing. Once memory is short, only
 what is on screen is kept. A rebuild of the pane carries the pictures it holds
 across rather than asking again, and a picture the desktop refuses is not
-asked for again. A picture that lands
+asked for again. One the desktop had no memory to draw keeps its glyph and is
+asked for again once memory may have been freed: when another picture fits,
+or when the pressure band moves. A picture that lands
 repaints its own tile and nothing else. [The pinboard's page](./pinboard.md)
 has the whole arrangement.
 
@@ -649,8 +653,9 @@ menu and photographs it on General, on Lock Screen, on a stated absence, and
 on Storage —
 reached past the fold of the strip by the strip's own scrollbar — each dump
 gated on the desktop session's witness that the frame carrying that pane's
-title is on screen. It then pages the strip back up, chooses Light on
-Appearance and photographs the desktop redrawn light, and passes only once the
+title is on screen. It then pages the strip back up, chooses the appearance
+the desktop did not boot in on Appearance and photographs the desktop redrawn
+in it, and passes only once the
 desktop's published settings document has been committed twice: for that
 choice, and for Compact density chosen on the same pane after the photograph.
 

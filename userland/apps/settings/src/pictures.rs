@@ -337,6 +337,11 @@ pub(crate) struct Pictures {
     /// Kept across rebuilds and never asked for again: a picture the desktop
     /// could not render once it cannot render at another size either.
     refused: Vec<PreviewSubject>,
+    /// Pictures the desktop had no memory to render, not asked for again
+    /// until there is reason to think there is now
+    /// ([`retry_unavailable`](Self::retry_unavailable)). Asking at once would
+    /// have each conclusion ask again, as fast as the desktop can refuse.
+    unavailable: Vec<PreviewSubject>,
 }
 
 impl Pictures {
@@ -461,6 +466,7 @@ impl Pictures {
                 if !in_reach
                     || held == Some(size)
                     || self.refused.contains(subject)
+                    || self.unavailable.contains(subject)
                     || asked(*subject)
                 {
                     return;
@@ -562,6 +568,24 @@ impl Pictures {
         }
         self.refused.push(subject);
         true
+    }
+
+    /// Record that the desktop had no memory to render `subject`, answering
+    /// whether it was news.
+    pub(crate) fn unavailable(&mut self, subject: PreviewSubject) -> bool {
+        if self.unavailable.contains(&subject) {
+            return false;
+        }
+        self.unavailable.push(subject);
+        true
+    }
+
+    /// Memory may have been freed: offer every picture that was short of it
+    /// again, answering whether any was.
+    pub(crate) fn retry_unavailable(&mut self) -> bool {
+        let any = !self.unavailable.is_empty();
+        self.unavailable.clear();
+        any
     }
 }
 

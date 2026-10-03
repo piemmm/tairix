@@ -20,8 +20,8 @@
 //! the desktop, open the capsule's menu, choose *Settings…*, photograph the
 //! window on General, walk to a pane that states an absence, scroll the strip,
 //! walk to Storage, page the strip back up, walk to Appearance and choose
-//! Light, photograph the desktop redrawn light, and finally choose Compact
-//! density on the same pane. Only the audit sink is swapped, for the PASS
+//! the appearance the desktop did not boot in, photograph the desktop redrawn
+//! in it, and finally choose Compact density on the same pane. Only the audit sink is swapped, for the PASS
 //! witnesses below.
 //!
 //! # The PASS gate
@@ -39,7 +39,7 @@
 //!    one, and only an adopted change of look rewrites it in this run.
 //! 4. **The next one did too.** A second such rename — the density choice.
 //!    It changes a key the first did not, so it commits whether or not
-//!    Settings has adopted the light desktop by the time it lands.
+//!    Settings has adopted the restyled desktop by the time it lands.
 //!
 //! Counting renames of that one path is attributable because the path is the
 //! desktop's alone and nothing else in this world rewrites it.

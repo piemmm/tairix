@@ -70,7 +70,7 @@ mod program {
         DecodeService, Isa,
     };
     use tairix_sandbox::host::{
-        log_unavailable, ParserSandbox, SandboxError, EVENT_WORKER_CRASHED,
+        log_unavailable, ParserSandbox, SandboxError, WorkerEnd, EVENT_WORKER_CRASHED,
     };
     use tairix_sandbox::rt::{
         serve_session_stdio, serve_stdio, session_worker_role, worker_role, RtLauncher,
@@ -526,7 +526,7 @@ mod program {
         let sink = CountingSink::default();
         let mut dying = ParserSandbox::new(RtLauncher::new(DIE_PATH), sink.clone());
         match dying.request(b"anything") {
-            Err(SandboxError::WorkerFailed) => {}
+            Err(SandboxError::WorkerFailed(_)) => {}
             Ok(_) => return 20,
             Err(_) => return 21,
         }
@@ -579,7 +579,7 @@ mod program {
         let mut hung = ParserSandbox::new(launcher, sink.clone());
         let asked = tairix_rt::clock_get();
         match hung.request(b"anything") {
-            Err(SandboxError::WorkerFailed) => {}
+            Err(SandboxError::WorkerFailed(WorkerEnd::Killed)) => {}
             Ok(_) => return 80,
             Err(_) => return 81,
         }

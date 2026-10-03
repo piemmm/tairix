@@ -43,10 +43,10 @@ use crate::Errno;
 /// drift apart.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
 pub enum Appearance {
-    /// Light foreground on dark surfaces. TAIRiX's default.
-    #[default]
+    /// Light foreground on dark surfaces.
     Dark,
-    /// Dark foreground on light surfaces.
+    /// Dark foreground on light surfaces. TAIRiX's default.
+    #[default]
     Light,
 }
 
@@ -81,8 +81,8 @@ impl Appearance {
     }
 
     /// Every appearance, in the canonical listing order a chooser offers
-    /// them in.
-    pub const ALL: [Self; 2] = [Self::Dark, Self::Light];
+    /// them in: the default first.
+    pub const ALL: [Self; 2] = [Self::Light, Self::Dark];
 
     /// The canonical settings-document spelling.
     ///

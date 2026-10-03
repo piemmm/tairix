@@ -46,8 +46,8 @@ look changes.
   memory / disk / network), running tasks, background jobs, a plain-language
   "system pressure" view with per-task actions, activity grouping, a recovery
   view for unresponsive apps, a full system detail view, and the taskbar icon's
-  states and micro-interactions. Each scene is shown in both the default dark
-  theme and a light theme, matching the runtime-switchable dark/light theming
+  states and micro-interactions. Each scene is shown in both the dark theme and
+  the light theme, matching the runtime-switchable dark/light theming
   the desktop already requires (`AGENTS.md` §10).
 
 The `-light` / default pairing exists to validate that every storyboard reads

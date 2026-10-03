@@ -223,7 +223,8 @@ The committed faces carry no TrueType hinting bytecode, so that engine
 grid-fits every outline itself before filling it (`lib/fontface`'s `gridfit`):
 strokes snap to whole pixels, never narrower than one, and rows snap to the
 face's own baseline / x-height / cap-height / ascender / descender zones so a
-line of text agrees on them. Columns are snapped only on the fixed-cell path —
+line of text agrees on them; a stroke between zones is placed between their
+rows, and bars near the face's standard thickness share its width. Columns are snapped only on the fixed-cell path —
 the atlas, and the service whenever a *monospace* family asks for its cell —
 where the cell owns the advance and moving a stem costs no spacing; the
 proportional path fits rows alone so ink stays under the advance the client

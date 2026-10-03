@@ -3,7 +3,7 @@
 The single shared desktop **theme definition** for TAIRiX (`AGENTS.md` §6,
 §10 — `PLAN.md` Stage 7). One theme drives the colours, corner radii, fonts,
 and cursors of the window manager, the taskbar, and the default apps, with a
-default dark theme and a light theme switchable at runtime.
+default light theme and a dark theme switchable at runtime.
 
 This crate is pure theme *data*. A `Theme` is a table of:
 

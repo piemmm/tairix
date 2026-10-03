@@ -918,6 +918,19 @@ pub(crate) fn probe(bytes: &[u8]) -> Result<(u32, u32), DecodeError> {
     Ok((dib.width, dib.height))
 }
 
+/// An upper bound of the bytes a [`decode`] of `bytes` holds at once: its
+/// RGBA picture, which every row is decoded straight into.
+///
+/// # Errors
+///
+/// What [`decode`] would refuse from the header: a malformed header or a
+/// size `limits` do not admit.
+pub(crate) fn peak_bytes(bytes: &[u8], limits: &DecodeLimits) -> Result<u64, DecodeError> {
+    let (width, height) = probe(bytes)?;
+    limits.check(width, height)?;
+    Ok(u64::from(width) * u64::from(height) * RGBA_BYTES as u64)
+}
+
 /// Decode a BMP file at its natural size.
 pub(crate) fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage, DecodeError> {
     let (dib, palette, pixels) = parts(bytes)?;

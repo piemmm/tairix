@@ -30,6 +30,11 @@
 //!    palette picture to a GIF showing it at half opacity's threshold, to a
 //!    JPEG of the same size, and a sprite area to one that reopens as the
 //!    same sprites.
+//! 7. Whatever decodes holds no more memory than [`decode_peak_bytes`] read
+//!    from its header that it would, and a decode refused its memory is
+//!    answered [`DecodeError::OutOfMemory`] rather than an abort. A caller
+//!    accounting decodes before they run is only as sound as that bound, and
+//!    mutated files are where an odd but legal structure would break it.
 //!
 //! Every generator, and its chunk/zlib, marker/Huffman, and block/LZW
 //! framing helpers, are deliberately self-contained: this harness only calls
@@ -39,15 +44,137 @@
 //! here. Chunks are framed through `tairix_crc32`, the checksum's one
 //! definition, tested against the standard on its own.
 
+use core::alloc::{GlobalAlloc, Layout};
+use std::alloc::System;
+use std::cell::Cell;
+
 use tairix_fuzzseed::Prng;
 use tairix_image::{
-    decode, decode_as, decode_fitted, encode_bmp, encode_gif, encode_jpeg, encode_ora, encode_png,
-    encode_sprite_area, encode_tiff, open_native, probe_as, sniff, DecodeLimits, EncodeError,
-    FitBox, GifOptions, ImageFormat, IndexDepth, JpegOptions, NativeDocument, OraLayer,
-    OraLayerSource, Picture, PictureKind, PictureSource, Rgba8, Sequence, SequenceKind,
-    SpriteAreaReader, SpriteEntry, SpriteInput, SpriteMode, SpriteName, SpritePalette,
-    TiffCompression, TiffOptions, MOST_ORA_LAYERS,
+    decode, decode_as, decode_fitted, decode_peak_bytes, encode_bmp, encode_gif, encode_jpeg,
+    encode_ora, encode_png, encode_sprite_area, encode_tiff, open_native, probe_as, sniff,
+    DecodeError, DecodeLimits, EncodeError, FitBox, GifOptions, ImageFormat, IndexDepth,
+    JpegOptions, NativeDocument, OraLayer, OraLayerSource, Picture, PictureKind, PictureSource,
+    RasterImage, Rgba8, Sequence, SequenceKind, SpriteAreaReader, SpriteEntry, SpriteInput,
+    SpriteMode, SpriteName, SpritePalette, TiffCompression, TiffOptions, MOST_ORA_LAYERS,
 };
+
+std::thread_local! {
+    /// Requests larger than this are refused on this thread only, so the
+    /// harness's own threads allocate normally.
+    static REFUSE_ABOVE: Cell<usize> = const { Cell::new(usize::MAX) };
+    /// Bytes this thread holds, and the most it has held since last reset.
+    static LIVE: Cell<usize> = const { Cell::new(0) };
+    static PEAK: Cell<usize> = const { Cell::new(0) };
+}
+
+fn refused(size: usize) -> bool {
+    REFUSE_ABOVE
+        .try_with(|limit| size > limit.get())
+        .unwrap_or(false)
+}
+
+fn held(grown: usize, released: usize) {
+    let _ = LIVE.try_with(|live| {
+        let now = live.get().saturating_sub(released).saturating_add(grown);
+        live.set(now);
+        let _ = PEAK.try_with(|peak| peak.set(peak.get().max(now)));
+    });
+}
+
+/// The system allocator, metered and able to refuse, per thread.
+struct MeteredAlloc;
+
+// SAFETY: every request is either passed to the system allocator with the
+// caller's layout unchanged, or refused with a null pointer, which the
+// `GlobalAlloc` contract permits for any request; the metering touches only
+// this thread's counters.
+unsafe impl GlobalAlloc for MeteredAlloc {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        if refused(layout.size()) {
+            return core::ptr::null_mut();
+        }
+        // SAFETY: the caller's obligations for `layout` are passed on as given.
+        let block = unsafe { System.alloc(layout) };
+        if !block.is_null() {
+            held(layout.size(), 0);
+        }
+        block
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        if refused(layout.size()) {
+            return core::ptr::null_mut();
+        }
+        // SAFETY: as `alloc`.
+        let block = unsafe { System.alloc_zeroed(layout) };
+        if !block.is_null() {
+            held(layout.size(), 0);
+        }
+        block
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        if refused(new_size) {
+            return core::ptr::null_mut();
+        }
+        // SAFETY: `ptr` and `layout` come from this allocator, which only ever
+        // hands out the system allocator's blocks.
+        let block = unsafe { System.realloc(ptr, layout, new_size) };
+        if !block.is_null() {
+            // A moved block holds both until the copy is done.
+            held(new_size, 0);
+            held(0, layout.size());
+        }
+        block
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        held(0, layout.size());
+        // SAFETY: as `realloc`.
+        unsafe { System.dealloc(ptr, layout) }
+    }
+}
+
+#[global_allocator]
+static ALLOC: MeteredAlloc = MeteredAlloc;
+
+/// Run `f` with every allocation larger than `bytes` refused on this thread.
+fn refusing_above<R>(bytes: usize, f: impl FnOnce() -> R) -> R {
+    REFUSE_ABOVE.with(|limit| limit.set(bytes));
+    let out = f();
+    REFUSE_ABOVE.with(|limit| limit.set(usize::MAX));
+    out
+}
+
+/// Run `f`, answering the most bytes this thread held during it beyond what
+/// it held before.
+fn peak_of<R>(f: impl FnOnce() -> R) -> (R, u64) {
+    let before = LIVE.with(Cell::get);
+    PEAK.with(|peak| peak.set(before));
+    let out = f();
+    let peak = PEAK.with(Cell::get);
+    (out, (peak - before) as u64)
+}
+
+/// Decode with `decode`, asserting that a success held no more than
+/// [`decode_peak_bytes`] answered for `fit` beforehand.
+fn decoded_within_bound(
+    bytes: &[u8],
+    limits: &DecodeLimits,
+    fit: FitBox,
+    decode: impl FnOnce() -> Result<RasterImage, DecodeError>,
+) -> Result<RasterImage, DecodeError> {
+    let bound = decode_peak_bytes(bytes, limits, fit);
+    let (decoded, held) = peak_of(decode);
+    if decoded.is_ok() {
+        let bound = bound.expect("a file that decodes is costed");
+        assert!(
+            held <= bound,
+            "a decode held {held} bytes past a bound of {bound}"
+        );
+    }
+    decoded
+}
 
 /// Fixed-iteration sweep run when no budget is set.
 const SMOKE_ITERATIONS: u64 = 2_000;
@@ -2134,12 +2261,18 @@ const SEQUENCE_STEPS: u32 = 64;
 /// return actually respects the limits it was decoded under.
 fn decode_never_panics_and_respects_limits(bytes: &[u8]) {
     let limits = limits();
+    let natural = FitBox::new(u32::MAX, u32::MAX);
+    // A box smaller than any fixture, so JPEG's reduced-scale (1/2, 1/4,
+    // 1/8) inverse-DCT paths are chosen rather than full scale.
+    let reduced = FitBox::new(3, 3);
     let decoded = [
-        decode(bytes, &limits),
-        // A box smaller than any fixture, so JPEG's reduced-scale (1/2,
-        // 1/4, 1/8) inverse-DCT paths are chosen rather than full scale.
-        decode_fitted(bytes, &limits, FitBox::new(3, 3)),
-        decode_fitted(bytes, &limits, FitBox::new(u32::MAX, u32::MAX)),
+        decoded_within_bound(bytes, &limits, natural, || decode(bytes, &limits)),
+        decoded_within_bound(bytes, &limits, reduced, || {
+            decode_fitted(bytes, &limits, reduced)
+        }),
+        decoded_within_bound(bytes, &limits, natural, || {
+            decode_fitted(bytes, &limits, natural)
+        }),
     ];
     for image in decoded.into_iter().flatten() {
         assert!(image.width() <= limits.max_width());
@@ -3158,4 +3291,180 @@ fn the_ora_generator_produces_a_valid_corpus() {
             _ => panic!("a pristine document opens as its layers"),
         }
     }
+}
+
+/// A colour gradient, so a JPEG encoder writes three components.
+struct Gradient {
+    side: u32,
+}
+
+impl PictureSource for Gradient {
+    fn width(&self) -> u32 {
+        self.side
+    }
+
+    fn height(&self) -> u32 {
+        self.side
+    }
+
+    fn kind(&self) -> PictureKind<'_> {
+        PictureKind::Rgba
+    }
+
+    fn read_row(&self, y: u32, samples: &mut [u8], _mask: &mut [u8]) {
+        for (x, pixel) in samples.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+            let x = u8::try_from(x % 256).unwrap_or(0);
+            let y = u8::try_from(y % 256).unwrap_or(0);
+            *pixel = [x, y, x ^ y, u8::MAX];
+        }
+    }
+}
+
+/// The side of the pictures the memory tests decode: large enough that the
+/// per-pixel terms of a bound dominate its fixed ones.
+const MEMORY_SIDE: u32 = 256;
+
+fn memory_limits() -> DecodeLimits {
+    DecodeLimits::new(
+        MEMORY_SIDE,
+        MEMORY_SIDE,
+        u64::from(MEMORY_SIDE * MEMORY_SIDE),
+        1 << 20,
+    )
+}
+
+fn gradient_jpeg(quality: u8) -> Vec<u8> {
+    let options = JpegOptions::new(quality, [0; 3]).expect("quality");
+    encode_jpeg(&Gradient { side: MEMORY_SIDE }, options).expect("encodes")
+}
+
+#[test]
+fn a_jpeg_decode_refused_its_memory_is_answered_typed() {
+    let jpeg = gradient_jpeg(JpegOptions::DEFAULT_QUALITY);
+    assert!(decode(&jpeg, &memory_limits()).is_ok());
+
+    // Room for a component plane, but not for the RGBA picture.
+    let plane = usize::try_from(MEMORY_SIDE * MEMORY_SIDE).expect("fits");
+    let refused = refusing_above(plane, || decode(&jpeg, &memory_limits()));
+    assert_eq!(refused.err(), Some(DecodeError::OutOfMemory));
+}
+
+#[test]
+fn a_large_decode_holds_no_more_than_its_header_bound() {
+    let natural = FitBox::new(MEMORY_SIDE, MEMORY_SIDE);
+    let thumbnail = FitBox::new(MEMORY_SIDE / 8, MEMORY_SIDE / 8);
+    let cases = [
+        // Full-resolution colour, and colour sampled at half resolution.
+        (gradient_jpeg(JpegOptions::DEFAULT_QUALITY), natural),
+        (gradient_jpeg(50), natural),
+        // A reduced-scale decode, costed at the scale it picks.
+        (gradient_jpeg(JpegOptions::DEFAULT_QUALITY), thumbnail),
+        (
+            encode_png(&Gradient { side: MEMORY_SIDE }).expect("encodes"),
+            natural,
+        ),
+    ];
+    for (bytes, fit) in cases {
+        let limits = memory_limits();
+        let decoded =
+            decoded_within_bound(&bytes, &limits, fit, || decode_fitted(&bytes, &limits, fit));
+        assert!(decoded.is_ok());
+    }
+}
+
+#[test]
+fn a_reduced_scale_decode_is_costed_below_a_natural_one() {
+    let bytes = gradient_jpeg(JpegOptions::DEFAULT_QUALITY);
+    let limits = memory_limits();
+    let natural =
+        decode_peak_bytes(&bytes, &limits, FitBox::new(MEMORY_SIDE, MEMORY_SIDE)).expect("costed");
+    let thumbnail = decode_peak_bytes(
+        &bytes,
+        &limits,
+        FitBox::new(MEMORY_SIDE / 8, MEMORY_SIDE / 8),
+    )
+    .expect("costed");
+    assert!(thumbnail * 16 < natural, "{thumbnail} against {natural}");
+}
+
+/// A 16-bit RGBA PNG `side` pixels square whose image data — its zlib stream
+/// and `padding` bytes past the stream's end, which a decoder ignores — is
+/// split across `chunks` IDAT chunks, as an encoder streaming its output
+/// writes it.
+fn streamed_png(side: u32, padding: usize, chunks: usize) -> Vec<u8> {
+    let row = 1 + usize::try_from(side).expect("fits") * 8;
+    let raw: Vec<u8> = (0..row * usize::try_from(side).expect("fits"))
+        .map(|at| {
+            if at % row == 0 {
+                0
+            } else {
+                u8::try_from(at % 251).unwrap_or(0)
+            }
+        })
+        .collect();
+    let mut data = zlib_wrap(&raw);
+    data.resize(data.len() + padding, 0);
+    let mut header = Vec::new();
+    header.extend_from_slice(&side.to_be_bytes());
+    header.extend_from_slice(&side.to_be_bytes());
+    header.extend_from_slice(&[16, 6, 0, 0, 0]);
+    let mut png = SIGNATURE.to_vec();
+    png.extend(chunk(*b"IHDR", &header));
+    for part in data.chunks(data.len().div_ceil(chunks)) {
+        png.extend(chunk(*b"IDAT", part));
+    }
+    png.extend(chunk(*b"IEND", &[]));
+    png
+}
+
+/// Regrowing the gathered image data by each chunk's length held the old
+/// copy beside the new one at every step — nearly twice the data, where the
+/// data dwarfs the picture it decodes to.
+#[test]
+fn a_png_streamed_in_many_image_data_chunks_is_gathered_without_regrowing() {
+    let png = streamed_png(16, 1 << 18, 64);
+    let limits = memory_limits();
+    let natural = FitBox::new(u32::MAX, u32::MAX);
+    let decoded = decoded_within_bound(&png, &limits, natural, || decode(&png, &limits));
+    assert!(decoded.is_ok());
+}
+
+/// A GIF of two full-screen frames whose first asks to be restored once it
+/// has been shown.
+fn restoring_gif(side: u16) -> Vec<u8> {
+    let mut out = GIF_MAGIC.to_vec();
+    out.extend_from_slice(b"89a");
+    out.extend_from_slice(&side.to_le_bytes());
+    out.extend_from_slice(&side.to_le_bytes());
+    // A global table of two entries.
+    out.extend_from_slice(&[0x80, 0, 0, 0, 0, 0, 255, 255, 255]);
+    let pixels = usize::from(side) * usize::from(side);
+    for disposal in [3u8, 1] {
+        out.extend_from_slice(&[0x21, 0xF9, 0x04, disposal << 2, 0, 0, 0, 0]);
+        out.push(0x2C);
+        out.extend_from_slice(&[0, 0, 0, 0]);
+        out.extend_from_slice(&side.to_le_bytes());
+        out.extend_from_slice(&side.to_le_bytes());
+        out.push(0);
+        out.push(2);
+        let indices: Vec<u8> = (0..pixels).map(|at| u8::from(at % 3 == 0)).collect();
+        out.extend_from_slice(&gif_lzw(&indices, 2));
+    }
+    out.push(0x3B);
+    out
+}
+
+/// A still decode shows the first frame and no other, so it neither copies
+/// aside what that frame would restore nor copies the canvas out.
+#[test]
+fn a_still_gif_decode_holds_one_canvas_and_saves_nothing_for_a_frame_it_never_shows() {
+    let gif = restoring_gif(u16::try_from(MEMORY_SIDE).expect("fits"));
+    let limits = memory_limits();
+    let natural = FitBox::new(u32::MAX, u32::MAX);
+    let decoded = decoded_within_bound(&gif, &limits, natural, || decode(&gif, &limits));
+    assert!(decoded.is_ok());
+    let mut sequence = Sequence::open(&gif, &limits).expect("opens");
+    assert_eq!(sequence.info().count(), 2);
+    assert!(sequence.next_frame().expect("first frame").is_some());
+    assert!(sequence.next_frame().expect("second frame").is_some());
 }

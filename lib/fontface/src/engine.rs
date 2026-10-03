@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::font_ipc::FONT_MAX_OUTLINE_POINTS;
 
-use crate::gridfit::{self, AlignZones, Axes, Zone};
+use crate::gridfit::{self, Axes, FitMetrics, Zone};
 use crate::variations::{self, Axis, AxisSetting, Gvar, VarTables};
 use crate::FontError;
 use tairix_util::mathf;
@@ -176,8 +176,9 @@ pub struct Face<'a> {
     /// strictly monospace. Read once here because the cell grid asks for it
     /// per glyph.
     uniform: Option<u16>,
-    /// The rows every glyph of the face aligns to, read off its own outlines.
-    zones: AlignZones,
+    /// What every glyph of the face is fitted against, read off its own
+    /// outlines.
+    fit: FitMetrics,
 }
 
 impl<'a> Face<'a> {
@@ -262,10 +263,10 @@ impl<'a> Face<'a> {
             coords,
             var,
             uniform: None,
-            zones: AlignZones::default(),
+            fit: FitMetrics::default(),
         };
         face.uniform = face.read_uniform_advance();
-        face.zones = face.read_align_zones();
+        face.fit = face.read_fit_metrics();
         Ok(face)
     }
 
@@ -355,13 +356,14 @@ impl<'a> Face<'a> {
         Ok(base + delta)
     }
 
-    /// The rows glyphs of this face align to, for the grid fitter.
+    /// The rows glyphs of this face align to and the thickness its bars
+    /// share, for the grid fitter.
     ///
     /// Read from the face's own reference glyphs: the flat-sided ones fix
     /// where a zone sits, the round ones how far past it they overshoot. A
     /// face that maps none of a zone's references simply has no such zone,
     /// and its glyphs are fitted on their strokes alone.
-    fn read_align_zones(&self) -> AlignZones {
+    fn read_fit_metrics(&self) -> FitMetrics {
         /// The reference glyphs each zone is read from: the flat-sided ones,
         /// the round ones that overshoot past them, and whether the zone is
         /// the top or the bottom of those glyphs. The baseline is not listed
@@ -382,7 +384,59 @@ impl<'a> Face<'a> {
             let over = self.reference_extreme(round_from, top).unwrap_or(flat);
             zones.push(Zone::new(flat, over));
         }
-        AlignZones::new(zones)
+        FitMetrics::new(zones, self.reference_bar())
+    }
+
+    /// How thick the face draws a horizontal stroke, in font units: the ink
+    /// down the middle of `H`, where its crossbar is the only stroke. `None`
+    /// when the face has no `H`, or one whose middle crosses anything but a
+    /// single bar.
+    fn reference_bar(&self) -> Option<f64> {
+        let glyph = self.glyph_for(u32::from('H'))?;
+        let mut sink = RasterSink::uniform(1.0, 0.0);
+        Outliner::new(self, &mut sink)
+            .glyph(glyph, Affine::IDENTITY, 0)
+            .ok()?;
+        let (left, right) =
+            sink.segments
+                .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), seg| {
+                    (
+                        mathf::fmin(lo, mathf::fmin(seg.x0, seg.x1)),
+                        mathf::fmax(hi, mathf::fmax(seg.x0, seg.x1)),
+                    )
+                });
+        let middle = f64::midpoint(left, right);
+        let mut crossings: Vec<(f64, i32)> = sink
+            .segments
+            .iter()
+            .filter_map(|seg| {
+                let down = Segment {
+                    x0: seg.y0,
+                    y0: seg.x0,
+                    x1: seg.y1,
+                    y1: seg.x1,
+                };
+                crossing(&down, middle)
+            })
+            .collect();
+        crossings.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut winding = 0;
+        let mut entered = 0.0;
+        let mut inked = Vec::new();
+        for (at, direction) in crossings {
+            let was = winding;
+            winding += direction;
+            if was == 0 && winding != 0 {
+                entered = at;
+            } else if was != 0 && winding == 0 {
+                inked.push(at - entered);
+            }
+        }
+        match inked[..] {
+            [bar] if bar > 0.0 => Some(bar),
+            _ => None,
+        }
     }
 
     /// How far the first of `chars` the face draws reaches, in font units
@@ -541,11 +595,15 @@ impl<'a> Face<'a> {
             return Err(err("glyph cell is implausibly wide"));
         }
         let scale = px_per_em / f64::from(self.units_per_em);
+        let cell_scale = self.cell_scale(geometry.width, scale);
+        let span = cell_scale
+            .zip(self.uniform)
+            .map(|(scale_x, advance)| f64::from(advance) * scale_x);
         let sink = RasterSink {
-            scale_x: self.cell_scale(geometry.width, scale).unwrap_or(scale),
+            scale_x: cell_scale.unwrap_or(scale),
             ..RasterSink::uniform(scale, f64::from(geometry.baseline))
         };
-        let segments = self.fitted_outline(glyph, sink, Axes::RowsAndColumns)?;
+        let segments = self.fitted_outline(glyph, sink, Axes::RowsAndColumns { span })?;
         Ok(rasterise(&segments, geometry, bitmap_width))
     }
 
@@ -584,7 +642,7 @@ impl<'a> Face<'a> {
         gridfit::fit(
             &mut sink.segments,
             axes,
-            &self.zones,
+            &self.fit,
             sink.baseline_y,
             sink.scale_y,
         );

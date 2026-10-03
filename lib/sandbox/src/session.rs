@@ -52,7 +52,7 @@ use tairix_abi::{Errno, FieldValue};
 use tairix_collections::ByteQueue;
 use tairix_log::{Event, EventId, Field, Level, Sink};
 
-use crate::host::log_worker_crashed;
+use crate::host::{log_worker_crashed, WorkerEnd};
 use crate::proto::{
     head_declared, head_frame, recv_frame_into, send_frame, Channel, ProtoError, FRAME_HEADER_LEN,
     MAX_FRAME,
@@ -547,7 +547,9 @@ impl<T: SessionTransport, S: Sink> SandboxSession<T, S> {
         self.failed = true;
         let exit_code = self.transport.take().and_then(SessionTransport::dispose);
         match self.after_failure {
-            AfterFailure::Replace => log_worker_crashed(&self.sink, reason, exit_code),
+            AfterFailure::Replace => {
+                log_worker_crashed(&self.sink, reason, exit_code);
+            }
             AfterFailure::End => {
                 let exit_field = match exit_code {
                     Some(code) => FieldValue::SignedInt(i64::from(code)),
@@ -563,6 +565,10 @@ impl<T: SessionTransport, S: Sink> SandboxSession<T, S> {
                             Field {
                                 key: "reason",
                                 value: FieldValue::Str(reason),
+                            },
+                            Field {
+                                key: "cause",
+                                value: FieldValue::Str(WorkerEnd::of_status(exit_code).reason()),
                             },
                             Field {
                                 key: "exit_code",

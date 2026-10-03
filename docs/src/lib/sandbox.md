@@ -31,10 +31,14 @@ Stability tier: **experimental**.
   any parse the bounds admit). Every worker failure — crash, protocol
   violation, oversize reply, exit without answering, an answer not given in
   time — runs one containment path, a worker still running being killed
-  before it is reaped: the caller receives a typed `SandboxError`, the dead
-  worker is disposed of (reaped) and **replaced**, and the event is
-  logged with a stable id (`EventId(6000)` crashed, `EventId(6001)`
-  unavailable; the crate owns the `6000..7000` range). Dropping the seam
+  before it is reaped: the caller receives `SandboxError::WorkerFailed`
+  carrying how the worker ended, read from its exit status (`WorkerEnd`),
+  and the event is logged with that cause under a stable id
+  (`EventId(6000)` crashed, `EventId(6001)` unavailable; the crate owns the
+  `6000..7000` range). Only a failure for want of memory is worth asking
+  again (`SandboxError::out_of_memory`). The next request starts the
+  **replacement**, so none is started that nobody asked for, and one that
+  cannot start is that request's answer. Dropping the seam
   disposes of its live worker. A reply that frames correctly but that its
   service cannot believe is the same evidence of a broken or subverted
   worker: every client helper runs its exchange through

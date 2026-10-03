@@ -315,8 +315,8 @@ pub use tasks::TaskBridge;
 pub use thumbs::WindowThumbnails;
 pub use vigil::{HangTracker, UNRESPONSIVE_AFTER_NS};
 pub use wallpaper::{
-    land_preview, preview_source, Prepared, PreviewDone, PreviewJob, PreviewRequest, PreviewTarget,
-    WallpaperDesk, WallpaperJob, WallpaperService, WallpaperSource,
+    land_preview, preview_source, Acquisition, Prepared, PreviewBudget, PreviewDone, PreviewJob,
+    PreviewRequest, PreviewTarget, WallpaperDesk, WallpaperJob, WallpaperService, WallpaperSource,
 };
 pub use windows::{
     chain_geometry, desktop_info, resize_drag_event, resolve_window_identities, seat_menu_refusal,

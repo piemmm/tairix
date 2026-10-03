@@ -59,10 +59,11 @@ use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::window_ipc::PreviewSubject;
+use tairix_abi::window_ipc::{PreviewOutcome, PreviewSubject};
 use tairix_abi::{Errno, ProcId};
 use tairix_geometry::Rect;
 use tairix_raster::Surface;
+use tairix_reclaim::PressureBand;
 use tairix_wallpaper::{DesktopSettings, WallpaperChoice, WallpaperFit};
 use tairix_window::PreviewSize;
 
@@ -86,6 +87,13 @@ pub struct WallpaperSource {
 }
 
 impl WallpaperSource {
+    /// The bytes preparing this source holds beside its render: the picture
+    /// drawn for the screen, and the surface made from it.
+    #[must_use]
+    pub fn surface_bytes(&self) -> u64 {
+        2 * u64::from(self.width) * u64::from(self.height) * 4
+    }
+
     /// What `settings` ask for on a `screen`-sized display.
     ///
     /// The one place the desktop's settings and its output become a wallpaper
@@ -172,48 +180,130 @@ impl core::fmt::Debug for PreviewJob {
     }
 }
 
-/// A rendered preview: the request it answers, and whether its picture is in
-/// the client's region — `false` for a refusal the asking window is told
-/// about rather than left waiting on.
+/// A concluded preview: the request it answers, and how it concluded.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct PreviewDone {
     /// What was asked for.
     pub request: PreviewRequest,
-    /// Whether the picture was drawn.
-    pub rendered: bool,
+    /// Whether the picture was drawn, and if not, whether asking again could
+    /// help.
+    pub outcome: PreviewOutcome,
 }
 
-/// Draw `pixels` — the rendered picture, or `None` for a refusal — into
-/// `target` when they are exactly the picture `request` asked for and fit
-/// the region, answering whether they were drawn.
-fn draw_preview(
-    target: &mut dyn PreviewTarget,
-    request: &PreviewRequest,
-    pixels: Option<&[u8]>,
-) -> bool {
-    let Some(pixels) = pixels.filter(|pixels| Some(pixels.len()) == request.pixel_bytes()) else {
-        return false;
-    };
-    target
-        .bytes_mut()
-        .get_mut(..pixels.len())
-        .is_some_and(|slot| {
-            slot.copy_from_slice(pixels);
-            true
-        })
-}
-
-/// Finish `job` with `pixels`: drawn into its client's region, the region let
-/// go before the conclusion is told, so the client's own mapping is the only
-/// one left once it is.
+/// Conclude `job` as `outcome`, letting its region go before the conclusion is
+/// told, so the client's own mapping is the only one left once it is.
 #[must_use]
-pub fn land_preview(mut job: PreviewJob, pixels: Option<&[u8]>) -> PreviewDone {
-    let rendered = draw_preview(&mut *job.target, &job.request, pixels);
+pub fn land_preview(job: PreviewJob, outcome: PreviewOutcome) -> PreviewDone {
     drop(job.target);
     PreviewDone {
         request: job.request,
-        rendered,
+        outcome,
     }
+}
+
+/// What previews render within: the bytes renders may hold together, what a
+/// render holds before its worker has planned it, the preparers there are to
+/// run them, and whether one may run whatever it costs.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct PreviewBudget {
+    bytes: u64,
+    preparation: u64,
+    preparers: usize,
+    lone: bool,
+}
+
+impl PreviewBudget {
+    /// One render at a time and nothing beside it: a desk's budget until it is
+    /// told the machine.
+    pub const SERIAL: Self = Self {
+        bytes: 0,
+        preparation: u64::MAX,
+        preparers: 1,
+        lone: true,
+    };
+
+    /// The budget `preparers` threads render within on a machine of `total`
+    /// bytes in `band`, a render holding `preparation` until it is planned.
+    ///
+    /// While memory is plentiful, renders share the machine's speculative
+    /// budget; while it is not, one runs with nothing beside it; and while it
+    /// is critical none starts, since no speculative work runs then.
+    #[must_use]
+    pub fn of_machine(total: u64, band: PressureBand, preparers: usize, preparation: u64) -> Self {
+        Self {
+            bytes: if band == PressureBand::Normal {
+                tairix_reclaim::speculative_budget(total)
+            } else {
+                0
+            },
+            preparation,
+            preparers: preparers.max(1),
+            lone: band != PressureBand::Critical,
+        }
+    }
+
+    /// Whether a render reserving `cost` — needing the machine to itself when
+    /// `alone` — may start beside `running` renders reserving `reserved`.
+    const fn admits(self, running: usize, reserved: u64, cost: u64, alone: bool) -> bool {
+        if running >= self.preparers {
+            return false;
+        }
+        if running == 0 {
+            return self.lone || cost <= self.bytes;
+        }
+        !alone && reserved.saturating_add(cost) <= self.bytes
+    }
+
+    /// Whether no unplanned render fits the budget at all, so renders only
+    /// ever run one at a time.
+    const fn lean(self) -> bool {
+        self.bytes < self.preparation
+    }
+}
+
+/// What the desk decides for a preview its worker has planned.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Acquisition {
+    /// It holds what it planned and goes on.
+    Granted,
+    /// It does not fit beside the renders under way: it is queued again,
+    /// first, at that cost ([`WallpaperDesk::requeue_preview`]).
+    Wait,
+    /// It cannot run now — memory is critical, or the desk is stopping — and
+    /// concludes unavailable.
+    Unavailable,
+}
+
+/// A preview accepted and waiting for a preparer.
+struct Queued {
+    job: PreviewJob,
+    /// Its last render ran out of memory beside others, so it runs next with
+    /// the machine to itself.
+    alone: bool,
+    /// What its worker planned when it last started, which it holds when it
+    /// starts again.
+    cost: Option<u64>,
+}
+
+/// A preview a preparer has taken and not yet answered.
+struct Rendering {
+    request: PreviewRequest,
+    /// The bytes it holds against the budget: its preparation until its
+    /// worker planned it, then what that plan said.
+    reserved: u64,
+    /// Nothing starts beside it: it is retrying with the machine to itself,
+    /// or its plan was granted past the budget.
+    alone: bool,
+}
+
+/// A slideshow picture a preparer has taken and not yet answered.
+struct Slide {
+    source: WallpaperSource,
+    /// The bytes it holds against the budget.
+    reserved: u64,
+    /// The screensaver went down while it was prepared: its answer is
+    /// dropped, but it holds its share until the preparer is done with it.
+    abandoned: bool,
 }
 
 /// One unit of work a wallpaper preparer takes.
@@ -257,22 +347,20 @@ pub struct WallpaperDesk {
     /// The prepared surface (or the reason there is none), kept until the
     /// desktop asks for that same source.
     done: Option<(WallpaperSource, Result<Surface, String>)>,
+    /// The bytes the backdrop in preparation holds against the budget.
+    preparing_reserved: u64,
     /// Previews accepted and not yet taken by a preparer, oldest first.
-    previews: VecDeque<PreviewJob>,
+    previews: VecDeque<Queued>,
     /// Previews a preparer has taken and not yet answered.
-    rendering: Vec<PreviewRequest>,
-    /// Rendered previews waiting for the serve loop, oldest first.
+    rendering: Vec<Rendering>,
+    /// Concluded previews waiting for the serve loop, oldest first.
     rendered: VecDeque<PreviewDone>,
-    /// How many previews render at once, which is also how many one client
-    /// may have pending. Never zero.
-    preview_slots: usize,
-    /// Memory is short, so a preparer with nothing to do lets its sandbox
-    /// worker go rather than hold a whole process idle.
-    lean: bool,
+    /// What renders run within.
+    budget: PreviewBudget,
     /// The slideshow picture asked for and not yet taken by a preparer.
     wanted_slide: Option<WallpaperSource>,
     /// The slideshow picture a preparer has taken and not yet answered.
-    preparing_slide: Option<WallpaperSource>,
+    preparing_slide: Option<Slide>,
     /// The prepared slideshow picture waiting for the serve loop.
     slide_done: Option<Result<Surface, String>>,
     /// Set once the embedder is tearing down, so a parked preparer leaves.
@@ -287,18 +375,18 @@ impl Default for WallpaperDesk {
 
 impl WallpaperDesk {
     /// A desk with nothing wanted and nothing prepared, rendering one preview
-    /// at a time until told how many preparers it has.
+    /// at a time until told the machine it renders on.
     #[must_use]
     pub fn new() -> Self {
         Self {
             wanted: None,
             preparing: false,
+            preparing_reserved: 0,
             done: None,
             previews: VecDeque::new(),
             rendering: Vec::new(),
             rendered: VecDeque::new(),
-            preview_slots: 1,
-            lean: false,
+            budget: PreviewBudget::SERIAL,
             wanted_slide: None,
             preparing_slide: None,
             slide_done: None,
@@ -306,32 +394,42 @@ impl WallpaperDesk {
         }
     }
 
-    /// Set how many previews may render at once, and so how many one client
-    /// may have pending: the preparers the embedder runs, or fewer while
-    /// memory is short. At least one.
+    /// Render within `budget` from now on, answering whether parked preparers
+    /// must be woken: for a preview the new budget lets start, or to let their
+    /// workers go now that renders run one at a time.
     ///
-    /// Lowering it recalls nothing: renders already taken finish, and no more
-    /// are handed out until they drop below the new bound. Answers whether
-    /// raising it made a waiting preview takeable, so the embedder wakes the
-    /// preparers the new slots are for rather than leaving them parked.
-    pub fn set_preview_slots(&mut self, slots: usize) -> bool {
-        let raised = slots.max(1) > self.preview_slots;
-        self.preview_slots = slots.max(1);
-        raised && self.has_preview_work()
+    /// Tightening it recalls nothing: renders already taken finish, and no
+    /// more start until what they hold fits the new budget.
+    pub fn set_budget(&mut self, budget: PreviewBudget) -> bool {
+        let became_lean = budget.lean() && !self.budget.lean();
+        self.budget = budget;
+        became_lean || self.has_preview_work()
     }
 
-    /// Say whether memory is short, answering whether it just became so:
-    /// parked preparers must then be woken to let their workers go.
-    pub fn set_lean(&mut self, lean: bool) -> bool {
-        let became = lean && !self.lean;
-        self.lean = lean;
-        became
-    }
-
-    /// Whether a preparer with nothing to do should let its worker go.
+    /// Whether renders run only one at a time, so a preparer with nothing to
+    /// do lets its worker go rather than hold a whole process idle.
     #[must_use]
     pub const fn lean(&self) -> bool {
-        self.lean
+        self.budget.lean()
+    }
+
+    /// How many renders of any kind are under way.
+    fn running(&self) -> usize {
+        self.rendering.len()
+            + usize::from(self.preparing)
+            + usize::from(self.preparing_slide.is_some())
+    }
+
+    /// The bytes every render under way holds against the budget.
+    fn reserved(&self) -> u64 {
+        let slide = self
+            .preparing_slide
+            .as_ref()
+            .map_or(0, |slide| slide.reserved);
+        self.rendering.iter().map(|render| render.reserved).fold(
+            self.preparing_reserved.saturating_add(slide),
+            u64::saturating_add,
+        )
     }
 
     /// Answer the desktop's request for `source`, recording it if this desk does
@@ -374,6 +472,12 @@ impl WallpaperDesk {
         Prepared::Pending
     }
 
+    /// Whether a preparer could take a job now.
+    #[must_use]
+    pub fn ready(&self) -> bool {
+        !self.stopping && (self.has_work() || self.has_slide_work() || self.has_preview_work())
+    }
+
     /// Whether a wallpaper is wanted that no preparer has taken.
     #[must_use]
     pub fn has_work(&self) -> bool {
@@ -388,9 +492,18 @@ impl WallpaperDesk {
         self.wanted_slide.is_some() && self.preparing_slide.is_none()
     }
 
-    /// Whether a preview is waiting and a render slot is free for it.
+    /// Whether the oldest waiting preview may start now. Nothing starts beside
+    /// a render retrying with the machine to itself.
     fn has_preview_work(&self) -> bool {
-        !self.previews.is_empty() && self.rendering.len() < self.preview_slots
+        !self.rendering.iter().any(|render| render.alone)
+            && self.previews.front().is_some_and(|queued| {
+                self.budget.admits(
+                    self.running(),
+                    self.reserved(),
+                    queued.cost.unwrap_or(self.budget.preparation),
+                    queued.alone,
+                )
+            })
     }
 
     /// Take the next thing to prepare, or `None` when there is nothing to
@@ -403,21 +516,150 @@ impl WallpaperDesk {
         if self.stopping {
             return None;
         }
-        if self.wanted.is_some() && !self.preparing {
+        // The desktop's own pictures start whatever the budget says, but hold
+        // their share of it, so no preview starts beside them unless it fits.
+        if let Some(source) = self.wanted.clone().filter(|_| !self.preparing) {
             self.preparing = true;
-            return self.wanted.clone().map(WallpaperJob::Backdrop);
+            self.preparing_reserved = self
+                .budget
+                .preparation
+                .saturating_add(source.surface_bytes());
+            return Some(WallpaperJob::Backdrop(source));
         }
         if self.has_slide_work() {
             let source = self.wanted_slide.take()?;
-            self.preparing_slide = Some(source.clone());
+            self.preparing_slide = Some(Slide {
+                source: source.clone(),
+                reserved: self
+                    .budget
+                    .preparation
+                    .saturating_add(source.surface_bytes()),
+                abandoned: false,
+            });
             return Some(WallpaperJob::Slide(source));
         }
         if !self.has_preview_work() {
             return None;
         }
-        let job = self.previews.pop_front()?;
-        self.rendering.push(job.request);
+        let Queued { job, alone, cost } = self.previews.pop_front()?;
+        self.rendering.push(Rendering {
+            request: job.request,
+            reserved: cost.unwrap_or(self.budget.preparation),
+            alone,
+        });
         Some(WallpaperJob::Preview(job))
+    }
+
+    /// The worker rendering `request` planned it to hold `planned` bytes.
+    ///
+    /// It holds that if it fits beside the renders under way, or if nothing
+    /// else is under way — then running with nothing beside it, so one render
+    /// always makes progress. Otherwise it waits for room, unless memory is
+    /// critical.
+    pub fn acquire_preview(&mut self, request: &PreviewRequest, planned: u64) -> Acquisition {
+        let running = self.running();
+        let reserved = self.reserved();
+        let budget = self.budget;
+        let stopping = self.stopping;
+        let Some(render) = self
+            .rendering
+            .iter_mut()
+            .find(|render| render.request == *request)
+        else {
+            return Acquisition::Unavailable;
+        };
+        let others = reserved.saturating_sub(render.reserved);
+        if stopping {
+            return Acquisition::Unavailable;
+        }
+        if others.saturating_add(planned) <= budget.bytes {
+            render.reserved = planned;
+            return Acquisition::Granted;
+        }
+        if !budget.lone {
+            return Acquisition::Unavailable;
+        }
+        if running > 1 {
+            return Acquisition::Wait;
+        }
+        render.reserved = planned;
+        render.alone = true;
+        Acquisition::Granted
+    }
+
+    /// Queue `job` again, first, to start once the `planned` bytes its worker
+    /// asked for fit ([`Acquisition::Wait`]). Answers `job` back when it
+    /// cannot be queued, to be concluded unavailable.
+    pub fn requeue_preview(&mut self, job: PreviewJob, planned: u64) -> Option<PreviewJob> {
+        self.requeue_first(job, planned, false)
+    }
+
+    /// The backdrop's preparation planned to hold `planned` bytes, its surface
+    /// included, which it holds whatever the budget says, answering whether a
+    /// waiting preview may now start beside it.
+    pub fn plan_backdrop(&mut self, planned: u64) -> bool {
+        if self.preparing {
+            self.preparing_reserved = planned;
+        }
+        self.has_preview_work()
+    }
+
+    /// The preparation of slide `source` planned to hold `planned` bytes, its
+    /// surface included, which it holds whatever the budget says, answering
+    /// whether a waiting preview may now start beside it.
+    pub fn plan_slide(&mut self, source: &WallpaperSource, planned: u64) -> bool {
+        if let Some(slide) = self
+            .preparing_slide
+            .as_mut()
+            .filter(|slide| slide.source == *source)
+        {
+            slide.reserved = planned;
+        }
+        self.has_preview_work()
+    }
+
+    /// Take `job`'s render off the list under way and queue it first again,
+    /// to start holding `cost`, with nothing beside it when `alone`. Answers
+    /// `job` back when the desk is not rendering it, is stopping, or cannot
+    /// queue it.
+    fn requeue_first(&mut self, job: PreviewJob, cost: u64, alone: bool) -> Option<PreviewJob> {
+        let Some(at) = self
+            .rendering
+            .iter()
+            .position(|render| render.request == job.request)
+        else {
+            return Some(job);
+        };
+        if self.stopping || self.previews.try_reserve(1).is_err() {
+            return Some(job);
+        }
+        self.rendering.swap_remove(at);
+        self.previews.push_front(Queued {
+            job,
+            alone,
+            cost: Some(cost),
+        });
+        None
+    }
+
+    /// The render of `job` ran out of memory. Beside other renders, that is
+    /// the company it kept rather than the picture, so it is queued first to
+    /// run again with the machine to itself, and `None` is answered. Alone,
+    /// or alone already, memory is genuinely short: `job` is answered back to
+    /// be concluded as unavailable.
+    pub fn retry_preview(&mut self, job: PreviewJob) -> Option<PreviewJob> {
+        let Some(render) = self
+            .rendering
+            .iter()
+            .find(|render| render.request == job.request)
+        else {
+            return Some(job);
+        };
+        if render.alone || self.running() <= 1 {
+            return Some(job);
+        }
+        let cost = render.reserved;
+        self.requeue_first(job, cost, true)
     }
 
     /// Whether a preview of `request` would be accepted now: asked before its
@@ -439,10 +681,11 @@ impl WallpaperDesk {
         if self.stopping {
             return Err(Errno::Busy);
         }
-        let queued = self.previews.iter().map(|queued| &queued.request);
+        let queued = self.previews.iter().map(|queued| &queued.job.request);
+        let taken = self.rendering.iter().map(|render| &render.request);
         let answered = self.rendered.iter().map(|done| &done.request);
         let mut pending = 0usize;
-        for held in queued.chain(self.rendering.iter()).chain(answered) {
+        for held in queued.chain(taken).chain(answered) {
             if held.client != request.client {
                 continue;
             }
@@ -451,7 +694,7 @@ impl WallpaperDesk {
             }
             pending += 1;
         }
-        if pending >= self.preview_slots {
+        if pending >= self.budget.preparers {
             return Err(Errno::LimitExceeded);
         }
         Ok(())
@@ -469,7 +712,11 @@ impl WallpaperDesk {
         self.previews
             .try_reserve(1)
             .map_err(|_| Errno::OutOfMemory)?;
-        self.previews.push_back(job);
+        self.previews.push_back(Queued {
+            job,
+            alone: false,
+            cost: None,
+        });
         Ok(())
     }
 
@@ -482,7 +729,7 @@ impl WallpaperDesk {
         let Some(at) = self
             .rendering
             .iter()
-            .position(|request| *request == done.request)
+            .position(|render| render.request == done.request)
         else {
             return false;
         };
@@ -506,11 +753,11 @@ impl WallpaperDesk {
     pub fn forget_window(&mut self, window_id: u64) -> Vec<PreviewJob> {
         let (withdrawn, kept): (Vec<_>, Vec<_>) = core::mem::take(&mut self.previews)
             .into_iter()
-            .partition(|job| job.request.window_id == window_id);
+            .partition(|queued| queued.job.request.window_id == window_id);
         self.previews = kept.into();
         self.rendered
             .retain(|done| done.request.window_id != window_id);
-        withdrawn
+        withdrawn.into_iter().map(|queued| queued.job).collect()
     }
 
     /// Record a wanted slideshow picture, replacing one not yet taken:
@@ -531,10 +778,15 @@ impl WallpaperDesk {
         source: &WallpaperSource,
         outcome: Result<Surface, String>,
     ) -> bool {
-        if self.preparing_slide.as_ref() != Some(source) {
+        let Some(slide) = self
+            .preparing_slide
+            .take_if(|slide| slide.source == *source)
+        else {
+            return false;
+        };
+        if slide.abandoned {
             return false;
         }
-        self.preparing_slide = None;
         self.slide_done = Some(outcome);
         true
     }
@@ -545,10 +797,13 @@ impl WallpaperDesk {
     }
 
     /// Forget every slide wanted, in preparation, or prepared: the
-    /// screensaver has gone.
+    /// screensaver has gone. One in preparation holds its share of the budget
+    /// until its preparer is done, and its answer is dropped.
     pub fn forget_slides(&mut self) {
         self.wanted_slide = None;
-        self.preparing_slide = None;
+        if let Some(slide) = self.preparing_slide.as_mut() {
+            slide.abandoned = true;
+        }
         self.slide_done = None;
     }
 
@@ -564,6 +819,7 @@ impl WallpaperDesk {
     /// reads and rasterises a whole screen's worth each time round.
     pub fn deliver(&mut self, source: WallpaperSource, outcome: Result<Surface, String>) -> bool {
         self.preparing = false;
+        self.preparing_reserved = 0;
         if self.wanted.as_ref() != Some(&source) {
             return false;
         }

@@ -894,6 +894,8 @@ plan's own text is corrected when it is next touched, or sooner.
 Why each `AGENTS.md` rule was added or changed, newest first; the rule itself
 lives in the charter.
 
+- **2026-10-03 — §10: the light theme is the default.** The desktop boots
+  light at the user's direction; the dark theme stays switchable at runtime.
 - **2026-10-02 — §3: `lib/colour`.** The sRGB colour, its HSV and HSL
   coordinates and its hex notation were each re-derived by the theme,
   `lib/raster`, `lib/svg`, the settings documents, the terminal and Paint.

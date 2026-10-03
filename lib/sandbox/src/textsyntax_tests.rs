@@ -131,7 +131,9 @@ fn a_reply_that_cannot_be_believed_retires_its_worker() {
         detect(&mut sandbox, b"x"),
         Err(SyntaxFailure::ReplyMalformed)
     );
-    assert_eq!(launched.get(), 2, "the liar was replaced at once");
+    assert!(!sandbox.is_live(), "the liar was retired");
+    let _ = detect(&mut sandbox, b"x");
+    assert_eq!(launched.get(), 2, "the next request met a fresh worker");
     let refused = alloc::vec![super::REPLY_REFUSED];
     let mut refusing = scripted(refused);
     assert_eq!(detect(&mut refusing, b"x"), Err(SyntaxFailure::Refused));

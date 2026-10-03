@@ -2,7 +2,7 @@
 //!
 //! The charter requires "one shared theme definition" that drives the
 //! colours, corner radii, fonts, and cursors of the window manager, the
-//! taskbar, and the default apps, with a default dark theme and a light
+//! taskbar, and the default apps, with a default light theme and a dark
 //! theme switchable at runtime, and where "adding a theme is data, not new
 //! code". This crate is that definition.
 //!
@@ -32,10 +32,10 @@
 //! use tairix_theme::{Appearance, ThemeId, ThemeRegistry};
 //!
 //! let mut themes = ThemeRegistry::with_builtins();
-//! assert_eq!(themes.active().appearance(), Appearance::Dark);
-//!
-//! themes.set_active(ThemeId::LIGHT).expect("light is built in");
 //! assert_eq!(themes.active().appearance(), Appearance::Light);
+//!
+//! themes.set_active(ThemeId::DARK).expect("dark is built in");
+//! assert_eq!(themes.active().appearance(), Appearance::Dark);
 //! ```
 
 #![no_std]

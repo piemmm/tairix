@@ -1225,6 +1225,40 @@ fn header(bits: &mut Bits<'_>) -> Result<(u32, u32), DecodeError> {
     Ok((width, height))
 }
 
+/// An upper bound of the bytes decoding a `width`×`height` lossless stream
+/// from `input_len` bytes holds at once: the pixels; the transform images,
+/// the transform list and the palette; the entropy image beside its group
+/// indices; and the prefix codes of as many groups as the stream has the
+/// bits to describe, whose symbol store a regrowth holds twice. One more
+/// group's codes cover the sub-image being read, beside the colour cache and
+/// the code-length scratch.
+pub(crate) fn peak_ceiling(width: u32, height: u32, input_len: usize) -> u64 {
+    use core::mem::size_of;
+    let word = size_of::<u32>() as u64;
+    let pixels = u64::from(width) * u64::from(height);
+    // Transform and entropy images sample blocks at least four pixels a side.
+    let sampled = u64::from(width.div_ceil(4)) * u64::from(height.div_ceil(4)) * word;
+    let described = (input_len as u64).saturating_mul(8) / MIN_GROUP_BITS as u64;
+    let groups = u64::from(MAX_GROUPS).min(described).saturating_add(1);
+    let green = u64::from(LITERAL_CODES + LENGTH_CODES + (1 << MAX_CACHE_BITS));
+    let group_symbols = green + 3 * u64::from(LITERAL_CODES) + u64::from(DISTANCE_CODES);
+    let group = (CODES_PER_GROUP * size_of::<PrefixCode>()) as u64
+        + 2 * group_symbols * size_of::<u16>() as u64;
+    let transforms = (2 * MAX_TRANSFORMS * size_of::<Transform>()) as u64;
+    let palette = 2 * 256 * word;
+    let cache = (1u64 << MAX_CACHE_BITS) * word;
+    [
+        4 * sampled,
+        transforms,
+        palette,
+        groups.saturating_mul(group),
+        cache,
+        green,
+    ]
+    .into_iter()
+    .fold(pixels.saturating_mul(word), u64::saturating_add)
+}
+
 /// Decode a `VP8L` chunk into straight-alpha RGBA8.
 pub(crate) fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage, DecodeError> {
     let mut bits = Bits::new(bytes);

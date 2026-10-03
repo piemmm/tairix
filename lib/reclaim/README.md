@@ -23,7 +23,11 @@ that enforces all of it.
   `moderate`, `severe`, `critical`) shared with `plans/SWAPSWAPSWAP.md`,
   the hysteresis watermarks derived from the backing size, the reserve
   floor, and `shrink_target`: the deterministic map from a band and a
-  class to the byte ceiling that class must shrink to.
+  class to the byte ceiling that class must shrink to. `speculative_budget`
+  is the share of a machine's memory that work begun on speculation may hold
+  together — the room between the mild and moderate watermarks — so such work
+  begun on a machine with room stops short of pushing it into moderate
+  pressure.
 - `cache` — `ReclaimCache<K, V, E>`: the one bounded, generation-
   invalidated, pressure-governed, wiping, self-poisoning LRU cache. A hit
   is O(log n); a forced shrink visits only the entries it releases; a

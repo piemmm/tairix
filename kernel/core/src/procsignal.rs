@@ -1543,8 +1543,12 @@ mod tests {
         // A live task that is not *this* caller's child is off-limits: task 9
         // may not reach task 7's child through the child rule.
         let (child, child_pid) = spawn_child(scheduler);
-        wait.register_child(ProcessId(7), ProcessId(child))
-            .expect("registered");
+        wait.register_child(
+            ProcessId(7),
+            ProcessId(child),
+            crate::procwait::ChildListing::Listed,
+        )
+        .expect("registered");
         assert_eq!(
             signal_child(&signaller, ProcessId(9), child_pid, Signal::Kill),
             Err(Errno::NotFound)
@@ -1558,8 +1562,12 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
-        wait.register_child(ProcessId(7), ProcessId(child))
-            .expect("registered");
+        wait.register_child(
+            ProcessId(7),
+            ProcessId(child),
+            crate::procwait::ChildListing::Listed,
+        )
+        .expect("registered");
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         assert_eq!(
@@ -1602,8 +1610,12 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
-        wait.register_child(ProcessId(7), ProcessId(child))
-            .expect("registered");
+        wait.register_child(
+            ProcessId(7),
+            ProcessId(child),
+            crate::procwait::ChildListing::Listed,
+        )
+        .expect("registered");
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         // The child is mid-syscall: its handler may hold kernel state only
@@ -1638,8 +1650,12 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
-        wait.register_child(ProcessId(7), ProcessId(child))
-            .expect("registered");
+        wait.register_child(
+            ProcessId(7),
+            ProcessId(child),
+            crate::procwait::ChildListing::Listed,
+        )
+        .expect("registered");
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         assert!(!kernel_enter(child));
@@ -1672,8 +1688,12 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
-        wait.register_child(ProcessId(7), ProcessId(child))
-            .expect("registered");
+        wait.register_child(
+            ProcessId(7),
+            ProcessId(child),
+            crate::procwait::ChildListing::Listed,
+        )
+        .expect("registered");
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
         let landed: &'static LandingRecorder = Box::leak(Box::new(LandingRecorder::new()));
         signaller
@@ -2035,8 +2055,12 @@ mod tests {
             doomed: SpinLock::new(BTreeSet::new()),
         }));
         let (child, child_pid) = spawn_child(inner);
-        wait.register_child(ProcessId(7), ProcessId(child))
-            .expect("registered");
+        wait.register_child(
+            ProcessId(7),
+            ProcessId(child),
+            crate::procwait::ChildListing::Listed,
+        )
+        .expect("registered");
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
         LAND_REAPED.lock().remove(&child);
 
@@ -2117,8 +2141,12 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, _pid) = spawn_child(scheduler);
-        wait.register_child(ProcessId(7), ProcessId(child))
-            .expect("registered");
+        wait.register_child(
+            ProcessId(7),
+            ProcessId(child),
+            crate::procwait::ChildListing::Listed,
+        )
+        .expect("registered");
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
         let landed: &'static LandingRecorder = Box::leak(Box::new(LandingRecorder::new()));
         signaller
@@ -2153,8 +2181,12 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
-        wait.register_child(ProcessId(7), ProcessId(child))
-            .expect("registered");
+        wait.register_child(
+            ProcessId(7),
+            ProcessId(child),
+            crate::procwait::ChildListing::Listed,
+        )
+        .expect("registered");
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         assert_eq!(
@@ -2182,8 +2214,12 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
-        wait.register_child(ProcessId(7), ProcessId(child))
-            .expect("registered");
+        wait.register_child(
+            ProcessId(7),
+            ProcessId(child),
+            crate::procwait::ChildListing::Listed,
+        )
+        .expect("registered");
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         assert_eq!(
@@ -2212,8 +2248,12 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
-        wait.register_child(ProcessId(7), ProcessId(child))
-            .expect("registered");
+        wait.register_child(
+            ProcessId(7),
+            ProcessId(child),
+            crate::procwait::ChildListing::Listed,
+        )
+        .expect("registered");
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         assert_eq!(
@@ -2251,8 +2291,12 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
-        wait.register_child(ProcessId(7), ProcessId(child))
-            .expect("registered");
+        wait.register_child(
+            ProcessId(7),
+            ProcessId(child),
+            crate::procwait::ChildListing::Listed,
+        )
+        .expect("registered");
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         assert_eq!(
@@ -2280,8 +2324,12 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
-        wait.register_child(ProcessId(7), ProcessId(child))
-            .expect("registered");
+        wait.register_child(
+            ProcessId(7),
+            ProcessId(child),
+            crate::procwait::ChildListing::Listed,
+        )
+        .expect("registered");
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         assert_eq!(
@@ -2315,8 +2363,12 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, _child_pid) = spawn_child(scheduler);
-        wait.register_child(ProcessId(7), ProcessId(child))
-            .expect("registered");
+        wait.register_child(
+            ProcessId(7),
+            ProcessId(child),
+            crate::procwait::ChildListing::Listed,
+        )
+        .expect("registered");
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         // The console path never delivers Continue/Terminate/Kill.
@@ -2390,8 +2442,12 @@ mod tests {
         let (wait, scheduler) = scaffold();
         let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
         let (child, _child_pid) = spawn_child(scheduler);
-        wait.register_child(ProcessId(7), ProcessId(child))
-            .expect("registered");
+        wait.register_child(
+            ProcessId(7),
+            ProcessId(child),
+            crate::procwait::ChildListing::Listed,
+        )
+        .expect("registered");
         let signaller: &KernelProcessSignal<TestArch, Scheduler<TestArch>> =
             Box::leak(Box::new(KernelProcessSignal::new(wait, scheduler, caps)));
 
@@ -2430,8 +2486,12 @@ mod tests {
         let (wait, scheduler) = scaffold();
         let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
         let (child, _child_pid) = spawn_child(scheduler);
-        wait.register_child(ProcessId(7), ProcessId(child))
-            .expect("registered");
+        wait.register_child(
+            ProcessId(7),
+            ProcessId(child),
+            crate::procwait::ChildListing::Listed,
+        )
+        .expect("registered");
         let signaller: &KernelProcessSignal<TestArch, Scheduler<TestArch>> =
             Box::leak(Box::new(KernelProcessSignal::new(wait, scheduler, caps)));
 
@@ -2460,8 +2520,12 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
-        wait.register_child(ProcessId(7), ProcessId(child))
-            .expect("registered");
+        wait.register_child(
+            ProcessId(7),
+            ProcessId(child),
+            crate::procwait::ChildListing::Listed,
+        )
+        .expect("registered");
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         // The child is runnable, not stopped, so Continue succeeds as a no-op
@@ -2490,8 +2554,12 @@ mod tests {
         let child = scheduler
             .spawn_parked(0, Priority::Normal, |_| TaskAction::Exit)
             .expect("admitted parked");
-        wait.register_child(ProcessId(7), ProcessId(child))
-            .expect("registered");
+        wait.register_child(
+            ProcessId(7),
+            ProcessId(child),
+            crate::procwait::ChildListing::Listed,
+        )
+        .expect("registered");
         let signaller = KernelProcessSignal::new(wait, scheduler, caps);
 
         for signal in [Signal::Continue, Signal::Stop, Signal::Kill] {
@@ -2587,8 +2655,12 @@ mod tests {
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
         clear_intake(child);
-        wait.register_child(ProcessId(7), ProcessId(child))
-            .expect("registered");
+        wait.register_child(
+            ProcessId(7),
+            ProcessId(child),
+            crate::procwait::ChildListing::Listed,
+        )
+        .expect("registered");
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         intake_enable(child);
@@ -2633,8 +2705,12 @@ mod tests {
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
         clear_intake(child);
-        wait.register_child(ProcessId(7), ProcessId(child))
-            .expect("registered");
+        wait.register_child(
+            ProcessId(7),
+            ProcessId(child),
+            crate::procwait::ChildListing::Listed,
+        )
+        .expect("registered");
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         intake_enable(child);
@@ -2673,8 +2749,12 @@ mod tests {
         let (wait, scheduler) = scaffold();
         let (child, _child_pid) = spawn_child(scheduler);
         clear_intake(child);
-        wait.register_child(ProcessId(7), ProcessId(child))
-            .expect("registered");
+        wait.register_child(
+            ProcessId(7),
+            ProcessId(child),
+            crate::procwait::ChildListing::Listed,
+        )
+        .expect("registered");
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         intake_enable(child);
@@ -2698,8 +2778,12 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
-        wait.register_child(ProcessId(7), ProcessId(child))
-            .expect("registered");
+        wait.register_child(
+            ProcessId(7),
+            ProcessId(child),
+            crate::procwait::ChildListing::Listed,
+        )
+        .expect("registered");
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         assert_eq!(

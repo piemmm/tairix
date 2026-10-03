@@ -99,7 +99,7 @@ mod program {
     };
     use tairix_abi::window_ipc::{
         event_endpoint_for, BundleRunPath, DocumentName, DropTarget, MenuOutcome, PointerAction,
-        WindowEvent, WINDOW_ENDPOINT, WINDOW_MAX_REQUEST,
+        PreviewOutcome, WindowEvent, WINDOW_ENDPOINT, WINDOW_MAX_REQUEST,
     };
     use tairix_abi::{
         CapabilityId, DriverError, Errno, FdWire, Notice, Origin, ProcId, WaitFlags, WaitSetOp,
@@ -128,21 +128,21 @@ mod program {
         open_tray, parse, publish_pinboard, reap_launched, relay_power, resize_drag_event,
         resolve_launch, resolve_window_identities, serve_park_ns, serve_pinboard_apply,
         serve_switchboard_request, size_state_name, window_control_alternate_event,
-        window_control_event, AidPolicy, Answer, AppBarBridge, AppBarService, AppearanceWork,
-        ArtworkFileReader, ArtworkSandbox, BundleIndex, CliError, Command, ConfirmPrompt, Delivery,
-        Departure, Desktop, DesktopAction, DesktopActivation, DesktopOutcome, DesktopShell,
-        DeviceInputSource, DocumentAuthority, DocumentRelay, DragEnd, ElevatePrompt, Elevator,
-        FrameContent, FramePacer, FrameReportGate, FrameStatsPublisher, FrameStatsSink,
-        HangTracker, HoldBack, IconRasteriser, IdleAction, IdleClock, IdlePolicy, InputPolicy,
-        KeyboardInputSource, Launch, LaunchDocument, LaunchHost, LaunchTable, LaunchTarget,
-        LayerDecision, LayerFeed, LoadedPinboard, LoadedPrograms, MachineWatch, OwnerBundleGate,
-        OwnerWindow, PickAccess, PickEnd, PickStep, Prepared, PresentedOwners, PreviewDone,
-        PreviewJob, PreviewRequest, PreviewTarget, PromptOutcome, Routed, SaverIdentity,
-        SaverSetup, ScreenFade, ScreenLock, Screensaver, Seat, SeatDrain, SeatEventReader,
-        SeatInputChannel, SeatRouter, SeatWake, SessionClock, SessionFileReader, SessionPicker,
-        SessionWindows, ShellWindowHost, SizedRecord, SwitchboardMailbox, SwitchboardOutcome,
-        SwitchboardServe, WallpaperDesk, WallpaperJob, WallpaperService, WallpaperSource,
-        APP_ATTACH, APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE, APP_BAR_SLOT_SHOWN,
+        window_control_event, Acquisition, AidPolicy, Answer, AppBarBridge, AppBarService,
+        AppearanceWork, ArtworkFileReader, ArtworkSandbox, BundleIndex, CliError, Command,
+        ConfirmPrompt, Delivery, Departure, Desktop, DesktopAction, DesktopActivation,
+        DesktopOutcome, DesktopShell, DeviceInputSource, DocumentAuthority, DocumentRelay, DragEnd,
+        ElevatePrompt, Elevator, FrameContent, FramePacer, FrameReportGate, FrameStatsPublisher,
+        FrameStatsSink, HangTracker, HoldBack, IconRasteriser, IdleAction, IdleClock, IdlePolicy,
+        InputPolicy, KeyboardInputSource, Launch, LaunchDocument, LaunchHost, LaunchTable,
+        LaunchTarget, LayerDecision, LayerFeed, LoadedPinboard, LoadedPrograms, MachineWatch,
+        OwnerBundleGate, OwnerWindow, PickAccess, PickEnd, PickStep, Prepared, PresentedOwners,
+        PreviewBudget, PreviewDone, PreviewJob, PreviewRequest, PreviewTarget, PromptOutcome,
+        Routed, SaverIdentity, SaverSetup, ScreenFade, ScreenLock, Screensaver, Seat, SeatDrain,
+        SeatEventReader, SeatInputChannel, SeatRouter, SeatWake, SessionClock, SessionFileReader,
+        SessionPicker, SessionWindows, ShellWindowHost, SizedRecord, SwitchboardMailbox,
+        SwitchboardOutcome, SwitchboardServe, WallpaperDesk, WallpaperJob, WallpaperService,
+        WallpaperSource, APP_ATTACH, APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE, APP_BAR_SLOT_SHOWN,
         APP_BAR_SLOT_SHOWN_MESSAGE, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, DATETIME_RUN_PATH,
         DESKTOP_RESTYLED, DESKTOP_RESTYLED_MESSAGE, ELEVATE_PROMPT_SHOWN,
         ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, FILES_RUN_PATH, LAYER_FEEDS,
@@ -170,7 +170,10 @@ mod program {
     use tairix_raytrace::Detail;
     use tairix_rt::io::{self, Stderr, Write};
     use tairix_rt::ServedCall;
-    use tairix_sandbox::imagerender::{rasterise_icon, render_wallpaper, ImageRenderService};
+    use tairix_sandbox::imagerender::{
+        plan_wallpaper, rasterise_icon, upload_document, ImageRenderService, UploadFailure,
+        WallpaperRenderFailure, WALLPAPER_PREPARATION_BYTES,
+    };
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
     use tairix_sandbox::ParserSandbox;
     use tairix_taskbar::{MenuRequest, MenuSubject, TaskId, TaskbarConfig, TaskbarResponse};
@@ -1959,7 +1962,7 @@ mod program {
             wallpapers.stop();
         }
         let preparers = workers.wallpaper.len();
-        wallpapers.adopt_band(preparers, tairix_rt::pressure::gauge().band());
+        wallpapers.adopt_band(preparers, memory_total, tairix_rt::pressure::gauge().band());
         if workers.artwork.is_none() {
             artworks.stop();
         }
@@ -3258,7 +3261,11 @@ mod program {
                 // would spend the memory the release recovered on pixels
                 // nobody can see.
                 if tairix_procinfo::pressure::refresh() {
-                    wallpapers.adopt_band(preparers, tairix_rt::pressure::gauge().band());
+                    wallpapers.adopt_band(
+                        preparers,
+                        memory_total,
+                        tairix_rt::pressure::gauge().band(),
+                    );
                     let _ = shell.trim_caches(&mut compositor);
                     tairix_font::trim_glyph_cache();
                     deliver_released_notices(
@@ -3870,6 +3877,11 @@ mod program {
                             return;
                         }
                         if let Some(job) = desk.next_job() {
+                            // The budget may admit more than this one: pass the
+                            // wake on rather than leave it to the next arrival.
+                            if desk.ready() {
+                                self.work.notify_one();
+                            }
                             break Some(job);
                         }
                         if desk.lean() && sandbox.is_live() {
@@ -3888,19 +3900,46 @@ mod program {
                 // are the calls that used to stall the desktop.
                 let kept = match job {
                     WallpaperJob::Backdrop(source) => {
-                        let outcome = prepare_wallpaper_surface(&mut sandbox, &source);
+                        let outcome = prepare_wallpaper_surface(&mut sandbox, &source, |planned| {
+                            if self.desk.lock().plan_backdrop(planned) {
+                                self.work.notify_one();
+                            }
+                        });
                         self.desk.lock().deliver(source, outcome)
                     }
                     WallpaperJob::Slide(source) => {
-                        let outcome = prepare_wallpaper_surface(&mut sandbox, &source);
+                        let outcome = prepare_wallpaper_surface(&mut sandbox, &source, |planned| {
+                            if self.desk.lock().plan_slide(&source, planned) {
+                                self.work.notify_one();
+                            }
+                        });
                         self.desk.lock().deliver_slide(&source, outcome)
                     }
-                    WallpaperJob::Preview(job) => {
-                        let pixels = render_wallpaper_preview(&mut sandbox, &job);
+                    WallpaperJob::Preview(mut job) => {
+                        let request = job.request;
+                        let run = render_wallpaper_preview(&mut sandbox, &mut job, |planned| {
+                            self.desk.lock().acquire_preview(&request, planned)
+                        });
+                        let (outcome, unanswered) = match run {
+                            PreviewRun::Concluded(PreviewOutcome::Unavailable) => (
+                                PreviewOutcome::Unavailable,
+                                self.desk.lock().retry_preview(job),
+                            ),
+                            PreviewRun::Concluded(outcome) => (outcome, Some(job)),
+                            PreviewRun::Deferred(planned) => (
+                                PreviewOutcome::Unavailable,
+                                self.desk.lock().requeue_preview(job, planned),
+                            ),
+                        };
                         // Drawn and its region let go before the desk hears,
                         // with no lock held.
-                        let done = land_preview(job, pixels.as_deref());
-                        self.desk.lock().deliver_preview(done)
+                        if let Some(job) = unanswered {
+                            let done = land_preview(job, outcome);
+                            self.desk.lock().deliver_preview(done)
+                        } else {
+                            self.work.notify_one();
+                            false
+                        }
                     }
                 };
                 if kept {
@@ -3920,18 +3959,21 @@ mod program {
             Ok(())
         }
 
-        /// Render as many previews at once as there are `preparers`, or one
-        /// while memory is anything but plentiful: each holds a whole picture
-        /// file and its decode.
-        fn adopt_band(&self, preparers: usize, band: tairix_reclaim::PressureBand) {
-            let lean = band != tairix_reclaim::PressureBand::Normal;
-            let slots = if lean { 1 } else { preparers };
-            let wake = {
-                let mut desk = self.desk.lock();
-                let widened = desk.set_preview_slots(slots);
-                desk.set_lean(lean) | widened
-            };
-            if wake {
+        /// Render previews within what a machine of `memory_total` bytes in
+        /// `band` can spare, on at most `preparers` threads.
+        fn adopt_band(
+            &self,
+            preparers: usize,
+            memory_total: u64,
+            band: tairix_reclaim::PressureBand,
+        ) {
+            let budget = PreviewBudget::of_machine(
+                memory_total,
+                band,
+                preparers,
+                WALLPAPER_PREPARATION_BYTES,
+            );
+            if self.desk.lock().set_budget(budget) {
                 self.work.notify_all();
             }
         }
@@ -3993,7 +4035,7 @@ mod program {
                         refusal: None,
                     };
                 }
-                return match prepare_wallpaper_surface(&mut own.borrow_mut(), source) {
+                return match prepare_wallpaper_surface(&mut own.borrow_mut(), source, |_| {}) {
                     Ok(surface) => Prepared::Ready {
                         surface: Some(surface),
                         refusal: None,
@@ -4030,32 +4072,36 @@ mod program {
     fn prepare_wallpaper_surface<L: tairix_sandbox::Launcher, S: tairix_log::Sink>(
         sandbox: &mut ParserSandbox<L, S>,
         source: &WallpaperSource,
+        planned: impl FnOnce(u64),
     ) -> Result<Surface, alloc::string::String> {
         let Some(path) = source.image_path() else {
             return Err(alloc::string::String::from(
                 "no wallpaper image to prepare; using the backdrop colour",
             ));
         };
-        let bytes = match read_file(path, MAX_WALLPAPER_BYTES) {
-            Ok(bytes) if bytes.len() > MAX_WALLPAPER_BYTES => {
-                return Err(alloc::format!(
-                    "wallpaper {path} is larger than any wallpaper the desktop renders; using \
-                     the backdrop colour"
-                ));
-            }
-            Ok(bytes) => bytes,
-            Err(err) => {
-                return Err(alloc::format!(
-                    "wallpaper {path} could not be read ({err}); using the backdrop colour"
-                ));
-            }
+        let screen = (source.width, source.height);
+        let mut placed = tairix_util::fallible::filled(rgba_len(screen), 0u8).ok_or_else(|| {
+            alloc::format!("no memory to draw wallpaper {path}; using the backdrop colour")
+        })?;
+        let geometry = RenderGeometry {
+            screen,
+            dest: screen,
+            fit: source.fit,
         };
-        let placed = render_wallpaper(sandbox, source.width, source.height, source.fit, &bytes)
-            .map_err(|err| {
-                alloc::format!(
-                    "wallpaper {path} could not be rendered ({err}); using the backdrop colour"
-                )
-            })?;
+        render_file_into(
+            sandbox,
+            path,
+            MAX_WALLPAPER_BYTES,
+            geometry,
+            &mut placed,
+            |cost| {
+                planned(cost.saturating_add(source.surface_bytes()));
+                true
+            },
+        )
+        .map_err(|failure| {
+            alloc::format!("wallpaper {path} {failure}; using the backdrop colour")
+        })?;
         Surface::from_rgba8(source.width, source.height, &placed).ok_or_else(|| {
             alloc::format!("wallpaper {path} did not fill the screen; using the backdrop colour")
         })
@@ -4157,18 +4203,154 @@ mod program {
     /// session's own `stderr`.
     fn render_wallpaper_preview<L: tairix_sandbox::Launcher, S: tairix_log::Sink>(
         sandbox: &mut ParserSandbox<L, S>,
-        job: &PreviewJob,
-    ) -> Option<alloc::vec::Vec<u8>> {
-        let (width, height) = (
+        job: &mut PreviewJob,
+        acquire: impl FnOnce(u64) -> Acquisition,
+    ) -> PreviewRun {
+        let size = (
             u32::from(job.request.size.width),
             u32::from(job.request.size.height),
         );
-        let bytes = read_file(&job.path, job.bound).ok()?;
-        if bytes.len() > job.bound {
-            return None;
+        let Some(out) = job
+            .request
+            .pixel_bytes()
+            .and_then(|len| job.target.bytes_mut().get_mut(..len))
+        else {
+            return PreviewRun::Concluded(PreviewOutcome::Refused);
+        };
+        let geometry = RenderGeometry {
+            screen: size,
+            dest: size,
+            fit: PREVIEW_FIT,
+        };
+        let mut deferred = None;
+        let rendered =
+            render_file_into(
+                sandbox,
+                &job.path,
+                job.bound,
+                geometry,
+                out,
+                |planned| match acquire(planned) {
+                    Acquisition::Granted => true,
+                    Acquisition::Wait => {
+                        deferred = Some(planned);
+                        false
+                    }
+                    Acquisition::Unavailable => false,
+                },
+            );
+        match (rendered, deferred) {
+            (Ok(()), _) => PreviewRun::Concluded(PreviewOutcome::Rendered),
+            (Err(FileRenderFailure::Withheld), Some(planned)) => PreviewRun::Deferred(planned),
+            (Err(failure), _) if failure.out_of_memory() => {
+                PreviewRun::Concluded(PreviewOutcome::Unavailable)
+            }
+            (Err(_), _) => PreviewRun::Concluded(PreviewOutcome::Refused),
         }
-        let placed = render_wallpaper(sandbox, width, height, PREVIEW_FIT, &bytes).ok()?;
-        (placed.len() == job.request.pixel_bytes()?).then_some(placed)
+    }
+
+    /// How a preparer's render of a preview ended.
+    enum PreviewRun {
+        /// It concluded.
+        Concluded(PreviewOutcome),
+        /// Its plan, of the carried bytes, did not fit beside the renders
+        /// under way: it waits in the queue for room.
+        Deferred(u64),
+    }
+
+    /// Why drawing a picture from its file stopped.
+    enum FileRenderFailure {
+        Unreadable(Errno),
+        TooLarge,
+        Upload(UploadFailure<Errno>),
+        Render(WallpaperRenderFailure),
+        /// The memory its plan needs was not given to it.
+        Withheld,
+    }
+
+    impl FileRenderFailure {
+        /// Whether only memory was short, so the same render may succeed later.
+        const fn out_of_memory(&self) -> bool {
+            match self {
+                Self::Upload(failure) => failure.out_of_memory(),
+                Self::Render(failure) => failure.out_of_memory(),
+                Self::Withheld => true,
+                Self::Unreadable(_) | Self::TooLarge => false,
+            }
+        }
+    }
+
+    impl core::fmt::Display for FileRenderFailure {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            match self {
+                Self::Unreadable(err) | Self::Upload(UploadFailure::Read(err)) => {
+                    write!(f, "could not be read ({err})")
+                }
+                Self::TooLarge => f.write_str("is larger than any wallpaper the desktop renders"),
+                Self::Upload(UploadFailure::Shrank) => f.write_str("shrank while it was read"),
+                Self::Upload(UploadFailure::NoMemory) => {
+                    f.write_str("found no memory to read into")
+                }
+                Self::Upload(UploadFailure::Document(err)) => {
+                    write!(f, "could not be handed to its decoder ({err})")
+                }
+                Self::Render(err) => write!(f, "could not be rendered ({err})"),
+                Self::Withheld => f.write_str("was not given the memory it needs"),
+            }
+        }
+    }
+
+    /// The bytes a straight-alpha RGBA8 picture of `size` takes.
+    fn rgba_len(size: (u32, u32)) -> usize {
+        usize::try_from(u64::from(size.0) * u64::from(size.1) * 4).unwrap_or(usize::MAX)
+    }
+
+    /// How a picture is drawn: the screen it models, the destination drawn,
+    /// and how it is fitted.
+    #[derive(Copy, Clone)]
+    struct RenderGeometry {
+        screen: (u32, u32),
+        dest: (u32, u32),
+        fit: tairix_wallpaper::WallpaperFit,
+    }
+
+    /// Draw the picture at `path`, at most `bound` bytes, as `geometry` says,
+    /// straight into `out`.
+    ///
+    /// The file is streamed to the worker a run at a time rather than held
+    /// here. Once the worker has read its header, and before anything is
+    /// decoded, `admit` is told what the render will hold and answers whether
+    /// it may go on.
+    fn render_file_into<L: tairix_sandbox::Launcher, S: tairix_log::Sink>(
+        sandbox: &mut ParserSandbox<L, S>,
+        path: &str,
+        bound: usize,
+        geometry: RenderGeometry,
+        out: &mut [u8],
+        admit: impl FnOnce(u64) -> bool,
+    ) -> Result<(), FileRenderFailure> {
+        let RenderGeometry { screen, dest, fit } = geometry;
+        let file = tairix_rt::open(path.as_bytes())
+            .map_err(|ret| FileRenderFailure::Unreadable(Errno::from_syscall(ret)))?;
+        let length = file
+            .regular_len()
+            .map_err(FileRenderFailure::Unreadable)?
+            .ok_or(FileRenderFailure::Unreadable(Errno::OutOfRange))?;
+        let length = usize::try_from(length)
+            .ok()
+            .filter(|&length| length <= bound)
+            .ok_or(FileRenderFailure::TooLarge)?;
+        let fd = file.fd();
+        upload_document(sandbox, length, |offset, into| {
+            tairix_rt::fs_read(fd, offset, into).map_err(Errno::from_syscall)
+        })
+        .map_err(FileRenderFailure::Upload)?;
+        let plan = plan_wallpaper(sandbox, screen, dest.0, dest.1, fit)
+            .map_err(FileRenderFailure::Render)?;
+        if !admit(plan.peak_bytes()) {
+            return Err(FileRenderFailure::Withheld);
+        }
+        plan.render_into(out).map_err(FileRenderFailure::Render)
     }
 
     /// The desktop's icon artwork, decoded on a worker thread that owns its
@@ -5431,8 +5613,9 @@ mod program {
     /// The settings are applied to the model here rather than returned, so
     /// only the desktop ever holds what is in force, and the appearance the
     /// stored document asks for is put into effect before the first frame —
-    /// a desktop that came up dark because nothing read its own `appearance`
-    /// key would be showing a setting the user did not choose.
+    /// a desktop that came up in the default appearance because nothing read
+    /// its own `appearance` key would be showing a setting the user did not
+    /// choose.
     fn load_pinboard<S: DirectorySource>(
         desktop: &mut Desktop<S>,
         shell: &mut DesktopShell,
@@ -8265,7 +8448,7 @@ mod program {
             subject: done.request.size.subject,
             width: done.request.size.width,
             height: done.request.size.height,
-            rendered: done.rendered,
+            outcome: done.outcome,
         };
         deliver(
             server,

@@ -113,7 +113,11 @@ Three layers, each fail-closed, each with its own tests:
 The parent keeps full lifecycle authority over its child: `wait` reaps
 it, `signal` can kill it, and a crashed worker is observed exactly like
 any other abnormal child exit. Nothing about the sandbox brand weakens
-the parent's side.
+the parent's side. The child is **private** to the code that spawned it:
+only a `wait` naming its pid reaps it, and a wait for any child — the
+hosting program's own job control, say — never takes it or becomes ready
+for it. The sandbox host is library code inside someone else's program,
+and it can only explain a worker's end if nothing else reaped it first.
 
 ## The user-space seam: `lib/sandbox`
 
@@ -134,12 +138,23 @@ sandboxes a parse imports it:
   for the reply, never past the reply deadline (`rt::REPLY_DEADLINE_NS`),
   so a worker a hostile input hangs costs one bounded wait. Every worker
   failure — crash, protocol violation, oversize reply, exit without
-  answering, no answer in time — is contained identically: the caller
-  receives a typed `SandboxError`, the worker is killed if it still runs,
-  then reaped and **replaced**, and the event is logged with a stable id
-  (`EventId(6000)` worker crashed, `EventId(6001)` worker unavailable;
-  the crate owns `6000..7000`). A parser crash never takes down the
-  calling program.
+  answering, no answer in time — is contained identically: the worker is
+  killed if it still runs and reaped, and its exit status says how it
+  ended (`WorkerEnd`: out of memory, crashed, killed, transport failed, or
+  unknown). A worker whose transport has failed has no other channel left,
+  so it exits with a status naming the failure (`WorkerExit`); the
+  runtime's allocation-failure status (`OOM_EXIT_STATUS`) and the kernel's
+  fault status (`FAULT_EXIT_STATUS`) are read the same way. The caller
+  receives `SandboxError::WorkerFailed` carrying that end, and the event is
+  logged with its cause under a stable id (`EventId(6000)` worker crashed,
+  `EventId(6001)` worker unavailable; the crate owns `6000..7000`). Only a
+  failure for want of memory is worth asking again
+  (`SandboxError::out_of_memory`). The replacement is started by the next
+  request that needs a worker, not at the failure, so a worker that ran
+  out of memory is not followed at once by a fresh one competing for the
+  same memory, and a replacement that cannot start is reported to the
+  request that needed it. A parser crash never takes down the calling
+  program.
 - **Duplex sessions** (`session`): the long-lived seam beside that
   one-shot pair, for a worker that serves a *protocol* rather than
   answering a question. `SandboxSession` never blocks — the owner drives

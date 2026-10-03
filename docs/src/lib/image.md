@@ -817,6 +817,18 @@ so the caller reads why its picture did not decode instead of watching its
 sandbox die. Unlike every other variant it is a property of the machine
 rather than of the input, so the same image may decode later.
 
+A caller that runs several decodes at once accounts each before it starts:
+`decode_peak_bytes` answers, from the headers alone, an upper bound of what a
+`decode_fitted` holds at once. Each format is costed through its own decoder's
+sizing — the scale a JPEG decode picks, the page an icon decode picks, the
+buffers a PNG, GIF, BMP, TIFF or WebP decoder reserves — so the bound and the
+decode cannot drift apart, and the fuzz harness checks every decode it makes,
+valid or mutated, against it. Where a decoder's working set is not set by its
+picture alone — a lossless WebP's prefix codes grow with the stream, a
+JPEG-coded TIFF's units with the limits — the bound grows the same way and
+stands far above what an ordinary file needs (`plans/OPEN-DEFECTS.md` has the
+decoder fixes that would bring those down).
+
 ## API shape
 
 - `sniff(&[u8]) -> Option<ImageFormat>` — format identification from a
@@ -834,6 +846,9 @@ rather than of the input, so the same image may decode later.
   so it refuses precisely the headers a decode would.
 - `decode(&[u8], &DecodeLimits) -> Result<RasterImage, DecodeError>` —
   decode at natural (full) size, dispatching on `sniff`.
+- `decode_peak_bytes(&[u8], &DecodeLimits, FitBox) -> Result<u64,
+  DecodeError>` — an upper bound of the bytes `decode_fitted` holds at once,
+  read from the headers; it refuses what that decode would refuse from them.
 - `decode_fitted(&[u8], &DecodeLimits, FitBox) -> Result<RasterImage,
   DecodeError>` — decode at the smallest covering scale the format offers.
 - `probe_as(ImageFormat, &[u8])` and `decode_as(ImageFormat, &[u8],

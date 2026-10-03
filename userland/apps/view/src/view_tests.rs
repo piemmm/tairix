@@ -18,7 +18,7 @@ use tairix_icon::NoArtwork;
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_raster::{Pixel, Reorient, Surface};
 use tairix_sandbox::imagerender::{ViewDocument, ViewFailure, ViewFormat, ViewPage, ViewRefusal};
-use tairix_sandbox::SandboxError;
+use tairix_sandbox::{SandboxError, WorkerEnd};
 use tairix_theme::{TextRole, Theme, ThemeRegistry};
 
 use super::{Command, Outcome, Refusal, View};
@@ -473,7 +473,7 @@ fn a_refused_render_states_the_reason_and_keeps_showing_what_it_had() {
             decoded: None,
             pixels,
             outcome: Err(Refusal::Failed(ViewFailure::Sandbox(
-                SandboxError::WorkerFailed,
+                SandboxError::WorkerFailed(WorkerEnd::Crashed),
             ))),
         },
         &layout,

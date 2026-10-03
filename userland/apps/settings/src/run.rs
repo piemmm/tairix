@@ -53,7 +53,7 @@ mod program {
     use tairix_abi::pinboard_ipc::PinboardDocument;
     use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_abi::sysinfo::{SysinfoQueryId, SystemIdentity, Uptime};
-    use tairix_abi::window_ipc::{PreviewSubject, WindowEvent};
+    use tairix_abi::window_ipc::{PreviewOutcome, PreviewSubject, WindowEvent};
     use tairix_abi::{Errno, ProcId};
     use tairix_appdata::RtHost;
     use tairix_controls::Keystroke;
@@ -66,8 +66,8 @@ mod program {
     use tairix_reclaim::PressureBand;
     use tairix_settings::{
         win_sizing, AccountFacts, ElevateRefusal, Elevated, Elevation, MachineFacts, OwnAccount,
-        Pane, Renders, Roster, RunMode, Shell, ShellOutcome, VolumeReading, WINDOW_GROUND,
-        WIN_HEIGHT, WIN_WIDTH,
+        Pane, PictureWanted, Renders, Roster, RunMode, Shell, ShellOutcome, VolumeReading,
+        WINDOW_GROUND, WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_sysconfig::SystemConfig;
     use tairix_theme::{CursorSetId, Theme, ThemeRegistry};
@@ -124,6 +124,10 @@ mod program {
     /// one pane, and folding it into another's would spend three round
     /// trips every time that other pane came on show.
     const ACCOUNTS_TOKEN: u64 = app::FIRST_APP_TOKEN + 5;
+
+    /// The wait-set token of the preview asker's wake: readable exactly when
+    /// the desktop has answered a render this window asked for.
+    const ASK_TOKEN: u64 = app::FIRST_APP_TOKEN + 6;
 
     /// The desktop settings in effect for the launching user, so every
     /// composed row opens on what the desktop is actually drawn with.
@@ -391,6 +395,42 @@ mod program {
     /// submits and collects the answer on the wake it nudges, so the window
     /// keeps drawing throughout.
     type Elevator = tairix_rt::work::Worker<(), Elevation, Elevated>;
+
+    /// A render asked of the desktop for a pane's picture, and the grant of the
+    /// region it is drawn into.
+    #[derive(Copy, Clone)]
+    struct PreviewAsk {
+        window_id: u64,
+        grant: u64,
+        wanted: PictureWanted,
+    }
+
+    /// What the desktop answered a [`PreviewAsk`].
+    type Asked = (PreviewAsk, Result<(), Errno>);
+
+    /// The worker that carries a render request to the desktop, one at a time
+    /// and each answered.
+    type Asker = tairix_rt::work::Worker<
+        tairix_window::WindowClient<app::RtWindowTransport>,
+        PreviewAsk,
+        Asked,
+        tairix_util::defer::JobQueue<PreviewAsk, Asked>,
+    >;
+
+    /// Ask the desktop for one render: a round trip to its serve loop, which
+    /// the event loop must not wait on.
+    fn ask_preview(
+        client: &mut tairix_window::WindowClient<app::RtWindowTransport>,
+        ask: &mut PreviewAsk,
+    ) -> Asked {
+        let wanted = ask.wanted;
+        let answer = client.render_preview(
+            (ask.window_id, ask.grant),
+            wanted.subject,
+            (wanted.width, wanted.height),
+        );
+        (*ask, answer)
+    }
 
     /// The elevated run's body: one posted request, one verdict.
     ///
@@ -786,16 +826,17 @@ mod program {
             &mut self,
             shell: &mut Shell,
             surface: &mut SettingsWindow,
-            theme: &Theme,
-            scale: Scale,
+            (theme, scale): (&Theme, Scale),
+            asker: &Asker,
         ) {
+            asker.collect_landed(|answer| self.adopt_asked(shell, answer));
             let roomy = tairix_rt::pressure::gauge().band() == PressureBand::Normal;
             let viewport = surface.viewport();
             while self.renders.may_ask() {
                 let renders = &self.renders;
-                let asked = (renders.changes(), |subject| renders.asked(subject));
+                let outstanding = (renders.changes(), |subject| renders.asked(subject));
                 let Some(wanted) =
-                    shell.next_picture_wanted(viewport, (scale, theme), roomy, asked)
+                    shell.next_picture_wanted(viewport, (scale, theme), roomy, outstanding)
                 else {
                     return;
                 };
@@ -825,25 +866,38 @@ mod program {
                     shell.mark_picture_refused(wanted.subject);
                     return;
                 };
-                match surface.window.client().render_preview(
-                    (window_id, grant),
-                    wanted.subject,
-                    (wanted.width, wanted.height),
-                ) {
-                    Ok(()) => self.renders.accepted(wanted, region),
-                    Err(err) => {
-                        if self.renders.declined(err, region) {
-                            app::report(
-                                APP_NAME,
-                                format_args!(
-                                    "the desktop refused a picture ({err}); it keeps its \
-                                 placeholder"
-                                ),
-                            );
-                            shell.mark_picture_refused(wanted.subject);
-                        }
+                self.renders.submitted(wanted, region);
+                let ask = PreviewAsk {
+                    window_id,
+                    grant,
+                    wanted,
+                };
+                match asker.submit(ask) {
+                    // No worker: it was asked on this thread, so its answer is
+                    // already here.
+                    Ok(true) => asker.collect_landed(|answer| self.adopt_asked(shell, answer)),
+                    Ok(false) => {}
+                    // No room on the desk: asked for again on a later turn.
+                    Err(ask) => {
+                        self.renders.withdraw(ask.wanted);
+                        return;
                     }
                 }
+            }
+        }
+
+        /// Adopt the desktop's answer to a render this window asked for.
+        fn adopt_asked(&mut self, shell: &mut Shell, (ask, answer): Asked) {
+            let Err(err) = answer else {
+                self.renders.confirmed();
+                return;
+            };
+            if self.renders.declined(ask.wanted, err) {
+                app::report(
+                    APP_NAME,
+                    format_args!("the desktop refused a picture ({err}); it keeps its placeholder"),
+                );
+                shell.mark_picture_refused(ask.wanted.subject);
             }
         }
 
@@ -855,22 +909,24 @@ mod program {
         fn settle(
             &mut self,
             shell: &mut Shell,
-            (subject, width, height, rendered): (PreviewSubject, u16, u16, bool),
+            (subject, width, height, outcome): (PreviewSubject, u16, u16, PreviewOutcome),
             (viewport, scale, theme): (Rect, Scale, &Theme),
             damage: &mut Region,
         ) {
             self.renders
-                .concluded((subject, width, height), |wanted, region| {
-                    if rendered {
+                .concluded((subject, width, height), |wanted, region| match outcome {
+                    PreviewOutcome::Rendered => {
                         shell.set_picture(
                             wanted,
                             region.bytes_mut(),
                             (viewport, scale, theme),
                             damage,
                         );
-                    } else {
-                        shell.mark_picture_refused(subject);
+                        // One picture fitting is the sign memory freed.
+                        shell.retry_unavailable_pictures();
                     }
+                    PreviewOutcome::Refused => shell.mark_picture_refused(subject),
+                    PreviewOutcome::Unavailable => shell.mark_picture_unavailable(subject),
                 });
         }
 
@@ -903,22 +959,8 @@ mod program {
     struct RtEventSource<'a> {
         mailbox: EventMailbox,
         set: u64,
-        /// The applier's wake, drained on an [`APPLY_TOKEN`] wake. Its
-        /// readiness is a level peek, so leaving it undrained would report
-        /// ready for ever and turn the park into a spin.
-        applier: &'a Applier,
-        /// The mount walk's wake, drained on a [`MOUNTS_TOKEN`] wake for
-        /// the same reason.
-        mounts: &'a Mounts,
-        /// The machine readings' wake, drained on a [`MACHINE_TOKEN`] wake.
-        machine: &'a Machine,
-        /// The network readings' wake, drained on a [`NETWORK_TOKEN`] wake.
-        network: &'a Network,
-        /// The account readings' wake, drained on an [`ACCOUNTS_TOKEN`]
-        /// wake.
-        accounts: &'a Accounts,
-        /// The elevated run's wake, drained on an [`ELEVATE_TOKEN`] wake.
-        elevator: &'a Elevator,
+        /// The desks whose wakes the park drains.
+        workers: &'a Workers,
         /// Set when the park woke for a desktop change, cleared when the loop
         /// adopts it.
         desktop_moved: &'a Cell<bool>,
@@ -946,39 +988,10 @@ mod program {
                 None => app::park(self.set)?,
             };
             match woken {
-                // The session answered an apply. Draining is the whole of
-                // noticing it, and the answer is the loop's to adopt, so the
-                // wait ends here rather than parking again on a ready source.
-                Wake::App(APPLY_TOKEN) => {
-                    self.applier.wake().drain();
-                    Ok(Parked::Interrupted)
-                }
-                // The mount table landed. Draining is the whole of noticing
-                // it, and the answer is the loop's to adopt.
-                Wake::App(MOUNTS_TOKEN) => {
-                    self.mounts.wake().drain();
-                    Ok(Parked::Interrupted)
-                }
-                // The machine readings landed.
-                Wake::App(MACHINE_TOKEN) => {
-                    self.machine.wake().drain();
-                    Ok(Parked::Interrupted)
-                }
-                // The network readings landed.
-                Wake::App(NETWORK_TOKEN) => {
-                    self.network.wake().drain();
-                    Ok(Parked::Interrupted)
-                }
-                // The account readings landed.
-                Wake::App(ACCOUNTS_TOKEN) => {
-                    self.accounts.wake().drain();
-                    Ok(Parked::Interrupted)
-                }
-                // The broker answered an offered account.
-                Wake::App(ELEVATE_TOKEN) => {
-                    self.elevator.wake().drain();
-                    Ok(Parked::Interrupted)
-                }
+                // A desk answered. Draining is the whole of noticing it, and
+                // the answer is the loop's to adopt, so the wait ends here
+                // rather than parking again on a ready source.
+                Wake::App(token) if self.workers.drain(token) => Ok(Parked::Interrupted),
                 Wake::PressureChanged => {
                     tairix_font::trim_glyph_cache();
                     self.pressure_moved.set(true);
@@ -1118,8 +1131,8 @@ mod program {
             width: u16,
             /// The height it was rendered at.
             height: u16,
-            /// Whether the region holds the picture.
-            rendered: bool,
+            /// Whether the region holds the picture, and if not, why not.
+            outcome: PreviewOutcome,
         },
         /// The reader asked for the screen to be locked: ask the desktop.
         LockScreen,
@@ -1204,13 +1217,13 @@ mod program {
                 subject,
                 width,
                 height,
-                rendered,
+                outcome,
                 ..
             } => Acted::Rendered {
                 subject: *subject,
                 width: *width,
                 height: *height,
-                rendered: *rendered,
+                outcome: *outcome,
             },
             // A redraw needs nothing here: the client library re-presents the
             // last frame and the shell it drew has not changed. The rest are
@@ -1354,21 +1367,6 @@ mod program {
         }
     }
 
-    /// Ask for the pictures again after the desktop's scale or theme moved,
-    /// which may have moved the size they are drawn at: one of another size
-    /// is let go and asked for afresh once the render outstanding, if any, is
-    /// answered.
-    fn restart_pictures(
-        shell: &mut Shell,
-        surface: &mut SettingsWindow,
-        pictures: &mut Pictures,
-        theme: &Theme,
-        scale: Scale,
-    ) {
-        pictures.restart();
-        pictures.request(shell, surface, theme, scale);
-    }
-
     /// Present the whole client, answering whether the session took it.
     fn present_whole(
         surface: &mut SettingsWindow,
@@ -1402,7 +1400,7 @@ mod program {
         // A theme switch can move the blur the ground asks for.
         surface.apply_backdrop(themes);
         shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
-        restart_pictures(shell, surface, pictures, themes.active(), desktop.scale());
+        pictures.restart();
         present_whole(surface, shell, themes, desktop)
     }
 
@@ -1423,7 +1421,7 @@ mod program {
         desks: Desks<'a>,
     }
 
-    /// The four worker desks the loop submits to and collects from.
+    /// The worker desks the loop submits to and collects from.
     ///
     /// One group, because every path through the loop reaches all of them
     /// and each is the same shape: submit, carry on drawing, adopt the
@@ -1442,6 +1440,35 @@ mod program {
         accounts: AccountRead<'a>,
         /// The broker round trip an offered account costs.
         elevator: &'a Elevator,
+        /// The render requests the panes' pictures cost.
+        asker: &'a Asker,
+    }
+
+    impl<'a> Desks<'a> {
+        /// The loop's view of `workers`, with no reading yet asked for.
+        fn of(workers: &'a Workers) -> Self {
+            Self {
+                applier: &workers.applier,
+                mounts: MountWalk {
+                    worker: &workers.mounts,
+                    pending: false,
+                },
+                machine: MachineRead {
+                    worker: &workers.machine,
+                    pending: false,
+                },
+                network: NetworkRead {
+                    worker: &workers.network,
+                    pending: false,
+                },
+                accounts: AccountRead {
+                    worker: &workers.accounts,
+                    pending: false,
+                },
+                elevator: &workers.elevator,
+                asker: &workers.asker,
+            }
+        }
     }
 
     /// Adopt whatever a worker answered while the loop was parked, and
@@ -1574,12 +1601,12 @@ mod program {
                 subject,
                 width,
                 height,
-                rendered,
+                outcome,
             } => {
                 let viewport = surface.viewport();
                 pictures.settle(
                     shell,
-                    (*subject, *width, *height, *rendered),
+                    (*subject, *width, *height, *outcome),
                     (viewport, desktop.scale(), themes.active()),
                     damage,
                 );
@@ -1611,6 +1638,39 @@ mod program {
         landed.contains(&true)
     }
 
+    /// Bring the window up to date with what happened while it was parked —
+    /// a pressure move, a desk's answer, a password marker falling due — and
+    /// ask for the pictures the panes now want, answering whether the window
+    /// is still presentable.
+    fn catch_up(
+        (surface, shell): (&mut SettingsWindow, &mut Shell),
+        (themes, desktop): (&ThemeRegistry, &Desktop),
+        (pictures, desks): (&mut Pictures, &mut Desks<'_>),
+        pressure_moved: &Cell<bool>,
+    ) -> bool {
+        // Memory goes back when the machine asks for it, not at whatever later
+        // frame happens to draw an icon.
+        if pressure_moved.take() {
+            surface.artwork.trim();
+            pictures.trim(shell, surface, themes.active(), desktop.scale());
+            shell.retry_unavailable_pictures();
+        }
+        if !adopt_answers(surface, shell, themes, desktop, desks)
+            || !advance_secrets(surface, shell, themes, desktop)
+        {
+            return false;
+        }
+        // Every turn, not only an event's: a navigation, a resize and an
+        // answered request all move what the panes wait for.
+        pictures.request(
+            shell,
+            surface,
+            (themes.active(), desktop.scale()),
+            desks.asker,
+        );
+        true
+    }
+
     /// The event loop: park, apply, repaint.
     fn run_event_loop(session: Session<'_>, mut events: WindowEvents<RtEventSource<'_>>) -> i32 {
         let Session {
@@ -1625,18 +1685,12 @@ mod program {
             mut desks,
         } = session;
         loop {
-            // Memory goes back when the machine asks for it, not at whatever
-            // later frame happens to draw an icon.
-            if pressure_moved.take() {
-                surface.artwork.trim();
-                pictures.trim(shell, surface, themes.active(), desktop.scale());
-            }
-            // An answer the park drained is the loop's to adopt, whether or
-            // not an event came with it.
-            if !adopt_answers(surface, shell, themes, desktop, &mut desks) {
-                return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused");
-            }
-            if !advance_secrets(surface, shell, themes, desktop) {
+            if !catch_up(
+                (surface, shell),
+                (themes, desktop),
+                (pictures, &mut desks),
+                pressure_moved,
+            ) {
                 return app::fail(APP_NAME, EXIT_CHANNEL_LOST, "present refused");
             }
             secret_due.set(shell.secret_deadline_ns());
@@ -1667,7 +1721,7 @@ mod program {
             let redraw = adopt_desktop(desktop, themes, desktop_moved);
             if redraw {
                 shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
-                restart_pictures(shell, surface, pictures, themes.active(), desktop.scale());
+                pictures.restart();
             }
             let mut damage = tairix_controls::damage::sink();
             let acted = apply_event(
@@ -1687,10 +1741,6 @@ mod program {
             ) {
                 return 0;
             }
-            // Ask for the next picture a pane wants, whatever this round was:
-            // a navigation, a resize and an answered render all change what
-            // it is waiting for.
-            pictures.request(shell, surface, themes.active(), desktop.scale());
             let landed = request_readings(shell, surface, &mut desks);
             if landed {
                 shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
@@ -1817,7 +1867,7 @@ mod program {
 
     /// Every worker desk this window runs, started and owned together.
     ///
-    /// One desk per kind of work rather than one shared desk: the six
+    /// One desk per kind of work rather than one shared desk: the seven
     /// carry different jobs and a latest-wins desk would let any of them
     /// evict another's answer. Each would otherwise stall the window for a
     /// round trip.
@@ -1828,13 +1878,32 @@ mod program {
         network: Arc<Network>,
         accounts: Arc<Accounts>,
         elevator: Arc<Elevator>,
+        asker: Arc<Asker>,
     }
 
     impl Workers {
         /// Start every desk. A machine that grants no thread runs the work
         /// on the event loop instead, which each start states for itself.
-        fn started() -> Self {
-            Self {
+        ///
+        /// # Errors
+        ///
+        /// The exit code of the stated failure when the asker's queue could
+        /// not be held.
+        fn started() -> Result<Self, i32> {
+            // One render in flight at a time: the desktop takes one per window.
+            let Ok(asker) = Asker::queued(
+                ask_preview,
+                tairix_window::WindowClient::new(app::RtWindowTransport),
+                tairix_rt::sync::WorkerWake::create(),
+                1,
+            ) else {
+                return Err(app::fail(
+                    APP_NAME,
+                    app::EXIT_NO_EVENTS,
+                    "no room for the preview queue",
+                ));
+            };
+            Ok(Self {
                 applier: started(
                     Applier::new(send_apply, (), tairix_rt::sync::WorkerWake::create()),
                     "apply",
@@ -1859,39 +1928,75 @@ mod program {
                     Elevator::new(send_elevate, (), tairix_rt::sync::WorkerWake::create()),
                     "elevated-run",
                 ),
-            }
+                asker: started(asker, "preview-request"),
+            })
+        }
+
+        /// Each desk's wake, the token it is watched under, and how a refused
+        /// watch is stated.
+        fn wakes(&self) -> [(&tairix_rt::sync::WorkerWake, u64, &'static str); 7] {
+            [
+                (self.applier.wake(), APPLY_TOKEN, "apply wake refused"),
+                (self.mounts.wake(), MOUNTS_TOKEN, "mount-table wake refused"),
+                (
+                    self.machine.wake(),
+                    MACHINE_TOKEN,
+                    "machine-readings wake refused",
+                ),
+                (
+                    self.network.wake(),
+                    NETWORK_TOKEN,
+                    "network-readings wake refused",
+                ),
+                (
+                    self.accounts.wake(),
+                    ACCOUNTS_TOKEN,
+                    "account-readings wake refused",
+                ),
+                (
+                    self.elevator.wake(),
+                    ELEVATE_TOKEN,
+                    "elevated-run wake refused",
+                ),
+                (self.asker.wake(), ASK_TOKEN, "preview-request wake refused"),
+            ]
         }
 
         /// Put every desk's wake on `set`, so a landed answer ends the park
         /// the loop is already in.
+        ///
+        /// A refused add is fatal rather than tolerated: an answer nobody
+        /// collects would leave every row showing a value the desktop may
+        /// never have adopted, or a storage pane waiting for ever on a table
+        /// that has already landed.
         fn watched(&self, set: u64) -> Result<(), i32> {
-            watch_wakes(
-                set,
-                &[
-                    (self.applier.wake(), APPLY_TOKEN, "apply wake refused"),
-                    (self.mounts.wake(), MOUNTS_TOKEN, "mount-table wake refused"),
-                    (
-                        self.machine.wake(),
-                        MACHINE_TOKEN,
-                        "machine-readings wake refused",
-                    ),
-                    (
-                        self.network.wake(),
-                        NETWORK_TOKEN,
-                        "network-readings wake refused",
-                    ),
-                    (
-                        self.accounts.wake(),
-                        ACCOUNTS_TOKEN,
-                        "account-readings wake refused",
-                    ),
-                    (
-                        self.elevator.wake(),
-                        ELEVATE_TOKEN,
-                        "elevated-run wake refused",
-                    ),
-                ],
-            )
+            for (wake, token, refusal) in self.wakes() {
+                if let Err(err) = app::watch_wake(set, wake, token) {
+                    return Err(app::fail(
+                        APP_NAME,
+                        app::EXIT_NO_EVENTS,
+                        format_args!("{refusal} ({err})"),
+                    ));
+                }
+            }
+            Ok(())
+        }
+
+        /// Drain the wake watched under `token`, answering whether it is one
+        /// of these desks'.
+        ///
+        /// A wake's readiness is a level peek, so one left undrained would
+        /// report ready for ever and turn the park into a spin.
+        fn drain(&self, token: u64) -> bool {
+            let Some((wake, ..)) = self
+                .wakes()
+                .into_iter()
+                .find(|&(_, watched, _)| watched == token)
+            else {
+                return false;
+            };
+            wake.drain();
+            true
         }
     }
 
@@ -1905,14 +2010,21 @@ mod program {
             self.network.stop();
             self.accounts.stop();
             self.elevator.stop();
+            self.asker.stop();
         }
     }
 
     /// Put `worker` on a desk of its own and start it.
-    fn started<S: Send + 'static, Req: Send + 'static, Ans: Send + 'static>(
-        worker: tairix_rt::work::Worker<S, Req, Ans>,
+    fn started<S, Req, Ans, D>(
+        worker: tairix_rt::work::Worker<S, Req, Ans, D>,
         what: &str,
-    ) -> Arc<tairix_rt::work::Worker<S, Req, Ans>> {
+    ) -> Arc<tairix_rt::work::Worker<S, Req, Ans, D>>
+    where
+        S: Send + 'static,
+        Req: Send + 'static,
+        Ans: Send + 'static,
+        D: tairix_rt::work::Desk<Req, Ans> + Send + 'static,
+    {
         let worker = Arc::new(worker);
         start_worker(&worker, what);
         worker
@@ -1923,38 +2035,21 @@ mod program {
     ///
     /// Not a failure: a program with no thread is exactly as correct and
     /// only as responsive as it was before there was a worker at all.
-    fn start_worker<S: Send + 'static, Req: Send + 'static, Ans: Send + 'static>(
-        worker: &Arc<tairix_rt::work::Worker<S, Req, Ans>>,
+    fn start_worker<S, Req, Ans, D>(
+        worker: &Arc<tairix_rt::work::Worker<S, Req, Ans, D>>,
         what: &str,
-    ) {
+    ) where
+        S: Send + 'static,
+        Req: Send + 'static,
+        Ans: Send + 'static,
+        D: tairix_rt::work::Desk<Req, Ans> + Send + 'static,
+    {
         if let Err(reason) = tairix_rt::work::Worker::start(worker) {
             app::report(
                 APP_NAME,
                 format_args!("no {what} worker ({reason:?}); it is done on the event loop"),
             );
         }
-    }
-
-    /// Add each worker's wake to the loop's wait-set.
-    ///
-    /// A refused add is fatal rather than tolerated: an answer nobody
-    /// collects would leave every row showing a value the desktop may never
-    /// have adopted, or a storage pane waiting for ever on a table that has
-    /// already landed.
-    fn watch_wakes(
-        set: u64,
-        wakes: &[(&tairix_rt::sync::WorkerWake, u64, &str)],
-    ) -> Result<(), i32> {
-        for (wake, token, refusal) in wakes {
-            if let Err(err) = app::watch_wake(set, wake, *token) {
-                return Err(app::fail(
-                    APP_NAME,
-                    app::EXIT_NO_EVENTS,
-                    format_args!("{refusal} ({err})"),
-                ));
-            }
-        }
-        Ok(())
     }
 
     /// The window's icon cache, budgeted from the `frame_bytes` of the
@@ -2018,18 +2113,13 @@ mod program {
                 "the settings registry holds no categories",
             );
         };
-        let workers = Workers::started();
+        let workers = match Workers::started() {
+            Ok(workers) => workers,
+            Err(code) => return code,
+        };
         if let Err(code) = workers.watched(binding.set()) {
             return code;
         }
-        let Workers {
-            applier,
-            mounts,
-            machine,
-            network,
-            accounts,
-            elevator,
-        } = &workers;
 
         seat_first_frame(&mut shell, &mut surface, &desktop, &themes);
 
@@ -2044,12 +2134,7 @@ mod program {
         let events = WindowEvents::new(RtEventSource {
             mailbox: EventMailbox::new(event_endpoint, server),
             set: binding.set(),
-            applier,
-            mounts,
-            machine,
-            network,
-            accounts,
-            elevator,
+            workers: &workers,
             desktop_moved: &desktop_moved,
             pressure_moved: &pressure_moved,
             secret_due: &secret_due,
@@ -2064,26 +2149,7 @@ mod program {
                 pressure_moved: &pressure_moved,
                 secret_due: &secret_due,
                 pictures: &mut Pictures::new(),
-                desks: Desks {
-                    applier,
-                    mounts: MountWalk {
-                        worker: mounts,
-                        pending: false,
-                    },
-                    machine: MachineRead {
-                        worker: machine,
-                        pending: false,
-                    },
-                    network: NetworkRead {
-                        worker: network,
-                        pending: false,
-                    },
-                    accounts: AccountRead {
-                        worker: accounts,
-                        pending: false,
-                    },
-                    elevator,
-                },
+                desks: Desks::of(&workers),
             },
             events,
         )

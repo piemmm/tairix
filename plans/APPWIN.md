@@ -226,7 +226,7 @@ Done. What now holds:
   pointer buttons (`tools/qemu` ordered `PointerStep` script + ordered
   marker-gated screendumps): the reveal → served-window clicks →
   the Library popup's terminal launch (`plans/NEW-TASKBAR.md` T5), with
-  two host-verified screendumps (dark desktop;
+  two host-verified screendumps (the desktop;
   the served window at the cascade origin). All
   gates are kernel-attested serial records (the window endpoint's first
   `CallReplied`, `MessageDelivered` counts per the interaction contract in

@@ -748,14 +748,21 @@ impl SpawnSession {
 /// IPC binding, no spawning). The only authority a sandboxed child holds is
 /// the explicit descriptors its parent wired at spawn.
 ///
+/// A sandboxed child is also **private** to the code that spawned it: only a
+/// [`crate::SyscallNumber::WAIT`] naming its PID reaps it, and neither
+/// [`crate::WAIT_PID_ANY`] nor a [`crate::WAITSET_CHILD_ANY`] member ever
+/// reports it. A program reaping its own children therefore cannot steal a
+/// worker's exit status from the seam that owns it, nor free the worker's
+/// number while that seam may still signal it.
+///
 /// A sandbox block is canonical only when nothing ambient flows in: every
 /// wire must be [`FdWire::Closed`] or [`FdWire::Handle`] (never an inherit
 /// form), the credential must be inherited ([`SPAWN_UID_INHERIT`]), the
 /// console selector must be [`CONSOLE_INHERIT`] (no console index — a
 /// sandbox never receives console-backed streams), and the session must be
-/// [`SpawnSession::Inherit`] (a worker lives in its parent's session).
-/// [`SpawnAttach::parse`] refuses any other shape, so the rule has exactly
-/// one definition shared by the kernel and every userland encoder.
+/// [`SpawnSession::Anchored`] (a worker ends with the process that spawned
+/// it). [`SpawnAttach::parse`] refuses any other shape, so the rule has
+/// exactly one definition shared by the kernel and every userland encoder.
 pub const SPAWN_FLAG_SANDBOX: u64 = 1;
 
 /// Every [`SpawnAttach::flags`] bit with a defined meaning. A block
@@ -1137,6 +1144,17 @@ impl Signal {
         }
     }
 }
+
+/// The exit status of a process the kernel killed for a user fault it could
+/// not resolve: the `128 + SIGSEGV (11)` shell convention, so a parent
+/// reaping a crashed child observes a crash, never a clean exit.
+pub const FAULT_EXIT_STATUS: i32 = 139;
+
+/// The exit status of a program that ended because an allocation it could not
+/// do without failed: the `128 + SIGABRT (6)` a program aborting on allocation
+/// failure reports, so a parent can tell memory running out from a fault or a
+/// panic, and may ask again once memory is freed.
+pub const OOM_EXIT_STATUS: i32 = 134;
 
 /// A process's time-shared scheduling service level, set by
 /// [`crate::SyscallNumber::SCHED_SET_PRIORITY`] and reported in the System

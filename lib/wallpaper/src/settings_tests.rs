@@ -107,7 +107,7 @@ fn the_render_is_canonical_and_round_trips() {
         backdrop: Backdrop::Colour(Rgb::new(0xaa, 0xbb, 0xcc)),
         icons: IconFlow::Trailing,
         sort: IconSort::Size,
-        appearance: Appearance::Light,
+        appearance: Appearance::Dark,
         contrast: Contrast::High,
         density: Density::Comfortable,
         motion: Motion::Reduced,
@@ -143,7 +143,7 @@ fn the_render_is_canonical_and_round_trips() {
          backdrop = aabbcc\n\
          icons = trailing\n\
          sort = size\n\
-         appearance = light\n\
+         appearance = dark\n\
          contrast = high\n\
          density = comfortable\n\
          motion = reduced\n\
@@ -786,14 +786,14 @@ fn a_refusal_names_what_was_wrong() {
 #[test]
 fn every_appearance_key_reads_its_closed_set() {
     let settings = read(
-        "appearance = light\n\
+        "appearance = dark\n\
          contrast = monochrome\n\
          density = compact\n\
          motion = reduced\n\
          scale = 175\n",
     )
     .expect("every value is in its set");
-    assert_eq!(settings.appearance, Appearance::Light);
+    assert_eq!(settings.appearance, Appearance::Dark);
     assert_eq!(settings.contrast, Contrast::Monochrome);
     assert_eq!(settings.density, Density::Compact);
     assert_eq!(settings.motion, Motion::Reduced);
@@ -848,12 +848,12 @@ fn a_scale_that_would_overflow_the_accumulator_is_refused_not_wrapped() {
 #[test]
 fn a_tolerant_read_leaves_exactly_the_refused_appearance_key_at_its_default() {
     let mut document = Document::new();
-    let _ = document.set("appearance", "light");
+    let _ = document.set("appearance", "dark");
     let _ = document.set("contrast", "sepia");
     let _ = document.set("density", "compact");
     let (settings, refused) = DesktopSettings::load(&document);
     assert_eq!(refused, alloc::vec![SettingsKey::Contrast]);
-    assert_eq!(settings.appearance, Appearance::Light);
+    assert_eq!(settings.appearance, Appearance::Dark);
     assert_eq!(settings.contrast, Contrast::Normal);
     assert_eq!(settings.density, Density::Compact);
 }
@@ -863,7 +863,7 @@ fn a_merge_leaves_every_key_the_sender_did_not_name() {
     // The defect this forecloses: choosing a wallpaper must not reimpose
     // the appearance the surface happened to open on.
     let in_effect = DesktopSettings {
-        appearance: Appearance::Light,
+        appearance: Appearance::Dark,
         contrast: Contrast::High,
         density: Density::Comfortable,
         motion: Motion::Reduced,
@@ -881,7 +881,7 @@ fn a_merge_leaves_every_key_the_sender_did_not_name() {
     let merged = merge(&in_effect, &posted).expect("the pinboard keys are valid");
     assert_eq!(merged.fit, WallpaperFit::Tile);
     assert_eq!(merged.sort, IconSort::Date);
-    assert_eq!(merged.appearance, Appearance::Light);
+    assert_eq!(merged.appearance, Appearance::Dark);
     assert_eq!(merged.contrast, Contrast::High);
     assert_eq!(merged.density, Density::Comfortable);
     assert_eq!(merged.motion, Motion::Reduced);
@@ -891,7 +891,7 @@ fn a_merge_leaves_every_key_the_sender_did_not_name() {
 #[test]
 fn a_refused_merge_changes_nothing_at_all() {
     let in_effect = DesktopSettings {
-        appearance: Appearance::Light,
+        appearance: Appearance::Dark,
         fit: WallpaperFit::Tile,
         ..DesktopSettings::default()
     };

@@ -772,7 +772,7 @@ fn a_wallpaper_far_larger_than_the_destination_prepares_at_a_reduced_scale() {
 fn a_band_before_any_prepare_is_refused() {
     let mut sandbox = sandbox();
     assert_eq!(
-        super::band_wallpaper(&mut sandbox, 0, 1, 2),
+        super::band_wallpaper_into(&mut sandbox, 0, 1, &mut [0u8; 8]),
         Err(WallpaperRenderFailure::Refused(
             WallpaperRefusal::NoPreparedSource
         ))
@@ -783,16 +783,16 @@ fn a_band_before_any_prepare_is_refused() {
 fn a_band_out_of_range_or_with_zero_rows_is_refused() {
     let mut sandbox = sandbox();
     let png = solid_png(2, 2, WALLPAPER_COLOUR);
-    super::prepare_wallpaper(&mut sandbox, (2, 2), 2, 2, WallpaperFit::Stretch, &png)
-        .expect("prepares");
+    super::send_document(&mut sandbox, &png).expect("uploads");
+    super::prepare_wallpaper(&mut sandbox, (2, 2), 2, 2, WallpaperFit::Stretch).expect("prepares");
     assert_eq!(
-        super::band_wallpaper(&mut sandbox, 1, 5, 2),
+        super::band_wallpaper_into(&mut sandbox, 1, 5, &mut [0u8; 40]),
         Err(WallpaperRenderFailure::Refused(
             WallpaperRefusal::BandOutOfRange
         ))
     );
     assert_eq!(
-        super::band_wallpaper(&mut sandbox, 0, 0, 2),
+        super::band_wallpaper_into(&mut sandbox, 0, 0, &mut [0u8; 0]),
         Err(WallpaperRenderFailure::Refused(
             WallpaperRefusal::BandOutOfRange
         ))
@@ -803,11 +803,11 @@ fn a_band_out_of_range_or_with_zero_rows_is_refused() {
 fn release_makes_a_subsequent_band_fail_closed() {
     let mut sandbox = sandbox();
     let png = solid_png(2, 2, WALLPAPER_COLOUR);
-    super::prepare_wallpaper(&mut sandbox, (2, 2), 2, 2, WallpaperFit::Stretch, &png)
-        .expect("prepares");
+    super::send_document(&mut sandbox, &png).expect("uploads");
+    super::prepare_wallpaper(&mut sandbox, (2, 2), 2, 2, WallpaperFit::Stretch).expect("prepares");
     assert_eq!(super::release_wallpaper(&mut sandbox), Ok(()));
     assert_eq!(
-        super::band_wallpaper(&mut sandbox, 0, 1, 2),
+        super::band_wallpaper_into(&mut sandbox, 0, 1, &mut [0u8; 8]),
         Err(WallpaperRenderFailure::Refused(
             WallpaperRefusal::NoPreparedSource
         ))
@@ -913,8 +913,115 @@ fn every_wallpaper_refusal_has_non_empty_terse_display_text() {
         WallpaperRefusal::NoPreparedSource,
         WallpaperRefusal::BandOutOfRange,
         WallpaperRefusal::Unrenderable,
+        WallpaperRefusal::NoSource,
+        WallpaperRefusal::OutOfMemory,
     ] {
         assert!(!format!("{refusal}").is_empty());
+    }
+}
+
+// ---- wallpaper: plan -----------------------------------------------------
+
+#[test]
+fn a_plan_costs_the_source_and_a_thumbnail_far_below_a_full_screen() {
+    let mut sandbox = sandbox();
+    let jpeg = flat_grey_jpeg(1024, 512);
+    super::send_document(&mut sandbox, &jpeg).expect("uploads");
+    let full = super::plan_wallpaper(&mut sandbox, (1024, 512), 1024, 512, WallpaperFit::Fill)
+        .expect("plans")
+        .peak_bytes();
+    super::send_document(&mut sandbox, &jpeg).expect("uploads");
+    let thumbnail = super::plan_wallpaper(&mut sandbox, (128, 64), 128, 64, WallpaperFit::Fill)
+        .expect("plans")
+        .peak_bytes();
+    assert!(full >= jpeg.len() as u64 + 1024 * 512 * 4);
+    assert!(thumbnail * 16 < full, "{thumbnail} against {full}");
+}
+
+#[test]
+fn a_plan_with_no_source_uploaded_is_refused() {
+    let mut sandbox = sandbox();
+    assert_eq!(
+        super::plan_wallpaper(&mut sandbox, (2, 2), 2, 2, WallpaperFit::Fill).err(),
+        Some(WallpaperRenderFailure::Refused(WallpaperRefusal::NoSource))
+    );
+}
+
+#[test]
+fn a_planned_source_renders_into_the_buffer_and_is_let_go_after() {
+    let mut sandbox = sandbox();
+    let png = solid_png(2, 2, WALLPAPER_COLOUR);
+    super::send_document(&mut sandbox, &png).expect("uploads");
+    let planned =
+        super::plan_wallpaper(&mut sandbox, (2, 2), 2, 2, WallpaperFit::Stretch).expect("plans");
+    let mut out = vec![0u8; 2 * 2 * 4];
+    planned.render_into(&mut out).expect("renders");
+    for pixel in out.as_chunks::<4>().0 {
+        assert_eq!(pixel, &WALLPAPER_COLOUR);
+    }
+    assert_eq!(
+        super::band_wallpaper_into(&mut sandbox, 0, 1, &mut [0u8; 8]),
+        Err(WallpaperRenderFailure::Refused(
+            WallpaperRefusal::NoPreparedSource
+        ))
+    );
+}
+
+#[test]
+fn an_abandoned_plan_lets_its_source_go() {
+    let mut sandbox = sandbox();
+    let png = solid_png(2, 2, WALLPAPER_COLOUR);
+    super::send_document(&mut sandbox, &png).expect("uploads");
+    drop(super::plan_wallpaper(&mut sandbox, (2, 2), 2, 2, WallpaperFit::Stretch).expect("plans"));
+    assert_eq!(
+        super::plan_wallpaper(&mut sandbox, (2, 2), 2, 2, WallpaperFit::Stretch).err(),
+        Some(WallpaperRenderFailure::Refused(WallpaperRefusal::NoSource))
+    );
+}
+
+#[test]
+fn a_document_longer_than_one_run_arrives_whole() {
+    let mut sandbox = sandbox();
+    let bytes = vec![0x5A; super::UPLOAD_RUN * 2 + 7];
+    super::send_document(&mut sandbox, &bytes).expect("uploads in runs");
+    // Whole, so it is judged as what it is: not a picture at all.
+    assert_eq!(
+        super::plan_wallpaper(&mut sandbox, (2, 2), 2, 2, WallpaperFit::Fill).err(),
+        Some(WallpaperRenderFailure::Refused(
+            WallpaperRefusal::UnsupportedFormat
+        ))
+    );
+}
+
+#[test]
+fn a_decode_refused_its_memory_is_a_refusal_worth_trying_again() {
+    assert_eq!(
+        super::refusal_of_decode(&tairix_image::DecodeError::OutOfMemory),
+        WallpaperRefusal::OutOfMemory
+    );
+    let transient = [
+        WallpaperRenderFailure::Refused(WallpaperRefusal::OutOfMemory),
+        WallpaperRenderFailure::NoMemory,
+        WallpaperRenderFailure::Document(super::DocumentFailure::Refused(
+            super::DocumentRefusal::OutOfMemory,
+        )),
+        WallpaperRenderFailure::Sandbox(crate::host::SandboxError::WorkerFailed(
+            crate::host::WorkerEnd::OutOfMemory,
+        )),
+    ];
+    for failure in transient {
+        assert!(failure.out_of_memory(), "{failure:?}");
+    }
+    let broken = [
+        WallpaperRenderFailure::Refused(WallpaperRefusal::MalformedImage),
+        WallpaperRenderFailure::Refused(WallpaperRefusal::UnsupportedFormat),
+        WallpaperRenderFailure::ReplyMalformed,
+        WallpaperRenderFailure::Sandbox(crate::host::SandboxError::WorkerFailed(
+            crate::host::WorkerEnd::Crashed,
+        )),
+    ];
+    for failure in broken {
+        assert!(!failure.out_of_memory(), "{failure:?}");
     }
 }
 
@@ -2312,4 +2419,30 @@ fn a_chunk_is_pushed_framed_as_the_wire_writer_frames_one() {
     assert_eq!(frame.request(3), Some(push(b"abc").as_slice()));
     assert_eq!(frame.request(0), Some(push(b"").as_slice()));
     assert_eq!(frame.request(9), None, "past the room");
+}
+
+#[test]
+fn every_operation_this_worker_serves_has_its_own_opcode() {
+    let ops = [
+        super::OP_RASTERISE,
+        super::OP_FONTS_SUPPLY,
+        super::OP_WALLPAPER_PREPARE,
+        super::OP_WALLPAPER_BAND,
+        super::OP_WALLPAPER_RELEASE,
+        super::OP_WALLPAPER_PLAN,
+        super::OP_DOC_BEGIN,
+        super::OP_DOC_PUSH,
+        super::OP_VIEW_OPEN,
+        super::OP_VIEW_PAGE,
+        super::OP_VIEW_RENDER,
+        super::OP_VIEW_BAND,
+        super::OP_VIEW_RELEASE,
+    ];
+    for (at, op) in ops.iter().enumerate() {
+        assert!(!ops[at + 1..].contains(op), "opcode {op} served twice");
+        assert!(
+            !crate::imageedit::is_edit_op(*op),
+            "opcode {op} is also the editor's"
+        );
+    }
 }

@@ -669,6 +669,14 @@ landing).
 4. **Fail closed (§2.9).** A `pid` that is not a child of the caller →
    `NotFound`; no producer wired → `NotImplemented`; a faulting `status`
    pointer → `BadAddress`. The exit code is copied out only on success.
+5. **A sandbox child is private to its spawner.** A child spawned with
+   `SPAWN_FLAG_SANDBOX` is reaped, and its stop reported, only by a `wait`
+   naming its pid. `WAIT_PID_ANY` and the wait-set's any-child member never
+   take it and never become ready for it, and a parent with only private
+   children has no child to wait for. The sandbox host is library code, so
+   the process it runs in may reap "any child" for its own reasons; a
+   wildcard that could take the worker would leave the host unable to learn
+   why it ended (`kernel/core::procwait::ChildListing`).
 
 **Staging:**
 

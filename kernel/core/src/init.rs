@@ -3970,7 +3970,11 @@ mod tests {
             audit_sink,
         ));
         process_wait
-            .register_child(SecProcessId(1), process)
+            .register_child(
+                SecProcessId(1),
+                process,
+                crate::procwait::ChildListing::Listed,
+            )
             .expect("registered");
         let claims = crate::procsignal::claim_group_kill(
             Some(&state.caps),

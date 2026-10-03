@@ -175,6 +175,25 @@ can change the answer. Nothing is lost when one is refused: the pages stay
 mapped and recorded as free, so they still serve the next allocation, and the
 process simply keeps memory it could not give back.
 
+## Fatal reports
+
+A program that ends abnormally says why, on `stderr` and through the system
+log, from fixed stack buffers so neither report allocates. The exit status says
+which kind of ending it was:
+
+| Ending | Status | Log event |
+| --- | --- | --- |
+| A panic | `EXIT_PANIC` (`101`) | `PANIC_REPORTED` (`26000`) |
+| An allocation the program could not do without failed | `tairix_abi::OOM_EXIT_STATUS` (`134`) | `OUT_OF_MEMORY_REPORTED` (`26001`) |
+
+A null return from the heap reaches a fallible allocation (`try_reserve`) as an
+error. It reaches the allocation-failure handler only for an allocation the
+program had no way to refuse, such as a `Vec` growing. The separate status lets
+a parent tell memory running out from a bug and ask again once memory is freed.
+The sandbox host does exactly that with a worker's status
+(`docs/src/security/sandbox.md`). `lib/rt` owns the `26000..27000` event-id
+range.
+
 ## I/O abstraction (`io` module)
 
 `tairix_rt::io` is the ergonomic `std::io`-style layer a program programs

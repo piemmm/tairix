@@ -667,7 +667,11 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     let parent_tid = admit(sched, parent_root, parent_entry);
     PARENT_TID.store(parent_tid, Ordering::SeqCst);
     if wait_producer
-        .register_child(ProcessId(parent_tid), ProcessId(child_tid))
+        .register_child(
+            ProcessId(parent_tid),
+            ProcessId(child_tid),
+            tairix_kernel_core::ChildListing::Listed,
+        )
         .is_err()
     {
         qemu_exit::exit_failure(FAIL_SPAWN);
@@ -682,7 +686,11 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     let intake_tid = admit(sched, intake_root, intake_entry);
     INTAKE_TID.store(intake_tid, Ordering::SeqCst);
     if wait_producer
-        .register_child(ProcessId(SUPERVISOR), ProcessId(intake_tid))
+        .register_child(
+            ProcessId(SUPERVISOR),
+            ProcessId(intake_tid),
+            tairix_kernel_core::ChildListing::Listed,
+        )
         .is_err()
     {
         qemu_exit::exit_failure(FAIL_SPAWN);

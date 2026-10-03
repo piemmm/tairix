@@ -79,6 +79,7 @@ event loop** inherits the freeze:
 | Terminal settings sheet — the sheet's own pixels | `userland/apps/terminal/src/run.rs` (`present_overlay`) | The damage its controls reported was **computed and discarded**: every pointer sample allocated a sheet-sized surface, re-rendered every tab, row, label and swatch, and presented the whole popup. Fixed in DESK-16. |
 | Desktop listing + wallpaper workers | `lib/browse/src/desk.rs`, `userland/gui/session/src/wallpaper.rs` | A **runaway**: the job hand-out cloned the request instead of taking it, so an answered job was immediately workable again and the worker re-ran it for ever — 1030 directory reads of one folder in 13 s, ~150/s, each waking the compositor. A core and a disk spent continuously, contending with every frame. Fixed in DESK-17. |
 | Compositor glyph misses | `userland/gui/session/src/run.rs` (text drawn on the frame path through `lib/font`) | A glyph the client cache did not hold was a **blocking `FONT_ENDPOINT` round trip on the compositor loop** — 41 of them in a 13 s hover run, clustered where new text appears: 32 inside 41 ms on window-open. The cache absorbs the steady state, so this was a cold-cache stall rather than a periodic one. Fixed in DESK-18. |
+| Settings picture requests | `userland/apps/settings/src/run.rs` (`Pictures::request` → `WindowClient::render_preview`) | A window-channel round trip to the session's serve loop **per picture asked for**, on the pane's own loop: a busy desktop stalled the Settings window once per thumbnail. Fixed in DESK-20. |
 | Shell foreground launch | `userland/shell/elsh/src/run.rs` (`spawn_attached`) | The shell cannot service its own input (job-control signals, `stdinfo`) during the load. Secondary. |
 | Terminal startup shell | `userland/apps/terminal/src/run.rs` (`spawn_attached`) | One-time, at terminal open. Minor. |
 | Login → session/shell | `userland/session/login/src/run.rs` (`spawn_attached` / `spawn_in`) | One-time, at login. Minor. |
@@ -1020,6 +1021,18 @@ Each stage is independently reviewable and must leave the whole-project
   still end with every glyph resident. Output is bit-identical — the existing
   blit-reference tests are unchanged.
 
+### DESK-20 — Settings asks for its pictures off its loop
+- **Done.** Each `RenderPreview` round trip is carried by a queued worker of
+  the pane's own (`tairix_rt::work::Worker::queued`, room for one, with its own
+  `WindowClient`). The pane submits, carries on drawing, and adopts the
+  acceptance on the worker's wake; `Renders` holds one request unanswered at a
+  time, so requests stay ordered and a refusal is matched to the picture that
+  drew it. The loop asks every turn rather than only an event's, so an
+  answered request moves the queue on without waiting for input.
+- Tests: `renders_tests` — one request waits for its answer before the next
+  is asked, a decline withdraws the request and keeps its region spare, and an
+  acceptance lets the next go.
+
 ### DESK-19 — A client's `Present` must not carry the desktop's frame work
 - **Planned.** The desktop session serves window clients and composites on one
   thread, and `WindowServer::present` runs the whole `winframe::decode` of the
@@ -1330,6 +1343,8 @@ Each stage is independently reviewable and must leave the whole-project
   desk-plus-worker arrangement is one shared `lib/rt::work`; and the wait a
   worker's answer arrives on can end without an event, which also closed a
   busy-spin in the file manager.
+- **DESK-20 — done.** Settings' picture requests run on a worker; the pane
+  never waits on the session's serve loop.
 - **DESK-5 … DESK-7 — planned.**
 - **DESK-19 — planned.**
 

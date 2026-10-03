@@ -3,7 +3,7 @@
 `lib/theme` (`tairix-theme`) is the single shared theme definition for the
 TAIRiX desktop (`AGENTS.md` §6, §10). One theme drives the colours, corner
 radii, fonts, and cursors of the window manager, the taskbar, and the default
-apps, with a default dark theme and a light theme switchable at runtime.
+apps, with a default light theme and a dark theme switchable at runtime.
 "Adding a theme is data, not new code" (`AGENTS.md` §10).
 
 ## Why a `lib/` crate
@@ -362,7 +362,7 @@ theme agrees and no control can be forgotten and left an opaque patch;
 `lib/controls` is where a background becomes the chrome alpha for its layer. See
 [the control library](../lib/controls.md#surface-ground-opaque-floating-chrome-or-a-frosted-window).
 
-`Theme::dark` is the default; `Theme::light` is its light counterpart. Both are
+`Theme::light` is the default; `Theme::dark` is its dark counterpart. Both are
 the Reactive Alloy design boards (`plans/desktop1.png`, `plans/desktop2a.png`,
 `plans/desktop1-light.png`) read off rather than invented: near-black cool
 surfaces (dark) or one descending ladder of **neutral greys** (light) under one
@@ -587,12 +587,12 @@ asked for), the type ladder (every role's size and weight, the descending order,
 the base-size clamp at both ends, and the monospace role being the only one on
 the fixed-width family), the shared metrics/fonts/cursors, cursor lookup for
 every kind, and
-the registry: the dark default, runtime dark↔light switching, custom-theme
+the registry: the light default, runtime light↔dark switching, custom-theme
 registration and activation, and the fail-closed `UnknownTheme`/`DuplicateId`
 paths. The
 window manager's `cargo test -p tairix-wm` adds the integration tests that
 source the compositor background and a window's corner radius from the active
-theme and verify a dark→light switch changes the cleared screen. The
+theme and verify a light→dark switch changes the cleared screen. The
 appearance-toggle tests cover `set_appearance` selecting the matching built-in
 and `toggle_appearance` flipping between built-ins (including from an active
 custom theme).

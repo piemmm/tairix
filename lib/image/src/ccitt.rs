@@ -251,6 +251,26 @@ pub(crate) struct Codes {
     black: Vec<u16>,
 }
 
+/// The bytes a [`Codes`] holds: one lookup table per colour.
+pub(crate) const TABLE_BYTES: u64 = (2 * LOOKUP_LEN * core::mem::size_of::<u16>()) as u64;
+
+/// The changing elements one row of `columns` pixels can hold: a mode places
+/// at most two and must advance past the last of them.
+fn changing_elements(columns: u32) -> Option<usize> {
+    usize::try_from(columns)
+        .ok()?
+        .checked_mul(2)?
+        .checked_add(4)
+}
+
+/// The bytes decoding a strip or tile `columns` pixels wide holds beside its
+/// tables: its reference and changing-element rows.
+pub(crate) fn row_bytes(columns: u32) -> u64 {
+    changing_elements(columns).map_or(u64::MAX, |elements| {
+        2 * (elements * core::mem::size_of::<u32>()) as u64
+    })
+}
+
 impl Codes {
     pub(crate) fn new() -> Option<Self> {
         Some(Self {
@@ -602,14 +622,8 @@ pub(crate) fn decode(
 ) -> Result<(), DecodeError> {
     let stride =
         usize::try_from(columns.div_ceil(8)).map_err(|_| DecodeError::DimensionsOverflow)?;
-    // A mode places at most two changing elements and must advance past the
-    // last of them, so a row of `columns` pixels holds no more than this and
-    // the reservation is what lets a record be infallible.
-    let elements = usize::try_from(columns)
-        .ok()
-        .and_then(|columns| columns.checked_mul(2))
-        .and_then(|elements| elements.checked_add(4))
-        .ok_or(DecodeError::DimensionsOverflow)?;
+    // Reserved whole, so recording an element never allocates.
+    let elements = changing_elements(columns).ok_or(DecodeError::DimensionsOverflow)?;
     let mut bits = Bits::new(data, lsb_first);
     let mut reference: Vec<u32> = Vec::new();
     let mut changes: Vec<u32> = Vec::new();

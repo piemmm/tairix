@@ -130,7 +130,9 @@ use tairix_icon::{VectorIcon, MAX_ARTWORK_BYTES, MAX_ARTWORK_SIDE};
 use tairix_image::{
     DecodeError, DecodeLimits, FitBox, ImageFormat, RasterImage, Sequence, SequenceKind,
 };
-use tairix_raster::{resample, resample_window, Region, Rgba8Image, Surface, MAX_DRAWING_EXTENT};
+use tairix_raster::{
+    resample, resample_window, Region, ResampleError, Rgba8Image, Surface, MAX_DRAWING_EXTENT,
+};
 use tairix_svg::{SvgError, SvgImage};
 
 use tairix_svg::font::{FaceRequest, FontProvider};
@@ -312,12 +314,12 @@ impl Service for ImageRenderService {
                 Ok(reply) => reply,
                 Err(refusal) => encode_error(refusal.to_wire()),
             },
-            Some(OP_WALLPAPER_PREPARE | OP_WALLPAPER_BAND | OP_WALLPAPER_RELEASE) => {
-                match self.dispatch_wallpaper(request) {
-                    Ok(reply) => reply,
-                    Err(refusal) => encode_error(refusal.to_wire()),
-                }
-            }
+            Some(
+                OP_WALLPAPER_PREPARE | OP_WALLPAPER_BAND | OP_WALLPAPER_RELEASE | OP_WALLPAPER_PLAN,
+            ) => match self.dispatch_wallpaper(request) {
+                Ok(reply) => reply,
+                Err(refusal) => encode_error(refusal.to_wire()),
+            },
             Some(OP_DOC_BEGIN | OP_DOC_PUSH) => match self.dispatch_document(request) {
                 Ok(reply) => reply,
                 Err(refusal) => encode_error(refusal.to_wire()),
@@ -842,11 +844,13 @@ const MAX_WALLPAPER_DECODE_SIDE: u32 = MAX_DESTINATION_WIDTH.saturating_mul(MAX_
 const OP_WALLPAPER_PREPARE: u8 = 2;
 const OP_WALLPAPER_BAND: u8 = 3;
 const OP_WALLPAPER_RELEASE: u8 = 4;
+const OP_WALLPAPER_PLAN: u8 = 18;
 
 /// Wallpaper success reply tags.
 const REPLY_WALLPAPER_PREPARED: u8 = 2;
 const REPLY_WALLPAPER_BAND: u8 = 3;
 const REPLY_WALLPAPER_RELEASED: u8 = 4;
+const REPLY_WALLPAPER_PLANNED: u8 = 18;
 
 /// Wallpaper refusal wire codes.
 const REFUSAL_WALLPAPER_MALFORMED_REQUEST: u8 = 1;
@@ -856,6 +860,7 @@ const REFUSAL_WALLPAPER_NO_PREPARED_SOURCE: u8 = 4;
 const REFUSAL_WALLPAPER_BAND_OUT_OF_RANGE: u8 = 5;
 const REFUSAL_WALLPAPER_UNRENDERABLE: u8 = 6;
 const REFUSAL_WALLPAPER_NO_SOURCE: u8 = 7;
+const REFUSAL_WALLPAPER_OUT_OF_MEMORY: u8 = 8;
 
 /// Why the service refused a wallpaper request, carried typed over the
 /// wire — the wallpaper counterpart of [`IconRefusal`].
@@ -882,12 +887,15 @@ pub enum WallpaperRefusal {
     /// An `OP_WALLPAPER_BAND` request named an empty range, or one
     /// reaching past the prepared destination's height.
     BandOutOfRange,
-    /// A buffer the decode or the render needed could not be allocated, or
-    /// the prepared source or placement could not be drawn into the
-    /// requested band — the latter unreachable in practice, since
+    /// The prepared source or placement could not be drawn into the
+    /// requested band — unreachable in practice, since
     /// `OP_WALLPAPER_PREPARE` only ever holds geometry it has already
     /// validated, but the render path stays total rather than assuming so.
     Unrenderable,
+    /// A buffer the decode or the render needed could not be allocated: not
+    /// a fault in the picture, so the same request may succeed once memory
+    /// is freed.
+    OutOfMemory,
 }
 
 impl WallpaperRefusal {
@@ -900,6 +908,7 @@ impl WallpaperRefusal {
             Self::BandOutOfRange => REFUSAL_WALLPAPER_BAND_OUT_OF_RANGE,
             Self::Unrenderable => REFUSAL_WALLPAPER_UNRENDERABLE,
             Self::NoSource => REFUSAL_WALLPAPER_NO_SOURCE,
+            Self::OutOfMemory => REFUSAL_WALLPAPER_OUT_OF_MEMORY,
         }
     }
 
@@ -912,6 +921,7 @@ impl WallpaperRefusal {
             REFUSAL_WALLPAPER_BAND_OUT_OF_RANGE => Some(Self::BandOutOfRange),
             REFUSAL_WALLPAPER_UNRENDERABLE => Some(Self::Unrenderable),
             REFUSAL_WALLPAPER_NO_SOURCE => Some(Self::NoSource),
+            REFUSAL_WALLPAPER_OUT_OF_MEMORY => Some(Self::OutOfMemory),
             _ => None,
         }
     }
@@ -927,6 +937,7 @@ impl core::fmt::Display for WallpaperRefusal {
             Self::BandOutOfRange => f.write_str("wallpaper band is out of range"),
             Self::Unrenderable => f.write_str("wallpaper could not be drawn into its band"),
             Self::NoSource => f.write_str("no wallpaper source has been uploaded"),
+            Self::OutOfMemory => f.write_str("no memory to decode the wallpaper"),
         }
     }
 }
@@ -944,6 +955,24 @@ pub enum WallpaperRenderFailure {
     /// geometry: it cannot be believed, so the caller gets nothing
     /// (fail closed).
     ReplyMalformed,
+    /// There was no memory here for the pixels the worker would answer with.
+    NoMemory,
+}
+
+impl WallpaperRenderFailure {
+    /// Whether the render failed for want of memory, on either side, and may
+    /// succeed once memory is freed — as opposed to a picture or worker that
+    /// is broken.
+    #[must_use]
+    pub const fn out_of_memory(&self) -> bool {
+        match self {
+            Self::Sandbox(failure) => failure.out_of_memory(),
+            Self::Document(failure) => failure.out_of_memory(),
+            Self::Refused(refusal) => matches!(refusal, WallpaperRefusal::OutOfMemory),
+            Self::NoMemory => true,
+            Self::ReplyMalformed => false,
+        }
+    }
 }
 
 impl Unbelieved for WallpaperRenderFailure {
@@ -951,7 +980,7 @@ impl Unbelieved for WallpaperRenderFailure {
         match self {
             Self::ReplyMalformed => true,
             Self::Document(upload) => upload.unbelieved(),
-            Self::Sandbox(_) | Self::Refused(_) => false,
+            Self::Sandbox(_) | Self::Refused(_) | Self::NoMemory => false,
         }
     }
 }
@@ -963,6 +992,7 @@ impl core::fmt::Display for WallpaperRenderFailure {
             Self::Document(inner) => write!(f, "source upload failed: {inner}"),
             Self::Refused(refusal) => write!(f, "worker refused: {refusal}"),
             Self::ReplyMalformed => f.write_str("worker reply violated the reply grammar"),
+            Self::NoMemory => f.write_str("no memory for the rendered wallpaper"),
         }
     }
 }
@@ -1037,6 +1067,7 @@ impl ImageRenderService {
             OP_WALLPAPER_PREPARE => self.handle_wallpaper_prepare(&mut r),
             OP_WALLPAPER_BAND => self.handle_wallpaper_band(&mut r),
             OP_WALLPAPER_RELEASE => self.handle_wallpaper_release(&mut r),
+            OP_WALLPAPER_PLAN => self.handle_wallpaper_plan(&mut r),
             _ => Err(WallpaperRefusal::MalformedRequest),
         }
     }
@@ -1055,73 +1086,66 @@ impl ImageRenderService {
         &mut self,
         r: &mut Reader<'_>,
     ) -> Result<Vec<u8>, WallpaperRefusal> {
-        let screen_w = r.u32().map_err(|_| WallpaperRefusal::MalformedRequest)?;
-        let screen_h = r.u32().map_err(|_| WallpaperRefusal::MalformedRequest)?;
-        let dest_w = r.u32().map_err(|_| WallpaperRefusal::MalformedRequest)?;
-        let dest_h = r.u32().map_err(|_| WallpaperRefusal::MalformedRequest)?;
-        let fit_byte = r.u8().map_err(|_| WallpaperRefusal::MalformedRequest)?;
-        let fit = fit_from_wire(fit_byte).ok_or(WallpaperRefusal::MalformedRequest)?;
-        if !r.is_exhausted() {
-            return Err(WallpaperRefusal::MalformedRequest);
-        }
-        if dest_w == 0
-            || dest_w > MAX_DESTINATION_WIDTH
-            || dest_h == 0
-            || dest_h > MAX_DESTINATION_HEIGHT
-        {
-            return Err(WallpaperRefusal::MalformedRequest);
-        }
-        // The destination can never be asked to show more of the screen
-        // than the screen itself holds: a preview never magnifies past the
-        // real display, and requiring this here is what keeps the nominal
-        // scaling below from ever upscaling the decoded source. The screen
-        // itself carries the same fixed bound as any destination, since
-        // the desktop's own wallpaper models a screen no larger than that.
-        if screen_w == 0
-            || screen_w > MAX_DESTINATION_WIDTH
-            || screen_h == 0
-            || screen_h > MAX_DESTINATION_HEIGHT
-            || dest_w > screen_w
-            || dest_h > screen_h
-        {
-            return Err(WallpaperRefusal::MalformedRequest);
-        }
+        let geometry = WallpaperGeometry::read(r)?;
         // Taken, not borrowed: the decode below holds pixels, so the
         // file's own bytes are released rather than kept beside them.
         let document = self
             .document
             .take_if(|document| document.is_complete())
             .ok_or(WallpaperRefusal::NoSource)?;
-        let image_bytes = document.bytes.as_slice();
-        if image_bytes.len() > tairix_wallpaper::MAX_WALLPAPER_BYTES {
-            return Err(WallpaperRefusal::MalformedRequest);
-        }
-        let native = probe_wallpaper_source(image_bytes)?;
-        // What the composition can show decides what is decoded: a
-        // thumbnail of a 4K master is served from a one-eighth-scale decode
-        // rather than from a screen-sized one it would only throw away.
-        let request = tairix_wallpaper::decode_request(
-            native,
-            (screen_w, screen_h),
-            (dest_w, dest_h),
-            fit,
-        )
-        // Unreachable: `native` is non-zero (a probe refuses a zero-sided
-        // header) and the screen is already ruled out as zero-sided above.
-        .ok_or(WallpaperRefusal::Unrenderable)?;
-        let image = decode_wallpaper_source(image_bytes, request.0, request.1)?;
-        let nominal = tairix_wallpaper::nominal_source_size(native, (screen_w, screen_h), (dest_w, dest_h))
-                // Unreachable for the same reasons as the request above.
-                .ok_or(WallpaperRefusal::Unrenderable)?;
-        let placement = tairix_wallpaper::place(nominal, (dest_w, dest_h), fit)
-            // Unreachable: a nominal size is never zero-sided (clamped up
-            // to one) and `(dest_w, dest_h)` is already ruled out above.
-            .ok_or(WallpaperRefusal::Unrenderable)?;
-        let prepared = hold_wallpaper(image, nominal, dest_w, dest_h, &placement)?;
+        let image_bytes = wallpaper_bytes(&document)?;
+        let plan = geometry.plan(image_bytes)?;
+        let image = decode_wallpaper_source(image_bytes, plan.request.0, plan.request.1)?;
+        let prepared = hold_wallpaper(
+            image,
+            plan.nominal,
+            geometry.dest.0,
+            geometry.dest.1,
+            &plan.placement,
+        )?;
         self.wallpaper = Some(prepared);
         let mut w = Writer::new();
         w.u8(REPLY_WALLPAPER_PREPARED);
-        w.u32(rows_per_band(dest_w));
+        w.u32(rows_per_band(geometry.dest.0));
+        Ok(w.finish())
+    }
+
+    /// `OP_WALLPAPER_PLAN`: read the uploaded source's header and answer the
+    /// most bytes preparing and drawing it would hold at once, the source
+    /// itself included, so the caller can account the render before any of
+    /// it is decoded. Holds nothing new.
+    fn handle_wallpaper_plan(&self, r: &mut Reader<'_>) -> Result<Vec<u8>, WallpaperRefusal> {
+        let geometry = WallpaperGeometry::read(r)?;
+        let document = self
+            .document
+            .as_ref()
+            .filter(|document| document.is_complete())
+            .ok_or(WallpaperRefusal::NoSource)?;
+        let image_bytes = wallpaper_bytes(document)?;
+        let plan = geometry.plan(image_bytes)?;
+        let decode = tairix_image::decode_peak_bytes(
+            image_bytes,
+            &wallpaper_limits(),
+            FitBox::new(plan.request.0, plan.request.1),
+        )
+        .map_err(|err| refusal_of_decode(&err))?;
+        let (nominal_w, nominal_h) = plan.nominal;
+        let tiled = if plan.placement.tiled() {
+            u64::from(nominal_w) * u64::from(nominal_h) * 4
+        } else {
+            0
+        };
+        let (dest_w, dest_h) = geometry.dest;
+        // A band and the reply it is copied into.
+        let band_rows = rows_per_band(dest_w).min(dest_h);
+        let bands = u64::from(band_rows) * u64::from(dest_w) * 4 * 2;
+        let peak = [decode, tiled, bands]
+            .into_iter()
+            .try_fold(image_bytes.len() as u64, u64::checked_add)
+            .ok_or(WallpaperRefusal::MalformedRequest)?;
+        let mut w = Writer::new();
+        w.u8(REPLY_WALLPAPER_PLANNED);
+        w.u64(peak);
         Ok(w.finish())
     }
 
@@ -1193,6 +1217,110 @@ pub(crate) fn rows_fitting(row_bytes: u64, header: usize) -> u32 {
     u32::try_from((budget / row_bytes).max(1)).unwrap_or(u32::MAX)
 }
 
+/// Where a wallpaper request draws: the screen it models, the destination it
+/// renders, and the fit, validated as one.
+struct WallpaperGeometry {
+    screen: (u32, u32),
+    dest: (u32, u32),
+    fit: WallpaperFit,
+}
+
+/// How an uploaded source is drawn onto a [`WallpaperGeometry`]: the scale it
+/// is decoded at, the size the placement speaks in, and the placement.
+struct WallpaperPlan {
+    request: (u32, u32),
+    nominal: (u32, u32),
+    placement: Placement,
+}
+
+impl WallpaperGeometry {
+    /// Read and validate the geometry fields a plan and a prepare both carry.
+    fn read(r: &mut Reader<'_>) -> Result<Self, WallpaperRefusal> {
+        let screen_w = r.u32().map_err(|_| WallpaperRefusal::MalformedRequest)?;
+        let screen_h = r.u32().map_err(|_| WallpaperRefusal::MalformedRequest)?;
+        let dest_w = r.u32().map_err(|_| WallpaperRefusal::MalformedRequest)?;
+        let dest_h = r.u32().map_err(|_| WallpaperRefusal::MalformedRequest)?;
+        let fit_byte = r.u8().map_err(|_| WallpaperRefusal::MalformedRequest)?;
+        let fit = fit_from_wire(fit_byte).ok_or(WallpaperRefusal::MalformedRequest)?;
+        if !r.is_exhausted() || !wallpaper_geometry_admitted((screen_w, screen_h), dest_w, dest_h) {
+            return Err(WallpaperRefusal::MalformedRequest);
+        }
+        Ok(Self {
+            screen: (screen_w, screen_h),
+            dest: (dest_w, dest_h),
+            fit,
+        })
+    }
+
+    /// Plan drawing `image_bytes` here from its header alone.
+    fn plan(&self, image_bytes: &[u8]) -> Result<WallpaperPlan, WallpaperRefusal> {
+        let native = probe_wallpaper_source(image_bytes)?;
+        // What the composition can show decides what is decoded: a
+        // thumbnail of a 4K master is served from a one-eighth-scale decode
+        // rather than from a screen-sized one it would only throw away.
+        // `native` is never zero-sided (a probe refuses such a header) and
+        // neither is the validated geometry, so none of these can fail.
+        let request = tairix_wallpaper::decode_request(native, self.screen, self.dest, self.fit)
+            .ok_or(WallpaperRefusal::Unrenderable)?;
+        let nominal = tairix_wallpaper::nominal_source_size(native, self.screen, self.dest)
+            .ok_or(WallpaperRefusal::Unrenderable)?;
+        let placement = tairix_wallpaper::place(nominal, self.dest, self.fit)
+            .ok_or(WallpaperRefusal::Unrenderable)?;
+        Ok(WallpaperPlan {
+            request,
+            nominal,
+            placement,
+        })
+    }
+}
+
+/// Whether a request may draw a `dest_w`×`dest_h` destination modelling
+/// `screen`: both within the fixed destination bound, and the destination
+/// never larger than the screen it models — a preview never magnifies past
+/// the real display, which is what keeps the nominal scaling from ever
+/// upscaling the decoded source.
+const fn wallpaper_geometry_admitted(screen: (u32, u32), dest_w: u32, dest_h: u32) -> bool {
+    let (screen_w, screen_h) = screen;
+    dest_w != 0
+        && dest_w <= MAX_DESTINATION_WIDTH
+        && dest_h != 0
+        && dest_h <= MAX_DESTINATION_HEIGHT
+        && screen_w != 0
+        && screen_w <= MAX_DESTINATION_WIDTH
+        && screen_h != 0
+        && screen_h <= MAX_DESTINATION_HEIGHT
+        && dest_w <= screen_w
+        && dest_h <= screen_h
+}
+
+/// A complete uploaded document's bytes, refused past a wallpaper's bound.
+fn wallpaper_bytes(document: &Document) -> Result<&[u8], WallpaperRefusal> {
+    let bytes = document.bytes.as_slice();
+    if bytes.len() > tairix_wallpaper::MAX_WALLPAPER_BYTES {
+        return Err(WallpaperRefusal::MalformedRequest);
+    }
+    Ok(bytes)
+}
+
+/// The limits every wallpaper decode, and its plan, is held to.
+fn wallpaper_limits() -> DecodeLimits {
+    DecodeLimits::new(
+        MAX_WALLPAPER_DECODE_SIDE,
+        MAX_WALLPAPER_DECODE_SIDE,
+        MAX_WALLPAPER_DECODE_PIXELS,
+        MAX_WALLPAPER_PROGRESSIVE_COEFFICIENT_BYTES,
+    )
+}
+
+/// The refusal a failed decode, or decode plan, of a wallpaper source is.
+const fn refusal_of_decode(err: &DecodeError) -> WallpaperRefusal {
+    match err {
+        DecodeError::OutOfMemory => WallpaperRefusal::OutOfMemory,
+        DecodeError::UnknownFormat => WallpaperRefusal::UnsupportedFormat,
+        _ => WallpaperRefusal::MalformedImage,
+    }
+}
+
 /// Read `bytes`' header and answer the natural size it declares.
 ///
 /// The declared geometry is the file's own claim and nothing is sized from
@@ -1224,18 +1352,12 @@ fn decode_wallpaper_source(
     request_w: u32,
     request_h: u32,
 ) -> Result<RasterImage, WallpaperRefusal> {
-    let limits = DecodeLimits::new(
-        MAX_WALLPAPER_DECODE_SIDE,
-        MAX_WALLPAPER_DECODE_SIDE,
-        MAX_WALLPAPER_DECODE_PIXELS,
-        MAX_WALLPAPER_PROGRESSIVE_COEFFICIENT_BYTES,
-    );
-    tairix_image::decode_fitted(bytes, &limits, FitBox::new(request_w, request_h)).map_err(|err| {
-        match err {
-            DecodeError::OutOfMemory => WallpaperRefusal::Unrenderable,
-            _ => WallpaperRefusal::MalformedImage,
-        }
-    })
+    tairix_image::decode_fitted(
+        bytes,
+        &wallpaper_limits(),
+        FitBox::new(request_w, request_h),
+    )
+    .map_err(|err| refusal_of_decode(&err))
 }
 
 /// Turn a decoded image and the placement computed for its nominal size
@@ -1263,8 +1385,11 @@ fn hold_wallpaper(
     let (image_width, image_height, image_pixels) = if placement.tiled() && decoded != nominal {
         let source = Rgba8Image::new(decoded.0, decoded.1, image.pixels())
             .map_err(|_| WallpaperRefusal::Unrenderable)?;
-        let scaled = resample(&source, source.whole(), nominal.0, nominal.1)
-            .map_err(|_| WallpaperRefusal::Unrenderable)?;
+        let scaled =
+            resample(&source, source.whole(), nominal.0, nominal.1).map_err(|err| match err {
+                ResampleError::OutOfMemory => WallpaperRefusal::OutOfMemory,
+                _ => WallpaperRefusal::Unrenderable,
+            })?;
         (nominal.0, nominal.1, scaled)
     } else {
         (decoded.0, decoded.1, image.into_pixels())
@@ -1568,58 +1693,174 @@ pub fn render_wallpaper_for_screen<L: Launcher, S: tairix_log::Sink>(
     fit: WallpaperFit,
     image: &[u8],
 ) -> Result<Vec<u8>, WallpaperRenderFailure> {
-    let (screen_w, screen_h) = screen;
-    if width == 0
-        || width > MAX_DESTINATION_WIDTH
-        || height == 0
-        || height > MAX_DESTINATION_HEIGHT
-        || screen_w == 0
-        || screen_w > MAX_DESTINATION_WIDTH
-        || screen_h == 0
-        || screen_h > MAX_DESTINATION_HEIGHT
-        || width > screen_w
-        || height > screen_h
+    if !wallpaper_geometry_admitted(screen, width, height)
         || image.len() > tairix_wallpaper::MAX_WALLPAPER_BYTES
     {
         return Err(WallpaperRenderFailure::Refused(
             WallpaperRefusal::MalformedRequest,
         ));
     }
-    sandbox.ask(|sandbox| {
-        let outcome = prepare_and_assemble(sandbox, screen, width, height, fit, image);
-        // A failed release is discarded rather than overriding the outcome,
-        // though a release reply beyond belief still retires the worker.
-        let _ = sandbox.ask(release_wallpaper);
-        outcome
-    })
+    send_document(sandbox, image).map_err(WallpaperRenderFailure::Document)?;
+    let planned = plan_wallpaper(sandbox, screen, width, height, fit)?;
+    let mut out = fallible::filled(pixel_buffer_len(width, height), 0u8)
+        .ok_or(WallpaperRenderFailure::NoMemory)?;
+    planned.render_into(&mut out)?;
+    Ok(out)
 }
 
-/// Drive the prepare/band sequence and assemble the whole destination.
-fn prepare_and_assemble<L: Launcher, S: tairix_log::Sink>(
+/// Ask the worker what drawing the source already uploaded to it
+/// ([`upload_document`], [`send_document`]) onto a `width`×`height`
+/// destination modelling `screen` under `fit` would hold at its peak, before
+/// any of it is decoded.
+///
+/// The answer is a worker's own account of a decode it has not run, so a
+/// caller budgeting by it should still expect a render to fail for want of
+/// memory ([`WallpaperRenderFailure::out_of_memory`]). An inflated answer only
+/// holds back the render that gave it.
+///
+/// # Errors
+///
+/// [`WallpaperRenderFailure`]: the geometry is refused locally, or the worker
+/// refused the source, failed, or answered beyond belief.
+pub fn plan_wallpaper<L: Launcher, S: tairix_log::Sink>(
     sandbox: &mut ParserSandbox<L, S>,
     screen: (u32, u32),
     width: u32,
     height: u32,
     fit: WallpaperFit,
-    image: &[u8],
-) -> Result<Vec<u8>, WallpaperRenderFailure> {
-    let rows_per_band = prepare_wallpaper(sandbox, screen, width, height, fit, image)?;
-    if rows_per_band == 0 {
-        return Err(WallpaperRenderFailure::ReplyMalformed);
+) -> Result<PlannedWallpaper<'_, L, S>, WallpaperRenderFailure> {
+    if !wallpaper_geometry_admitted(screen, width, height) {
+        return Err(WallpaperRenderFailure::Refused(
+            WallpaperRefusal::MalformedRequest,
+        ));
     }
-    let mut out = vec![0u8; pixel_buffer_len(width, height)];
-    let mut first_row = 0u32;
-    while first_row < height {
-        let rows = rows_per_band.min(height - first_row);
-        let band = band_wallpaper(sandbox, first_row, rows, width)?;
-        let offset = pixel_buffer_len(width, first_row);
-        let expected = pixel_buffer_len(width, rows);
-        out.get_mut(offset..offset + expected)
-            .ok_or(WallpaperRenderFailure::ReplyMalformed)?
-            .copy_from_slice(&band);
-        first_row += rows;
+    let peak_bytes = sandbox.ask(|sandbox| {
+        let reply = sandbox
+            .request(&wallpaper_geometry_request(
+                OP_WALLPAPER_PLAN,
+                screen,
+                width,
+                height,
+                fit,
+            ))
+            .map_err(WallpaperRenderFailure::Sandbox)?;
+        let mut r = Reader::new(&reply);
+        match r.u8().map_err(|_| WallpaperRenderFailure::ReplyMalformed)? {
+            REPLY_WALLPAPER_PLANNED => {
+                let peak = r
+                    .u64()
+                    .map_err(|_| WallpaperRenderFailure::ReplyMalformed)?;
+                if !r.is_exhausted() {
+                    return Err(WallpaperRenderFailure::ReplyMalformed);
+                }
+                peak.checked_add(client_render_bytes(width, height))
+                    .ok_or(WallpaperRenderFailure::ReplyMalformed)
+            }
+            REPLY_ERROR => Err(decode_wallpaper_error(&mut r)),
+            _ => Err(WallpaperRenderFailure::ReplyMalformed),
+        }
+    })?;
+    Ok(PlannedWallpaper {
+        sandbox,
+        screen,
+        width,
+        height,
+        fit,
+        peak_bytes,
+    })
+}
+
+/// What one wallpaper render holds before its worker has planned it, in the
+/// worker and here together: the largest source, and the run it is pushed in
+/// on each side. What a caller accounting a render reserves until the plan
+/// says what the rest costs.
+pub const WALLPAPER_PREPARATION_BYTES: u64 =
+    tairix_wallpaper::MAX_WALLPAPER_BYTES as u64 + 2 * (DOC_PUSH_OVERHEAD + UPLOAD_RUN) as u64;
+
+/// What drawing a `width`×`height` destination holds on this side: the run a
+/// source is pushed in and the band reply the pixels arrive in.
+fn client_render_bytes(width: u32, height: u32) -> u64 {
+    let band_rows = rows_per_band(width).min(height);
+    UPLOAD_RUN as u64 + u64::from(band_rows) * u64::from(width) * 4 + 16
+}
+
+/// A source uploaded to a worker and costed ([`plan_wallpaper`]), which the
+/// worker holds until it is rendered or this is dropped.
+pub struct PlannedWallpaper<'s, L: Launcher, S: tairix_log::Sink> {
+    sandbox: &'s mut ParserSandbox<L, S>,
+    screen: (u32, u32),
+    width: u32,
+    height: u32,
+    fit: WallpaperFit,
+    peak_bytes: u64,
+}
+
+impl<L: Launcher, S: tairix_log::Sink> PlannedWallpaper<'_, L, S> {
+    /// The most bytes the render will hold at once, in its worker and here.
+    #[must_use]
+    pub const fn peak_bytes(&self) -> u64 {
+        self.peak_bytes
     }
-    Ok(out)
+
+    /// Decode, place and draw the planned wallpaper into `out`, which must be
+    /// exactly the destination's straight-alpha RGBA8 bytes.
+    ///
+    /// # Errors
+    ///
+    /// [`WallpaperRenderFailure`]: `out` is the wrong size, or the worker
+    /// refused, failed, or answered beyond belief.
+    pub fn render_into(self, out: &mut [u8]) -> Result<(), WallpaperRenderFailure> {
+        if out.len() != pixel_buffer_len(self.width, self.height) {
+            return Err(WallpaperRenderFailure::Refused(
+                WallpaperRefusal::MalformedRequest,
+            ));
+        }
+        let (screen, width, height, fit) = (self.screen, self.width, self.height, self.fit);
+        self.sandbox.ask(|sandbox| {
+            let rows_per_band = prepare_wallpaper(sandbox, screen, width, height, fit)?;
+            if rows_per_band == 0 {
+                return Err(WallpaperRenderFailure::ReplyMalformed);
+            }
+            let mut first_row = 0u32;
+            while first_row < height {
+                let rows = rows_per_band.min(height - first_row);
+                let offset = pixel_buffer_len(width, first_row);
+                let band = out
+                    .get_mut(offset..offset + pixel_buffer_len(width, rows))
+                    .ok_or(WallpaperRenderFailure::ReplyMalformed)?;
+                band_wallpaper_into(sandbox, first_row, rows, band)?;
+                first_row += rows;
+            }
+            Ok(())
+        })
+    }
+}
+
+impl<L: Launcher, S: tairix_log::Sink> Drop for PlannedWallpaper<'_, L, S> {
+    fn drop(&mut self) {
+        // The worker never holds a source or a decode past the render it was
+        // uploaded for. A failed release changes nothing the caller can act
+        // on, though a reply beyond belief still retires the worker.
+        let _ = self.sandbox.ask(release_wallpaper);
+    }
+}
+
+/// A request carrying `op` and the geometry a plan and a prepare share.
+fn wallpaper_geometry_request(
+    op: u8,
+    screen: (u32, u32),
+    width: u32,
+    height: u32,
+    fit: WallpaperFit,
+) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.u8(op);
+    w.u32(screen.0);
+    w.u32(screen.1);
+    w.u32(width);
+    w.u32(height);
+    w.u8(fit_to_wire(fit));
+    w.finish()
 }
 
 /// Send `OP_WALLPAPER_PREPARE` and return the worker's answered band size.
@@ -1629,18 +1870,15 @@ fn prepare_wallpaper<L: Launcher, S: tairix_log::Sink>(
     width: u32,
     height: u32,
     fit: WallpaperFit,
-    image: &[u8],
 ) -> Result<u32, WallpaperRenderFailure> {
-    send_document(sandbox, image).map_err(WallpaperRenderFailure::Document)?;
-    let mut w = Writer::new();
-    w.u8(OP_WALLPAPER_PREPARE);
-    w.u32(screen.0);
-    w.u32(screen.1);
-    w.u32(width);
-    w.u32(height);
-    w.u8(fit_to_wire(fit));
     let reply = sandbox
-        .request(&w.finish())
+        .request(&wallpaper_geometry_request(
+            OP_WALLPAPER_PREPARE,
+            screen,
+            width,
+            height,
+            fit,
+        ))
         .map_err(WallpaperRenderFailure::Sandbox)?;
     let mut r = Reader::new(&reply);
     let tag = r.u8().map_err(|_| WallpaperRenderFailure::ReplyMalformed)?;
@@ -1659,14 +1897,14 @@ fn prepare_wallpaper<L: Launcher, S: tairix_log::Sink>(
     }
 }
 
-/// Send one `OP_WALLPAPER_BAND` request and return its validated pixels
-/// (exactly `rows * width * 4` bytes).
-fn band_wallpaper<L: Launcher, S: tairix_log::Sink>(
+/// Send one `OP_WALLPAPER_BAND` request and copy its validated pixels into
+/// `out`, which is exactly those rows.
+fn band_wallpaper_into<L: Launcher, S: tairix_log::Sink>(
     sandbox: &mut ParserSandbox<L, S>,
     first_row: u32,
     rows: u32,
-    width: u32,
-) -> Result<Vec<u8>, WallpaperRenderFailure> {
+    out: &mut [u8],
+) -> Result<(), WallpaperRenderFailure> {
     let mut w = Writer::new();
     w.u8(OP_WALLPAPER_BAND);
     w.u32(first_row);
@@ -1687,14 +1925,14 @@ fn band_wallpaper<L: Launcher, S: tairix_log::Sink>(
             if echoed_first != first_row || echoed_rows != rows {
                 return Err(WallpaperRenderFailure::ReplyMalformed);
             }
-            let expected_len = pixel_buffer_len(width, rows);
             let pixels = r
-                .bytes(expected_len)
+                .bytes(out.len())
                 .map_err(|_| WallpaperRenderFailure::ReplyMalformed)?;
-            if pixels.len() != expected_len || !r.is_exhausted() {
+            if pixels.len() != out.len() || !r.is_exhausted() {
                 return Err(WallpaperRenderFailure::ReplyMalformed);
             }
-            Ok(pixels.to_vec())
+            out.copy_from_slice(pixels);
+            Ok(())
         }
         REPLY_ERROR => Err(decode_wallpaper_error(&mut r)),
         _ => Err(WallpaperRenderFailure::ReplyMalformed),
@@ -1757,6 +1995,14 @@ const DOC_PUSH_OVERHEAD: usize = 1 + crate::wire::BYTES_PREFIX;
 /// independently could sit just above what a frame can actually carry, and
 /// the request would then be refused by the framing rather than served.
 pub const MAX_DOCUMENT_CHUNK: usize = MAX_FRAME - DOC_PUSH_OVERHEAD;
+
+/// The run a client pushes a document in.
+///
+/// A run rather than the file, so neither side holds a second copy of the
+/// document while it travels: the client reads or copies one run at a time,
+/// and the worker's frame buffer never grows past one. A quarter of a
+/// mebibyte keeps an 8 MiB source to 32 round trips.
+const UPLOAD_RUN: usize = 256 * 1024;
 
 /// Document upload opcodes, shared by every consumer that hands this
 /// service an untrusted file.
@@ -1838,6 +2084,19 @@ pub enum DocumentFailure {
     ReplyMalformed,
     /// There was no memory for the request a chunk is sent in.
     NoMemory,
+}
+
+impl DocumentFailure {
+    /// Whether the upload failed for want of memory, on either side.
+    #[must_use]
+    pub const fn out_of_memory(&self) -> bool {
+        match self {
+            Self::Sandbox(failure) => failure.out_of_memory(),
+            Self::Refused(refusal) => matches!(refusal, DocumentRefusal::OutOfMemory),
+            Self::NoMemory => true,
+            Self::ReplyMalformed => false,
+        }
+    }
 }
 
 impl Unbelieved for DocumentFailure {
@@ -2066,11 +2325,11 @@ pub fn send_document<L: Launcher, S: tairix_log::Sink>(
     sandbox: &mut ParserSandbox<L, S>,
     bytes: &[u8],
 ) -> Result<(), DocumentFailure> {
-    let mut frame = PushFrame::new(bytes.len()).ok_or(DocumentFailure::NoMemory)?;
+    let mut frame = PushFrame::new(bytes.len().min(UPLOAD_RUN)).ok_or(DocumentFailure::NoMemory)?;
     sandbox.ask(|sandbox| {
         begin_document(sandbox, bytes.len())?;
         let mut sent = 0u64;
-        for chunk in bytes.chunks(MAX_DOCUMENT_CHUNK) {
+        for chunk in bytes.chunks(UPLOAD_RUN) {
             frame.chunk()[..chunk.len()].copy_from_slice(chunk);
             frame.push(sandbox, chunk.len(), &mut sent)?;
         }
@@ -2091,6 +2350,18 @@ pub enum UploadFailure<E> {
     Document(DocumentFailure),
 }
 
+impl<E> UploadFailure<E> {
+    /// Whether the upload failed for want of memory, on either side.
+    #[must_use]
+    pub const fn out_of_memory(&self) -> bool {
+        match self {
+            Self::NoMemory => true,
+            Self::Document(failure) => failure.out_of_memory(),
+            Self::Read(_) | Self::Shrank => false,
+        }
+    }
+}
+
 impl<E> Unbelieved for UploadFailure<E> {
     fn unbelieved(&self) -> bool {
         matches!(self, Self::Document(failure) if failure.unbelieved())
@@ -2104,8 +2375,8 @@ impl<E> From<DocumentFailure> for UploadFailure<E> {
 }
 
 /// Stream a file of `length` bytes to the worker without holding it whole:
-/// `read_at(offset, into)` fills a run of at most [`MAX_DOCUMENT_CHUNK`]
-/// bytes from the file, and each run is pushed and counted as it arrives.
+/// `read_at(offset, into)` fills a run of at most a fixed upload run from the
+/// file, and each run is pushed and counted as it arrives.
 ///
 /// # Errors
 ///
@@ -2120,7 +2391,7 @@ where
     L: Launcher,
     S: tairix_log::Sink,
 {
-    let mut frame = PushFrame::new(length).ok_or(UploadFailure::NoMemory)?;
+    let mut frame = PushFrame::new(length.min(UPLOAD_RUN)).ok_or(UploadFailure::NoMemory)?;
     sandbox.ask(|sandbox| {
         begin_document(sandbox, length)?;
         let mut sent = 0u64;

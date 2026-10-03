@@ -17,8 +17,8 @@ use tairix_xml::Element;
 
 use crate::encode::EncodeError;
 use crate::picture::{over, Picture, PictureSource};
-use crate::zip::{Archive, Writer, ZipError};
-use crate::{png, rgba_picture, DecodeError, DecodeLimits, RasterImage, Unkept};
+use crate::zip::{Archive, View, Writer, ZipError};
+use crate::{png, rgba_picture, DecodeError, DecodeLimits, RasterImage, Unkept, RGBA_BYTES};
 
 /// What the first entry holds, which names the archive OpenRaster.
 const MIMETYPE: &str = "image/openraster";
@@ -414,6 +414,90 @@ pub(crate) fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage,
     }
     let (document, _) = decode_native(bytes, limits)?;
     composed(&document)
+}
+
+/// An upper bound of the bytes a [`decode`] of `bytes` holds at once, read
+/// from the directory, the stack and the layers' own headers: the directory
+/// twice over, the stack and its parse, the merged image read and decoded,
+/// then — where that does not answer — the layers' path. A layer stored in
+/// the archive is costed from its header; one compressed there, or whose
+/// header will not read, at the most `limits` admit.
+///
+/// # Errors
+///
+/// What [`decode`] would refuse before decoding: a malformed archive, or a
+/// stack whose canvas will not read.
+pub(crate) fn peak_bytes(bytes: &[u8], limits: &DecodeLimits) -> Result<u64, DecodeError> {
+    let archive = open(bytes)?;
+    let stack = archive
+        .view("stack.xml")?
+        .ok_or(DecodeError::OraBadStack)?
+        .size;
+    let xml = stack_xml(&archive)?;
+    canvas(&tairix_xml::parse(&xml, "").map_err(|_| DecodeError::OraBadStack)?)?;
+    let directory = 2 * (archive.held_bytes() + MIMETYPE.len()) as u64;
+    let parsed = (stack as u64).saturating_add(tairix_xml::parse_peak_bytes(stack));
+    let merged = archive
+        .view("mergedimage.png")?
+        .map_or(0, |view| entry_peak(&view, limits));
+    // A stack the layers' path refuses ends that path before any layer is read.
+    let layered = read_stack(&xml, limits).map_or(0, |(size, placed, _)| {
+        layers_peak(&archive, (size, &placed, stack), limits)
+    });
+    Ok([parsed, merged, layered]
+        .into_iter()
+        .fold(directory, u64::saturating_add))
+}
+
+/// What the layers' path holds over a `canvas` holding `placed` read from a
+/// stack of `stack` bytes: the layer records, every layer kept decoded beside
+/// the costliest being read, the canvas they are composed into and one
+/// layer's colours copied out to compose it. A layer the archive does not
+/// hold ends the path there, so it costs nothing.
+fn layers_peak(
+    archive: &Archive<'_>,
+    ((width, height), placed, stack): ((u32, u32), &[Placed], usize),
+    limits: &DecodeLimits,
+) -> u64 {
+    use core::mem::size_of;
+    // The records grow by doubling; their names are copied out of the stack.
+    let records = ((4 + 3 * placed.len()) * size_of::<Placed>() + stack) as u64;
+    let mut kept = 0u64;
+    let mut widest = 0u64;
+    let mut reading = 0u64;
+    for view in placed
+        .iter()
+        .filter_map(|layer| archive.view(&layer.src).ok().flatten())
+    {
+        let picture = layer_bytes(&view, limits);
+        kept = kept.saturating_add(picture);
+        widest = widest.max(picture);
+        reading = reading.max(entry_peak(&view, limits));
+    }
+    let layers = (placed.len() * size_of::<OraLayer>()) as u64;
+    let canvas = u64::from(width) * u64::from(height) * RGBA_BYTES as u64;
+    [kept, reading, layers, canvas, widest]
+        .into_iter()
+        .fold(records, u64::saturating_add)
+}
+
+/// What reading `view` out of the archive and decoding it as a PNG holds.
+fn entry_peak(view: &View<'_>, limits: &DecodeLimits) -> u64 {
+    let decode = view
+        .stored
+        .and_then(|png| png::peak_bytes(png, limits).ok())
+        .unwrap_or_else(|| png::peak_ceiling(view.size, limits));
+    (view.size as u64).saturating_add(decode)
+}
+
+/// The colours the layer `view` holds decode to, kept beside the others.
+fn layer_bytes(view: &View<'_>, limits: &DecodeLimits) -> u64 {
+    view.stored
+        .and_then(|png| png::probe(png).ok())
+        .map_or(limits.max_pixels(), |(width, height)| {
+            u64::from(width) * u64::from(height)
+        })
+        .saturating_mul(RGBA_BYTES as u64)
 }
 
 /// `document`'s visible layers composed over clear, each as faint as it is.

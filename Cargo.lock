@@ -6904,6 +6904,7 @@ dependencies = [
 name = "tairix-test-wild-fault"
 version = "0.0.0"
 dependencies = [
+ "tairix-abi",
  "tairix-rt",
 ]
 

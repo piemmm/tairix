@@ -126,7 +126,8 @@ pub trait ProcessWait: Sync {
         Err(Errno::NotImplemented)
     }
 
-    /// Record that `child` was spawned by `parent`.
+    /// Record that `child` was spawned by `parent`, reported to waits as
+    /// `listing` says.
     ///
     /// Called from the `spawn` admit path before the child can run, so a
     /// subsequent [`Self::wait`] can validate the parent/child relationship
@@ -139,7 +140,12 @@ pub trait ProcessWait: Sync {
     /// [`Errno::OutOfMemory`] when the bookkeeping cannot grow. Nothing is
     /// recorded, and the admission is refused rather than start a child whose
     /// exit no parent could reap.
-    fn register_child(&self, _parent: ProcessId, _child: ProcessId) -> Result<(), Errno> {
+    fn register_child(
+        &self,
+        _parent: ProcessId,
+        _child: ProcessId,
+        _listing: ChildListing,
+    ) -> Result<(), Errno> {
         Ok(())
     }
 
@@ -264,6 +270,31 @@ impl ProcessWait for NullProcessWait {
 /// `KernelSyscallHandlers::with_process_wait`.
 pub static NULL_PROCESS_WAIT: NullProcessWait = NullProcessWait;
 
+/// Whether a wait that names no child — [`WAIT_PID_ANY`], or a wait-set
+/// member for any child — reports this one.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum ChildListing {
+    /// Reported to every wait of its parent.
+    Listed,
+    /// Reported only to a wait naming its pid. A parser-sandbox worker is
+    /// private: it belongs to the seam that spawned it, and a host program
+    /// reaping its own children must neither steal its exit status nor free
+    /// its number while that seam still means to signal it.
+    Private,
+}
+
+impl ChildListing {
+    /// The listing of a child spawned with or without the sandbox mode.
+    #[must_use]
+    pub const fn of_spawn(sandbox: bool) -> Self {
+        if sandbox {
+            Self::Private
+        } else {
+            Self::Listed
+        }
+    }
+}
+
 /// One tracked process's row in the [`ProcessTable`].
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 struct Row {
@@ -271,6 +302,7 @@ struct Row {
     /// nothing selects an orphan again, and its row only keeps
     /// [`ProcessTable::is_live`] honest until the orphan itself exits.
     parent: Option<u64>,
+    listing: ChildListing,
     /// Its exit code once it has exited: a reapable zombie.
     exit: Option<i32>,
     /// A stop not yet reported to a [`WaitFlags::STOPPED`] wait. Set when the
@@ -281,14 +313,19 @@ struct Row {
 
 /// One parent's tracked children.
 ///
-/// Both queues hold room for every child, and a child sits in each at most
+/// The queues serve [`WAIT_PID_ANY`] alone, so they hold listed children
+/// only. Both hold room for every child, and a child sits in each at most
 /// once, so an exit or a stop never allocates.
 #[derive(Debug)]
 struct Family {
     children: HashSet<u64, BuildSipHash13>,
-    /// Exited children, the first to exit at the front.
+    /// How many of `children` are [`ChildListing::Listed`]: with none, a
+    /// wait for any child has no child to wait for.
+    listed: usize,
+    /// Exited listed children, the first to exit at the front.
     zombies: VecDeque<u64>,
-    /// Children carrying an unreported stop, the first stopped at the front.
+    /// Listed children carrying an unreported stop, the first stopped at the
+    /// front.
     stopped: VecDeque<u64>,
 }
 
@@ -296,6 +333,7 @@ impl Family {
     fn new(hasher: BuildSipHash13) -> Self {
         Self {
             children: HashSet::with_hasher(hasher),
+            listed: 0,
             zombies: VecDeque::new(),
             stopped: VecDeque::new(),
         }
@@ -415,7 +453,7 @@ impl Tables {
         }
     }
 
-    fn register(&mut self, parent: u64, child: u64) -> Result<(), Errno> {
+    fn register(&mut self, parent: u64, child: u64, listing: ChildListing) -> Result<(), Errno> {
         // A row still standing under this number is replaced: the newer link
         // is the one that holds.
         self.forget(child);
@@ -433,6 +471,7 @@ impl Tables {
         let placed = family.reserve_child().and_then(|()| {
             let row = Row {
                 parent: Some(parent),
+                listing,
                 exit: None,
                 stop: None,
             };
@@ -442,6 +481,9 @@ impl Tables {
                 rows.remove(&child);
                 Errno::OutOfMemory
             })?;
+            if listing == ChildListing::Listed {
+                family.listed += 1;
+            }
             Ok(())
         });
         if placed.is_err() && family.children.is_empty() {
@@ -462,11 +504,14 @@ impl Tables {
             return;
         };
         family.children.remove(&child);
-        if row.exit.is_some() {
-            remove_queued(&mut family.zombies, child);
-        }
-        if row.stop.is_some() {
-            remove_queued(&mut family.stopped, child);
+        if row.listing == ChildListing::Listed {
+            family.listed -= 1;
+            if row.exit.is_some() {
+                remove_queued(&mut family.zombies, child);
+            }
+            if row.stop.is_some() {
+                remove_queued(&mut family.stopped, child);
+            }
         }
         if family.children.is_empty() {
             self.families.remove(&parent);
@@ -489,8 +534,10 @@ impl Tables {
         let Some(signal) = row.stop.take() else {
             return Reap::Blocked;
         };
-        if let Some(family) = self.families.get_mut(&parent) {
-            remove_queued(&mut family.stopped, child);
+        if row.listing == ChildListing::Listed {
+            if let Some(family) = self.families.get_mut(&parent) {
+                remove_queued(&mut family.stopped, child);
+            }
         }
         Reap::Ready(WaitedChild {
             pid: child,
@@ -506,7 +553,8 @@ impl ProcessTable {
         Self { tables: None }
     }
 
-    /// Record that `child` was spawned by `parent`.
+    /// Record that `child` was spawned by `parent`, reported to waits as
+    /// `listing` says.
     ///
     /// A row still standing under `child`'s number is replaced. That cannot
     /// happen while the number is held against the draw, and the newer link
@@ -515,10 +563,15 @@ impl ProcessTable {
     /// # Errors
     ///
     /// [`Errno::OutOfMemory`] when the table cannot grow; nothing is recorded.
-    pub fn register(&mut self, parent: ProcessId, child: ProcessId) -> Result<(), Errno> {
+    pub fn register(
+        &mut self,
+        parent: ProcessId,
+        child: ProcessId,
+        listing: ChildListing,
+    ) -> Result<(), Errno> {
         self.tables
             .get_or_insert_with(Tables::keyed)
-            .register(parent.0, child.0)
+            .register(parent.0, child.0, listing)
     }
 
     /// Mark `process` a reapable zombie carrying `code`, if it is a tracked
@@ -535,7 +588,7 @@ impl ProcessTable {
         let first = row.exit.replace(code).is_none();
         // The exit report supersedes any unobserved stop.
         let was_stopped = row.stop.take().is_some();
-        if first {
+        if first && row.listing == ChildListing::Listed {
             if let Some(family) = families.get_mut(&parent) {
                 if was_stopped {
                     remove_queued(&mut family.stopped, process.0);
@@ -556,7 +609,7 @@ impl ProcessTable {
             return None;
         }
         let parent = row.parent?;
-        if row.stop.replace(signal).is_none() {
+        if row.stop.replace(signal).is_none() && row.listing == ChildListing::Listed {
             if let Some(family) = families.get_mut(&parent) {
                 family.stopped.push_back(process.0);
             }
@@ -573,7 +626,7 @@ impl ProcessTable {
         let Some(row) = rows.get_mut(&process.0) else {
             return;
         };
-        if row.stop.take().is_none() {
+        if row.stop.take().is_none() || row.listing == ChildListing::Private {
             return;
         }
         if let Some(family) = row.parent.and_then(|parent| families.get_mut(&parent)) {
@@ -600,9 +653,11 @@ impl ProcessTable {
         };
         let child = match Selector::of(pid) {
             Selector::Invalid => return Reap::NoChild,
-            // A family stands only while it has a child.
+            // A family stands only while it has a child; private children
+            // are not any wildcard's to wait for.
             Selector::Any => match tables.families.get(&parent.0) {
                 None => return Reap::NoChild,
+                Some(family) if family.listed == 0 => return Reap::NoChild,
                 Some(family) => {
                     let stopped = family.stopped.front().filter(|_| report_stopped);
                     match family.zombies.front().or(stopped) {
@@ -640,6 +695,7 @@ impl ProcessTable {
             Selector::Invalid => ChildPeek::NoChild,
             Selector::Any => match tables.families.get(&parent.0) {
                 None => ChildPeek::NoChild,
+                Some(family) if family.listed == 0 => ChildPeek::NoChild,
                 Some(family) if family.zombies.is_empty() => ChildPeek::Running,
                 Some(_) => ChildPeek::Reapable,
             },
@@ -794,8 +850,13 @@ impl<A> ProcessWait for KernelProcessWait<A>
 where
     A: SchedulerArch + Send + Sync + 'static,
 {
-    fn register_child(&self, parent: ProcessId, child: ProcessId) -> Result<(), Errno> {
-        self.table.lock().register(parent, child)
+    fn register_child(
+        &self,
+        parent: ProcessId,
+        child: ProcessId,
+        listing: ChildListing,
+    ) -> Result<(), Errno> {
+        self.table.lock().register(parent, child, listing)
     }
 
     fn parent_exited(&self, parent: ProcessId) {
@@ -931,7 +992,7 @@ mod tests {
         );
         // The bookkeeping hooks are inert no-ops on the null producer.
         assert_eq!(
-            NULL_PROCESS_WAIT.register_child(ProcessId(1), ProcessId(2)),
+            NULL_PROCESS_WAIT.register_child(ProcessId(1), ProcessId(2), ChildListing::Listed),
             Ok(())
         );
         NULL_PROCESS_WAIT.record_exit(ProcessId(2), 0);
@@ -948,7 +1009,7 @@ mod tests {
     fn registered_but_unexited_child_blocks() {
         let mut table = ProcessTable::new();
         table
-            .register(ProcessId(1), ProcessId(2))
+            .register(ProcessId(1), ProcessId(2), ChildListing::Listed)
             .expect("registered");
         assert_eq!(table.reap(ProcessId(1), WAIT_PID_ANY, false), Reap::Blocked);
         // Selecting the specific child blocks the same way.
@@ -962,7 +1023,7 @@ mod tests {
     fn exited_child_is_reaped_once_and_removed() {
         let mut table = ProcessTable::new();
         table
-            .register(ProcessId(1), ProcessId(2))
+            .register(ProcessId(1), ProcessId(2), ChildListing::Listed)
             .expect("registered");
         table.record_exit(ProcessId(2), 7);
         assert_eq!(
@@ -977,13 +1038,113 @@ mod tests {
     }
 
     #[test]
+    fn a_private_child_is_no_wildcards_to_wait_for() {
+        let mut table = ProcessTable::new();
+        table
+            .register(ProcessId(1), ProcessId(2), ChildListing::Private)
+            .expect("registered");
+        assert_eq!(table.reap(ProcessId(1), WAIT_PID_ANY, false), Reap::NoChild);
+        assert_eq!(table.peek(ProcessId(1), WAIT_PID_ANY), ChildPeek::NoChild);
+        assert_eq!(table.peek(ProcessId(1), 2), ChildPeek::Running);
+
+        table.record_exit(ProcessId(2), 1);
+        // Exited, it is still not a wildcard's to take: only its owner's wait
+        // naming it reaps it, with its status intact.
+        assert_eq!(table.reap(ProcessId(1), WAIT_PID_ANY, false), Reap::NoChild);
+        assert_eq!(table.peek(ProcessId(1), WAIT_PID_ANY), ChildPeek::NoChild);
+        assert_eq!(table.peek(ProcessId(1), 2), ChildPeek::Reapable);
+        assert_eq!(
+            table.reap(ProcessId(1), 2, false),
+            Reap::Ready(WaitedChild {
+                pid: 2,
+                status: WaitStatus::Exited(1)
+            })
+        );
+        assert_eq!(table.reap(ProcessId(1), 2, false), Reap::NoChild);
+    }
+
+    #[test]
+    fn a_wildcard_takes_only_listed_children_beside_private_ones() {
+        let mut table = ProcessTable::new();
+        table
+            .register(ProcessId(1), ProcessId(2), ChildListing::Private)
+            .expect("registered");
+        table
+            .register(ProcessId(1), ProcessId(3), ChildListing::Listed)
+            .expect("registered");
+        table.record_exit(ProcessId(2), 1);
+        // The private zombie neither readies nor satisfies the wildcard while
+        // the listed child runs.
+        assert_eq!(table.peek(ProcessId(1), WAIT_PID_ANY), ChildPeek::Running);
+        assert_eq!(table.reap(ProcessId(1), WAIT_PID_ANY, false), Reap::Blocked);
+        table.record_exit(ProcessId(3), 0);
+        assert_eq!(
+            table.reap(ProcessId(1), WAIT_PID_ANY, false),
+            Reap::Ready(WaitedChild {
+                pid: 3,
+                status: WaitStatus::Exited(0)
+            })
+        );
+        // With the listed child gone, a wildcard has nothing left to wait
+        // for, though the private zombie still awaits its owner.
+        assert_eq!(table.reap(ProcessId(1), WAIT_PID_ANY, false), Reap::NoChild);
+        assert_eq!(table.peek(ProcessId(1), 2), ChildPeek::Reapable);
+    }
+
+    #[test]
+    fn a_private_childs_stop_is_reported_only_to_a_wait_naming_it() {
+        let mut table = ProcessTable::new();
+        table
+            .register(ProcessId(1), ProcessId(2), ChildListing::Private)
+            .expect("registered");
+        table
+            .register(ProcessId(1), ProcessId(3), ChildListing::Listed)
+            .expect("registered");
+        table.record_stop(ProcessId(2), Signal::Stop);
+        assert_eq!(table.reap(ProcessId(1), WAIT_PID_ANY, true), Reap::Blocked);
+        assert_eq!(
+            table.reap(ProcessId(1), 2, true),
+            Reap::Ready(WaitedChild {
+                pid: 2,
+                status: WaitStatus::Stopped(Signal::Stop)
+            })
+        );
+        // Resumed and stopped again, then reaped by name after its exit: no
+        // stale wildcard report is ever left behind.
+        table.record_continue(ProcessId(2));
+        table.record_stop(ProcessId(2), Signal::Stop);
+        table.record_exit(ProcessId(2), 0);
+        assert_eq!(table.reap(ProcessId(1), WAIT_PID_ANY, true), Reap::Blocked);
+        assert_eq!(
+            table.reap(ProcessId(1), 2, true),
+            Reap::Ready(WaitedChild {
+                pid: 2,
+                status: WaitStatus::Exited(0)
+            })
+        );
+    }
+
+    #[test]
+    fn a_dead_parents_private_zombie_is_dropped_with_its_number() {
+        let mut table = ProcessTable::new();
+        table
+            .register(ProcessId(1), ProcessId(2), ChildListing::Private)
+            .expect("registered");
+        table.record_exit(ProcessId(2), 1);
+        let mut dropped = alloc::vec::Vec::new();
+        table.parent_exited(ProcessId(1), |process| dropped.push(process));
+        assert_eq!(dropped, [ProcessId(2)]);
+        assert!(!table.is_live(ProcessId(2)));
+    }
+
+    #[test]
     fn specific_pid_reaps_only_that_child() {
         let mut table = ProcessTable::new();
         table
-            .register(ProcessId(1), ProcessId(2))
+            .register(ProcessId(1), ProcessId(2), ChildListing::Listed)
             .expect("registered");
         table
-            .register(ProcessId(1), ProcessId(3))
+            .register(ProcessId(1), ProcessId(3), ChildListing::Listed)
             .expect("registered");
         table.record_exit(ProcessId(3), 5);
         // Waiting on child 2 (still running) blocks even though 3 is a zombie.
@@ -1002,7 +1163,7 @@ mod tests {
     fn a_process_cannot_reap_another_parents_child() {
         let mut table = ProcessTable::new();
         table
-            .register(ProcessId(1), ProcessId(2))
+            .register(ProcessId(1), ProcessId(2), ChildListing::Listed)
             .expect("registered");
         table.record_exit(ProcessId(2), 0);
         // Task 9 is not the parent of child 2, so it sees no child.
@@ -1026,7 +1187,7 @@ mod tests {
         assert_eq!(table.peek(ProcessId(1), 2), ChildPeek::NoChild);
 
         table
-            .register(ProcessId(1), ProcessId(2))
+            .register(ProcessId(1), ProcessId(2), ChildListing::Listed)
             .expect("registered");
         assert_eq!(table.peek(ProcessId(1), WAIT_PID_ANY), ChildPeek::Running);
         assert_eq!(table.peek(ProcessId(1), 2), ChildPeek::Running);
@@ -1053,10 +1214,10 @@ mod tests {
     fn parent_exited_drops_unreaped_zombies() {
         let mut table = ProcessTable::new();
         table
-            .register(ProcessId(1), ProcessId(2))
+            .register(ProcessId(1), ProcessId(2), ChildListing::Listed)
             .expect("registered");
         table
-            .register(ProcessId(1), ProcessId(3))
+            .register(ProcessId(1), ProcessId(3), ChildListing::Listed)
             .expect("registered");
         assert!(
             table.record_exit(ProcessId(2), 7).is_some(),
@@ -1081,11 +1242,11 @@ mod tests {
             "an untracked process leaves nothing"
         );
         table
-            .register(ProcessId(1), ProcessId(41))
+            .register(ProcessId(1), ProcessId(41), ChildListing::Listed)
             .expect("registered");
         assert_eq!(table.record_exit(ProcessId(41), 3), Some(ProcessId(1)));
         table
-            .register(ProcessId(1), ProcessId(42))
+            .register(ProcessId(1), ProcessId(42), ChildListing::Listed)
             .expect("registered");
         table.parent_exited(ProcessId(1), |_| {});
         assert!(
@@ -1102,7 +1263,7 @@ mod tests {
     fn parent_exited_orphans_a_running_child_without_stranding_a_zombie() {
         let mut table = ProcessTable::new();
         table
-            .register(ProcessId(1), ProcessId(2))
+            .register(ProcessId(1), ProcessId(2), ChildListing::Listed)
             .expect("registered");
         table.parent_exited(ProcessId(1), |_| {});
         // Unmatchable by any parent selector...
@@ -1123,13 +1284,13 @@ mod tests {
     fn parent_exited_leaves_other_parents_children_untouched() {
         let mut table = ProcessTable::new();
         table
-            .register(ProcessId(1), ProcessId(2))
+            .register(ProcessId(1), ProcessId(2), ChildListing::Listed)
             .expect("registered");
         table
-            .register(ProcessId(9), ProcessId(3))
+            .register(ProcessId(9), ProcessId(3), ChildListing::Listed)
             .expect("registered");
         table
-            .register(ProcessId(9), ProcessId(4))
+            .register(ProcessId(9), ProcessId(4), ChildListing::Listed)
             .expect("registered");
         table.record_exit(ProcessId(3), 5);
         table.parent_exited(ProcessId(1), |_| {});
@@ -1150,7 +1311,7 @@ mod tests {
     fn parent_exited_discards_an_orphans_pending_stop() {
         let mut table = ProcessTable::new();
         table
-            .register(ProcessId(1), ProcessId(2))
+            .register(ProcessId(1), ProcessId(2), ChildListing::Listed)
             .expect("registered");
         table.record_stop(ProcessId(2), Signal::Stop);
         table.parent_exited(ProcessId(1), |_| {});
@@ -1162,7 +1323,7 @@ mod tests {
     fn peek_never_reveals_another_parents_child() {
         let mut table = ProcessTable::new();
         table
-            .register(ProcessId(1), ProcessId(2))
+            .register(ProcessId(1), ProcessId(2), ChildListing::Listed)
             .expect("registered");
         table.record_exit(ProcessId(2), 0);
         // Task 9 is not the parent: the peek observes nothing, exactly as
@@ -1204,7 +1365,7 @@ mod tests {
         let mut table = ProcessTable::new();
         for child in [3, 5, 7] {
             table
-                .register(ProcessId(1), ProcessId(child))
+                .register(ProcessId(1), ProcessId(child), ChildListing::Listed)
                 .expect("registered");
         }
         table.record_stop(ProcessId(3), Signal::Stop);
@@ -1240,7 +1401,7 @@ mod tests {
         let children = 2..10;
         for child in children.clone() {
             table
-                .register(ProcessId(1), ProcessId(child))
+                .register(ProcessId(1), ProcessId(child), ChildListing::Listed)
                 .expect("registered");
         }
         let room = |table: &ProcessTable| {
@@ -1268,7 +1429,7 @@ mod tests {
         let mut table = ProcessTable::new();
         for child in [2, 3, 4] {
             table
-                .register(ProcessId(1), ProcessId(child))
+                .register(ProcessId(1), ProcessId(child), ChildListing::Listed)
                 .expect("registered");
             table.record_exit(ProcessId(child), 0);
         }
@@ -1295,7 +1456,7 @@ mod tests {
     fn negative_non_wait_any_pid_is_no_child() {
         let mut table = ProcessTable::new();
         table
-            .register(ProcessId(1), ProcessId(2))
+            .register(ProcessId(1), ProcessId(2), ChildListing::Listed)
             .expect("registered");
         table.record_exit(ProcessId(2), 0);
         // -2 is not WAIT_PID_ANY and not a valid child id: fail closed.
@@ -1307,7 +1468,7 @@ mod tests {
     fn live_child_finds_only_a_running_child_of_the_asker() {
         let mut table = ProcessTable::new();
         table
-            .register(ProcessId(1), ProcessId(2))
+            .register(ProcessId(1), ProcessId(2), ChildListing::Listed)
             .expect("registered");
         // A live child of the real parent resolves.
         assert_eq!(table.live_child(ProcessId(1), 2), Some(ProcessId(2)));
@@ -1324,7 +1485,7 @@ mod tests {
     fn live_child_does_not_find_a_zombie() {
         let mut table = ProcessTable::new();
         table
-            .register(ProcessId(1), ProcessId(2))
+            .register(ProcessId(1), ProcessId(2), ChildListing::Listed)
             .expect("registered");
         table.record_exit(ProcessId(2), 0);
         // A child that already exited is a zombie awaiting reap, not a
@@ -1336,7 +1497,7 @@ mod tests {
     fn is_live_reports_only_a_tracked_running_task() {
         let mut table = ProcessTable::new();
         table
-            .register(ProcessId(1), ProcessId(2))
+            .register(ProcessId(1), ProcessId(2), ChildListing::Listed)
             .expect("registered");
         // A tracked, running process is live; an untracked one is not.
         assert!(table.is_live(ProcessId(2)));
@@ -1365,7 +1526,7 @@ mod tests {
     #[test]
     fn authorise_child_gates_the_signal_path() {
         let p = producer();
-        p.register_child(ProcessId(1), ProcessId(2))
+        p.register_child(ProcessId(1), ProcessId(2), ChildListing::Listed)
             .expect("registered");
         // The parent may signal its live child.
         assert_eq!(p.authorise_child(ProcessId(1), 2), Ok(ProcessId(2)));
@@ -1380,7 +1541,7 @@ mod tests {
     #[test]
     fn a_signalled_exit_makes_the_child_reapable_with_its_status() {
         let p = producer();
-        p.register_child(ProcessId(1), ProcessId(2))
+        p.register_child(ProcessId(1), ProcessId(2), ChildListing::Listed)
             .expect("registered");
         // A signalled child becomes a reapable zombie carrying the signal's
         // termination status, indistinguishable from a self-exit to `reap`.
@@ -1417,9 +1578,9 @@ mod tests {
         let (child, other_child) = (claim_peer_task(), claim_peer_task());
         let (waiter, sibling_waiter, stranger) =
             (claim_peer_task(), claim_peer_task(), claim_peer_task());
-        p.register_child(mine, ProcessId(child))
+        p.register_child(mine, ProcessId(child), ChildListing::Listed)
             .expect("registered");
-        p.register_child(theirs, ProcessId(other_child))
+        p.register_child(theirs, ProcessId(other_child), ChildListing::Listed)
             .expect("registered");
         for (parent, task) in [(mine, waiter), (mine, sibling_waiter), (theirs, stranger)] {
             PROCWAIT_WAITQ.register_keyed(procwait_key(parent), task, NO_DEADLINE);
@@ -1454,7 +1615,7 @@ mod tests {
         let (parent, reaped, orphaned) = (ProcessId(0x7A11_0000), 0x7A11_0001, 0x7A11_0002);
         for child in [reaped, orphaned] {
             reserve_task_id(child).expect("held at admission");
-            p.register_child(parent, ProcessId(child))
+            p.register_child(parent, ProcessId(child), ChildListing::Listed)
                 .expect("registered");
             assert!(p.record_exit(ProcessId(child), 0), "a reap is owed");
             assert!(
@@ -1488,7 +1649,7 @@ mod tests {
     #[test]
     fn producer_reaps_an_already_exited_child_without_blocking() {
         let p = producer();
-        p.register_child(ProcessId(1), ProcessId(2))
+        p.register_child(ProcessId(1), ProcessId(2), ChildListing::Listed)
             .expect("registered");
         // The child has already exited by the time the parent waits, so the
         // reap is immediate — the blocking park path is never reached (it
@@ -1512,7 +1673,7 @@ mod tests {
     #[test]
     fn producer_waiting_on_a_non_child_fails_closed() {
         let p = producer();
-        p.register_child(ProcessId(1), ProcessId(2))
+        p.register_child(ProcessId(1), ProcessId(2), ChildListing::Listed)
             .expect("registered");
         p.record_exit(ProcessId(2), 0);
         // Task 9 never spawned child 2: it may not reap it.
@@ -1533,7 +1694,7 @@ mod tests {
         // resumable user kthread is published, so the park cannot proceed and
         // the producer fails closed with `NotImplemented` rather than
         // busy-spinning forever.
-        p.register_child(ProcessId(1), ProcessId(2))
+        p.register_child(ProcessId(1), ProcessId(2), ChildListing::Listed)
             .expect("registered");
         assert_eq!(
             p.wait(ProcessId(1), REAPER, WAIT_PID_ANY, WaitFlags::empty()),
@@ -1544,7 +1705,7 @@ mod tests {
     #[test]
     fn producer_poll_reaps_an_exited_child_without_blocking() {
         let p = producer();
-        p.register_child(ProcessId(1), ProcessId(2))
+        p.register_child(ProcessId(1), ProcessId(2), ChildListing::Listed)
             .expect("registered");
         p.record_exit(ProcessId(2), 9);
         assert_eq!(
@@ -1567,7 +1728,7 @@ mod tests {
         // A registered-but-unexited child: a *blocking* wait here would park
         // (and fail closed in a host test), but the poll reports `WouldBlock`
         // immediately without ever touching the scheduler.
-        p.register_child(ProcessId(1), ProcessId(2))
+        p.register_child(ProcessId(1), ProcessId(2), ChildListing::Listed)
             .expect("registered");
         assert_eq!(
             p.poll(ProcessId(1), WAIT_PID_ANY, WaitFlags::NONBLOCK),
@@ -1582,7 +1743,7 @@ mod tests {
     #[test]
     fn producer_poll_of_a_non_child_fails_closed() {
         let p = producer();
-        p.register_child(ProcessId(1), ProcessId(2))
+        p.register_child(ProcessId(1), ProcessId(2), ChildListing::Listed)
             .expect("registered");
         p.record_exit(ProcessId(2), 0);
         // Task 9 never spawned child 2, and a caller with no children at all
@@ -1611,7 +1772,7 @@ mod tests {
     fn a_pending_stop_is_reported_once_and_only_when_requested() {
         let mut table = ProcessTable::new();
         table
-            .register(ProcessId(1), ProcessId(2))
+            .register(ProcessId(1), ProcessId(2), ChildListing::Listed)
             .expect("registered");
         table.record_stop(ProcessId(2), Signal::Stop);
         // Without the stop-report request the stopped child is invisible:
@@ -1642,7 +1803,7 @@ mod tests {
     fn a_continue_clears_an_unreported_stop() {
         let mut table = ProcessTable::new();
         table
-            .register(ProcessId(1), ProcessId(2))
+            .register(ProcessId(1), ProcessId(2), ChildListing::Listed)
             .expect("registered");
         table.record_stop(ProcessId(2), Signal::Stop);
         // The child is resumed before the parent ever looked: the stale
@@ -1655,7 +1816,7 @@ mod tests {
     fn an_exit_supersedes_an_unreported_stop() {
         let mut table = ProcessTable::new();
         table
-            .register(ProcessId(1), ProcessId(2))
+            .register(ProcessId(1), ProcessId(2), ChildListing::Listed)
             .expect("registered");
         table.record_stop(ProcessId(2), Signal::Stop);
         // The child died while stopped (e.g. a kill): the terminal exit is
@@ -1675,7 +1836,7 @@ mod tests {
     fn a_stop_on_a_zombie_is_ignored() {
         let mut table = ProcessTable::new();
         table
-            .register(ProcessId(1), ProcessId(2))
+            .register(ProcessId(1), ProcessId(2), ChildListing::Listed)
             .expect("registered");
         table.record_exit(ProcessId(2), 3);
         // A dead child cannot stop; the exit report stands untouched.
@@ -1693,10 +1854,10 @@ mod tests {
     fn a_reapable_zombie_wins_over_a_pending_stop() {
         let mut table = ProcessTable::new();
         table
-            .register(ProcessId(1), ProcessId(2))
+            .register(ProcessId(1), ProcessId(2), ChildListing::Listed)
             .expect("registered");
         table
-            .register(ProcessId(1), ProcessId(3))
+            .register(ProcessId(1), ProcessId(3), ChildListing::Listed)
             .expect("registered");
         table.record_stop(ProcessId(2), Signal::Stop);
         table.record_exit(ProcessId(3), 0);
@@ -1722,7 +1883,7 @@ mod tests {
     fn peek_does_not_consume_or_reveal_a_pending_stop() {
         let mut table = ProcessTable::new();
         table
-            .register(ProcessId(1), ProcessId(2))
+            .register(ProcessId(1), ProcessId(2), ChildListing::Listed)
             .expect("registered");
         table.record_stop(ProcessId(2), Signal::Stop);
         // The wait-set readiness peek is about reapability; a stopped child
@@ -1740,7 +1901,7 @@ mod tests {
     #[test]
     fn producer_poll_reports_a_pending_stop_without_blocking() {
         let p = producer();
-        p.register_child(ProcessId(1), ProcessId(2))
+        p.register_child(ProcessId(1), ProcessId(2), ChildListing::Listed)
             .expect("registered");
         p.record_stop(ProcessId(2), Signal::Stop);
         let flags = WaitFlags::from_bits(WaitFlags::NONBLOCK.bits() | WaitFlags::STOPPED.bits())
@@ -1765,7 +1926,7 @@ mod tests {
     #[test]
     fn producer_wait_reports_an_already_pending_stop_without_parking() {
         let p = producer();
-        p.register_child(ProcessId(1), ProcessId(2))
+        p.register_child(ProcessId(1), ProcessId(2), ChildListing::Listed)
             .expect("registered");
         p.record_stop(ProcessId(2), Signal::Stop);
         // The stop is already pending when the parent waits, so the report

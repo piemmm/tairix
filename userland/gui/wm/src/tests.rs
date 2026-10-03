@@ -1366,22 +1366,20 @@ fn more_dirty_rectangles_than_the_list_holds_collapse_to_one_bounding_present() 
 #[test]
 fn active_theme_drives_compositor_background() {
     // The compositor sources its root background from the active theme,
-    // and a runtime theme switch (dark -> light) changes the colour the
+    // and a runtime theme switch (light -> dark) changes the colour the
     // screen clears to. One shared definition drives the WM.
     let mut themes = ThemeRegistry::with_builtins();
-    let dark_bg = themes.active().palette().desktop;
-    let mut c = new_compositor(mode(2, 2), dark_bg.into()).expect("compositor");
-    c.composite();
-    assert_eq!(frame_pixel(&c, 0, 0), dark_bg.to_array());
-
-    themes
-        .set_active(ThemeId::LIGHT)
-        .expect("light is built in");
     let light_bg = themes.active().palette().desktop;
-    assert_ne!(light_bg, dark_bg);
     let mut c = new_compositor(mode(2, 2), light_bg.into()).expect("compositor");
     c.composite();
     assert_eq!(frame_pixel(&c, 0, 0), light_bg.to_array());
+
+    themes.set_active(ThemeId::DARK).expect("dark is built in");
+    let dark_bg = themes.active().palette().desktop;
+    assert_ne!(dark_bg, light_bg);
+    let mut c = new_compositor(mode(2, 2), dark_bg.into()).expect("compositor");
+    c.composite();
+    assert_eq!(frame_pixel(&c, 0, 0), dark_bg.to_array());
 }
 
 #[test]

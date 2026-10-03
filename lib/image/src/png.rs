@@ -20,7 +20,6 @@
 //! passes' scanlines) is unfiltered and its samples expanded to
 //! straight-alpha RGBA8.
 
-use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_util::fallible;
@@ -265,6 +264,12 @@ fn parse_trns(data: &[u8], ihdr: &Ihdr, palette: Option<&[[u8; 3]]>) -> Result<T
 /// chunk that is not `IHDR`, a failed CRC, or an illegal bit depth, colour
 /// type, compression, filter or interlace method is refused here too.
 pub(crate) fn probe(bytes: &[u8]) -> Result<(u32, u32), DecodeError> {
+    let ihdr = first_header(bytes, &PROBE_LIMITS)?;
+    Ok((ihdr.width, ihdr.height))
+}
+
+/// The `IHDR` a file must open with, held to `limits`.
+fn first_header(bytes: &[u8], limits: &DecodeLimits) -> Result<Ihdr, DecodeError> {
     if !bytes.starts_with(&SIGNATURE) {
         return Err(DecodeError::BadSignature);
     }
@@ -272,8 +277,90 @@ pub(crate) fn probe(bytes: &[u8]) -> Result<(u32, u32), DecodeError> {
     if chunk_type != IHDR {
         return Err(DecodeError::HeaderNotFirst);
     }
-    let ihdr = parse_ihdr(payload, &PROBE_LIMITS)?;
-    Ok((ihdr.width, ihdr.height))
+    parse_ihdr(payload, limits)
+}
+
+/// The payload bytes the chunks of `stream` declare, read from their
+/// headers alone. A stream whose structure breaks off is summed to where it
+/// does; the parse refuses it there. Neither sum is ever more than `stream`.
+#[derive(Default)]
+struct Declared {
+    /// The image data, so its concatenation is reserved once rather than
+    /// regrown, and copied, chunk by chunk.
+    image_data: usize,
+    /// The palette and transparency tables a parse copies out.
+    tables: usize,
+}
+
+fn declared(stream: &[u8]) -> Declared {
+    let mut pos = 0usize;
+    let mut sums = Declared::default();
+    while let Some(header) = stream.get(pos..).and_then(|rest| rest.get(..8)) {
+        let length = usize::try_from(u32::from_be_bytes([
+            header[0], header[1], header[2], header[3],
+        ]))
+        .unwrap_or(usize::MAX);
+        let Some(next) = length
+            .checked_add(12)
+            .and_then(|chunk| pos.checked_add(chunk))
+            .filter(|&next| next <= stream.len())
+        else {
+            break;
+        };
+        match <[u8; 4]>::try_from(&header[4..8]) {
+            Ok(IDAT) => sums.image_data += length,
+            Ok(PLTE | TRNS) => sums.tables += length,
+            _ => {}
+        }
+        pos = next;
+    }
+    sums
+}
+
+/// An upper bound of the bytes a [`decode`] holds at once for any PNG of
+/// `input_len` bytes `limits` admit, for a caller that cannot read its
+/// header: the image data, the tables at their largest, sixteen-bit RGBA
+/// scanlines with every pass's filter bytes, and the RGBA picture.
+pub(crate) fn peak_ceiling(input_len: usize, limits: &DecodeLimits) -> u64 {
+    // The palette and its transparency at their largest.
+    const TABLE_BYTES: u64 = 256 * 3 + 256;
+    let pixels = limits.max_pixels();
+    let rows = u64::from(limits.max_height()).min(pixels);
+    // Adam7's passes hold every row at most twice over, and seven more.
+    let inflated = pixels
+        .saturating_mul(8)
+        .saturating_add(rows.saturating_mul(2))
+        .saturating_add(7);
+    [
+        TABLE_BYTES,
+        inflated,
+        pixels.saturating_mul(RGBA_BYTES as u64),
+    ]
+    .into_iter()
+    .fold(input_len as u64, u64::saturating_add)
+}
+
+/// An upper bound of the bytes a [`decode`] of `bytes` holds at once, read
+/// from its chunk headers: the concatenated image data, the palette and
+/// transparency tables, the inflated scanlines, and the RGBA picture.
+///
+/// # Errors
+///
+/// What [`decode`] would refuse from the header: a bad signature, a first
+/// chunk that is not a valid `IHDR`, or a size `limits` do not admit.
+pub(crate) fn peak_bytes(bytes: &[u8], limits: &DecodeLimits) -> Result<u64, DecodeError> {
+    let ihdr = first_header(bytes, limits)?;
+    let bits = bits_per_pixel(ihdr.colour_type, ihdr.bit_depth);
+    let inflated = expected_decompressed_len(&passes_for(&ihdr), bits)?;
+    let picture = u64::from(ihdr.width)
+        .checked_mul(u64::from(ihdr.height))
+        .and_then(|pixels| pixels.checked_mul(RGBA_BYTES as u64))
+        .ok_or(DecodeError::DimensionsOverflow)?;
+    let stream = declared(bytes.get(SIGNATURE.len()..).unwrap_or_default());
+    [stream.tables as u64, inflated, picture]
+        .into_iter()
+        .try_fold(stream.image_data as u64, u64::checked_add)
+        .ok_or(DecodeError::DimensionsOverflow)
 }
 
 /// A validated chunk stream: the header, the palette and transparency it
@@ -351,6 +438,7 @@ fn parse(bytes: &[u8], limits: &DecodeLimits) -> Result<Parsed, DecodeError> {
         if seen_iend {
             return Err(DecodeError::DataAfterEnd);
         }
+        let chunk_pos = pos;
         let (chunk_type, payload, next_pos) = read_chunk(rest, pos)?;
         pos = next_pos;
 
@@ -390,7 +478,12 @@ fn parse(bytes: &[u8], limits: &DecodeLimits) -> Result<Parsed, DecodeError> {
                 if idat_finished {
                     return Err(DecodeError::ImageDataNotContiguous);
                 }
-                if !fallible::reserve(&mut idat, payload.len()) {
+                let run = if seen_idat {
+                    payload.len()
+                } else {
+                    declared(&rest[chunk_pos..]).image_data
+                };
+                if !fallible::reserve(&mut idat, run) {
                     return Err(DecodeError::OutOfMemory);
                 }
                 idat.extend_from_slice(payload);
@@ -545,6 +638,7 @@ fn to_usize64(value: u64) -> Result<usize, DecodeError> {
 
 /// One Adam7 pass's placement in the final image, or the single implicit
 /// pass covering the whole image when the file is not interlaced.
+#[derive(Clone, Copy)]
 struct Pass {
     row_start: u32,
     col_start: u32,
@@ -585,30 +679,33 @@ const fn pass_extent(total: u32, start: u32, step: u32) -> u32 {
 }
 
 /// The passes an image decodes as: the seven Adam7 passes when interlaced,
-/// or a single pass covering the whole image otherwise.
-fn passes_for(ihdr: &Ihdr) -> Vec<Pass> {
+/// or one pass covering the whole image and six empty ones otherwise. An
+/// empty pass is skipped wherever passes are walked.
+fn passes_for(ihdr: &Ihdr) -> [Pass; ADAM7.len()] {
+    let mut passes = [Pass {
+        row_start: 0,
+        col_start: 0,
+        row_step: 1,
+        col_step: 1,
+        width: 0,
+        height: 0,
+    }; ADAM7.len()];
     if ihdr.interlaced {
-        ADAM7
-            .iter()
-            .map(|&(row_start, col_start, row_step, col_step)| Pass {
+        for (pass, &(row_start, col_start, row_step, col_step)) in passes.iter_mut().zip(&ADAM7) {
+            *pass = Pass {
                 row_start,
                 col_start,
                 row_step,
                 col_step,
                 width: pass_extent(ihdr.width, col_start, col_step),
                 height: pass_extent(ihdr.height, row_start, row_step),
-            })
-            .collect()
+            };
+        }
     } else {
-        vec![Pass {
-            row_start: 0,
-            col_start: 0,
-            row_step: 1,
-            col_step: 1,
-            width: ihdr.width,
-            height: ihdr.height,
-        }]
+        passes[0].width = ihdr.width;
+        passes[0].height = ihdr.height;
     }
+    passes
 }
 
 /// Bits per complete pixel for `colour_type` at `bit_depth`.
@@ -685,55 +782,48 @@ fn paeth_predictor(a: u8, b: u8, c: u8) -> u8 {
     }
 }
 
-/// Reconstruct one pass's scanlines from its filtered bytes.
+/// Reconstruct one pass's scanlines in place.
 ///
-/// `raw` holds exactly `pass_height` scanlines, each a filter-type byte
-/// followed by `row_sample_bytes` filtered sample bytes. Returns the
-/// unfiltered sample bytes, `row_sample_bytes` per row, with no filter
-/// bytes interleaved.
+/// `scanlines` holds `pass_height` rows, each a filter-type byte followed by
+/// `row_sample_bytes` filtered sample bytes, and each row's samples are
+/// replaced by their reconstruction. A sample is predicted only from bytes to
+/// its left and from the row above, both already reconstructed when it is
+/// reached, so no second buffer is needed.
 fn defilter_pass(
-    raw: &[u8],
+    scanlines: &mut [u8],
     pass_height: u32,
     row_sample_bytes: usize,
     bpp: usize,
-) -> Result<Vec<u8>, DecodeError> {
-    let total = row_sample_bytes
-        .checked_mul(to_usize(pass_height)?)
+) -> Result<(), DecodeError> {
+    let stride = row_sample_bytes
+        .checked_add(1)
         .ok_or(DecodeError::DimensionsOverflow)?;
-    let mut out = fallible::filled(total, 0u8).ok_or(DecodeError::OutOfMemory)?;
-    let mut raw_pos = 0usize;
-    let mut previous_row_start: Option<usize> = None;
-
-    for row in 0..to_usize(pass_height)? {
-        let filter_type = *raw
-            .get(raw_pos)
-            .ok_or(DecodeError::CompressedSizeMismatch)?;
-        raw_pos += 1;
-        let filtered = raw
-            .get(raw_pos..raw_pos + row_sample_bytes)
-            .ok_or(DecodeError::CompressedSizeMismatch)?;
-        raw_pos += row_sample_bytes;
-
-        let out_start = row * row_sample_bytes;
+    let rows = to_usize(pass_height)?;
+    if Some(scanlines.len()) != stride.checked_mul(rows) {
+        return Err(DecodeError::CompressedSizeMismatch);
+    }
+    for row in 0..rows {
+        let (above, current) = scanlines.split_at_mut(row * stride);
+        let prior = above
+            .len()
+            .checked_sub(row_sample_bytes)
+            .map(|at| &above[at..]);
+        let Some((&mut filter_type, samples)) = current[..stride].split_first_mut() else {
+            return Err(DecodeError::CompressedSizeMismatch);
+        };
         for i in 0..row_sample_bytes {
-            let x = filtered[i];
-            let a = if i >= bpp {
-                out[out_start + i - bpp]
-            } else {
-                0
-            };
-            let b = previous_row_start.map_or(0, |p| out[p + i]);
+            let a = if i >= bpp { samples[i - bpp] } else { 0 };
+            let b = prior.map_or(0, |prior| prior[i]);
             let c = if i >= bpp {
-                previous_row_start.map_or(0, |p| out[p + i - bpp])
+                prior.map_or(0, |prior| prior[i - bpp])
             } else {
                 0
             };
             let predicted = predict(filter_type, a, b, c).ok_or(DecodeError::InvalidFilterType)?;
-            out[out_start + i] = x.wrapping_add(predicted);
+            samples[i] = samples[i].wrapping_add(predicted);
         }
-        previous_row_start = Some(out_start);
     }
-    Ok(out)
+    Ok(())
 }
 
 /// Extract sample `channel` (of `channels`) for pixel `x` from a
@@ -909,20 +999,15 @@ where
             .checked_add(1)
             .and_then(|full| full.checked_mul(to_usize(pass.height).ok()?))
             .ok_or(DecodeError::DimensionsOverflow)?;
-        let pass_raw = raw
-            .get(raw_pos..raw_pos + pass_len)
+        let scanlines = raw
+            .get_mut(raw_pos..raw_pos + pass_len)
             .ok_or(DecodeError::CompressedSizeMismatch)?;
         raw_pos += pass_len;
 
-        let defiltered = defilter_pass(pass_raw, pass.height, row_sample_bytes, bpp)?;
+        defilter_pass(scanlines, pass.height, row_sample_bytes, bpp)?;
 
-        for y in 0..pass.height {
-            let row_start = to_usize(y)?
-                .checked_mul(row_sample_bytes)
-                .ok_or(DecodeError::DimensionsOverflow)?;
-            let row = defiltered
-                .get(row_start..row_start + row_sample_bytes)
-                .ok_or(DecodeError::CompressedSizeMismatch)?;
+        for (y, scanline) in (0..pass.height).zip(scanlines.chunks_exact(row_sample_bytes + 1)) {
+            let row = &scanline[1..];
             let out_y = to_usize(placed_coordinate(pass.row_start, y, pass.row_step)?)?;
             for x in 0..pass.width {
                 let out_x = to_usize(placed_coordinate(pass.col_start, x, pass.col_step)?)?;

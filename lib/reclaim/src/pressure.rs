@@ -207,6 +207,17 @@ const CRITICAL_EXIT_DIVISOR: usize = 20; // leave above 5% free
 // commits, so the two floors can never diverge: `RESERVE_DIVISOR` is
 // defined once above and imported there.
 
+/// What speculative work — memory spent ahead of need and shed rather than
+/// relied on, a gallery's thumbnails — may hold together on a machine of
+/// `total` bytes: the room between where free memory stops being plentiful
+/// and where clean caches start being reclaimed in earnest, so such work
+/// begun on a plentiful machine can never by itself push it past
+/// [`PressureBand::Mild`].
+#[must_use]
+pub const fn speculative_budget(total: u64) -> u64 {
+    total / MILD_ENTER_DIVISOR as u64 - total / MODERATE_ENTER_DIVISOR as u64
+}
+
 /// The per-band enter/exit watermarks and the reserve floor, in bytes,
 /// derived from the size of the backing resource — never free-standing
 /// magic numbers, so a small board and a large server both get a
@@ -838,6 +849,21 @@ mod tests {
 
     fn budget() -> CacheBudget {
         CacheBudget::from_backing(64 * 1024 * 1024)
+    }
+
+    #[test]
+    fn speculative_work_begun_on_a_plentiful_machine_stops_short_of_moderate() {
+        let t = PressureThresholds::from_total(TOTAL);
+        let budget = speculative_budget(TOTAL as u64);
+        // The least a machine still reported plentiful holds free is the mild
+        // watermark; spending the whole budget from there leaves it above the
+        // moderate one.
+        let left = t.enter[0] as u64 - budget;
+        assert!(left >= t.enter[1] as u64, "{left} below {}", t.enter[1]);
+        assert!(budget > 0);
+        // A machine sixteen times larger affords sixteen times as much, to
+        // within the divisions' rounding.
+        assert!(speculative_budget(TOTAL as u64 * 16).abs_diff(budget * 16) < 16);
     }
 
     #[test]

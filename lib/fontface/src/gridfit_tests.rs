@@ -6,9 +6,9 @@ use core::cmp::Ordering;
 use alloc::vec::Vec;
 
 use crate::engine::Segment;
-use crate::gridfit::{fit, AlignZones, Axes, Zone};
+use crate::gridfit::{fit, Axes, FitMetrics, Zone};
 use crate::tests::asset;
-use crate::{CellGeometry, Face, ATLAS_EM_PX};
+use crate::{AxisSetting, CellGeometry, Face, ATLAS_EM_PX};
 use tairix_util::mathf;
 
 /// One outline segment.
@@ -67,7 +67,7 @@ fn columns(segments: &[Segment]) -> (i32, i32) {
 /// Fit with no alignment zones, the way columns are always fitted and rows
 /// are for a face that declares none.
 fn fit_unzoned(segments: &mut [Segment], axes: Axes) {
-    fit(segments, axes, &AlignZones::default(), 0.0, 1.0);
+    fit(segments, axes, &FitMetrics::default(), 0.0, 1.0);
 }
 
 #[test]
@@ -75,7 +75,7 @@ fn a_stroke_straddling_two_pixels_lands_on_one() {
     // The defect the fitter exists for: 1.2 pixels of stem spread over two
     // columns at 60% each, instead of one solid column.
     let mut stem = rect(1.3, 3.4, 2.5, 12.6);
-    fit_unzoned(&mut stem, Axes::RowsAndColumns);
+    fit_unzoned(&mut stem, Axes::RowsAndColumns { span: None });
     assert_eq!(columns(&stem), (1, 2), "1.2 columns of stem draw one");
     assert_eq!(rows(&stem), (4, 13), "and 9.2 rows of it draw nine");
 }
@@ -85,7 +85,7 @@ fn a_hairline_thickens_to_a_pixel_rather_than_fading_away() {
     // Rounding each edge on its own would collapse anything under half a
     // pixel to nothing, which is how a rule or a box border disappears.
     let mut hairline = rect(2.4, 4.0, 2.7, 9.0);
-    fit_unzoned(&mut hairline, Axes::RowsAndColumns);
+    fit_unzoned(&mut hairline, Axes::RowsAndColumns { span: None });
     let (left, right) = columns(&hairline);
     assert_eq!(right - left, 1, "0.3px of stem still draws a whole pixel");
 }
@@ -101,7 +101,7 @@ fn a_diagonal_is_left_alone() {
         seg(2.0, 13.1, 1.3, 12.7),
     ];
     let mut fitted = diagonal.clone();
-    fit_unzoned(&mut fitted, Axes::RowsAndColumns);
+    fit_unzoned(&mut fitted, Axes::RowsAndColumns { span: None });
     assert!(
         unmoved(&diagonal, &fitted, |s| (s.x0, s.x1)),
         "the diagonal moved sideways"
@@ -127,7 +127,7 @@ fn rows_only_fitting_leaves_every_column_exactly_where_it_was() {
 fn an_alignment_zone_lands_two_glyphs_on_one_row() {
     // The reason zones exist: `x` and `o` reach almost but not quite the same
     // height, and rounding each on its own leaves a line of text ragged.
-    let zones = AlignZones::new(alloc::vec![Zone::new(-7.0, -7.4)]);
+    let zones = FitMetrics::new(alloc::vec![Zone::new(-7.0, -7.4)], None);
     let fitted_top = |top: f64| {
         let mut glyph = rect(1.0, top, 3.0, 13.0);
         fit(&mut glyph, Axes::Rows, &zones, 13.0, 1.0);
@@ -142,7 +142,7 @@ fn an_overshoot_worth_a_pixel_is_kept() {
     // Flattening the overshoot is only right while it cannot be drawn. At a
     // size where it is a pixel or more the design meant it, and a round
     // letter that lost it would sit visibly short of its neighbours.
-    let zones = AlignZones::new(alloc::vec![Zone::new(-7.0, -7.4)]);
+    let zones = FitMetrics::new(alloc::vec![Zone::new(-7.0, -7.4)], None);
     let mut glyph = rect(1.0, 25.6, 3.0, 52.0);
     fit(&mut glyph, Axes::Rows, &zones, 52.0, 4.0);
     assert_eq!(rows(&glyph).0, 26, "rounded on its own, not to the zone");
@@ -153,7 +153,10 @@ fn fitting_never_folds_an_outline_over_itself() {
     // The one invariant the whole warp rests on: it is monotone. Two
     // coordinates that were ordered stay ordered, so no contour turns inside
     // out however the strokes and zones pull at it.
-    let zones = AlignZones::new(alloc::vec![Zone::new(0.0, 0.3), Zone::new(-7.0, -7.4)]);
+    let zones = FitMetrics::new(
+        alloc::vec![Zone::new(0.0, 0.3), Zone::new(-7.0, -7.4)],
+        None,
+    );
     let mut rng = tairix_fuzzseed::Prng::new(0x243f_6a88_85a3_08d3);
     let mut next = || f64::from(u16::try_from(rng.below(16_000)).unwrap_or(0)) / 1000.0;
     for _ in 0..200 {
@@ -161,7 +164,13 @@ fn fitting_never_folds_an_outline_over_itself() {
             .map(|_| seg(next(), next(), next(), next()))
             .collect();
         let mut after = before.clone();
-        fit(&mut after, Axes::RowsAndColumns, &zones, 13.0, 1.0);
+        fit(
+            &mut after,
+            Axes::RowsAndColumns { span: None },
+            &zones,
+            13.0,
+            1.0,
+        );
         let coordinates = |list: &[Segment]| -> Vec<(f64, f64)> {
             list.iter()
                 .flat_map(|s| [(s.x0, s.y0), (s.x1, s.y1)])
@@ -201,7 +210,7 @@ fn an_outline_too_intricate_to_be_a_glyph_is_filled_unfitted() {
 #[test]
 fn an_empty_outline_is_left_empty() {
     let mut none: Vec<Segment> = Vec::new();
-    fit_unzoned(&mut none, Axes::RowsAndColumns);
+    fit_unzoned(&mut none, Axes::RowsAndColumns { span: None });
     assert!(none.is_empty());
 }
 
@@ -226,7 +235,7 @@ fn two_edges_facing_the_same_way_are_not_a_stroke() {
         seg(5.7, 13.0, 4.7, 13.0),
         seg(4.7, 13.0, 4.7, 2.0),
     ];
-    fit_unzoned(&mut glyph, Axes::RowsAndColumns);
+    fit_unzoned(&mut glyph, Axes::RowsAndColumns { span: None });
     assert_eq!(
         whole(glyph[STEM_RIGHT].x0) - whole(glyph[STEM_LEFT].x0),
         1,
@@ -264,7 +273,7 @@ fn a_long_shallow_run_is_not_an_edge() {
         seg(2.5, 12.0, 1.0, 2.0),
     ];
     let mut fitted = slanted.clone();
-    fit_unzoned(&mut fitted, Axes::RowsAndColumns);
+    fit_unzoned(&mut fitted, Axes::RowsAndColumns { span: None });
     assert!(
         unmoved(&slanted, &fitted, |s| (s.x0, s.x1)),
         "a slanted run was snapped onto a column"
@@ -281,7 +290,7 @@ fn evenly_spaced_stems_stay_evenly_spaced() {
     for left in [0.718, 3.537, 6.356] {
         stems.extend(rect(left, 6.0, left + 1.021, 13.0));
     }
-    fit_unzoned(&mut stems, Axes::RowsAndColumns);
+    fit_unzoned(&mut stems, Axes::RowsAndColumns { span: None });
     let lefts: Vec<i32> = stems.chunks(4).map(|stem| whole(stem[0].x0)).collect();
     assert_eq!(
         lefts[1] - lefts[0],
@@ -501,4 +510,233 @@ fn console_letters_share_a_baseline_and_an_x_height() {
     for ch in ['E', 'T', 'I', 'L', 'F'] {
         assert_eq!(extent(ch), (cap_top, cap_bottom), "{ch} sits off the line");
     }
+}
+
+/// A capital `E` as the single contour a face draws it with, in the fitter's
+/// y-downward pixel space: a stem from `cap` to `baseline` and three bars
+/// `bar` thick, the middle one's top at `middle`.
+fn capital_e(cap: f64, baseline: f64, bar: f64, middle: f64) -> Vec<Segment> {
+    let corners = [
+        (1.0, cap),
+        (8.0, cap),
+        (8.0, cap + bar),
+        (2.7, cap + bar),
+        (2.7, middle),
+        (7.0, middle),
+        (7.0, middle + bar),
+        (2.7, middle + bar),
+        (2.7, baseline - bar),
+        (8.0, baseline - bar),
+        (8.0, baseline),
+        (1.0, baseline),
+    ];
+    corners
+        .iter()
+        .zip(corners.iter().cycle().skip(1))
+        .map(|(&(x0, y0), &(x1, y1))| seg(x0, y0, x1, y1))
+        .collect()
+}
+
+/// The rows of an outline's horizontal segments, ascending.
+fn flat_rows(segments: &[Segment]) -> Vec<i32> {
+    let mut rows: Vec<i32> = segments
+        .iter()
+        .filter(|s| s.y0.total_cmp(&s.y1) == Ordering::Equal)
+        .map(|s| whole(s.y0))
+        .collect();
+    rows.sort_unstable();
+    rows
+}
+
+#[test]
+fn a_free_bar_is_placed_between_the_zones_not_by_a_neighbours_error() {
+    // Inter's title `E`: cap height 10.83 pixels over a baseline on row 15,
+    // bars 1.59 thick, the middle one centred 5.47 pixels up. Carrying the
+    // top bar's zone shift dropped the middle bar to rows 9-10, leaving a
+    // taller counter above it than below — the reverse of the design.
+    let metrics = FitMetrics::new(
+        alloc::vec![Zone::new(0.0, 0.0), Zone::new(-10.83, -10.83)],
+        Some(1.59),
+    );
+    let mut e = capital_e(15.0 - 10.83, 15.0, 1.59, 15.0 - 5.47 - 0.795);
+    fit(&mut e, Axes::Rows, &metrics, 15.0, 1.0);
+    assert_eq!(flat_rows(&e), alloc::vec![4, 6, 8, 10, 13, 15]);
+}
+
+#[test]
+fn bars_drawn_alike_round_alike_and_a_lighter_one_keeps_its_own() {
+    // Two bars a few hundredths either side of the half-pixel used to round
+    // to one pixel and two; drawn alike, they are now the standard's width.
+    let metrics = FitMetrics::new(Vec::new(), Some(1.5));
+    let mut bars = rect(0.0, 2.0, 6.0, 3.46);
+    bars.extend(rect(0.0, 6.0, 6.0, 7.53));
+    bars.extend(rect(0.0, 10.0, 6.0, 11.2));
+    fit(&mut bars, Axes::Rows, &metrics, 0.0, 1.0);
+    let thickness: Vec<i32> = bars
+        .chunks(4)
+        .map(|bar| {
+            let (top, bottom) = rows(bar);
+            bottom - top
+        })
+        .collect();
+    assert_eq!(thickness, alloc::vec![2, 2, 1]);
+}
+
+#[test]
+fn inter_capitals_agree_on_their_bars_at_every_ui_size() {
+    // The desktop's UI face at body and title weight over the line heights
+    // its text roles reach across the UI scales, sized as the font service
+    // sizes it. An `E` draws three bars of one weight, splits its counter the
+    // way its design does — the lower never the smaller — and puts its middle
+    // bar on the rows of `H`'s crossbar.
+    let bytes = asset("inter/Inter-Variable.ttf");
+    let unvaried = Face::parse(&bytes).expect("Inter parses");
+    let (ascent, descent) = (f64::from(unvaried.ascent()), f64::from(unvaried.descent()));
+    let em = f64::from(unvaried.units_per_em());
+    for weight in [480.0_f32, 580.0] {
+        let face = Face::parse_instance(
+            &bytes,
+            &[AxisSetting {
+                tag: *b"wght",
+                value: weight,
+            }],
+        )
+        .expect("Inter instances");
+        for height in [14_u32, 16, 18, 19, 20, 22, 24, 27, 32, 36] {
+            let line = f64::from(height);
+            let baseline = u32::try_from(mathf::round_i32(mathf::ceil(
+                ascent * line / (ascent + descent),
+            )))
+            .expect("a row");
+            let px_per_em = line * em / (ascent + descent);
+            let bars = |ch: char| -> Vec<(usize, usize)> {
+                let glyph = face.glyph_for(u32::from(ch)).expect("covered");
+                let raster = face
+                    .rasterise_proportional(glyph, px_per_em, baseline, height)
+                    .expect("rasterises");
+                let width = raster.width as usize;
+                let column = width * 2 / 3;
+                let mut bars = Vec::new();
+                let mut top = None;
+                for (row, line) in raster.coverage.chunks(width).enumerate() {
+                    match (line[column] >= 8, top) {
+                        (true, None) => top = Some(row),
+                        (false, Some(start)) => {
+                            bars.push((start, row));
+                            top = None;
+                        }
+                        _ => {}
+                    }
+                }
+                bars
+            };
+            let e = bars('E');
+            let at = alloc::format!("Inter {weight} at {height}px");
+            let [first, middle, last] = e[..] else {
+                panic!("{at}: E draws {e:?}");
+            };
+            let weights = [first.1 - first.0, middle.1 - middle.0, last.1 - last.0];
+            assert!(
+                weights.iter().all(|&w| w == weights[0]),
+                "{at}: E's bars {e:?}"
+            );
+            let (above, below) = (middle.0 - first.1, last.0 - middle.1);
+            assert!(
+                above <= below && below - above <= 1,
+                "{at}: E's counters {above}/{below}"
+            );
+            assert_eq!(bars('H'), alloc::vec![middle], "{at}: H's crossbar");
+        }
+    }
+}
+
+#[test]
+fn a_side_that_just_misses_the_edge_cut_off_is_fitted_with_its_partner() {
+    // A slanted stroke cut short: its left side wanders 0.30 pixels, its
+    // right 0.36, either side of the 0.35 a lone edge may. Fitted apart, the
+    // left snapped and the right stayed a diagonal, and the stroke covered two
+    // columns at half strength. Both sides now land straight on whole columns.
+    let mut piece = alloc::vec![
+        seg(2.82, 2.88, 3.76, 2.88),
+        seg(3.76, 2.88, 3.40, 5.62),
+        seg(3.40, 5.62, 2.52, 5.62),
+        seg(2.52, 5.62, 2.82, 2.88),
+    ];
+    fit_unzoned(&mut piece, Axes::RowsAndColumns { span: None });
+    let (left, right) = (&piece[3], &piece[1]);
+    assert_eq!(whole(left.x0), whole(left.x1), "the left side is straight");
+    assert_eq!(
+        whole(right.x0),
+        whole(right.x1),
+        "the right side is straight"
+    );
+    assert_eq!(whole(right.x0) - whole(left.x0), 1, "one solid column");
+}
+
+#[test]
+fn strokes_alongside_each_other_keep_their_spacing_in_every_bay() {
+    // Two legs, each cut into two bays that lean a little apart, 2.64 pixels
+    // between the legs throughout. Rounding every bay by one shift put the
+    // legs three columns apart in one bay and two in the other.
+    let mut legs = rect(2.835, 2.0, 3.765, 5.0);
+    legs.extend(rect(5.475, 2.0, 6.405, 5.0));
+    legs.extend(rect(2.265, 6.0, 3.195, 9.0));
+    legs.extend(rect(4.905, 6.0, 5.835, 9.0));
+    fit_unzoned(&mut legs, Axes::RowsAndColumns { span: None });
+    let placed: Vec<(i32, i32)> = legs.chunks(4).map(columns).collect();
+    assert!(placed.iter().all(|&(lo, hi)| hi - lo == 1), "{placed:?}");
+    assert_eq!(placed[1].0 - placed[0].0, 3, "upper bay {placed:?}");
+    assert_eq!(placed[3].0 - placed[2].0, 3, "lower bay {placed:?}");
+}
+
+#[test]
+fn a_fixed_cell_keeps_its_strokes_inside_it() {
+    // The ring of a `%` keeps its 2.51-pixel width rounded up to three behind
+    // a wall the rest of the glyph's phase already pushed right, which would
+    // put its right wall in the next character's cell.
+    let mut glyph = rect(0.60, 8.0, 1.52, 10.0);
+    glyph.extend(rect(4.16, 2.0, 5.08, 5.0));
+    glyph.extend(rect(6.67, 2.0, 7.58, 5.0));
+    fit_unzoned(&mut glyph, Axes::RowsAndColumns { span: Some(8.0) });
+    let walls: Vec<(i32, i32)> = glyph.chunks(4).map(columns).collect();
+    assert!(walls.iter().all(|&(lo, hi)| hi - lo == 1), "{walls:?}");
+    assert!(walls.iter().all(|&(_, hi)| hi <= 8), "{walls:?}");
+}
+
+#[test]
+fn the_console_hash_draws_parallel_solid_legs() {
+    // The console face's `#` leans its legs a third of a pixel every bay
+    // between its bars. Every bay of each leg must be one solid column, and
+    // the legs must keep one distance apart from top to bottom.
+    let (bytes, geometry) = console_cell();
+    let face = Face::parse(&bytes).expect("parses");
+    let glyph = face.glyph_for(u32::from('#')).expect("covered");
+    let coverage = face
+        .rasterise_glyph(glyph, &geometry, f64::from(ATLAS_EM_PX), geometry.width)
+        .expect("rasterises");
+    let mut apart = Vec::new();
+    for (row, line) in coverage.chunks(geometry.width as usize).enumerate() {
+        let mut runs: Vec<(usize, u8)> = Vec::new();
+        for (column, &level) in line.iter().enumerate() {
+            let continues = column > 0 && line[column - 1] > 0;
+            match runs.last_mut() {
+                Some((_, strongest)) if level > 0 && continues => {
+                    *strongest = (*strongest).max(level);
+                }
+                _ if level > 0 => runs.push((column, level)),
+                _ => {}
+            }
+        }
+        if let [(left, left_level), (right, right_level)] = runs[..] {
+            assert!(
+                left_level == 15 && right_level == 15,
+                "row {row} draws a leg in grey: {line:?}"
+            );
+            apart.push(right - left);
+        }
+    }
+    assert!(
+        !apart.is_empty() && apart.iter().all(|&gap| gap == apart[0]),
+        "the legs wander apart: {apart:?}"
+    );
 }

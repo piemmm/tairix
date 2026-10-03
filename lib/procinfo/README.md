@@ -68,9 +68,10 @@ The crate provides:
   part per memory class holding anything, in class order, then the free
   remainder, with shares summing to exactly a thousand. The Switchboard's
   memory pane and the System Monitor both draw this one composition.
-- `pressure::publish_depth` — publishing a reported memory-pressure band and
-  publishing it to a `tairix_reclaim::ReportedPressure` gauge, the one
-  definition every caching program keeps its band current through.
+- `pressure::publish_depth` — publishing a reported memory-pressure band
+  through the reporter a program names — `tairix_rt::pressure::report`, which
+  also has the heap give back the pages it retains — the one definition every
+  caching program keeps its band current through.
 - `resolve` / `ResolveInfoError` — the userspace `info:`/`state:`/`stats:`
   resolver, mapping a parsed `resref` reference onto a registry-defined query.
   Its `Display` is the one wording of a refusal and its `to_errno` the one

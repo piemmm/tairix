@@ -248,17 +248,44 @@ removed from the store, or from outside it — is still offered and still
 selectable, beside the others of its category; it simply has no position to
 be rendered at, so its tile draws its built-in glyph and its name.
 
-The desktop renders as many previews at once as it has preparers — one per
-online CPU, each with its own sandbox, and one while memory is short — and a
-window may have no more than that pending, which is what bounds how much
-decoding a browsing application can set going. A request past that is
-answered `LimitExceeded`, and the application asks again when a render
-concludes. A window that closes takes what it still has waiting with it; only
-renders already under way finish, into nothing. The desktop's own backdrop is
-always prepared first: the picture the user is looking at never waits behind a
-thumbnail. Every picture is requested and never awaited — a paint draws what
-has come back and a placeholder for what has not — so the pane is usable from
-its first frame and fills in as the answers land, those on screen first.
+The desktop renders previews on its preparers — one per online CPU, each with
+its own sandbox — but **memory**, not the preparer count, bounds how many run
+at once. Renders share a budget sized from the machine's memory and its
+pressure band: the share `lib/reclaim` grants work begun speculatively
+(`speculative_budget`), so renders begun on a machine with room stop short of
+pushing it into moderate pressure. A render starts holding only what it is
+known to need before its picture has been read: the largest source and the run
+it is uploaded in (`WALLPAPER_PREPARATION_BYTES`). The worker then reads the
+picture's header and reports what decoding it at the size asked will hold
+(`plan_wallpaper`, priced by `tairix_image::decode_peak_bytes`). The render
+acquires that figure if it fits beside the renders under way. If it does not,
+it goes back to the head of the queue with its cost known, and starts again
+only once that cost fits — or once nothing else runs, since one render always
+makes progress whatever it costs and runs with nothing beside it. A screenful
+of small thumbnails therefore decodes side by side while a large picture
+decodes alone, on a small machine or a large one. At critical pressure no
+render starts. The desktop's own backdrop and the screensaver's slides hold
+the figure their plans report like any render, without waiting, and the
+backdrop is always prepared first: the picture the user is looking at never
+waits behind a thumbnail.
+
+A conclusion says how the render ended (`PreviewOutcome`). A render that runs
+out of memory beside others is queued again to run alone; one that runs out of
+memory alone, or whose plan cannot be met at critical pressure, is answered
+`Unavailable`, and Settings asks for it again once memory may have been freed
+— another picture fitting, or the pressure band moving. A picture the session
+cannot read or decode is answered `Refused` and keeps its placeholder.
+
+A window may have no more renders pending than there are preparers, which
+bounds how much decoding a browsing application can set going. A request past
+that is answered `LimitExceeded`, and the application asks again when a render
+concludes. Settings carries each request to the session on a worker of its own,
+one round trip at a time, so its window never waits on the session's serve
+loop. A window that closes takes what it still has waiting with it; only
+renders already under way finish, into nothing. Every picture is requested and
+never awaited — a paint draws what has come back and a placeholder for what has
+not — so the pane is usable from its first frame and fills in as the answers
+land, those on screen first.
 
 **An apply does not block the window.** The session answers only once its own
 publisher has written the store, so the choice is rendered into the pinboard

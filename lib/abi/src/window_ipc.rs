@@ -6041,12 +6041,13 @@ pub enum WindowEvent {
     },
     /// A [`WindowRequest::RenderPreview`] concluded.
     ///
-    /// `rendered` says whether the granted region now holds the picture:
-    /// the session refuses a subject it cannot read or whose bytes its
-    /// parser sandbox will not decode, and says so here so the picture shows
-    /// its placeholder instead of waiting for pixels that are never coming.
-    /// The region is the caller's throughout — the session maps it for the
-    /// render and lets go of it before this is delivered.
+    /// `outcome` says whether the granted region now holds the picture, and
+    /// when it does not, whether asking again could help: so the picture
+    /// shows its placeholder instead of waiting for pixels that are never
+    /// coming, and is asked for again once memory allows when it was only
+    /// memory that was short. The region is the caller's throughout — the
+    /// session maps it for the render and lets go of it before this is
+    /// delivered.
     PreviewRendered {
         /// The window that asked.
         window_id: u64,
@@ -6057,8 +6058,8 @@ pub enum WindowEvent {
         width: u16,
         /// The height the picture was rendered at, echoed for the same reason.
         height: u16,
-        /// Whether the region holds the picture.
-        rendered: bool,
+        /// Whether the region holds the picture, and if not, why not.
+        outcome: PreviewOutcome,
     },
     /// The window manager minimized the window (the user pressed the
     /// title-bar minimize control, or clicked the taskbar entry): it is
@@ -6357,7 +6358,7 @@ impl WindowEvent {
             subject,
             width,
             height,
-            rendered,
+            outcome,
             ..
         } = *self
         else {
@@ -6367,7 +6368,7 @@ impl WindowEvent {
         subject.write_to(out, PREVIEW_EVENT_SUBJECT_OFFSET);
         put_u16(out, PREVIEW_EVENT_SIZE_OFFSET, width);
         put_u16(out, PREVIEW_EVENT_SIZE_OFFSET + 2, height);
-        out[PREVIEW_EVENT_RENDERED_OFFSET] = u8::from(rendered);
+        out[PREVIEW_EVENT_OUTCOME_OFFSET] = outcome.to_wire();
     }
 
     /// The window this event addresses, or `None` for an event addressed
@@ -6804,8 +6805,42 @@ fn read_menu_outcome(bytes: &[u8]) -> Result<MenuOutcome, Errno> {
 const PREVIEW_EVENT_SUBJECT_OFFSET: usize = 16;
 /// Byte offset of its echoed width, then height.
 const PREVIEW_EVENT_SIZE_OFFSET: usize = PREVIEW_EVENT_SUBJECT_OFFSET + PREVIEW_SUBJECT_WIRE_LEN;
-/// Byte offset of whether it rendered.
-const PREVIEW_EVENT_RENDERED_OFFSET: usize = PREVIEW_EVENT_SIZE_OFFSET + 4;
+/// Byte offset of how it concluded.
+const PREVIEW_EVENT_OUTCOME_OFFSET: usize = PREVIEW_EVENT_SIZE_OFFSET + 4;
+
+/// How a [`WindowRequest::RenderPreview`] concluded.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum PreviewOutcome {
+    /// The granted region holds the picture.
+    Rendered,
+    /// The picture cannot be drawn: the session cannot read it, or its
+    /// parser sandbox will not decode it. Asking again draws nothing more.
+    Refused,
+    /// There was no memory to draw it now; the same request may succeed
+    /// once memory is freed.
+    Unavailable,
+}
+
+impl PreviewOutcome {
+    /// The byte this outcome is carried as. Zero is never one, so a zeroed
+    /// frame decodes as nothing at all.
+    const fn to_wire(self) -> u8 {
+        match self {
+            Self::Rendered => 1,
+            Self::Refused => 2,
+            Self::Unavailable => 3,
+        }
+    }
+
+    const fn from_wire(raw: u8) -> Result<Self, Errno> {
+        match raw {
+            1 => Ok(Self::Rendered),
+            2 => Ok(Self::Refused),
+            3 => Ok(Self::Unavailable),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
 
 /// Decode a [`WindowEvent::PreviewRendered`] frame for `window_id`.
 ///
@@ -6813,14 +6848,14 @@ const PREVIEW_EVENT_RENDERED_OFFSET: usize = PREVIEW_EVENT_SIZE_OFFSET + 4;
 /// subject or a zero or over-bound side is a frame no accepted request could
 /// have produced.
 fn read_preview_render_event(window_id: u64, bytes: &[u8]) -> Result<WindowEvent, Errno> {
-    event_reserved_zero(bytes, PREVIEW_EVENT_RENDERED_OFFSET + 1)?;
-    let rendered = flag_at(bytes, PREVIEW_EVENT_RENDERED_OFFSET)?;
+    event_reserved_zero(bytes, PREVIEW_EVENT_OUTCOME_OFFSET + 1)?;
+    let outcome = PreviewOutcome::from_wire(bytes[PREVIEW_EVENT_OUTCOME_OFFSET])?;
     Ok(WindowEvent::PreviewRendered {
         window_id,
         subject: PreviewSubject::read_from(bytes, PREVIEW_EVENT_SUBJECT_OFFSET)?,
         width: preview_side(read_u16(bytes, PREVIEW_EVENT_SIZE_OFFSET))?,
         height: preview_side(read_u16(bytes, PREVIEW_EVENT_SIZE_OFFSET + 2))?,
-        rendered,
+        outcome,
     })
 }
 
@@ -6844,7 +6879,6 @@ fn flag_at(bytes: &[u8], at: usize) -> Result<bool, Errno> {
 
 #[cfg(test)]
 mod tests {
-    use super::PreviewSubject;
     use super::{
         app_bar_wire_len, decode_clipboard_reply, decode_create_reply, decode_cursor_sets_reply,
         decode_desktop_reply, decode_drop_target_reply, decode_hand_over_reply,
@@ -6882,7 +6916,7 @@ mod tests {
         OPEN_MENU_ROWS_OFFSET, OPEN_MENU_ROW_COUNT_OFFSET, OPEN_MENU_TEXT_LEN_OFFSET,
         OPEN_MENU_TITLE_LEN_OFFSET, PICKED_NAME_REPLY_TEXT_OFFSET, PICK_NAME_LEN_OFFSET,
         PICK_NAME_OFFSET, PICK_PURPOSE_OFFSET, PICK_PURPOSE_OPEN, PINCH_MODIFIERS_OFFSET,
-        PINCH_PHASE_OFFSET, PLACE_LAYER_WIRE_LEN, PRESENT_WIRE_LEN, PREVIEW_EVENT_RENDERED_OFFSET,
+        PINCH_PHASE_OFFSET, PLACE_LAYER_WIRE_LEN, PRESENT_WIRE_LEN, PREVIEW_EVENT_OUTCOME_OFFSET,
         PREVIEW_EVENT_SIZE_OFFSET, PREVIEW_EVENT_SUBJECT_OFFSET, PREVIEW_SCREENSAVER_LEN_OFFSET,
         QUERY_CURSOR_SETS_WIRE_LEN, QUERY_WALLPAPERS_WIRE_LEN, RENDER_PREVIEW_SIZE_OFFSET,
         RENDER_PREVIEW_SUBJECT_OFFSET, RENDER_PREVIEW_WIRE_LEN, REQUEST_HEADER_LEN,
@@ -6900,6 +6934,7 @@ mod tests {
         WINDOW_PICKED_NAME_REPLY_MAX, WINDOW_PREVIEW_MAX_SIDE, WINDOW_REQUEST_MAGIC,
         WINDOW_TERRAIN_REPLY_MAX, WINDOW_TITLE_MAX, WINDOW_WALLPAPERS_REPLY_MAX,
     };
+    use super::{PreviewOutcome, PreviewSubject};
     use crate::desktop::ScreensaverKind;
     use crate::desktop::{Appearance, DesktopInfo};
     use crate::driver::display::{DamageRect, DisplayFormat};
@@ -10478,19 +10513,24 @@ mod tests {
             subject: PreviewSubject::Screensaver(ScreensaverKind::Life),
             width: 144,
             height: 81,
-            rendered: true,
+            outcome: PreviewOutcome::Rendered,
         };
         let frame = concluded.to_le_bytes();
         assert_eq!(WindowEvent::from_bytes(&frame), Ok(concluded));
 
-        let refused = WindowEvent::PreviewRendered {
-            window_id: 3,
-            subject: PreviewSubject::Wallpaper(5),
-            width: 144,
-            height: 81,
-            rendered: false,
-        };
-        assert_eq!(WindowEvent::from_bytes(&refused.to_le_bytes()), Ok(refused));
+        for outcome in [PreviewOutcome::Refused, PreviewOutcome::Unavailable] {
+            let answered = WindowEvent::PreviewRendered {
+                window_id: 3,
+                subject: PreviewSubject::Wallpaper(5),
+                width: 144,
+                height: 81,
+                outcome,
+            };
+            assert_eq!(
+                WindowEvent::from_bytes(&answered.to_le_bytes()),
+                Ok(answered)
+            );
+        }
 
         for at in [PREVIEW_EVENT_SIZE_OFFSET, PREVIEW_EVENT_SIZE_OFFSET + 2] {
             let mut bad = frame;
@@ -10504,11 +10544,13 @@ mod tests {
         let mut bad = frame;
         bad[PREVIEW_EVENT_SUBJECT_OFFSET] = 9;
         assert_eq!(WindowEvent::from_bytes(&bad), Err(Errno::OutOfRange));
+        for unknown in [0, 4] {
+            let mut bad = frame;
+            bad[PREVIEW_EVENT_OUTCOME_OFFSET] = unknown;
+            assert_eq!(WindowEvent::from_bytes(&bad), Err(Errno::OutOfRange));
+        }
         let mut bad = frame;
-        bad[PREVIEW_EVENT_RENDERED_OFFSET] = 2;
-        assert_eq!(WindowEvent::from_bytes(&bad), Err(Errno::OutOfRange));
-        let mut bad = frame;
-        bad[PREVIEW_EVENT_RENDERED_OFFSET + 1] = 1;
+        bad[PREVIEW_EVENT_OUTCOME_OFFSET + 1] = 1;
         assert_eq!(
             WindowEvent::from_bytes(&bad),
             Err(Errno::BadMagic),

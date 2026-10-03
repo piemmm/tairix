@@ -720,7 +720,7 @@ fn a_grounded_form_follows_every_switch_of_the_theme_it_was_derived_from() {
         SurfaceGround::Opaque
     );
 
-    themes.set_appearance(Appearance::Light);
+    themes.set_appearance(Appearance::Dark);
     let axes = Accessibility {
         contrast: Contrast::High,
         ..Accessibility::default()
@@ -728,7 +728,7 @@ fn a_grounded_form_follows_every_switch_of_the_theme_it_was_derived_from() {
     assert!(themes.set_accessibility(axes));
     for ground in [SurfaceGround::Floating, SurfaceGround::Frosted] {
         let drawn = themes.active_on(ground);
-        assert_eq!(drawn.appearance(), Appearance::Light, "{ground:?}");
+        assert_eq!(drawn.appearance(), Appearance::Dark, "{ground:?}");
         assert_eq!(drawn.contrast(), Contrast::High, "{ground:?}");
         assert_eq!(drawn.ground(), ground);
     }
@@ -1259,10 +1259,10 @@ fn cursor_set_resolves_every_kind() {
 }
 
 #[test]
-fn registry_defaults_to_dark_and_holds_both_builtins() {
+fn registry_defaults_to_light_and_holds_both_builtins() {
     let themes = ThemeRegistry::with_builtins();
-    assert_eq!(themes.active_id(), ThemeId::DARK);
-    assert_eq!(themes.active().appearance(), Appearance::Dark);
+    assert_eq!(themes.active_id(), ThemeId::LIGHT);
+    assert_eq!(themes.active().appearance(), Appearance::Light);
     assert_eq!(themes.len(), 2);
     assert!(!themes.is_empty());
     assert!(themes.get(ThemeId::DARK).is_some());
@@ -1275,20 +1275,20 @@ fn runtime_switch_changes_the_active_theme() {
     let mut themes = ThemeRegistry::with_builtins();
     assert_eq!(
         themes.active().palette().desktop,
+        Theme::light().palette().desktop
+    );
+
+    themes.set_active(ThemeId::DARK).expect("dark is built in");
+    assert_eq!(themes.active_id(), ThemeId::DARK);
+    assert_eq!(
+        themes.active().palette().desktop,
         Theme::dark().palette().desktop
     );
 
     themes
         .set_active(ThemeId::LIGHT)
         .expect("light is built in");
-    assert_eq!(themes.active_id(), ThemeId::LIGHT);
-    assert_eq!(
-        themes.active().palette().desktop,
-        Theme::light().palette().desktop
-    );
-
-    themes.set_active(ThemeId::DARK).expect("dark is built in");
-    assert_eq!(themes.active().appearance(), Appearance::Dark);
+    assert_eq!(themes.active().appearance(), Appearance::Light);
 }
 
 #[test]
@@ -1297,7 +1297,7 @@ fn set_active_unknown_fails_closed() {
     let err = themes.set_active(ThemeId(42)).unwrap_err();
     assert_eq!(err, ThemeError::UnknownTheme(ThemeId(42)));
     // The active theme is unchanged by the rejected switch.
-    assert_eq!(themes.active_id(), ThemeId::DARK);
+    assert_eq!(themes.active_id(), ThemeId::LIGHT);
 }
 
 #[test]
@@ -1351,13 +1351,13 @@ fn set_appearance_selects_the_matching_builtin() {
 #[test]
 fn toggle_appearance_flips_between_builtins() {
     let mut themes = ThemeRegistry::with_builtins();
-    assert_eq!(themes.active().appearance(), Appearance::Dark);
-
-    assert_eq!(themes.toggle_appearance(), ThemeId::LIGHT);
     assert_eq!(themes.active().appearance(), Appearance::Light);
 
     assert_eq!(themes.toggle_appearance(), ThemeId::DARK);
     assert_eq!(themes.active().appearance(), Appearance::Dark);
+
+    assert_eq!(themes.toggle_appearance(), ThemeId::LIGHT);
+    assert_eq!(themes.active().appearance(), Appearance::Light);
 }
 
 #[test]
@@ -1610,8 +1610,8 @@ fn the_axes_survive_an_appearance_switch() {
         density: Density::Compact,
         motion: Motion::Reduced,
     });
-    themes.set_appearance(Appearance::Light);
-    assert_eq!(themes.active().appearance(), Appearance::Light);
+    themes.set_appearance(Appearance::Dark);
+    assert_eq!(themes.active().appearance(), Appearance::Dark);
     assert_eq!(themes.active().contrast(), Contrast::Monochrome);
     assert_eq!(themes.active().density(), Density::Compact);
     assert!(themes.active().motion().reduced_motion());

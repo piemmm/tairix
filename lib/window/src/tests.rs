@@ -20,9 +20,10 @@ use tairix_abi::window_ipc::{
     AppBar, AppBarClick, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow,
     AppMenuRowView, BundleRunPath, ClipboardHeld, ClipboardKind, CursorShape, DocumentName,
     DropTarget, HandOverDocument, HandOverOutcome, LayerDepth, MenuOutcome, MenuRefusal,
-    PickPurpose, PointerAction, PreviewSubject, SaveEndings, TerrainPlate, TooltipText,
-    WindowEvent, WindowRegion, WindowRequest, APP_MENU_ENTRY_MAX, DESKTOP_LAYER_MAX_PER_CLIENT,
-    HAND_OVER_RUN_PATH_MAX, WINDOW_MAX_OPEN_TARGETS, WINDOW_TITLE_MAX,
+    PickPurpose, PointerAction, PreviewOutcome, PreviewSubject, SaveEndings, TerrainPlate,
+    TooltipText, WindowEvent, WindowRegion, WindowRequest, APP_MENU_ENTRY_MAX,
+    DESKTOP_LAYER_MAX_PER_CLIENT, HAND_OVER_RUN_PATH_MAX, WINDOW_MAX_OPEN_TARGETS,
+    WINDOW_TITLE_MAX,
 };
 use tairix_abi::{BundleId, CapabilityId, Errno, PublisherId};
 use tairix_display::{FrameRegion, ShmMapper};
@@ -308,7 +309,7 @@ impl Default for RecordingHost {
 }
 
 /// The desktop the host tests report: a 1024x768 screen at the reference
-/// density, in the default dark appearance.
+/// density, in the dark appearance — not the default an app starts in.
 fn sample_desktop() -> DesktopInfo {
     match DesktopInfo::new(1024, 768, 100, Appearance::Dark) {
         Ok(info) => info,
@@ -2518,7 +2519,7 @@ fn a_preview_render_is_owner_bound_and_each_is_concluded_once_by_its_own_event()
         subject,
         width: 144,
         height: 81,
-        rendered: true,
+        outcome: PreviewOutcome::Rendered,
     };
     assert_eq!(
         deliver(

@@ -788,7 +788,7 @@ const AUTOLOAD_INPUT_ARMED_OCCURRENCES: u32 = 2;
 const KEYBOARD_ONLY_ARMED_OCCURRENCES: u32 = 1;
 
 /// Guest marker keying the second screendump (the served files window on
-/// the dark desktop): the activating click's `Focus` + `Pressed` both
+/// the booted desktop): the activating click's `Focus` + `Pressed` both
 /// reached that window's own event port. The guest attributes the pair to
 /// the window itself, so no other app or service can key the dump.
 const AUTOLOAD_FILES_ACTIVATED_MARKER: &str =
@@ -8491,7 +8491,7 @@ static TESTS: &[QemuTest] = &[
     //
     // AW3 (`plans/APPWIN.md`) grows the presented desktop into the full
     // click-through: the session's one-shot `DESKTOP_REVEALED` witness
-    // keys the first screendump (the dark composited desktop) and
+    // keys the first screendump (the composited desktop) and
     // the click on the autostarted file manager's own icon-bar slot (the
     // guest applies injected events strictly in device order, so the click
     // needs no extra gate); that click opens its window over the
@@ -8500,7 +8500,7 @@ static TESTS: &[QemuTest] = &[
     // the kernel/ipc `MessageDelivered` records the desktop's app-ward
     // event deliveries emit — the shared interaction contract in the test
     // crate's lib target: delivery 2 (Focus + Pressed from the window
-    // click) keys the second screendump (the served window on the dark
+    // click) keys the second screendump (the served window on the
     // desktop), and a handshake click (delivery 3, injected only after
     // delivery 2 appeared and held while the second dump is pending) is
     // the wake boundary the terminal stage gates on.
@@ -8588,13 +8588,13 @@ static TESTS: &[QemuTest] = &[
                 marker: AUTOLOAD_DESKTOP_REVEALED_MARKER,
                 occurrences: 1,
                 suffix: "desktop",
-                assert: assert_dark_desktop_screendump,
+                assert: assert_booted_desktop_screendump,
             },
             ScreendumpPlan {
                 marker: AUTOLOAD_FILES_ACTIVATED_MARKER,
                 occurrences: 1,
                 suffix: "window",
-                assert: assert_files_window_dark_screendump,
+                assert: assert_booted_files_window_screendump,
             },
         ],
         pointer_script: Some(autoload_desktop_pointer_script),
@@ -8670,19 +8670,19 @@ static TESTS: &[QemuTest] = &[
                 marker: AUTOLOAD_DESKTOP_REVEALED_MARKER,
                 occurrences: 1,
                 suffix: APPBAR_BARE_BAR_DUMP,
-                assert: assert_bare_bar_dark_screendump,
+                assert: assert_bare_bar_screendump,
             },
             ScreendumpPlan {
                 marker: WINDOW_SHOWN_MARKER,
                 occurrences: 1,
                 suffix: APPBAR_ONE_WINDOW_DUMP,
-                assert: assert_one_window_dark_screendump,
+                assert: assert_one_window_screendump,
             },
             ScreendumpPlan {
                 marker: WINDOW_SHOWN_MARKER,
                 occurrences: 2,
                 suffix: APPBAR_TWO_WINDOWS_DUMP,
-                assert: assert_two_windows_dark_screendump,
+                assert: assert_two_windows_screendump,
             },
         ],
         pointer_script: Some(appbar_pointer_script),
@@ -8836,7 +8836,7 @@ static TESTS: &[QemuTest] = &[
             marker: WINDOW_SHOWN_MARKER,
             occurrences: 1,
             suffix: "manager-window",
-            assert: assert_files_window_dark_screendump,
+            assert: assert_booted_files_window_screendump,
         }],
         pointer_script: Some(handover_pointer_script),
         bounded_pointer_script: false,
@@ -8959,13 +8959,13 @@ static TESTS: &[QemuTest] = &[
                 marker: WINDOW_SHOWN_MARKER,
                 occurrences: 1,
                 suffix: MENU_WINDOW_DUMP,
-                assert: assert_menu_window_dark_screendump,
+                assert: assert_menu_window_screendump,
             },
             ScreendumpPlan {
                 marker: MENU_SHOWN_MARKER,
                 occurrences: 1,
                 suffix: MENU_PLATE_DUMP,
-                assert: assert_menu_plate_dark_screendump,
+                assert: assert_menu_plate_screendump,
             },
         ],
         pointer_script: Some(menu_pointer_script),
@@ -9023,10 +9023,10 @@ static TESTS: &[QemuTest] = &[
     // and starts `desktop`, then opens Settings from the Switchboard capsule's
     // system menu. Four dumps read the screen: the window on General; a pane
     // that states an absence; Storage, reached past the fold of the strip by
-    // its own scrollbar; and the desktop redrawn light after the Appearance
-    // pane's choice. Each window dump is gated on the session's witness that a
+    // its own scrollbar; and the desktop redrawn in the other appearance after
+    // the Appearance pane's choice. Each window dump is gated on the session's witness that a
     // frame carrying that pane's title is on screen — the window retitles only
-    // after presenting the pane — and the light dump on the session's witness
+    // after presenting the pane — and the restyled dump on the session's witness
     // that the restyled desktop is. The walk photographs every pane before it
     // changes the appearance, because each application redraws itself for a
     // new look on its own time and a dump of its window could otherwise catch
@@ -9034,9 +9034,9 @@ static TESTS: &[QemuTest] = &[
     //
     // PASS needs the guest's four witnesses in order: an `APP_LOADED` naming
     // the settings bundle, the create reply of its window, and two commits of
-    // the desktop's published settings document — the pane's Light choice,
+    // the desktop's published settings document — the pane's appearance choice,
     // then its Compact density, the last gesture, which the runner sends only
-    // once the light dump is read back.
+    // once the restyled dump is read back.
     //
     // Single CPU and the same 300-second *inactivity* budget its siblings
     // carry: the longest the guest may fall silent, never a runtime deadline,
@@ -9091,8 +9091,8 @@ static TESTS: &[QemuTest] = &[
             ScreendumpPlan {
                 marker: DESKTOP_RESTYLED_MARKER,
                 occurrences: 1,
-                suffix: SETTINGS_LIGHT_DUMP,
-                assert: assert_settings_light_screendump,
+                suffix: SETTINGS_RESTYLED_DUMP,
+                assert: assert_settings_restyled_screendump,
             },
         ],
         pointer_script: Some(settings_pointer_script),
@@ -9239,7 +9239,7 @@ static TESTS: &[QemuTest] = &[
                 marker: APPBAR_SETTLED_MARKER,
                 occurrences: 1,
                 suffix: DESKTOP_PRESSURE_ICONS_DRAWN_DUMP,
-                assert: assert_icons_drawn_dark_screendump,
+                assert: assert_icons_drawn_screendump,
             },
             ScreendumpPlan {
                 marker: tairix_test_desktop_pressure_qemu_aarch64::PRESSURE_LEFT_NORMAL_MARKER,
@@ -11631,12 +11631,12 @@ fn wintersun_window() -> Result<WintersunWindow, String> {
     use tairix_wm::{Compositor, Surface};
 
     let fail = |what: &str| format!("wintersun window: {what}");
-    let theme = tairix_theme::Theme::dark();
+    let theme = booted_theme();
     let scale = RECONSTRUCTION_SCALE;
     let (width, height) = ramfb_screen();
     let mut compositor = geometry_compositor(&theme)?;
 
-    let desktop = DesktopInfo::new(width, height, 100, Appearance::Dark)
+    let desktop = DesktopInfo::new(width, height, 100, Appearance::default())
         .and_then(tairix_window::Desktop::new)
         .map_err(|e| fail(&format!("desktop: {e:?}")))?;
     let (client_w, client_h) = desktop.window_size(OPEN_WIDTH, OPEN_HEIGHT);
@@ -11881,7 +11881,7 @@ fn cursor_footprint(pointer: tairix_geometry::Point) -> tairix_geometry::Rect {
 fn plate_corners(outer: tairix_geometry::Rect) -> [tairix_geometry::Rect; 4] {
     use tairix_geometry::Rect;
 
-    let theme = tairix_theme::Theme::dark();
+    let theme = booted_theme();
     let (inset, radius) = tairix_controls::FrameRim::of(RECONSTRUCTION_SCALE, &theme).plate();
     let (inset_px, radius_px) = (
         i32::try_from(inset).unwrap_or(0),
@@ -12128,20 +12128,49 @@ fn read_screendump(t: &QemuTest, path: &Path) -> Result<tairix_qemu::screendump:
         .map_err(|e| format!("test --qemu ({}): decode screendump: {e}", t.package))
 }
 
-/// [`ScreendumpPlan`] assertion: the dark-theme composited desktop — the
-/// session boots with the shared dark theme active.
-fn assert_dark_desktop_screendump(t: &QemuTest, path: &Path, _serial: &str) -> Result<(), String> {
-    assert_desktop_screendump(t, path, &tairix_theme::Theme::dark())
+/// The theme a guest's desktop boots in: the shared default, in force until a
+/// vertical changes it.
+fn booted_theme() -> tairix_theme::Theme {
+    tairix_theme::ThemeRegistry::with_builtins()
+        .active()
+        .clone()
 }
 
-/// [`ScreendumpPlan`] assertion: the served files window on the
-/// dark-theme desktop (see [`assert_files_window_screendump`]).
-fn assert_files_window_dark_screendump(
+/// The appearance the Settings vertical switches the desktop to: whichever one
+/// it did not boot in, so the choice is a real restyle.
+fn restyled_appearance() -> tairix_theme::Appearance {
+    match tairix_theme::Appearance::default() {
+        tairix_theme::Appearance::Light => tairix_theme::Appearance::Dark,
+        tairix_theme::Appearance::Dark => tairix_theme::Appearance::Light,
+    }
+}
+
+/// The theme the desktop is drawn in once it has switched to
+/// [`restyled_appearance`].
+fn restyled_theme() -> tairix_theme::Theme {
+    let mut themes = tairix_theme::ThemeRegistry::with_builtins();
+    themes.set_appearance(restyled_appearance());
+    themes.active().clone()
+}
+
+/// [`ScreendumpPlan`] assertion: the composited desktop in the theme it boots
+/// in.
+fn assert_booted_desktop_screendump(
     t: &QemuTest,
     path: &Path,
     _serial: &str,
 ) -> Result<(), String> {
-    assert_files_window_screendump(t, path, &tairix_theme::Theme::dark())
+    assert_desktop_screendump(t, path, &booted_theme())
+}
+
+/// [`ScreendumpPlan`] assertion: the served files window on the booted
+/// desktop (see [`assert_files_window_screendump`]).
+fn assert_booted_files_window_screendump(
+    t: &QemuTest,
+    path: &Path,
+    _serial: &str,
+) -> Result<(), String> {
+    assert_files_window_screendump(t, path, &booted_theme())
 }
 
 /// The served files window is on the desktop rendered with `theme`. The
@@ -12539,8 +12568,8 @@ fn bare_bar_dump_path(t: &QemuTest, path: &Path) -> Result<PathBuf, String> {
 }
 
 /// [`ScreendumpPlan`] assertion for the icon-bar vertical's **first** dump,
-/// taken on the first fully-revealed desktop frame: the dark-theme session
-/// has composited its own wallpaper, and the bar carries no application the
+/// taken on the first fully-revealed desktop frame: the session has
+/// composited its own wallpaper, and the bar carries no application the
 /// script has launched yet.
 ///
 /// This frame is also the baseline the later dumps are read against
@@ -12548,8 +12577,8 @@ fn bare_bar_dump_path(t: &QemuTest, path: &Path) -> Result<PathBuf, String> {
 /// into "this run's gesture put it there": the frames are the same screen, so
 /// an application slot that differs between them differs *because of the
 /// launch*.
-fn assert_bare_bar_dark_screendump(t: &QemuTest, path: &Path, _serial: &str) -> Result<(), String> {
-    let theme = tairix_theme::Theme::dark();
+fn assert_bare_bar_screendump(t: &QemuTest, path: &Path, _serial: &str) -> Result<(), String> {
+    let theme = booted_theme();
     let image = read_screendump(t, path)?;
     assert_desktop_wallpaper(t, path, &image, &theme, &[])
 }
@@ -12564,12 +12593,8 @@ fn assert_bare_bar_dark_screendump(t: &QemuTest, path: &Path, _serial: &str) -> 
 /// wallpaper across the whole frame: the window covers a large part of this
 /// output. The desktop's presence is measured where it is genuinely expected
 /// instead — exactly, over the bare column beside the window.
-fn assert_one_window_dark_screendump(
-    t: &QemuTest,
-    path: &Path,
-    _serial: &str,
-) -> Result<(), String> {
-    let theme = tairix_theme::Theme::dark();
+fn assert_one_window_screendump(t: &QemuTest, path: &Path, _serial: &str) -> Result<(), String> {
+    let theme = booted_theme();
     let image = read_screendump(t, path)?;
     let bare = read_screendump(t, &bare_bar_dump_path(t, path)?)?;
     assert_app_slot_drawn(t, path, (&image, &bare), &theme)?;
@@ -12584,12 +12609,8 @@ fn assert_one_window_dark_screendump(
 ///
 /// That last fact is the point of the frame: the bar shows *applications*, so
 /// a second window of one application must not put a second slot beside it.
-fn assert_two_windows_dark_screendump(
-    t: &QemuTest,
-    path: &Path,
-    _serial: &str,
-) -> Result<(), String> {
-    let theme = tairix_theme::Theme::dark();
+fn assert_two_windows_screendump(t: &QemuTest, path: &Path, _serial: &str) -> Result<(), String> {
+    let theme = booted_theme();
     let image = read_screendump(t, path)?;
     let bare = read_screendump(t, &bare_bar_dump_path(t, path)?)?;
     assert_app_slot_drawn(t, path, (&image, &bare), &theme)?;
@@ -12640,19 +12661,15 @@ const MAX_UNDER_PRESSURE_SLOT_DRIFT: f64 = 0.0;
 
 /// [`ScreendumpPlan`] assertion for the desktop-under-pressure vertical's
 /// **first** dump, taken on the first revealed frame whose icon bar has
-/// settled ([`APPBAR_SETTLED_MARKER`]): a real composited dark-theme desktop,
+/// settled ([`APPBAR_SETTLED_MARKER`]): a real composited desktop,
 /// with the autostarted file manager holding the leading slot and drawing the
 /// picture it keeps.
 ///
 /// This frame is the artwork baseline the second one is read against, so what
 /// it samples is the wallpaper — the slot itself is judged by the comparison,
 /// not here.
-fn assert_icons_drawn_dark_screendump(
-    t: &QemuTest,
-    path: &Path,
-    _serial: &str,
-) -> Result<(), String> {
-    let theme = tairix_theme::Theme::dark();
+fn assert_icons_drawn_screendump(t: &QemuTest, path: &Path, _serial: &str) -> Result<(), String> {
+    let theme = booted_theme();
     let image = read_screendump(t, path)?;
     assert_desktop_wallpaper(t, path, &image, &theme, &[])
 }
@@ -12666,7 +12683,7 @@ fn assert_bar_artwork_survived_screendump(
     path: &Path,
     _serial: &str,
 ) -> Result<(), String> {
-    let theme = tairix_theme::Theme::dark();
+    let theme = booted_theme();
     let image = read_screendump(t, path)?;
     let drawn = read_screendump(
         t,
@@ -13039,12 +13056,12 @@ fn datetime_elevate_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
 
 /// The Settings vertical's screendump names: the window on General, on Lock
 /// Screen, on a pane that states an absence, on Storage, and the desktop
-/// redrawn light.
+/// redrawn in the other appearance.
 const SETTINGS_GENERAL_DUMP: &str = "general";
 const SETTINGS_LOCK_DUMP: &str = "lock-screen";
 const SETTINGS_ABSENCE_DUMP: &str = "absence";
 const SETTINGS_STORAGE_DUMP: &str = "storage";
-const SETTINGS_LIGHT_DUMP: &str = "light";
+const SETTINGS_RESTYLED_DUMP: &str = "restyled";
 
 /// The cascade slot the Settings window takes: the first, because nothing has
 /// opened a served window before it — the autostarted file manager holds a bar
@@ -13094,7 +13111,7 @@ struct SettingsWalk {
     strip_page_up: tairix_geometry::Point,
     appearance_row: tairix_geometry::Point,
     appearance_combo: tairix_geometry::Point,
-    light_choice: tairix_geometry::Point,
+    restyled_choice: tairix_geometry::Point,
     density_combo: tairix_geometry::Point,
     compact_choice: tairix_geometry::Point,
     general: SettingsFrame,
@@ -13395,10 +13412,8 @@ fn reconstruct_settings_walk() -> Result<SettingsWalk, String> {
     use tairix_geometry::{Point, Rect};
     use tairix_settings::{Category, Setting, Shell, WIN_HEIGHT, WIN_WIDTH};
     use tairix_taskbar::SystemAction;
-    use tairix_theme::{Appearance, Theme};
-
     let scale = RECONSTRUCTION_SCALE;
-    let theme = Theme::dark();
+    let theme = booted_theme();
     let viewport = Rect::new(0, 0, WIN_WIDTH, WIN_HEIGHT);
     let window = settings_window_layout(&theme);
     let origin = Point::new(window.client.left(), window.client.top());
@@ -13470,18 +13485,19 @@ fn reconstruct_settings_walk() -> Result<SettingsWalk, String> {
         &theme,
     )?;
     let appearance_row = settings_walk_to(&mut shell, Category::Appearance, viewport, &theme)?;
-    let (appearance_combo, light_choice) = settings_choose(
+    let restyled = restyled_appearance();
+    let (appearance_combo, restyled_choice) = settings_choose(
         &mut shell,
         (
             Setting::Appearance,
-            choice_index(&Appearance::ALL, &Appearance::Light)?,
-            Appearance::Light.as_str(),
+            choice_index(&tairix_theme::Appearance::ALL, &restyled)?,
+            restyled.as_str(),
         ),
         viewport,
         &theme,
     )?;
     // The last gesture changes a key the first did not, so it commits whether
-    // or not Settings has adopted the light desktop by the time it lands.
+    // or not Settings has adopted the restyled desktop by the time it lands.
     let (density_combo, compact_choice) = settings_choose(
         &mut shell,
         (
@@ -13504,7 +13520,7 @@ fn reconstruct_settings_walk() -> Result<SettingsWalk, String> {
         strip_page_up: to_screen(strip_page_up)?,
         appearance_row: to_screen(appearance_row)?,
         appearance_combo: to_screen(appearance_combo)?,
-        light_choice: to_screen(light_choice)?,
+        restyled_choice: to_screen(restyled_choice)?,
         density_combo: to_screen(density_combo)?,
         compact_choice: to_screen(compact_choice)?,
         general,
@@ -13516,7 +13532,8 @@ fn reconstruct_settings_walk() -> Result<SettingsWalk, String> {
 
 /// Open Settings from the capsule's system menu, walk its strip to a stated
 /// absence, wheel it down past the fold to Storage, page it back up to
-/// Appearance, choose Light, then choose Compact density on the same pane.
+/// Appearance, choose the appearance the desktop did not boot in, then choose
+/// Compact density on the same pane.
 ///
 /// Every gate is the session's own witness that what the next press aims at is
 /// on screen: the menu drawn, the window's first frame, and — for each pane —
@@ -13524,7 +13541,7 @@ fn reconstruct_settings_walk() -> Result<SettingsWalk, String> {
 /// presses that share a gate are one gesture each (a page then the row it
 /// brought in; a list opened then a choice on it), which the application
 /// applies strictly in order. The last press is the one whose commit
-/// completes the guest's PASS, and it is sent only once the light dump is
+/// completes the guest's PASS, and it is sent only once the restyled dump is
 /// read back.
 fn settings_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     use tairix_qemu::MouseButton;
@@ -13581,7 +13598,7 @@ fn settings_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
         WINDOW_RETITLED_MARKER,
         4,
         MouseButton::Primary,
-        walk.light_choice,
+        walk.restyled_choice,
     );
     pen.click(
         DESKTOP_RESTYLED_MARKER,
@@ -13839,14 +13856,14 @@ fn settings_plate_edges(
 }
 
 /// [`ScreendumpPlan`] assertion for the Settings vertical's **first** dump:
-/// the window, on General, over the composited dark desktop, its strip
+/// the window, on General, over the composited desktop, its strip
 /// selecting the pane it opened on and its column drawing that pane's plates.
 fn assert_settings_general_screendump(
     t: &QemuTest,
     path: &Path,
     _serial: &str,
 ) -> Result<(), String> {
-    let theme = tairix_theme::Theme::dark();
+    let theme = booted_theme();
     let image = read_screendump(t, path)?;
     let window = settings_window_layout(&theme).outer;
     assert_desktop_wallpaper(t, path, &image, &theme, &[window])?;
@@ -13869,7 +13886,7 @@ fn assert_settings_general_screendump(
 /// Lock Screen composes a form — its setting and its *Lock Now* command on a
 /// plate — rather than stating an absence.
 fn assert_settings_lock_screendump(t: &QemuTest, path: &Path, _serial: &str) -> Result<(), String> {
-    let theme = tairix_theme::Theme::dark();
+    let theme = booted_theme();
     let image = read_screendump(t, path)?;
     let walk = settings_walk()?;
     assert_settings_strip(t, path, &image, &theme, walk.lock)?;
@@ -13893,7 +13910,7 @@ fn assert_settings_absence_screendump(
     path: &Path,
     _serial: &str,
 ) -> Result<(), String> {
-    let theme = tairix_theme::Theme::dark();
+    let theme = booted_theme();
     let image = read_screendump(t, path)?;
     let walk = settings_walk()?;
     assert_settings_strip(t, path, &image, &theme, walk.absence)?;
@@ -13977,7 +13994,7 @@ fn assert_settings_storage_screendump(
     path: &Path,
     _serial: &str,
 ) -> Result<(), String> {
-    let theme = tairix_theme::Theme::dark();
+    let theme = booted_theme();
     let image = read_screendump(t, path)?;
     let walk = settings_walk()?;
     assert_settings_strip(t, path, &image, &theme, walk.storage)?;
@@ -14013,21 +14030,21 @@ fn luma(pixel: Rgb) -> u32 {
     (2126 * u32::from(pixel.0) + 7152 * u32::from(pixel.1) + 722 * u32::from(pixel.2)) / 10_000
 }
 
-/// How much brighter, on average, a surface the session draws must read once
-/// the desktop is light than it read dark: the two grounds sit at opposite
+/// How far, on average, the luminance of a surface the session draws must
+/// move once the desktop switches appearance: the two grounds sit at opposite
 /// ends of the scale, so even translucent chrome over a mid-toned wallpaper
 /// moves far more than this.
-const MIN_SETTINGS_LIGHTENING: u32 = 64;
+const MIN_SETTINGS_RESTYLE: u32 = 64;
 
-/// The least share of such a surface's pixels that must be brighter light than
-/// dark: all of it but the marks drawn on it, which invert.
-const MIN_SETTINGS_LIGHTENED_SHARE: f64 = 0.75;
+/// The least share of such a surface's pixels that must move that way: all of
+/// it but the marks drawn on it, which invert.
+const MIN_SETTINGS_RESTYLED_SHARE: f64 = 0.75;
 
-/// `rect` of `image` is the session's own chrome redrawn light: brighter than
-/// the same rectangle of the dark `before` frame, on average by at least
-/// [`MIN_SETTINGS_LIGHTENING`] and pixel by pixel over at least
-/// [`MIN_SETTINGS_LIGHTENED_SHARE`] of it.
-fn assert_lightened(
+/// `rect` of `image` is the session's own chrome redrawn in `appearance`:
+/// lighter or darker, as that appearance is, than the same rectangle of the
+/// `before` frame, on average by at least [`MIN_SETTINGS_RESTYLE`] and pixel by
+/// pixel over at least [`MIN_SETTINGS_RESTYLED_SHARE`] of it.
+fn assert_restyled(
     t: &QemuTest,
     path: &Path,
     frames: (
@@ -14036,34 +14053,38 @@ fn assert_lightened(
     ),
     rect: tairix_geometry::Rect,
     what: &str,
+    appearance: tairix_theme::Appearance,
 ) -> Result<(), String> {
     let (image, before) = frames;
     let now = region_pixels(t, path, image, rect, what)?;
     let then = region_pixels(t, path, before, rect, what)?;
+    let lighter = appearance == tairix_theme::Appearance::Light;
     let mut total = 0u64;
-    let mut lightened = 0u64;
-    let (mut now_sum, mut then_sum) = (0u64, 0u64);
+    let mut moved = 0u64;
+    let (mut towards_sum, mut away_sum) = (0u64, 0u64);
     for (now_row, then_row) in now.iter().zip(&then) {
         for (now_pixel, then_pixel) in now_row.iter().zip(then_row) {
             let (a, b) = (luma(*now_pixel), luma(*then_pixel));
+            let (towards, away) = if lighter { (a, b) } else { (b, a) };
             total += 1;
-            now_sum += u64::from(a);
-            then_sum += u64::from(b);
-            if a > b {
-                lightened += 1;
+            towards_sum += u64::from(towards);
+            away_sum += u64::from(away);
+            if towards > away {
+                moved += 1;
             }
         }
     }
-    let gain = now_sum.saturating_sub(then_sum) / total.max(1);
+    let shift = towards_sum.saturating_sub(away_sum) / total.max(1);
     #[allow(clippy::cast_precision_loss)] // Chrome pixel counts are far below 2^52.
-    let share = lightened as f64 / total.max(1) as f64;
-    if gain < u64::from(MIN_SETTINGS_LIGHTENING) || share < MIN_SETTINGS_LIGHTENED_SHARE {
+    let share = moved as f64 / total.max(1) as f64;
+    if shift < u64::from(MIN_SETTINGS_RESTYLE) || share < MIN_SETTINGS_RESTYLED_SHARE {
         return Err(format!(
-            "test --qemu ({}): screendump {}: the {what} at {rect:?} was not redrawn light: its \
-             luminance rose by {gain} on average, over {share:.3} of it (expected >= \
-             {MIN_SETTINGS_LIGHTENING} over >= {MIN_SETTINGS_LIGHTENED_SHARE})",
+            "test --qemu ({}): screendump {}: the {what} at {rect:?} was not redrawn {}: its \
+             luminance moved that way by {shift} on average, over {share:.3} of it (expected >= \
+             {MIN_SETTINGS_RESTYLE} over >= {MIN_SETTINGS_RESTYLED_SHARE})",
             t.package,
             path.display(),
+            appearance.as_str(),
         ));
     }
     Ok(())
@@ -14072,30 +14093,32 @@ fn assert_lightened(
 /// [`ScreendumpPlan`] assertion for the Settings vertical's **last** dump,
 /// taken on the session's witness that the restyled desktop is on screen: the
 /// wallpaper is still exactly the composited desktop, and the bar and the
-/// Settings window's own title bar — the session's surfaces — are drawn light.
+/// Settings window's own title bar — the session's surfaces — are drawn in the
+/// appearance the walk chose.
 ///
 /// The window's client is deliberately not read: the application redraws its
 /// own pixels for the new look on its own time, so this frame may hold them in
 /// either appearance, or part way between.
-fn assert_settings_light_screendump(
+fn assert_settings_restyled_screendump(
     t: &QemuTest,
     path: &Path,
     _serial: &str,
 ) -> Result<(), String> {
-    let theme = tairix_theme::Theme::light();
+    let theme = restyled_theme();
     let image = read_screendump(t, path)?;
-    let dark = read_screendump(
+    let booted = read_screendump(
         t,
-        &baseline_dump_path(t, path, &[SETTINGS_LIGHT_DUMP], SETTINGS_GENERAL_DUMP)?,
+        &baseline_dump_path(t, path, &[SETTINGS_RESTYLED_DUMP], SETTINGS_GENERAL_DUMP)?,
     )?;
     let window = settings_window_layout(&theme);
     assert_desktop_wallpaper(t, path, &image, &theme, &[window.outer])?;
-    assert_lightened(
+    assert_restyled(
         t,
         path,
-        (&image, &dark),
+        (&image, &booted),
         taskbar_bar_rect(&theme),
         "icon bar",
+        restyled_appearance(),
     )?;
     let title_bar = tairix_geometry::Rect::new(
         window.outer.left(),
@@ -14103,7 +14126,14 @@ fn assert_settings_light_screendump(
         window.outer.width,
         u32::try_from(window.client.top() - window.outer.top()).unwrap_or(0),
     );
-    assert_lightened(t, path, (&image, &dark), title_bar, "Settings title bar")
+    assert_restyled(
+        t,
+        path,
+        (&image, &booted),
+        title_bar,
+        "Settings title bar",
+        restyled_appearance(),
+    )
 }
 
 /// Build the desktop-hover script: launch the `framestats` fixture from the
@@ -15226,7 +15256,7 @@ fn chain_plate_and_row(
 ) -> Result<(tairix_geometry::Rect, tairix_geometry::Rect), String> {
     use tairix_desktop_session::menu::{ChainOwner, MenuChain};
 
-    let theme = tairix_theme::Theme::dark().floating();
+    let theme = booted_theme().floating();
     let geom = reconstruction_chain_geometry(&theme);
     let row = model
         .rows()
@@ -15339,12 +15369,8 @@ const MENU_SETTINGS_ROW_LABEL: &str = tairix_terminal::menu::Command::Settings.l
 /// This frame is also the baseline the plate dump is read against, which is
 /// what turns "something is drawn where the plate goes" into "*this* run's
 /// right-click put it there".
-fn assert_menu_window_dark_screendump(
-    t: &QemuTest,
-    path: &Path,
-    _serial: &str,
-) -> Result<(), String> {
-    let theme = tairix_theme::Theme::dark();
+fn assert_menu_window_screendump(t: &QemuTest, path: &Path, _serial: &str) -> Result<(), String> {
+    let theme = booted_theme();
     let image = read_screendump(t, path)?;
     assert_cascade_slot_covered(t, path, &image, &theme, MENU_TERMINAL_CASCADE_SLOT)
 }
@@ -15361,19 +15387,16 @@ fn assert_menu_window_dark_screendump(
 /// the earlier frame showed at the same point is what keeps the second fact
 /// strong now that a plate is translucent: it holds a plate to the exact
 /// composite the theme asks for, over the terminal and over the wallpaper alike,
-/// where a bare distance from the ground colour would admit any dark repaint.
+/// where a bare distance from the ground colour would admit any repaint of a
+/// similar shade.
 /// The rectangle is the one the production chain reports, so a placement
 /// regression moves the probe off the plate and fails here rather than passing
 /// on a menu drawn somewhere else.
-fn assert_menu_plate_dark_screendump(
-    t: &QemuTest,
-    path: &Path,
-    _serial: &str,
-) -> Result<(), String> {
+fn assert_menu_plate_screendump(t: &QemuTest, path: &Path, _serial: &str) -> Result<(), String> {
     /// The share of the plate rectangle that must differ from the frame before
     /// the menu opened. Measured at 0.922 on the board while the plate was
-    /// opaque; four fifths of the ground still moves a dark backdrop well clear
-    /// of itself, so the floor stands.
+    /// opaque; four fifths of the ground still moves the backdrop well clear of
+    /// itself, so the floor stands.
     const MIN_PLATE_DRIFT: f64 = 0.75;
     /// The share of the plate's interior that must be its ground composited over
     /// what was behind it.
@@ -15389,7 +15412,7 @@ fn assert_menu_plate_dark_screendump(
     /// and of the anti-aliasing on its rounded corners.
     const PLATE_PROBE_INSET_PX: u32 = 4;
 
-    let theme = tairix_theme::Theme::dark();
+    let theme = booted_theme();
     let image = read_screendump(t, path)?;
     let before = read_screendump(
         t,
@@ -15721,7 +15744,7 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
         // The handshake click on the still-focused window: keyed on the
         // first click's own deliveries reaching that window and
         // additionally held while the second dump is pending, so the dump
-        // captures the staged dark frame and the terminal stage below
+        // captures the staged frame and the terminal stage below
         // starts in a strictly later wake.
         step(AUTOLOAD_FILES_ACTIVATED_MARKER, 1, click),
         // --- The AW4 terminal stage, keyed on the handshake click's own

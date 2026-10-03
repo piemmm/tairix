@@ -509,7 +509,7 @@ mod tests {
         // pinboard keys, so adopting its request must not reset the
         // appearance another pane set (and the reverse).
         let in_effect = DesktopSettings {
-            appearance: tairix_abi::desktop::Appearance::Light,
+            appearance: tairix_abi::desktop::Appearance::Dark,
             density: tairix_abi::desktop::Density::Compact,
             ..DesktopSettings::default()
         };
@@ -536,7 +536,7 @@ mod tests {
     #[test]
     fn an_unattested_apply_reads_nothing_and_changes_nothing() {
         let in_effect = DesktopSettings {
-            appearance: tairix_abi::desktop::Appearance::Light,
+            appearance: tairix_abi::desktop::Appearance::Dark,
             ..DesktopSettings::default()
         };
         let frame = apply_frame(&edited());
@@ -546,6 +546,6 @@ mod tests {
         );
         // The identity check precedes the parse, so the settings in effect
         // are untouched whatever the document said.
-        assert_eq!(in_effect.appearance, tairix_abi::desktop::Appearance::Light);
+        assert_eq!(in_effect.appearance, tairix_abi::desktop::Appearance::Dark);
     }
 }

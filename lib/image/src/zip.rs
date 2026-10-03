@@ -161,6 +161,13 @@ struct Entry {
     local: u32,
 }
 
+/// An entry as the archive holds it: its declared size, and its bytes in
+/// place where they are stored rather than compressed.
+pub(crate) struct View<'a> {
+    pub(crate) size: usize,
+    pub(crate) stored: Option<&'a [u8]>,
+}
+
 /// An archive read through its central directory.
 pub(crate) struct Archive<'a> {
     bytes: &'a [u8],
@@ -234,20 +241,19 @@ impl<'a> Archive<'a> {
         self.entries.iter().map(|entry| self.name(entry))
     }
 
-    /// The bytes of the entry named `name`, no more than `most` of them,
-    /// checked against its CRC-32; `None` where no entry is so named.
-    pub(crate) fn read(&self, name: &str, most: usize) -> Result<Option<Vec<u8>>, ZipError> {
-        let Some(entry) = self
-            .entries
+    /// The bytes the directory's record of the entries holds.
+    pub(crate) fn held_bytes(&self) -> usize {
+        self.entries.capacity() * core::mem::size_of::<Entry>()
+    }
+
+    fn entry(&self, name: &str) -> Option<&Entry> {
+        self.entries
             .iter()
             .find(|entry| self.name(entry) == name.as_bytes())
-        else {
-            return Ok(None);
-        };
-        let size = usize::try_from(entry.size).map_err(|_| ZipError::TooLarge)?;
-        if size > most {
-            return Err(ZipError::TooLarge);
-        }
+    }
+
+    /// The entry's data as the archive holds it, packed or stored.
+    fn data(&self, entry: &Entry) -> Result<&'a [u8], ZipError> {
         let local = usize::try_from(entry.local).map_err(|_| ZipError::Malformed)?;
         if get32(self.bytes, local)? != LOCAL {
             return Err(ZipError::Malformed);
@@ -257,10 +263,38 @@ impl<'a> Archive<'a> {
             + usize::from(get16(self.bytes, local + 26)?)
             + usize::from(get16(self.bytes, local + 28)?);
         let packed = usize::try_from(entry.packed).map_err(|_| ZipError::Malformed)?;
-        let data = self
-            .bytes
+        self.bytes
             .get(start..start.checked_add(packed).ok_or(ZipError::Malformed)?)
-            .ok_or(ZipError::Malformed)?;
+            .ok_or(ZipError::Malformed)
+    }
+
+    /// The entry named `name` as the archive holds it, reading none of it
+    /// out; `None` where no entry is so named. Stored bytes are not checked
+    /// against the entry's CRC-32 here: [`Self::read`] checks what it reads.
+    pub(crate) fn view(&self, name: &str) -> Result<Option<View<'a>>, ZipError> {
+        let Some(entry) = self.entry(name) else {
+            return Ok(None);
+        };
+        let size = usize::try_from(entry.size).map_err(|_| ZipError::TooLarge)?;
+        let stored = match entry.method {
+            STORED if entry.packed == entry.size => Some(self.data(entry)?),
+            _ => None,
+        };
+        Ok(Some(View { size, stored }))
+    }
+
+    /// The bytes of the entry named `name`, no more than `most` of them,
+    /// checked against its CRC-32; `None` where no entry is so named.
+    pub(crate) fn read(&self, name: &str, most: usize) -> Result<Option<Vec<u8>>, ZipError> {
+        let Some(entry) = self.entry(name) else {
+            return Ok(None);
+        };
+        let size = usize::try_from(entry.size).map_err(|_| ZipError::TooLarge)?;
+        if size > most {
+            return Err(ZipError::TooLarge);
+        }
+        let packed = usize::try_from(entry.packed).map_err(|_| ZipError::Malformed)?;
+        let data = self.data(entry)?;
         let out = match entry.method {
             STORED if packed == size => {
                 fallible::collected(size, data.iter().copied()).ok_or(ZipError::OutOfMemory)?

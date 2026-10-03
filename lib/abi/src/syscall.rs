@@ -2768,8 +2768,10 @@ pub const RESOURCE_REF_MAX: usize = 1024;
 ///
 /// Passing this rather than a specific PID waits for whichever of the
 /// caller's children exits next (the POSIX `waitpid(-1, …)` convention).
-/// A named constant keeps the sentinel from appearing as a bare `-1` at
-/// every call site.
+/// A parser-sandbox worker ([`crate::SPAWN_FLAG_SANDBOX`]) is private to the
+/// seam that spawned it and is never reported here; only a wait naming its
+/// PID reaps it. A named constant keeps the sentinel from appearing as a
+/// bare `-1` at every call site.
 pub const WAIT_PID_ANY: i64 = -1;
 
 /// Flags accepted by [`SyscallNumber::WAIT`].

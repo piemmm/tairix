@@ -109,8 +109,9 @@ use tairix_abi::window_ipc::{
     encode_picked_name_reply, AppBar, AppBarClick, AppMenu, AppMenuBundle, AppMenuEntry,
     AppMenuEntryText, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuReason,
     AppMenuRole, AppMenuRow, AppMenuShortcut, BundleRunPath, ClipboardKind, CursorShape,
-    DocumentName, HandOverDocument, MenuOutcome, MenuRefusal, PickPurpose, PreviewSubject,
-    SaveEndings, TooltipText, WindowEvent, WindowRegion, WindowRequest, WindowSizing, WindowTitle,
+    DocumentName, HandOverDocument, MenuOutcome, MenuRefusal, PickPurpose, PreviewOutcome,
+    PreviewSubject, SaveEndings, TooltipText, WindowEvent, WindowRegion, WindowRequest,
+    WindowSizing, WindowTitle,
 };
 use tairix_abi::BUNDLE_ID_MAX;
 use tairix_abi::{
@@ -2190,7 +2191,7 @@ fn structured_icon_bar_inputs_with_corrupted_fields_never_panic() {
             subject: PreviewSubject::Screensaver(ScreensaverKind::Clock),
             width: 144,
             height: 81,
-            rendered: true,
+            outcome: PreviewOutcome::Unavailable,
         }
         .to_le_bytes(),
     ];

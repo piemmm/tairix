@@ -888,6 +888,27 @@ impl Shell {
         }
     }
 
+    /// Record that the desktop had no memory to render `subject`, so it keeps
+    /// its glyph until memory may have been freed.
+    pub fn mark_picture_unavailable(&mut self, subject: PreviewSubject) {
+        self.pictures_moved();
+        if let Some(form) = self.body.form_mut() {
+            form.picture_unavailable(subject);
+        }
+    }
+
+    /// Memory may have been freed: offer the pictures that were short of it
+    /// again.
+    pub fn retry_unavailable_pictures(&mut self) {
+        if self
+            .body
+            .form_mut()
+            .is_some_and(crate::form::Form::retry_unavailable_pictures)
+        {
+            self.pictures_moved();
+        }
+    }
+
     /// Record that what the pane's pictures want may have changed.
     fn pictures_moved(&mut self) {
         self.pictures_epoch = self.pictures_epoch.wrapping_add(1);

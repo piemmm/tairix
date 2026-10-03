@@ -147,14 +147,20 @@ fn log_panic_best_effort(info: &PanicInfo<'_>) {
     if let Some(at) = info.location() {
         let _ = write!(line, " at {}:{}", at.file(), at.line());
     }
-    let Ok(text) = core::str::from_utf8(line.as_bytes()) else {
+    log_fatal_best_effort(crate::PANIC_REPORTED, line.as_bytes());
+}
+
+/// Record a fatal report `line` as `event` through the system log, encoded on
+/// the stack and dropped rather than failing a second time.
+fn log_fatal_best_effort(event: tairix_log::EventId, line: &[u8]) {
+    let Ok(text) = core::str::from_utf8(line) else {
         return;
     };
     let mut record = [0u8; tairix_abi::LOG_RECORD_MAX];
     if let Ok(len) = tairix_abi::encode_log_record(
         &mut record,
         tairix_log::Level::Error.as_u8(),
-        crate::PANIC_REPORTED.0,
+        event.0,
         text,
         &[],
     ) {
@@ -186,6 +192,26 @@ fn panic(info: &PanicInfo<'_>) -> ! {
     write_stderr_best_effort(report.as_bytes());
     log_panic_best_effort(info);
     exit(EXIT_PANIC)
+}
+
+/// An allocation the program could not do without failed.
+///
+/// Reported like a panic, on both channels and without allocating, since the
+/// heap is what failed — but ended with its own status, so a parent can tell
+/// memory running out from a bug and ask again once memory is freed.
+#[alloc_error_handler]
+fn out_of_memory(layout: core::alloc::Layout) -> ! {
+    use core::fmt::Write as _;
+    let mut report = crate::io::FixedFmtBuf::<PANIC_REPORT_BYTES>::new();
+    let _ = write!(
+        report,
+        "out of memory: an allocation of {} bytes failed",
+        layout.size()
+    );
+    log_fatal_best_effort(crate::OUT_OF_MEMORY_REPORTED, report.as_bytes());
+    let _ = report.write_str("\n");
+    write_stderr_best_effort(report.as_bytes());
+    exit(tairix_abi::OOM_EXIT_STATUS)
 }
 
 /// Read the declared total startup-vector length from its header, so the

@@ -101,7 +101,7 @@ moves (`fit_to_listing`), so the window manager holds it there.
 The desktop is asked for first, before anything is sized or painted
 (`WindowClient::desktop`), so the window opens at a size the screen can
 hold, the listing is set at the desktop's own UI density, and a session in
-light mode gets a light window rather than a dark one corrected after the
+dark mode gets a dark window rather than a light one corrected after the
 user has seen it. A `DesktopChanged` afterwards is adopted and repainted —
 during a long copy too, where the modal progress panel is re-presented each
 pass — so a light/dark switch reaches this window at once. A desktop query

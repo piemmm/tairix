@@ -146,10 +146,10 @@ fails before the fix), and that a board renders differently under light and
 dark so an adopted appearance demonstrably reaches pixels.
 
 What no host test can show is the whole chain on real firmware: boot the
-desktop, open an application, switch to Light on Settings' Appearance pane,
+desktop, open an application, switch to Dark on Settings' Appearance pane,
 and read the application's own window rectangle out of two screendumps to see
 it repaint — then close the application to its icon-bar slot, switch back to
-Dark, re-open it, and see it open dark. That last half is the case the
+Light, re-open it, and see it open light. That last half is the case the
 per-window announcement could not serve at all and is the reason this
 mechanism exists, so it is the vertical worth having.
 

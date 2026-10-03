@@ -27,7 +27,7 @@ pub struct DesktopSession {
 
 impl DesktopSession {
     /// Build a session for a taskbar placed by `config`, starting from the
-    /// built-in themes with the default dark theme active.
+    /// built-in themes with the default light theme active.
     ///
     /// The taskbar comes up with its two permanent leading launchers and an
     /// empty program library; the embedder hands the popup the resolved
