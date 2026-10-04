@@ -109,10 +109,12 @@ strength, and the four pass effects off. Translucency is free (it is the alpha
 the background is filled at, and it is not a pass), so the shipped look keeps
 the cell-diff present; the blur is what makes the window read as frosted glass
 rather than as a hole. A screenful of frosted terminals is affordable because
-the compositor rations frosting: it frosts the stack from the front until the
-retention budget runs out, and a terminal buried beneath that draws as the
-plain translucency it also is (`plans/FIX-DESKTOP-SPEEDUP.md` D.13). A window
-piled on by others therefore loses the frosted look, never its correctness.
+the compositor rations *retention*, never the blur: it retains frosts from the
+front of the stack until the budget runs out, and a terminal buried beneath
+that is still frosted, recomputing only what each frame uncovers of its frost
+(`plans/FIX-DESKTOP-SPEEDUP.md` D.13). A window piled on by others therefore
+keeps its look; what it gives up is only the retained copy that made
+repainting it cheap.
 
 ---
 

@@ -32,11 +32,12 @@ use tairix_terrain::{FlowDir, Grid as Square};
 use tairix_util::{fallible, mathf};
 
 use crate::band;
+use crate::channel::{self, Banked, Form, Section, Station, BROADEST};
 use crate::course::{smoothed, Courses, Mark, Nearest, Reach};
 use crate::heightfield::{apart, Heightfield, Sealing, ABSENT};
 use crate::noise::{fbm2, noise2, ridged2, smoothstep};
 use crate::terrain::Terrain;
-use crate::vector::{real, share, single, Vec3};
+use crate::vector::{power, real, share, single, Vec3};
 
 /// How water wears a land.
 #[derive(Copy, Clone, Debug)]
@@ -68,6 +69,36 @@ pub(crate) struct Rivers {
     pub(crate) width: f64,
     /// How far it wanders from side to side across level ground, in widths.
     pub(crate) meander: f64,
+    /// The share of its channel's depth its water fills: one in spate, less
+    /// in a dry season, the margins of its bed left bare.
+    pub(crate) flowing: f64,
+    /// The share of its reaches whose fall bedded rock gathers at a ledge,
+    /// and of its banks rock outcrops in.
+    pub(crate) ledges: f64,
+    pub(crate) outcrops: f64,
+}
+
+impl Rivers {
+    /// What shapes the channels of a land built under `seed`.
+    pub(crate) fn form(&self, seed: u32) -> Form {
+        Form {
+            flowing: self.flowing,
+            ledges: self.ledges,
+            outcrops: self.outcrops,
+            seed: seed ^ CHANNELS,
+        }
+    }
+}
+
+/// The key a land's channels are drawn under, against its own.
+const CHANNELS: u32 = 0xc4a7;
+
+/// A finer grid of the fresh water's surface laid about the eye, where a
+/// scene shapes the surface itself: its half breadth, and its cells a side.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct NearWater {
+    pub(crate) reach: f64,
+    pub(crate) cells: usize,
 }
 
 /// What a road is made of.
@@ -114,6 +145,9 @@ pub(crate) struct Plan {
     pub(crate) cells: (usize, usize),
     /// The finer grids laid about the eye, coarsest first.
     pub(crate) nests: [Option<Nest>; NESTS],
+    /// The fresh water's own finer grid about the eye, if the scene shapes
+    /// its surface there.
+    pub(crate) near_water: Option<NearWater>,
     /// The relief running on past the far grid out to the horizon, if it
     /// does rather than settling to a rim.
     pub(crate) horizon: Option<Horizon>,
@@ -138,6 +172,11 @@ pub(crate) struct Horizon {
 }
 
 impl Plan {
+    /// How far apart the far grid's vertices lie, and the fresh water's.
+    pub(crate) fn far_step(&self) -> f64 {
+        2.0 * self.reach / real(self.cells.1)
+    }
+
     /// Where the horizon grid lies — its first vertex and its step — and its
     /// cells a side, its reach nudged so the far grid's border runs along its
     /// cell edges; `None` if the land has none, or one too small to leave a
@@ -164,6 +203,8 @@ pub(crate) struct Fields {
     /// A grid for each finer grid the plan lays.
     pub(crate) nests: [Option<u32>; NESTS],
     pub(crate) water: Option<u32>,
+    /// A grid for the fresh water's own finer grid, if the plan lays one.
+    pub(crate) near_water: Option<u32>,
     /// A grid for the horizon, if the plan has one.
     pub(crate) horizon: Option<u32>,
 }
@@ -197,6 +238,11 @@ impl Laid {
     pub(crate) fn holds(&self, x: f64, z: f64) -> bool {
         let inner = 0.97 * self.reach;
         (x - self.centre.0).abs() < inner && (z - self.centre.1).abs() < inner
+    }
+
+    /// How far within its border `(x, z)` lies, negative outside it.
+    fn inside(&self, (x, z): (f64, f64)) -> f64 {
+        self.reach - (x - self.centre.0).abs().max((z - self.centre.1).abs())
     }
 }
 
@@ -232,7 +278,12 @@ pub(crate) struct Land {
     pub(crate) far: u32,
     pub(crate) nests: [Option<Laid>; NESTS],
     pub(crate) water: Option<u32>,
+    /// The fresh water's own finer grid about the eye, if it has one.
+    pub(crate) near_water: Option<Laid>,
     pub(crate) horizon: Option<u32>,
+    /// The rivers, and what shapes their channels.
+    pub(crate) rivers: Courses,
+    pub(crate) form: Option<Form>,
     pub(crate) roads: Courses,
     pub(crate) road: Option<Roadway>,
     /// Where the road bridges its rivers.
@@ -312,10 +363,15 @@ impl Land {
             .filter(|&level| level > self.height(fields, x, z))
     }
 
-    /// The fresh water's level about `(x, z)` wherever its grid holds one,
-    /// over a bank beside the water as over the water itself.
+    /// The fresh water's level about `(x, z)` wherever its grids hold one,
+    /// over a bank beside the water as over the water itself: the finer
+    /// grid's where it lies, as the flow has shaped it.
     pub(crate) fn water_level(&self, fields: &[Heightfield], x: f64, z: f64) -> Option<f64> {
-        let level = fields.get(self.water? as usize)?.height_at(x, z);
+        let grid = match self.near_water.filter(|near| near.inside((x, z)) > 0.0) {
+            Some(near) => near.field,
+            None => self.water?,
+        };
+        let level = fields.get(grid as usize)?.height_at(x, z);
         level.is_finite().then_some(level)
     }
 
@@ -386,11 +442,11 @@ impl Survey<'_> {
             .lakes
             .get(build.sample_at(x, z))
             .map(|&level| f64::from(level));
-        let river = build
-            .rivers
-            .nearest(x, z)
-            .filter(|near| near.distance < 0.5 * near.width)
-            .map(|near| near.level);
+        let river = build.form().and_then(|form| {
+            let near = build.rivers.nearest(x, z)?;
+            let section = Section::new(&Station::of(&near), &form);
+            (near.distance < section.half).then_some(section.water)
+        });
         lake.into_iter()
             .chain(river)
             .filter(|level| level.is_finite() && *level > ground)
@@ -405,6 +461,15 @@ impl Survey<'_> {
 
     pub(crate) fn roads(&self) -> &Courses {
         &self.build.roads
+    }
+
+    pub(crate) fn rivers(&self) -> &Courses {
+        &self.build.rivers
+    }
+
+    /// What shapes the land's rivers' channels, if it has any.
+    pub(crate) fn form(&self) -> Option<Form> {
+        self.build.form()
     }
 
     /// Where the land's road bridges its rivers.
@@ -527,17 +592,24 @@ enum Step {
         level: usize,
         row: usize,
     },
+    /// Running droplets over finer grid `level`, its heights as they stood
+    /// before them kept.
     NestDroplets {
         level: usize,
         erosion: Erosion,
+        before: Vec<f32>,
     },
-    /// Holding finer grid `level`'s border to the grid about it, and its
-    /// clearing level, from row `row`.
+    /// Holding finer grid `level`'s channels to what they stood at before the
+    /// droplets, its border to the grid about it, and its clearing level, from
+    /// row `row`.
     NestSettle {
         level: usize,
         row: usize,
+        before: Vec<f32>,
     },
     Water(usize),
+    /// Filling the fresh water's finer grid from its row.
+    NearWater(usize),
     /// Sealing the land's grids, the `next` of them on.
     Seal {
         next: usize,
@@ -578,6 +650,8 @@ pub(crate) struct Build {
     /// The finer grids, placed once the scene sites them.
     nests: [Option<Laid>; NESTS],
     water: Option<u32>,
+    /// The fresh water's own finer grid, placed with the others.
+    near_water: Option<Laid>,
     horizon: Option<u32>,
     stage: Step,
 }
@@ -620,7 +694,7 @@ impl Build {
         );
         // Each finer grid spans whole cells of the grid about it, so its
         // border runs along that grid's cell edges.
-        let mut parent = 2.0 * plan.reach / real(plan.cells.1);
+        let mut parent = plan.far_step();
         let mut nests = [None; NESTS];
         for ((slot, nest), field) in nests.iter_mut().zip(&plan.nests).zip(fields.nests) {
             match (nest, field) {
@@ -637,6 +711,21 @@ impl Build {
                 _ => return None,
             }
         }
+        // Whole cells of the water grid, which is the far grid's, so its
+        // border runs along that grid's cell edges.
+        let far_cell = plan.far_step();
+        let near_water = match (plan.near_water, fields.near_water) {
+            (Some(near), Some(field)) => Some(Laid {
+                field,
+                centre: plan.relief.centre,
+                reach: (mathf::round(near.reach / far_cell) * far_cell).max(2.0 * far_cell),
+            }),
+            (None, None) => None,
+            _ => return None,
+        };
+        if near_water.is_some() && (plan.rivers.is_none() || fields.water.is_none()) {
+            return None;
+        }
         Some(Self {
             square,
             height: fallible::filled(side * side, 0.0)?,
@@ -652,6 +741,7 @@ impl Build {
             far: fields.far,
             nests,
             water: fields.water,
+            near_water,
             horizon: fields.horizon,
             stage: Step::Relief(0),
             plan,
@@ -703,6 +793,9 @@ impl Build {
         } else {
             0.0
         };
+        let (near_side, near_water) = self.plan.near_water.map_or((1, 0.0), |near| {
+            (near.cells + 1, vertices(near.cells) * WATER_NS)
+        });
         let ran = |erosion: &Erosion| {
             1.0 - f64::from(erosion.left()) / f64::from(erosion.total()).max(1.0)
         };
@@ -742,19 +835,20 @@ impl Build {
                 let (side, fill, ..) = nest(*level);
                 sited + nests_before(*level) + fill * share(*row, side)
             }
-            Step::NestDroplets { level, erosion } => {
+            Step::NestDroplets { level, erosion, .. } => {
                 let (_, fill, drops, _) = nest(*level);
                 sited + nests_before(*level) + fill + drops * ran(erosion)
             }
-            Step::NestSettle { level, row } => {
+            Step::NestSettle { level, row, .. } => {
                 let (side, fill, drops, settle) = nest(*level);
                 sited + nests_before(*level) + fill + drops + settle * share(*row, side)
             }
             Step::Water(row) => laid + water * share(*row, far_side),
+            Step::NearWater(row) => laid + water + near_water * share(*row, near_side),
             Step::Seal { .. } | Step::Done => return 1.0,
             Step::Gone => 0.0,
         };
-        (spent / (laid + water).max(1.0)).min(1.0)
+        (spent / (laid + water + near_water).max(1.0)).min(1.0)
     }
 
     /// Whether the build waits for the scene to say where the near grid lies.
@@ -793,19 +887,42 @@ impl Build {
             // and kept well within it.
             let ((origin_x, origin_z), step) = parent;
             let room = (around_reach - laid.reach - 8.0 * step).max(0.0);
-            let place = |value: f64, middle: f64, from: f64| {
-                let kept = value.clamp(middle - room, middle + room);
-                from + mathf::round((kept - from) / step) * step
-            };
             laid.centre = (
-                place(focus.0 + lead.0 * laid.reach, around.0, origin_x),
-                place(focus.1 + lead.1 * laid.reach, around.1, origin_z),
+                snapped(
+                    focus.0 + lead.0 * laid.reach,
+                    (around.0, room),
+                    (origin_x, step),
+                ),
+                snapped(
+                    focus.1 + lead.1 * laid.reach,
+                    (around.1, room),
+                    (origin_z, step),
+                ),
             );
             (around, around_reach) = (laid.centre, laid.reach);
             let own = 2.0 * laid.reach / real(nest.cells);
             parent = (
                 (laid.centre.0 - laid.reach, laid.centre.1 - laid.reach),
                 own,
+            );
+        }
+        let ((origin_x, origin_z), step) = self.far_placing();
+        let (centre, reach) = (self.plan.relief.centre, self.plan.reach);
+        if let Some(near) = self.near_water.as_mut() {
+            // On a vertex of the far water grid it leaves its square out of,
+            // and well within it.
+            let room = (reach - near.reach - 8.0 * step).max(0.0);
+            near.centre = (
+                snapped(
+                    focus.0 + lead.0 * near.reach,
+                    (centre.0, room),
+                    (origin_x, step),
+                ),
+                snapped(
+                    focus.1 + lead.1 * near.reach,
+                    (centre.1, room),
+                    (origin_z, step),
+                ),
             );
         }
         let outermost = self.nests.iter().flatten().next().copied();
@@ -840,7 +957,10 @@ impl Build {
             far: self.far,
             nests: self.nests,
             water: self.water,
+            near_water: self.near_water,
             horizon: self.horizon,
+            form: self.form(),
+            rivers: self.rivers,
             roads: self.roads,
             road: self.plan.road,
             crossings: self.crossings,
@@ -850,9 +970,13 @@ impl Build {
         })
     }
 
+    /// What shapes the land's rivers' channels, if it has any.
+    fn form(&self) -> Option<Form> {
+        self.plan.rivers.map(|rivers| rivers.form(self.plan.seed))
+    }
+
     fn far_placing(&self) -> ((f64, f64), f64) {
-        let step = 2.0 * self.plan.reach / real(self.plan.cells.1);
-        (self.origin, step)
+        (self.origin, self.plan.far_step())
     }
 
     /// The scene's grid finer grid `level` is laid within.
@@ -970,11 +1094,16 @@ impl Build {
             }
             Step::Sited => Step::Sited,
             Step::Nest { level, row } => self.filling_nest(fields, level, row, runner)?,
-            Step::NestDroplets { level, erosion } => {
-                self.eroding_nest(fields, (level, erosion), runner)?
+            Step::NestDroplets {
+                level,
+                erosion,
+                before,
+            } => self.eroding_nest(fields, (level, erosion, before), runner)?,
+            Step::NestSettle { level, row, before } => {
+                self.settling_nest(fields, (level, row, before), runner)?
             }
-            Step::NestSettle { level, row } => self.settling_nest(fields, (level, row), runner)?,
             Step::Water(row) => self.filling_water(fields, row, runner)?,
+            Step::NearWater(row) => self.filling_near_water(fields, row, runner)?,
             Step::Seal { next, sealing } => self.sealing(fields, (next, sealing), runner)?,
             done @ Step::Done => done,
             Step::Gone => return None,
@@ -991,7 +1120,7 @@ impl Build {
     ) -> Option<Step> {
         let field = fields.get_mut(self.horizon? as usize)?;
         let end = (row + UNIT_ROWS * runner.width().max(1)).min(field.side());
-        self.fill_horizon(field, row..end, runner)?;
+        self.fill_horizon(field, row..end, runner);
         if end < field.side() {
             Some(Step::Horizon(end))
         } else {
@@ -1088,24 +1217,13 @@ impl Build {
             head: CHANNEL_HEAD * self.step * self.step,
         };
         let strata = self.plan.wear.strata;
-        let hardness = |_: usize, height: f64| match strata {
-            Some((spacing, hard)) => {
-                let (_, within) = crate::noise::cell(height / spacing);
-                // The top tenth of each bed is the hard cap.
-                if within > 0.9 {
-                    hard
-                } else {
-                    1.0
-                }
-            }
-            None => 1.0,
-        };
+        let erodibility = |_: usize, height: f64| erodibility(strata, height);
         incise_implicit(
             &mut self.height,
             &network,
             self.square,
             law,
-            (start..end, &hardness),
+            (start..end, &erodibility),
         )
         .ok()?;
         if end < network.order.len() {
@@ -1318,6 +1436,7 @@ impl Build {
         let side = field.side();
         let end = (row + UNIT_ROWS * runner.width().max(1)).min(side);
         let placing = field.placing();
+        let ((origin_x, origin_z), step) = placing;
         let roughness = self.plan.roughness;
         field.each_row(row..end, runner, &|(row, heights, attributes)| {
             let first = *row * side;
@@ -1325,6 +1444,13 @@ impl Build {
                 before.get(first..first + side).unwrap_or_default(),
                 flux.get(first..first + side).unwrap_or_default(),
             );
+            // A river's channel and its banks' faces stand as it carved
+            // them: its floods, not the droplets, shape them.
+            let z = origin_z + real(*row) * step;
+            for (column, (slot, &was)) in heights.iter_mut().zip(before).enumerate() {
+                let say = self.channel_say((origin_x + real(column) * step, z), step);
+                *slot += single(say) * (was - *slot);
+            }
             settle_row((heights, attributes), (before, flux), roughness);
             self.hold_row((*row, heights), placing);
             if let Some(horizon) = horizon {
@@ -1339,7 +1465,7 @@ impl Build {
             });
         }
         if let Some(beyond) = self.horizon {
-            leave_out(far, fields.get_mut(beyond as usize)?);
+            leave_out(far, fields.get_mut(beyond as usize)?, 1);
         }
         Some(Step::Sited)
     }
@@ -1373,6 +1499,7 @@ impl Build {
         Some(Step::NestDroplets {
             level,
             erosion: Erosion::new(square, Self::droplets(step), nest.droplets, seed).ok()?,
+            before: fallible::collected(grid.heights().len(), grid.heights().iter().copied())?,
         })
     }
 
@@ -1381,15 +1508,23 @@ impl Build {
     fn eroding_nest(
         &self,
         fields: &mut [Heightfield],
-        (level, mut erosion): (usize, Erosion),
+        (level, mut erosion, before): (usize, Erosion, Vec<f32>),
         runner: &dyn JobRunner,
     ) -> Option<Step> {
         let laid = self.nests.get(level).copied().flatten()?;
         let grid = fields.get_mut(laid.field as usize)?;
         Some(if erosion.run(grid.heights_mut(), None, runner).ok()? {
-            Step::NestSettle { level, row: 0 }
+            Step::NestSettle {
+                level,
+                row: 0,
+                before,
+            }
         } else {
-            Step::NestDroplets { level, erosion }
+            Step::NestDroplets {
+                level,
+                erosion,
+                before,
+            }
         })
     }
 
@@ -1399,22 +1534,40 @@ impl Build {
     fn settling_nest(
         &self,
         fields: &mut [Heightfield],
-        (level, row): (usize, usize),
+        (level, row, before): (usize, usize, Vec<f32>),
         runner: &dyn JobRunner,
     ) -> Option<Step> {
         let laid = self.nests.get(level).copied().flatten()?;
         let parent = self.parent_of(level)? as usize;
         let (grid, around) = apart(fields, laid.field as usize, parent)?;
-        let end = (row + UNIT_ROWS * runner.width().max(1)).min(grid.side());
+        let side = grid.side();
+        let end = (row + UNIT_ROWS * runner.width().max(1)).min(side);
         let placing = grid.placing();
+        let ((origin_x, origin_z), step) = placing;
         grid.each_row(row..end, runner, &|(row, heights, _)| {
+            // A river's channel and its banks' faces stand as it carved
+            // them: its floods, not the droplets, shape them.
+            let z = origin_z + real(*row) * step;
+            let before = before
+                .get(*row * side..(*row + 1) * side)
+                .unwrap_or_default();
+            for (column, (slot, &was)) in heights.iter_mut().zip(before).enumerate() {
+                if slot.is_finite() && was.is_finite() {
+                    let say = self.channel_say((origin_x + real(column) * step, z), step);
+                    *slot += single(say) * (was - *slot);
+                }
+            }
             blend_row(laid, around, (*row, heights), (placing, NEST_BAND));
             self.hold_row((*row, heights), placing);
         });
-        if end < grid.side() {
-            return Some(Step::NestSettle { level, row: end });
+        if end < side {
+            return Some(Step::NestSettle {
+                level,
+                row: end,
+                before,
+            });
         }
-        leave_out(laid, fields.get_mut(parent)?);
+        leave_out(laid, fields.get_mut(parent)?, 1);
         Some(self.next_nest(level + 1))
     }
 
@@ -1428,22 +1581,66 @@ impl Build {
         let Some(index) = self.water else {
             return Some(Step::SEALING);
         };
-        let field = fields.get_mut(index as usize)?;
         if row == 0 && !self.watered() {
             // A dry land's water keeps its place as a grid of one empty cell.
-            field.heights_mut().fill(ABSENT);
+            for kept in [Some(index), self.near_water.map(|near| near.field)]
+                .into_iter()
+                .flatten()
+            {
+                fields.get_mut(kept as usize)?.heights_mut().fill(ABSENT);
+            }
             return Some(Step::SEALING);
         }
+        let field = fields.get_mut(index as usize)?;
         if row == 0 {
             let (origin, step) = self.far_placing();
             *field = Heightfield::new(self.plan.cells.1, origin, step, false)?;
         }
         let end = (row + UNIT_ROWS * 2 * runner.width().max(1)).min(field.side());
-        self.fill_water(field, row..end, runner)?;
+        self.fill_water(field, row..end, runner);
+        if end < field.side() {
+            return Some(Step::Water(end));
+        }
+        Some(match self.near_water {
+            Some(near) => {
+                // The finer grid meets it at its border rather than sharing a
+                // ring with it: a ray must cross one water's surface, not two.
+                leave_out(near, field, 0);
+                Step::NearWater(0)
+            }
+            None => Step::SEALING,
+        })
+    }
+
+    /// A unit of the fresh water's finer grid's rows from `row`, its surface
+    /// as the far water grid has it, to be shaped by the scene; the grid
+    /// carries what the scene's shaping leaves on the water.
+    fn filling_near_water(
+        &self,
+        fields: &mut [Heightfield],
+        row: usize,
+        runner: &dyn JobRunner,
+    ) -> Option<Step> {
+        let (Some(near), Some(cells)) =
+            (self.near_water, self.plan.near_water.map(|near| near.cells))
+        else {
+            return Some(Step::SEALING);
+        };
+        let (field, far) = apart(fields, near.field as usize, self.water? as usize)?;
+        if row == 0 {
+            let origin = (near.centre.0 - near.reach, near.centre.1 - near.reach);
+            *field = Heightfield::new(cells, origin, 2.0 * near.reach / real(cells), false)?;
+            if !field.carry_attributes() {
+                return None;
+            }
+        }
+        let end = (row + UNIT_ROWS * 2 * runner.width().max(1)).min(field.side());
+        self.fill_water(field, row..end, runner);
+        seam_rows(near, far, field, row..end, runner);
         Some(if end >= field.side() {
             Step::SEALING
         } else {
-            Step::Water(end)
+            Step::NearWater(end)
         })
     }
 
@@ -1459,6 +1656,7 @@ impl Build {
             .into_iter()
             .chain(nests)
             .chain(self.water)
+            .chain(self.near_water.map(|near| near.field))
             .chain(self.horizon);
         let Some(index) = laid.into_iter().nth(next) else {
             return Some(Step::Done);
@@ -1523,17 +1721,10 @@ impl Build {
     /// Fill rows `rows` of the horizon grid across `runner`, from the relief
     /// and the coarsest of the far land's detail: water has not worn the land
     /// that far off, and the haze would hide it if it had.
-    fn fill_horizon(
-        &self,
-        field: &mut Heightfield,
-        rows: Range<usize>,
-        runner: &dyn JobRunner,
-    ) -> Option<()> {
+    fn fill_horizon(&self, field: &mut Heightfield, rows: Range<usize>, runner: &dyn JobRunner) {
         let side = field.side();
         let ((origin_x, origin_z), step) = field.placing();
-        let heights = field
-            .heights_mut()
-            .get_mut(rows.start * side..rows.end * side)?;
+        let (heights, _) = field.rows_mut(rows.clone());
         let relief = &self.plan.relief;
         let longest = 8.0 * step;
         let octaves = octaves_between(longest, step);
@@ -1549,7 +1740,6 @@ impl Build {
                 *slot = single(rise(0.0, 0.0) + self.detail((x, z), slope, (longest, octaves)));
             }
         });
-        Some(())
     }
 
     /// `height` shelving away beneath the sea, if the land has one, so the
@@ -1743,6 +1933,7 @@ impl Build {
             }
         }
         let mut traced = fallible::filled(area, false)?;
+        let runs = runs(network, self.square, self.step)?;
         let mut courses: Vec<Vec<Mark>> = Vec::new();
         for head in (0..area).filter(|&index| river(index) && !fed[index]) {
             let mut marks = Vec::new();
@@ -1758,7 +1949,9 @@ impl Build {
                     z,
                     level: network.filled[here],
                     width,
-                    depth: 0.35 * mathf::exp(0.6 * mathf::ln(width.max(0.5))),
+                    depth: bankfull_depth(width),
+                    run: runs.get(here).copied().unwrap_or(0.0),
+                    ..Mark::default()
                 });
                 let joined = traced[here];
                 traced[here] = true;
@@ -1795,17 +1988,18 @@ impl Build {
     }
 
     /// A river's course smoothed from the sample steps it was traced along,
-    /// set wandering across its level stretches, and its surface falling
-    /// steadily downstream.
+    /// set wandering across its level stretches, its brim falling steadily
+    /// downstream, and its pools and riffles counted along it.
     fn shape_river(&self, traced: &[Mark], rivers: Rivers) -> Option<Vec<Mark>> {
         let mut course = meandering(&smoothed(traced, 3)?, rivers, self.plan.seed)?;
-        // The water falls, never rises, on its way down, and runs below the
-        // floodplain it has cut its channel into.
+        // The brim falls, never rises, on its way down, below the floodplain
+        // the river has cut its channel into.
         let mut surface = f64::INFINITY;
         for mark in &mut course {
             surface = surface.min(mark.level);
             mark.level = surface - (0.3 + 0.6 * mark.depth);
         }
+        channel::survey(&mut course, rivers.form(self.plan.seed).seed)?;
         Some(course)
     }
 
@@ -1876,7 +2070,7 @@ impl Build {
                 z,
                 level: self.height[index],
                 width: roadway.width,
-                depth: 0.0,
+                ..Mark::default()
             });
         }
         let mut course = smoothed(&marks, 4)?;
@@ -2019,7 +2213,7 @@ impl Build {
         // fades out there, so the clearing stays as level as the relief left it.
         let keep = self.plan.relief.keep(x, z);
         let natural = worn + keep * self.detail((x, z), slope, self.band(0));
-        let (carved, lie) = self.carve((x, z), natural, step);
+        let (carved, lie, channel) = self.carve((x, z), natural, step);
         let height = natural + keep * (self.shelve(carved) - natural);
         let height = self.plan.relief.pin(x, z, height);
         // Read between the coarse samples, so neither steps from one to the
@@ -2041,7 +2235,7 @@ impl Build {
         let sediment = self.between((x, z), &laid).max(lie.sediment);
         let lie = Lie {
             wet,
-            sediment,
+            sediment: sediment + (channel.0 - sediment) * channel.1,
             upright: 1.0 / mathf::sqrt(1.0 + slope * slope),
             ..lie
         };
@@ -2071,8 +2265,10 @@ impl Build {
 
     /// `natural` ground at `(x, z)` with river beds and the road's bed cut
     /// into it, and what the cutting leaves the place like; `step` the
-    /// grid's, which the cut is softened across.
-    fn carve(&self, (x, z): (f64, f64), natural: f64, step: f64) -> (f64, Lie) {
+    /// grid's, which the cut is softened across. And what a river's channel
+    /// laid down or wore away there, with how much of the say it has over
+    /// what was laid, the rest the land's own.
+    fn carve(&self, (x, z): (f64, f64), natural: f64, step: f64) -> (f64, Lie, (f64, f64)) {
         let mut height = natural;
         let mut lie = Lie {
             green: 1.0,
@@ -2084,11 +2280,16 @@ impl Build {
             lie.sediment = lie.sediment.max(laid);
             lie.wet = lie.wet.max(0.8 * laid);
         }
+        let mut channel = (0.0, 0.0);
         let river = self.rivers.nearest(x, z);
-        if let Some(near) = &river {
-            let (bed, wet) = river_bed(near, natural.min(height), step);
-            height = bed;
-            lie.wet = lie.wet.max(wet);
+        if let (Some(near), Some(form)) = (&river, self.form()) {
+            let banked = Banked::new(&Station::of(near), &form);
+            let wander = noise2(x / SCOUR_WANDER, z / SCOUR_WANDER, self.plan.seed ^ 0x5c0f);
+            let bedding = river_bed(&banked, near, natural.min(height), (step, wander));
+            height = bedding.height;
+            lie.wet = lie.wet.max(bedding.wet);
+            lie.green *= 1.0 - bedding.scoured;
+            channel = (bedding.laid, bedding.say);
         }
         if let (Some(near), Some(roadway)) = (self.roads.nearest(x, z), self.plan.road) {
             // A road bridges a river rather than filling it, and its bridge
@@ -2107,7 +2308,7 @@ impl Build {
             height -= 0.08 * worn;
             lie.path = worn;
         }
-        (height, lie)
+        (height, lie, channel)
     }
 
     /// Encode what a vertex at `height` is like as its four bytes.
@@ -2124,6 +2325,7 @@ impl Build {
         let growth = self.plan.growth;
         let watered = growth + (1.0 - growth) * smoothstep(0.3, 0.8, lie.wet);
         let green = watered
+            * lie.green
             * (1.0 - steep)
             * (1.0 - lie.road)
             * (1.0 - 0.8 * lie.path)
@@ -2154,67 +2356,76 @@ impl Build {
         }
         let side = grid.side();
         let ((origin_x, origin_z), step) = grid.placing();
-        let (_, parent_step) = parent.placing();
+        let detail = self.band(level + 1);
         let mut values = fallible::filled(rows.len() * side, (0.0f32, [0u8; 4]))?;
-        let spectrum = self.band(level + 1);
         band::for_each(runner, &mut values, (rows.start, side), &|row, band| {
             let z = origin_z + real(row) * step;
             for (column, slot) in band.iter_mut().enumerate() {
                 let x = origin_x + real(column) * step;
-                let flat = parent.height_at(x, z);
-                let (smooth, dx, dz) = cubic_on(parent, (x, z));
-                let slope = mathf::hypot(dx, dz);
-                let keep = self.plan.relief.keep(x, z);
-                let own = smooth + keep * self.detail((x, z), slope, spectrum);
-                let (carved, lie) = self.carve((x, z), own, step);
-                let carved = self
-                    .plan
-                    .relief
-                    .pin(x, z, own + keep * (self.shelve(carved) - own));
-                let height =
-                    flat + (carved - flat) * border_blend(laid, (x, z), (parent_step, NEST_BAND));
-                let [wet, sediment, _, _] = parent.attributes_at(x, z);
-                let lie = Lie {
-                    wet: wet.max(lie.wet),
-                    sediment: 2.0 * sediment - 1.0,
-                    upright: 1.0 / mathf::sqrt(1.0 + slope * slope),
-                    ..lie
-                };
-                *slot = (single(height), self.attributes(&lie, height));
+                let (height, attributes) = self.nest_vertex(laid, parent, (x, z), (step, detail));
+                *slot = (single(height), attributes);
             }
         });
         store(grid, rows.start, &values);
         Some(())
     }
 
+    /// A finer grid's vertex at `(x, z)`, laid as `laid` describes within
+    /// `parent` on a grid `step` apart and holding the `detail` its band of
+    /// octaves does: its height, and what it is like.
+    fn nest_vertex(
+        &self,
+        laid: Laid,
+        parent: &Heightfield,
+        (x, z): (f64, f64),
+        (step, detail): (f64, (f64, u32)),
+    ) -> (f64, [u8; 4]) {
+        let (_, parent_step) = parent.placing();
+        let flat = parent.height_at(x, z);
+        let (smooth, dx, dz) = cubic_on(parent, (x, z));
+        let slope = mathf::hypot(dx, dz);
+        let keep = self.plan.relief.keep(x, z);
+        let own = smooth + keep * self.detail((x, z), slope, detail);
+        let (carved, lie, channel) = self.carve((x, z), own, step);
+        let carved = self
+            .plan
+            .relief
+            .pin(x, z, own + keep * (self.shelve(carved) - own));
+        let height = flat + (carved - flat) * border_blend(laid, (x, z), (parent_step, NEST_BAND));
+        let [wet, sediment, _, _] = parent.attributes_at(x, z);
+        let sediment = (2.0 * sediment - 1.0).max(lie.sediment);
+        let lie = Lie {
+            wet: wet.max(lie.wet),
+            sediment: sediment + (channel.0 - sediment) * channel.1,
+            upright: 1.0 / mathf::sqrt(1.0 + slope * slope),
+            ..lie
+        };
+        (height, self.attributes(&lie, height))
+    }
+
+    /// How much of the say a river's channel has over the ground at
+    /// `(x, z)` on a grid `step` apart: what it carved there stands against
+    /// the droplets run over the land after.
+    fn channel_say(&self, (x, z): (f64, f64), step: f64) -> f64 {
+        match (self.rivers.nearest(x, z), self.form()) {
+            (Some(near), Some(form)) if near.distance < channel::farthest_say(near.width, step) => {
+                say(&Banked::new(&Station::of(&near), &form), &near, step)
+            }
+            _ => 0.0,
+        }
+    }
+
     /// Fill the fresh-water grid's rows `rows` across `runner`: a lake's
     /// surface over its basin and a little beyond, a river's along its
     /// channel, and nothing elsewhere.
-    fn fill_water(
-        &self,
-        field: &mut Heightfield,
-        rows: Range<usize>,
-        runner: &dyn JobRunner,
-    ) -> Option<()> {
+    fn fill_water(&self, field: &mut Heightfield, rows: Range<usize>, runner: &dyn JobRunner) {
         let side = field.side();
         let ((origin_x, origin_z), step) = field.placing();
-        let heights = field
-            .heights_mut()
-            .get_mut(rows.start * side..rows.end * side)?;
+        let (heights, _) = field.rows_mut(rows.clone());
         band::for_each(runner, heights, (rows.start, side), &|row, band| {
             let z = origin_z + real(row) * step;
             for (column, slot) in band.iter_mut().enumerate() {
-                let x = origin_x + real(column) * step;
-                let lake = self
-                    .lakes
-                    .get(self.sample_at(x, z))
-                    .map_or(f64::NEG_INFINITY, |&lake| f64::from(lake));
-                let river = self
-                    .rivers
-                    .nearest(x, z)
-                    .filter(|near| near.distance < river_reach(near.width, step))
-                    .map_or(f64::NEG_INFINITY, |near| near.level);
-                let level = lake.max(river);
+                let level = self.water_surface(origin_x + real(column) * step, z, step);
                 *slot = if level.is_finite() {
                     single(level)
                 } else {
@@ -2222,17 +2433,78 @@ impl Build {
                 };
             }
         });
-        Some(())
+    }
+
+    /// The fresh water's surface at `(x, z)` on a grid `step` apart, or
+    /// negative infinity where none stands: a lake's over its basin and a
+    /// little beyond, a river's along its channel as high as it flows.
+    fn water_surface(&self, x: f64, z: f64, step: f64) -> f64 {
+        let lake = self
+            .lakes
+            .get(self.sample_at(x, z))
+            .map_or(f64::NEG_INFINITY, |&lake| f64::from(lake));
+        let river = match self.form() {
+            Some(form) => self
+                .rivers
+                .nearest(x, z)
+                .filter(|near| near.distance < river_reach(near.width, step))
+                .map_or(f64::NEG_INFINITY, |near| {
+                    channel::water(&Station::of(&near), &form)
+                }),
+            None => f64::NEG_INFINITY,
+        };
+        lake.max(river)
     }
 }
 
 /// How far from its middle a river `width` wide wets a grid `step` apart's
-/// vertices: past its banks by a cell's diagonal, so every cell its course
-/// crosses holds water at all four corners, however narrow the river and
-/// however it slants across the grid. Water drawn past the banks lies under
-/// the ground there, unseen.
+/// vertices: past its banks, as broad as its channel ever stands, by a
+/// cell's diagonal, so every cell its course crosses holds water at all four
+/// corners, however narrow the river and however it slants across the grid.
+/// Water drawn past the banks lies under the ground there, unseen.
 fn river_reach(width: f64, step: f64) -> f64 {
-    0.5 * width + core::f64::consts::SQRT_2 * step
+    0.5 * BROADEST * width + core::f64::consts::SQRT_2 * step
+}
+
+/// How far the water draining each coarse sample of `network`, `step`
+/// apart over `square`, has run to reach it: the longest way down the
+/// routing from a divide, where nothing drains into a sample, to it.
+fn runs(network: &Network, square: Square, step: f64) -> Option<Vec<f64>> {
+    let mut run = fallible::filled(network.flow.len(), 0.0)?;
+    // Upstream first: every sample before the one it drains to.
+    for &raw in network.order.iter().rev() {
+        let index = raw as usize;
+        let Some(next) = downstream(square, &network.flow, index) else {
+            continue;
+        };
+        let reached = *run.get(index)? + step * network.flow.get(index)?.length();
+        let slot = run.get_mut(next)?;
+        *slot = slot.max(reached);
+    }
+    Some(run)
+}
+
+/// How deep a river `width` across runs at bankfull: as hydraulic geometry
+/// has a gravel-bed river, its breadth five times its depth for each cube
+/// root of a metre of it, so a stream two to nine metres broad is six to ten
+/// times as broad as it is deep.
+fn bankfull_depth(width: f64) -> f64 {
+    0.2 * power(width.max(0.5), 2.0 / 3.0)
+}
+
+/// How readily ground at `height` wears under `strata`, against ordinary
+/// ground's one: the top tenth of each bed is its hard cap, which wears its
+/// hardness times as slowly.
+fn erodibility(strata: Option<(f64, f64)>, height: f64) -> f64 {
+    let Some((spacing, hardness)) = strata else {
+        return 1.0;
+    };
+    let (_, within) = crate::noise::cell(height / spacing);
+    if within > 0.9 {
+        1.0 / hardness
+    } else {
+        1.0
+    }
 }
 
 /// A lake stands where the ground lies this far below the surface its basin
@@ -2247,32 +2519,84 @@ const MOST_ROAD_GRADE: f64 = 0.09;
 /// How far either rut of a track lies from its middle.
 pub(crate) const TRACK_GAUGE: f64 = 0.72;
 
-/// `natural` ground `near` a river: its channel's bed within its banks, the
-/// banks rising from the water to the land beyond, and never lower beside
-/// the river than its levees raise them; and how wet the place is.
-fn river_bed(near: &Nearest, natural: f64, step: f64) -> (f64, f64) {
-    let half = 0.5 * near.width;
-    let across = near.distance;
-    let bed = near.level - near.depth;
-    let channel = if across < half {
-        let t = across / half;
-        bed + near.depth * t * t
-    } else {
-        near.level
-    };
-    let beside = 1.0
-        - smoothstep(
-            half + near.width,
-            half + 2.5 * near.width + 2.0 * step,
-            across,
-        );
-    let banks = natural.max(natural + (near.level + FREEBOARD - natural) * beside);
-    // Banks as broad as the river, softened across a grid step.
-    let bank = smoothstep(half, half + near.width.max(2.0 * step) + step, across);
-    let height = channel + (banks - channel).max(0.0) * bank;
-    let wet = 1.0 - smoothstep(half, half + 2.0 * near.width + 3.0 * step, across);
-    (height, wet)
+/// What a river's channel makes of the ground about it.
+#[derive(Copy, Clone, Debug, PartialEq)]
+struct Bedding {
+    height: f64,
+    /// How wet the place is, and how much of it the river's floods scour.
+    wet: f64,
+    scoured: f64,
+    /// What the river laid down or wore away there, and how much of the say
+    /// it has over that, the rest the land's own.
+    laid: f64,
+    say: f64,
 }
+
+/// `natural` ground `near` a river whose channel and banks are `banked`
+/// there: its bed within its brims, and its banks rising beyond to the land, never lower
+/// beside the river than its levees raise them, their faces softened across
+/// a grid `step`; how wet the place is, the margin of its bed its low water
+/// leaves bare soaked but not under; how much of it its floods scour, all
+/// of its bed and a fringe up its banks where plants thin toward it, the
+/// fringe's edge wandering by `wander` either way; and what the river laid
+/// down or wore away, as far as its banks' faces reach.
+fn river_bed(banked: &Banked, near: &Nearest, natural: f64, (step, wander): (f64, f64)) -> Bedding {
+    let section = &banked.section;
+    let half = section.half;
+    let width = 2.0 * half;
+    let distance = near.distance;
+    let across = near.side * distance;
+    let beside = 1.0 - smoothstep(half + width, half + 2.5 * width + 2.0 * step, distance);
+    let top = natural.max(natural + (section.brim + FREEBOARD - natural) * beside);
+    let height = banked.ground(across, top, step);
+    // Soaked within the brim where the low water bares the bed, damp up the
+    // banks above it.
+    let margin = 1.0 - (1.0 - SOAKED) * smoothstep(0.0, BARE, height - section.water);
+    let bank = DAMP_BANK * (1.0 - smoothstep(half, half + 2.0 * width + 3.0 * step, distance));
+    let wet = margin + (bank - margin) * smoothstep(half, half + (2.0 * step).max(0.3), distance);
+    let fringe = (FRINGE * width).clamp(0.4, 2.0).max(step);
+    // Pioneer plants take the tops of its bars, high over its low water, in
+    // the patches its last flood spared.
+    let pioneers =
+        PIONEERS * smoothstep(0.12, 0.45, height - section.water) * smoothstep(-0.2, 0.5, wander);
+    let scoured =
+        (1.0 - smoothstep(
+            half - 0.25 * fringe,
+            half + fringe,
+            distance + 0.6 * fringe * wander,
+        )) * (1.0 - pioneers);
+    Bedding {
+        height,
+        wet,
+        scoured,
+        laid: banked.laid(across),
+        say: say(banked, near, step),
+    }
+}
+
+/// How much of the say a river's channel and banks, `banked`, have over the
+/// ground `near` them, on a grid `step` apart: all of it within their faces,
+/// none beyond.
+fn say(banked: &Banked, near: &Nearest, step: f64) -> f64 {
+    let faces = banked.section.half + banked.bank_reach(near.side * near.distance, step);
+    1.0 - smoothstep(faces, faces + 2.0 * step, near.distance)
+}
+
+/// How high above a river's water its bare bed has drained, and how wet it
+/// stays there: soaked, though no water stands on it; and how damp its
+/// banks are above its brim, too dry to be its bed.
+const BARE: f64 = 0.05;
+pub(crate) const SOAKED: f64 = 0.78;
+pub(crate) const DAMP_BANK: f64 = 0.55;
+
+/// How much of its bars' tops pioneer plants take, at most.
+const PIONEERS: f64 = 0.3;
+
+/// How far up a river's banks its floods thin the plants, as a share of its
+/// breadth, and how far apart the turns of that fringe's edge lie, in
+/// metres.
+const FRINGE: f64 = 0.15;
+const SCOUR_WANDER: f64 = 2.5;
 
 /// How many coarse samples' ground a stream drains where its channel
 /// begins: a few hundred metres of slope, as hillslopes run before their
@@ -2319,8 +2643,50 @@ const FAR_BAND: (f64, f64) = (0.5, 3.0);
 /// surface of the grid about it, whose cells are `parent_step` across: all
 /// of it within, none at its border, over the `band` between.
 fn border_blend(laid: Laid, (x, z): (f64, f64), (parent_step, band): (f64, (f64, f64))) -> f64 {
-    let inside = laid.reach - (x - laid.centre.0).abs().max((z - laid.centre.1).abs());
-    smoothstep(band.0, band.1, inside / parent_step)
+    smoothstep(band.0, band.1, laid.inside((x, z)) / parent_step)
+}
+
+/// How broad the band within the fresh water's finer grid's border is over
+/// which its surface gives way to the far water grid's.
+const SEAM: f64 = 1.5;
+
+/// How much of the fresh water's finer grid `near`'s own surface shows at
+/// `(x, z)`, the rest the far water grid's: none at its border, where the
+/// two meet, and all of it a `SEAM` within.
+pub(crate) fn seam(near: Laid, at: (f64, f64)) -> f64 {
+    smoothstep(0.0, SEAM, near.inside(at))
+}
+
+/// Hold rows `rows` of the fresh water's finer grid `near`, `field`, to the
+/// far water grid `far` across its seam, wherever both hold water; across
+/// `runner`.
+fn seam_rows(
+    near: Laid,
+    far: &Heightfield,
+    field: &mut Heightfield,
+    rows: Range<usize>,
+    runner: &dyn JobRunner,
+) {
+    let side = field.side();
+    let ((origin_x, origin_z), step) = field.placing();
+    let (heights, _) = field.rows_mut(rows.clone());
+    band::for_each(runner, heights, (rows.start, side), &|row, band| {
+        let z = origin_z + real(row) * step;
+        for (column, slot) in band.iter_mut().enumerate() {
+            let x = origin_x + real(column) * step;
+            let (own, level) = (seam(near, (x, z)), far.height_at(x, z));
+            if own < 1.0 && slot.is_finite() && level.is_finite() {
+                *slot = single(level + (f64::from(*slot) - level) * own);
+            }
+        }
+    });
+}
+
+/// `value` held within `room` of `middle`, on the nearest vertex of a grid
+/// `step` apart from `from`.
+fn snapped(value: f64, (middle, room): (f64, f64), (from, step): (f64, f64)) -> f64 {
+    let kept = value.clamp(middle - room, middle + room);
+    from + mathf::round((kept - from) / step) * step
 }
 
 /// Hold row `row` of the finer grid `laid` describes, lying as `placing`
@@ -2346,19 +2712,20 @@ fn blend_row(
 }
 
 /// Leave out of `parent` the cells the finer grid `laid` describes covers,
-/// but for the ring along its border where both hold the same surface.
-fn leave_out(laid: Laid, parent: &mut Heightfield) {
+/// but for the `kept` rings of them along its border where both hold the
+/// same surface.
+fn leave_out(laid: Laid, parent: &mut Heightfield, kept: usize) {
     let ((origin_x, origin_z), step) = parent.placing();
     let cell = |value: f64, origin: f64| {
         usize::try_from(mathf::round_i32(mathf::round((value - origin) / step))).unwrap_or(0)
     };
     let (x0, x1) = (
-        cell(laid.centre.0 - laid.reach, origin_x) + 1,
-        cell(laid.centre.0 + laid.reach, origin_x).saturating_sub(1),
+        cell(laid.centre.0 - laid.reach, origin_x) + kept,
+        cell(laid.centre.0 + laid.reach, origin_x).saturating_sub(kept),
     );
     let (z0, z1) = (
-        cell(laid.centre.1 - laid.reach, origin_z) + 1,
-        cell(laid.centre.1 + laid.reach, origin_z).saturating_sub(1),
+        cell(laid.centre.1 - laid.reach, origin_z) + kept,
+        cell(laid.centre.1 + laid.reach, origin_z).saturating_sub(kept),
     );
     if x0 < x1 && z0 < z1 {
         parent.leave_out(x0..x1, z0..z1);
@@ -2581,9 +2948,8 @@ pub(crate) fn footpath(
         marks.push(Mark {
             x,
             z,
-            level: 0.0,
             width,
-            depth: 0.0,
+            ..Mark::default()
         });
         // Of three ways ahead, the easiest, and a wander of its own.
         let mut best = (f64::INFINITY, going);

@@ -200,10 +200,9 @@ This crate owns:
   window cuts short still reads its whole shape while the frost touches only
   what the bounds and the clip admit. A zero radius, an empty or wholly
   off-surface rectangle, and a scratch that cannot be grown each leave the
-  surface exactly as it was. The effect was the window manager's alone until
-  the graphical login screen needed it behind a selected account tile, and
-  neither the login screen nor any other `lib/*` consumer may depend on the
-  window manager.
+  surface exactly as it was. It lives here rather than in the window manager
+  because the login screen frosts behind a selected account tile, and nothing
+  in `lib/*` may depend on the window manager.
 
   `frost_from` is the same frost over **bands** of a rectangle (a `Frosting`),
   reading the backdrop from the destination within the part it holds and from
@@ -218,12 +217,15 @@ This crate owns:
   read only within `radius` of the bands, which is what lets the compositor
   compose just a ring of it past a damaged rectangle. The horizontal pass is
   written into the plane and the vertical pass runs a strip of rows at a time,
-  each column piece carrying its running sums from strip to strip, so nothing
-  in `BlurScratch` grows with a frost's area: `reserve` sizes it once for an
-  output and a runner, a frost within the reservation never grows it, and a
-  scratch reserved for fewer participants spreads a frost less widely rather
-  than refusing it. `wipe` overwrites what its last frosts left in it — a
-  picture of what they frosted — and keeps the reservation.
+  each column piece carrying its running sums from strip to strip and the
+  strips keeping to the rows the bands cover, so nothing in `BlurScratch` grows
+  with a frost's area: `reserve` sizes it once for an output and a runner, and
+  a scratch reserved for fewer participants spreads a frost less widely rather
+  than refusing it. A parallel pass draws its pieces from the iterator that
+  splits them off (`tairix_parallel::for_each_drawn`), so a frost within the
+  reservation allocates nothing at all (`tests/frost_allocations.rs`). `wipe`
+  overwrites what its last frosts left in it — a picture of what they
+  frosted — and keeps the reservation.
 
   Each pass costs a load, a running-sum update, a multiply and a store per
   sample. The window is the same size for every output — replicated edges keep

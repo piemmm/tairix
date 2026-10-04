@@ -8,12 +8,12 @@ random from a seed, and a tracer that answers what one pixel of one shows.
 
 ## What it provides
 
-- `Setting` — the nineteen settings a scene is set in: still lifes (a
+- `Setting` — the twenty settings a scene is set in: still lifes (a
   checkerboard of spheres and gems, a studio, crystals at dusk, lamps at
   night, soap bubbles), buildings (colonnades, arcades and aqueducts,
   rotundas, ruins), sculpture in a landscape, and landscapes (meadows, a
   forest, mountains over a lake, a coast, desert, snow, a lagoon, canyons, a
-  river valley).
+  river valley, a stream through its pools, riffles and ledges).
 - `Detail` — how much a scene sets out: `Simple`, every setting plainer
   within about 384 MiB at its peak, or `Maximum`, all the realism a 2 GiB peak
   buys; `peak` states each one's budget for a caller weighing its memory.
@@ -60,7 +60,8 @@ random from a seed, and a tracer that answers what one pixel of one shows.
   or a run of their ranking, a few rows of the water's edge's lattice, a
   hundred or so of the caustics' survey points, a
   couple of thousand of their beams or a few thousand of their pyramids'
-  nodes, a few rows of a radiosity record's hemisphere, a few rows of a cloud
+  nodes, 48 steps of a stone's wear, a few rows of a stream's flow, a few rows
+  of a radiosity record's hemisphere, a few rows of a cloud
   level's weather, of its grid of the sun's depth or of its shadow, each
   level's maps reserved whole and written as their rows are filled.
 
@@ -81,15 +82,19 @@ the tall, sown all about the eye near it and across the view beyond, none
 walling off the view, and a forest standing thousands of trees and its fallen
 among them clear of the eye; the shade crowns cast and the sky they hide, and
 the air beneath them roofed; fallen trunks lying along the ground, thrown or
-snapped, and stumps sawn or splintered; ferns arching from the ground; reeds
-and reedmace standing in the shallows and on wet level banks and lilies and
-pondweed floating on still water as deep as each roots in, none in a closed
-wood's gloom and the floating ones gone over winter, each patch within its
+snapped, each break torn wood bristling with fibres, and stumps sawn or
+splintered; ferns arching from the ground; reeds and reedmace standing in the
+shallows and on wet level banks off scoured ground, lilies and pondweed
+floating on still water as deep as each roots in, and crowfoot streaming
+where the water runs over gravel, none in a closed wood's gloom and the
+floating and streaming ones gone over winter, each patch within its
 square and its plants' reach, in its own materials and as tall as its
 stature, a lily's pads round and flat on the water and its flowers one in
 eight in summer, the near lattice filling the far one's hole on the land's own
 grid, a lake's reeds and lilies standing only where they suit it, and a
-scene's patches kept to its detail's most, those nearest the eye; a strap leaf in pieces keeping one
+scene's patches kept to its detail's most, those nearest the eye; a plant's
+patch planned only once one is set out, and left out past the most a scene
+plans; a strap leaf in pieces keeping one
 outline and a pad round but for its slit; the
 sampling, lights, materials and pigments; a limb narrowing by its level's
 taper and a fork's arms carrying its narrowing on, a scaled limb met at its
@@ -155,7 +160,24 @@ waves off level; every pyramid bounding the beams beneath it however its
 sealing is shared; a run of points asking for tiles just as each alone would,
 and a tile asked for twice laid once for the most asked; a point seen over no
 footprint taking a level surface's light; and a picture of a bed under
-ripples showing the net that one with nothing laid does not.
+ripples showing the net that one with nothing laid does not; a valley along
+its compass heading and a hard cap wearing its hardness times as slowly; a
+transform matching the transform written out and the same on any runner; a
+stone worn only inward and the rounder the further carried, slate staying
+flat and sharp-edged; the flow's long-wave dip, lee waves standing only
+behind a stone, a pillow before one through the surface and foam in its
+wake, a stone's answer keeping pace with the bed's, a ledge breaking white
+at its foot and a train of standing waves dying away behind a ridge, and
+nothing standing past what water can; a perched river's bank falling to its land and its deep water
+alternating from unit to unit; a finer water grid meeting the far one at its
+seam; a stream always having somewhere to be looked at from, and a scene
+away from it composing without a brook; its flow solved further the way the
+eye looks, its boulders claiming their ground and standing in the flow as
+they lie, its floating plants on its shaped water and its growing never
+reporting less done; a bed's median at Shields' stone and its wears from
+fresh to the farthest-carried; a river's sand carrying no
+grit of its own and a grain's octaves sharing its depth; and a sward's shade
+on the ground blended between its cells.
 
 The design and the measurements behind its budgets are in
 `docs/src/lib/raytrace.md`.

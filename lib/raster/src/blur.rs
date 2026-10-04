@@ -144,11 +144,12 @@ const STRIP_FRACTION: u32 = 4;
 ///
 /// None of it grows with a frost's area: a horizontal-pass line per
 /// participant, a running vertical sum per output column, the strip vertical
-/// averages wait in before they are mixed back, and the band and piece lists.
-/// [`Surface::frost_from`] reads its backdrop from a plane its caller holds, so
-/// a caller that [reserves](Self::reserve) the scratch once frosts every frame
-/// without allocating and is never refused. [`Surface::frost_region`] frosts in
-/// place, so it also keeps here the copy of the backdrop it reads.
+/// averages wait in before they are mixed back — a fraction of the
+/// rectangle's height — and the band and piece lists. [`Surface::frost_from`]
+/// reads its backdrop from a plane its caller holds, so a caller that
+/// [reserves](Self::reserve) the scratch once frosts every frame without
+/// allocating and is never refused. [`Surface::frost_region`] frosts in place,
+/// so it also keeps here the copy of the backdrop it reads.
 #[derive(Default)]
 pub struct BlurScratch {
     plane: Option<Surface>,
@@ -220,22 +221,6 @@ impl BlurScratch {
         tairix_util::secret::wipe_with(&mut self.lines, Pixel::TRANSPARENT);
         tairix_util::secret::wipe_with(&mut self.sums, PixelSum::default());
         tairix_util::secret::wipe_with(&mut self.strip, Pixel::TRANSPARENT);
-    }
-
-    /// Grow the scratch to what an in-place frost of a `width`×`height`
-    /// rectangle needs on `runner`: its whole vertical pass in one strip.
-    fn fit(&mut self, width: usize, height: usize, runner: &dyn JobRunner) -> bool {
-        let (Some(lines), Some(strip)) = (
-            width.checked_mul(runner.width().max(1)),
-            width.checked_mul(height),
-        ) else {
-            return false;
-        };
-        let pieces = tairix_parallel::bands(runner, usize::MAX, 1);
-        fallible::grow_to(&mut self.lines, lines, Pixel::TRANSPARENT)
-            && fallible::grow_to(&mut self.sums, width, PixelSum::default())
-            && fallible::grow_to(&mut self.strip, strip, Pixel::TRANSPARENT)
-            && room(&mut self.pieces, pieces)
     }
 }
 
@@ -309,9 +294,6 @@ impl Surface {
             columns.end.saturating_sub(columns.start),
             rows.end.saturating_sub(rows.start),
         );
-        let (Ok(wide), Ok(tall)) = (usize::try_from(width), usize::try_from(height)) else {
-            return;
-        };
         // The plane only ever receives the horizontal pass, so one already the
         // right size is reused as it stands rather than cleared.
         let plane = match scratch.plane.take() {
@@ -322,33 +304,18 @@ impl Surface {
         let Some(mut plane) = plane else {
             return;
         };
-        let held = (columns.clone(), rows.clone());
-        let frost = Frost::new(x, y, (columns.clone(), rows.clone()), &held, radius);
+        // A refusal keeps what was reserved before, which costs parallelism
+        // and strip height, never the frost.
+        let _ = scratch.reserve(width, height, 1, runner);
+        let whole = (columns.clone(), rows.clone());
+        let frosting = Frosting {
+            rect: (x, y, w, h),
+            held: whole.clone(),
+            bands: core::slice::from_ref(&whole),
+            radius,
+        };
         let origin = (columns.start, rows.start);
-        if scratch.fit(wide, tall, runner) {
-            let BlurScratch {
-                lines,
-                sums,
-                strip,
-                bands,
-                pieces,
-                ..
-            } = scratch;
-            bands.clear();
-            if fallible::reserve(bands, 1) {
-                bands.push(Band {
-                    cols: 0..wide,
-                    rows: 0..tall,
-                });
-                let work = Work {
-                    lines,
-                    sums,
-                    strip,
-                    pieces,
-                };
-                let _ = frost.run(self, (&mut plane, origin), bands, work, runner, &coverage);
-            }
-        }
+        let _ = self.frost_through((&mut plane, origin), &frosting, scratch, runner, &coverage);
         scratch.plane = Some(plane);
     }
 
@@ -377,6 +344,20 @@ impl Surface {
         scratch: &mut BlurScratch,
         runner: &dyn JobRunner,
         coverage: impl Fn(u32, u32) -> u8 + Sync,
+    ) -> bool {
+        self.frost_through((plane, (0, 0)), frosting, scratch, runner, &coverage)
+    }
+
+    /// [`frost_from`](Self::frost_from) reading what this surface does not
+    /// hold from `plane`, whose top-left sits at the given point of this
+    /// surface.
+    fn frost_through(
+        &mut self,
+        (plane, origin): Plane<'_>,
+        frosting: &Frosting<'_>,
+        scratch: &mut BlurScratch,
+        runner: &dyn JobRunner,
+        coverage: &(impl Fn(u32, u32) -> u8 + Sync),
     ) -> bool {
         let Frosting {
             rect: (x, y, w, h),
@@ -427,7 +408,7 @@ impl Surface {
             strip,
             pieces,
         };
-        frost.run(self, (plane, (0, 0)), written, work, runner, &coverage)
+        frost.run(self, (plane, origin), written, work, runner, coverage)
     }
 }
 
@@ -608,13 +589,9 @@ impl Frost {
         coverage: &(impl Fn(u32, u32) -> u8 + Sync),
     ) -> bool {
         let width = self.width();
-        let Some(rows) = bands
-            .iter()
-            .map(|band| band.rows.clone())
-            .reduce(|a, b| a.start.min(b.start)..a.end.max(b.end))
-        else {
+        if bands.is_empty() {
             return true;
-        };
+        }
         let Work {
             lines,
             sums,
@@ -637,9 +614,12 @@ impl Frost {
         };
         let plane: &Surface = plane;
         let per = strip.len() / width;
-        let mut start = rows.start;
-        while start < rows.end {
-            let mut end = start.saturating_add(per).min(rows.end);
+        let mut start = 0;
+        // Strips keep to the runs of rows the pieces cover: rows between
+        // distant bands hold nothing to average or mix.
+        while let Some(run) = covered_run(pieces, start) {
+            start = run.start;
+            let mut end = start.saturating_add(per).min(run.end);
             // Disjoint bands never need more than the strip's rows times the
             // rectangle's width; bands that overlap are given fewer rows.
             while strip_need(pieces, &(start..end)) > strip.len() && end > start.saturating_add(1) {
@@ -673,25 +653,9 @@ impl Frost {
         let per = u32::try_from(rows.len().div_ceil(count.max(1)))
             .unwrap_or(u32::MAX)
             .max(1);
-        let mut bands = dest.row_bands_mut(self.row(rows.start)..self.row(rows.end), per);
-        if count <= 1 {
-            if let Some(mut only) = bands.next() {
-                self.mix_rows(&mut only, pieces, strip, rows, coverage);
-            }
-            return;
-        }
-        let mut split: Vec<RowBand<'_>> = Vec::new();
-        if !fallible::reserve(&mut split, count) {
-            // Without room for every band the mix would be partial; run the
-            // rows serially instead, which needs no split at all.
-            for mut band in bands {
-                self.mix_rows(&mut band, pieces, strip, rows, coverage);
-            }
-            return;
-        }
-        split.extend(bands);
-        tairix_parallel::for_each(runner, &mut split, &|band| {
-            self.mix_rows(band, pieces, strip, rows, coverage);
+        let bands = dest.row_bands_mut(self.row(rows.start)..self.row(rows.end), per);
+        tairix_parallel::for_each_drawn(runner, bands, &|mut band| {
+            self.mix_rows(&mut band, pieces, strip, rows, coverage);
         });
     }
 
@@ -800,7 +764,7 @@ impl PlaneRead<'_> {
         let Some(span) = bands
             .iter()
             .map(|band| self.frost.pass_rows(band))
-            .reduce(|a, b| a.start.min(b.start)..a.end.max(b.end))
+            .reduce(hull)
         else {
             return;
         };
@@ -810,25 +774,11 @@ impl PlaneRead<'_> {
         let per = u32::try_from(span.len().div_ceil(count))
             .unwrap_or(u32::MAX)
             .max(1);
-        let mut work = plane
+        let work = plane
             .row_bands_mut(self.row(span.start)..self.row(span.end), per)
             .zip(lines.chunks_exact_mut(width));
-        if count <= 1 {
-            if let Some((mut band, line)) = work.next() {
-                self.blur_band_lines(&mut band, line, bands, dest);
-            }
-            return;
-        }
-        let mut split: Vec<(RowBand<'_>, &mut [Pixel])> = Vec::new();
-        if !fallible::reserve(&mut split, count) {
-            for (mut band, line) in work {
-                self.blur_band_lines(&mut band, line, bands, dest);
-            }
-            return;
-        }
-        split.extend(work);
-        tairix_parallel::for_each(runner, &mut split, &|(band, line)| {
-            self.blur_band_lines(band, line, bands, dest);
+        tairix_parallel::for_each_drawn(runner, work, &|(mut band, line)| {
+            self.blur_band_lines(&mut band, line, bands, dest);
         });
     }
 
@@ -865,10 +815,7 @@ impl PlaneRead<'_> {
                     .iter()
                     .filter(move |band| frost.pass_rows(band).contains(&local))
             };
-            let Some(read) = reading()
-                .map(|band| frost.reach(&band.cols))
-                .reduce(|a, b| a.start.min(b.start)..a.end.max(b.end))
-            else {
+            let Some(read) = reading().map(|band| frost.reach(&band.cols)).reduce(hull) else {
                 continue;
             };
             let Some((start, target)) = rows.row_span_mut(plane_row, first, span) else {
@@ -940,16 +887,25 @@ impl PlaneRead<'_> {
         rows: &Range<usize>,
         runner: &dyn JobRunner,
     ) {
-        let mut jobs: Vec<Averaging<'_>> = Vec::new();
-        let spread = fallible::reserve(&mut jobs, pieces.len());
+        let covering = pieces
+            .iter()
+            .filter(|piece| !overlap(&piece.rows, rows).is_empty())
+            .count();
+        // One covering piece is all a strip of distant bands holds, and the
+        // others answer nothing, so there is nothing to hand to another core.
+        let runner = if covering > 1 {
+            runner
+        } else {
+            &tairix_parallel::SERIAL
+        };
         let (mut sums, mut strip) = (sums, strip);
-        for piece in pieces {
+        let jobs = pieces.iter().map(move |piece| {
             let all_sums = core::mem::take(&mut sums);
             let (held, rest) = all_sums.split_at_mut(piece.cols.len().min(all_sums.len()));
             sums = rest;
             let covered = overlap(&piece.rows, rows);
             if covered.is_empty() {
-                continue;
+                return None;
             }
             let all_strip = core::mem::take(&mut strip);
             let need = piece
@@ -959,19 +915,18 @@ impl PlaneRead<'_> {
                 .min(all_strip.len());
             let (block, rest) = all_strip.split_at_mut(need);
             strip = rest;
-            let mut job = Averaging {
+            Some(Averaging {
                 piece,
                 rows: covered,
                 sums: held,
                 block,
-            };
-            if spread {
-                jobs.push(job);
-            } else {
+            })
+        });
+        tairix_parallel::for_each_drawn(runner, jobs, &|job| {
+            if let Some(mut job) = job {
                 self.average(plane, &mut job);
             }
-        }
-        tairix_parallel::for_each(runner, &mut jobs, &|job| self.average(plane, job));
+        });
     }
 
     /// One piece's averages over its rows of a strip: primed at its band's
@@ -1078,6 +1033,26 @@ impl PlaneRead<'_> {
     }
 }
 
+/// The first run of rows at or after `from` that `pieces` cover without a
+/// gap, or `None` when they cover none.
+fn covered_run(pieces: &[Piece], from: usize) -> Option<Range<usize>> {
+    let start = pieces
+        .iter()
+        .filter(|piece| piece.rows.end > from)
+        .map(|piece| piece.rows.start.max(from))
+        .min()?;
+    let mut end = start;
+    while let Some(further) = pieces
+        .iter()
+        .filter(|piece| piece.rows.start <= end && piece.rows.end > end)
+        .map(|piece| piece.rows.end)
+        .max()
+    {
+        end = further;
+    }
+    Some(start..end)
+}
+
 /// The strip one pass over `rows` lays its pieces' averages out in: each
 /// piece's columns times the rows of `rows` it covers.
 fn strip_need(pieces: &[Piece], rows: &Range<usize>) -> usize {
@@ -1135,6 +1110,11 @@ fn divide(bands: &[Band], pieces: &mut Vec<Piece>, runner: &dyn JobRunner) -> Op
 fn overlap(a: &Range<usize>, b: &Range<usize>) -> Range<usize> {
     let start = a.start.max(b.start);
     start..a.end.min(b.end).max(start)
+}
+
+/// The least range holding both `a` and `b`.
+fn hull(a: Range<usize>, b: Range<usize>) -> Range<usize> {
+    a.start.min(b.start)..a.end.max(b.end)
 }
 
 /// Row `y` of `src` and of `dst`, both `width` samples wide.

@@ -940,12 +940,12 @@ the user last saw it whatever the work area's exact extent is. A vertical
 `lib/controls` `ScrollBar` is drawn in a reserved right-edge gutter over that
 same `ScrollRange` — always: with nothing to scroll, or beside the "Listing…"
 cue while a folder is read, it rests its thumb the length of the track, and
-the cue lays out no entry an undrawn press or scroll could reach. The wheel arrives in the seat's scroll units, already
-accelerated, and `scroll_wheel` moves the listing through that bar a fixed
-distance a detent, carrying what is short of a pixel to the next turn and
-reporting the bar and the items it slid; a selection-moving key reveals the
-selection the least it can (`reveal_selection`) — the browser owns the one
-`ScrollColumn` both consume. The in-place rename editor is drawn at the name's
+the cue lays out no entry an undrawn press or scroll could reach. The wheel
+arrives in the seat's scroll units, already accelerated, and `scroll_wheel`
+moves the listing through that bar a fixed distance a detent, carrying what is
+short of a pixel to the next turn and reporting the bar and the items it slid; a
+selection-moving key reveals the selection the least it can
+(`reveal_selection`) — the browser owns the one `ScrollColumn` both consume. The in-place rename editor is drawn at the name's
 laid-out place (`draw_rename_field`), so it scrolls with its item.
 `render::visible_range` is the one definition of which entry indices are on
 screen, dispatching on the view mode over the same geometry both painters use,
@@ -2133,11 +2133,10 @@ strip per frame so it holds no offset to scroll with. Its height,
 bands the window draws (`render::listing_floor_height`) — a line of tiles in
 the grid, a row in the list — so a window can be made exactly one row tall,
 and the window restates it as the view or its bands change. A Properties
-window declares its own (`properties_sizing`). The app must not clamp a granted size itself: resizing its
-own window back up while a drag keeps shrinking makes the two fight once per
-pointer sample, which is what made the listing visibly bounce as the window
-approached its minimum. An app never answers a resize with a larger size of
-its own.
+window declares its own (`properties_sizing`). The app must not clamp a
+granted size itself: resizing its own window back up while a drag keeps
+shrinking makes the two fight once per pointer sample, so an app never answers
+a resize with a larger size of its own.
 
 **The window is never taller than its listing.** Its height ceiling is what
 the listing, and the places rail beside it, fill at the window's width

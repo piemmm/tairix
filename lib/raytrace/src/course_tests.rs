@@ -12,6 +12,7 @@ fn mark(x: f64, z: f64, level: f64) -> Mark {
         level,
         width: 4.0,
         depth: 1.0,
+        ..Mark::default()
     }
 }
 

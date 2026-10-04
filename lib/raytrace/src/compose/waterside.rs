@@ -1,8 +1,10 @@
 //! The plants of a scene's water's edge set out about the eye: reeds and
 //! reedmace standing in the shallows and along wet, level banks, water
-//! lilies and pondweed floating where the water lies still — each only where
-//! the land's water and the light the woods leave let it grow, and in
-//! patches with gaps between.
+//! lilies and pondweed floating where the water lies still, water-crowfoot
+//! streaming where it runs — each only where the land's water and the light
+//! the woods leave let it grow, rooting in the silt and sand the water laid
+//! rather than ground its floods scour bare, and in patches with gaps
+//! between.
 //!
 //! Each cell of two lattices about the eye holds a square patch of one plant
 //! or none, a clump in the fine cells near the eye and a bed in the coarse
@@ -35,15 +37,18 @@ use crate::vector::{real, share, Frame, Pose, Vec3};
 use crate::waterside::{Margin, Marsh};
 
 /// The plants of the water's edge.
-const KINDS: [Margin; 4] = [
+const KINDS: [Margin; 5] = [
     Margin::Reed,
     Margin::Reedmace,
     Margin::Lily,
     Margin::Pondweed,
+    Margin::Crowfoot,
 ];
-/// How many clumps and beds of each are grown to choose among.
+/// How many clumps and beds of each are grown to choose among, the clumps
+/// first.
 const CLUMPS: usize = 6;
 const BEDS: usize = 3;
+const PATCHES: usize = CLUMPS + BEDS;
 /// The statures a plant's patches are grown at, from the shortest and
 /// thinnest, where a place barely suits it, to where it thrives; and how far
 /// either way of what its place gives it a patch's is drawn.
@@ -61,17 +66,67 @@ const FAR_ROWS: usize = 6;
 const PLACED_A_UNIT: usize = 8192;
 /// How far apart along the water its fall is measured.
 const FALL_REACH: f64 = 2.0;
+/// How near the eye no patch stands, which one there would fill the picture.
+const EYE_CLEAR: f64 = 2.5;
 /// The most a bank may rise above the water beside it and still be read
 /// against that water.
 const BANK: f64 = 0.5;
 
-/// One plant's prototypes, as clumps and as beds, and the material its
-/// patches are added in.
+/// One plant as it grows in the scene's season: its marsh, and its patches
+/// as clumps and then as beds, each planned as a prototype only once a patch
+/// of it is set out, so a plant the scene's water never suits costs it
+/// nothing.
 #[derive(Copy, Clone, Debug)]
-struct Grown {
-    clumps: [u32; CLUMPS],
-    beds: [u32; BEDS],
-    material: usize,
+struct Sown {
+    margin: Margin,
+    marsh: Marsh,
+    season: Season,
+    patches: [Patch; PATCHES],
+    planned: [Option<u32>; PATCHES],
+}
+
+/// One of a plant's patches as it is drawn: the cell it fills, how many
+/// plants stand in it and how tall, and its seed.
+#[derive(Copy, Clone, Debug)]
+struct Patch {
+    side: f64,
+    count: u16,
+    stature: f64,
+    seed: u64,
+}
+
+impl Sown {
+    /// The prototype of patch `patch`, if it is planned yet.
+    fn planned(&self, patch: usize) -> Option<u32> {
+        self.planned.get(patch).copied().flatten()
+    }
+
+    /// Plan patch `patch` on `stage`: its prototype, or `None` when the stage
+    /// will not hold it.
+    fn plan(&mut self, stage: &mut Stage, patch: usize) -> Option<u32> {
+        let Patch {
+            side,
+            count,
+            stature,
+            seed,
+        } = *self.patches.get(patch)?;
+        let prototype = stage.plan(&Recipe::Margin {
+            margin: self.margin,
+            side,
+            count,
+            stature,
+            marsh: self.marsh,
+            season: self.season,
+            seed,
+        })?;
+        *self.planned.get_mut(patch)? = Some(prototype);
+        Some(prototype)
+    }
+
+    /// The material its patches are added in.
+    fn material(&self) -> usize {
+        usize::from(self.marsh.leaves)
+    }
 }
 
 /// The plants of a scene's water's edge, to be set out once its woods'
@@ -79,7 +134,7 @@ struct Grown {
 #[derive(Debug)]
 pub(super) struct Margins {
     /// What grows in the scene's season, by kind.
-    grown: [Option<Grown>; 4],
+    sown: [Option<Sown>; KINDS.len()],
     /// The level of the fresh lake the land's sea stands for, if it does.
     lake: Option<f64>,
     seed: u32,
@@ -122,12 +177,12 @@ struct Lattice {
     hole: Option<((f64, f64), (f64, f64))>,
 }
 
-/// A patch of a plant a cell holds: its prototype and material, where its
-/// middle stands, how it is turned, and its key.
+/// A patch of a plant a cell holds: its kind and which of its patches,
+/// where its middle stands, how it is turned, and its key.
 #[derive(Copy, Clone, Debug)]
 struct Placed {
-    prototype: u32,
-    material: usize,
+    kind: u8,
+    patch: u8,
     base: Vec3,
     turn: f64,
     key: u32,
@@ -136,7 +191,8 @@ struct Placed {
 /// What a place by the water is like: the ground there and the water's
 /// level, how deep it stands, negative on the bank above it, how steeply its
 /// surface falls, the ground's wetness, uprightness and the way across it,
-/// and the share of the sky no crown hides from it.
+/// what the water laid there and how much grows there, and the share of the
+/// sky no crown hides from it.
 #[derive(Copy, Clone, Debug)]
 struct Edge {
     ground: f64,
@@ -146,6 +202,8 @@ struct Edge {
     wet: f64,
     upright: f64,
     way: f64,
+    laid: f64,
+    green: f64,
     lit: f64,
 }
 
@@ -159,38 +217,40 @@ pub(super) fn margins(
     (eye, season, lake): ((f64, f64), Season, Option<f64>),
 ) -> Option<()> {
     let mut dice = Dice::keyed(dice.wide(), 0);
-    let mut grown = [None; 4];
-    for (slot, margin) in grown.iter_mut().zip(KINDS) {
+    let mut sown = [None; KINDS.len()];
+    for (slot, margin) in sown.iter_mut().zip(KINDS) {
         if !grows(margin, season) {
             continue;
         }
         let marsh = marsh(stage, margin, season)?;
-        let mut plan = |side: f64, (variant, variants): (usize, usize)| {
+        let mut patches = [Patch {
+            side: 0.0,
+            count: 0,
+            stature: 0.0,
+            seed: 0,
+        }; PATCHES];
+        for (index, patch) in patches.iter_mut().enumerate() {
+            let (side, (variant, variants)) = if index < CLUMPS {
+                (NEAR_CELL, (index, CLUMPS))
+            } else {
+                (FAR_CELL, (index - CLUMPS, BEDS))
+            };
             let vigour = share(variant, variants - 1);
             let count =
                 mathf::round_i32((0.4 + 0.6 * vigour) * density(margin) * side * side).max(1);
-            stage.plan(&Recipe::Margin {
-                margin,
+            *patch = Patch {
                 side,
                 count: u16::try_from(count).ok()?,
                 stature: STATURE.0 + (STATURE.1 - STATURE.0) * vigour,
-                marsh,
-                season,
                 seed: dice.wide(),
-            })
-        };
-        let mut clumps = [0; CLUMPS];
-        for (variant, clump) in clumps.iter_mut().enumerate() {
-            *clump = plan(NEAR_CELL, (variant, CLUMPS))?;
+            };
         }
-        let mut beds = [0; BEDS];
-        for (variant, bed) in beds.iter_mut().enumerate() {
-            *bed = plan(FAR_CELL, (variant, BEDS))?;
-        }
-        *slot = Some(Grown {
-            clumps,
-            beds,
-            material: usize::from(marsh.leaves),
+        *slot = Some(Sown {
+            margin,
+            marsh,
+            season,
+            patches,
+            planned: [None; PATCHES],
         });
     }
     let (reach, most) = (
@@ -198,7 +258,7 @@ pub(super) fn margins(
         stage.densities.waterside.most,
     );
     stage.margins = Some(Margins {
-        grown,
+        sown,
         lake,
         seed: dice.seed(),
         eye,
@@ -316,21 +376,31 @@ impl Margins {
     /// the stage has room for them.
     fn place(&mut self, stage: &mut Stage, next: usize) -> Option<()> {
         let end = (next + PLACED_A_UNIT).min(self.found.len());
-        for placed in self.found.get(next..end).unwrap_or(&[]) {
+        let (found, sown) = (&self.found, &mut self.sown);
+        for placed in found.get(next..end).unwrap_or(&[]) {
             if stage.room() <= KEPT {
                 self.found = Vec::new();
                 self.pass = Pass::Done;
                 return Some(());
             }
+            let sown = sown.get_mut(usize::from(placed.kind))?.as_mut()?;
+            let patch = usize::from(placed.patch);
+            let prototype = match sown.planned(patch) {
+                Some(prototype) => prototype,
+                None if stage.plans_more() => sown.plan(stage, patch)?,
+                // Once the stage plans no more, a patch never planned is
+                // left out.
+                None => continue,
+            };
             let pose = Pose::new(placed.base, Frame::turned(placed.turn, 0.0));
             stage.add(
                 Shape::Instance {
-                    prototype: placed.prototype,
+                    prototype,
                     pose,
                     scale: 1.0,
                     key: placed.key,
                 },
-                placed.material,
+                sown.material(),
                 pose,
                 false,
             )?;
@@ -396,7 +466,8 @@ impl Margins {
             return None;
         }
         let (dx, dz) = (x - self.eye.0, z - self.eye.1);
-        if dx * dx + dz * dz > self.reach * self.reach {
+        let apart = dx * dx + dz * dz;
+        if apart > self.reach * self.reach || apart < EYE_CLEAR * EYE_CLEAR {
             return None;
         }
         let far = lattice.cell > NEAR_CELL;
@@ -405,8 +476,8 @@ impl Margins {
         let key = hash2(place(x), place(z), self.seed ^ u32::from(far));
         let edge = edge_at((land, fields, shades), (x, z), self.lake)?;
         let mut best: Option<(usize, f64)> = None;
-        for (slot, (&margin, grown)) in KINDS.iter().zip(&self.grown).enumerate() {
-            if grown.is_none() {
+        for (slot, (&margin, sown)) in KINDS.iter().zip(&self.sown).enumerate() {
+            if sown.is_none() {
                 continue;
             }
             let held = best.map_or(0.0, |(_, held)| held);
@@ -424,22 +495,30 @@ impl Margins {
         if unit(key) >= score {
             return None;
         }
-        let grown = self.grown.get(slot).copied().flatten()?;
-        let variants: &[u32] = if far { &grown.beds } else { &grown.clumps };
+        let (first, variants) = if far { (CLUMPS, BEDS) } else { (0, CLUMPS) };
         // The better the place suits it, the taller and thicker its patch,
         // so a bed thins and shortens toward its edges.
         let vigour = (score + SCATTER * (unit(mix32(key ^ 1)) - 0.5)).clamp(0.0, 1.0);
-        let last = variants.len() - 1;
+        let last = variants - 1;
         let pick = usize::try_from(mathf::round_i32(vigour * real(last)))
             .ok()?
             .min(last);
-        let floating = matches!(KINDS.get(slot), Some(Margin::Lily | Margin::Pondweed));
+        let margin = KINDS.get(slot).copied()?;
+        let floating = matches!(margin, Margin::Lily | Margin::Pondweed | Margin::Crowfoot);
+        // Crowfoot streams down the current; quarter turns keep the rest's
+        // patches square to the lattice.
+        let turn = match margin {
+            Margin::Crowfoot => land
+                .rivers
+                .nearest(x, z)
+                .map(|near| mathf::atan2(near.toward.0, near.toward.1))?,
+            _ => FRAC_PI_2 * f64::from(mix32(key ^ 2) & 3),
+        };
         Some(Placed {
-            prototype: *variants.get(pick)?,
-            material: grown.material,
+            kind: u8::try_from(slot).ok()?,
+            patch: u8::try_from(first + pick).ok()?,
             base: Vec3::new(x, if floating { edge.level } else { edge.ground }, z),
-            // Quarter turns keep a patch square to the lattice.
-            turn: FRAC_PI_2 * f64::from(mix32(key ^ 2) & 3),
+            turn,
             key: mix32(key ^ 3),
         })
     }
@@ -471,6 +550,8 @@ fn edge_at(
         wet: lie.wet,
         upright: lie.upright,
         way: lie.road + lie.path,
+        laid: lie.sediment,
+        green: lie.green,
         lit: 1.0 - shades.map_or(0.0, |shades| shades.at(x, z).1),
     })
 }
@@ -493,29 +574,46 @@ fn fall_of(land: &Land, fields: &[Heightfield], (x, z): (f64, f64), level: f64) 
 }
 
 /// How well `margin` grows at `edge`, `0.0..=1.0`: in water as deep as it
-/// takes and as still as it needs, in as much of the sky's light as it
-/// wants, or, for those rooting on one, on a wet, level bank off any way —
-/// more level for a far bed, whose square spans more of the slope.
+/// takes and running as fast as it can bear — the still-water plants in the
+/// stillest, crowfoot only where it runs — in as much of the sky's light as
+/// it wants, its roots in the silt or the gravel it favours; or, for those
+/// rooting on one, on a wet, level bank off any way that the floods leave
+/// growing — more level for a far bed, whose square spans more of the slope.
 fn suits(margin: Margin, edge: &Edge, far: bool) -> f64 {
-    let ((shallowest, rooted, deepest, drowned), calm, (gloom, open)) = match margin {
-        Margin::Reed => ((-0.45, -0.15, 0.6, 1.0), 0.02, (0.35, 0.65)),
-        Margin::Reedmace => ((-0.15, 0.0, 0.45, 0.75), 0.008, (0.4, 0.7)),
-        Margin::Lily => ((0.35, 0.6, 1.8, 2.6), 0.0015, (0.45, 0.75)),
-        Margin::Pondweed => ((0.2, 0.35, 1.3, 1.8), 0.004, (0.25, 0.55)),
+    let ((shallowest, rooted, deepest, drowned), (lull, race), (gloom, open)) = match margin {
+        Margin::Reed => ((-0.45, -0.15, 0.6, 1.0), (0.0, 0.02), (0.35, 0.65)),
+        Margin::Reedmace => ((-0.15, 0.0, 0.45, 0.75), (0.0, 0.008), (0.4, 0.7)),
+        Margin::Lily => ((0.35, 0.6, 1.8, 2.6), (0.0, 0.0015), (0.45, 0.75)),
+        Margin::Pondweed => ((0.2, 0.35, 1.3, 1.8), (0.0, 0.004), (0.25, 0.55)),
+        Margin::Crowfoot => ((0.06, 0.15, 0.7, 1.1), (0.0015, 0.06), (0.35, 0.65)),
     };
     let deep = smoothstep(shallowest, rooted, edge.depth)
         * (1.0 - smoothstep(deepest, drowned, edge.depth));
-    let still = 1.0 - smoothstep(0.5 * calm, calm, edge.fall);
+    let running =
+        smoothstep(0.5 * lull, lull, edge.fall) * (1.0 - smoothstep(0.5 * race, race, edge.fall));
     let light = smoothstep(gloom, open, edge.lit);
     let bank = if edge.depth < 0.0 {
         let (sloping, level) = if far { (0.985, 0.995) } else { (0.95, 0.975) };
         smoothstep(0.45, 0.75, edge.wet)
             * smoothstep(sloping, level, edge.upright)
             * (1.0 - edge.way.min(1.0))
+            * smoothstep(0.1, 0.4, edge.green)
     } else {
-        1.0
+        rooting(margin, edge.laid)
     };
-    deep * still * light * bank
+    deep * running * light * bank
+}
+
+/// How well `margin` roots under water where what the water laid is
+/// `laid`: crowfoot anchors in gravel, the rest in silt and sand, sparser
+/// over bare gravel and hardly at all on bare rock.
+fn rooting(margin: Margin, laid: f64) -> f64 {
+    let bare = 1.0 - 0.9 * smoothstep(-0.25, -0.7, laid);
+    let fine = smoothstep(-0.05, 0.35, laid);
+    bare * match margin {
+        Margin::Crowfoot => 1.0 - 0.6 * fine,
+        _ => 0.35 + 0.65 * fine,
+    }
 }
 
 /// Where `margin` gathers, `0.0..=1.0`: a field of its own beds and the
@@ -526,6 +624,7 @@ fn patchy(margin: Margin, (x, z): (f64, f64), seed: u32) -> f64 {
         Margin::Reedmace => (14.0, 0x3b),
         Margin::Lily => (11.0, 0xc1),
         Margin::Pondweed => (18.0, 0x57),
+        Margin::Crowfoot => (7.0, 0x6d),
     };
     smoothstep(
         -0.2,
@@ -534,20 +633,22 @@ fn patchy(margin: Margin, (x, z): (f64, f64), seed: u32) -> f64 {
     )
 }
 
-/// Whether `margin` stands in `season`: the floating plants die back over
-/// winter, and the reeds and reedmace stand on, dry.
+/// Whether `margin` stands in `season`: the floating and the streaming
+/// plants die back over winter, and the reeds and reedmace stand on, dry.
 fn grows(margin: Margin, season: Season) -> bool {
     season != Season::Winter || matches!(margin, Margin::Reed | Margin::Reedmace)
 }
 
 /// Plants of `margin` to a square metre of its patch: reeds thick-set,
-/// reedmace in looser fans, lily pads, and pondweed's rosettes.
+/// reedmace in looser fans, lily pads, pondweed's rosettes, and crowfoot's
+/// streaming plants.
 fn density(margin: Margin) -> f64 {
     match margin {
         Margin::Reed => 55.0,
         Margin::Reedmace => 8.0,
         Margin::Lily => 9.0,
         Margin::Pondweed => 6.0,
+        Margin::Crowfoot => 5.0,
     }
 }
 
@@ -627,6 +728,28 @@ fn marsh(stage: &mut Stage, margin: Margin, season: Season) -> Option<Marsh> {
                 hearts: leaves,
             }
         }
+        Margin::Crowfoot => {
+            let stems = made(stage, palette(CROWFOOT), strap, leaf(0.2))?;
+            let leaves = made(
+                stage,
+                palette(CROWFOOT),
+                strap,
+                Finish::Coated { roughness: 0.4 },
+            )?;
+            let heads = made(stage, PETALS, Outline::Ovate { teeth: 0 }, leaf(0.5))?;
+            let hearts = made(
+                stage,
+                HEARTS,
+                Outline::Ovate { teeth: 0 },
+                Finish::Coated { roughness: 0.6 },
+            )?;
+            Marsh {
+                stems,
+                leaves,
+                heads,
+                hearts,
+            }
+        }
     })
 }
 
@@ -702,6 +825,14 @@ const PONDWEED: [[u32; 4]; 4] = [
     [0x8A_7A_38, 0x7E_70_34, 0x96_86_40, 0x72_66_30],
     [0x7A_6E_40, 0x6E_64_3A, 0x86_7A_48, 0x64_5A_34],
 ];
+/// Water-crowfoot's dark green threads, darkening through the year.
+const CROWFOOT: [[u32; 4]; 4] = [
+    [0x3E_5C_22, 0x46_66_28, 0x36_52_1E, 0x4E_6E_2E],
+    [0x34_50_1E, 0x3C_5A_22, 0x2E_48_1A, 0x44_62_28],
+    [0x3A_48_1E, 0x44_52_22, 0x32_40_1A, 0x4C_5A_26],
+    [0x2E_3C_1A, 0x36_44_1E, 0x28_3416, 0x3E_4C_22],
+];
+
 /// A reedmace's spikes, a lily's petals and the heart of its flower, the
 /// same each season.
 const SPIKES: [u32; 4] = [0x4A_2E_1C, 0x54_34_1E, 0x40_28_18, 0x5E_3C_24];

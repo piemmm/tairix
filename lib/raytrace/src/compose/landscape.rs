@@ -15,25 +15,27 @@ use core::f64::consts::{FRAC_PI_2, PI, TAU};
 use tairix_util::{fallible, mathf};
 
 use super::architecture::Aqueduct;
-use super::plants::Dead;
 use super::plants::{self, Character, Fallen, Grassland, Grove, Kind, Stand, Tier};
-use super::stones::Stones;
+use super::plants::{Dead, Drift};
+use super::stones::{self, Brook, Stones};
 use super::waterside;
 use super::weather::{self, Climate, Cover, Hour, Outdoors};
 use super::woodland::{Beneath, Deadfall, Rooting, Wood, Woodland, ANYWHERE};
 use super::{direction, lumens, rgb, Composed, Dice, Landing, Look, Stage, View, GOLD};
 
+use crate::channel::{Section, Station};
 use crate::course::Mark;
 use crate::grass::Seen;
 use crate::ground::{Ground, Palette, Road, Rock};
 use crate::heightfield::Heightfield;
 use crate::land::{
-    self, Build, Fields, Horizon, Laid, Land, Lie, Nest, Plan, Rivers, Roadway, Surface, Survey,
-    Wear, NESTS,
+    self, Build, Fields, Horizon, Laid, Land, Lie, NearWater, Nest, Plan, Rivers, Roadway, Surface,
+    Survey, Wear, NESTS,
 };
 use crate::material::{Finish, Foam, Material, Relief, Wind};
 use crate::noise::smoothstep;
 use crate::pigment::Pigment;
+use crate::rock::Lithology;
 use crate::scene::Exposure;
 use crate::shade::Rect;
 use crate::shape::Shape;
@@ -198,7 +200,7 @@ pub(super) fn ground(
     // light as if it did.
     stage.material(
         Material::new(Pigment::Ground(ground), Finish::Ground).with_relief(Relief::Grain {
-            depth: 0.06,
+            depth: 0.14,
             scale: 14.0,
             seed: dice.seed(),
         }),
@@ -238,8 +240,7 @@ pub(super) fn lay(
     material: usize,
     water: Option<usize>,
 ) -> Option<Build> {
-    let cells = plan.cells.1;
-    let step = 2.0 * plan.reach / real(cells);
+    let (cells, step) = (plan.cells.1, plan.far_step());
     let origin = (
         plan.relief.centre.0 - plan.reach,
         plan.relief.centre.1 - plan.reach,
@@ -253,11 +254,15 @@ pub(super) fn lay(
             *slot = Some(stage.field(Heightfield::new(1, origin, 1.0, false)?)?);
         }
     }
-    // The lakes' and rivers' grid, like the finer grids, is laid once the
+    // The lakes' and rivers' grids, like the finer grids, are laid once the
     // land knows it has any.
     let fresh = match water {
         Some(_) => Some(stage.field(Heightfield::new(1, origin, 1.0, false)?)?),
         None => None,
+    };
+    let near_fresh = match (water, plan.near_water) {
+        (Some(_), Some(_)) => Some(stage.field(Heightfield::new(1, origin, 1.0, false)?)?),
+        _ => None,
     };
     let beyond = match (plan.horizon, plan.horizon_placing()) {
         (Some(horizon), Some((origin, step))) => {
@@ -274,13 +279,16 @@ pub(super) fn lay(
     if beyond.is_some() {
         stage.ground(plan.relief.lowest() - 2.0 * plan.roughness - 1.0, material)?;
     }
-    if let (Some(field), Some(water)) = (fresh, water) {
-        stage.add(Shape::Land { field }, water, flat, false)?;
+    if let Some(water) = water {
+        for field in [fresh, near_fresh].into_iter().flatten() {
+            stage.add(Shape::Land { field }, water, flat, false)?;
+        }
     }
     let fields = Fields {
         far,
         nests: nested,
         water: fresh,
+        near_water: near_fresh,
         horizon: beyond,
     };
     Build::new(plan, fields)
@@ -371,6 +379,10 @@ pub(super) enum Scheme {
         terrace: f64,
     },
     Valley,
+    /// A stream whose bed is of `lithology`, seen from its edge.
+    Stream {
+        lithology: Lithology,
+    },
     /// A sculpture set out on the land another of these schemes sites.
     Sculpture(Grounds),
     Aqueduct(Aqueduct),
@@ -470,6 +482,10 @@ impl Scheme {
                 let rise = dice.range(1.6, 3.0);
                 overlook(survey, dice, rise)
             }),
+            Self::Stream { .. } => stream_vantage(survey, dice).unwrap_or_else(|| {
+                let rise = dice.range(1.6, 3.0);
+                overlook(survey, dice, rise)
+            }),
             Self::Aqueduct(ref aqueduct) => aqueduct.site(survey, dice),
             Self::Sculpture(grounds) => return grounds.scheme().site(dice, survey),
         };
@@ -516,6 +532,7 @@ impl Scheme {
             Self::Winter { pond } => winter_scene(stage, dice, land, (vantage?, pond)),
             Self::Canyon { .. } => canyon_scene(stage, dice, land, vantage?),
             Self::Valley => valley_scene(stage, dice, land, vantage?),
+            Self::Stream { lithology } => stream_scene(stage, dice, land, (vantage?, lithology)),
             Self::Sculpture(grounds) => {
                 let vantage = vantage?;
                 sculpture_piece(stage, dice, land, &vantage)?;
@@ -829,6 +846,7 @@ pub(super) fn backdrop(
         droplets: 0.03,
         cells: (192, 512),
         nests: nests((700.0, (3.0 * radius).max(70.0)), (0.08, 0.08)),
+        near_water: None,
         horizon: Some(horizon(reach)),
         snow_line: None,
         pond: None,
@@ -1409,6 +1427,9 @@ pub(super) fn meadow(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
             catchment: 4.0e5,
             width: 3.0,
             meander: 1.2,
+            flowing: 1.0,
+            ledges: 0.0,
+            outcrops: 0.05,
         }),
         road,
         roughness: 1.2,
@@ -1416,6 +1437,7 @@ pub(super) fn meadow(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
         droplets: 0.05,
         cells: (256, 1024),
         nests: nests((700.0, 80.0), (0.08, 0.12)),
+        near_water: None,
         horizon: Some(horizon(reach)),
         snow_line: None,
         pond: None,
@@ -1537,6 +1559,9 @@ pub(super) fn forest(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
             catchment: 2.0e5,
             width: 1.8,
             meander: 1.6,
+            flowing: 1.0,
+            ledges: 0.0,
+            outcrops: 0.1,
         }),
         road: None,
         roughness: 0.8,
@@ -1544,6 +1569,7 @@ pub(super) fn forest(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
         droplets: 0.04,
         cells: (256, 1024),
         nests: nests((700.0, 64.0), (0.08, 0.1)),
+        near_water: None,
         horizon: Some(horizon(reach)),
         snow_line: None,
         pond: None,
@@ -1772,6 +1798,9 @@ pub(super) fn alpine(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
             catchment: 1.5e6,
             width: 6.0,
             meander: 0.9,
+            flowing: 1.0,
+            ledges: 0.0,
+            outcrops: 0.3,
         }),
         road: None,
         roughness: 22.0,
@@ -1779,6 +1808,7 @@ pub(super) fn alpine(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
         droplets: 0.06,
         cells: (384, 1024),
         nests: nests((1000.0, 90.0), (0.08, 0.12)),
+        near_water: None,
         horizon: Some(Horizon {
             cells: 512,
             ..horizon(reach)
@@ -1974,6 +2004,9 @@ pub(super) fn coast(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
             catchment: 2.5e5,
             width: 3.0,
             meander: 1.2,
+            flowing: 1.0,
+            ledges: 0.0,
+            outcrops: 0.05,
         }),
         road: None,
         roughness: 1.5,
@@ -1981,6 +2014,7 @@ pub(super) fn coast(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
         droplets: 0.05,
         cells: (256, 1024),
         nests: nests((700.0, 70.0), (0.08, 0.12)),
+        near_water: None,
         horizon: None,
         snow_line: None,
         pond: None,
@@ -2330,6 +2364,7 @@ fn desert_of(stage: &mut Stage, dice: &mut Dice, dunes: bool) -> Option<Composed
         droplets: droplets.0,
         cells: (256, 1024),
         nests: nests((700.0, 80.0), (droplets.1, droplets.2)),
+        near_water: None,
         horizon: Some(horizon(reach)),
         snow_line: None,
         pond: None,
@@ -2604,6 +2639,7 @@ pub(super) fn winter(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
         droplets: 0.01,
         cells: (256, 1024),
         nests: nests((700.0, 72.0), (0.015, 0.0)),
+        near_water: None,
         horizon: Some(horizon(reach)),
         snow_line: Some(-1e3),
         pond: Some(((0.0, 0.0), 1.3 * pond)),
@@ -2889,6 +2925,7 @@ fn island(stage: &mut Stage, dice: &mut Dice, facing: f64) -> Option<Build> {
         droplets: 0.04,
         cells: (128, 512),
         nests: [None; NESTS],
+        near_water: None,
         horizon: None,
         snow_line: None,
         pond: None,
@@ -2981,6 +3018,9 @@ pub(super) fn canyon(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
             catchment: 6.0e5,
             width: 7.0,
             meander: 0.8,
+            flowing: 1.0,
+            ledges: 0.0,
+            outcrops: 0.4,
         }),
         road: None,
         roughness: 2.5,
@@ -2988,6 +3028,7 @@ pub(super) fn canyon(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
         droplets: 0.06,
         cells: (256, 1024),
         nests: nests((700.0, 90.0), (0.08, 0.12)),
+        near_water: None,
         horizon: Some(horizon(reach)),
         snow_line: None,
         pond: None,
@@ -3151,6 +3192,9 @@ pub(super) fn valley(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
             catchment: 3.0e5,
             width: 4.5,
             meander: 1.4,
+            flowing: 1.0,
+            ledges: 0.0,
+            outcrops: 0.15,
         }),
         road: Some(road),
         roughness: 1.2,
@@ -3158,6 +3202,7 @@ pub(super) fn valley(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
         droplets: 0.05,
         cells: (256, 1024),
         nests: nests((700.0, 80.0), (0.08, 0.12)),
+        near_water: None,
         horizon: Some(horizon(reach)),
         snow_line: None,
         pond: None,
@@ -3254,6 +3299,322 @@ fn valley_scene(stage: &mut Stage, dice: &mut Dice, land: &Land, vantage: Vantag
         None => view(stage, land, &vantage, (fov, dice.range(0.5, 0.66))),
     };
     Some(look(weather, view, 1.0))
+}
+
+/// A narrow valley falling steeply enough along `heading` that the stream
+/// down it runs over stones, its bed of one rock, and the water low in its
+/// channel in a dry season.
+pub(super) fn stream(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
+    let lithology = dice.pick(&Lithology::ALL)?;
+    let (ledges, outcrops) = bedrock(lithology);
+    let heading = dice.range(0.0, TAU);
+    let reach = 2600.0;
+    let fall = dice.range(0.004, 0.014);
+    let relief = Terrain {
+        form: Landform::Valley {
+            heading,
+            floor: dice.range(50.0, 120.0),
+            height: dice.range(60.0, 160.0),
+            seed: dice.seed(),
+        },
+        datum: 0.0,
+        centre: (0.0, 0.0),
+        radius: reach,
+        rim: None,
+        tilt: (-fall * mathf::sin(heading), -fall * mathf::cos(heading)),
+        clearing: None,
+    };
+    let bed = &stage.densities.bed;
+    let plan = Plan {
+        relief,
+        reach,
+        sea: None,
+        wear: Wear {
+            passes: 20,
+            incision: 1.2e-3,
+            creep: 0.07,
+            repose: 0.9,
+            infill: 0.3,
+            strata: None,
+        },
+        rivers: Some(Rivers {
+            catchment: 1.5e5,
+            width: 2.2,
+            meander: 0.9,
+            flowing: dice.range(0.28, 0.5),
+            ledges,
+            outcrops,
+        }),
+        road: None,
+        roughness: 1.0,
+        ridges: 0.4,
+        droplets: 0.05,
+        cells: (256, 1024),
+        nests: nests((500.0, 24.0), (0.08, 0.1)),
+        near_water: Some(NearWater {
+            reach: bed.water.0,
+            cells: bed.water.1,
+        }),
+        horizon: Some(horizon(reach)),
+        snow_line: None,
+        pond: None,
+        growth: 1.0,
+        seed: dice.seed(),
+    };
+    let soil = dale(lithology);
+    let bedding = match lithology {
+        Lithology::Slate => 0.3,
+        Lithology::Granite => 6.0,
+        Lithology::Sandstone | Lithology::Limestone => 1.5,
+    };
+    let material = ground(stage, dice, &soil, (-1e3, NO_SNOW, 0.72), bedding)?;
+    let water = brook_water(stage, dice)?;
+    let build = lay(stage, plan, material, Some(water))?;
+    Some(Composed::Landed(Landing {
+        build,
+        scheme: Scheme::Stream { lithology },
+        vantage: None,
+    }))
+}
+
+/// How often a stream over `lithology` gathers its fall at a ledge, and how
+/// much of its banks the rock outcrops in: bedded rock steps and shows most,
+/// granite in boulder-strewn steps and tors.
+fn bedrock(lithology: Lithology) -> (f64, f64) {
+    match lithology {
+        Lithology::Slate | Lithology::Limestone => (0.35, 0.3),
+        Lithology::Sandstone => (0.3, 0.3),
+        Lithology::Granite => (0.15, 0.25),
+    }
+}
+
+/// A green upland dale's ground, its rock `lithology`'s.
+fn dale(lithology: Lithology) -> Soil {
+    let (rock, strata, lichen) = match lithology {
+        Lithology::Granite => (0x8C_88_82, 0x6E_6A_66, 0xA4_A6_84),
+        Lithology::Sandstone => (0xA0_84_62, 0x84_68_4A, 0xAC_A6_80),
+        Lithology::Limestone => (0xB2_AE_A4, 0x96_92_88, 0xB0_B2_92),
+        Lithology::Slate => (0x5C_62_6A, 0x48_4C_54, 0x8C_92_76),
+    };
+    Soil {
+        rock,
+        strata,
+        lichen,
+        ..HIGHLAND
+    }
+}
+
+/// A stream's water: clear, tinted as its peat or its chalk has it, the
+/// breeze down its sheltered valley lightly rippling it, so its own flow
+/// over its stones roughens its riffles far more than its pools.
+fn brook_water(stage: &mut Stage, dice: &mut Dice) -> Option<usize> {
+    let (absorb, glow) = dice.pick(&[
+        (Vec3::new(0.3, 0.15, 0.2), Vec3::new(0.003, 0.01, 0.008)),
+        (Vec3::new(0.5, 0.22, 0.12), Vec3::new(0.004, 0.008, 0.006)),
+        (Vec3::new(0.22, 0.1, 0.14), Vec3::new(0.002, 0.01, 0.012)),
+    ])?;
+    let ripples = Relief::waves(
+        Wind {
+            slope_variance: dice.range(1e-3, 5e-3),
+            lengths: (dice.range(0.3, 0.9), CAPILLARY),
+            spread: 0.8,
+            gusts: (dice.range(0.3, 0.6), dice.range(3.0, 10.0)),
+        },
+        dice.seed(),
+    )?;
+    stage.water(absorb, glow, None, ripples)
+}
+
+/// A place at the edge of one of `survey`'s streams, a few metres across,
+/// on the margin its low water leaves bare — on the bar across from the
+/// deep water most often — looking up or down along it toward a ledge or a
+/// riffle where one lies ahead; `None` when the land has no such stream.
+fn stream_vantage(survey: &Survey<'_>, dice: &mut Dice) -> Option<Vantage> {
+    let rivers = survey.rivers();
+    let form = survey.form()?;
+    let (centre, reach) = survey.extent();
+    let up = dice.chance(0.6);
+    let ahead = if up { -1.0 } else { 1.0 };
+    let mut spots = Vec::new();
+    let mut best = 0;
+    for course in 0..rivers.len() {
+        let marks = rivers.course(course);
+        let mut along = 0.0;
+        for (index, pair) in marks.windows(2).enumerate() {
+            let (mark, next) = (pair[0], pair[1]);
+            let here = along;
+            along += mathf::hypot(next.x - mark.x, next.z - mark.z);
+            // A mark well along its course, with room to look along it;
+            // best near the land's middle where it runs as broad as a
+            // stream, between dry banks rather than through a lake, and
+            // toward a ledge or a riffle ahead.
+            if index < 4 || index + 5 > marks.len() {
+                continue;
+            }
+            let inner = mathf::hypot(mark.x - centre.0, mark.z - centre.1) < 0.55 * reach;
+            let sized = (2.5..9.0).contains(&mark.width);
+            let running = (RUNNING.0..RUNNING.1).contains(&mark.fall);
+            let placed = (u32::from(inner) * 2 + u32::from(sized)) * 4
+                + 2 * u32::from(banked(survey, (mark, next)))
+                + u32::from(running);
+            // What lies ahead only breaks a tie, so it is read only where it
+            // could.
+            if 3 * placed + 2 < best {
+                continue;
+            }
+            let interest = (0..12)
+                .filter_map(|step| {
+                    let at = here + ahead * (8.0 + 2.0 * f64::from(step));
+                    Station::on(rivers, course, at).map(|station| Section::new(&station, &form))
+                })
+                .map(|section| {
+                    if section.ledge > 0.5 {
+                        2
+                    } else {
+                        u32::from(section.pool < 0.15)
+                    }
+                })
+                .max()
+                .unwrap_or(0);
+            let rank = 3 * placed + interest;
+            if rank < best {
+                continue;
+            }
+            if rank > best {
+                best = rank;
+                spots.clear();
+            }
+            spots.try_reserve(1).ok()?;
+            spots.push((course, here));
+        }
+    }
+    let (course, along) = dice.pick(&spots)?;
+    let section = Section::new(&Station::on(rivers, course, along)?, &form);
+    let (before, mark, after) = (
+        rivers.at(course, along - 1.0)?,
+        rivers.at(course, along)?,
+        rivers.at(course, along + 1.0)?,
+    );
+    let (dx, dz) = (after.x - before.x, after.z - before.z);
+    let length = mathf::hypot(dx, dz).max(1e-6);
+    let (downstream, left) = ((dx / length, dz / length), (-dz / length, dx / length));
+    // The bar rises across from where the deep water swings.
+    let bar = if section.thalweg >= 0.0 { -1.0 } else { 1.0 };
+    let side = if dice.chance(0.75) { bar } else { -bar };
+    let edge = side * section.edge(side);
+    let back = edge + dice.range(0.15, 0.6) * (section.half - edge).max(0.2);
+    let spot = (mark.x + side * left.0 * back, mark.z + side * left.1 * back);
+    // Looking along the stream, turned a little out over the water.
+    let turn = dice.range(0.05, 0.3);
+    let (cos, sin) = (mathf::cos(turn), mathf::sin(turn));
+    let look = (
+        ahead * downstream.0 * cos - side * left.0 * sin,
+        ahead * downstream.1 * cos - side * left.1 * sin,
+    );
+    Some(Vantage {
+        eye: stand(survey, spot, dice.range(1.2, 1.7)),
+        heading: mathf::atan2(look.0, look.1),
+    })
+}
+
+/// The falls between which a stream's eye looks over running water: not a
+/// level reach where it pools still, nor a steep one where it steps down.
+const RUNNING: (f64, f64) = (0.003, 0.03);
+
+/// Whether the stream running from `mark` to `next` on `survey`'s land runs
+/// between dry banks, no lake or marsh standing beside it.
+fn banked(survey: &Survey<'_>, (mark, next): (Mark, Mark)) -> bool {
+    let (dx, dz) = (next.x - mark.x, next.z - mark.z);
+    let length = mathf::hypot(dx, dz).max(1e-6);
+    let beyond = 0.5 * mark.width + 2.5;
+    [-1.0, 1.0].iter().all(|&side| {
+        let (x, z) = (
+            mark.x - side * dz / length * beyond,
+            mark.z + side * dx / length * beyond,
+        );
+        survey.water(x, z).is_none()
+    })
+}
+
+fn stream_scene(
+    stage: &mut Stage,
+    dice: &mut Dice,
+    land: &Land,
+    (vantage, lithology): (Vantage, Lithology),
+) -> Option<Look> {
+    let eye = vantage.eye;
+    let brook = land
+        .rivers
+        .nearest(eye.x, eye.z)
+        .zip(land.form)
+        .map(|(near, form)| Brook {
+            course: near.course,
+            station: Station::of(&near),
+            form,
+            run: near.run,
+            lithology,
+        });
+    let season = dice.pick(&[
+        Season::Spring,
+        Season::Summer,
+        Season::Summer,
+        Season::Autumn { fallen: 30 },
+    ])?;
+    let kinds: &[Kind] = if dice.chance(0.5) {
+        &[Kind::Willow, Kind::Birch, Kind::Hazel]
+    } else {
+        &[Kind::Oak, Kind::Willow, Kind::Hazel]
+    };
+    // What the floods broke from the trees along it lies lodged in its bed;
+    // an eye that found no stream looks over its dale without one.
+    if let Some(brook) = brook {
+        let drift = Drift::new(stage, dice, (*kinds.first()?, season))?;
+        stones::bed(
+            stage,
+            dice,
+            (brook, (eye.x, eye.z), vantage.heading),
+            Some(drift),
+        )?;
+    }
+    let grove = Grove::new(stage, dice, (kinds, season), Stand::Open)?;
+    stage.claim((eye.x, eye.z), 3.0)?;
+    let grassland = Grassland {
+        fallen: grove
+            .first()
+            .and_then(|grown| Fallen::from(&grown, season, 0.6)),
+        ..plants::grassland(dice, Character::Meadow, season)
+    };
+    let woodland = Woodland {
+        cover: dice.range(0.2, 0.45),
+        patch: 160.0,
+        closure: (0.7, 1.6),
+        stature: (0.6, 0.9),
+        gaps: 0.1,
+        most: stage.densities.woods.valley,
+        open: (3.0, 0.6),
+    };
+    stage.sow(Wood {
+        grove,
+        woodland,
+        rooting: Rooting {
+            streams: 1.6,
+            ..ANYWHERE
+        },
+        vantage,
+        beneath: None,
+        deadfall: None,
+    })?;
+    // Its banks are grass down to the margin its floods scour bare; reeds
+    // and pondweed take only its slack water and silt, crowfoot its runs.
+    waterside::margins(stage, dice, ((eye.x, eye.z), season, None))?;
+    stage.sward = Some(Lawning {
+        eye: (eye.x, eye.z),
+        grassland,
+    });
+    let weather = weather::outdoors(stage, dice, &MEADOW, vantage.heading)?;
+    let fov = dice.angle(50.0, 62.0);
+    let pitch = -dice.range(0.16, 0.34);
+    Some(look(weather, level_view(&vantage, fov, pitch), 1.0))
 }
 
 /// A monumental abstract sculpture standing out in a meadow, a sea of dunes

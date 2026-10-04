@@ -14,7 +14,9 @@
 //! * [`for_each`] — the one place an index becomes an element. A runner deals
 //!   in indices because that is all it can share between threads; a pass wants
 //!   its own `&mut` piece. That conversion is the crate's single `unsafe`
-//!   block, and it lives here rather than in every pass.
+//!   block, and it lives here rather than in every pass. [`for_each_drawn`]
+//!   hands out pieces an iterator splits off instead, so a pass need not
+//!   gather them into a list first.
 //! * [`Pool`] (feature `pool`) — the fork-join worker pool over `lib/rt`
 //!   threads. Workers park on a futex between dispatches and never spin.
 //!
@@ -45,6 +47,8 @@ pub mod pool;
 
 #[cfg(feature = "pool")]
 pub use pool::Pool;
+
+use tairix_sync::SpinLock;
 
 /// How many pieces of work a runner can make progress on at once, and how to
 /// run them.
@@ -324,6 +328,58 @@ pub fn for_each<T: Send>(runner: &dyn JobRunner, items: &mut [T], visit: &(dyn F
     });
 }
 
+/// Visit every piece `pieces` yields exactly once, spread across `runner`,
+/// returning when every one has been visited.
+///
+/// For pieces a pass splits off one borrow at a time — row bands, a buffer cut
+/// into parts of differing lengths — which [`for_each`] would need gathered
+/// into a list first: each participant draws its next piece from the iterator
+/// itself, under a lock held only for the draw, so a dispatch allocates
+/// nothing. The pieces must be independent, as [`for_each`]'s elements are,
+/// and the order they are visited in is unspecified.
+///
+/// Fewer than two pieces, or a runner one thread wide, are visited in order on
+/// the calling thread with no lock taken.
+pub fn for_each_drawn<I>(runner: &dyn JobRunner, pieces: I, visit: &(dyn Fn(I::Item) + Sync))
+where
+    I: ExactSizeIterator + Send,
+{
+    fold_drawn(runner, pieces, (), &|piece| visit(piece), &|(), ()| ());
+}
+
+/// [`for_each_drawn`], joining what each visit answers onto `start`.
+///
+/// The answers are joined in the order the visits finish, so `join` must give
+/// the same result in any order — a sum, a maximum. It runs under the lock the
+/// pieces are drawn through, so it should cost no more than they do.
+pub fn fold_drawn<I, R>(
+    runner: &dyn JobRunner,
+    pieces: I,
+    start: R,
+    visit: &(dyn Fn(I::Item) -> R + Sync),
+    join: &(dyn Fn(R, R) -> R + Sync),
+) -> R
+where
+    I: ExactSizeIterator + Send,
+    R: Copy + Send,
+{
+    let count = pieces.len();
+    if count <= 1 || runner.width() <= 1 {
+        return pieces.fold(start, |joined, piece| join(joined, visit(piece)));
+    }
+    let shared = SpinLock::new((pieces, start));
+    runner.run(count, &|_| {
+        let drawn = shared.lock().0.next();
+        let Some(piece) = drawn else {
+            return;
+        };
+        let answer = visit(piece);
+        let mut held = shared.lock();
+        held.1 = join(held.1, answer);
+    });
+    shared.into_inner().1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,6 +479,85 @@ mod tests {
         let mut items = [0u32; 4];
         for_each(&Forgetful, &mut items, &|item| *item += 1);
         assert_eq!(items, [1, 1, 1, 0]);
+    }
+
+    /// A drawn piece is visited exactly once whoever draws it, and whichever
+    /// order the runner draws in, the pieces write what running them in turn
+    /// wrote.
+    #[test]
+    fn every_drawn_piece_is_visited_once_by_any_runner() {
+        let stamp = |piece: &mut [u64]| {
+            for slot in piece {
+                *slot = slot.wrapping_mul(3).wrapping_add(0x9E37_79B9);
+            }
+        };
+        let mut serial = [1u64; 257];
+        for_each_drawn(&SERIAL, serial.chunks_mut(16), &stamp);
+        let runners: [&dyn JobRunner; 3] =
+            [&Reversed::new(4), &Threaded::new(4), &Threaded::new(0)];
+        for runner in runners {
+            let mut drawn = [1u64; 257];
+            for_each_drawn(runner, drawn.chunks_mut(16), &stamp);
+            assert_eq!(serial, drawn);
+        }
+    }
+
+    /// Pieces of differing lengths, the case a list of `for_each` elements
+    /// would have had to be gathered for.
+    #[test]
+    fn a_fold_over_drawn_pieces_joins_every_answer_once() {
+        fn split(values: &mut [u32]) -> [&mut [u32]; 5] {
+            let mut rest = values;
+            [1usize, 7, 0, 20, 36].map(|len| {
+                let (part, after) = core::mem::take(&mut rest).split_at_mut(len);
+                rest = after;
+                part
+            })
+        }
+        let mut values: [u32; 64] = core::array::from_fn(|at| u32::try_from(at).unwrap_or(0));
+        let total = |runner: &dyn JobRunner, values: &mut [u32]| {
+            fold_drawn(
+                runner,
+                split(values).into_iter(),
+                0u64,
+                &|part| {
+                    for value in part.iter_mut() {
+                        *value += 1;
+                    }
+                    part.iter().map(|&value| u64::from(value)).sum()
+                },
+                &|a, b| a + b,
+            )
+        };
+        let mut drawn = values;
+        assert_eq!(total(&SERIAL, &mut values), (1..=64).sum::<u64>());
+        assert_eq!(total(&Threaded::new(4), &mut drawn), (1..=64).sum::<u64>());
+        assert_eq!(values, drawn);
+    }
+
+    /// Fewer than two pieces never reach the runner, so a single band costs no
+    /// dispatch and no lock.
+    #[test]
+    fn fewer_than_two_drawn_pieces_are_visited_without_a_dispatch() {
+        let runner = Reversed::new(4);
+        let mut values = [0u32; 4];
+        for_each_drawn(&runner, values.chunks_mut(4), &|piece| piece[0] += 1);
+        for_each_drawn(&runner, values.chunks_mut(4).take(0), &|_| {
+            panic!("no piece")
+        });
+        assert_eq!(runner.dispatches(), 0);
+        for_each_drawn(&runner, values.chunks_mut(2), &|piece| piece[1] += 1);
+        assert_eq!(runner.dispatches(), 1);
+        assert_eq!(values, [1, 1, 0, 1]);
+    }
+
+    /// A runner that skips an index leaves a piece undrawn — a defect in the
+    /// runner, and not memory-unsafe: nothing of it is ever handed out.
+    #[test]
+    fn a_runner_that_skips_a_draw_leaves_that_piece_unvisited() {
+        let mut values = [0u32; 4];
+        for_each_drawn(&Forgetful, values.chunks_mut(1), &|piece| piece[0] += 1);
+        assert_eq!(values, [1, 1, 1, 0]);
     }
 
     #[test]

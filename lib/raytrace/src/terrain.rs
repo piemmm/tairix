@@ -133,9 +133,17 @@ fn mountains((x, z): (f64, f64), (scale, height, floor): (f64, f64, f64), seed: 
     height * (0.08 * rolling + rise * (0.25 * rolling + 0.75 * ridges * ridges))
 }
 
+/// How far `(x, z)` lies along the compass `heading` from the origin, and
+/// how far to its right: the axes a landform with a heading is drawn along,
+/// the way every scene reads a heading.
+fn axes((x, z): (f64, f64), heading: f64) -> (f64, f64) {
+    let (sin, cos) = (mathf::sin(heading), mathf::cos(heading));
+    (x * sin + z * cos, x * cos - z * sin)
+}
+
 fn dunes((x, z): (f64, f64), (scale, height, heading): (f64, f64, f64), seed: u32) -> f64 {
-    let (cos, sin) = (mathf::cos(heading), mathf::sin(heading));
-    let (along, across) = ((x * cos + z * sin) / scale, (-x * sin + z * cos) / scale);
+    let (along, across) = axes((x, z), heading);
+    let (along, across) = (along / scale, across / scale);
     // The crest line wanders, so the ridges are not ruled lines.
     let bent = along + 0.8 * noise2(across * 0.35, along * 0.1, seed);
     let phase = bent - mathf::floor(bent);
@@ -171,8 +179,7 @@ fn mesas((x, z): (f64, f64), (scale, height, steps): (f64, f64, f64), seed: u32)
 }
 
 fn valley((x, z): (f64, f64), (heading, floor, height): (f64, f64, f64), seed: u32) -> f64 {
-    let (cos, sin) = (mathf::cos(heading), mathf::sin(heading));
-    let (along, across) = (x * cos + z * sin, -x * sin + z * cos);
+    let (along, across) = axes((x, z), heading);
     // The river's course meanders down the valley.
     let course = across - 0.6 * floor * noise2(along / (4.0 * floor), 0.5, seed);
     let sides = smoothstep(0.5 * floor, 2.5 * floor, course.abs());

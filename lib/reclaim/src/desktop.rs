@@ -6,10 +6,11 @@
 //! view: cheap to lose, expensive to rebuild, owned by the seat that is
 //! showing them, and invalidated wholesale the moment the scale, theme, or
 //! source set changes. [`disposable_ui_candidate`] is the one declaration
-//! of that classification, and [`disposable_ui_cache`] is the one place a
-//! [`ReclaimCache`] is assembled from it, so the window manager's cursor
-//! cache and the taskbar's icon cache — which may not depend on each
-//! other — never carry two copies of the same six declared dimensions.
+//! of that classification, and every constructor here assembles its
+//! [`ReclaimCache`] from it in one place, differing only in its budget, so the
+//! window manager's cursor cache and the taskbar's icon cache — which may not
+//! depend on each other — never carry two copies of the same six declared
+//! dimensions.
 //!
 //! # Why this lives here and not in the desktop session
 //!
@@ -111,10 +112,11 @@ where
     E: PartialEq + Clone,
     S: BuildHasher,
 {
-    ReclaimCache::new(
+    ui_cache(
         label,
-        disposable_ui_candidate(seat, entry_metadata_bytes),
-        CacheBudget::from_backing(fb_bytes).with_reserved_floor(UI_CACHE_RESERVE_BYTES),
+        seat,
+        entry_metadata_bytes,
+        CacheBudget::from_backing(fb_bytes),
         pressure,
         sink,
         hasher,
@@ -151,10 +153,11 @@ where
     E: PartialEq + Clone,
     S: BuildHasher,
 {
-    ReclaimCache::new(
+    ui_cache(
         label,
-        disposable_ui_candidate(seat, entry_metadata_bytes),
-        CacheBudget::from_ceiling(fb_bytes).with_reserved_floor(UI_CACHE_RESERVE_BYTES),
+        seat,
+        entry_metadata_bytes,
+        CacheBudget::from_ceiling(fb_bytes),
         pressure,
         sink,
         hasher,
@@ -200,12 +203,11 @@ where
     S: BuildHasher,
 {
     let budget = CacheBudget::from_ceiling(fb_bytes);
-    ReclaimCache::new(
+    ui_cache(
         label,
-        disposable_ui_candidate(seat, entry_metadata_bytes),
-        budget
-            .with_working_set_floor(budget.hard() / WORKING_SET_DIVISOR)
-            .with_reserved_floor(UI_CACHE_RESERVE_BYTES),
+        seat,
+        entry_metadata_bytes,
+        budget.with_working_set_floor(budget.hard() / WORKING_SET_DIVISOR),
         pressure,
         sink,
         hasher,
@@ -249,12 +251,38 @@ where
     S: BuildHasher,
 {
     let ceiling = fb_bytes.max(CacheBudget::from_backing(memory_bytes).hard());
+    ui_cache(
+        label,
+        seat,
+        entry_metadata_bytes,
+        CacheBudget::from_ceiling(ceiling).with_working_set_floor(fb_bytes),
+        pressure,
+        sink,
+        hasher,
+    )
+}
+
+/// The cache every constructor above builds: the one classification under
+/// `budget`, with the shared reserve no band may take.
+fn ui_cache<K, V, E, S>(
+    label: &'static str,
+    seat: u64,
+    entry_metadata_bytes: usize,
+    budget: CacheBudget,
+    pressure: &'static (dyn PressureGauge + 'static),
+    sink: &'static (dyn Sink + Sync),
+    hasher: S,
+) -> ReclaimCache<K, V, E, S>
+where
+    K: Eq + Hash,
+    V: CachedBytes,
+    E: PartialEq + Clone,
+    S: BuildHasher,
+{
     ReclaimCache::new(
         label,
         disposable_ui_candidate(seat, entry_metadata_bytes),
-        CacheBudget::from_ceiling(ceiling)
-            .with_working_set_floor(fb_bytes)
-            .with_reserved_floor(UI_CACHE_RESERVE_BYTES),
+        budget.with_reserved_floor(UI_CACHE_RESERVE_BYTES),
         pressure,
         sink,
         hasher,

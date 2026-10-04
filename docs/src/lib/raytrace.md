@@ -8,7 +8,7 @@ forbids `unsafe`.
 ## Scenes
 
 A `Draft::new(setting, seed, size, detail)` composes a scene in one of the
-nineteen `Setting`s. Within a setting everything is drawn from the seed: which
+twenty `Setting`s. Within a setting everything is drawn from the seed: which
 pieces, where, in what, lit from where, at what hour and under what weather,
 and seen from where — and every draw is bounded so the scene is lit and framed
 to read.
@@ -34,8 +34,8 @@ takes, a seed shows the same place at either detail.
   grass; a sculpture stands out in a meadow, on dunes or by a mountain lake.
 - **Landscapes** are lands: rolling meadows, a forest, mountains over a lake,
   an island's coast, dunes or rocky desert, snow over a frozen pond, a lagoon
-  at sunset, canyons between mesas, and a river valley crossed by a stone
-  bridge.
+  at sunset, canyons between mesas, a river valley crossed by a stone
+  bridge, and a stream running clear over its stones, seen from its edge.
 
 The weather (`compose::weather`) sets the hour and the cloud. The sky is a
 physical atmosphere over a round Earth (Hillaire, EGSR 2020), its sky, sun
@@ -226,7 +226,90 @@ it suits it, the taller and thicker its patch, so a bed thins and shortens
 toward its edges. `Simple` sets them out to 250 m, at most 8000 patches;
 `Maximum` to 700 m, at most 40 000 — where more would stand, those nearest
 the eye, so the water's edge ends at a distance rather than part way across
-the view.
+the view. A plant's clumps and beds are planned as prototypes only once a
+patch of one is set out, so a plant no water in the scene suits costs it
+nothing; once the scene plans no more prototypes, a patch never planned is
+left out rather than the scene refused.
+
+## Streams
+
+A land keeps its rivers, each mark carrying how far its water has run from
+the divide, where it lies in its run of pools and riffles, how it bends and
+how steeply its brim falls. Their channels (`channel`) are drawn from that
+alone, so the land's grids, its water and a stream's flow read the same one.
+A course is counted in units of pool and riffle some six widths apart,
+shorter as it steepens toward steps; at low water each pool stands ponded
+behind the crest below it and the water falls fast down the riffle after,
+and where bedded rock holds a reach two or three units' fall gathers at one
+ledge over a plunge pool. In a pool the deepest water swings to one bank —
+from side to side unit by unit along a straight reach, to the outside of a
+bend — cutting that
+bank steep while a bar rises gently on the other, sanded in patches where the
+slack water drops it. The bed is lumped by the gravel its floods heaped and
+the hollows they scoured and its breadth wanders, so its water's edge does
+too; its banks rise over faces of earth, broken by benches, slumped and
+bulging, their tops lifted into levees or let down, to the land beyond, or
+down to it where the land lies below a perched river's brim. The
+channel stands as it carved it against the droplets run over the land after.
+The water runs as fast over each crest as down a riffle, slow where it
+deepens and fast where it shallows.
+
+Seen close, ground holds grain to the millimetre — crumbs, coarse and fine
+sand, a scoured bed's gravel of the land's own rock and the cobbles in it,
+relief in five octaves sharing a grain's depth — each only as finely as a
+pixel resolves it,
+settling to its mean beyond. A river's bare rock is stained dark by its
+water; bedded rock breaks in blocks along two sets of upright joints and its
+beds. Nothing roots in the bed its floods scour or the fringe up its banks,
+but pioneer plants take the tops of its bars.
+
+A stream's bed (`compose::stones`) is the stones its bankfull flow can move,
+their median the stone that flow just stirs (Shields' criterion), the rest
+spread lognormally about it. Each has come a distance drawn evenly from
+nought to the run above it and is worn as far as it came, against its rock's
+rounding length; slate stays flat and angular, splitting along its cleavage
+as fast as it rounds. Stones are drawn from a lattice per size class about
+the eye, kept where they span a few pixels at their distance and gravel can
+rest, sparser on sand and bare rock, laid largest first where none already
+lies, each on its flattest side, its length across the stream, its upstream
+end dipping and its foot bedded in the gravel. Where a bank's rock outcrops it
+stands out of the earth as blocks; boulders fallen from the banks, most where
+a pool cuts one or its rock outcrops, roll down whatever is too steep to hold
+them, often into the water at the bank's foot; both are mossed above the
+water, and stand in its flow as they lie across it. The floods leave the streamside trees' wood lodged in the
+stream — branches stranded at the edge, jammed across the flow, sunk in the
+pools or fallen in from the banks, and where the stream is narrow a trunk
+across it with branches piled against it, never through a boulder — each
+break torn and splintered, never rounded.
+
+The water's edge plants (`compose::waterside`) take only its slack water and
+silt — reeds, reedmace, pondweed in its pools — and water-crowfoot streams
+down the current where it runs over gravel, each set out on the water as
+the flow has shaped it.
+
+A rock (`rock`) is worn by the mean-curvature term of Bloore's flow: its
+surface moves in as fast as it curves out and never out, so its edges round
+first and its hollows last, each vertex kept to its own ray from the middle.
+
+The stream's surface about the eye is its own grid, meeting the far water's
+along its border, where it gives way to it over a metre and a half, so a ray
+meets one surface of water there and not two. It is shaped by the flow's
+steady answer to the stones and the wood in it (`stream`), over the stretch
+the eye looks along, the more of it ahead whichever way it looks: linear potential
+flow over a finite depth with gravity and surface tension, solved by Fourier
+transforms of a grid along the stream (`fourier`) at four depths and three
+speeds, each place taking the answers about its own, a stone parting the
+water in proportion to its speed. Over a stone the water
+dips or humps, lee waves stand behind it fanned in a V, and before a stone
+through the surface it piles up, its wake falling away behind; the pools lie
+glassy and the riffles stand in waves. No place rises past the stream's
+velocity head. Foam comes only where the water breaks about an obstruction —
+a wave standing steeper than water can, the wake a stone through brisk water
+sheds, the pool where a ledge's glassy tongue lands — and bursts within a
+second; then fast water
+churns and shallow water drapes over its gravel, texture its breaking never
+sees. The foam is held on the grid and broken into bubbles and streaks where
+it is shaded.
 
 ## Geometry
 
@@ -251,8 +334,10 @@ each where three faces meet within the rest.
 - **Prototypes** are built once and placed as often as a scene wants: trees
   grown after Weber and Penn (SIGGRAPH 1995), palms and ferns of fronds,
   saguaros, rocks cut from noised icospheres, fallen trunks and stumps. Each
-  is a list of parts — tapering limbs with rounded ends, leaves cut to an
-  outline, triangles — under a hierarchy of its own, built a slice at a time.
+  is a list of parts — tapering limbs with rounded or open ends, leaves cut
+  to an outline, triangles — under a hierarchy of its own, built a slice at a
+  time. A triangle with no material of its own takes the one its placing is
+  made in, so one rock is laid wet, dry or mossed.
   A trunk holds its girth up its bole by its kind's form before narrowing into
   its crown, bows in one gentle sweep, swells at its foot over a metre or so —
   drawn in short segments so the swell curves — and is gripped by roots that

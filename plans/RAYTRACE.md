@@ -25,7 +25,7 @@ D503, D505 and D514–D520 (the tracer's open defects).
 | RT7 | The water defects: ripples aliasing far off, reflections lost at grazing angles, the open sea stopping short of the horizon, and the noise seams under every pattern (D490–D494) | done |
 | RT8 | Caustics on and under every body of water, from the light the surface itself focuses: beams over the water the picture shows, every one gathered, refracted onto beds and what stands in the water and reflected onto what stands over it | done |
 | RT9 | Water's edge: reeds and bulrushes along banks, pondweed and water lilies in still water | done |
-| RT10 | Streams close up: running water over stones worn round, slate the angular exception | planned |
+| RT10 | Streams close up: pools and riffles, ledges, bars and cut banks, running water over stones worn round, boulders, drift and weeds | done |
 | RT11 | Deltas, beaches and eroding coasts: sand with driftwood, footprints, paw prints, shells, stones and wrack; cliffs, sandbanks, marram binding the dunes | planned |
 | RT12 | Jetties, harbours and fishing villages; gulls and other birds; shoals of fish | planned |
 | RT13 | `lib/countryside`: the renderer-neutral countryside layout — parcels, boundaries, gates, ways, land use, farmsteads, villages and plots — shared with WinterSun | planned |
@@ -334,7 +334,7 @@ points asking for tiles as each alone would; a point seen over no footprint
 taking a level surface's light; and a picture of the bed showing the net that
 one with nothing laid does not.
 
-## RT9–RT12 — Water's edge and the coast
+## RT9, RT11, RT12 — Water's edge and the coast
 
 - Banks and still water (RT9): reeds and reedmace stand in the shallows and
   on wet, level banks off any way; lilies and pondweed float where the water
@@ -349,17 +349,16 @@ one with nothing laid does not.
   the detail's reach (`Simple` 250 m, at most 8000 patches; `Maximum` 700 m,
   40 000, the nearest the eye kept where more would stand), each cell a patch
   of the plant its place suits best or none, as likely as it suits it and as
-  tall and thick, so beds thin toward their edges. A cell's patch is drawn from its place and the light there alone, so
+  tall and thick, so beds thin toward their edges. A plant's clumps and beds
+  are planned as prototypes only once a patch of one is set out, so a plant
+  no water in the scene suits costs it none of the scene's 96, and past the
+  96 a patch never planned is left out. A cell's patch is drawn from its place and the light there alone, so
   it is the same on any runner; the woods differ by detail, so where their
   shade falls the water's edge does too. Measured at 960×540 at *Simple*, a
   frozen pond's reeds about the eye trace 10% longer and a canyon's far beds
   14%, preparation takes about 0.1 s more, and a scene holds at most 5 MB
   more; at *Maximum* a winter scene prepares about 3 s longer, its radiosity
   records' rays crossing the reeds.
-- Streams close up (RT10): a close vantage on a stream; its stones rounded in
-  proportion to how far water has carried them, angular only where the bed is
-  slate; the water's surface shaped by the flow over them, standing waves and
-  all.
 - Deltas and coasts (RT11): distributaries building lobes into still water;
   beaches graded by exposure — sand, shingle and stones — with driftwood and
   wrack along the tide line, shells, footprints and paw prints in tracks that
@@ -367,6 +366,201 @@ one with nothing laid does not.
   bound by marram clumps.
 - Waterside life (RT12): jetties and piers of weathered timber; harbours with
   moorings; gulls, birds in flight, and shoals beneath clear water.
+
+## RT10 — Streams close up
+
+`Setting::Stream`: a stream a few metres across in the narrow valley it has
+cut, seen from the margin its low water leaves — on the bar across from the
+deep water three times in four — the eye 1.2–1.7 m up and looking along it
+toward a ledge or a riffle where one lies 8–30 m ahead. The spot is ranked,
+not filtered: near the land's middle where the stream runs 2.5–9 m across
+first, then between dry banks, then falling between 0.3 % and 3 %, so a land
+whose streams offer no such reach still gets the best they do; an eye that
+stands by no stream looks over its dale with no brook laid.
+
+- **The channel** (`channel`). A river's course is counted in units of pool
+  and riffle (`Mark::phase`), six widths apart on a gentle stream and
+  shortening toward a step every width or two as it steepens (Leopold and
+  Wolman 1957; Montgomery and Buffington 1997), each mark carrying its run,
+  its bend (`turn`, the curvature through it and its neighbours) and its
+  brim's fall over 10 m either way. A unit is a crest, the riffle falling
+  quickly below it over a quarter to two fifths of its length, and the pool
+  after; where bedded rock holds a reach (`Rivers::ledges`: slate and
+  limestone 0.35, sandstone 0.3, granite 0.15), two or three units' fall
+  gathers at one ledge over a plunge pool scoured by its drop. The bed's long
+  profile is a staircase, and at low water the water's follows it — as
+  `1 − flowing⁴` of it over a ledge and `1 − flowing²` down a riffle, not at
+  all in spate —
+  so each pool stands ponded behind the crest below it; the mean water stands
+  where its depth's share has it. In a pool the deepest line swings to one
+  bank — along a straight reach to one side a unit's length along and to the
+  other the next, over a ledge's units as a riffle's, and to the outside of a
+  bend as it tightens — the bed rising steeply to the cut bank and gently up the bar on
+  the other side; across a riffle the bed is flat but for its margins. The
+  bed is lumped by a fifth of its depth at most, in lumps 2.5 m to 40 cm
+  long, enveloped so it never leaves its deepest and its brim, and its
+  breadth wanders 8 % either way, so its water's edge wanders as a stream's
+  does. Along its thalweg the water carries what runs over the crest at
+  Manning's speed down a typical riffle (`n` = 0.04), fast where shallow and
+  slow where deep; across, Manning's law at each depth, never past Froude
+  0.9 (Grant 1997).
+- **Banks.** Each bank rises from the brim over a face broad on a bar's side
+  and narrow and steep where a pool cuts it, broken by a bench a share of its
+  height up, its top lifted into a levee or let down a little, slumped and
+  bulging along its faces, and settling to the land beyond, or falling to it
+  where the land lies below a perched river's brim. Sand lies up the
+  bars and in the deep of the pools, in patches; a ledge's lip, tongue and
+  the slab above it are bare rock, stained dark with the water's film; a
+  bank's faces are its alluvium's earth, a cut face showing its beds of loam
+  and gravel. The channel has the say over what was laid within its banks'
+  faces, and stands there as it carved them against the droplets run over
+  the land after, which only rill the land beyond.
+- **The water as it runs.** A land's rivers may run below bankfull
+  (`Rivers::flowing`, 0.28–0.5 here); bankfull depth follows hydraulic
+  geometry, a fifth of the width to the two-thirds power. The bed's bare
+  margin is soaked, its banks above it damp; nothing roots in what its floods
+  scour or the fringe up its banks, where grass grows sparse and short, but
+  pioneer plants take up to 0.3 of a bar's top. The ground's grass is painted
+  only off the bed; gravel lies no steeper than it rests at, the steeper
+  walls of a low channel showing the bank's earth.
+- **Ground seen close.** The eye stands over a near grid of 4.7 cm cells. The
+  ground's grain runs from crumbs and fine pebbles to fine sand (55, 170 and
+  520 grains a metre), a scoured bed is gravel of the land's own rock (90
+  granules a metre) mottled by cobbles too small to lay (14 a metre), sand
+  mottled finer, and its relief runs five octaves from 7 cm to about a
+  millimetre, sharing the grain's depth between them; each holds only as finely as the footprint resolves it and
+  settles to its mean beyond, its relief lending its slope to the roughness.
+  Bedded rock breaks along two sets of upright joints near square to each
+  other, opening and closing along their strike, and parts along its beds.
+  Scree keeps to drained ground. A sward's shade on the ground is blended
+  between its cells, and a cell that barely thrives grows short as well as
+  sparse.
+- **Stones by the water that carried them** (`compose::stones`). The bed's
+  median is the stone its bankfull flow just stirs (Shields, τ* = 0.045), at
+  most 25 cm, the rest lognormal about it (σ 1–1.5 in φ). Each stone has come
+  a distance drawn evenly from nought to the run above it, every stretch
+  upstream feeding the bed alike, and is worn by that distance over its rock's
+  rounding length (granite 8 km, slate 4 km, sandstone 3 km, limestone
+  2.5 km); slate splits along its cleavage as fast as it rounds, so its wear
+  stays at 0.08, flat and angular. A bed grows four shapes of its rock at four
+  wears from fresh to the farthest-carried. Stones are drawn from a lattice per
+  size class about the eye, a cell one stone or none, kept only where they span
+  the detail's pixels at their distance (5 at *Simple*, 3 at *Maximum*), lie
+  in a channel, on ground no steeper than gravel rests on, sparser on its
+  sand and its bare rock; ranked largest first, each laid where it keeps clear
+  of every stone laid before it by four fifths of its breadth, up to 40 000 at
+  *Simple* and 160 000 at *Maximum*. Each lies on its flattest side, its
+  length across the stream and its upstream end dipping 8–25° (imbrication),
+  a fifth to two fifths of its height bedded, wet beneath the water and dry
+  above. A rock's facets carry no material of their own, so each stone takes
+  the one it is placed in.
+- **Boulders and outcrops.** A lattice of 1.6 m cells holds, on a bank's face
+  where its rock outcrops (`Rivers::outcrops`), a block of that rock
+  0.6–1.6 m across standing square out of the face, buried more than half
+  in it; elsewhere boulders fallen from the banks, likelier and larger where a
+  pool cuts the bank or its rock outcrops, 0.35–1.3 m and fresh, each rolled
+  down whatever is steeper over its own breadth than a boulder rests on (a
+  rise of a half) until the ground holds it, often into the water at the
+  bank's foot; now and then one lies out in the channel. Above the water both
+  are mossed, moss mantling the faces turned to the sky in patches. Each
+  claims its ground, so no drift is laid through it, and stands in the flow as
+  long and as broad as it lies along and across the current. A bank's
+  rock is never painted on its face: it stands out of the earth as these
+  blocks, and only a ledge bares rock across the bed.
+- **Drift.** The floods leave 7–14 pieces of the streamside trees' wood in
+  the stretch the eye looks over, branches and trunks of their kind in
+  weathered bark: stranded half in the water up a bar, jammed across the flow,
+  waterlogged and sunk along the bed of a pool, fallen in from a bank with
+  their tops swung downstream; and where the stream is under 6 m across, a
+  trunk undercut from one bank spans it about one scene in three, the current
+  piling branches against its upstream side more often than not. Each rests on
+  the ground or the bed beneath its ends, and what lies in the water joins the
+  flow as obstructions. A break is torn, not rounded: the trunk's tube is left
+  open there (`Tube::opened`) and closed by a jagged face of weathered wood,
+  bristling with splinters longest about the rim and hung with tatters of bark.
+- **Weeds** (`compose::waterside`). The water's edge plants come to the
+  stream: reeds and reedmace in its slack water and silt, pondweed in its
+  pools, and water-crowfoot — stems streaming down the current just beneath
+  the surface, tufted with thread-fine leaves, white-flowered in spring and
+  summer — where it runs over gravel, all set out once the flow has shaped
+  the water they float on. Nothing roots on ground the floods scour
+  bare; the still-water plants root thicker in silt than over gravel, crowfoot
+  the reverse; none stands within 2.5 m of the eye.
+- **Wear** (`rock`). A rock is cut from its radius in every direction of a
+  subdivided icosphere, its fractures and a slate's cleavage planes cut
+  through it, then worn by the mean-curvature term of Bloore's flow (Bloore
+  1977; Domokos and Gibbons 2012): the surface moves in as fast as it curves
+  out and never out, so edges round first and hollows last, each vertex kept
+  to its own ray so the facets hold their shape. The cotangent Laplacian
+  (Meyer et al. 2003) is refreshed every eight steps, 48 steps a unit; its
+  proportions are set after wear.
+- **The surface** (`stream`). The water's own finer grid about the eye
+  (`NearWater`, 15.2 m either way — whole cells of the far water grid — 1024
+  cells at *Simple* and 2048 at *Maximum*) is left out of the far water grid
+  entirely and meets it along its border, its own surface giving way to the
+  far grid's over the 1.5 m within it (`land::seam`), so a ray meets one
+  water's surface there and not two; the land reads its water within it from
+  it. It is shaped by the flow's steady answer to its obstructions, solved
+  linearly on a grid along the stream (Lamb §§ 246–247; Wehausen and Laitone
+  1960) over the channel's sections read every 10 cm, 1.2 near-grid reaches
+  behind the eye and 2.2 ahead of it whichever way it looks: potential flow over a finite depth with gravity and surface
+  tension, a stone beneath the surface a rise in the bed (at most 0.6 of the
+  depth) and one through it a Rankine half-body as broad as its waterline,
+  Rayleigh damping keeping waves to the way the flow carries them and the
+  eddies' viscosity (10⁻³ m²/s, of the order a stony stream's turbulence
+  holds; Elder 1959) damping the short ones sooner, so a train of standing
+  waves behind a log across the flow dies within a few of its lengths. The answer
+  is worked at four depths and three speeds, six pairs of transforms, and each
+  place takes the four about its own depth and speed. A stone parts the water
+  in proportion to the stream's speed, so its answer falls away with the
+  speed as the bed's does and slower water than the slowest answers as that
+  does scaled by the square of its speed. The stones are laid into the grid a
+  band of rows a core, each row taking them in one order. No place
+  rises past the velocity head or falls within 0.15 of the bed. Foam comes
+  only from the flow's own answer: where a wave stands steeper than 0.45, in
+  the wake a stone through water faster than 0.5 m/s sheds, and in streaks
+  where the water lands below a ledge, a quarter steeper within the 0.4 m its
+  jet throws above than it runs there, its tongue pouring glassy; it bursts within
+  0.8 s, whitening only the water an obstruction stirs. Then, unseen by its
+  breaking, water nearing critical churns in boils as big as its depth (by
+  6 % of it), and water shallower than 8 cm drapes over its gravel, but not
+  over bare rock. The grid carries the foam, and the shading breaks it into
+  bubbles and streaks. The caustics count the grid's own slopes in how far its
+  beams stray.
+
+Measured on Stream at 960×540, *Simple*, 16 threads, seeds 0–2: preparation
+3.1–4.1 s.
+The flow is solved on 2048 × 256 points at *Simple* and 4096 × 512 at
+*Maximum*, holding about 29 MB and 116 MB while it is solved.
+
+Tests: a valley along its compass heading; a hard cap wearing its hardness
+times as slowly; a course counted in units by its width and its fall, its
+bends read; water over the deepest line and under the brim; a stepped low
+water and an even one in spate; pools deeper than crests and the bed keeping
+its depth; a ledge's drop of bare rock into its plunge pool; a bend's swing,
+cut bank and sandy bar; the water fastest where shallowest; a bank from brim
+to land; a channel standing as carved against the droplets; a transform
+matching the transform written out, undoing itself and the same on any
+runner; a stone worn only inward along its rays, rounder the further carried,
+slate flat and sharp-edged, made in what it is placed in; the linear
+answer's long-wave dip, its silence to a ridge along the flow and its peak at
+the still wave; lee waves only behind a stone, a pillow before one through
+the surface and foam in its wake; a riffle stirred where a pool lies still;
+fast water churning and a ledge pouring glassy down its tongue and breaking
+white at its foot; a train of standing waves dying away behind a ridge;
+nothing past what water can stand; a bed's median at Shields' stone and its wears from fresh to the
+farthest; a broken end torn wood bristling with fibres; crowfoot streaming
+where the water runs over gravel, and reeds off scoured ground; a perched
+river's bank falling to its land; the deep water alternating from unit to
+unit; a grid within the points it is allowed; a wake halfway between two
+points still shedding; a stone's answer keeping pace with the bed's; a finer
+water grid meeting the far one at its seam; a stream always having
+somewhere to be looked at from, and a scene away from it composing without a
+brook; a river's sand carrying no grit of its own; a grain's octaves sharing
+its depth; a water planning only the patches it sets out; a stream's flow
+solved further the way the eye looks; a boulder claiming its ground and
+standing in the flow as it lies; a stream's floating plants on its shaped
+water; and a stream's growing never reporting less done.
 
 ## RT13 — `lib/countryside`
 

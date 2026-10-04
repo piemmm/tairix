@@ -11,6 +11,8 @@ use core::f64::consts::PI;
 
 use tairix_util::mathf;
 
+use crate::vector::power;
+
 /// A leaf's outline.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Outline {
@@ -102,15 +104,6 @@ fn strap(w: f64) -> f64 {
 fn pad(u: f64, v: f64) -> bool {
     let (x, y) = (u - 0.5, 0.5 * v);
     x * x + y * y <= 0.25 && !(x < 0.0 && y.abs() < -0.105 * x)
-}
-
-/// `x` to the power `p`, for `x` in `0.0..=1.0`.
-fn power(x: f64, p: f64) -> f64 {
-    if x <= 0.0 {
-        0.0
-    } else {
-        mathf::exp(p * mathf::ln(x))
-    }
 }
 
 fn ovate(u: f64) -> f64 {

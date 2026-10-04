@@ -28,6 +28,7 @@ use tairix_parallel::JobRunner;
 use tairix_util::{fallible, mathf};
 
 use crate::detail::Focus;
+use crate::heightfield::Heightfield;
 use crate::material::{fresnel, refract, Sweep};
 use crate::scene::{Object, Scene, Sight, NEAR};
 use crate::shape::Shape;
@@ -90,6 +91,37 @@ const SEAL_UNIT: usize = 8192;
 /// The blocks at the foot of a level's pyramid one job seals, so a large
 /// level is shared among the cores.
 const SEAL_BAND: usize = 1024;
+
+/// How many points a side a water grid's own slopes are looked over at.
+const SLOPE_SURVEY: u32 = 64;
+
+/// The variance of `grid`'s own slope where it holds a surface, looked over
+/// at the cells' slopes across a lattice of points spread over it.
+fn slope_variance(grid: &Heightfield) -> f64 {
+    let ((origin_x, origin_z), step) = grid.placing();
+    let span = real(grid.side().saturating_sub(1)) * step;
+    let (mut sum, mut count) = (0.0, 0u32);
+    for row in 0..SLOPE_SURVEY {
+        for column in 0..SLOPE_SURVEY {
+            let place = |index: u32| (f64::from(index) + 0.5) / f64::from(SLOPE_SURVEY) * span;
+            let (x, z) = (origin_x + place(column), origin_z + place(row));
+            let at = |dx: f64, dz: f64| grid.height_at(x + dx, z + dz);
+            let (east, west, north, south) =
+                (at(step, 0.0), at(-step, 0.0), at(0.0, step), at(0.0, -step));
+            if !(east.is_finite() && west.is_finite() && north.is_finite() && south.is_finite()) {
+                continue;
+            }
+            let (dx, dz) = ((east - west) / (2.0 * step), (north - south) / (2.0 * step));
+            sum += dx * dx + dz * dz;
+            count += 1;
+        }
+    }
+    if count == 0 {
+        0.0
+    } else {
+        sum / f64::from(count)
+    }
+}
 
 /// The side of a cell at level `level`.
 fn cell(level: u32) -> f64 {
@@ -948,6 +980,14 @@ impl Focusing {
                 else {
                     continue;
                 };
+                // A grid shaped by more than its waves, as a stream's is by its
+                // flow, strays its beams the further for its own slopes.
+                let shaped = match scene.objects.get(object).map(|found| &found.shape) {
+                    Some(&Shape::Land { field }) => {
+                        scene.fields.get(field as usize).map_or(0.0, slope_variance)
+                    }
+                    _ => 0.0,
+                };
                 let (mut unresolved, mut curvature) =
                     ([0.0; FINEST as usize], [0.0; FINEST as usize]);
                 for ((level, blurred), curved) in
@@ -961,7 +1001,7 @@ impl Focusing {
                     ior,
                     top,
                     flat,
-                    slope: mathf::sqrt(waves.slope_variance()),
+                    slope: mathf::sqrt(waves.slope_variance() + shaped),
                     clear: water.absorb.x.min(water.absorb.y).min(water.absorb.z),
                     unresolved,
                     curvature,

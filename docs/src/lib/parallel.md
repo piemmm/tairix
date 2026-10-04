@@ -3,8 +3,8 @@
 `lib/parallel` is how a pass hands the machine's other cores work it has already
 proved independent. It discovers nothing: independence is the caller's proof, and
 the caller keeps it. The crate supplies the contract that proof is expressed
-through, the one place an index becomes an element, the one split policy, and the
-worker pool that runs the pieces.
+through, the one place an index becomes an element, the dispatch of pieces an iterator
+splits off, the one split policy, and the worker pool that runs the pieces.
 
 ## The contract, not the threads
 
@@ -36,6 +36,20 @@ An index a runner *skips* is different: that element is simply not visited, whic
 is a bug in the runner and not unsoundness. `for_each` re-checks the index against
 the slice length, so a runner that hands out a bogus one leaves an element
 unvisited rather than reaching outside the slice.
+
+## Pieces split off one at a time
+
+`for_each` visits the elements of a slice, so a pass whose pieces are borrows it
+splits off one at a time — row bands of a surface, a buffer cut into parts of
+differing lengths — would have to gather them into a heap list before every
+dispatch. `for_each_drawn` takes the iterator that splits them instead: each
+participant draws its next piece from it under a `lib/sync` spin lock held only
+for the draw, so a dispatch allocates nothing, and `fold_drawn` joins what each
+visit answers in whatever order the visits finish, so its join must not care.
+Fewer than two pieces, or a runner one thread wide, are visited in order on the
+calling thread with no lock taken. The compositor's band split and the frost's
+three passes dispatch this way, which is what lets a frost run from a reserved
+scratch without allocating.
 
 ## Sizing
 
@@ -121,7 +135,8 @@ and park again.
 An idle worker is parked in `futex_wait` on the dispatch epoch; a dispatcher with
 pieces still in flight is parked in `futex_wait` on the claim word. An idle pool
 costs the address space its workers' kernel-owned stacks reserve and no CPU at
-all.
+all. The one spin is `for_each_drawn`'s, on a lock held only for one draw from
+the pieces' iterator.
 
 ### It cannot deadlock
 
@@ -151,8 +166,9 @@ than assume it.
 
 Host tests cover the split policy at and around its boundaries, `for_each`
 visiting each element exactly once, that the order pieces run in cannot change the
-result, the unvisited-element case a skipping runner produces, the no-worker
-degradation, and nested dispatch. The host has no syscall trap, so a pool there has
+result, the unvisited-element case a skipping runner produces, drawn pieces
+visited once by every runner and folded with every answer joined once, the
+no-worker degradation, and nested dispatch. The host has no syscall trap, so a pool there has
 no workers by construction; the concurrent protocol is exercised by the `parallel`
 role of the `threads_qemu_{aarch64,riscv64,x86_64}` verticals, which runs a divided
 pass through a real multi-worker pool and compares every round against the same

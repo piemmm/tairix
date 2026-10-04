@@ -737,11 +737,11 @@ fn blur(harness: &BenchHarness<'_>) -> Result<Vec<Measurement>, String> {
     // traffic grows with the region's width while its per-pixel arithmetic does
     // not. Shapes of *identical* area separate the two: a slower wide row is the
     // striding, not the work. Two areas, because the effect can only appear once
-    // the buffer outgrows cache — the small triple's middle shape is the
-    // 640x360 row above, and the large triple is a screen-sized backdrop.
+    // the buffer outgrows cache: a window backdrop's and a screen's.
     let backdrop = backdrop_radius();
     for (wide, tall) in [
         (2400u32, 96u32),
+        (width, height),
         (96, 2400),
         (7680, 270),
         (1920, 1080),
@@ -1036,7 +1036,7 @@ fn scene(stack: Stack, runner: &'static dyn JobRunner) -> Result<CompositeWarm, 
     let frame_bytes = count_of(mode.stride_bytes).saturating_mul(count_of(mode.height_px));
     let chrome = chrome_cache(SEAT_PRIMARY, frame_bytes, &PRESSURE, &SINK);
     // No memory figure, so the frost ceiling is one screenful and the windows a
-    // scene frosts are the same on every host.
+    // scene retains are the same on every host.
     let frost = frost_cache(SEAT_PRIMARY, frame_bytes, 0, &PRESSURE, &SINK);
     let mut compositor = Compositor::new(mode, Theme::dark(), chrome, frost, &PRESSURE)
         .ok_or_else(|| format!("bench: no compositor for {SCREEN_W}x{SCREEN_H}"))?;

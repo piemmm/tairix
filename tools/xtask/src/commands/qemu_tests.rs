@@ -11716,26 +11716,15 @@ fn wintersun_window() -> Result<WintersunWindow, String> {
 fn geometry_compositor(theme: &tairix_theme::Theme) -> Result<tairix_wm::Compositor, String> {
     static NO_PRESSURE_FEED: tairix_reclaim::ReportedPressure =
         tairix_reclaim::ReportedPressure::unknown();
-    // A gauge that admits nothing frosts nothing, whatever the memory.
-    host_compositor(theme, &NO_PRESSURE_FEED, 0)
-}
-
-/// The physical memory an aarch64 vertical that declares none is given, which
-/// the guest session sizes its frost ceiling from.
-fn default_guest_memory() -> Result<usize, String> {
-    usize::try_from(u64::from(tairix_qemu::aarch64::DEFAULT_RAM_MIB) << 20)
-        .map_err(|_| "host compositor: guest memory".to_string())
+    host_compositor(theme, &NO_PRESSURE_FEED)
 }
 
 /// A host compositor over the guest's ramfb screen whose caches answer to
-/// `pressure`, on a guest of `memory_bytes`: a gauge that admits nothing suits
-/// geometry, while a picture has to be drawn at the normal pressure and with
-/// the memory a live session composites with, because the frost budget decides
-/// whether a glass window is blurred at all.
+/// `pressure`. What they retain never changes a pixel, so a picture is drawn
+/// alike under any gauge and machine size; it only changes what a frame costs.
 fn host_compositor(
     theme: &tairix_theme::Theme,
     pressure: &'static (dyn tairix_reclaim::PressureGauge + 'static),
-    memory_bytes: usize,
 ) -> Result<tairix_wm::Compositor, String> {
     use tairix_abi::driver::display::{DisplayFormat, DisplayMode};
     use tairix_abi::seat::SEAT_PRIMARY;
@@ -11757,13 +11746,7 @@ fn host_compositor(
         mode,
         theme.clone(),
         chrome_cache(SEAT_PRIMARY, frame_bytes, pressure, &DISCARD_SINK),
-        frost_cache(
-            SEAT_PRIMARY,
-            frame_bytes,
-            memory_bytes,
-            pressure,
-            &DISCARD_SINK,
-        ),
+        frost_cache(SEAT_PRIMARY, frame_bytes, 0, pressure, &DISCARD_SINK),
         pressure,
     )
     .ok_or_else(|| "host compositor: none for the ramfb mode".to_string())
@@ -13733,8 +13716,7 @@ fn compose_settings_ground() -> Result<tairix_wm::Surface, String> {
     let glass = themes.grounds(tairix_settings::WINDOW_GROUND).window;
     let layout = settings_window_layout(theme);
     let wallpaper = expected_wallpaper()?;
-    let mut compositor =
-        host_compositor(theme, &tairix_reclaim::Unpressured, default_guest_memory()?)?;
+    let mut compositor = host_compositor(theme, &tairix_reclaim::Unpressured)?;
     compositor.set_desktop(
         Surface::from_rgba8(wallpaper.width, wallpaper.height, &wallpaper.pixels)
             .ok_or_else(|| fail("the wallpaper surface"))?,

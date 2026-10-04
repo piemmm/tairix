@@ -991,6 +991,15 @@ How a retained backdrop is known to be still right:
   one that must be blurred outright, because its border is blurred and a border
   blurred over a strip of damage would spread a neighbourhood clipped to that
   strip.
+- **A frost nothing of which shows is neither looked up nor computed.** Where
+  everything a frame recomposes of a window lies under frosts above it that are
+  copied whole or kept at their core, its own frost would be written and never
+  seen, so the plan does not promote it and the composite leaves it out, the
+  window composing as a plain layer beneath them. Frosts above are asked front
+  first, so one hidden by another in front of it costs no lookup either. This
+  holds whatever the hidden window's own plan would have been — a frost the
+  plan did not widen for, blurred whole, would write past what the frame
+  recomposes.
 - **The layers a frost covers are not composed at all.** A frost is copied on
   top of whatever is beneath it, so composing that stack first is work the copy
   throws away — a whole window's worth of blending per pointer sample for a
@@ -1022,16 +1031,18 @@ How a retained backdrop is known to be still right:
 
 A frost is a *whole window's* rectangle, and stacked frosted windows all read
 the same pixels, so `n` of them want `n` screenfuls of retention against a
-budget of one. Asking "does one more fit?" of each in turn answers *yes* for
-every window in such a stack, so each frame blurred one, evicted another, and
-re-blurred it the next: cost climbed with the depth of the stack and the cache
-served nobody, and sixteen translucent, blurred terminals took the desktop to a
-crawl.
+budget that may hold far fewer. Asking "does one more fit?" of each in turn
+answers *yes* for every window in such a stack, so each frame would blur one,
+evict another and re-blur it the next, and the cache would serve nobody.
 
 `Compositor::grant_backdrops` therefore spends the cache's live ceiling from the
 **front** of the stack and stops (`ReclaimCache::holds`, which weighs a whole
 set against the ceiling rather than one entry against what is charged). What
-the budget reaches is **retained** (`Window::is_retained`).
+the budget reaches is **retained** (`Window::is_retained`). The ration is
+settled before the band is enforced — every frame, and when the session trims
+at a deepened band (`trim_frost`) — so pressure takes the frosts the ration
+withdraws, never the one it keeps because it happened to be looked at least
+recently.
 
 What the budget decides is retention, and only retention. **Every visible
 blurred window is frosted, every frame it shows** (`Window::is_frosted`): the

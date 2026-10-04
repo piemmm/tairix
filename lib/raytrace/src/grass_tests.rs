@@ -696,3 +696,70 @@ fn a_far_cell_heads_its_shoot_any_way_round_whatever_its_share_rounds_to() {
         );
     }
 }
+
+/// A level field over `-4..4` whose vertices grow fully green west of
+/// `edge` and grow nothing east of it.
+fn greening(edge: f64) -> Heightfield {
+    let mut field = Heightfield::new(16, (-4.0, -4.0), 0.5, false).expect("a grid");
+    let side = field.side();
+    for (_, band) in field.bands(0..side, side) {
+        band.fill(0.0);
+    }
+    assert!(field.carry_attributes());
+    let attributes = field.rows_mut(0..side).1;
+    for (index, slot) in attributes.iter_mut().enumerate() {
+        let x = -4.0 + 0.5 * f64::from(u32::try_from(index % side).expect("a column"));
+        *slot = [0, 128, 0, if x < edge { 255 } else { 0 }];
+    }
+    field.seal();
+    field
+}
+
+/// The ground beneath a sward darkens smoothly where the sward thins, never
+/// a whole cell at a time: across ground going from fully green to bare,
+/// the light its blades take is blended between the cells about each point.
+#[test]
+fn a_swards_shade_on_the_ground_runs_smoothly_from_cell_to_cell() {
+    let lawn = lawn(0.0);
+    let fields = [greening(0.0)];
+    let density = |x: f64| {
+        lawn.canopy(Vec3::new(x, 0.01, 0.37), &fields)
+            .map_or(0.0, |canopy| canopy.density)
+    };
+    let densities: Vec<f64> = (0..240)
+        .map(|step| density(-0.9 + 0.0075 * f64::from(step)))
+        .collect();
+    let most = densities.iter().copied().fold(0.0, f64::max);
+    assert!(most > 0.0);
+    let steepest = densities
+        .windows(2)
+        .map(|pair| (pair[1] - pair[0]).abs())
+        .fold(0.0, f64::max);
+    // A cell is twenty steps across: blended, no step moves the density by
+    // more than a fifth of it.
+    assert!(steepest < 0.2 * most, "a step of {steepest} in {most}");
+}
+
+/// Grass that barely thrives grows short as well as sparse, so a sward
+/// thinning out fades away rather than ending in a wall of tall grass.
+#[test]
+fn grass_thinning_out_grows_short_as_well_as_sparse() {
+    let lawn = lawn(0.0);
+    let statures = |green: u8| {
+        let field = level(Some([0, 128, 0, green]));
+        let (count, total) = (0..60)
+            .filter_map(|index| {
+                let at = (-0.95 + 0.032 * f64::from(index), 0.3);
+                stand_at(&lawn, &field, at)
+            })
+            .fold((0u32, 0.0), |(count, total), stand| {
+                (count + 1, total + stand.stature)
+            });
+        total / f64::from(count.max(1))
+    };
+    let (thriving, barely) = (statures(255), statures(12));
+    assert!(
+        barely > 0.0 && barely < 0.3 * thriving,
+        "{barely} against {thriving}"
+    );
+}

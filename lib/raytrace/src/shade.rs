@@ -19,7 +19,7 @@ use tairix_parallel::JobRunner;
 use tairix_util::{fallible, mathf};
 
 use crate::noise::{cell, smoothstep};
-use crate::vector::{real, share};
+use crate::vector::{byte, real, share};
 
 /// A crown: where its trunk stands, and how far it reaches from it.
 pub(crate) type Crown = ((f64, f64), f64);
@@ -717,11 +717,6 @@ impl Shading {
             far: self.far.finish(),
         }
     }
-}
-
-/// `share`, `0.0..=1.0`, as a byte.
-fn byte(share: f64) -> u8 {
-    u8::try_from(mathf::round_i32(255.0 * share.clamp(0.0, 1.0))).unwrap_or(u8::MAX)
 }
 
 /// Each of the values `stride` apart along `run` replaced by the mean of

@@ -194,3 +194,35 @@ fn a_seas_swells_keep_within_their_lengths() {
         "{lengths:?}"
     );
 }
+
+/// A valley runs along its heading as a compass reads it, the way the scenes
+/// that tilt it, route a road across it and stand an aqueduct over it read
+/// that heading: its floor lies along the heading's line, and a line square
+/// to it climbs out onto the hills.
+#[test]
+fn a_valley_runs_along_its_compass_heading() {
+    for heading in [0.0, 0.5, 1.2, 2.9, 4.4] {
+        let floor = 80.0;
+        let form = Landform::Valley {
+            heading,
+            floor,
+            height: 120.0,
+            seed: 11,
+        };
+        let (sin, cos) = (mathf::sin(heading), mathf::cos(heading));
+        let at = |along: f64, across: f64| {
+            form.height(along * sin + across * cos, along * cos - across * sin)
+        };
+        for step in -10..=10 {
+            let along = 150.0 * f64::from(step);
+            let on_floor = at(along, 0.0);
+            for side in [-1.0, 1.0] {
+                let on_hills = at(along, side * 4.0 * floor);
+                assert!(
+                    on_floor < on_hills,
+                    "heading {heading} along {along}: floor {on_floor} against hills {on_hills}"
+                );
+            }
+        }
+    }
+}

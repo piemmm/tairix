@@ -109,6 +109,11 @@ const PLUME: f64 = 7.0;
 /// The least a cell must thrive to grow anything, and the most points a
 /// side a lawn is looked over at for whether anything grows on it.
 const THRIVES: f64 = 0.02;
+/// A cell's stature against one thriving fully goes as its thriving over
+/// this and its thriving together: grass thinning out toward bare ground or
+/// deep shade grows short as well as sparse, so a sward fades out rather
+/// than ending in a wall.
+const STUNTED: f64 = 0.25;
 const SURVEY: u32 = 256;
 
 /// How much of a leaf's height by its width it covers, tapering to its tip.
@@ -541,7 +546,7 @@ impl Lawn {
         Some(Stand {
             kind,
             shoots: fmin(share * thrives * thickness, share * THICKEST),
-            stature: (0.5 + 0.5 * thrives) * stature,
+            stature: (1.0 + STUNTED) * thrives / (STUNTED + thrives) * stature,
             merged: self.merged(middle, kind.width),
             marks: marks(index, vigour),
             out: sward.out,
@@ -713,20 +718,50 @@ impl Lawn {
             return None;
         }
         let tops = self.tops.and_then(|tops| fields.get(tops.field as usize));
-        let Stand {
-            kind,
-            shoots,
-            stature,
-            ..
-        } = self.stand(&grass, (field, tops), self.cell_of(at))?;
-        // Most leaves stand tall: the taller of two draws, as a leaf's is.
-        let top = stature * (kind.height.0 + (kind.height.1 - kind.height.0) * (2.0 / 3.0));
-        if shoots <= 0.0 || !(-0.05..top).contains(&above) {
+        // The leaves' density and height blended between the four cells
+        // whose middles stand about the point: how much light gets through a
+        // sward is a mean over many leaves, so the ground beneath it darkens
+        // smoothly from cell to cell rather than a cell at a time.
+        let (u, v) = (
+            (at.0 - self.from.0) / self.cell - 0.5,
+            (at.1 - self.from.1) / self.cell - 0.5,
+        );
+        let (column, row) = (mathf::floor(u), mathf::floor(v));
+        let (right, down) = (u - column, v - row);
+        let (mut density, mut top) = (0.0, 0.0);
+        for (dx, dz, weight) in [
+            (0.0, 0.0, (1.0 - right) * (1.0 - down)),
+            (1.0, 0.0, right * (1.0 - down)),
+            (0.0, 1.0, (1.0 - right) * down),
+            (1.0, 1.0, right * down),
+        ] {
+            let middle = (
+                self.from.0 + (column + dx + 0.5) * self.cell,
+                self.from.1 + (row + dz + 0.5) * self.cell,
+            );
+            if weight <= 0.0 || !self.covers(middle) {
+                continue;
+            }
+            let Some(Stand {
+                kind,
+                shoots,
+                stature,
+                ..
+            }) = self.stand(&grass, (field, tops), self.cell_of(middle))
+            else {
+                continue;
+            };
+            // Most leaves stand tall: the taller of two draws, as a leaf's is.
+            let tall = stature * (kind.height.0 + (kind.height.1 - kind.height.0) * (2.0 / 3.0));
+            density += weight * BLADE_FILL * shoots * kind.width / (self.cell * self.cell);
+            top += weight * tall;
+        }
+        if density <= 0.0 || !(-0.05..top).contains(&above) {
             return None;
         }
         let above = above.max(0.0);
         Some(Canopy {
-            density: BLADE_FILL * shoots * kind.width / (self.cell * self.cell),
+            density,
             up: top - above,
             down: above,
         })

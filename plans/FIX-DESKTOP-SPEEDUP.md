@@ -791,11 +791,11 @@ change far past the rectangle that caused it.
 `userland/gui/wm/src/frost.rs`: `FrostedBackdrop` (the rectangle's frosted
 pixels plus the rectangle, physical radius and window shape they are a function
 of) in a `ReclaimCache` keyed by `WindowId`, built by `frost_cache` from
-`lib/reclaim`'s shared `screenful_ui_cache` policy — generalised from
-`window_chrome_cache`. A frost is a *whole window's* rectangle, so unlike
-furniture a stack of overlapping ones can want several times that screenful;
-the ceiling is a bound on what the desktop may retain, not a claim that no more
-can be wanted, and D.13 is how a frame chooses which of them to retain.
+`lib/reclaim`'s shared `stacked_ui_cache` policy. A frost is a *whole window's*
+rectangle, so unlike furniture a stack of overlapping ones can want more than
+the ceiling holds; the ceiling is a bound on what the desktop may retain, not a
+claim that no more can be wanted, and D.13 is how a frame chooses which of them
+to retain.
 
 - The rectangle recorded is the window's **whole** one, not the on-screen part:
   a window pushed off an edge is frosted from the row and column the screen
@@ -1028,7 +1028,7 @@ composited over it, which is also what makes a partial repaint total.
 ### D.12 A restack marks where it crossed, not what it moved
 **Reordering two windows that do not overlap changes no pixel** — nothing is
 drawn differently and no frost sees a different backdrop, so there is nothing to
-mark. `restack_family` asks `crossed_bounds` for the windows the family actually
+mark. `restack_family` asks `crossed_footprints` for the windows the family actually
 swaps sides with (those above it when moving to the front, below it when moving
 to the back, visible only) and marks each moved member's bounds **intersected**
 with each of them. Windows on the far side keep their relative order with the
@@ -1043,16 +1043,17 @@ crossings used to mark a large translucent window in full and drop its frost.
 
 ### D.13 Retention is rationed, front to back; a blur never is
 A frost is a whole window's rectangle and stacked frosted windows all read the
-same pixels, so `n` of them want `n` screenfuls of retention against a budget of
-one. Granting retention one window at a time — "does one more fit?" — answers
-*yes* for every window in such a stack, so each frame blurred one, evicted
-another, and re-blurred it the next, with every window whose frost was rebuilt
-promoted whole into the plan: sixteen terminals stacked at the shipped
-translucent, blurred default took the desktop to a crawl.
+same pixels, so `n` of them want `n` screenfuls of retention against a budget
+that may hold far fewer. Granting retention one window at a time — "does one
+more fit?" — answers *yes* for every window in such a stack, so each frame
+would blur one, evict another and re-blur it the next.
 
 **The bound.** `Compositor::grant_backdrops` spends the cache's live ceiling from
-the **front** of the stack, once per frame, before the frame takes its damage,
-and what it reaches is **retained** (`Window::is_retained`):
+the **front** of the stack, once per frame, before the frame takes its damage
+and before the band is enforced, and what it reaches is **retained**
+(`Window::is_retained`). Enforcing first would evict the least recently looked
+at, which can be the one frost the ration then keeps; the session's
+`trim_frost` settles the ration first for the same reason.
 
 - `ReclaimCache::holds(entries, payload)` weighs the whole set being chosen
   against the live band's ceiling, rather than one entry against what is charged.
@@ -1089,7 +1090,10 @@ whole instead, which reads no ring, and drops no frost above it, since its
 pixels come out as they were. A changed backdrop is recomputed whole, as a
 retained frost's is. The plan asks nothing of a window touched only where frosts
 above it are copied whole (`recomposed_and_seen`): those replace everything
-beneath them, and nothing beneath one can have changed without dropping it.
+beneath them, and nothing beneath one can have changed without dropping it. The
+composite leaves the same window's frost out wherever it composes it hidden,
+whatever its plan (`seen_through`), and both ask the frosts above front first,
+so one hidden by another costs no lookup.
 
 **What it costs, asserted.** With nothing retained at all, the D.4 sweep composes
 every one of its mutations to the same bytes as the retaining compositor. On
@@ -1350,7 +1354,7 @@ self-verify against that baseline over a fixed size/alignment/alpha vector,
 3. the WM's opaque/blended run loop (B.1). Its copy-and-encode half is now
    0.50 ns/px full screen; what is left is the strided alpha scan in
    `WindowRow::opaque_run`/`blend_len`.
-4. `blur_line`/`blur_span` add/sub/mean — after the D.3 reciprocal. F.1
+4. `blur_span` add/sub/mean — after the D.3 reciprocal. F.1
    established this needs intrinsics: no source shape vectorises the
    reciprocal multiply.
 5. `encode_run` is not a family: F.1 measured its byte-order shuffle at

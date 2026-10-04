@@ -369,8 +369,10 @@ fn ground_is_sand_by_the_shore_rock_on_cliffs_and_snow_on_high_flat_ground() {
     let pigment = ground();
     let green = [0.0, 0.5, 0.0, 1.0];
     let beach = ground_at(&pigment, -2.0, Vec3::UP, green);
+    // Its grains lighten or darken it, never change its colour.
+    let hue = |colour: Vec3| colour * (1.0 / colour.luminance());
     assert!(
-        (beach - Vec3::new(0.9, 0.8, 0.5)).length() < 0.12,
+        (hue(beach) - hue(Vec3::new(0.9, 0.8, 0.5))).length() < 0.12,
         "{beach:?}"
     );
     let meadow = ground_at(&pigment, 50.0, Vec3::UP, green);
@@ -489,4 +491,48 @@ fn rock_is_bedded_and_the_same_wherever_it_is_asked() {
         rock.colour(Vec3::new(1.0, 2.0, 3.0), face, 0.01),
         rock.colour(Vec3::new(1.0, 2.0, 3.0), face, 0.01)
     );
+}
+
+/// Ground seen close shows its grain, a shade a grain, and settles to an
+/// even shade once a pixel spans its grains: two places a few millimetres
+/// apart differ up close and match far off.
+#[test]
+fn ground_grain_shows_up_close_and_settles_to_its_mean_far_off() {
+    let pigment = ground();
+    let at = |x: f64, width: f64, (ground, height): ([f64; 4], f64)| {
+        pigment.colour(&Spot {
+            p: Vec3::new(x, height, 2.0),
+            normal: Vec3::UP,
+            height,
+            width,
+            mark: 0,
+            along: 0.0,
+            uv: (0.0, 0.0),
+            girth: 0.0,
+            instance: 0,
+            front: true,
+            ground,
+            thatch: 0.0,
+        })
+    };
+    let places: Vec<f64> = (0..40).map(|step| 1.0 + 0.003 * f64::from(step)).collect();
+    // Bare soil, a river's scoured bed of gravel, and the sand of a shore.
+    for lie in [
+        ([0.3, 0.5, 0.0, 0.0], 5.0),
+        ([0.9, 0.5, 0.0, 0.0], 5.0),
+        ([0.3, 0.5, 0.0, 0.0], 0.0),
+    ] {
+        let spread = |width: f64| {
+            let shades: Vec<f64> = places
+                .iter()
+                .map(|&x| at(x, width, lie).luminance())
+                .collect();
+            let most = shades.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let least = shades.iter().copied().fold(f64::INFINITY, f64::min);
+            let mean = shades.iter().sum::<f64>() / f64::from(40u32);
+            (most - least) / mean
+        };
+        assert!(spread(2e-4) > 0.04, "{lie:?} up close: {}", spread(2e-4));
+        assert!(spread(0.5) < 5e-3, "{lie:?} far off: {}", spread(0.5));
+    }
 }

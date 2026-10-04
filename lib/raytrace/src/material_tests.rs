@@ -483,3 +483,68 @@ fn bark_relief_leans_the_normal_away_from_where_the_bark_rises() {
         "{tilted:?} leans toward {rising:?}"
     );
 }
+
+/// A grain tilts a normal finely up close and settles to its mean as its
+/// footprint widens: the slope of what the footprint cannot resolve goes to
+/// the roughness instead, growing as the tilt it would have given fades, and
+/// the whole of it once nothing is resolved.
+#[test]
+fn a_grain_settles_to_its_mean_in_relief_as_its_footprint_widens() {
+    let grain = Relief::Grain {
+        depth: 0.12,
+        scale: 14.0,
+        seed: 5,
+    };
+    let at = |width: f64| grain.tilt(Vec3::UP, &bump_at(Vec3::new(0.37, 0.0, -1.21), width));
+    let close = at(1e-5);
+    assert!(close.normal.y < 1.0 - 1e-6, "{close:?}");
+    let mut last = close.unresolved;
+    for step in 1..60 {
+        let width = 1e-5 * mathf::exp(0.25 * f64::from(step));
+        let tilt = at(width);
+        assert!(tilt.unresolved >= last - 1e-12, "{width}: {tilt:?}");
+        last = tilt.unresolved;
+    }
+    let far = at(10.0);
+    assert!((far.normal.y - 1.0).abs() < 1e-12);
+    let whole: f64 = (0..GRAIN_OCTAVES)
+        .map(|octave| {
+            let steep = 0.12 / GRAIN_SUM * mathf::exp(f64::from(octave) * mathf::ln(GRAIN_GAIN));
+            steep * steep / 3.0
+        })
+        .sum();
+    assert!(
+        (far.unresolved - whole).abs() < 1e-12,
+        "{} against {whole}",
+        far.unresolved
+    );
+}
+
+/// A grain's octaves share its depth between them: too fine for a pixel to
+/// resolve, all of it lends the roughness no more slope variance than one
+/// octave as steep as its depth would hold, and resolved, it tilts a normal
+/// no further than that octave would.
+#[test]
+fn a_grains_octaves_share_its_depth() {
+    let depth = 0.2;
+    let grain = Relief::Grain {
+        depth,
+        scale: 10.0,
+        seed: 3,
+    };
+    let up = Vec3::UP;
+    let blurred = grain.tilt(up, &bump_at(Vec3::new(0.3, 0.0, 0.7), 1e3));
+    assert!(blurred.unresolved > 0.0);
+    assert!(
+        blurred.unresolved <= depth * depth / 3.0,
+        "{} lent the roughness",
+        blurred.unresolved
+    );
+    assert!((blurred.normal.dot(up) - 1.0).abs() < 1e-12);
+    for index in 0..2000u32 {
+        let p = Vec3::new(0.013 * f64::from(index), 0.0, 0.031 * f64::from(index % 53));
+        let sharp = grain.tilt(up, &bump_at(p, 1e-6));
+        let lean = mathf::sqrt(1.0 - sharp.normal.dot(up).powi(2)) / sharp.normal.dot(up);
+        assert!(lean <= depth * mathf::sqrt(3.0) + 1e-9, "{lean} at {p:?}");
+    }
+}

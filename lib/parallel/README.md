@@ -21,6 +21,11 @@ and the caller keeps it.
   single `unsafe` block. A pass splits its output into disjoint pieces
   (`split_at_mut` / `chunks_mut`), hands the slice here, and gets each piece
   visited exactly once.
+- `for_each_drawn` / `fold_drawn` — the same visit for pieces an iterator
+  splits off one borrow at a time (row bands, parts of differing lengths):
+  participants draw them from the iterator under a `lib/sync` spin lock held
+  only for the draw, so a dispatch gathers them into no list and allocates
+  nothing. `fold_drawn` joins each visit's answer in the order visits finish.
 - `bands` — the one split policy: how many pieces `units` units of work should
   become, given how few units are worth a hand-off. Work below one piece's worth
   answers `1`, so a small repaint runs its plain loop with no atomics and no
@@ -35,7 +40,8 @@ and the caller keeps it.
 - **Nothing spins.** An idle worker is parked in `futex_wait` on the dispatch
   epoch; a dispatcher with pieces still in flight is parked in `futex_wait` on
   the claim word. An idle pool costs the address space its workers' stacks
-  reserve and no CPU.
+  reserve and no CPU. The one spin is `for_each_drawn`'s, on a lock held only
+  for one draw from the pieces' iterator.
 - **The dispatch lives on the dispatcher's stack.** It is published as an erased
   pointer, and a worker reaches it only through a draw that took a piece of the
   work *and* a hold on the dispatch in one atomic. Both halves live in one
@@ -89,7 +95,8 @@ crates were otherwise spelling the same eight lines.
 Host tests cover the pure half: the split policy at and around its boundaries,
 `for_each` visiting each element exactly once, that the order pieces run in
 cannot change the result, the unvisited-element case a skipping runner produces,
-the no-worker degradation, and nested dispatch. The host has no syscall trap, so
+drawn pieces visited once by every runner and folded with every answer joined
+once, the no-worker degradation, and nested dispatch. The host has no syscall trap, so
 a pool there has no workers by construction; the concurrent protocol is exercised
 by the desktop's per-architecture QEMU verticals, which composite through a real
 multi-worker pool.

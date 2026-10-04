@@ -103,7 +103,7 @@ fn a_facet_is_shaded_by_its_corners_normals_blended() {
     let rock = Prototype::new(
         vec![Part::Facet(Facet {
             corners: [0, 1, 2],
-            material: 2,
+            material: Some(2),
         })],
         vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
         vec![[0.0, 1.0, 0.0], [0.6, 0.8, 0.0], [0.0, 0.8, 0.6]],
@@ -123,7 +123,7 @@ fn a_facet_is_shaded_by_its_corners_normals_blended() {
         Prototype::new(
             vec![Part::Facet(Facet {
                 corners: [0, 1, 7],
-                material: 0
+                material: None
             })],
             vec![[0.0; 3]; 3],
             vec![[0.0, 1.0, 0.0]; 3]

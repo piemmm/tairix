@@ -9,6 +9,7 @@
 //! scene is lit and framed to read well.
 
 mod architecture;
+mod chains;
 mod footprint;
 mod landscape;
 mod plants;
@@ -39,7 +40,7 @@ use crate::light::Light;
 use crate::material::{Finish, Foam, Material, Relief};
 use crate::pigment::Pigment;
 use crate::prototype::{Building, Prototype, BUILD_UNIT};
-use crate::rock::{rock, Habit};
+use crate::rock::{Habit, Wearing};
 use crate::sample::mix64;
 use crate::scene::{Exposure, Object, Parts};
 use crate::shade::{Crown, Shades};
@@ -52,6 +53,7 @@ use crate::waterside::{patch, Margin, Marsh};
 use footprint::Footprints;
 use landscape::Lawning;
 use landscape::{Scheme, Vantage};
+use stones::Bed;
 use waterside::Margins;
 use woodland::{Growing, Wood};
 
@@ -95,13 +97,15 @@ pub enum Setting {
     Canyon,
     /// A river valley, a road crossing it on a stone bridge.
     Valley,
+    /// A stream running clear over its stones, seen from its edge.
+    Stream,
     /// A monumental abstract sculpture standing out in a natural landscape.
     Sculpture,
 }
 
 impl Setting {
     /// Every setting.
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 20] = [
         Self::Classic,
         Self::Studio,
         Self::Crystals,
@@ -120,6 +124,7 @@ impl Setting {
         Self::Lagoon,
         Self::Canyon,
         Self::Valley,
+        Self::Stream,
         Self::Sculpture,
     ];
 
@@ -146,6 +151,7 @@ impl Setting {
             Self::Lagoon => "Lagoon",
             Self::Canyon => "Canyon",
             Self::Valley => "Valley",
+            Self::Stream => "Stream",
             Self::Sculpture => "Sculpture",
         }
     }
@@ -185,11 +191,9 @@ pub(super) enum Recipe {
         fronds: u16,
         seed: u64,
     },
-    Rock {
-        habit: Habit,
-        stock: u16,
-        seed: u64,
-    },
+    /// A rock broken to `habit` and worn by `wear`, a stone worn round by
+    /// one.
+    Rock { habit: Habit, wear: f64, seed: u64 },
     /// A square patch of a plant of the water's edge, its plants of
     /// `stature` against their kind's.
     Margin {
@@ -205,6 +209,7 @@ pub(super) enum Recipe {
         length: f64,
         radius: f64,
         bark: u16,
+        wood: u16,
         thrown: bool,
         seed: u64,
     },
@@ -239,6 +244,8 @@ enum Work {
     Planned(Recipe),
     /// A tree, growing its stems and then its hierarchy.
     Growing(Growth),
+    /// A rock, being worn before its hierarchy is built.
+    Wearing(Wearing),
     /// Its parts made, its hierarchy being built.
     Indexing(Building),
     Grown(Prototype),
@@ -256,6 +263,11 @@ impl Work {
             Self::Growing(mut growth) => match growth.step() {
                 Some(true) => growth.finish().map_or(Self::Refused, Self::Grown),
                 Some(false) => Self::Growing(growth),
+                None => Self::Refused,
+            },
+            Self::Wearing(mut wearing) => match wearing.step() {
+                Some(true) => wearing.finish().map_or(Self::Refused, Self::Indexing),
+                Some(false) => Self::Wearing(wearing),
                 None => Self::Refused,
             },
             Self::Indexing(mut building) => {
@@ -297,7 +309,7 @@ fn begun(recipe: &Recipe) -> Option<Work> {
             fronds,
             seed,
         } => Work::Indexing(fern(height, stock, fronds, seed)?),
-        Recipe::Rock { habit, stock, seed } => Work::Indexing(rock(habit, stock, seed)?),
+        Recipe::Rock { habit, wear, seed } => Work::Wearing(Wearing::new(habit, wear, seed)?),
         Recipe::Margin {
             margin,
             side,
@@ -311,9 +323,10 @@ fn begun(recipe: &Recipe) -> Option<Work> {
             length,
             radius,
             bark,
+            wood,
             thrown,
             seed,
-        } => Work::Indexing(log(length, radius, (bark, thrown), seed)?),
+        } => Work::Indexing(log(length, radius, (bark, wood, thrown), seed)?),
         Recipe::Stump {
             height,
             radius,
@@ -373,7 +386,7 @@ impl Grow {
                 refused = true;
                 false
             }
-            Work::Planned(_) | Work::Growing(_) | Work::Indexing(_) => true,
+            Work::Planned(_) | Work::Growing(_) | Work::Wearing(_) | Work::Indexing(_) => true,
         });
         if refused {
             return None;
@@ -719,6 +732,7 @@ fn compose(setting: Setting, stage: &mut Stage, dice: &mut Dice) -> Option<Compo
         Setting::Lagoon => landscape::lagoon(stage, dice)?,
         Setting::Canyon => landscape::canyon(stage, dice)?,
         Setting::Valley => landscape::valley(stage, dice)?,
+        Setting::Stream => landscape::stream(stage, dice)?,
         Setting::Sculpture => landscape::sculpture(stage, dice)?,
     })
 }
@@ -842,6 +856,8 @@ struct Stage {
     /// sward under them, grown once the land stands.
     woods: Vec<Wood>,
     margins: Option<Margins>,
+    /// A stream's bed, laid with the water's edge.
+    bed: Option<Bed>,
     sward: Option<Lawning>,
     /// The shade the woods cast once they stand.
     shades: Option<Shades>,
@@ -897,6 +913,7 @@ impl Stage {
             canopies: Vec::new(),
             woods: Vec::new(),
             margins: None,
+            bed: None,
             sward: None,
             shades: None,
             subject: Aabb::EMPTY,
@@ -929,6 +946,11 @@ impl Stage {
     /// scene's once it is grown.
     fn plan(&mut self, recipe: &Recipe) -> Option<u32> {
         u32::try_from(push(&mut self.recipes, MAX_PROTOTYPES, *recipe)?).ok()
+    }
+
+    /// Whether the stage plans another prototype.
+    const fn plans_more(&self) -> bool {
+        self.recipes.len() < MAX_PROTOTYPES
     }
 
     /// Add `shape` in `material`, its pattern fixed in `texture`; `framed`

@@ -8,6 +8,8 @@
 
 extern crate std;
 
+use alloc::format;
+use alloc::string::String;
 use alloc::vec::Vec;
 use std::sync::OnceLock;
 
@@ -55,20 +57,24 @@ struct Built {
     scene: Scene,
 }
 
-/// Prepare a draft of `setting` under `seed` across `runner` to the end.
-fn build(setting: Setting, seed: u64, runner: Threaded) -> Scene {
-    let mut draft = Draft::new(setting, seed, SIZE, Detail::Maximum).expect("the scene composes");
+/// Prepare a draft of `setting` under `seed` across `runner` to the end;
+/// which step refused it otherwise.
+fn build(setting: Setting, seed: u64, runner: Threaded) -> Result<Scene, String> {
+    let refused = |step: &str| format!("{setting:?} under seed {seed} {step}");
+    let mut draft = Draft::new(setting, seed, SIZE, Detail::Maximum)
+        .ok_or_else(|| refused("does not compose"))?;
     while !draft
         .prepare(&runner, &mut || false)
-        .expect("the scene prepares")
+        .ok_or_else(|| refused("does not prepare"))?
     {}
-    draft.finish().expect("the scene finishes")
+    draft.finish().ok_or_else(|| refused("does not finish"))
 }
 
-/// Every setting's scenes, built once for every test.
+/// Every setting's scenes, built once for every test: a scene that will not
+/// build fails every test at once rather than each building them again.
 fn corpus() -> &'static [Built] {
-    static CORPUS: OnceLock<Vec<Built>> = OnceLock::new();
-    CORPUS.get_or_init(|| {
+    static CORPUS: OnceLock<Result<Vec<Built>, String>> = OnceLock::new();
+    let built = CORPUS.get_or_init(|| {
         let wanted: Vec<(Setting, u64)> = Setting::ALL
             .into_iter()
             .flat_map(|setting| (0..seeds(setting)).map(move |seed| (setting, seed)))
@@ -76,7 +82,7 @@ fn corpus() -> &'static [Built] {
         // Several scenes at once, each spread over a few threads: enough to
         // keep a host busy without holding every scene's grids at once.
         let next = core::sync::atomic::AtomicUsize::new(0);
-        let built = std::sync::Mutex::new(Vec::new());
+        let built = std::sync::Mutex::new(Ok(Vec::new()));
         std::thread::scope(|scope| {
             for _ in 0..6 {
                 scope.spawn(|| {
@@ -88,24 +94,32 @@ fn corpus() -> &'static [Built] {
                         };
                         let scene = build(setting, seed, runner);
                         let mut built = built.lock().expect("no builder panicked");
-                        built.push(Built {
-                            setting,
-                            seed,
-                            scene,
-                        });
+                        match (&mut *built, scene) {
+                            (Ok(scenes), Ok(scene)) => scenes.push(Built {
+                                setting,
+                                seed,
+                                scene,
+                            }),
+                            (Ok(_), Err(refused)) => *built = Err(refused),
+                            (Err(_), _) => break,
+                        }
                     }
                 });
             }
         });
-        let mut built = built.into_inner().expect("no builder panicked");
+        let mut built = built.into_inner().expect("no builder panicked")?;
         built.sort_by_key(|built| {
             (
                 Setting::ALL.iter().position(|s| *s == built.setting),
                 built.seed,
             )
         });
-        built
-    })
+        Ok(built)
+    });
+    match built {
+        Ok(built) => built,
+        Err(refused) => panic!("{refused}"),
+    }
 }
 
 fn unit_range(value: f64) -> bool {
@@ -250,6 +264,7 @@ fn a_landscape_stands_on_a_built_land() {
         Setting::Winter,
         Setting::Canyon,
         Setting::Valley,
+        Setting::Stream,
         Setting::Sculpture,
     ];
     for Built {
@@ -382,7 +397,7 @@ fn a_seed_composes_the_same_scene_every_time_and_another_seed_another() {
             .iter()
             .find(|built| built.setting == setting && built.seed == 1)
             .expect("in the corpus");
-        let again = build(setting, 1, runner);
+        let again = build(setting, 1, runner).unwrap_or_else(|refused| panic!("{refused}"));
         let other = corpus()
             .iter()
             .find(|built| built.setting == setting && built.seed == 2)
@@ -776,9 +791,11 @@ fn prototypes_grow_a_core_apiece_a_unit_as_each_grows_alone() {
         .map(|seed| Recipe::Rock {
             habit: Habit {
                 squash: 0.6,
+                elongation: 0.8,
                 fractures: 3,
+                cleaved: seed == 2,
             },
-            stock: 0,
+            wear: 0.4 * f64::from(u8::try_from(seed).expect("a small seed")),
             seed,
         })
         .collect();
@@ -787,6 +804,7 @@ fn prototypes_grow_a_core_apiece_a_unit_as_each_grows_alone() {
             length: 9.0,
             radius: 0.3,
             bark: 0,
+            wood: 1,
             thrown: true,
             seed: 7,
         },

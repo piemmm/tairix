@@ -1,7 +1,7 @@
 //! Host tests of the water's edge set out about the eye: each plant only
-//! where the water, its bank and the light suit it, the lattices tiling the
-//! ground about the eye without a gap, and no more patches than a scene's
-//! detail allows.
+//! where the water, its bank, what the water laid and the light suit it,
+//! the lattices tiling the ground about the eye without a gap, and no more
+//! patches than a scene's detail allows.
 
 extern crate std;
 
@@ -12,8 +12,9 @@ use super::*;
 use crate::compose::{Composition, Setting};
 use crate::detail::{Densities, Detail};
 
-/// A place `depth` deep beneath a surface falling `fall`, on ground as wet
-/// and as upright as `ground` holds, under `lit` of the sky.
+/// A place `depth` deep beneath a surface falling `fall`, on silted ground
+/// as wet and as upright as `ground` holds and growing, under `lit` of the
+/// sky.
 fn edge(depth: f64, fall: f64, (wet, upright): (f64, f64), lit: f64) -> Edge {
     Edge {
         ground: 0.0,
@@ -23,9 +24,15 @@ fn edge(depth: f64, fall: f64, (wet, upright): (f64, f64), lit: f64) -> Edge {
         wet,
         upright,
         way: 0.0,
+        laid: SILT,
+        green: 1.0,
         lit,
     }
 }
+
+/// What water lays where it slows, and the gravel its floods leave.
+const SILT: f64 = 0.4;
+const GRAVEL: f64 = -0.1;
 
 const STILL: f64 = 0.0;
 const WET_AND_LEVEL: (f64, f64) = (0.9, 1.0);
@@ -98,7 +105,19 @@ fn none_grows_in_the_gloom_beneath_a_closed_wood() {
         } else {
             0.2
         };
-        let under = |lit| suits(margin, &edge(depth, STILL, WET_AND_LEVEL, lit), false);
+        // Crowfoot runs over gravel; the rest stand in still water's silt.
+        let (fall, laid) = if margin == Margin::Crowfoot {
+            (0.01, GRAVEL)
+        } else {
+            (STILL, SILT)
+        };
+        let under = |lit| {
+            let place = Edge {
+                laid,
+                ..edge(depth, fall, WET_AND_LEVEL, lit)
+            };
+            suits(margin, &place, false)
+        };
         assert!(under(OPEN) > 0.99, "{margin:?}");
         assert!(under(0.5) < under(0.8), "{margin:?}");
         assert!(under(0.2) <= 0.0, "{margin:?} under a closed canopy");
@@ -136,13 +155,71 @@ fn the_floating_plants_die_back_over_winter_and_the_reeds_stand_on() {
     }
     assert!(grows(Margin::Reed, Season::Winter) && grows(Margin::Reedmace, Season::Winter));
     assert!(!grows(Margin::Lily, Season::Winter) && !grows(Margin::Pondweed, Season::Winter));
+    assert!(!grows(Margin::Crowfoot, Season::Winter));
+}
+
+/// Crowfoot streams only where the water runs, as shallow or deep as it
+/// roots in, anchored in gravel more than silt, and not where a riffle races
+/// too fast for it, on a bank, or in a still pool.
+#[test]
+fn crowfoot_streams_where_the_water_runs_over_gravel() {
+    let at = |depth, fall, laid| {
+        let place = Edge {
+            laid,
+            ..edge(depth, fall, WET_AND_LEVEL, OPEN)
+        };
+        suits(Margin::Crowfoot, &place, false)
+    };
+    assert!(at(0.35, 0.01, GRAVEL) > 0.99);
+    assert!(at(0.35, 0.01, SILT) < 0.5 * at(0.35, 0.01, GRAVEL));
+    assert!(at(0.35, STILL, GRAVEL) <= 0.0, "in a still pool");
+    assert!(at(0.35, 0.08, GRAVEL) <= 0.0, "in a race");
+    assert!(at(-0.1, 0.01, GRAVEL) <= 0.0, "on the bank");
+    assert!(at(1.5, 0.01, GRAVEL) <= 0.0, "too deep to root in");
+    assert!(at(0.35, 0.01, -1.0) < 0.15, "on bare rock");
+}
+
+/// Nothing roots on ground its floods scour bare, however wet and level,
+/// and the still-water plants root thicker in silt than over gravel.
+#[test]
+fn reeds_keep_off_scoured_ground_and_favour_silt() {
+    let scoured = Edge {
+        green: 0.0,
+        ..edge(-0.1, STILL, WET_AND_LEVEL, OPEN)
+    };
+    let grown = edge(-0.1, STILL, WET_AND_LEVEL, OPEN);
+    for margin in [Margin::Reed, Margin::Reedmace] {
+        assert!(suits(margin, &grown, false) > 0.0, "{margin:?}");
+        assert!(suits(margin, &scoured, false) <= 0.0, "{margin:?}");
+    }
+    for margin in [
+        Margin::Reed,
+        Margin::Reedmace,
+        Margin::Pondweed,
+        Margin::Lily,
+    ] {
+        let depth = if matches!(margin, Margin::Lily | Margin::Pondweed) {
+            1.0
+        } else {
+            0.2
+        };
+        let silted = edge(depth, STILL, WET_AND_LEVEL, OPEN);
+        let gravelled = Edge {
+            laid: GRAVEL,
+            ..silted
+        };
+        assert!(
+            suits(margin, &gravelled, false) < 0.6 * suits(margin, &silted, false),
+            "{margin:?}"
+        );
+    }
 }
 
 #[test]
 fn the_near_lattice_fills_the_far_ones_hole_on_the_lands_own_grid() {
     for eye in [(0.0, 0.0), (12.3, -40.7), (-3001.9, 777.77)] {
         let margins = Margins {
-            grown: [None; 4],
+            sown: [None; KINDS.len()],
             lake: None,
             seed: 1,
             eye,
@@ -209,9 +286,82 @@ fn patches(composition: &Composition) -> Vec<(Margin, Vec3, bool)> {
         .collect()
 }
 
+/// A plant's patch is planned as a prototype only once one is set out, and
+/// once for all its patches; past the most the stage plans, a patch never
+/// planned is left out rather than the scene refused, and one planned still
+/// stands.
+#[test]
+fn a_patch_is_planned_once_when_first_set_out_and_left_out_past_the_most() {
+    let mut stage = Stage::new(Detail::Simple.densities()).expect("a stage");
+    let mut dice = Dice::keyed(7, 0);
+    margins(&mut stage, &mut dice, ((0.0, 0.0), Season::Summer, None)).expect("margins");
+    assert!(
+        stage.recipes.is_empty(),
+        "nothing planned before a patch is set out"
+    );
+    let mut margins = stage.margins.take().expect("margins");
+    let at = |patch: u8, x: f64| Placed {
+        kind: 0,
+        patch,
+        base: Vec3::new(x, 0.0, 0.0),
+        turn: 0.0,
+        key: 0,
+    };
+    margins.found = alloc::vec![at(2, 3.0), at(2, 4.0)];
+    margins.place(&mut stage, 0).expect("set out");
+    assert_eq!(stage.recipes.len(), 1);
+    assert_eq!(stage.objects.len(), 2);
+    let mut filler = margins.sown[0].expect("summer reeds");
+    while stage.plans_more() {
+        filler.plan(&mut stage, 0).expect("planned");
+    }
+    margins.found = alloc::vec![at(3, 5.0), at(2, 6.0)];
+    margins.place(&mut stage, 0).expect("set out");
+    assert_eq!(stage.objects.len(), 3);
+    let placed: Vec<u32> = stage
+        .objects
+        .iter()
+        .filter_map(|object| match object.shape {
+            Shape::Instance { prototype, .. } => Some(prototype),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(placed, [0, 0, 0]);
+}
+
+/// A still lake's edge plans no crowfoot, which only grows where water
+/// runs, and every plant's patch it does plan stands somewhere.
+#[test]
+fn a_water_plans_only_the_patches_it_sets_out() {
+    for seed in 0..2 {
+        let mut composition =
+            Composition::new(Setting::Alpine, seed, (320, 180), Detail::Simple).expect("composes");
+        composition.run_until_seen().expect("a lake lies in a land");
+        let stage = &composition.stage;
+        let mut used = alloc::vec![false; stage.recipes.len()];
+        for object in &stage.objects {
+            if let Shape::Instance { prototype, .. } = object.shape {
+                used[prototype as usize] = true;
+            }
+        }
+        for (index, recipe) in stage.recipes.iter().enumerate() {
+            if let Recipe::Margin { margin, .. } = recipe {
+                assert!(
+                    *margin != Margin::Crowfoot,
+                    "{seed}: crowfoot on a still lake"
+                );
+                assert!(
+                    used[index],
+                    "{seed}: {margin:?}'s patch {index} planned for nothing"
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn a_lake_sets_reeds_in_its_shallows_and_floats_lilies_on_it_in_the_light() {
-    let mut set = [0usize; 4];
+    let mut set = [0usize; KINDS.len()];
     for seed in 0..3 {
         let mut composition =
             Composition::new(Setting::Alpine, seed, (320, 180), Detail::Simple).expect("composes");
@@ -250,23 +400,56 @@ fn a_lake_sets_reeds_in_its_shallows_and_floats_lilies_on_it_in_the_light() {
             );
         }
     }
-    assert!(
-        set.iter().all(|&count| count > 10),
-        "every plant somewhere: {set:?}"
-    );
+    for (&kind, &count) in KINDS.iter().zip(&set) {
+        if kind == Margin::Crowfoot {
+            assert_eq!(count, 0, "crowfoot, which wants running water, on a lake");
+        } else {
+            assert!(count > 10, "{kind:?} too seldom: {set:?}");
+        }
+    }
+}
+
+/// A stream's floating plants float on its water as its flow has shaped
+/// it: each about the eye stands on the finer water grid's own surface.
+#[test]
+fn a_streams_floating_plants_float_on_its_shaped_water() {
+    let mut floating = 0;
+    for seed in 0..3 {
+        let mut composition =
+            Composition::new(Setting::Stream, seed, (320, 180), Detail::Simple).expect("composes");
+        let land = composition
+            .run_until_seen()
+            .expect("a stream lies in a land");
+        let near = land.near_water.expect("a finer water grid");
+        let finer = &composition.stage.fields[near.field as usize];
+        for (margin, at, _) in patches(&composition) {
+            let within = (at.x - near.centre.0).abs() < near.reach
+                && (at.z - near.centre.1).abs() < near.reach;
+            if !within || !matches!(margin, Margin::Lily | Margin::Pondweed | Margin::Crowfoot) {
+                continue;
+            }
+            assert_eq!(
+                at.y.to_bits(),
+                finer.height_at(at.x, at.z).to_bits(),
+                "{seed}: {margin:?} at {at:?}"
+            );
+            floating += 1;
+        }
+    }
+    assert!(floating > 0, "plants float in the streams about the eye");
 }
 
 #[test]
 fn the_patches_kept_are_the_nearest_the_eye_in_order() {
     let at = |x: f64, z: f64| Placed {
-        prototype: 0,
-        material: 0,
+        kind: 0,
+        patch: 0,
         base: Vec3::new(x, 0.0, z),
         turn: 0.0,
         key: 0,
     };
     let mut margins = Margins {
-        grown: [None; 4],
+        sown: [None; KINDS.len()],
         lake: None,
         seed: 1,
         eye: (10.0, 10.0),

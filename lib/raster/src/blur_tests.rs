@@ -216,8 +216,9 @@ fn the_reciprocal_answers_exactly_what_the_divide_would() {
     };
 
     // Every reachable sum, exhaustively, for every window of at most 255
-    // samples: past the widest radius any desktop surface frosts at, and down
-    // to the degenerate single-sample window.
+    // samples, down to the degenerate single-sample one. A scaled desktop
+    // radius reaches past these; the proof above covers every count the
+    // multiply serves.
     for radius in 0..=127u32 {
         let count = radius * 2 + 1;
         for sum in 0..=255 * count {
@@ -1293,23 +1294,63 @@ fn a_frost_reads_its_plane_only_around_its_bands() {
     }
 }
 
-/// A strip of a few rows mixes the vertical pass back over many strips, and
-/// writes exactly what one strip holding every row writes: the running sums
-/// carry from strip to strip rather than starting again.
+/// The rows between two distant bands hold nothing to average or mix, so a
+/// frost of both hands other cores no more work than frosting each alone.
+#[test]
+fn the_rows_between_distant_bands_cost_no_dispatch() {
+    let (width, height) = (1000u32, 760u32);
+    let rect = (20u32, 28, 960, 704);
+    let (x, y, w, h) = rect;
+    let top = (x..x + w, y..y + 16);
+    let bottom = (x..x + w, y + h - 16..y + h);
+    let dispatches = |bands: &[(Range<u32>, Range<u32>)]| {
+        let runner = tairix_parallel::Reversed::new(4);
+        let mut scratch = BlurScratch::new();
+        assert!(scratch.reserve(width, height, 2, &runner));
+        let (mut plane, mut surface) = (patterned(width, height), patterned(width, height));
+        assert!(frost_from_plane(
+            &mut surface,
+            &mut plane,
+            &frosting(rect, NOTHING_HELD, bands, 43),
+            &mut scratch,
+            &runner,
+            230,
+        ));
+        runner.dispatches()
+    };
+    let apart =
+        dispatches(core::slice::from_ref(&top)) + dispatches(core::slice::from_ref(&bottom));
+    let together = dispatches(&[top, bottom]);
+    assert!(
+        together <= apart,
+        "two distant bands dispatched {together} times, and {apart} frosted apart"
+    );
+}
+
+/// A frost mixed back a few rows at a time, over many strips, writes exactly
+/// what one strip holding every row writes.
 #[test]
 fn a_frost_mixed_back_over_many_strips_is_the_one_strip_frost() {
     let rect = (1u32, 1, 18, 23);
     let before = patterned(20, 25);
     let bands = border(rect, (5..11, 6..15));
     for radius in [1u32, 4, 9] {
-        let whole = frosted_bands_via(
+        let mut one_strip = BlurScratch::new();
+        assert!(one_strip.reserve(
+            rect.2,
+            rect.3 * super::STRIP_FRACTION,
+            4,
+            &tairix_parallel::SERIAL
+        ));
+        let (mut plane, mut whole) = (before.clone(), before.clone());
+        assert!(frost_from_plane(
+            &mut whole,
+            &mut plane,
+            &frosting(rect, NOTHING_HELD, &bands, radius),
+            &mut one_strip,
             &tairix_parallel::SERIAL,
-            before.clone(),
-            rect,
-            &bands,
-            radius,
             230,
-        );
+        ));
         for rows in [1u32, 2, 3, 7] {
             for width in [1usize, 2, 5] {
                 let runner = tairix_parallel::Reversed::new(width);

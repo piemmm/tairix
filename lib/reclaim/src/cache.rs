@@ -461,10 +461,11 @@ where
     /// as the by-product of an operation the cache cannot drive: a
     /// compositor's frosted backdrop is the blur its own composite pass has
     /// just written into the frame buffer, reproducible only by composing
-    /// that frame again. Such a consumer asks with
-    /// [`get_or_build`](Self::get_or_build) — which counts the lookup — and
-    /// offers the finished value here afterwards, so one lookup is counted
-    /// once however the consumer had to satisfy it.
+    /// that frame again. Such a consumer looks the key up — with
+    /// [`find`](Self::find) where a pass must not have the band enforced under
+    /// it, otherwise [`get_or_build`](Self::get_or_build) — and offers the
+    /// finished value here afterwards, so one lookup is counted once however
+    /// the consumer had to satisfy it.
     ///
     /// Admission is otherwise identical to a built value's: a generation
     /// change empties the cache first, the pressure band is enforced, and a

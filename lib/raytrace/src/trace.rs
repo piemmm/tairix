@@ -38,7 +38,7 @@ use crate::heightfield::PLAIN;
 use crate::light::Light;
 use crate::material::{
     fresnel, refract, schlick, schlick_scalar, thin_film, widened, Bump, Finish, Foam, Material,
-    Microfacet, Tilt, COAT_F0, SPREAD,
+    Microfacet, Tilt, CARRIED_FOAM, COAT_F0, SPREAD,
 };
 use crate::noise::{cells3, noise3, smoothstep};
 use crate::pigment::{Pigment, Spot};
@@ -877,13 +877,19 @@ impl<'a> Tracer<'a> {
                 roughness,
                 dispersion,
                 foam,
-            } => self.clear(
-                (&surface, outside),
-                (ior, dispersion, roughness),
-                (absorb, glow, foam),
-                path,
-                sampler,
-            ),
+            } => {
+                let carried = spot.ground.get(CARRIED_FOAM).copied().unwrap_or(0.0);
+                let foamed = foam
+                    .map_or(0.0, |foam| foam_cover(&foam, &surface))
+                    .max(carried_foam(carried, &surface));
+                self.clear(
+                    (&surface, outside),
+                    (ior, dispersion, roughness),
+                    (absorb, glow, foamed),
+                    path,
+                    sampler,
+                )
+            }
             Finish::Film {
                 thickness,
                 index,
@@ -929,19 +935,17 @@ impl<'a> Tracer<'a> {
 
     /// A clear surface bending light by its index, dispersion and roughness,
     /// filled with a medium that absorbs and glows as its finish has it, or
-    /// the foam breaking over it where it breaks.
+    /// the foam over it where `foamed` of it is foam.
     fn clear(
         &self,
         (surface, outside): (&Surface, bool),
         bending: (f64, f64, f64),
-        (absorb, glow, foam): (Vec3, Vec3, Option<Foam>),
+        (absorb, glow, foamed): (Vec3, Vec3, f64),
         path: Path,
         sampler: &mut Sampler,
     ) -> Shaded {
-        if let Some(foam) = foam {
-            if sampler.next_1d() < foam_cover(&foam, surface) {
-                return self.coated(surface, FOAM, Microfacet::isotropic(0.9), path, sampler);
-            }
+        if foamed > 0.0 && sampler.next_1d() < foamed {
+            return self.coated(surface, FOAM, Microfacet::isotropic(0.9), path, sampler);
         }
         let medium = Medium {
             absorb,
@@ -1858,6 +1862,20 @@ fn foam_cover(foam: &Foam, surface: &Surface) -> f64 {
         surface.point.y + broken,
     )
 }
+
+/// How much of a stream's surface the foam its flow carries covers at
+/// `surface`, where its grid holds `held` of it: gathered into the bubbles
+/// and the streaks a running stream draws it out in, never an even film.
+fn carried_foam(held: f64, surface: &Surface) -> f64 {
+    if held <= 0.0 {
+        return 0.0;
+    }
+    let bubbles = noise3(surface.texture * 30.0, CARRIED_SEED);
+    smoothstep(0.35, 0.95, held + 0.3 * bubbles)
+}
+
+/// The key the foam a stream carries is broken up under.
+const CARRIED_SEED: u32 = 0x0f0a_3b17;
 
 /// How thick a film is at `surface`, in nanometres: thinner toward the top,
 /// as a bubble's drains, and swirled by the currents in it.

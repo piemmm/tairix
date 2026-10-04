@@ -9,13 +9,34 @@
 //! Every pattern fades to its mean once a pixel's footprint spans it, so the
 //! land far off is as steady as the land underfoot is detailed.
 
+use core::f64::consts::{FRAC_PI_2, TAU};
+
+use tairix_util::mathf;
+
 use crate::course::{Courses, Nearest};
-use crate::land::{decode_lane, Surface, TRACK_GAUGE};
-use crate::noise::{cell, cells2, cells3, fbm2, noise2, octaves_within, smoothstep};
+use crate::land::{decode_lane, Surface, DAMP_BANK, SOAKED, TRACK_GAUGE};
+use crate::noise::{cell, cells2, fbm2, hash3, noise2, octaves_within, smoothstep};
 use crate::pigment::Spot;
 use crate::sample::{mix32, unit};
 use crate::shade::Shades;
 use crate::vector::Vec3;
+
+/// The grains of ground too fine to model, to a metre, coarsest first: a
+/// crumb or a fine pebble, coarse sand, fine sand; and the shade a grain and
+/// the gap about it average to.
+const GRIT: [(f64, u32); 3] = [(55.0, 0x91), (170.0, 0x92), (520.0, 0x93)];
+const GRIT_MEAN: f64 = 0.96;
+
+/// The granules of a river's bed to a metre, gravel finer than the stones a
+/// bed lays; its cobbles; and its sand's mottles.
+const GRANULES: f64 = 90.0;
+const COBBLES: f64 = 14.0;
+const MOTTLES: f64 = 9.0;
+
+/// How thick the beds a cut bank shows lie, and its gravel's pebbles to a
+/// metre.
+const BEDS: f64 = 0.22;
+const PEBBLES: f64 = 30.0;
 
 /// A region's ground colours.
 #[derive(Copy, Clone, Debug)]
@@ -118,6 +139,18 @@ impl Ground {
     }
 }
 
+/// Where `p` lies among a set of upright joints striking at `angle`,
+/// `spacing` apart and wavering a little under `seed`: which slab between
+/// them, and how far it lies from the nearer joint, as a share of the
+/// spacing.
+fn joint_set(p: Vec3, (angle, spacing): (f64, f64), seed: u32) -> (u32, f64) {
+    let (sin, cos) = (mathf::sin(angle), mathf::cos(angle));
+    let (across, along) = (p.x * cos + p.z * sin, p.z * cos - p.x * sin);
+    let waver = 0.3 * noise2(along / (2.5 * spacing), p.y / (2.5 * spacing), seed);
+    let (slab, within) = cell(across / spacing + waver);
+    (slab, within.min(1.0 - within))
+}
+
 /// `value`, a pattern `detail` of its own periods across a pixel, faded to
 /// its mean of nought as the pixel comes to span it.
 fn fade(value: f64, detail: f64) -> f64 {
@@ -157,9 +190,40 @@ impl Rock {
             1.0 - smoothstep(0.0, 0.07, within.min(1.0 - within)),
             8.0 * beds,
         );
-        let joints = cells3(p * (1.3 / bedding), seed ^ 0x7a, 0.9);
-        let crack = fade(1.0 - smoothstep(0.012, 0.05, joints.wall()), 3.0 * beds);
-        let block = 1.0 + fade(0.22 * (unit(joints.id) - 0.5), 1.3 * beds);
+        // Bedded rock breaks along two sets of upright joints near square to
+        // each other, and parts along its beds across them, so it stands in
+        // blocks.
+        let spacing = bedding / 1.3;
+        let strike = TAU * unit(mix32(seed ^ 0x7b));
+        let skew = 0.15 * (unit(mix32(seed ^ 0x7d)) - 0.5);
+        let (first, near_first) = joint_set(p, (strike, spacing), seed ^ 0x7a);
+        let (second, near_second) = joint_set(
+            p,
+            (
+                strike + FRAC_PI_2 + skew,
+                spacing * (0.8 + 0.5 * unit(mix32(seed ^ 0x7e))),
+            ),
+            seed ^ 0x7c,
+        );
+        // A joint opens here and closes there rather than running whole.
+        let open = smoothstep(
+            -0.2,
+            0.35,
+            noise2(
+                p.x / (2.0 * spacing) + p.y,
+                p.z / (2.0 * spacing),
+                seed ^ 0x7f,
+            ),
+        );
+        let crack = fade(
+            1.0 - smoothstep(0.012, 0.05, near_first.min(near_second)),
+            3.0 * beds,
+        ) * open;
+        let block = 1.0
+            + fade(
+                0.22 * (unit(hash3(first, second, bed, seed)) - 0.5),
+                1.3 * beds,
+            );
         // Water running down a steep face leaves it streaked.
         let across = if normal.x.abs() > normal.z.abs() {
             p.z
@@ -178,7 +242,7 @@ impl Rock {
         let mut colour = tone
             * block
             * (1.0 - 0.4 * parting)
-            * (1.0 - 0.55 * crack)
+            * (1.0 - 0.4 * crack)
             * (1.0 - 0.3 * streaked)
             * (0.93 + 0.1 * grain);
         // Lichen spreads over rock that faces the sky.
@@ -212,9 +276,20 @@ impl Ground {
         let mottle = fade(noise2(p.x * 2.3, p.z * 2.3, seed ^ 3), width * 2.3);
         // Worn ground shows its stony subsoil, built-up ground fresh silt; the
         // rock is worked out only where it, its scree or bare stone shows.
+        // A river's bed shows what its floods leave there however steep, and
+        // a face of earth laid down stands as earth, not rock.
         let subsoil = 0.5 * smoothstep(-0.2, -0.8, laid);
-        let talus = self.talus(laid, upright, patch);
-        let bare = smoothstep(self.cliff + 0.08, self.cliff - 0.06, upright + 0.05 * patch);
+        let talus = self.talus(laid, (upright, wet), patch);
+        // Gravel lies no steeper than it rests at; the walls of a channel
+        // steeper than that are its bank's earth, or rock.
+        let soaked = smoothstep(SOAKED - 0.16, SOAKED, wet);
+        let bed = (1.0 - green) * soaked * smoothstep(0.7, 0.82, upright);
+        // The steep walls a low water bares in its channel are its banks'
+        // earth unless the channel marks bare rock there.
+        let walled = soaked * smoothstep(-0.3, -0.1, laid);
+        let bare = smoothstep(self.cliff + 0.08, self.cliff - 0.06, upright + 0.05 * patch)
+            * (1.0 - bed.max(walled))
+            * (1.0 - smoothstep(0.05, 0.18, laid));
         let rock = (subsoil > 0.0 || talus > 0.0 || bare > 0.0).then(|| {
             Rock {
                 stone: palette.rock,
@@ -231,15 +306,45 @@ impl Ground {
         if let Some(rock) = rock {
             soil = soil.lerp(rock * 0.85, subsoil);
         }
-        let soil = soil * (0.9 + 0.12 * mottle);
+        // A face of earth a river cut shows the beds of loam and gravel its
+        // floods laid down.
+        let cut = smoothstep(0.78, 0.55, upright) * smoothstep(0.05, 0.18, laid);
+        if cut > 0.0 {
+            soil = soil.lerp(self.cut_bank(p, width), cut);
+        }
+        // The bed a river's floods scour, under its water or bared by it: the
+        // gravel and sand of the land's own rock, sand where the slack water
+        // dropped it, and the bare rock of a ledge.
+        if bed > 0.0 {
+            let sandy = smoothstep(0.1, 0.45, laid);
+            let mut floor = if sandy >= 1.0 {
+                self.sand_bed(p, width)
+            } else if sandy > 0.0 {
+                self.gravel_bed(p, width)
+                    .lerp(self.sand_bed(p, width), sandy)
+            } else {
+                self.gravel_bed(p, width)
+            };
+            // A river's bare rock is stained dark with the film of algae and
+            // silt its water leaves.
+            if let Some(rock) = rock {
+                let stained = rock.lerp(palette.moss * 0.6, 0.35) * 0.7;
+                floor = floor.lerp(stained, smoothstep(-0.25, -0.7, laid));
+            }
+            soil = soil.lerp(floor, bed);
+        }
+        let grit = self.grit(p, width);
+        let soil = soil * (0.9 + 0.12 * mottle) * grit;
         let mut colour = match rock.filter(|_| talus > 0.0) {
             Some(rock) => soil.lerp(self.scree(p, width, rock), talus),
             None => soil,
         };
-        let grows = green * smoothstep(self.cliff - 0.02, self.cliff + 0.16, upright);
+        // Grass is painted only off a river's bed: what grows sparsely on the
+        // bed stands on its gravel, a blade at a time.
+        let grows = green * smoothstep(self.cliff - 0.02, self.cliff + 0.16, upright) * (1.0 - bed);
         let grassed = smoothstep(0.2, 0.75, grows + 0.22 * patch + 0.1 * mottle);
         // Beneath a sward's own blades, its grass is the thatch at their roots.
-        let thatch = palette.earth.lerp(palette.dry, 0.45) * (0.7 + 0.2 * mottle);
+        let thatch = palette.earth.lerp(palette.dry, 0.45) * (0.7 + 0.2 * mottle) * grit;
         let grass = self
             .grass(wet, patch, mottle)
             .lerp(thatch, smoothstep(0.0, 0.6, spot.thatch));
@@ -259,8 +364,8 @@ impl Ground {
             self.shore + 0.2,
             spot.height + 0.6 * patch,
         );
-        colour = colour.lerp(palette.sand * (0.94 + 0.08 * mottle), beach);
-        colour = self.lanes(colour, spot, lane, (wet, patch, mottle));
+        colour = colour.lerp(palette.sand * (0.94 + 0.08 * mottle) * grit, beach);
+        colour = self.lanes(colour, spot, (lane, grit), (wet, patch, mottle));
         let snowed = self.snowed(
             &Spot {
                 normal: Vec3::new(spot.normal.x, upright + 0.08 * mottle, spot.normal.z),
@@ -300,7 +405,8 @@ impl Ground {
         let ground = leaf.lerp(
             floor.humus,
             (0.55 * (1.0 - drift) * thin).max(0.45 * hollows),
-        ) * (0.9 + 0.14 * mottle);
+        ) * (0.9 + 0.14 * mottle)
+            * self.grit(p, width);
         let carpet = fade(noise2(p.x * 0.15, p.z * 0.15, seed ^ 0x74), width * 0.15)
             + 0.35 * fade(noise2(p.x * 0.6, p.z * 0.6, seed ^ 0x76), width * 0.6);
         let mossy = smoothstep(
@@ -309,16 +415,103 @@ impl Ground {
             0.5 + 0.5 * carpet + 0.35 * wet,
         );
         let moss = self.palette.moss
-            * (0.85 + 0.3 * fade(noise2(p.x * 3.3, p.z * 3.3, seed ^ 0x77), width * 3.3));
+            * (0.85 + 0.3 * fade(noise2(p.x * 3.3, p.z * 3.3, seed ^ 0x77), width * 3.3))
+            * self.grit(p * 1.6, width * 1.6);
         ground.lerp(moss, 0.85 * mossy)
     }
 
+    /// Grains of ground too fine to model, as fine as a footprint `width`
+    /// across resolves them: each its own shade and a little darker in the
+    /// gaps between them, settling to an even shade as a pixel comes to span
+    /// them.
+    fn grit(&self, p: Vec3, width: f64) -> f64 {
+        let mut shade = 1.0;
+        for (scale, salt) in GRIT {
+            let detail = width * scale;
+            // Coarsest first: once one is too fine to resolve, so is the rest.
+            if detail >= 1.0 {
+                break;
+            }
+            let grains = cells2(p.x * scale, p.z * scale, self.seed ^ salt, 0.9);
+            let own = 0.85 + 0.3 * unit(grains.id);
+            let gap = 1.0 - smoothstep(0.03, 0.14, grains.wall());
+            shade *= 1.0 + fade(own * (1.0 - 0.3 * gap) - GRIT_MEAN, detail);
+        }
+        shade
+    }
+
+    /// A river's scoured bed: gravel of the land's own rock, each granule its
+    /// own shade between its stone and its darker beds, sand and silt in the
+    /// gaps, settling to their mean far off.
+    fn gravel_bed(&self, p: Vec3, width: f64) -> Vec3 {
+        let palette = &self.palette;
+        let granules = cells2(p.x * GRANULES, p.z * GRANULES, self.seed ^ 0x95, 0.9);
+        let stone = palette.rock.lerp(palette.strata, unit(granules.id))
+            * (0.8 + 0.4 * unit(mix32(granules.id ^ 7)));
+        let sand = palette.sand.lerp(palette.silt, 0.5);
+        let between = 1.0 - smoothstep(0.04, 0.16, granules.wall());
+        let mean = sand.lerp(palette.rock.lerp(palette.strata, 0.5), 0.6);
+        // Cobbles too small to lay, each its own shade, shown as far off as
+        // a pixel resolves them.
+        let cobble = cells2(p.x * COBBLES, p.z * COBBLES, self.seed ^ 0x97, 0.9);
+        let shade = 1.0 + fade(0.3 * (unit(cobble.id) - 0.5), width * COBBLES);
+        mean.lerp(
+            stone.lerp(sand * 0.8, between),
+            1.0 - smoothstep(0.25, 1.0, width * GRANULES),
+        ) * shade
+    }
+
+    /// The face of a bank a river has cut: beds of dark loam and of gravel
+    /// laid by its floods, wavering as they run, the gravel's pebbles each
+    /// their own shade, settling to their mean far off.
+    fn cut_bank(&self, p: Vec3, width: f64) -> Vec3 {
+        let palette = &self.palette;
+        let loam = palette.earth.lerp(palette.strata, 0.3) * 0.8;
+        let wavering = 0.12 * noise2(p.x * 0.5, p.z * 0.5, self.seed ^ 0x98);
+        let (bed, within) = cell((p.y + wavering) / BEDS);
+        // Not every bed is gravel, nor every gravel bed as coarse.
+        let lens = unit(mix32(bed ^ self.seed));
+        let gravelly = fade(
+            smoothstep(0.65, 0.78, within) * (1.0 - smoothstep(0.86, 0.95, within)),
+            width / BEDS,
+        ) * smoothstep(0.35, 0.65, lens);
+        let pebbles = cells2(
+            p.x * PEBBLES + p.z * PEBBLES,
+            p.y * PEBBLES,
+            self.seed ^ 0x99,
+            0.9,
+        );
+        let pebble = palette.rock.lerp(palette.strata, unit(pebbles.id))
+            * (0.75 + 0.4 * unit(mix32(pebbles.id ^ 5)));
+        let between = 1.0 - smoothstep(0.05, 0.2, pebbles.wall());
+        let gravel = palette.rock.lerp(loam, 0.5).lerp(
+            pebble.lerp(loam, between),
+            1.0 - smoothstep(0.25, 1.0, width * PEBBLES),
+        );
+        loam.lerp(gravel, gravelly)
+    }
+
+    /// A river's sand: fine and pale, mottled where its grains lie thicker
+    /// or thinner, settling to its mean far off.
+    fn sand_bed(&self, p: Vec3, width: f64) -> Vec3 {
+        let palette = &self.palette;
+        let sand = palette.sand.lerp(palette.silt, 0.35);
+        let mottled = fade(
+            noise2(p.x * MOTTLES, p.z * MOTTLES, self.seed ^ 0x96),
+            width * MOTTLES,
+        );
+        sand * (0.92 + 0.08 * mottled)
+    }
+
     /// How much of the ground is scree: broken rock gathered where the land
-    /// was built up at the foot of what stands too steep for soil.
-    fn talus(&self, laid: f64, upright: f64, patch: f64) -> f64 {
+    /// was built up at the foot of what stands too steep for soil — on
+    /// drained ground, the damp ground by water holding finer stuff.
+    fn talus(&self, laid: f64, (upright, wet): (f64, f64), patch: f64) -> f64 {
         let below_cliffs = smoothstep(self.cliff - 0.04, self.cliff + 0.06, upright)
             * smoothstep(self.cliff + 0.3, self.cliff + 0.12, upright);
-        below_cliffs * smoothstep(0.05, 0.4, laid + 0.15 * patch)
+        below_cliffs
+            * smoothstep(0.05, 0.4, laid + 0.15 * patch)
+            * (1.0 - smoothstep(DAMP_BANK - 0.13, DAMP_BANK, wet))
     }
 
     /// Scree: stones of `rock` lying loose in the soil between them.
@@ -344,17 +537,18 @@ impl Ground {
         blade.lerp(palette.moss, 0.7 * smoothstep(0.6, 0.95, wet + 0.1 * patch))
     }
 
-    /// `colour` with any path trodden into it and any road laid over it.
+    /// `colour` with any path trodden into it and any road laid over it, the
+    /// path's earth showing the ground's `grit`.
     fn lanes(
         &self,
         colour: Vec3,
         spot: &Spot,
-        lane: f64,
+        (lane, grit): (f64, f64),
         (wet, patch, mottle): (f64, f64, f64),
     ) -> Vec3 {
         let (road, footpath) = decode_lane(lane);
         let palette = &self.palette;
-        let trodden = palette.earth.lerp(palette.silt, 0.4) * (0.82 + 0.25 * mottle);
+        let trodden = palette.earth.lerp(palette.silt, 0.4) * (0.82 + 0.25 * mottle) * grit;
         let mut colour = colour.lerp(trodden, smoothstep(0.2, 0.8, footpath + 0.15 * mottle));
         let Some(painted) = &self.road else {
             return colour.lerp(palette.silt * 0.8, road);
@@ -446,3 +640,7 @@ impl Ground {
         self.grass(wet, patch, mottle).lerp(earth, rut)
     }
 }
+
+#[cfg(test)]
+#[path = "ground_tests.rs"]
+mod tests;

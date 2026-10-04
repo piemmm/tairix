@@ -21,7 +21,7 @@ use alloc::vec::Vec;
 
 use tairix_util::{fallible, mathf};
 
-use crate::vector::real;
+use crate::vector::{real, tanh, whole};
 
 /// How many measured points across the film one cell of the grid spans each
 /// way: what the base layer is smooth over, about a sixteenth of the frame.
@@ -253,17 +253,6 @@ fn correction(base: f64) -> f64 {
 /// How many stops exposed `luminance` lies from the exposed `key`.
 pub(crate) fn stops(luminance: f64, key: f64) -> f64 {
     mathf::ln(luminance.max(1e-12) / key.max(1e-12)) / core::f64::consts::LN_2
-}
-
-/// The hyperbolic tangent of `x`, for `x` at or above nought.
-fn tanh(x: f64) -> f64 {
-    let e = mathf::exp(-2.0 * x);
-    (1.0 - e) / (1.0 + e)
-}
-
-/// `value`, at or above nought and whole, as a count.
-fn whole(value: f64) -> usize {
-    usize::try_from(mathf::round_i32(value).max(0)).unwrap_or(0)
 }
 
 #[cfg(test)]

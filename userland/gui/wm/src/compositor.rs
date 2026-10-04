@@ -809,20 +809,17 @@ impl Compositor {
     }
 
     /// What the frame in flight will do about the frost of the window at
-    /// z-index `index`: copy the retained one whole, copy its still-valid core
-    /// and blur the border around it, or blur the whole rectangle.
+    /// z-index `index`.
     ///
-    /// Asked of the cache once per frame and remembered
-    /// ([`frost_decision`](Self::frost_decision)), because the plan and the
-    /// composite that follows it both need the answer and two lookups could
-    /// return two different ones — which would leave a window the plan did
-    /// not widen for being blurred over a rectangle whose lower layers the
-    /// frame never composed, and it would seam.
+    /// Decided once per frame and remembered, because the plan and the
+    /// composite after it both act on the answer and two lookups could
+    /// disagree: a window the plan did not widen for would then be blurred over
+    /// lower layers the frame never composed.
     ///
-    /// This is the one counted lookup: a hit is a frost the frame goes on to
-    /// copy from, whole or in part, a miss one it has to blur outright, and the
-    /// recency the lookup touches is what keeps a frost every frame reuses
-    /// ahead of one nothing has looked at when the band forces an eviction.
+    /// For a retained window this is the frame's one counted lookup of its
+    /// frost, and the recency it touches is what keeps a frost every frame
+    /// reuses ahead of one nothing has looked at when the band evicts. An
+    /// unretained window's asks the cache nothing.
     fn frost_plan(&mut self, index: usize) -> FrostPlan {
         if let Some(Some(decided)) = self.frost_decision.get(index).copied() {
             return decided;
@@ -966,7 +963,20 @@ impl Compositor {
     /// A released frost is blurred again on demand, so this costs blur work
     /// and never a wrong pixel. A band that demands nothing releases nothing.
     pub fn trim_frost(&mut self) -> usize {
-        self.frost.enforce_pressure()
+        self.ration_frost()
+    }
+
+    /// Settle the frost ration and then the band, returning the bytes
+    /// released.
+    ///
+    /// In that order so the band takes the frosts the ration withdraws: evicting
+    /// first takes the least recently looked at, which can be the one frost the
+    /// ration then grants, beside one it then releases.
+    fn ration_frost(&mut self) -> usize {
+        let before = self.frost.charged_bytes();
+        self.grant_backdrops();
+        self.frost.enforce_pressure();
+        before.saturating_sub(self.frost.charged_bytes())
     }
 
     /// Release and wipe every retained frost, and wipe what the last frosts
@@ -2928,10 +2938,9 @@ impl Compositor {
 
         self.frost_decision.clear();
         self.frost_decision.resize(self.windows.len(), None);
-        // Enforced once, here, so that no lookup the pass makes can evict a
-        // frost an earlier one promised it.
-        self.frost.enforce_pressure();
-        self.grant_backdrops();
+        // Once, before any lookup, so none the pass makes can evict a frost an
+        // earlier one promised it.
+        let _ = self.ration_frost();
         let mut damage = core::mem::take(&mut self.damage);
         // Clipping once here is what lets the walk below trust every
         // rectangle it is handed: damage marked wholly off screen composites
@@ -3124,12 +3133,6 @@ impl Compositor {
     /// Whether the frame recomposes any of the window at `index`'s on-screen
     /// `bounds` — `damage`, or a rectangle already `claimed` — that shows past
     /// the frosts stacked above it.
-    ///
-    /// A frost copied whole, or the core of one kept as it moved, replaces
-    /// everything beneath it, so a window recomposed only there needs no frost
-    /// of its own this frame. Nothing beneath such a frost can have changed —
-    /// a change there would have dropped it — so what is hidden is never a
-    /// change that spreads past the frost's edge.
     fn recomposed_and_seen(
         &mut self,
         index: usize,
@@ -3137,33 +3140,41 @@ impl Compositor {
         damage: &Region,
         claimed: &[Rect],
     ) -> bool {
-        let touched = damage.intersects(bounds)
-            || claimed
-                .iter()
-                .any(|rect| !rect.intersection(&bounds).is_empty());
-        if !touched {
-            return false;
-        }
         let mut seen = core::mem::take(&mut self.frost_ring);
         seen.clear();
         for &rect in damage.rects().iter().chain(claimed) {
             seen.add(rect.intersection(&bounds));
         }
-        for upper in index.saturating_add(1)..self.windows.len() {
+        self.hide_beneath_frosts(
+            &mut seen,
+            (index.saturating_add(1)..self.windows.len()).rev(),
+        );
+        let shown = !seen.is_empty();
+        self.frost_ring = seen;
+        shown
+    }
+
+    /// Take out of `seen` what the frosts of the windows `above` write over
+    /// without reading: one copied whole, or the core of one kept as it moved.
+    ///
+    /// `above` runs front first, so a frost hidden by one in front of it is
+    /// never looked up. Nothing beneath such a frost can have changed — a
+    /// change there would have dropped it — so what it hides is never a change
+    /// that spreads past its edge.
+    fn hide_beneath_frosts(&mut self, seen: &mut Region, above: impl Iterator<Item = usize>) {
+        for upper in above {
             if seen.is_empty() {
                 break;
             }
-            let covers = self.windows.get(upper).is_some_and(|over| {
-                over.is_visible() && over.is_frosted() && seen.intersects(over.bounds())
-            });
-            if covers {
+            let hides = self
+                .windows
+                .get(upper)
+                .is_some_and(|over| over.is_frosted() && seen.intersects(over.bounds()));
+            if hides {
                 let plan = self.frost_plan(upper);
                 seen.subtract(self.frost_spared(upper, plan));
             }
         }
-        let shown = !seen.is_empty();
-        self.frost_ring = seen;
-        shown
     }
 
     /// Whether every frost beneath the window at z-index `index` that its
@@ -3716,14 +3727,12 @@ impl Compositor {
             let frosts_here = self.windows.get(index).is_some_and(|window| {
                 window.is_frosted() && !window.bounds().intersection(&area).is_empty()
             });
-            if !frosts_here {
-                continue;
-            }
-            let plan = self.frost_plan(index);
-            // A local frost no part of which shows past the frosts above it is
-            // left out, and its window composes as a plain layer beneath them.
-            if plan == FrostPlan::Local
-                && !self.seen_through(
+            // A frost hidden here by the frosts above it is left out, and its
+            // window composes as a plain layer beneath them: the plan did not
+            // widen for it, so a frost of its whole rectangle would read and
+            // write past what the frame recomposes.
+            if !frosts_here
+                || !self.seen_through(
                     index,
                     area,
                     hits.get(split.saturating_add(1)..).unwrap_or_default(),
@@ -3731,6 +3740,7 @@ impl Compositor {
             {
                 continue;
             }
+            let plan = self.frost_plan(index);
             self.compose_plane(
                 area,
                 self.frost_spared(index, plan),
@@ -3933,12 +3943,8 @@ impl Compositor {
     }
 
     /// Fill `frost_bands` with the part of the window at `index` inside `area`
-    /// that no frost stacked above it in `above` covers, reporting whether any
-    /// is left.
-    ///
-    /// A frost copied over a rectangle, or the core of one kept as it moved,
-    /// replaces whatever is beneath it outright, so a local frost there would
-    /// be computed and never seen.
+    /// that shows past the frosts of the windows in `above`, reporting whether
+    /// any is left.
     fn seen_through(&mut self, index: usize, area: Rect, above: &[usize]) -> bool {
         let screen = self.screen_rect();
         let Some(window) = self.windows.get(index) else {
@@ -3947,18 +3953,7 @@ impl Compositor {
         let mut seen = core::mem::take(&mut self.frost_bands);
         seen.clear();
         seen.add(window.bounds().intersection(&screen).intersection(&area));
-        for &upper in above {
-            if seen.is_empty() {
-                break;
-            }
-            let frosted_here = self.windows.get(upper).is_some_and(|over| {
-                over.is_frosted() && !over.bounds().intersection(&area).is_empty()
-            });
-            if frosted_here {
-                let plan = self.frost_plan(upper);
-                seen.subtract(self.frost_spared(upper, plan));
-            }
-        }
+        self.hide_beneath_frosts(&mut seen, above.iter().rev().copied());
         let any = !seen.is_empty();
         self.frost_bands = seen;
         any
@@ -4104,9 +4099,9 @@ impl Compositor {
         self.ring_hits = hits;
     }
 
-    /// Compose the layers `span` names over screen rectangle `area`,
-    /// writing the result to the back buffer and — when `encode` — to the
-    /// encoded scan-out frame.
+    /// Compose the layers `span` names over screen rectangle `area` into
+    /// `target`, and encode the back buffer there into the scan-out frame on a
+    /// pass that finishes or rescans it.
     ///
     /// Encoding is the one point a composed pixel becomes a scan-out byte,
     /// so it is also the one point the screen reveal
@@ -4116,7 +4111,7 @@ impl Compositor {
     ///
     /// `under` is what the layers are composed over: `Some(base)` starts
     /// from the root fill with the desktop layer beneath the windows, while
-    /// `None` starts from whatever the back buffer already holds, which is
+    /// `None` starts from whatever `target` already holds, which is
     /// how a later segment of the same rectangle continues over an earlier
     /// one's (possibly blurred) result. `span` is a sub-slice of the
     /// rectangle's covering-window indices, or `None` for a range that does
@@ -4244,7 +4239,7 @@ impl Compositor {
         };
         // Both splits step the same number of rows over the same row span, so
         // band *i* owns the scan-out bytes of exactly the rows it composes.
-        let mut bands = target
+        let bands = target
             .surface(back, frost_plane)
             .row_bands_mut(top..bottom, per_band)
             .zip(frames)
@@ -4253,20 +4248,17 @@ impl Compositor {
                 frame,
                 work: BandWork::default(),
             });
-        if count <= 1 {
-            // One band is the whole rectangle: no vector, no dispatch, and the
-            // same per-row body a wide composite runs.
-            if let Some(mut only) = bands.next() {
-                compose_band(&shared, &mut only);
-                only.work.record(stats);
-            }
-            return;
-        }
-        let mut split: Vec<SpanBand<'_>> = bands.collect();
-        tairix_parallel::for_each(runner, &mut split, &|band| compose_band(&shared, band));
-        for band in &split {
-            band.work.record(stats);
-        }
+        let work = tairix_parallel::fold_drawn(
+            runner,
+            bands,
+            BandWork::default(),
+            &|mut band| {
+                compose_band(&shared, &mut band);
+                band.work
+            },
+            &BandWork::join,
+        );
+        work.record(stats);
     }
 
     /// Spread each composite's per-pixel work across `runner`'s participants.
@@ -4419,10 +4411,11 @@ struct SpanBand<'a> {
 }
 
 /// The scan-out bytes a segment's bands pair with: the frame's, a band's
-/// worth at a time, or none for a segment written to the frost plane.
+/// worth at a time, or none for each of a segment's bands written to the frost
+/// plane.
 enum FrameChunks<'a> {
     Frame(core::slice::ChunksMut<'a, u8>),
-    Absent,
+    Absent(usize),
 }
 
 impl<'a> Iterator for FrameChunks<'a> {
@@ -4431,10 +4424,23 @@ impl<'a> Iterator for FrameChunks<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             Self::Frame(chunks) => chunks.next().map(Some),
-            Self::Absent => Some(None),
+            Self::Absent(left) => {
+                *left = left.checked_sub(1)?;
+                Some(None)
+            }
         }
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let left = match self {
+            Self::Frame(chunks) => chunks.len(),
+            Self::Absent(left) => *left,
+        };
+        (left, Some(left))
+    }
 }
+
+impl ExactSizeIterator for FrameChunks<'_> {}
 
 /// The surface a composite writes.
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -4457,7 +4463,7 @@ impl Target {
 
 /// What composing one band cost, tallied in the band and folded into the frame's
 /// counters once it is done — so a band never touches shared state while it runs.
-#[derive(Default)]
+#[derive(Copy, Clone, Default)]
 struct BandWork {
     blended: u64,
     copied: u64,
@@ -4465,6 +4471,15 @@ struct BandWork {
 }
 
 impl BandWork {
+    /// What two bands cost between them.
+    fn join(self, other: Self) -> Self {
+        Self {
+            blended: self.blended.saturating_add(other.blended),
+            copied: self.copied.saturating_add(other.copied),
+            encoded: self.encoded.saturating_add(other.encoded),
+        }
+    }
+
     /// Fold this band's cost into the frame's counters.
     fn record(&self, stats: &mut FrameCounters) {
         stats.add_blended(self.blended);
@@ -4488,7 +4503,11 @@ fn frame_chunks(
             let region = frame_region(frame, rows.start, rows.end, stride)?;
             Some(FrameChunks::Frame(region.chunks_mut(band_bytes)))
         }
-        Target::Plane => Some(FrameChunks::Absent),
+        Target::Plane => {
+            let rows = usize::try_from(rows.end.saturating_sub(rows.start)).ok()?;
+            let per_band = usize::try_from(per_band.max(1)).ok()?;
+            Some(FrameChunks::Absent(rows.div_ceil(per_band)))
+        }
     }
 }
 

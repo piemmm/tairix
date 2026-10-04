@@ -1,4 +1,5 @@
 use super::*;
+use crate::prototype::point;
 use crate::vector::Ray;
 
 /// Where a ray straight down from high over `(x, z)` meets `prototype`, and
@@ -14,7 +15,7 @@ fn top_at(prototype: &Prototype, (x, z): (f64, f64)) -> Option<f64> {
 fn a_fallen_trunk_lies_along_the_ground_narrowing_toward_its_crown() {
     for seed in 0..6u64 {
         let (length, radius) = (9.0, 0.35);
-        let log = log(length, radius, (0, seed % 2 == 0), seed)
+        let log = log(length, radius, (0, 1, seed % 2 == 0), seed)
             .expect("a log")
             .whole();
         let bounds = log.bounds();
@@ -45,11 +46,11 @@ fn a_fallen_trunk_lies_along_the_ground_narrowing_toward_its_crown() {
 #[test]
 fn a_windthrown_trunk_carries_its_roots_and_a_snapped_one_ends_in_splinters() {
     let radius = 0.4;
-    let thrown = log(8.0, radius, (0, true), 3)
+    let thrown = log(8.0, radius, (0, 1, true), 3)
         .expect("a log")
         .whole()
         .bounds();
-    let snapped = log(8.0, radius, (0, false), 3)
+    let snapped = log(8.0, radius, (0, 1, false), 3)
         .expect("a log")
         .whole()
         .bounds();
@@ -65,6 +66,52 @@ fn a_windthrown_trunk_carries_its_roots_and_a_snapped_one_ends_in_splinters() {
         snapped.max.y < 2.2 * radius + 8.0 * 0.4 * 2.0,
         "{snapped:?}"
     );
+}
+
+/// A trunk breaks torn, not rounded: looking back along it from beyond
+/// either broken end a ray meets the torn wood of the break or the fibres
+/// bristling from it, never a rounded cap of bark, and the fibres stand out
+/// past the end the trunk itself reaches.
+#[test]
+fn a_broken_end_is_torn_wood_bristling_with_fibres() {
+    let (length, radius) = (6.0, 0.25);
+    for seed in 0..4u64 {
+        let log = log(length, radius, (0, 1, false), seed)
+            .expect("a log")
+            .whole();
+        let woods = log
+            .parts()
+            .iter()
+            .filter(|part| match part {
+                Part::Facet(facet) => facet.material == Some(1),
+                Part::Tube(tube) => tube.material == 1,
+                Part::Leaf(_) => false,
+            })
+            .count();
+        assert!(
+            woods > 2 * (3 * BREAK_SIDES as usize + FIBRES.0 as usize),
+            "{seed}: {woods} parts of torn wood"
+        );
+        // The trunk's segments come first, foot to crown.
+        let segment = |index: usize| match log.parts().get(index) {
+            Some(Part::Tube(tube)) => (point(tube.a), point(tube.b)),
+            _ => panic!("{seed}: segment {index} is no tube"),
+        };
+        let ((foot, second), (before, tip)) = (segment(0), segment(LOG_SEGMENTS as usize - 1));
+        for (end, out) in [
+            (foot, (foot - second).normalized()),
+            (tip, (tip - before).normalized()),
+        ] {
+            let hit = log
+                .intersect(&Ray::new(end + out * 3.0, -out), 1e-9, 10.0)
+                .expect("the break is met");
+            assert_eq!(hit.material, Some(1), "{seed}: torn wood, not bark");
+        }
+        assert!(
+            log.bounds().min.z < foot.z - 0.2 * radius,
+            "{seed}: fibres past its foot"
+        );
+    }
 }
 
 #[test]

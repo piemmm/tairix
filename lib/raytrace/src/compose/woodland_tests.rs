@@ -3,7 +3,7 @@ extern crate std;
 use alloc::vec::Vec;
 
 use super::*;
-use crate::compose::{planted_at, Composition, Recipe, Setting, Stage};
+use crate::compose::{planted_at, Composition, Job, Progress, Recipe, Setting, Stage};
 use crate::detail::Detail;
 use crate::shape::Shape;
 
@@ -590,4 +590,38 @@ fn a_wood_with_nothing_growing_beneath_it_still_roofs_the_air_and_strews_its_flo
         matches!(&material.pigment, crate::pigment::Pigment::Ground(ground) if ground.floor.is_some())
     });
     assert!(floored, "and strewn with what the crowns shed");
+}
+
+/// A stream's growing reports its work rising steadily through its woods,
+/// its bed and the flow over it, and its water's edge, never falling back.
+#[test]
+fn a_streams_growing_never_reports_less_done() {
+    let mut composition =
+        Composition::new(Setting::Stream, 1, (64, 36), Detail::Simple).expect("composes");
+    let runner = tairix_parallel::Threaded::new(8);
+    let mut planting = loop {
+        let job = composition.jobs.pop_front().expect("work remains");
+        if let Job::Plant(planting) = job {
+            break planting;
+        }
+        if let Progress::Again(unfinished) = composition.run(job, &runner).expect("runs") {
+            composition.jobs.push_front(unfinished);
+        }
+    };
+    let mut last = planting.growing.done();
+    let mut steps = 0;
+    while !planting
+        .growing
+        .step(&mut composition.stage, (&planting.land, &runner))
+        .expect("grows")
+    {
+        let now = planting.growing.done();
+        assert!(
+            now >= last - 1e-12,
+            "step {steps}: {now} fell back from {last}"
+        );
+        last = now;
+        steps += 1;
+    }
+    assert!(steps > 10, "grown in {steps} steps");
 }

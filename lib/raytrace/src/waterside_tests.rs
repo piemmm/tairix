@@ -1,6 +1,6 @@
 //! Host tests of the water's edge's plants: each patch stands within its
-//! square and its plants' reach, made in its own materials, floating flat
-//! or rising as its plant does, and drawn from its seed alone.
+//! square and its plants' reach, made in its own materials, floating flat,
+//! streaming or rising as its plant does, and drawn from its seed alone.
 
 extern crate std;
 
@@ -16,11 +16,12 @@ const MARSH: Marsh = Marsh {
     hearts: 4,
 };
 
-const MARGINS: [Margin; 4] = [
+const MARGINS: [Margin; 5] = [
     Margin::Reed,
     Margin::Reedmace,
     Margin::Lily,
     Margin::Pondweed,
+    Margin::Crowfoot,
 ];
 
 const SEASONS: [Season; 4] = [
@@ -54,6 +55,8 @@ fn reach(margin: Margin) -> (f64, (f64, f64)) {
         // A pad's box is the square about its circle, turned.
         Margin::Lily => (0.23, (-0.006, 0.1)),
         Margin::Pondweed => (0.15, (0.0, 0.009)),
+        // Its stems stream a metre and more down the current.
+        Margin::Crowfoot => (1.3, (-0.07, 0.02)),
     }
 }
 
@@ -104,6 +107,10 @@ fn a_patch_fits_the_room_it_takes_for_its_parts() {
             }
         }
     }
+    // Every crowfoot plant is made alike and one in eight flowers once, so a
+    // patch of a whole number of eights in flower takes all the room.
+    let crowfoot = grown(Margin::Crowfoot, (0.75, 64), Season::Summer, 2);
+    assert_eq!(crowfoot.parts().len(), most_parts(Margin::Crowfoot, 64));
 }
 
 #[test]
@@ -112,9 +119,9 @@ fn a_patch_is_made_in_its_marshs_materials_alone() {
         let mut materials: Vec<u16> = grown(margin, (3.75, 200), season, 4)
             .parts()
             .iter()
-            .map(|part| match part {
-                Part::Tube(tube) => tube.material,
-                Part::Leaf(blade) => blade.material,
+            .filter_map(|part| match part {
+                Part::Tube(tube) => Some(tube.material),
+                Part::Leaf(blade) => Some(blade.material),
                 Part::Facet(facet) => facet.material,
             })
             .collect();
@@ -135,6 +142,41 @@ fn a_patch_is_made_in_its_marshs_materials_alone() {
         "only its pads"
     );
     assert_eq!(made(Margin::Pondweed, Season::Summer), [2]);
+    assert_eq!(
+        made(Margin::Crowfoot, Season::Summer),
+        [1, 2, 3, 4],
+        "stems, threads, petals and hearts"
+    );
+    assert_eq!(
+        made(Margin::Crowfoot, Season::Autumn { fallen: 80 }),
+        [1, 2],
+        "only its stems and threads"
+    );
+}
+
+/// A crowfoot's stems stream down the current, its patch's `z`, beneath the
+/// water, and its flowers stand on it.
+#[test]
+fn crowfoot_streams_down_the_current_beneath_the_surface() {
+    let patch = grown(Margin::Crowfoot, (0.75, 24), Season::Summer, 3);
+    let (mut stems, mut flowers) = (0, 0);
+    for part in patch.parts() {
+        match part {
+            Part::Tube(tube) if tube.material == MARSH.stems => {
+                let (a, b) = (point(tube.a), point(tube.b));
+                assert!(b.z > a.z, "streams down the current: {a:?} {b:?}");
+                assert!(a.y < 0.0 && b.y < 0.0, "beneath the surface");
+                stems += 1;
+            }
+            Part::Leaf(blade) if blade.material == MARSH.heads => {
+                assert!(blade.base[1] > 0.0, "on the water");
+                flowers += 1;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(stems, 24 * usize::from(STREAMERS * STREAMER_PIECES));
+    assert!(flowers > 0 && flowers % usize::from(BLOSSOM - 1) == 0);
 }
 
 #[test]

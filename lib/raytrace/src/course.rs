@@ -14,16 +14,25 @@ use tairix_util::{fallible, mathf};
 use crate::vector::real;
 
 /// One vertex of a course.
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub(crate) struct Mark {
     pub(crate) x: f64,
     pub(crate) z: f64,
-    /// The height the course runs at here: a river's surface, a road's bed.
+    /// The height the course runs at here: a river's brim, a road's bed.
     pub(crate) level: f64,
     /// Its breadth, bank to bank or verge to verge.
     pub(crate) width: f64,
     /// How far below its level its bed lies: a river's depth.
     pub(crate) depth: f64,
+    /// What only a river's marks carry, nought along a road or a path: how
+    /// far its water has run to come here from the divide above its head;
+    /// how many units of pool and riffle it has run through since its head;
+    /// how sharply it bends here, per metre, toward the side `Nearest`
+    /// counts positive; and how steeply its brim falls.
+    pub(crate) run: f64,
+    pub(crate) phase: f64,
+    pub(crate) turn: f64,
+    pub(crate) fall: f64,
 }
 
 /// The nearest point of a course to a place.
@@ -36,11 +45,18 @@ pub(crate) struct Nearest {
     /// going downstream.
     pub(crate) distance: f64,
     pub(crate) side: f64,
-    /// The course's level, breadth and depth there, blended between its
-    /// vertices.
+    /// The course's level, breadth, depth, and its river's run, phase, turn
+    /// and fall there, blended between its vertices.
     pub(crate) level: f64,
     pub(crate) width: f64,
     pub(crate) depth: f64,
+    pub(crate) run: f64,
+    pub(crate) phase: f64,
+    pub(crate) turn: f64,
+    pub(crate) fall: f64,
+    /// Which way the course runs there, as a unit step in x and z:
+    /// downstream along a river.
+    pub(crate) toward: (f64, f64),
 }
 
 /// How far from a course a point may ask after it: `per_width` times the
@@ -108,15 +124,8 @@ impl Courses {
         }
         for course in courses.iter().filter(|course| course.len() >= 2) {
             starts.push(u32::try_from(marks.len()).ok()?);
-            let mut travelled = 0.0;
-            for (index, &mark) in course.iter().enumerate() {
-                if index > 0 {
-                    let last = course[index - 1];
-                    travelled += mathf::hypot(mark.x - last.x, mark.z - last.z);
-                }
-                marks.push(mark);
-                along.push(travelled);
-            }
+            marks.extend_from_slice(course);
+            along.extend(travelled(course));
         }
         starts.push(u32::try_from(marks.len()).ok()?);
         let mut courses = Self {
@@ -141,6 +150,21 @@ impl Courses {
             return &[];
         };
         self.marks.get(start as usize..end as usize).unwrap_or(&[])
+    }
+
+    /// Course `index` as it runs `along` its length from its first mark,
+    /// blended between the marks either side and held at its ends; `None`
+    /// for a course with no marks.
+    pub(crate) fn at(&self, index: usize, along: f64) -> Option<Mark> {
+        let (start, end) = (
+            *self.starts.get(index)? as usize,
+            *self.starts.get(index + 1)? as usize,
+        );
+        blended(
+            self.marks.get(start..end)?,
+            self.along.get(start..end)?,
+            along,
+        )
     }
 
     /// The first mark of every segment: each mark but its course's last.
@@ -262,7 +286,8 @@ impl Courses {
             else {
                 continue;
             };
-            let along = self.along.get(mark).copied().unwrap_or(0.0) + share * mathf::sqrt(length2);
+            let length = mathf::sqrt(length2);
+            let along = self.along.get(mark).copied().unwrap_or(0.0) + share * length;
             let blend = |from: f64, to: f64| from + (to - from) * share;
             best = Some(Nearest {
                 course,
@@ -272,6 +297,15 @@ impl Courses {
                 level: blend(here.level, next.level),
                 width: blend(here.width, next.width),
                 depth: blend(here.depth, next.depth),
+                run: blend(here.run, next.run),
+                phase: blend(here.phase, next.phase),
+                turn: blend(here.turn, next.turn),
+                fall: blend(here.fall, next.fall),
+                toward: if length > 0.0 {
+                    (dx / length, dz / length)
+                } else {
+                    (0.0, 1.0)
+                },
             });
         }
         best
@@ -305,6 +339,37 @@ pub(crate) fn smoothed(marks: &[Mark], rounds: u32) -> Option<Vec<Mark>> {
 }
 
 /// The mark `t` of the way from `a` to `b`.
+/// How far along `course` each of its marks lies from its first.
+pub(crate) fn travelled(course: &[Mark]) -> impl Iterator<Item = f64> + '_ {
+    let mut total = 0.0;
+    let mut last: Option<&Mark> = None;
+    course.iter().map(move |mark| {
+        if let Some(last) = last {
+            total += mathf::hypot(mark.x - last.x, mark.z - last.z);
+        }
+        last = Some(mark);
+        total
+    })
+}
+
+/// `marks`, lying `along` their course, as they run `at` that far along it:
+/// blended between the marks either side and held at its ends; `None` for
+/// no marks.
+pub(crate) fn blended(marks: &[Mark], along: &[f64], at: f64) -> Option<Mark> {
+    let last = along.len().min(marks.len()).checked_sub(1)?;
+    let next = along
+        .partition_point(|&mark| mark <= at)
+        .clamp(1, last.max(1));
+    let (a, b) = (*marks.get(next - 1)?, *marks.get(next.min(last))?);
+    let (from, to) = (*along.get(next - 1)?, *along.get(next.min(last))?);
+    let t = if to > from {
+        ((at - from) / (to - from)).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    Some(between(a, b, t))
+}
+
 pub(crate) fn between(a: Mark, b: Mark, t: f64) -> Mark {
     let blend = |from: f64, to: f64| from + (to - from) * t;
     Mark {
@@ -313,6 +378,10 @@ pub(crate) fn between(a: Mark, b: Mark, t: f64) -> Mark {
         level: blend(a.level, b.level),
         width: blend(a.width, b.width),
         depth: blend(a.depth, b.depth),
+        run: blend(a.run, b.run),
+        phase: blend(a.phase, b.phase),
+        turn: blend(a.turn, b.turn),
+        fall: blend(a.fall, b.fall),
     }
 }
 

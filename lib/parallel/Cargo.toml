@@ -1,6 +1,6 @@
 [package]
 name = "tairix-parallel"
-description = "TAIRiX bounded data-parallel work engine: the JobRunner contract a pass expresses its independent work through, the allocation-free index-to-element erasure (for_each), the one band-split policy, and — behind the default `pool` feature — the process-wide fork-join worker pool over lib/rt threads whose workers park on a futex and never spin (plans/THREADS.md)."
+description = "TAIRiX bounded data-parallel work engine: the JobRunner contract a pass expresses its independent work through, the allocation-free index-to-element erasure (for_each) and drawn-piece dispatch (for_each_drawn), the one band-split policy, and — behind the default `pool` feature — the process-wide fork-join worker pool over lib/rt threads whose workers park on a futex and never spin (plans/THREADS.md)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -27,6 +27,9 @@ pool = ["dep:tairix-rt", "dep:tairix-abi"]
 test-util = []
 
 [dependencies]
+# The lock participants draw `for_each_drawn` pieces through, held only for the
+# draw.
+tairix-sync = { path = "../sync", version = "=0.0.0" }
 # The thread and futex primitives the pool is built on: a worker is a
 # `lib/rt` thread, and a parked worker waits on a futex word rather than
 # spinning.

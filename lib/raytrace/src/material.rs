@@ -274,8 +274,8 @@ pub(crate) enum Relief {
     /// Waves a wind raises on a level surface: water, or a dune's ripples.
     Waves(Waves),
     /// An even, fine unevenness in every direction: hammered metal, honed
-    /// stone, snow. `depth` is how far it tilts the normal, `scale` how fine
-    /// it is.
+    /// stone, snow, ground. `depth` is the most it tilts the normal, all its
+    /// octaves together, and `scale` how fine the coarsest of them is.
     Grain { depth: f64, scale: f64, seed: u32 },
     /// The ridges and furrows of a bark, `depth` metres deep, over its limb.
     Bark { bark: Bark, depth: f64 },
@@ -321,16 +321,7 @@ impl Relief {
         };
         match self {
             Self::Waves(waves) => waves.tilt(normal, p, bump.stretch),
-            &Self::Grain { depth, scale, seed } => {
-                let q = p * scale;
-                let jolt = Vec3::new(
-                    noise3(q, seed),
-                    noise3(q, seed ^ 0x2c1b_3c6d),
-                    noise3(q, seed ^ 0x297a_2d39),
-                );
-                let across = jolt - normal * jolt.dot(normal);
-                tilted((normal + across * depth).normalized())
-            }
+            &Self::Grain { depth, scale, seed } => grained(normal, bump, (depth, scale, seed)),
             Self::Bark { bark, depth } => {
                 // The height's slope along the limb and round it is read a
                 // millimetre apart.
@@ -364,6 +355,53 @@ impl Relief {
     }
 }
 
+/// How many octaves a grain's relief runs to, each this many times finer than
+/// the last and this share as steep: the coarsest `scale` across, the finest
+/// about a millimetre on ground or stone.
+const GRAIN_OCTAVES: u32 = 5;
+const GRAIN_LACUNARITY: f64 = 2.7;
+const GRAIN_GAIN: f64 = 0.62;
+/// How steep all a grain's octaves stand together against its first.
+const GRAIN_SUM: f64 = {
+    let (mut sum, mut steep, mut octave) = (0.0, 1.0, 0);
+    while octave < GRAIN_OCTAVES {
+        sum += steep;
+        steep *= GRAIN_GAIN;
+        octave += 1;
+    }
+    sum
+};
+
+/// `normal` tilted by grain at most `depth` steep, from `scale` through its
+/// finer octaves, each kept as far as `bump`'s footprint resolves it: what
+/// it cannot resolve lends its slope variance to the surface's roughness
+/// instead, so the grain settles to its mean in relief as in colour.
+fn grained(normal: Vec3, bump: &Bump, (depth, scale, seed): (f64, f64, u32)) -> Tilt {
+    let (mut across, mut unresolved) = (Vec3::ZERO, 0.0);
+    let (mut frequency, mut steep) = (scale, depth / GRAIN_SUM);
+    for octave in 0..GRAIN_OCTAVES {
+        // A noise's slope spreads about a third of its steepness squared.
+        let variance = steep * steep / 3.0;
+        let kept = 1.0 - smoothstep(0.25, 1.0, bump.stretch * frequency);
+        if kept > 0.0 {
+            let (q, salt) = (bump.p * frequency, seed ^ octave.wrapping_mul(0x9e37_79b9));
+            let jolt = Vec3::new(
+                noise3(q, salt),
+                noise3(q, salt ^ 0x2c1b_3c6d),
+                noise3(q, salt ^ 0x297a_2d39),
+            );
+            across += (jolt - normal * jolt.dot(normal)) * (steep * kept);
+        }
+        unresolved += variance * (1.0 - kept * kept);
+        frequency *= GRAIN_LACUNARITY;
+        steep *= GRAIN_GAIN;
+    }
+    Tilt {
+        normal: (normal + across).normalized(),
+        unresolved,
+    }
+}
+
 /// A microfacet roughness widened by the slope variance of relief too fine to
 /// tilt the normal itself: GGX's width squared is near enough the slope
 /// variance a Beckmann surface of that width holds, so the two add there.
@@ -375,6 +413,11 @@ pub(crate) fn widened(roughness: f64, unresolved: f64) -> f64 {
 /// The most bark's relief tilts a normal, as the tangent of the angle: a bump
 /// any steeper would light the walls of a furrow its own sides hide.
 const STEEPEST: f64 = 0.7;
+
+/// Which of a water grid's attributes holds the foam its flow carries,
+/// where it carries any: what a stream sheds behind its stones and where its
+/// waves break.
+pub(crate) const CARRIED_FOAM: usize = 0;
 
 /// Where breaking water turns to foam.
 #[derive(Copy, Clone, Debug)]

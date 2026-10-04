@@ -1,6 +1,6 @@
 //! Plants of the water's edge: reeds and reedmace standing in the shallows
-//! and along wet banks, and water lilies and pondweed floating on still
-//! water.
+//! and along wet banks, water lilies and pondweed floating on still water,
+//! and water-crowfoot streaming in running water.
 //!
 //! Each is grown as a square patch of its plants, so one prototype stands for
 //! a clump near the eye and another for a whole bed far off, the squares
@@ -33,6 +33,10 @@ pub(crate) enum Margin {
     Lily,
     /// Floating pondweed: small oval leaves lying on the water in rosettes.
     Pondweed,
+    /// Water-crowfoot: long stems streaming down the current just beneath
+    /// the surface, tufted with thread-fine leaves, and in spring and
+    /// summer white flowers held on the water.
+    Crowfoot,
 }
 
 /// The materials a patch is made in: its stems; its leaves or pads; its
@@ -87,6 +91,11 @@ pub(crate) fn patch(
                 grower.lily(at, key, flowers)?;
             }
             Margin::Pondweed => grower.pondweed(at, key)?,
+            Margin::Crowfoot => {
+                let flowers = matches!(season, Season::Spring | Season::Summer)
+                    && (u32::from(plant) + first) % flowering == 0;
+                grower.crowfoot(at, key, flowers)?;
+            }
         }
     }
     Prototype::building(grower.parts, Vec::new(), Vec::new())
@@ -100,6 +109,10 @@ fn most_parts(margin: Margin, count: u16) -> usize {
         Margin::Reedmace => count * usize::from(3 + u16::from(MACE_PIECES) * MACE_LEAVES),
         Margin::Lily => count + count.div_ceil(usize::from(FLOWERING_EVERY)) * usize::from(FLOWER),
         Margin::Pondweed => count * usize::from(ROSETTE),
+        Margin::Crowfoot => {
+            count * usize::from(STREAMERS * STREAMER_PIECES * (1 + TUFT))
+                + count.div_ceil(usize::from(FLOWERING_EVERY)) * usize::from(BLOSSOM)
+        }
     }
 }
 
@@ -112,6 +125,13 @@ const PLUME: u16 = 10;
 const MACE_LEAVES: u16 = 8;
 const MACE_PIECES: u8 = 4;
 const ROSETTE: u16 = 5;
+/// The stems a crowfoot plant streams, the pieces each runs in, the leaves
+/// each piece's tuft spreads, and the parts of its flower: five petals and
+/// a heart.
+const STREAMERS: u16 = 3;
+const STREAMER_PIECES: u16 = 4;
+const TUFT: u16 = 4;
+const BLOSSOM: u16 = 6;
 /// A lily flower's whorls, outermost first — its green sepals, then its
 /// petals — each as its count, how far it rises from the water in radians,
 /// and its length against the flower's size.
@@ -121,7 +141,7 @@ const WHORLS: [(u16, f64, f64); 4] = [
     (8, 0.75, 0.85),
     (6, 1.1, 0.65),
 ];
-/// One lily in so many flowers in summer.
+/// One lily, or crowfoot, in so many flowers in its season.
 const FLOWERING_EVERY: u16 = 8;
 /// The parts a lily's flower takes: its whorls and its heart.
 const FLOWER: u16 = {
@@ -413,6 +433,93 @@ impl Grower {
         self.tube(
             (at + Vec3::UP * (0.9 * heart), at + Vec3::UP * (1.3 * heart)),
             (heart, 0.8 * heart),
+            hearts,
+            part(key, 0),
+        )
+    }
+
+    /// A water-crowfoot plant rising at `at`: its stems streaming down the
+    /// current, the patch's `z`, just beneath the surface and swaying from
+    /// side to side, a tuft of thread-fine leaves at each joint, and, if
+    /// `flowering`, a white flower held on the water at a stem's end.
+    fn crowfoot(&mut self, at: Vec3, key: u32, flowering: bool) -> Option<()> {
+        let stems = self.marsh.stems;
+        let mut index = 0;
+        for streamer in 0..STREAMERS {
+            let length = self.range(0.5, 1.1) * self.stature;
+            let piece = length / f64::from(STREAMER_PIECES);
+            let mut point = at
+                + Vec3::new(
+                    self.range(-0.06, 0.06),
+                    -self.range(0.015, 0.045),
+                    self.range(-0.06, 0.06),
+                );
+            let mut sway = self.range(-0.25, 0.25);
+            for _ in 0..STREAMER_PIECES {
+                sway = (sway + self.range(-0.3, 0.3)).clamp(-0.6, 0.6);
+                let axis = Vec3::new(sway, 0.0, 1.0).normalized();
+                let next = point + axis * piece;
+                index += 1;
+                self.tube((point, next), (0.0018, 0.0014), stems, part(key, index))?;
+                for _ in 0..TUFT {
+                    let spread = Vec3::new(self.range(-0.7, 0.7), self.range(-0.08, 0.02), 0.0);
+                    let out = (axis + spread).normalized();
+                    let across = Vec3::UP.cross(out).normalized();
+                    let normal = across.cross(out).normalized();
+                    let thread = self.range(0.04, 0.08);
+                    index += 1;
+                    self.push(Part::Leaf(Blade {
+                        base: singles(next),
+                        normal: singles(if normal.y < 0.0 { -normal } else { normal }),
+                        axis: singles(out),
+                        length: single(thread),
+                        width: single(0.0025),
+                        outline: Outline::Strap { from: 0, to: 255 },
+                        fold: 0.0,
+                        material: self.marsh.leaves,
+                        key: part(key, index),
+                    }))?;
+                }
+                point = next;
+            }
+            if flowering && streamer == 0 {
+                self.blossom(
+                    Vec3::new(point.x, at.y + 0.004, point.z),
+                    part(key, 1 + index),
+                )?;
+            }
+        }
+        Some(())
+    }
+
+    /// A crowfoot's flower held on the water at `at`: five white petals
+    /// spread almost flat about a small yellow heart.
+    fn blossom(&mut self, at: Vec3, key: u32) -> Option<()> {
+        let size = self.range(0.009, 0.013);
+        let turn = TAU * self.unit();
+        for petal in 0..BLOSSOM - 1 {
+            let around = turn + TAU * f64::from(petal) / f64::from(BLOSSOM - 1);
+            let out = Vec3::new(mathf::cos(around), 0.0, mathf::sin(around));
+            let axis = (out + Vec3::UP * 0.15).normalized();
+            let across = Vec3::UP.cross(out).normalized();
+            let normal = across.cross(axis).normalized();
+            self.push(Part::Leaf(Blade {
+                base: singles(at),
+                normal: singles(if normal.y < 0.0 { -normal } else { normal }),
+                axis: singles(axis),
+                length: single(size),
+                width: single(0.45 * size),
+                outline: Outline::Ovate { teeth: 0 },
+                fold: 0.2,
+                material: self.marsh.heads,
+                key: part(key, u32::from(petal) + 1),
+            }))?;
+        }
+        let heart = 0.18 * size;
+        let hearts = self.marsh.hearts;
+        self.tube(
+            (at + Vec3::UP * heart, at + Vec3::UP * (1.6 * heart)),
+            (heart, 0.7 * heart),
             hearts,
             part(key, 0),
         )

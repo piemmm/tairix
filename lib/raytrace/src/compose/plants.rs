@@ -22,7 +22,7 @@ use crate::pigment::{Blades, Crowd, Foliage, Pigment};
 use crate::shade::{Rect, Sampling, Shade, Shades};
 use crate::shape::Shape;
 use crate::tree::{Envelope, Leafing, Level, Season, Species, Stock};
-use crate::vector::{real, Frame, Pose, Vec3};
+use crate::vector::{real, share, Frame, Pose, Vec3};
 
 /// The kinds of tree and shrub a scene can grow.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -220,25 +220,8 @@ impl Dead {
         dice: &mut Dice,
         (kind, season): (Kind, Season),
     ) -> Option<Self> {
-        let pattern = dead_bark(kind, dice.seed());
-        let snow = if season == Season::Winter { 0.85 } else { 0.0 };
-        let bark = stage.material(
-            Material::new(
-                Pigment::Bark(Bark {
-                    snow,
-                    ..pattern.clone()
-                }),
-                Finish::Coated { roughness: 0.95 },
-            )
-            .with_relief(Relief::Bark {
-                bark: pattern,
-                depth: bark_depth(kind),
-            }),
-        )?;
-        let wood = stage.material(Material::new(
-            Pigment::Solid(rgb(0xA4_98_80)),
-            Finish::Matte,
-        ))?;
+        let bark = dead_bark_material(stage, dice, (kind, season))?;
+        let wood = dead_wood_material(stage)?;
         let (bark_stock, wood_stock) = (u16::try_from(bark).ok()?, u16::try_from(wood).ok()?);
         let species = species(kind);
         let typical = f64::midpoint(species.height.0, species.height.1);
@@ -254,6 +237,7 @@ impl Dead {
                 length,
                 radius,
                 bark: bark_stock,
+                wood: wood_stock,
                 thrown: dice.chance(0.5),
                 seed: dice.wide(),
             };
@@ -293,20 +277,164 @@ impl Dead {
         pose: Pose,
         key: u32,
     ) -> Option<()> {
-        stage
-            .add(
-                Shape::Instance {
-                    prototype,
-                    pose,
-                    scale,
-                    key,
-                },
-                self.bark,
-                pose,
-                false,
-            )
-            .map(|_| ())
+        lay_dead(stage, self.bark, (prototype, scale), (pose, key))
     }
+}
+
+/// How many branches, and trunks, of a kind a stream's floods leave in it to
+/// choose among.
+const DRIFT_BRANCHES: usize = 4;
+const DRIFT_TRUNKS: usize = 2;
+
+/// What a stream's floods leave of a kind: the branches they broke off and
+/// carried and a trunk or two undercut from the bank, their bark weathered
+/// and mossed.
+#[derive(Copy, Clone, Debug)]
+pub(super) struct Drift {
+    branches: [Piece; DRIFT_BRANCHES],
+    trunks: [Piece; DRIFT_TRUNKS],
+    bark: usize,
+}
+
+/// A piece of drift: its prototype, its length, and how thick at its foot.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub(super) struct Piece {
+    pub(super) prototype: u32,
+    pub(super) length: f64,
+    pub(super) radius: f64,
+}
+
+impl Drift {
+    /// `kind`'s drift in `season`, to be grown before the scene is traced;
+    /// `None` when the heap will not hold it.
+    pub(super) fn new(
+        stage: &mut Stage,
+        dice: &mut Dice,
+        (kind, season): (Kind, Season),
+    ) -> Option<Self> {
+        let bark = dead_bark_material(stage, dice, (kind, season))?;
+        let (stock, wood) = (
+            u16::try_from(bark).ok()?,
+            u16::try_from(dead_wood_material(stage)?).ok()?,
+        );
+        let species = species(kind);
+        let typical = f64::midpoint(species.height.0, species.height.1);
+        let girth = typical * species.girth;
+        let mut log = |stage: &mut Stage, (length, radius): (f64, f64)| {
+            let recipe = Recipe::Log {
+                length,
+                radius,
+                bark: stock,
+                wood,
+                thrown: false,
+                seed: dice.wide(),
+            };
+            Some(Piece {
+                prototype: stage.plan(&recipe)?,
+                length,
+                radius,
+            })
+        };
+        let unset = Piece {
+            prototype: 0,
+            length: 0.0,
+            radius: 0.0,
+        };
+        let mut branches = [unset; DRIFT_BRANCHES];
+        for (variant, branch) in branches.iter_mut().enumerate() {
+            let grown = share(variant, DRIFT_BRANCHES - 1);
+            *branch = log(stage, (0.8 + 2.4 * grown, 0.025 + 0.065 * grown))?;
+        }
+        let mut trunks = [unset; DRIFT_TRUNKS];
+        for (variant, trunk) in trunks.iter_mut().enumerate() {
+            let grown = share(variant, DRIFT_TRUNKS - 1);
+            *trunk = log(
+                stage,
+                (
+                    typical * (0.35 + 0.2 * grown),
+                    girth * (0.45 + 0.25 * grown),
+                ),
+            )?;
+        }
+        Some(Self {
+            branches,
+            trunks,
+            bark,
+        })
+    }
+
+    /// A trunk if `trunk`, else a branch, drawn from `dice`.
+    pub(super) fn piece(&self, dice: &mut Dice, trunk: bool) -> Option<Piece> {
+        let pieces: &[Piece] = if trunk { &self.trunks } else { &self.branches };
+        let last = u32::try_from(pieces.len().checked_sub(1)?).ok()?;
+        pieces
+            .get(usize::try_from(dice.count(0, last)).ok()?)
+            .copied()
+    }
+
+    /// Lay branch or trunk `prototype`, `scale` times its size, posed at
+    /// `pose`, set apart from the rest by `key`.
+    pub(super) fn lay(
+        &self,
+        stage: &mut Stage,
+        (prototype, scale): (u32, f64),
+        (pose, key): (Pose, u32),
+    ) -> Option<()> {
+        lay_dead(stage, self.bark, (prototype, scale), (pose, key))
+    }
+}
+
+/// The weathered, mossed bark `kind`'s dead wear in `season`, as a material
+/// of `stage`'s; `None` when the stage will not hold it.
+fn dead_bark_material(
+    stage: &mut Stage,
+    dice: &mut Dice,
+    (kind, season): (Kind, Season),
+) -> Option<usize> {
+    let pattern = dead_bark(kind, dice.seed());
+    let snow = if season == Season::Winter { 0.85 } else { 0.0 };
+    stage.material(
+        Material::new(
+            Pigment::Bark(Bark {
+                snow,
+                ..pattern.clone()
+            }),
+            Finish::Coated { roughness: 0.95 },
+        )
+        .with_relief(Relief::Bark {
+            bark: pattern,
+            depth: bark_depth(kind),
+        }),
+    )
+}
+
+/// The wood where dead wood broke or was sawn, weathered grey, as a
+/// material of `stage`'s; `None` when the stage will not hold it.
+fn dead_wood_material(stage: &mut Stage) -> Option<usize> {
+    stage.material(Material::new(Pigment::Solid(rgb(0x7E_7464)), Finish::Matte))
+}
+
+/// Lay dead wood `prototype`, `scale` times its size, in `bark`, posed at
+/// `pose` and set apart from the rest by `key`.
+fn lay_dead(
+    stage: &mut Stage,
+    bark: usize,
+    (prototype, scale): (u32, f64),
+    (pose, key): (Pose, u32),
+) -> Option<()> {
+    stage
+        .add(
+            Shape::Instance {
+                prototype,
+                pose,
+                scale,
+                key,
+            },
+            bark,
+            pose,
+            false,
+        )
+        .map(|_| ())
 }
 
 /// The colours of what `kind` sheds on a wood's floor, `age` from this

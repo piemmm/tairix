@@ -37,6 +37,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+#[cfg(test)]
 extern crate alloc;
 
 pub mod client;

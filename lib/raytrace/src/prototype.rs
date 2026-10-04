@@ -1,8 +1,8 @@
 //! Prototypes: a tree, a rock or a bush built once in its own frame and
 //! placed as many times as a scene wants it.
 //!
-//! A prototype is a list of parts — tapering limbs with rounded ends, flat
-//! leaves cut to an outline, and the triangles of a mesh — and a hierarchy
+//! A prototype is a list of parts — tapering limbs with rounded or open ends,
+//! flat leaves cut to an outline, and the triangles of a mesh — and a hierarchy
 //! over them, so a ray entering an instance tests the few parts along its
 //! path. Its parts are stored in single precision, since a forest's worth of
 //! leaves is what a scene holds most of; they are met in double.
@@ -18,7 +18,8 @@ use crate::vector::{single, singles, Ray, Vec3};
 
 /// A limb: a tube tapering from radius `radii[0]` at `a` to `radii[1]` at
 /// `b`, each end rounded by a sphere of its radius, so a chain of them bends
-/// without a seam.
+/// without a seam — or left open, for something else to close, where it
+/// broke.
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct Tube {
     pub(crate) a: [f32; 3],
@@ -32,6 +33,8 @@ pub(crate) struct Tube {
     /// world alone would start it: toward the side its stem carries along
     /// it, so a bending stem's segments agree on it.
     turn: f32,
+    /// Which of its ends are open rather than rounded.
+    open: [bool; 2],
 }
 
 impl Tube {
@@ -60,7 +63,13 @@ impl Tube {
             material,
             key,
             turn: single(turn),
+            open: [false; 2],
         }
+    }
+
+    /// The same limb with each end `open` where it is, rather than rounded.
+    pub(crate) const fn opened(self, open: [bool; 2]) -> Self {
+        Self { open, ..self }
     }
 }
 
@@ -93,11 +102,13 @@ pub(crate) struct Blade {
     pub(crate) key: u32,
 }
 
-/// A triangle of the prototype's vertices, shaded by their normals blended.
+/// A triangle of the prototype's vertices, shaded by their normals blended,
+/// in its own material, or in whatever its placing is made in where it has
+/// none.
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct Facet {
     pub(crate) corners: [u32; 3],
-    pub(crate) material: u16,
+    pub(crate) material: Option<u16>,
 }
 
 /// One part of a prototype.
@@ -317,7 +328,7 @@ impl Prototype {
             along: 0.0,
             uv: (u, v),
             girth: 0.0,
-            material: Some(u32::from(facet.material)),
+            material: facet.material.map(u32::from),
             tangent: Vec3::ZERO,
         })
     }
@@ -353,8 +364,8 @@ fn part_bounds(part: &Part, vertices: &[[f32; 3]]) -> Option<Aabb> {
 }
 
 /// Where `ray` meets a limb within `(near, far)`: the tapering body between
-/// its two spheres, or the sphere capping either end (Quílez, "Rounded cone
-/// – intersection", 2019).
+/// its two spheres, or the sphere capping either end it rounds (Quílez,
+/// "Rounded cone – intersection", 2019).
 #[allow(
     clippy::many_single_char_names,
     reason = "the derivation's symbols, as it writes them"
@@ -392,10 +403,11 @@ fn meet_tube(tube: &Tube, ray: &Ray, (near, far): (f64, f64)) -> Option<Hit> {
         }
     }
     let mut best: Option<Hit> = None;
-    for (centre, radius, to, at) in [(a, ra, oa, 0.0), (b, rb, ob, 1.0)] {
+    let ends = [(a, ra, oa, 0.0), (b, rb, ob, 1.0)];
+    for ((centre, radius, to, at), open) in ends.into_iter().zip(tube.open) {
         let dot = ray.dir.dot(to);
         let reach = dot * dot - to.dot(to) + radius * radius;
-        if reach <= 0.0 || radius <= 0.0 {
+        if open || reach <= 0.0 || radius <= 0.0 {
             continue;
         }
         let t = -dot - mathf::sqrt(reach);

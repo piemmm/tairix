@@ -408,10 +408,10 @@ impl Window {
     }
 
     /// Whether the compositor composes this window over a frost of its
-    /// backdrop: always for a blurred window, and for a plainly translucent
-    /// one only while its backdrop is [retained](Self::is_retained), since
-    /// composing it over an unretained one is exactly blending it straight
-    /// through.
+    /// backdrop: always for a visible blurred window, and for a visible plainly
+    /// translucent one only while its backdrop is
+    /// [retained](Self::is_retained), since composing it over an unretained one
+    /// is exactly blending it straight through.
     pub(crate) const fn is_frosted(&self) -> bool {
         self.backdrop.frosted
     }
@@ -419,8 +419,8 @@ impl Window {
     /// Whether the compositor keeps this window's frost between frames.
     ///
     /// Retention is rationed, because stacked windows all want a frost of the
-    /// same pixels; frosting is not. A window refused retention is frosted
-    /// all the same, recomputing what each frame needs of its frost.
+    /// same pixels; a blur is not. A blurred window refused retention is
+    /// frosted all the same, recomputing what each frame needs of its frost.
     pub(crate) const fn is_retained(&self) -> bool {
         self.backdrop.retained
     }

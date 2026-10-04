@@ -21,16 +21,20 @@ use core::f64::consts::{PI, TAU};
 use tairix_parallel::JobRunner;
 use tairix_util::{fallible, mathf};
 
+use super::chains::Chains;
 use super::landscape::{self, Lawning, Vantage};
 use super::plants::{self, Dead, Grove, Grown, Kind, Laying, DEAD_VARIANTS, VARIANTS};
+use super::stones::{self, Bed};
 use super::waterside::Margins;
 use super::{Dice, Stage};
+use crate::detail;
 use crate::ground::Floor;
-use crate::heightfield::Heightfield;
+use crate::heightfield::{Heightfield, Sealing};
 use crate::land::{Land, Lie};
 use crate::noise::{cells2, fbm2, hash3, smoothstep};
 use crate::sample::{mix32, unit};
 use crate::shade::{Casting, Shade, Shades, Shading, NEAR_CELL, ROOFED};
+use crate::stream::{Flow, Solving};
 use crate::vector::{real, share, single, Frame, Pose, Vec3};
 
 /// How a wood grows over a land.
@@ -521,93 +525,57 @@ struct Stood {
     apart: f64,
 }
 
-/// The trees stood so far, by the cells of a grid over the wood each trunk
-/// stands in: a cell as broad as the most room two trees keep, so that any
-/// tree too near another stands in a cell beside the other's.
+/// The trees stood so far, each chained into the cell of a grid over the
+/// wood its trunk stands in: a cell as broad as the most room two trees
+/// keep, so that any tree too near another stands in a cell beside the
+/// other's.
 #[derive(Debug)]
 struct Crowns {
-    least: (f64, f64),
-    cell: f64,
-    side: usize,
-    heads: Vec<u32>,
-    /// Each tree, and the next in its cell.
-    trees: Vec<(Stood, u32)>,
+    chains: Chains,
+    trees: Vec<Stood>,
 }
-
-/// No tree: an empty cell, or the last of one's chain.
-const NONE: u32 = u32::MAX;
 
 /// The most cells a side of the crowns' grid holds: past it, the cells grow
 /// broader instead, holding more trees each.
-const MOST_SIDE: i32 = 1024;
+const MOST_SIDE: usize = 1024;
 
 impl Crowns {
     fn new((centre, reach): ((f64, f64), f64), cell: f64) -> Option<Self> {
-        let cell = cell.max(1.0);
-        let side =
-            usize::try_from(mathf::round_i32(mathf::ceil(2.0 * reach / cell)).clamp(1, MOST_SIDE))
-                .ok()?;
-        let cell = (2.0 * reach / real(side)).max(cell);
         Some(Self {
-            least: (centre.0 - reach, centre.1 - reach),
-            cell,
-            side,
-            heads: fallible::filled(side * side, NONE)?,
+            chains: Chains::new((centre, reach), cell.max(1.0), MOST_SIDE)?,
             trees: Vec::new(),
         })
-    }
-
-    /// The cell `at` stands in, as its column and row.
-    fn cell_of(&self, at: (f64, f64)) -> (usize, usize) {
-        let place = |value: f64, least: f64| {
-            let whole = mathf::round_i32(mathf::floor((value - least) / self.cell));
-            usize::try_from(whole.max(0))
-                .unwrap_or(0)
-                .min(self.side - 1)
-        };
-        (place(at.0, self.least.0), place(at.1, self.least.1))
     }
 
     /// Whether `tree` would crowd any tree stood: its trunk nearer one's
     /// than their crowns allow, a much shorter tree standing under a taller
     /// one's crown more readily than beside a peer's.
     fn crowds(&self, tree: &Stood) -> bool {
-        let (column, row) = self.cell_of(tree.at);
-        let rows = row.saturating_sub(1)..=(row + 1).min(self.side - 1);
-        rows.flat_map(|row| {
-            let columns = column.saturating_sub(1)..=(column + 1).min(self.side - 1);
-            columns.map(move |column| row * self.side + column)
-        })
-        .any(|cell| {
-            let mut next = self.heads.get(cell).copied().unwrap_or(NONE);
-            while let Some(&(other, after)) = self.trees.get(next as usize) {
-                next = after;
-                let (short, tall) = if tree.height < other.height {
-                    (tree, &other)
-                } else {
-                    (&other, tree)
-                };
-                let layered = LAYERED
-                    + (1.0 - LAYERED)
-                        * smoothstep(UNDER.0, UNDER.1, short.height / tall.height.max(1e-3));
-                let room = (tree.apart.max(other.apart) * (tree.reach + other.reach) * layered)
-                    .max(trunk(tree.height) + trunk(other.height) + 0.5);
-                if mathf::hypot(tree.at.0 - other.at.0, tree.at.1 - other.at.1) < room {
-                    return true;
-                }
-            }
-            false
+        let (beside, _) = self.chains.span(tree.at, self.chains.cell());
+        self.chains.within(beside).any(|id| {
+            let Some(other) = self.trees.get(id as usize) else {
+                return false;
+            };
+            let (short, tall) = if tree.height < other.height {
+                (tree, other)
+            } else {
+                (other, tree)
+            };
+            let layered = LAYERED
+                + (1.0 - LAYERED)
+                    * smoothstep(UNDER.0, UNDER.1, short.height / tall.height.max(1e-3));
+            let room = (tree.apart.max(other.apart) * (tree.reach + other.reach) * layered)
+                .max(trunk(tree.height) + trunk(other.height) + 0.5);
+            mathf::hypot(tree.at.0 - other.at.0, tree.at.1 - other.at.1) < room
         })
     }
 
     fn add(&mut self, tree: Stood) -> Option<()> {
-        let (column, row) = self.cell_of(tree.at);
-        let head = self.heads.get_mut(row * self.side + column)?;
-        let index = u32::try_from(self.trees.len()).ok()?;
+        let id = u32::try_from(self.trees.len()).ok()?;
+        let (own, _) = self.chains.span(tree.at, 0.0);
         self.trees.try_reserve(1).ok()?;
-        self.trees.push((tree, *head));
-        *head = index;
-        Some(())
+        self.trees.push(tree);
+        self.chains.link(id, own)
     }
 }
 
@@ -687,12 +655,17 @@ impl Standing {
     /// then thinned.
     fn done(&self) -> f64 {
         let read = share(self.ring as usize, self.rings as usize);
+        // Until every ring is read the ranking holds only what has been, and
+        // an empty one has done nothing.
+        if self.ring < self.rings {
+            return 0.6 * read;
+        }
         let thinned = if self.stood >= self.most {
             1.0
         } else {
             self.ranking.taken()
         };
-        0.6 * read + 0.05 * self.ranking.sorted() + 0.35 * thinned
+        0.6 + 0.05 * self.ranking.sorted() + 0.35 * thinned
     }
 
     /// The next step of standing `wood`'s plants — its trees, or those of
@@ -801,7 +774,7 @@ const RUN: usize = 1 << 14;
 /// worth more costs only its own room: no copy of what came before, and no
 /// room held past the last run's.
 #[derive(Debug)]
-struct Runs<T> {
+pub(super) struct Runs<T> {
     runs: Vec<Vec<T>>,
     len: usize,
 }
@@ -816,12 +789,12 @@ impl<T> Default for Runs<T> {
 }
 
 impl<T> Runs<T> {
-    fn len(&self) -> usize {
+    pub(super) fn len(&self) -> usize {
         self.len
     }
 
     /// Room for `count` more; `false` when the heap will not hold it.
-    fn reserve(&mut self, count: usize) -> bool {
+    pub(super) fn reserve(&mut self, count: usize) -> bool {
         let room = self.runs.len() * RUN;
         let wanted = (self.len + count).saturating_sub(room).div_ceil(RUN);
         if self.runs.try_reserve(wanted).is_err() {
@@ -838,14 +811,14 @@ impl<T> Runs<T> {
     }
 
     /// Add `item`, within the room reserved.
-    fn push(&mut self, item: T) {
+    pub(super) fn push(&mut self, item: T) {
         if let Some(run) = self.runs.get_mut(self.len / RUN) {
             run.push(item);
             self.len += 1;
         }
     }
 
-    fn get(&self, index: usize) -> Option<&T> {
+    pub(super) fn get(&self, index: usize) -> Option<&T> {
         self.runs.get(index / RUN)?.get(index % RUN)
     }
 }
@@ -978,6 +951,93 @@ impl Ranking {
     }
 }
 
+/// The next step of a stream's flow over its bed, out of `phase`: solved a
+/// unit at a time, then shaping the water's finer grid on `land` and sealing
+/// it again, then back to setting out the water's edge.
+fn surfacing(
+    stage: &mut Stage,
+    (land, runner): (&Land, &dyn JobRunner),
+    phase: Phase,
+) -> Option<Phase> {
+    Some(match phase {
+        Phase::Flowing {
+            shades,
+            mut solving,
+            course,
+        } => {
+            if solving.step(runner)? {
+                Phase::Surfacing {
+                    shades,
+                    flow: solving.finish()?,
+                    course,
+                    row: 0,
+                }
+            } else {
+                Phase::Flowing {
+                    shades,
+                    solving,
+                    course,
+                }
+            }
+        }
+        Phase::Surfacing {
+            shades,
+            flow,
+            course,
+            row,
+        } => match stones::surface(stage, land, (&flow, course), row, runner)? {
+            (_, true) => Phase::Resealing {
+                shades,
+                sealing: Sealing::BEGUN,
+            },
+            (row, false) => Phase::Surfacing {
+                shades,
+                flow,
+                course,
+                row,
+            },
+        },
+        Phase::Resealing {
+            shades,
+            mut sealing,
+        } => {
+            let field = stage.fields.get_mut(land.near_water?.field as usize)?;
+            if sealing.step(field, runner) {
+                Phase::Edging { shades }
+            } else {
+                Phase::Resealing { shades, sealing }
+            }
+        }
+        other => other,
+    })
+}
+
+/// The flow over the stream bed `bed` has laid, to be solved over the
+/// stretch the water's finer grid on `land` spans along it, in the grid
+/// `densities` sets; or, with no such grid or no water to run, straight on
+/// to what follows, the water left as its own grid has it.
+fn flowing(
+    bed: &mut Bed,
+    land: &Land,
+    shades: Option<Shades>,
+    densities: &detail::Bed,
+) -> Option<Phase> {
+    let Some(near) = land.near_water else {
+        return Some(Phase::Edging { shades });
+    };
+    // Behind the eye and ahead of it along the stream, as far as the grid
+    // laid ahead of the eye reaches either way.
+    let (stretch, stones) = bed.take(land, (1.2 * near.reach, 2.2 * near.reach))?;
+    if !stretch.flows() {
+        return Some(Phase::Edging { shades });
+    }
+    Some(Phase::Flowing {
+        shades,
+        solving: Solving::new(stretch, stones, densities.flow)?,
+        course: bed.course(),
+    })
+}
+
 /// How a wood's trees are sown: closely enough for its middling trees where
 /// it grows thickest; all the way about the eye as far as their shadows
 /// reach, and across the view beyond out to the land's edge, as far as its
@@ -1041,8 +1101,12 @@ fn walls_off(open: (f64, f64), vantage: &Vantage, at: (f64, f64), height: f64) -
 pub(super) struct Growing {
     woods: Vec<Wood>,
     /// The plants of the water's edge, set out once the woods' shade is
-    /// cast.
+    /// cast, and a stream's bed, laid and its flow solved before them.
     margins: Option<Margins>,
+    bed: Option<Bed>,
+    /// Whether a stream's bed was asked for, so its share of the work stays
+    /// counted once it is taken to solve its flow.
+    bedded: bool,
     sward: Option<Lawning>,
     /// The wood being grown, and how far.
     next: usize,
@@ -1080,9 +1144,29 @@ enum Phase {
     /// Every wood stands, and the shade they cast over the land is being
     /// cast.
     Shading { shading: Shading },
-    /// The water's edge is being set out in the light the woods leave it:
-    /// in their shade, or in the open where no wood stands.
+    /// A stream's bed is being laid, or the water's edge set out in the
+    /// light the woods leave it — in their shade, or in the open where no
+    /// wood stands — on the water as the stream's flow has shaped it.
     Edging { shades: Option<Shades> },
+    /// The flow of the stream down `course` over its bed is being solved.
+    Flowing {
+        shades: Option<Shades>,
+        solving: Solving,
+        course: usize,
+    },
+    /// The water's finer grid is being shaped by the flow from `row`, then
+    /// sealed again.
+    Surfacing {
+        shades: Option<Shades>,
+        flow: Flow,
+        course: usize,
+        row: usize,
+    },
+    /// The water's finer grid, shaped, is being sealed again.
+    Resealing {
+        shades: Option<Shades>,
+        sealing: Sealing,
+    },
     /// Every wood stands, its shade cast over the land for the sward being
     /// laid in it.
     Laying { shades: Shades, laying: Laying },
@@ -1095,14 +1179,17 @@ impl Growing {
     pub(super) fn from(stage: &mut Stage, dice: &mut Dice) -> Option<Self> {
         let woods = core::mem::take(&mut stage.woods);
         let margins = stage.margins.take();
+        let bed = stage.bed.take();
         let sward = stage.sward.take();
-        if woods.is_empty() && margins.is_none() && sward.is_none() {
+        if woods.is_empty() && margins.is_none() && bed.is_none() && sward.is_none() {
             return None;
         }
         let seed = dice.wide();
         Some(Self {
             woods,
             margins,
+            bedded: bed.is_some(),
+            bed,
             sward,
             next: 0,
             phase: Phase::Sowing,
@@ -1115,15 +1202,17 @@ impl Growing {
     /// the shade they cast, the water's edge and the sward laid beneath
     /// them all.
     pub(super) fn done(&self) -> f64 {
-        // Setting out the water's edge is a small share of the last part;
-        // laying the sward is most of it.
+        // Setting out the water's edge is a small share of the last part, and
+        // a stream's bed and its flow a larger one; laying the sward is most
+        // of it.
         let edging = if self.margins.is_some() { 0.05 } else { 0.0 };
+        let bedding = if self.bedded { 0.3 } else { 0.0 };
         let laying = if self.sward.is_some() {
-            0.75 * (1.0 - edging)
+            0.75 * (1.0 - edging - bedding)
         } else {
             0.0
         };
-        let shading = 1.0 - edging - laying;
+        let shading = 1.0 - edging - bedding - laying;
         let within = match &self.phase {
             Phase::Sowing => 0.0,
             Phase::Trees { standing, .. } => 0.55 * standing.done(),
@@ -1132,9 +1221,16 @@ impl Growing {
             Phase::Deadfall { .. } => 0.9,
             Phase::Shading { shading: casting } => shading * casting.done(),
             Phase::Edging { .. } => {
-                shading + edging * self.margins.as_ref().map_or(1.0, Margins::done)
+                // A bed once taken has had its flow solved: all its share.
+                let laid = self.bed.as_ref().map_or(1.0, |bed| 0.4 * bed.done());
+                let edged = self.margins.as_ref().map_or(1.0, Margins::done);
+                shading + bedding * laid + edging * edged
             }
-            Phase::Laying { laying: sward, .. } => shading + edging + laying * sward.done(),
+            Phase::Flowing { solving, .. } => shading + bedding * (0.4 + 0.5 * solving.done()),
+            Phase::Surfacing { .. } | Phase::Resealing { .. } => shading + 0.9 * bedding,
+            Phase::Laying { laying: sward, .. } => {
+                shading + edging + bedding + laying * sward.done()
+            }
         };
         let parts = self.woods.len() + 1;
         share(self.next.min(self.woods.len()), parts) + within / real(parts)
@@ -1201,7 +1297,12 @@ impl Growing {
                 self.dice = Dice::keyed(self.seed, self.next);
                 Phase::Sowing
             }
-            Phase::Shading { .. } | Phase::Edging { .. } | Phase::Laying { .. } => return None,
+            Phase::Shading { .. }
+            | Phase::Edging { .. }
+            | Phase::Flowing { .. }
+            | Phase::Surfacing { .. }
+            | Phase::Resealing { .. }
+            | Phase::Laying { .. } => return None,
         };
         self.phase = next;
         Some(false)
@@ -1227,6 +1328,18 @@ impl Growing {
                 shades
             }
             Phase::Edging { shades } => {
+                // A stream's flow shapes its water before the water's edge
+                // floats on it.
+                if let Some(bed) = self.bed.as_mut() {
+                    if !bed.finished() {
+                        bed.step(stage, (land, runner))?;
+                        self.phase = Phase::Edging { shades };
+                        return Some(false);
+                    }
+                    self.phase = flowing(bed, land, shades, &stage.densities.bed)?;
+                    self.bed = None;
+                    return Some(false);
+                }
                 if let Some(margins) = self.margins.as_mut().filter(|margins| !margins.finished()) {
                     margins.step(stage, (land, shades.as_ref(), runner))?;
                     self.phase = Phase::Edging { shades };
@@ -1250,6 +1363,10 @@ impl Growing {
                 } else {
                     self.phase = Phase::Shading { shading };
                 }
+                return Some(false);
+            }
+            phase @ (Phase::Flowing { .. } | Phase::Surfacing { .. } | Phase::Resealing { .. }) => {
+                self.phase = surfacing(stage, (land, runner), phase)?;
                 return Some(false);
             }
             _ => {

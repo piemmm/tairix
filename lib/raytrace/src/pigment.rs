@@ -122,6 +122,18 @@ pub(crate) enum Pigment {
         scale: f64,
         seed: u32,
     },
+    /// Stones of one rock, flecked as `Speckle` is, each its own shade:
+    /// its key blends it between the two `bases` and lightens or darkens it
+    /// by up to `shade`; and up to `moss.0` of the faces each turns to the
+    /// sky mantled in patches of moss of `moss.1`.
+    Pebbles {
+        bases: [Vec3; 2],
+        flecks: [Vec3; 2],
+        scale: f64,
+        shade: f64,
+        moss: (f64, Vec3),
+        seed: u32,
+    },
     /// Bark, laid over a limb by its distance along and round it.
     Bark(Bark),
     /// Leaves: veined, paler beneath, and in autumn browning at their edges
@@ -198,6 +210,31 @@ impl Pigment {
                 scale,
                 seed,
             } => speckle(p * scale, (base, flecks), seed, width * scale),
+            &Self::Pebbles {
+                bases,
+                flecks,
+                scale,
+                shade,
+                moss,
+                seed,
+            } => {
+                let key = mix32(spot.instance ^ seed);
+                // Each stone weathered unevenly over its faces as well as its
+                // own shade overall.
+                let weathered = 1.0
+                    + WEATHERING
+                        * noise3(p * WEATHERED, key ^ 0x3c)
+                        * (1.0 - smoothstep(0.25, 1.0, width * WEATHERED));
+                let tint = (1.0 + shade * (2.0 * unit(mix32(key ^ 1)) - 1.0)) * weathered;
+                let base = bases[0].lerp(bases[1], unit(key)) * tint;
+                let stone = speckle(
+                    p * scale,
+                    (base, flecks.map(|fleck| fleck * tint)),
+                    key,
+                    width * scale,
+                );
+                mossed(stone, spot, moss, key)
+            }
             Self::Bark(bark) => bark.colour(spot),
             Self::Foliage(foliage) => foliage.colour(spot),
             &Self::Stripes { a, b, width: band } => {
@@ -233,6 +270,32 @@ fn stone(
     let in_joint = 1.0 - smoothstep(gap - soft, gap + soft, found.wall());
     (face * mottle).lerp(joint, in_joint)
 }
+
+/// `stone` at `spot` under up to `share` of moss of `colour`: on the faces
+/// turned to the sky, in patches drawn under `key`, its cushions darker
+/// and paler by turns and settling to their mean far off.
+fn mossed(stone: Vec3, spot: &Spot, (share, colour): (f64, Vec3), key: u32) -> Vec3 {
+    if share <= 0.0 {
+        return stone;
+    }
+    let upward = smoothstep(0.15, 0.7, spot.normal.y);
+    let patches = smoothstep(-0.2, 0.35, noise3(spot.p * MOSS_PATCHES, key ^ 0x3a));
+    let cushions = 1.0
+        + 0.3
+            * noise3(spot.p * MOSS_CUSHIONS, key ^ 0x3b)
+            * (1.0 - smoothstep(0.25, 1.0, spot.width * MOSS_CUSHIONS));
+    stone.lerp(colour * cushions, share * upward * patches)
+}
+
+/// How much a stone's shade wanders over its faces as it weathers, and how
+/// many of those patches span a metre.
+const WEATHERING: f64 = 0.22;
+const WEATHERED: f64 = 7.0;
+
+/// How many of a mossed stone's patches, and of the cushions within them,
+/// span a metre.
+const MOSS_PATCHES: f64 = 2.4;
+const MOSS_CUSHIONS: f64 = 40.0;
 
 /// A flecked stone at `q`, in grains of its own units, a footprint `detail`
 /// of them across.

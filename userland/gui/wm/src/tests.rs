@@ -9893,10 +9893,9 @@ fn a_window_under_another_keeps_its_frost_on_a_machine_that_can_spare_it() {
     );
 }
 
-/// Pressure took the frost of the Settings window beneath the Switchboard, and
-/// with it the blur: the window drew as plain translucency until pressure
-/// eased. Pressure may take what is *retained*; the picture never changes, and
-/// a change of mind marks nothing.
+/// Pressure may take the retained frost of Settings beneath the Switchboard,
+/// never its blur: the picture never changes, and a change of mind marks
+/// nothing.
 #[test]
 fn pressure_takes_the_retained_glass_beneath_and_never_its_blur() {
     static PRESSURE: ReportedPressure = ReportedPressure::unknown();
@@ -9939,6 +9938,136 @@ fn pressure_takes_the_retained_glass_beneath_and_never_its_blur() {
         c.window(settings).expect("window").is_retained(),
         "and it comes back"
     );
+    assert_eq!(present_content(&mut c, switchboard, paint_dot), Some(true));
+    c.composite();
+    assert_composed_as_a_full_repaint(&mut c, "a present after the band eased");
+}
+
+/// Require what `c` last composed — its frame and its back buffer — to be what
+/// a full repaint composes.
+fn assert_composed_as_a_full_repaint(c: &mut Compositor, step: &str) {
+    let (frame, back) = (c.frame().to_vec(), c.back_buffer().pixels().to_vec());
+    repaint_everything(c);
+    assert_eq!(c.frame(), &frame[..], "the frame differs after {step}");
+    assert_eq!(
+        c.back_buffer().pixels(),
+        &back[..],
+        "the back buffer differs after {step}"
+    );
+}
+
+/// The Switchboard's frost kept and Settings' taken, then Settings back in the
+/// ration with nothing yet retained for it.
+fn settings_regranted_beneath_a_kept_switchboard(
+    pressure: &'static ReportedPressure,
+) -> (Compositor, [WindowId; 2]) {
+    pressure.report(PressureBand::Normal);
+    let mut c = machine_frost_budget(mode(1024, 768), QEMU_MEMORY, pressure);
+    let [settings, switchboard] = settings_under_switchboard(&mut c);
+    c.composite();
+    pressure.report(PressureBand::Mild);
+    c.composite();
+    pressure.report(PressureBand::Normal);
+    c.composite();
+    assert!(c.window(settings).expect("window").is_retained());
+    assert!(
+        !c.frost_resident(settings),
+        "the premise: nothing is retained yet for the glass beneath"
+    );
+    assert!(
+        c.frost_resident(switchboard),
+        "the premise: the Switchboard's frost survived"
+    );
+    (c, [settings, switchboard])
+}
+
+/// Glass hidden beneath a kept frost is neither looked up nor blurred: the
+/// plan widened nothing for it, so a frost of its whole rectangle would write
+/// past what the frame recomposes.
+#[test]
+fn glass_hidden_beneath_a_kept_frost_is_left_alone_when_its_own_is_gone() {
+    static PRESSURE: ReportedPressure = ReportedPressure::unknown();
+    let (mut c, [settings, switchboard]) = settings_regranted_beneath_a_kept_switchboard(&PRESSURE);
+    let misses = c.frost_cache_stats().misses();
+    assert_eq!(present_content(&mut c, switchboard, paint_dot), Some(true));
+    c.composite();
+    assert_eq!(
+        c.frame_stats().blur_px,
+        0,
+        "a present over glass hidden beneath a kept frost blurred it"
+    );
+    assert_eq!(
+        c.frost_cache_stats().misses(),
+        misses,
+        "glass hidden beneath a kept frost was looked up"
+    );
+    assert!(!c.frost_resident(settings));
+    assert_composed_as_a_full_repaint(&mut c, "a present over glass hidden beneath a kept frost");
+}
+
+/// A popup inside a frosted window closes, and what it gave back of the ration
+/// regrants the glass beneath, which the popup's footprint reaches only under
+/// the frost that stays.
+#[test]
+fn closing_a_popup_regrants_the_glass_beneath_without_frosting_it() {
+    let mut c = screenful_frost_budget(mode(1024, 768));
+    let beneath = c.add_window(Point::new(40, 40), veiled(700, 500, 204));
+    let over = c.add_window(Point::new(200, 200), veiled(700, 500, 204));
+    let popup = c.add_window(Point::new(300, 300), veiled(400, 300, 204));
+    for id in [beneath, over, popup] {
+        assert!(c.set_backdrop_blur(id, 12));
+    }
+    c.composite();
+    assert!(
+        !c.window(beneath).expect("window").is_retained(),
+        "the premise: the popup's frost leaves none for the glass beneath"
+    );
+    assert!(c.remove(popup));
+    let misses = c.frost_cache_stats().misses();
+    c.composite();
+    assert!(c.window(beneath).expect("window").is_retained());
+    assert_eq!(c.frame_stats().blur_px, 0, "the glass beneath was blurred");
+    assert_eq!(
+        c.frost_cache_stats().misses(),
+        misses,
+        "the glass beneath was looked up though nothing of it showed"
+    );
+    assert_composed_as_a_full_repaint(&mut c, "the popup closed");
+}
+
+/// The band takes the frost the ration withdraws, never the one it keeps —
+/// whether the next composite notices the band or the session trims at once.
+#[test]
+fn a_band_takes_the_frost_the_ration_withdraws_not_the_least_recently_looked_at() {
+    static PRESSURE: ReportedPressure = ReportedPressure::unknown();
+    for trim in [false, true] {
+        PRESSURE.report(PressureBand::Normal);
+        let mut c = machine_frost_budget(mode(1024, 768), QEMU_MEMORY, &PRESSURE);
+        let [settings, switchboard] = settings_under_switchboard(&mut c);
+        c.composite();
+        // A present where Settings shows clear of the Switchboard looks up its
+        // frost alone, so the Switchboard's is the least recently looked at.
+        assert_eq!(present_content(&mut c, settings, paint_dot), Some(true));
+        c.composite();
+        PRESSURE.report(PressureBand::Mild);
+        if trim {
+            assert!(c.trim_frost() > 0, "the band released nothing");
+        }
+        assert!(c.composite().is_empty());
+        assert!(c.window(switchboard).expect("window").is_retained());
+        assert!(
+            c.frost_resident(switchboard),
+            "trim {trim}: the band took the frost the ration kept"
+        );
+        assert!(!c.frost_resident(settings), "trim {trim}");
+        assert_eq!(present_content(&mut c, switchboard, paint_dot), Some(true));
+        c.composite();
+        assert_eq!(
+            c.frame_stats().blur_px,
+            0,
+            "trim {trim}: the kept frost was blurred again"
+        );
+    }
 }
 
 /// The Switchboard dragged over Settings while pressure holds only one of
@@ -9976,6 +10105,11 @@ fn dragging_a_window_over_glass_pressure_could_not_retain_draws_the_same_frames(
             pressed.frame(),
             spared.frame(),
             "step {step}: the glass beneath came out differently"
+        );
+        assert_eq!(
+            pressed.back_buffer().pixels(),
+            spared.back_buffer().pixels(),
+            "step {step}: the back buffers differ"
         );
         assert_eq!(
             pressed.frame_stats().damaged_px,
@@ -10027,14 +10161,11 @@ fn frosted_cascade(c: &mut Compositor, windows: i32) -> alloc::vec::Vec<WindowId
 
 #[test]
 fn a_cascade_of_frosted_terminals_repaints_for_what_it_changed() {
-    // Sixteen terminals opened on top of one another at the shipped
-    // translucent, blurred default want sixteen screenfuls of retained frost
-    // against a budget of one. Asking "does one more fit" of each in turn
-    // granted them all, so every frame blurred, evicted and re-blurred the lot,
-    // and a single repainted cell cost several screenfuls of blur and of
-    // blending. The ration retains what the budget reaches from the front, and
-    // a cell repainted in the front window — whose retained frost replaces
-    // everything beneath it there — costs the cell.
+    // Sixteen stacked terminals want sixteen screenfuls of retained frost
+    // against a budget of one. The ration retains what the budget reaches from
+    // the front, so a cell repainted in the front window — whose retained frost
+    // replaces everything beneath it — costs the cell, not a re-blur of the
+    // stack.
     let mut c = screenful_frost_budget(mode(1024, 768));
     let stack = frosted_cascade(&mut c, 16);
     let top = *stack.last().expect("a front window");
@@ -10244,7 +10375,9 @@ fn a_blur_takes_the_budget_ahead_of_a_plain_translucency_above_it() {
     );
 }
 
-/// Apply `act` to both compositors and require the same frame from each.
+/// Apply `act` to both compositors and require the same frame and back buffer
+/// from each: a frost reads the back buffer, so a difference there surfaces in
+/// a later frame.
 fn compose_alike(
     a: &mut Compositor,
     b: &mut Compositor,
@@ -10256,6 +10389,11 @@ fn compose_alike(
     a.composite();
     b.composite();
     assert_eq!(a.frame(), b.frame(), "the frames differ after {step}");
+    assert_eq!(
+        a.back_buffer().pixels(),
+        b.back_buffer().pixels(),
+        "the back buffers differ after {step}"
+    );
 }
 
 #[test]

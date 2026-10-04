@@ -131,3 +131,57 @@ fn a_backdrops_clearing_stays_level_once_its_land_is_built() {
         }
     }
 }
+
+/// A stream's land always has somewhere by its stream for the eye to stand.
+#[test]
+fn a_stream_always_has_somewhere_to_be_looked_at_from() {
+    for seed in 0..4 {
+        let (stage, landing, mut dice) = surveyed(stream, seed);
+        let survey = landing.build.survey(&stage.fields).expect("a survey");
+        let vantage = stream_vantage(&survey, &mut dice).expect("a spot by the stream");
+        let near = survey.rivers().nearest(vantage.eye.x, vantage.eye.z);
+        assert!(near.is_some(), "{seed}: the eye stands by its stream");
+    }
+}
+
+/// An eye that stands away from every stream on a stream's land still
+/// composes a scene, its dale without a brook, rather than refusing one.
+#[test]
+fn a_stream_scene_away_from_its_stream_still_composes() {
+    let (mut stage, mut landing, mut dice) = surveyed(stream, 2);
+    let survey = landing.build.survey(&stage.fields).expect("a survey");
+    let (centre, reach) = survey.extent();
+    let dry = (0..64)
+        .map(|step| {
+            let angle = core::f64::consts::TAU * f64::from(step) / 64.0;
+            let at = 0.3 * reach;
+            (
+                centre.0 + at * mathf::sin(angle),
+                centre.1 + at * mathf::cos(angle),
+            )
+        })
+        .find(|&(x, z)| survey.rivers().nearest(x, z).is_none())
+        .expect("somewhere away from the streams");
+    let eye = Vec3::new(dry.0, survey.height(dry.0, dry.1) + 1.7, dry.1);
+    let vantage = Vantage { eye, heading: 0.0 };
+    let siting = Siting::ahead(&vantage);
+    landing
+        .build
+        .site(siting.focus, siting.lead, None)
+        .expect("sited");
+    let runner = Threaded::new(8);
+    while !landing
+        .build
+        .step(&mut stage.fields, &runner)
+        .expect("builds")
+    {}
+    let land = landing.build.finish().expect("a land");
+    stage
+        .footprints
+        .index(land.centre, land.reach)
+        .expect("indexed");
+    assert!(land.rivers.nearest(eye.x, eye.z).is_none());
+    let look = stream_scene(&mut stage, &mut dice, &land, (vantage, Lithology::Granite));
+    assert!(look.is_some(), "the scene composes");
+    assert!(stage.bed.is_none(), "with no brook to lay");
+}

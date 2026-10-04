@@ -38,7 +38,6 @@
 //! ([`Surface::with_clip`]) narrows which pixels it reaches, which is the
 //! caller's own choice rather than something this module second-guesses.
 
-use alloc::vec::Vec;
 use core::ops::Range;
 
 use tairix_abi::driver::display::{DamageRect, DisplayMode};
@@ -157,22 +156,21 @@ impl Shape {
         u32::try_from(self.columns).unwrap_or(u32::MAX)
     }
 
-    /// How many rows each band carries, and whether there is more than one.
+    /// How many rows each band carries.
     ///
     /// The grain is a pixel budget expressed in this rectangle's own rows, so a
     /// narrow rectangle needs many rows to reach it and a wide one needs few —
     /// the rule the compositor splits a composite by.
-    fn split(&self, runner: &dyn JobRunner) -> (usize, u32) {
+    fn rows_per_band(&self, runner: &dyn JobRunner) -> u32 {
         let rows = self.rows();
         let count = tairix_parallel::bands(
             runner,
             rows,
             MIN_PARALLEL_BAND_PX.div_ceil(self.columns.max(1)),
         );
-        let per_band = u32::try_from(rows.div_ceil(count.max(1)))
+        u32::try_from(rows.div_ceil(count.max(1)))
             .unwrap_or(u32::MAX)
-            .max(1);
-        (count, per_band)
+            .max(1)
     }
 
     /// Byte range of surface row `y`'s span, within a frame slice whose first
@@ -214,7 +212,7 @@ pub fn encode(
     if shape.rows() == 0 || shape.columns == 0 {
         return Ok(());
     }
-    let (count, per_band) = shape.split(runner);
+    let per_band = shape.rows_per_band(runner);
     let band_bytes = usize::try_from(per_band)
         .ok()
         .and_then(|rows| rows.checked_mul(shape.stride))
@@ -232,17 +230,8 @@ pub fn encode(
             ),
             bytes,
         });
-    if count <= 1 {
-        // One band is the whole rectangle: no vector, no dispatch, and the same
-        // per-row body a wide conversion runs.
-        for mut only in bands {
-            encode_band(&shape, surface, &mut only);
-        }
-        return Ok(());
-    }
-    let mut split: Vec<EncodeBand<'_>> = bands.collect();
-    tairix_parallel::for_each(runner, &mut split, &|band| {
-        encode_band(&shape, surface, band);
+    tairix_parallel::for_each_drawn(runner, bands, &|mut band| {
+        encode_band(&shape, surface, &mut band);
     });
     Ok(())
 }
@@ -304,30 +293,28 @@ pub fn decode(
     if shape.rows() == 0 || shape.columns == 0 {
         return Ok(Rect::EMPTY);
     }
-    let (count, per_band) = shape.split(runner);
+    let per_band = shape.rows_per_band(runner);
     let bands = surface
         .row_bands_mut(shape.top..shape.bottom, per_band)
         .map(|rows| DecodeBand {
             rows,
             changed: Bounds::default(),
         });
-    let mut changed = Bounds::default();
-    if count <= 1 {
-        for mut only in bands {
-            decode_band(&shape, frame, &mut only);
-            changed.merge(&only.changed);
-        }
-        return Ok(changed.rect());
-    }
-    let mut split: Vec<DecodeBand<'_>> = bands.collect();
-    tairix_parallel::for_each(runner, &mut split, &|band| {
-        decode_band(&shape, frame, band);
-    });
     // The union of the bands' boxes: a merge that cannot depend on the order the
     // bands ran in, which is what makes the split invisible in the result.
-    for band in &split {
-        changed.merge(&band.changed);
-    }
+    let changed = tairix_parallel::fold_drawn(
+        runner,
+        bands,
+        Bounds::default(),
+        &|mut band| {
+            decode_band(&shape, frame, &mut band);
+            band.changed
+        },
+        &|mut joined, band| {
+            joined.merge(&band);
+            joined
+        },
+    );
     Ok(changed.rect())
 }
 
@@ -373,7 +360,7 @@ fn decode_band(shape: &Shape, frame: &[u8], band: &mut DecodeBand<'_>) {
 /// The bounding box of the pixels a conversion changed, accumulated as
 /// inclusive edges so an untouched conversion stays distinguishable from one
 /// that changed the single pixel at the origin.
-#[derive(Default)]
+#[derive(Copy, Clone, Default)]
 struct Bounds {
     edges: Option<(u32, u32, u32, u32)>,
 }

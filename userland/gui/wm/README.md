@@ -37,9 +37,10 @@ router**:
   already holds that backdrop: the compositor composes the layers below
   the window, blurs the back buffer inside that window's rectangle only,
   and resumes composing from the window itself. The effect is
-  `lib/raster`'s shared `Surface::frost_region` — the one frosted glass the
-  desktop has, so the taskbar and every popup it opens, and the login screen
-  frosting a selected account tile, all draw through the same code. It blurs
+  `lib/raster`'s shared frost — `Surface::frost_from` here, and the in-place
+  `Surface::frost_region` built on it that the taskbar, every popup it opens
+  and the login screen's selected account tile draw through — so the desktop
+  has one frosted glass. It blurs
   the rectangle's own pixels with a separable box blur carrying running
   sums (cost proportional to the rectangle's area whatever the radius, over
   premultiplied channels including alpha, with samples past an edge

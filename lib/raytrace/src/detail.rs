@@ -49,8 +49,24 @@ pub(crate) struct Densities {
     pub(crate) objects: usize,
     pub(crate) woods: Woods,
     pub(crate) waterside: Waterside,
+    pub(crate) bed: Bed,
     pub(crate) records: Records,
     pub(crate) focus: Focus,
+}
+
+/// How a stream's bed and its water are set out about the eye.
+#[derive(Clone, Debug)]
+pub(crate) struct Bed {
+    /// How far about the eye its stones are laid, the most it lays, and the
+    /// fewest pixels across the smallest it lays spans at its distance.
+    pub(crate) reach: f64,
+    pub(crate) most: u32,
+    pub(crate) pixels: f64,
+    /// The water's own finer grid about the eye: its half breadth and cells
+    /// a side; and the grid its flow is solved on: the cell, and the most
+    /// points along the stream and across it.
+    pub(crate) water: (f64, usize),
+    pub(crate) flow: (f64, (usize, usize)),
 }
 
 /// How far about the eye the plants of a scene's water's edge stand, and
@@ -129,6 +145,13 @@ const SIMPLE: Densities = Densities {
         reach: 250.0,
         most: 8000,
     },
+    bed: Bed {
+        reach: 30.0,
+        most: 40_000,
+        pixels: 5.0,
+        water: (16.0, 1024),
+        flow: (0.03, (2048, 256)),
+    },
     records: Records {
         rows: 8,
         columns: 32,
@@ -158,6 +181,13 @@ const MAXIMUM: Densities = Densities {
     waterside: Waterside {
         reach: 700.0,
         most: 40_000,
+    },
+    bed: Bed {
+        reach: 60.0,
+        most: 160_000,
+        pixels: 3.0,
+        water: (16.0, 2048),
+        flow: (0.015, (4096, 512)),
     },
     records: Records {
         rows: 16,

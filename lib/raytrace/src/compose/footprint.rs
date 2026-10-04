@@ -6,8 +6,7 @@
 
 use alloc::vec::Vec;
 
-use tairix_util::{fallible, mathf};
-
+use super::chains::Chains;
 use crate::vector::real;
 
 /// The clearance two pieces' circles keep between them.
@@ -18,13 +17,6 @@ const GAP: f64 = 0.08;
 const MOST_SIDE: usize = 512;
 const LEAST_CELL: f64 = 4.0;
 
-/// No link: an empty cell, or a chain's end.
-const END: u32 = u32::MAX;
-
-/// The least and greatest columns of a run of the grid's cells, and its
-/// least and greatest rows.
-type Cells = ((usize, usize), (usize, usize));
-
 /// Circles `(x, z, radius)` on the ground, each taken by a piece.
 #[derive(Debug, Default)]
 pub(super) struct Footprints {
@@ -32,17 +24,13 @@ pub(super) struct Footprints {
     index: Option<Index>,
 }
 
-/// A square grid over the ground, each cell chaining the circles reaching
-/// into it.
+/// The circles chained into the cells of a grid over the ground, each into
+/// the cells of its square widened by half the gap: two circles too close
+/// together have squares that overlap, so they share a cell. Those reaching
+/// past the grid are kept apart and asked of by every question.
 #[derive(Debug)]
 struct Index {
-    least: (f64, f64),
-    cell: f64,
-    side: usize,
-    heads: Vec<u32>,
-    /// A circle, and the next link along its cell's chain.
-    links: Vec<(u32, u32)>,
-    /// The circles reaching past the grid, which every question asks of.
+    chains: Chains,
     beyond: Vec<u32>,
 }
 
@@ -61,12 +49,8 @@ impl Footprints {
         let Some(index) = &self.index else {
             return (0..self.circles.len()).all(|id| u32::try_from(id).is_ok_and(apart));
         };
-        let ((columns, rows), _) = index.span(at, radius);
-        index.beyond.iter().all(|&id| apart(id))
-            && (rows.0..=rows.1).all(|row| {
-                (columns.0..=columns.1)
-                    .all(|column| index.chain(row * index.side + column).all(apart))
-            })
+        let (cells, _) = index.chains.span(at, radius + 0.5 * GAP);
+        index.beyond.iter().all(|&id| apart(id)) && index.chains.within(cells).all(apart)
     }
 
     /// Take a circle `radius` across at `at`, no room for a negative one;
@@ -85,15 +69,9 @@ impl Footprints {
     /// Index the circles over the square `reach` either way of `centre`, the
     /// ground a land lays; `None` when the heap will not hold the grid.
     pub(super) fn index(&mut self, centre: (f64, f64), reach: f64) -> Option<()> {
-        let span = 2.0 * reach.max(0.0);
-        let cell = (span / real(MOST_SIDE)).max(LEAST_CELL);
-        let side = usize::try_from(mathf::round_i32(mathf::ceil(span / cell)).max(1)).ok()?;
+        let cell = (2.0 * reach.max(0.0) / real(MOST_SIDE)).max(LEAST_CELL);
         let mut index = Index {
-            least: (centre.0 - reach, centre.1 - reach),
-            cell,
-            side,
-            heads: fallible::filled(side * side, END)?,
-            links: Vec::new(),
+            chains: Chains::new((centre, reach), cell, MOST_SIDE)?,
             beyond: Vec::new(),
         };
         for (id, &(x, z, radius)) in self.circles.iter().enumerate() {
@@ -105,60 +83,16 @@ impl Footprints {
 }
 
 impl Index {
-    /// The columns and rows of the cells a circle `radius` across at `at`
-    /// reaches into, clamped to the grid, and whether it reaches past it.
-    ///
-    /// Each circle is chained into the cells of its square widened by half
-    /// the gap, and a question asks the cells of its own: two circles too
-    /// close together have squares that overlap, so they share a cell.
-    fn span(&self, (x, z): (f64, f64), radius: f64) -> (Cells, bool) {
-        let half = radius + 0.5 * GAP;
-        let side = real(self.side);
-        let place = |value: f64, least: f64| (value - least) / self.cell;
-        let (west, east) = (place(x - half, self.least.0), place(x + half, self.least.0));
-        let (south, north) = (place(z - half, self.least.1), place(z + half, self.least.1));
-        let past = west < 0.0 || south < 0.0 || east >= side || north >= side;
-        let at = |value: f64| {
-            usize::try_from(mathf::round_i32(mathf::floor(mathf::clamp(
-                value,
-                0.0,
-                side - 1.0,
-            ))))
-            .unwrap_or(0)
-        };
-        (((at(west), at(east)), (at(south), at(north))), past)
-    }
-
     /// Chain circle `id`, `radius` across at `at`, into every cell it
     /// reaches, or set it beyond the grid.
     fn link(&mut self, id: u32, at: (f64, f64), radius: f64) -> Option<()> {
-        let ((columns, rows), past) = self.span(at, radius);
+        let (cells, past) = self.chains.span(at, radius + 0.5 * GAP);
         if past {
             self.beyond.try_reserve(1).ok()?;
             self.beyond.push(id);
             return Some(());
         }
-        let cells = (columns.1 - columns.0 + 1) * (rows.1 - rows.0 + 1);
-        self.links.try_reserve(cells).ok()?;
-        for row in rows.0..=rows.1 {
-            for column in columns.0..=columns.1 {
-                let head = self.heads.get_mut(row * self.side + column)?;
-                let link = u32::try_from(self.links.len()).ok()?;
-                self.links.push((id, *head));
-                *head = link;
-            }
-        }
-        Some(())
-    }
-
-    /// The circles chained into cell `cell`.
-    fn chain(&self, cell: usize) -> impl Iterator<Item = u32> + '_ {
-        let mut next = self.heads.get(cell).copied().unwrap_or(END);
-        core::iter::from_fn(move || {
-            let &(id, after) = self.links.get(next as usize)?;
-            next = after;
-            Some(id)
-        })
+        self.chains.link(id, cells)
     }
 }
 

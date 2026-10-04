@@ -1104,12 +1104,16 @@ weaker policy:
   built without a live gauge would retain nothing while looking like it
   worked.
 
-  The furniture and frost caches differ only in their ceiling
-  (`tairix_reclaim::desktop::screenful_ui_cache`): a whole screenful of
-  pixels rather than the small fraction a cursor or a glyph is allowed,
-  because no more of either than fills the screen can be visible at once
-  and everything above that belongs to a minimised, off-screen, or
-  stacked-under window — exactly what eviction should take first. Both are
+  The furniture and frost caches differ from the cursor's only in their
+  ceiling. Furniture's is a whole screenful
+  (`tairix_reclaim::desktop::screenful_ui_cache`) rather than the small
+  fraction a cursor or a glyph is allowed, because no more of it than fills
+  the screen can be visible at once and everything above that belongs to a
+  minimised, off-screen, or stacked-under window — exactly what eviction
+  should take first. A frost's is the machine's share of its memory, never
+  below a screenful (`stacked_ui_cache`), because a window beneath a
+  translucent one still shows through it and so wants a frost of the same
+  pixels; mild and moderate pressure take it back to the screenful. Both are
   owned by the `Compositor` and keyed by `WindowId`; furniture within a
   `(scale, theme-generation)` epoch, so one window's change releases one
   entry while a DPI or theme change drops them all.
