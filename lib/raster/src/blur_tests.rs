@@ -23,8 +23,8 @@ use alloc::vec::Vec;
 use tairix_fuzzseed::Prng;
 
 use super::{
-    box_blur, box_blur_coverage, soften_coverage, BlurScratch, Reciprocal, RECIPROCAL_MAX_COUNT,
-    RECIPROCAL_SHIFT, SOFTEN_PASSES,
+    box_blur, box_blur_coverage, soften_coverage, BlurScratch, Frosting, Reciprocal,
+    RECIPROCAL_MAX_COUNT, RECIPROCAL_SHIFT, SOFTEN_PASSES,
 };
 use crate::color::{div255_biased, Pixel, ROUND_NEAREST};
 use crate::dither::DitherRow;
@@ -768,25 +768,86 @@ fn frosted_around(
 /// As [`frosted_around`], but with the frost's pieces run through `runner`.
 fn frosted_around_via(
     runner: &dyn tairix_parallel::JobRunner,
-    mut surface: Surface,
-    (x, y, w, h): (u32, u32, u32, u32),
-    (cols, rows): (Range<u32>, Range<u32>),
+    surface: Surface,
+    rect: (u32, u32, u32, u32),
+    keep: (Range<u32>, Range<u32>),
     radius: u32,
     weight: u8,
 ) -> Surface {
-    surface.frost_region_around(
-        x,
-        y,
-        w,
-        h,
-        cols,
-        rows,
-        radius,
+    let bands = border(rect, keep);
+    frosted_bands_via(runner, surface, rect, &bands, radius, weight)
+}
+
+/// The bands of `rect` a kept `cols` × `rows` block — given relative to the
+/// rectangle's own top-left — leaves: full width above and below it, and the
+/// two sides between. A block covering nothing leaves the whole rectangle.
+fn border(
+    (x, y, w, h): (u32, u32, u32, u32),
+    (cols, rows): (Range<u32>, Range<u32>),
+) -> Vec<(Range<u32>, Range<u32>)> {
+    let cols = cols.start.min(w)..cols.end.min(w);
+    let rows = rows.start.min(h)..rows.end.min(h);
+    if cols.is_empty() || rows.is_empty() {
+        return vec![(x..x + w, y..y + h)];
+    }
+    vec![
+        (x..x + w, y..y + rows.start),
+        (x..x + w, y + rows.end..y + h),
+        (x..x + cols.start, y + rows.start..y + rows.end),
+        (x + cols.end..x + w, y + rows.start..y + rows.end),
+    ]
+}
+
+/// `surface` with `bands` of `rect` frosted at a constant coverage, the
+/// backdrop read wholly from a copy of the surface, as a compositor reads it
+/// from its plane where the destination does not hold it.
+fn frosted_bands_via(
+    runner: &dyn tairix_parallel::JobRunner,
+    mut surface: Surface,
+    rect: (u32, u32, u32, u32),
+    bands: &[(Range<u32>, Range<u32>)],
+    radius: u32,
+    weight: u8,
+) -> Surface {
+    let mut plane = surface.clone();
+    assert!(frost_from_plane(
+        &mut surface,
+        &mut plane,
+        &frosting(rect, NOTHING_HELD, bands, radius),
         &mut BlurScratch::new(),
         runner,
-        |_, _| weight,
-    );
+        weight,
+    ));
     surface
+}
+
+/// No part of the rectangle: every backdrop read comes from the plane.
+const NOTHING_HELD: (Range<u32>, Range<u32>) = (0..0, 0..0);
+
+fn frosting(
+    rect: (u32, u32, u32, u32),
+    held: (Range<u32>, Range<u32>),
+    bands: &[(Range<u32>, Range<u32>)],
+    radius: u32,
+) -> Frosting<'_> {
+    Frosting {
+        rect,
+        held,
+        bands,
+        radius,
+    }
+}
+
+/// [`Surface::frost_from`] at a constant coverage.
+fn frost_from_plane(
+    surface: &mut Surface,
+    plane: &mut Surface,
+    frosting: &Frosting<'_>,
+    scratch: &mut BlurScratch,
+    runner: &dyn tairix_parallel::JobRunner,
+    weight: u8,
+) -> bool {
+    surface.frost_from(plane, frosting, scratch, runner, |_, _| weight)
 }
 
 /// Frosting the border around a kept block, then putting back what the block
@@ -1020,7 +1081,7 @@ fn a_reused_scratch_carries_nothing_between_frosts() {
 }
 
 #[test]
-fn a_released_scratch_grows_again_and_frosts_the_same() {
+fn a_wiped_scratch_holds_no_picture_and_frosts_the_same() {
     let mut scratch = BlurScratch::default();
     let mut first = patterned(8, 6);
     first.frost_region(
@@ -1033,7 +1094,22 @@ fn a_released_scratch_grows_again_and_frosts_the_same() {
         &tairix_parallel::SERIAL,
         |_, _| 255,
     );
-    scratch.release();
+    let held = (scratch.lines.capacity(), scratch.strip.capacity());
+    scratch.wipe();
+    assert!(
+        scratch
+            .lines
+            .iter()
+            .chain(&scratch.strip)
+            .chain(scratch.plane.iter().flat_map(Surface::pixels))
+            .all(|&pixel| pixel == Pixel::TRANSPARENT),
+        "a wiped scratch still holds what it frosted"
+    );
+    assert_eq!(
+        (scratch.lines.capacity(), scratch.strip.capacity()),
+        held,
+        "wiping kept the memory"
+    );
     let mut second = patterned(8, 6);
     second.frost_region(
         0,
@@ -1045,7 +1121,7 @@ fn a_released_scratch_grows_again_and_frosts_the_same() {
         &tairix_parallel::SERIAL,
         |_, _| 255,
     );
-    assert_eq!(first, second, "releasing the memory changes no result");
+    assert_eq!(first, second, "wiping changes no result");
 }
 
 /// A frost divided into pieces is bit-for-bit the undivided frost.
@@ -1157,4 +1233,268 @@ fn a_scratch_reused_across_divided_and_undivided_frosts_carries_nothing() {
         again, expected,
         "the scratch a divided frost left behind must not change an undivided one"
     );
+}
+
+/// The plane is read only within `radius` of the bands, as far as the
+/// rectangle reaches, so a caller need compose its backdrop there and nowhere
+/// else: whatever the plane holds beyond cannot reach the frost.
+#[test]
+fn a_frost_reads_its_plane_only_around_its_bands() {
+    const POISON: Pixel = Pixel {
+        r: 255,
+        g: 0,
+        b: 255,
+        a: 255,
+    };
+    let mut rng = Prng::new(0x7E57_F0A5_C0DE_0B1A);
+    let rect = (3u32, 2, 20, 16);
+    let before = patterned(26, 21);
+    for radius in [1u32, 3, 6] {
+        for _ in 0..12 {
+            let cols = span_within(&mut rng, rect.2);
+            let rows = span_within(&mut rng, rect.3);
+            let bands = [(
+                rect.0 + cols.start..rect.0 + cols.end,
+                rect.1 + rows.start..rect.1 + rows.end,
+            )];
+            let honest = frosted_bands_via(
+                &tairix_parallel::SERIAL,
+                before.clone(),
+                rect,
+                &bands,
+                radius,
+                200,
+            );
+
+            let reach_x = (rect.0 + cols.start).saturating_sub(radius).max(rect.0)
+                ..(rect.0 + cols.end + radius).min(rect.0 + rect.2);
+            let reach_y = (rect.1 + rows.start).saturating_sub(radius).max(rect.1)
+                ..(rect.1 + rows.end + radius).min(rect.1 + rect.3);
+            let mut plane = Surface::filled(26, 21, POISON).expect("allocates");
+            for y in reach_y.clone() {
+                for x in reach_x.clone() {
+                    plane.set(x, y, before.get(x, y).expect("inside the surface"));
+                }
+            }
+            let mut poisoned = before.clone();
+            assert!(frost_from_plane(
+                &mut poisoned,
+                &mut plane,
+                &frosting(rect, NOTHING_HELD, &bands, radius),
+                &mut BlurScratch::new(),
+                &tairix_parallel::SERIAL,
+                200,
+            ));
+            assert_eq!(
+                poisoned, honest,
+                "radius {radius} band {bands:?} read the plane beyond its reach"
+            );
+        }
+    }
+}
+
+/// A strip of a few rows mixes the vertical pass back over many strips, and
+/// writes exactly what one strip holding every row writes: the running sums
+/// carry from strip to strip rather than starting again.
+#[test]
+fn a_frost_mixed_back_over_many_strips_is_the_one_strip_frost() {
+    let rect = (1u32, 1, 18, 23);
+    let before = patterned(20, 25);
+    let bands = border(rect, (5..11, 6..15));
+    for radius in [1u32, 4, 9] {
+        let whole = frosted_bands_via(
+            &tairix_parallel::SERIAL,
+            before.clone(),
+            rect,
+            &bands,
+            radius,
+            230,
+        );
+        for rows in [1u32, 2, 3, 7] {
+            for width in [1usize, 2, 5] {
+                let runner = tairix_parallel::Reversed::new(width);
+                let mut scratch = BlurScratch::new();
+                assert!(scratch.reserve(rect.2, rows * super::STRIP_FRACTION, 4, &runner));
+                let (mut plane, mut surface) = (before.clone(), before.clone());
+                assert!(frost_from_plane(
+                    &mut surface,
+                    &mut plane,
+                    &frosting(rect, NOTHING_HELD, &bands, radius),
+                    &mut scratch,
+                    &runner,
+                    230,
+                ));
+                assert_eq!(
+                    surface, whole,
+                    "strips of {rows} rows at radius {radius}, {width} participants"
+                );
+            }
+        }
+    }
+}
+
+/// A scratch reserved for a rectangle frosts any rectangle no larger, on the
+/// runner it was reserved for, without growing: the compositor frosts every
+/// frame from one reservation.
+#[test]
+fn a_reserved_scratch_frosts_without_growing() {
+    let runner = tairix_parallel::Reversed::new(4);
+    let mut scratch = BlurScratch::new();
+    assert!(scratch.reserve(24, 18, 4, &runner));
+    let held = |scratch: &BlurScratch| {
+        (
+            scratch.lines.capacity(),
+            scratch.sums.capacity(),
+            scratch.strip.capacity(),
+            scratch.bands.capacity(),
+            scratch.pieces.capacity(),
+        )
+    };
+    let reserved = held(&scratch);
+    let before = patterned(24, 18);
+    for (rect, keep) in [
+        ((0u32, 0u32, 24u32, 18u32), (0..0, 0..0)),
+        ((2, 1, 20, 15), (4..12, 3..9)),
+        ((0, 4, 24, 6), (0..0, 0..0)),
+        ((5, 0, 3, 18), (1..2, 4..10)),
+    ] {
+        let bands = border(rect, keep);
+        let (mut plane, mut surface) = (before.clone(), before.clone());
+        assert!(frost_from_plane(
+            &mut surface,
+            &mut plane,
+            &frosting(rect, NOTHING_HELD, &bands, 5),
+            &mut scratch,
+            &runner,
+            255,
+        ));
+        assert_eq!(
+            surface,
+            frosted_bands_via(&runner, before.clone(), rect, &bands, 5, 255)
+        );
+    }
+    assert_eq!(
+        held(&scratch),
+        reserved,
+        "a frost within the reservation grew the scratch"
+    );
+}
+
+/// Sorted cut points over `start..start + len`, both ends included, so their
+/// windows tile it.
+fn cuts(rng: &mut Prng, start: u32, len: u32) -> Vec<u32> {
+    let mut at: Vec<u32> = (0..3).map(|_| start + rng.next_u32() % len).collect();
+    at.push(start);
+    at.push(start + len);
+    at.sort_unstable();
+    at.dedup();
+    at
+}
+
+/// Any set of disjoint bands writes exactly what the whole frost writes there
+/// and nothing anywhere else — the shape a compositor's damaged rectangles
+/// take when only parts of a frosted window are seen.
+#[test]
+fn disjoint_bands_frost_exactly_what_the_whole_frost_writes_there() {
+    let mut rng = Prng::new(0x0B5E_55ED_BA4D_5EED);
+    let rect = (2u32, 3, 21, 17);
+    let before = patterned(25, 22);
+    for radius in [1u32, 2, 5] {
+        let whole = frosted(before.clone(), rect, radius, 255);
+        for _ in 0..16 {
+            let (xs, ys) = (
+                cuts(&mut rng, rect.0, rect.2),
+                cuts(&mut rng, rect.1, rect.3),
+            );
+            let mut bands = Vec::new();
+            for cols in xs.windows(2) {
+                for rows in ys.windows(2) {
+                    if rng.next_u32().is_multiple_of(2) {
+                        bands.push((cols[0]..cols[1], rows[0]..rows[1]));
+                    }
+                }
+            }
+            let out = frosted_bands_via(
+                &tairix_parallel::Reversed::new(3),
+                before.clone(),
+                rect,
+                &bands,
+                radius,
+                255,
+            );
+            for y in 0..before.height() {
+                for x in 0..before.width() {
+                    let inside = bands.iter().any(|(c, r)| c.contains(&x) && r.contains(&y));
+                    let expected = if inside {
+                        whole.get(x, y)
+                    } else {
+                        before.get(x, y)
+                    };
+                    assert_eq!(
+                        out.get(x, y),
+                        expected,
+                        "({x}, {y}) radius {radius} bands {bands:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Within `held` the backdrop is read from the destination and the plane is
+/// never read; outside it the plane is. A plane poisoned over the held part
+/// therefore frosts exactly as an honest one does — the compositor's case,
+/// where the back buffer holds the backdrop over the damage and only the ring
+/// beyond it is composed into the plane.
+#[test]
+fn the_backdrop_is_read_from_the_destination_wherever_it_holds_it() {
+    const POISON: Pixel = Pixel {
+        r: 0,
+        g: 255,
+        b: 0,
+        a: 255,
+    };
+    let mut rng = Prng::new(0x4E1D_0FBA_C4D2_0911);
+    let rect = (2u32, 1, 22, 18);
+    let before = patterned(27, 22);
+    for radius in [1u32, 3, 7] {
+        for _ in 0..16 {
+            let keep = (span_within(&mut rng, rect.2), span_within(&mut rng, rect.3));
+            let held = (
+                rect.0 + keep.0.start..rect.0 + keep.0.end,
+                rect.1 + keep.1.start..rect.1 + keep.1.end,
+            );
+            let bands = border(
+                rect,
+                (keep.0.start + 1..keep.0.end, keep.1.start + 1..keep.1.end),
+            );
+            let honest = frosted_bands_via(
+                &tairix_parallel::Reversed::new(4),
+                before.clone(),
+                rect,
+                &bands,
+                radius,
+                150,
+            );
+            let mut plane = before.clone();
+            for y in held.1.clone() {
+                for x in held.0.clone() {
+                    plane.set(x, y, POISON);
+                }
+            }
+            let mut surface = before.clone();
+            assert!(frost_from_plane(
+                &mut surface,
+                &mut plane,
+                &frosting(rect, held.clone(), &bands, radius),
+                &mut BlurScratch::new(),
+                &tairix_parallel::Reversed::new(4),
+                150,
+            ));
+            assert_eq!(
+                surface, honest,
+                "radius {radius} held {held:?} read the plane where the destination holds it"
+            );
+        }
+    }
 }

@@ -331,11 +331,13 @@ compositor can do it.
 - The hardware layer path cannot express a backdrop blur, so a frame
   containing a blurred window falls back to the software composite rather than
   presenting a wrong frame.
-- Frosting is rationed from the front of the stack, so a pile of blurred
-  terminals costs at most the machine's frost ceiling rather than one frost per
-  window, however deep (`plans/FIX-DESKTOP-SPEEDUP.md` D.13). That is what lets the blur ship on by
-  default: a cell repaint under sixteen cascaded terminals blurs nothing, where
-  it blurred some 4.7 M pixels.
+- Retention is rationed from the front of the stack, so a pile of blurred
+  terminals retains at most the machine's frost ceiling rather than one frost
+  per window, however deep, and a terminal it does not reach is frosted all the
+  same, recomputing only what each frame needs of its frost
+  (`plans/FIX-DESKTOP-SPEEDUP.md` D.13). That is what lets the blur ship on by
+  default: a cell repaint in the front of sixteen cascaded terminals blurs
+  nothing.
 
 ---
 

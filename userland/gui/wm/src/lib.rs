@@ -22,10 +22,10 @@
 //!   content behind its rectangle to be blurred before its own translucent
 //!   pixels are blended over it, so a panel reads like frosted glass. The
 //!   effect is `lib/raster`'s shared
-//!   [`frost_region`](tairix_raster::Surface::frost_region), driven through
-//!   one [`BlurScratch`](tairix_raster::BlurScratch) the compositor owns and
-//!   reuses, and the result is retained between frames ([`frost`]) so a
-//!   window's own repaint costs no re-blur at all.
+//!   [`frost_from`](tairix_raster::Surface::frost_from), run in working memory
+//!   the compositor reserves with its back buffer, and the result is retained
+//!   between frames ([`frost`]) wherever the budget allows, so a window's own
+//!   repaint costs no re-blur at all.
 //! - **Damage tracking** ([`Region`]): only changed pixels are
 //!   recomposited, and [`stats`] counts what each frame actually cost so a
 //!   redraw that repaints far more than it changed is measurable rather than

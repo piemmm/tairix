@@ -22,7 +22,7 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 287 open, 363 closed, 650 total.
+**closed**, and a partial fix stays **open**. 287 open, 365 closed, 652 total.
 
 ### Open (287)
 
@@ -364,7 +364,7 @@ resolves to a kind with a `.svg` extension, and read only those. That is a
 signature change to `load_icon_set` (it needs the present kinds, since the
 `SessionFileReader` seam only reads a path) plus the bring-up call.
 
-### Closed (363)
+### Closed (365)
 
 | ID | Subject |
 |---|---|
@@ -731,6 +731,8 @@ signature change to `load_icon_set` (it needs the present kinds, since the
 | D652 | stale documentation and naming: the wallpaper desk's render limit stated per window though it is per client, `Acquisition::Unavailable` omitted a closed window, `render_preview` omitted a region not granted, `docs/src/lib/util.md` named a `JobQueue::land` that does not exist, Settings' `adopt_settings` claimed a re-read on focus, the Settings plan and page said no round trip runs on its loop, a session test type shadowed `Sized`, and three paragraphs were left unwrapped |
 | D654 | the x86_64 probe published a segment's functions untranslated when its DMA unit nodes could not be built, and left every function behind a unit the hardware tree had no room for mastering and published, and left firmware's masters running where the functions' DMA identities or stops failed; each now leaves the segment unconfined, as a refused walk does (D612); `a_full_tree_keeps_the_units_it_could_hold` |
 | D656 | a choice list opened in Settings or in a Paint dialog, and Settings' category list opened from the keyboard, were drawn but not reported, so the frame presented showed only what other damage happened to cover — often just the list's first row: the press that opens a list is routed with a layout that placed none, and the category list reported the pane's column though its plate reaches above it; once a group acts its owner lays the list out again and reports where it moved (`FieldLayout::report_popup_moved`, which the widget gallery's private copy now is), and the category list reports its own plate; `an_opened_list_is_reported_by_the_owner_that_places_it`, `opening_a_list_reports_every_choice_it_draws`, `an_opened_list_is_reported_past_the_sheet`, `opening_the_category_list_reports_its_plate` |
+| D657 | a frosted window lost its blur whenever its frost was not retained: the frost ration (`plans/FIX-DESKTOP-SPEEDUP.md` D.13) refused the frost itself rather than its retention, so a Settings window under the Switchboard drew as plain translucency whenever mild pressure left one screenful of budget; and the blur's whole-area working buffers were grown on the frame path, where a refused growth skipped the blur and the unblurred backdrop was then retained as the frost. A blurred window is now frosted every frame it shows and only retention is rationed — an unretained frost is recomputed where the frame needs it, its backdrop past the damage composed into a reserved frost plane — and a frost's working memory is reserved with the back buffer, so none is refused; `pressure_takes_the_retained_glass_beneath_and_never_its_blur`, `dragging_a_window_over_glass_pressure_could_not_retain_draws_the_same_frames`, `refusing_retention_never_changes_a_pixel`, the no-budget third of `every_change_around_a_frosted_window_composes_the_frame_a_fresh_blur_would`, `a_reserved_scratch_frosts_without_growing` |
+| D658 | a compositor pass's frost lookup enforced the pressure band, so a band tightened mid-pass (the gauge is the process's) could evict a frost an earlier lookup of the same pass had promised to copy, and the fallback then frosted the whole rectangle over finished pixels outside the damage; the band is enforced once before the pass and the lookup (`ReclaimCache::find`) never enforces it, and the fallback recomputes the frost within the damage; `a_band_tightening_mid_pass_evicts_no_frost_the_pass_was_promised`, `find_never_evicts_however_far_the_band_has_tightened` |
 
 ## Scope
 

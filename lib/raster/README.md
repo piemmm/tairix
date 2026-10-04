@@ -178,8 +178,9 @@ This crate owns:
   Newton iteration that stopped when two successive estimates agreed — for a
   squared length one below a perfect square the estimates cycle and never
   agree, so an unlucky graph reading spun its process forever.
-- `box_blur` / `box_blur_coverage` / `Surface::frost_region` / `BlurScratch` —
-  the single separable box blur and the one frosted glass built on it.
+- `box_blur` / `box_blur_coverage` / `Surface::frost_region` /
+  `Surface::frost_from` / `BlurScratch` — the single separable box blur and
+  the one frosted glass built on it.
   `box_blur_coverage` is the same window over one byte of coverage instead of a
   pixel's four channels, for a soft shape drawn in one colour; it is proved to
   be exactly the alpha the pixel blur computes. `soften_coverage` is the one
@@ -199,29 +200,30 @@ This crate owns:
   window cuts short still reads its whole shape while the frost touches only
   what the bounds and the clip admit. A zero radius, an empty or wholly
   off-surface rectangle, and a scratch that cannot be grown each leave the
-  surface exactly as it was. Nothing is written until both passes are done,
-  which is what lets the horizontal one read the surface's own rows rather than
-  a copy of them. `BlurScratch` holds the blurred pixels and the pass-to-pass
-  intermediate across calls — grown on demand, reused, and handed back by
-  `release` — so the per-frame caller (the compositor frosting a window's
-  backdrop) allocates nothing once it is warm. The effect was the window
-  manager's alone until the graphical login screen needed it behind a selected
-  account tile, and neither the login screen nor any other `lib/*` consumer may
-  depend on the window manager.
+  surface exactly as it was. The effect was the window manager's alone until
+  the graphical login screen needed it behind a selected account tile, and
+  neither the login screen nor any other `lib/*` consumer may depend on the
+  window manager.
 
-  `frost_region_around` frosts the same rectangle **except** a kept inner
-  block, and writes exactly the pixels the whole-rectangle frost would write
-  around it — proved by a differential sweep over random blocks, radii and
-  coverages. The rectangle still decides the answer: samples replicate at *its*
-  edges and coverage is read at its own coordinates, so a border is never a
-  smaller frost of a smaller rectangle, which would spread a clipped
-  neighbourhood and seam against the pixels it was kept beside. The border's
-  four bands are all blurred before any is mixed back, because a band's
-  neighbourhood reaches into the bands next to it and what it must read there
-  is the *unfrosted* surface. Its caller is the compositor: a frosted window
-  that has moved keeps every retained pixel neither the blur's replication nor
-  its own corners can reach, and pays for the border alone instead of a whole
-  blur per pointer sample.
+  `frost_from` is the same frost over **bands** of a rectangle (a `Frosting`),
+  reading the backdrop from the destination within the part it holds and from
+  a caller's *plane* everywhere else — `frost_region` is `frost_from` with the
+  surface as its whole backdrop. Each band is written exactly as the whole
+  frost writes it — proved by differential sweeps over random bands, kept
+  blocks, radii and coverages — because samples replicate at the *rectangle's*
+  edges and coverage is read at its own coordinates, so a band is never a
+  smaller frost of a smaller rectangle. Every band's horizontal pass is taken
+  before any is mixed back, because a band's neighbourhood reaches into the
+  bands beside it and what it must read there is the backdrop. The backdrop is
+  read only within `radius` of the bands, which is what lets the compositor
+  compose just a ring of it past a damaged rectangle. The horizontal pass is
+  written into the plane and the vertical pass runs a strip of rows at a time,
+  each column piece carrying its running sums from strip to strip, so nothing
+  in `BlurScratch` grows with a frost's area: `reserve` sizes it once for an
+  output and a runner, a frost within the reservation never grows it, and a
+  scratch reserved for fewer participants spreads a frost less widely rather
+  than refusing it. `wipe` overwrites what its last frosts left in it — a
+  picture of what they frosted — and keeps the reservation.
 
   Each pass costs a load, a running-sum update, a multiply and a store per
   sample. The window is the same size for every output — replicated edges keep

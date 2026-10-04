@@ -2377,9 +2377,10 @@ strength** (`Effects::default`), the five pass effects off. Translucency is
 free — it is the alpha the background is filled at, so the compositor's own
 blend does the work — and the blur is what makes the window read as frosted
 glass rather than as a hole. A screenful of them is affordable because
-frosting is rationed front to back: what the frost cache's budget reaches is
-frosted, and a terminal beneath that composites as the plain translucent window
-it also is (`docs/src/desktop/wm.md`, *Frosting is rationed, front to back*).
+retention is rationed front to back: what the frost cache's budget reaches is
+retained, and a terminal beneath that recomputes only what each frame needs of
+its frost (`docs/src/desktop/wm.md`, *Retention is rationed, front to back; a
+blur never is*).
 
 A pass is a *whole-frame* post-process by nature — wobble displaces rows,
 phosphor decays every pixel, and the glow spreads light across them — so when

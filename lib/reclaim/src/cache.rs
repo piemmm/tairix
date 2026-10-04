@@ -429,6 +429,31 @@ where
         self.admit(policy, key, value)
     }
 
+    /// Look `key` up at `generation`, counting the hit or the miss and
+    /// refreshing a hit's recency, without building, admitting, or enforcing
+    /// the pressure band.
+    ///
+    /// For a consumer that decides, entry by entry, which retained values a
+    /// pass will reuse, and then reads them later in the same pass: a lookup
+    /// that enforced the band could evict an entry an earlier lookup had
+    /// already promised to the pass. Such a consumer enforces the band once,
+    /// before the pass ([`enforce_pressure`](Self::enforce_pressure)), and
+    /// looks up through this. A generation different from the retained one
+    /// empties the cache first, as every lookup does.
+    pub fn find(&mut self, generation: &E, key: &K) -> Option<&V> {
+        if self.poisoned {
+            return None;
+        }
+        self.enter_generation(generation);
+        let policy = self.policy?;
+        if self.entries.contains_key(key) {
+            self.accounting.record_hit(policy.class());
+            return self.entries.get(key).map(|entry| &entry.value);
+        }
+        self.accounting.record_miss(policy.class());
+        None
+    }
+
     /// Retain `value` under `key` at `generation`, replacing whatever was
     /// held for it, and record no hit or miss because no lookup happened.
     ///
@@ -1072,6 +1097,59 @@ mod tests {
             None,
             "the one nothing has asked for since is"
         );
+    }
+
+    #[test]
+    fn find_counts_the_lookup_and_refreshes_a_hit_without_building() {
+        let (mut cache, _, _) = cache(PressureBand::Normal, Sensitivity::UserData);
+        for key in 0..3u32 {
+            cache.retain(&1, key, Block::of(1024, 0xFF));
+        }
+        assert_eq!(cache.find(&1, &0), Some(&Block::of(1024, 0xFF)));
+        assert_eq!(
+            cache.find(&1, &9),
+            None,
+            "an absent key is a miss, never a build"
+        );
+        assert_eq!(cache.accounting().hits(), 1);
+        assert_eq!(cache.accounting().misses(), 1);
+        cache.retain(&1, 3, Block::of(1024, 0xFF));
+        assert!(
+            cache.peek(&1, &0).is_some(),
+            "the entry found is not the first one out"
+        );
+        assert_eq!(cache.peek(&1, &1), None, "the one nothing found since is");
+    }
+
+    /// The reason `find` exists: a pass decides entry by entry what it will
+    /// reuse, so a lookup must never evict an entry an earlier one promised.
+    #[test]
+    fn find_never_evicts_however_far_the_band_has_tightened() {
+        let (mut cache, gauge, _) = cache(PressureBand::Normal, Sensitivity::UserData);
+        for key in 0..3u32 {
+            cache.retain(&1, key, Block::of(1024, 0xFF));
+        }
+        gauge.report(PressureBand::Mild);
+        for key in 0..3u32 {
+            assert!(
+                cache.find(&1, &key).is_some(),
+                "found {key} under mild pressure"
+            );
+        }
+        assert_eq!(cache.len(), 3, "a lookup took nothing");
+        assert!(
+            cache.enforce_pressure() > 0,
+            "enforcing the band is what takes it"
+        );
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn find_at_another_generation_drops_the_entries_built_at_the_old_one() {
+        let (mut cache, _, _) = cache(PressureBand::Normal, Sensitivity::UserData);
+        cache.retain(&1, 7, Block::of(64, 0xAA));
+        assert_eq!(cache.find(&2, &7), None);
+        assert!(cache.is_empty(), "a superseded generation is never served");
     }
 
     #[test]

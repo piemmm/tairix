@@ -435,35 +435,37 @@ the final segment encodes the scan-out frame, so the intermediate stages
 cost no wasted encoding, and several blurred windows in one stack simply
 segment it further.
 
-The effect itself is `lib/raster`'s shared `Surface::frost_region` — the
-one frosted glass the desktop has, which the login screen frosting a
-selected account tile draws through too. It reads the rectangle out of the
-back buffer a row at a time, blurs it, and mixes the blurred pixels back over
-the originals at a per-pixel weight the caller supplies.
+The effect itself is `lib/raster`'s shared frost — the one frosted glass the
+desktop has, which the login screen frosting a selected account tile draws
+through too (`Surface::frost_region`, in place). The compositor reaches it as
+`Surface::frost_from`: it blurs *bands* of a window's rectangle and mixes the
+blurred pixels back over the originals at a per-pixel weight the caller
+supplies, reading the backdrop from the back buffer where the frame has just
+composed it and from the **frost plane** — a screen of pixels reserved with the
+back buffer — everywhere else.
 
 The blur is a **separable box blur**: a horizontal pass then a vertical
 one, each carrying a running sum so the window slides by one add and one
 subtract per output. The cost is proportional to the rectangle's *area*
-whatever the radius, never to area × radius. Nothing is written until both
-passes are done, which is what lets the horizontal one read the surface
-directly instead of a copy of it. The blurred pixels and the pass-to-pass
-intermediate live in one `tairix_raster::BlurScratch` the compositor owns,
-grown to the largest frosted rectangle the session has needed and reused,
-so a frosted window allocates nothing after its first frame; a mode change
-releases it rather than pinning the old screen's worth of pixels.
+whatever the radius, never to area × radius. The horizontal pass is written into
+the frost plane, and the vertical one runs a strip of rows at a time, each
+column piece carrying its running sums from strip to strip, so nothing a frost
+works in grows with its area: the plane and a `tairix_raster::BlurScratch` of
+lines, sums and a strip are **reserved** with the back buffer for the output
+and the installed runner. A frost never allocates on the frame path, so a
+machine short of memory can never refuse one, and a mode the compositor cannot
+reserve them for is refused like one it cannot allocate a back buffer for.
 
-`Surface::frost_region_around` frosts the same rectangle *except* a kept
-inner block, writing exactly the pixels the whole-rectangle frost would write
-around it. The kept block is a retained frost's still-valid core
-([Retained backdrops](#retained-backdrops)). The rectangle still decides the answer — samples replicate at its
-edges and coverage is read at its own coordinates — so a border is never a
-smaller frost of a smaller rectangle, which would spread a clipped
-neighbourhood and seam against the pixels it was kept beside. The border's
-bands are all blurred before any is mixed back, because a band's own
-neighbourhood reaches into the bands next to it and what it must read there is
-the backdrop, not the frost of it. This is what a dragged frosted window costs
-instead of a whole blur (see [Retained
-backdrops](#retained-backdrops)).
+A band is written exactly as the whole-rectangle frost writes it: samples
+replicate at the *rectangle's* edges and coverage is read at its own
+coordinates, so a band is never a smaller frost of a smaller rectangle, which
+would spread a clipped neighbourhood and seam against the pixels beside it.
+Every band's horizontal pass is taken before any band is mixed back, because a
+band's neighbourhood reaches into the bands next to it and what it must read
+there is the backdrop, not the frost of it. Bands are what a dragged frosted
+window costs instead of a whole blur — the border around its retained core —
+and what an unretained frost costs instead of a whole blur — the part of the
+damage it shows through (see [Retained backdrops](#retained-backdrops)).
 
 Every channel is averaged, alpha included: on premultiplied data that is
 the same convex combination of the contributing colours that compositing
@@ -982,10 +984,13 @@ How a retained backdrop is known to be still right:
   widen for being blurred over a rectangle whose lower layers the frame never
   composed. That one lookup is also what the cache counts, so a reuse reads as
   a hit and refreshes the entry's recency: the frost every frame serves must
-  not be the first one a pressured cache gives back. A frost that survives only
-  in part is promoted like one that must be blurred outright, because its
-  border is blurred and a border blurred over a strip of damage would spread a
-  neighbourhood clipped to that strip.
+  not be the first one a pressured cache gives back. The lookup
+  (`ReclaimCache::find`) never enforces the pressure band — the frame enforces
+  it once, before the pass — so no lookup can evict an entry an earlier one
+  promised the same pass. A frost that survives only in part is promoted like
+  one that must be blurred outright, because its border is blurred and a border
+  blurred over a strip of damage would spread a neighbourhood clipped to that
+  strip.
 - **The layers a frost covers are not composed at all.** A frost is copied on
   top of whatever is beneath it, so composing that stack first is work the copy
   throws away — a whole window's worth of blending per pointer sample for a
@@ -1013,30 +1018,31 @@ How a retained backdrop is known to be still right:
   never looked up again, so setting its blur radius to zero releases its entry
   outright rather than leaving a screenful of dead pixels charged.
 
-### Frosting is rationed, front to back
+### Retention is rationed, front to back; a blur never is
 
 A frost is a *whole window's* rectangle, and stacked frosted windows all read
 the same pixels, so `n` of them want `n` screenfuls of retention against a
 budget of one. Asking "does one more fit?" of each in turn answers *yes* for
 every window in such a stack, so each frame blurred one, evicted another, and
-re-blurred it the next frame: cost climbed with the depth of the stack and the
-cache served nobody. Sixteen terminals opened on top of one another at the
-shipped translucent, blurred default is the shape that finds it, and it took the
-desktop to a crawl — one repainted cell costing several screenfuls of blur and
-of blending.
+re-blurred it the next: cost climbed with the depth of the stack and the cache
+served nobody, and sixteen translucent, blurred terminals took the desktop to a
+crawl.
 
 `Compositor::grant_backdrops` therefore spends the cache's live ceiling from the
 **front** of the stack and stops (`ReclaimCache::holds`, which weighs a whole
-set against the ceiling rather than one entry against what is charged):
+set against the ceiling rather than one entry against what is charged). What
+the budget reaches is **retained** (`Window::is_retained`).
 
-- What the budget reaches is **frosted** — its backdrop retained, the window
-  composed over it — and is recorded on the window (`Window::is_frosted`), so
-  the plan and the composite read one answer.
-- What it does not reach composites as the **plain translucent window it also
-  is**: no blur, no retained backdrop, no segment split, and the layers beneath
-  it blended straight through. The frame it draws there is byte for byte what
-  the same window draws with its blur turned off, which the compositor's tests
-  assert rather than assume.
+What the budget decides is retention, and only retention. **Every visible
+blurred window is frosted, every frame it shows** (`Window::is_frosted`): the
+cache is an accelerator, never a condition of drawing the blur, so no budget,
+pressure band or refused allocation can take a window's glass away. A plainly
+translucent window is frosted only while retained, because composing it over a
+frost of radius zero that is not kept is exactly blending it straight through.
+Neither answer changes a pixel, so the ration changing its mind — and it turns
+on the live pressure band as well as the scene — marks no damage; a window that
+loses its retention gives its entry back at once, so the windows still retained
+are weighed against a budget it has returned.
 
 ### Desktop chrome is served first
 
@@ -1051,16 +1057,12 @@ window the embedder paints itself, which is the taskbar, a session dialog, or
 the lock screen. It is permanently on screen and its frost is a band-sized
 slice of the budget, yet it is an ordinary compositor window and deliberately
 *not* pinned topmost, so it sits at the **back** of the stack. Weighed there in
-one front-to-back sweep, a default terminal — translucent, blurred — took the
-ceiling ahead of it, and the bar kept its blur only while the applications'
-frosts happened to leave a bar-sized slice over. That is why the icon bar's
-frost came and went with how many windows were open and how big they were:
-around fourteen terminals was where the leftover stopped fitting. Its
-transparency survived throughout, because that is the window's own alpha.
+one front-to-back sweep, a default terminal took the ceiling ahead of it, and
+the bar kept its retention only while the applications' frosts happened to
+leave a bar-sized slice over.
 
-An unblurred window is served last whatever its depth, for the reason it always
-was: a blur decides how a window *looks*, where a radius-zero retention only
-saves recomposing the stack beneath it and changes no pixel.
+An unblurred window is served last whatever its depth: its retention only saves
+recomposing the stack beneath it.
 
 Depth is bounded by the one fact that matters — what can be retained — rather
 than by a window count that a large screen would waste and a small one could not
@@ -1070,33 +1072,37 @@ the same pixels, and on a 1024×768 output a Settings window under the
 Switchboard already wants more than a screenful. The ceiling is therefore the
 machine's share of its memory, never below one screenful
 (`tairix_reclaim::stacked_ui_cache`), so an ordinary stack of windows is never
-rationed. Mild and moderate pressure take it back to one screenful — every
-window's glass in a single layer, giving up what is stacked beneath it first —
-and severe pressure to the shared reserve. Because the frame never
-over-commits the budget, nothing is admitted only to be evicted.
+rationed. Mild and moderate pressure take it back to one screenful, giving up
+the retention of what is stacked beneath first, and severe pressure to the
+shared reserve. Because the frame never over-commits the budget, nothing is
+admitted only to be evicted.
 
-Measured on that cascade as a host unit test — sixteen 80%-opaque blurred
-terminals on eight positions over a 1024×768 output on a machine that reports
-no memory, retained backdrops wanting some thirteen screenfuls against a budget
-of one — the first frame blurs 640 680
-pixels (four fifths of the screen) and three of the sixteen windows are frosted
-within the ceiling. A terminal then repainting one cell of itself blurs **0**
-pixels and recomposes **1**, where the same repaint over an ungoverned stack
-blurred some 4.7 M and blended some 4.9 M.
+### An unretained frost is recomputed where the frame needs it
 
-What it costs is that a window buried under a pile of frosted ones deeper than
-the machine's share holds, or under any stack while memory is short, reads as
-translucent rather than as frosted glass where it still shows. That is the
-deliberate trade, and it is bounded: nothing is ever drawn wrong, only less
-prettily than an unbounded machine would draw it.
+A frost that is not retained, and whose backdrop has not changed, is still
+right on screen everywhere the frame leaves alone, so it is recomputed only
+within the damage (`FrostPlan::Local`) — and only where the frosts above it
+leave it seen, since a frost copied whole replaces everything beneath it. The
+blur reads `radius` past the damage's edge, where the back buffer holds finished
+pixels, so the layers beneath are composed into the frost plane over that ring
+and the frost reads its backdrop from there. A frost beneath that the ring
+reaches is copied from the cache; that is what keeps a ring from needing a ring
+of its own, so a window whose rectangle reaches a frost beneath that is *not*
+copied whole is recomputed whole instead, which reads no ring. A frost
+recomputed only because it was not retained comes out exactly as it was, so it
+drops no frost above it. One whose backdrop changed is recomputed whole, as a
+retained frost is.
 
-**A change of mind marks damage.** The ration turns on the cache's ceiling and
-the live pressure band as well as on the scene, so a window can start or stop
-frosting with nothing on screen having moved — and it draws differently either
-way. The grant runs before the frame takes its damage and marks the bounds of
-every window whose answer changed, releasing the retained entry of one that has
-stopped frosting at the same time, so the windows still frosted are weighed
-against a budget the refused ones have given back.
+So what pressure costs is work, never the look, and the work is bounded by
+what the frame changes: with the Switchboard dragged over a Settings window
+whose frost pressure would not retain, every frame is the frame a machine
+retaining both draws and recomposes exactly as many pixels, and a cursor sample
+over the unretained glass blurs at most 64 pixels — all asserted against a
+compositor that retains both. On the sixteen-terminal cascade, a cell repainted
+in the front window, whose retained frost covers everything beneath it there,
+blurs **0** pixels and recomposes under 4 000. A change beneath a deep stack of
+unretained glass is the costly case: every frost above that it reaches is
+recomputed whole.
 
 The cache is read-only for the whole of a composite pass and written at the end
 of it: admitting a frost mid-pass could evict one the same pass had already
@@ -1105,16 +1111,17 @@ the frame only composed where the damage happened to fall.
 
 Losing a frost costs blur work and never a wrong pixel, which is what makes the
 cache an accelerator rather than a correctness requirement. That is asserted,
-not asserted-about: the compositor's tests compose one scene twice — once
-reusing retained frosts, once blurring afresh every frame — through some thirty
-mutations (content presents above, below and inside the frost, cursor motion, a
-fade, restacking, geometry, radius, corner, scale, theme and mode changes,
-overlapping frosts, a frost clipped by the screen edge, and window removal) and
-require the scan-out frame *and* the back buffer to be byte-identical after
-every one. The partial reuse a moved window takes is held to the same bar from
-both ends: that sweep covers it, and `lib/raster` proves separately that
-frosting a border around a kept block is bit-for-bit the whole frost, over
-random blocks, radii and coverages.
+not asserted-about: the compositor's tests compose one scene three ways —
+reusing retained frosts, blurring afresh every frame, and with no frost budget
+at all — through some thirty mutations (content presents above, below and
+inside the frost, cursor motion, a fade, restacking, geometry, radius, corner,
+scale, theme and mode changes, overlapping frosts, a frost clipped by the screen
+edge, and window removal) and require the scan-out frame *and* the back buffer
+to be byte-identical after every one. The partial reuse a moved window takes is
+held to the same bar from both ends: that sweep covers it, and `lib/raster`
+proves separately that frosting any set of disjoint bands — a border around a
+kept block among them — is bit-for-bit the whole frost there, reading its
+backdrop only within reach of the bands.
 
 ## What one frame cost (`FrameStats`)
 

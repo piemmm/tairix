@@ -35,10 +35,14 @@ that enforces all of it.
   (`Served::Uncached`), so caching is never required for correctness.
   A consumer whose value cannot be built on demand — a compositor's
   frosted backdrop exists only as the by-product of a composite pass —
-  asks with `get_or_build`, which counts the lookup, and offers the
-  finished value afterwards with `retain`, which counts none, so one
-  lookup is recorded once however it was satisfied; a value `retain`
-  declines is the cache's to drop, and is wiped like an evicted one.
+  asks with `find`, which counts the lookup without building or enforcing
+  the band, and offers the finished value afterwards with `retain`, which
+  counts none, so one lookup is recorded once however it was satisfied; a
+  value `retain` declines is the cache's to drop, and is wiped like an
+  evicted one. Because `find` never enforces the band, a consumer deciding
+  entry by entry what one pass reuses enforces it once before the pass
+  (`enforce_pressure`), and no lookup can evict an entry an earlier one
+  promised that pass.
   `holds` answers the
   question before that: admission evicts to make room, which is right when
   the oldest entry has gone cold and wrong when every entry is live, so a

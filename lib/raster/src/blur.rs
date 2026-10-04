@@ -34,9 +34,8 @@ use crate::surface::{RowBand, Surface};
 ///
 /// `aux` is supplied by the caller — so a blur costs no allocation on the
 /// frame path. A caller frosting a rectangle of a surface takes
-/// [`Surface::frost_region`] instead, which reads the surface itself and owns
-/// the shape-weighted mix back into it, carrying both buffers in a
-/// [`BlurScratch`].
+/// [`Surface::frost_region`] or [`Surface::frost_from`] instead, which own the
+/// shape-weighted mix back into it.
 ///
 /// Nothing is blurred, and `region` is left exactly as it was, when the
 /// radius is `0` (the effect is disabled), when either dimension is `0`, or
@@ -126,25 +125,38 @@ fn blur_block<S: Sample>(
 /// The fewest pixels a piece of a frost carries before it is worth handing to
 /// another core.
 ///
-/// A piece is two sliding-window passes plus a mix over its own pixels, which at
-/// this size is hundreds of microseconds even on a slow core — several times what
-/// a dispatch's wake and park syscalls cost. Below it the frost runs on the
+/// A piece is a share of one pass over its own pixels, which at this size is
+/// hundreds of microseconds even on a slow core — several times what a
+/// dispatch's wake and park syscalls cost. Below it the frost runs on the
 /// calling thread with no atomics, so a small frosted control costs what it
 /// always did.
 const MIN_PARALLEL_FROST_PX: usize = 8_192;
 
-/// The buffers a frost works in: the blurred pixels it mixes back, the
-/// intermediate its horizontal pass hands to its vertical one, and the pieces it
-/// splits itself into.
+/// The share of the height a scratch is [reserved](BlurScratch::reserve) for
+/// that one strip of the vertical pass covers.
 ///
-/// All three grow to the largest frost asked of them and are then reused, so a
-/// per-frame caller — the compositor frosting a window's backdrop on every
-/// composite — allocates nothing once its scratch is warm.
+/// The strip is the one buffer that follows a frost's height, so a quarter
+/// holds it to a quarter of the plane the frost reads, at the price of three
+/// more hand-offs for a frost as tall as the screen.
+const STRIP_FRACTION: u32 = 4;
+
+/// The working memory a frost runs in.
+///
+/// None of it grows with a frost's area: a horizontal-pass line per
+/// participant, a running vertical sum per output column, the strip vertical
+/// averages wait in before they are mixed back, and the band and piece lists.
+/// [`Surface::frost_from`] reads its backdrop from a plane its caller holds, so
+/// a caller that [reserves](Self::reserve) the scratch once frosts every frame
+/// without allocating and is never refused. [`Surface::frost_region`] frosts in
+/// place, so it also keeps here the copy of the backdrop it reads.
 #[derive(Default)]
 pub struct BlurScratch {
-    frosted: Vec<Pixel>,
-    aux: Vec<Pixel>,
-    pieces: Vec<Band>,
+    plane: Option<Surface>,
+    lines: Vec<Pixel>,
+    sums: Vec<PixelSum>,
+    strip: Vec<Pixel>,
+    bands: Vec<Band>,
+    pieces: Vec<Piece>,
 }
 
 impl BlurScratch {
@@ -152,19 +164,86 @@ impl BlurScratch {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            frosted: Vec::new(),
-            aux: Vec::new(),
+            plane: None,
+            lines: Vec::new(),
+            sums: Vec::new(),
+            strip: Vec::new(),
+            bands: Vec::new(),
             pieces: Vec::new(),
         }
     }
 
-    /// Give the memory back, so a scratch that frosted a large region stops
-    /// holding it; the next frost grows it again.
-    pub fn release(&mut self) {
-        self.frosted = Vec::new();
-        self.aux = Vec::new();
-        self.pieces = Vec::new();
+    /// Reserve what a [`Surface::frost_from`] of up to `bands` bands of a
+    /// rectangle no wider than `width` and no taller than `height` needs when
+    /// `runner` spreads it, reporting whether it could.
+    ///
+    /// A caller that frosts every frame reserves once, for its output, so no
+    /// frost it runs grows the scratch on its frame path or finds it refused.
+    /// A frost spreads only as widely as the scratch holds lines and pieces
+    /// for, so a refusal here — which keeps what was reserved before — costs
+    /// parallelism, never the frost.
+    pub fn reserve(
+        &mut self,
+        width: u32,
+        height: u32,
+        bands: usize,
+        runner: &dyn JobRunner,
+    ) -> bool {
+        let wide = usize::try_from(width).unwrap_or(usize::MAX);
+        let strip_rows = usize::try_from(height.div_ceil(STRIP_FRACTION))
+            .unwrap_or(usize::MAX)
+            .max(1);
+        let pieces = tairix_parallel::bands(runner, usize::MAX, 1).saturating_mul(bands.max(1));
+        let (Some(lines), Some(sums), Some(strip)) = (
+            wide.checked_mul(runner.width().max(1)),
+            wide.checked_mul(bands.max(1)),
+            wide.checked_mul(strip_rows),
+        ) else {
+            return false;
+        };
+        fallible::grow_to(&mut self.lines, lines, Pixel::TRANSPARENT)
+            && fallible::grow_to(&mut self.sums, sums, PixelSum::default())
+            && fallible::grow_to(&mut self.strip, strip, Pixel::TRANSPARENT)
+            && room(&mut self.bands, bands.max(1))
+            && room(&mut self.pieces, pieces)
     }
+
+    /// Overwrite everything the scratch holds — what its last frosts read and
+    /// wrote is a picture of whatever they frosted — keeping its reservation.
+    ///
+    /// Volatile, like a reclaimed surface's wipe, so the stores are not
+    /// optimised away for memory nothing reads again.
+    pub fn wipe(&mut self) {
+        if let Some(plane) = self.plane.as_mut() {
+            tairix_util::secret::wipe_with(plane.pixels_mut(), Pixel::TRANSPARENT);
+        }
+        tairix_util::secret::wipe_with(&mut self.lines, Pixel::TRANSPARENT);
+        tairix_util::secret::wipe_with(&mut self.sums, PixelSum::default());
+        tairix_util::secret::wipe_with(&mut self.strip, Pixel::TRANSPARENT);
+    }
+
+    /// Grow the scratch to what an in-place frost of a `width`×`height`
+    /// rectangle needs on `runner`: its whole vertical pass in one strip.
+    fn fit(&mut self, width: usize, height: usize, runner: &dyn JobRunner) -> bool {
+        let (Some(lines), Some(strip)) = (
+            width.checked_mul(runner.width().max(1)),
+            width.checked_mul(height),
+        ) else {
+            return false;
+        };
+        let pieces = tairix_parallel::bands(runner, usize::MAX, 1);
+        fallible::grow_to(&mut self.lines, lines, Pixel::TRANSPARENT)
+            && fallible::grow_to(&mut self.sums, width, PixelSum::default())
+            && fallible::grow_to(&mut self.strip, strip, Pixel::TRANSPARENT)
+            && room(&mut self.pieces, pieces)
+    }
+}
+
+/// Clear `list` and make room in it for `count` entries without allocating
+/// again.
+fn room<T>(list: &mut Vec<T>, count: usize) -> bool {
+    list.clear();
+    list.try_reserve(count).is_ok()
 }
 
 impl Surface {
@@ -173,11 +252,10 @@ impl Surface {
     /// `coverage` — `255` takes the blurred pixel, `0` keeps the original,
     /// and the values between are the weighted mix.
     ///
-    /// This is the desktop's one frosted glass: the compositor frosts a
-    /// window's backdrop before the window's own translucent pixels blend
-    /// over it. Weighting the mix rather than clipping it is what lets
-    /// a rounded shape fade from frosted to untouched across its own arc
-    /// instead of showing a square edge.
+    /// This is the desktop's one frosted glass in place: a control frosting
+    /// what it is drawn over. Weighting the mix rather than clipping it is
+    /// what lets a rounded shape fade from frosted to untouched across its own
+    /// arc instead of showing a square edge.
     ///
     /// `coverage` is asked about a pixel's position relative to the
     /// rectangle's **own** top-left, so a caller whose rectangle the surface
@@ -193,14 +271,16 @@ impl Surface {
     /// The frost is confined to what the surface bounds and the active clip
     /// window admit and reads only the pixels it may write: samples past
     /// that edge replicate it, so the effect can neither pull a neighbour's
-    /// pixels in nor mark a pixel outside. `scratch` carries the blurred
-    /// pixels and the pass-to-pass intermediate between calls and holds
-    /// nothing from one frost to the next.
+    /// pixels in nor mark a pixel outside. This is [`frost_from`] with the
+    /// surface itself as the whole backdrop and a plane held in `scratch`, so
+    /// the two cannot round, replicate, weight, or dither differently.
     ///
     /// The surface is left exactly as it was, never partly frosted, when
     /// `radius` is `0` (the effect is disabled), when the rectangle is empty
     /// or lands nowhere the surface admits, or when the scratch could not be
     /// grown.
+    ///
+    /// [`frost_from`]: Self::frost_from
     #[expect(
         clippy::too_many_arguments,
         reason = "the rectangle is spelled as the four scalars every other \
@@ -219,204 +299,158 @@ impl Surface {
         runner: &dyn JobRunner,
         coverage: impl Fn(u32, u32) -> u8 + Sync,
     ) {
-        self.frost(x, y, w, h, None, radius, scratch, runner, coverage);
-    }
-
-    /// Frost `[x, x+w) × [y, y+h)` **around** `keep_cols` × `keep_rows` — the
-    /// columns and rows given relative to that rectangle's own top-left —
-    /// writing exactly the pixels [`frost_region`](Self::frost_region) would
-    /// write outside the kept block and leaving the block itself untouched.
-    ///
-    /// The whole rectangle still decides the answer: samples replicate at
-    /// *its* edges, and coverage is read at its own coordinates, so this is
-    /// never a smaller frost of a smaller rectangle — which would spread a
-    /// neighbourhood clipped to the border and seam against the kept pixels.
-    /// What it buys is cost: each pass runs over the border and `radius`
-    /// beyond it rather than over the whole rectangle.
-    ///
-    /// This is what lets a caller holding the frost it computed for the same
-    /// backdrop one frame ago — the compositor's retained backdrop, for a
-    /// window that has since moved — keep every pixel no edge or shape
-    /// difference can reach and recompute only the border that changed.
-    ///
-    /// The reads come from the surface, so the caller must have put back
-    /// whatever it means the blur to read: the border's neighbourhood is
-    /// `radius` pixels of the rectangle around it, which is the kept block
-    /// eroded by `radius` at most. Keeping nothing frosts the whole rectangle.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "frost_region's arguments plus the block to leave alone, \
-                  spelled as the column and row ranges the passes take"
-    )]
-    pub fn frost_region_around(
-        &mut self,
-        x: u32,
-        y: u32,
-        w: u32,
-        h: u32,
-        keep_cols: Range<u32>,
-        keep_rows: Range<u32>,
-        radius: u32,
-        scratch: &mut BlurScratch,
-        runner: &dyn JobRunner,
-        coverage: impl Fn(u32, u32) -> u8 + Sync,
-    ) {
-        self.frost(
-            x,
-            y,
-            w,
-            h,
-            Some((keep_cols, keep_rows)),
-            radius,
-            scratch,
-            runner,
-            coverage,
-        );
-    }
-
-    /// Frost `[x, x+w) × [y, y+h)` except `keep`, or the whole of it for
-    /// `None`.
-    ///
-    /// The one frost: both entry points are this call, so a border and a whole
-    /// cannot round, replicate, weight, or dither differently.
-    ///
-    /// Neither pass reads a copy of the rectangle — the horizontal one reads
-    /// the surface's own rows and the vertical one reads what it wrote — so a
-    /// frost costs two passes over what it writes rather than three over the
-    /// rectangle.
-    ///
-    /// # How it is split
-    ///
-    /// The work becomes **pieces**: the up-to-four row bands a kept block leaves,
-    /// each divided across its columns so `runner`'s participants share it. A
-    /// piece is independent of every other because both of its passes read only
-    /// the *surface* and write only its own scratch — and a piece's answer is
-    /// bit-for-bit what the undivided band would have written there, because
-    /// replication and coverage are read from the whole rectangle whichever part
-    /// of it a pass writes.
-    ///
-    /// Blurring and mixing stay two phases with a barrier between them, and split
-    /// differently: blurring writes the scratch, so its pieces are the column
-    /// divisions; mixing writes the *surface*, so its pieces are row bands of it.
-    /// The barrier is not an artefact of splitting — a band's neighbourhood
-    /// reaches into the bands beside it, and a frosted pixel is not the backdrop
-    /// pixel the blur is a function of, so writing one band and then reading it as
-    /// another's neighbour would seam.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "the two public entry points' arguments, with the kept block \
-                  they differ by; splitting it would duplicate the frost"
-    )]
-    fn frost(
-        &mut self,
-        x: u32,
-        y: u32,
-        w: u32,
-        h: u32,
-        keep: Option<(Range<u32>, Range<u32>)>,
-        radius: u32,
-        scratch: &mut BlurScratch,
-        runner: &dyn JobRunner,
-        coverage: impl Fn(u32, u32) -> u8 + Sync,
-    ) {
         if radius == 0 {
             return;
         }
         let Some((columns, rows)) = self.admitted(x, y, w, h) else {
             return;
         };
-        let radius = usize::try_from(radius).unwrap_or(usize::MAX);
-        let frost = Frost {
-            x,
-            y,
-            columns,
-            rows,
-            radius,
-            recip: Reciprocal::new(radius.saturating_mul(2).saturating_add(1)),
-        };
-        let BlurScratch {
-            frosted,
-            aux,
-            pieces,
-        } = scratch;
-        frost.push_pieces(pieces, keep, runner);
-        // Each piece is blurred at the same time as the others, so each needs its
-        // own intermediate rather than taking turns in one.
-        let (Some(output), Some(intermediate)) = (
-            pieces
-                .iter()
-                .try_fold(0usize, |total, piece| total.checked_add(piece.area())),
-            pieces.iter().try_fold(0usize, |total, piece| {
-                total.checked_add(frost.intermediate(piece))
-            }),
-        ) else {
+        let (width, height) = (
+            columns.end.saturating_sub(columns.start),
+            rows.end.saturating_sub(rows.start),
+        );
+        let (Ok(wide), Ok(tall)) = (usize::try_from(width), usize::try_from(height)) else {
             return;
         };
-        if output == 0
-            || !fallible::grow_to(frosted, output, Pixel::TRANSPARENT)
-            || !fallible::grow_to(aux, intermediate, Pixel::TRANSPARENT)
-        {
+        // The plane only ever receives the horizontal pass, so one already the
+        // right size is reused as it stands rather than cleared.
+        let plane = match scratch.plane.take() {
+            Some(plane) if plane.width() == width && plane.height() == height => Some(plane),
+            Some(plane) => plane.reshaped(width, height),
+            None => Self::new(width, height),
+        };
+        let Some(mut plane) = plane else {
             return;
-        }
-        // One piece is the ordinary case — a serial runner, or a frost too small
-        // to be worth dividing — and it is served from the stack, so a frost that
-        // is not spread allocates nothing at all.
-        if let [only] = pieces.as_slice() {
-            let (Some(out), Some(mid)) = (
-                frosted.get_mut(..only.area()),
-                aux.get_mut(..frost.intermediate(only)),
-            ) else {
-                return;
-            };
-            let mut one = [BlurPiece {
-                band: only.clone(),
-                aux: mid,
-                frosted: out,
-            }];
-            frost.blur_pieces(self, &mut one, runner);
-            frost.mix_pieces(self, &one, runner, &coverage);
-            return;
-        }
-        let mut split: Vec<BlurPiece<'_>> = Vec::new();
-        if split.try_reserve_exact(pieces.len()).is_err() {
-            return;
-        }
-        let mut out_rest: &mut [Pixel] = frosted;
-        let mut mid_rest: &mut [Pixel] = aux;
-        for band in pieces.iter() {
-            let (area, span) = (band.area(), frost.intermediate(band));
-            if area > out_rest.len() || span > mid_rest.len() {
-                return;
+        };
+        let held = (columns.clone(), rows.clone());
+        let frost = Frost::new(x, y, (columns.clone(), rows.clone()), &held, radius);
+        let origin = (columns.start, rows.start);
+        if scratch.fit(wide, tall, runner) {
+            let BlurScratch {
+                lines,
+                sums,
+                strip,
+                bands,
+                pieces,
+                ..
+            } = scratch;
+            bands.clear();
+            if fallible::reserve(bands, 1) {
+                bands.push(Band {
+                    cols: 0..wide,
+                    rows: 0..tall,
+                });
+                let work = Work {
+                    lines,
+                    sums,
+                    strip,
+                    pieces,
+                };
+                let _ = frost.run(self, (&mut plane, origin), bands, work, runner, &coverage);
             }
-            let (out, rest) = out_rest.split_at_mut(area);
-            out_rest = rest;
-            let (mid, rest) = mid_rest.split_at_mut(span);
-            mid_rest = rest;
-            split.push(BlurPiece {
-                band: band.clone(),
-                aux: mid,
-                frosted: out,
-            });
         }
-        frost.blur_pieces(self, &mut split, runner);
-        frost.mix_pieces(self, &split, runner, &coverage);
+        scratch.plane = Some(plane);
+    }
+
+    /// Write the frost `frosting` describes into this surface, reading the
+    /// backdrop from this surface within [`held`](Frosting::held) and from
+    /// `plane` — addressed in this surface's coordinates — elsewhere, and report
+    /// whether it was written.
+    ///
+    /// Each band is written exactly as [`frost_region`](Self::frost_region)
+    /// writes it frosting the whole rectangle: samples replicate at the
+    /// rectangle's edges and coverage is read at its own coordinates, so bands
+    /// side by side meet without a seam. Nothing outside the bands is written,
+    /// and the backdrop is read only within `radius` of them; this surface must
+    /// hold it over the bands themselves, which a partial coverage mixes over.
+    /// The horizontal pass is written into `plane`, so what the plane holds
+    /// there afterwards is unspecified.
+    ///
+    /// A scratch [reserved](BlurScratch::reserve) for the rectangle is used as
+    /// it stands. `false` is a frost the scratch could not be grown for, and
+    /// leaves this surface untouched; a radius of `0`, or bands covering
+    /// nothing, frost nothing and answer `true`.
+    pub fn frost_from(
+        &mut self,
+        plane: &mut Self,
+        frosting: &Frosting<'_>,
+        scratch: &mut BlurScratch,
+        runner: &dyn JobRunner,
+        coverage: impl Fn(u32, u32) -> u8 + Sync,
+    ) -> bool {
+        let Frosting {
+            rect: (x, y, w, h),
+            ref held,
+            bands,
+            radius,
+        } = *frosting;
+        if radius == 0 {
+            return true;
+        }
+        let Some(admitted) = self.admitted(x, y, w, h) else {
+            return true;
+        };
+        let frost = Frost::new(x, y, admitted, held, radius);
+        let BlurScratch {
+            lines,
+            sums,
+            strip,
+            bands: written,
+            pieces,
+            ..
+        } = scratch;
+        written.clear();
+        let mut columns = 0usize;
+        for (cols, rows) in bands {
+            let Some(band) = frost.local(cols, rows) else {
+                continue;
+            };
+            if !fallible::reserve(written, 1) {
+                return false;
+            }
+            columns = columns.saturating_add(band.cols.len());
+            written.push(band);
+        }
+        if written.is_empty() {
+            return true;
+        }
+        let width = frost.width();
+        if !(fallible::grow_to(lines, width, Pixel::TRANSPARENT)
+            && fallible::grow_to(sums, columns, PixelSum::default())
+            && fallible::grow_to(strip, width, Pixel::TRANSPARENT))
+        {
+            return false;
+        }
+        let work = Work {
+            lines,
+            sums,
+            strip,
+            pieces,
+        };
+        frost.run(self, (plane, (0, 0)), written, work, runner, &coverage)
     }
 }
 
-/// One independent piece of a frost: the part of the rectangle it answers for,
-/// the intermediate its horizontal pass hands to its vertical one, and the
-/// blurred pixels it produces.
-struct BlurPiece<'a> {
-    band: Band,
-    aux: &'a mut [Pixel],
-    frosted: &'a mut [Pixel],
+/// The frost a [`Surface::frost_from`] writes, in the destination's
+/// coordinates.
+pub struct Frosting<'a> {
+    /// The rectangle `(x, y, w, h)` the blur is a function of: samples
+    /// replicate at its edges and coverage is read from its top-left.
+    pub rect: (u32, u32, u32, u32),
+    /// The columns and rows of the rectangle where the destination already
+    /// holds the backdrop; the plane holds it everywhere else the frost reads.
+    pub held: (Range<u32>, Range<u32>),
+    /// The parts of the rectangle written, which must not overlap.
+    pub bands: &'a [(Range<u32>, Range<u32>)],
+    /// How far the blur spreads, in pixels.
+    pub radius: u32,
 }
 
-/// The rectangle a frost is a function of: the surface columns and rows it
-/// admits, the caller's own origin the shape coverage is read from, and the
-/// blur it spreads by.
+/// The rectangle a frost is a function of: the destination columns and rows
+/// it admits, the origin its shape coverage is read from, and the blur it
+/// spreads by.
 ///
-/// Replication and coverage are read from *this* rectangle whichever part of
+/// Replication and coverage are read from *this* rectangle whichever band of
 /// it a call writes, which is what makes frosting a border equal frosting the
 /// whole and keeping the middle.
 struct Frost {
@@ -424,12 +458,14 @@ struct Frost {
     y: u32,
     columns: Range<u32>,
     rows: Range<u32>,
+    /// Where the destination holds the backdrop, in the rectangle's own
+    /// columns and rows.
+    held: Band,
     radius: usize,
     recip: Reciprocal,
 }
 
-/// A part of a frosted rectangle one pass writes, in that rectangle's own
-/// columns and rows.
+/// A part of a frosted rectangle, in that rectangle's own columns and rows.
 #[derive(Clone)]
 struct Band {
     cols: Range<usize>,
@@ -437,15 +473,6 @@ struct Band {
 }
 
 impl Band {
-    /// The band covering no pixels, which a caller filters out: the placeholder
-    /// for a border band a kept block flush against an edge leaves out.
-    const fn none() -> Self {
-        Self {
-            cols: 0..0,
-            rows: 0..0,
-        }
-    }
-
     fn is_empty(&self) -> bool {
         self.cols.is_empty() || self.rows.is_empty()
     }
@@ -455,140 +482,201 @@ impl Band {
     }
 }
 
+/// One column share of a band's vertical pass.
+#[derive(Clone)]
+struct Piece {
+    cols: Range<usize>,
+    rows: Range<usize>,
+}
+
+/// The plane a frost reads its backdrop from, and the destination coordinate
+/// of the plane's own top-left.
+type Plane<'a> = (&'a mut Surface, (u32, u32));
+
+/// The scratch buffers one frost works in.
+struct Work<'a> {
+    lines: &'a mut [Pixel],
+    sums: &'a mut [PixelSum],
+    strip: &'a mut [Pixel],
+    pieces: &'a mut Vec<Piece>,
+}
+
+/// One piece's share of a strip: the rows of it the piece covers, the running
+/// sums it carries from strip to strip, and the block its averages go to.
+struct Averaging<'a> {
+    piece: &'a Piece,
+    rows: Range<usize>,
+    sums: &'a mut [PixelSum],
+    block: &'a mut [Pixel],
+}
+
 impl Frost {
+    fn new(
+        x: u32,
+        y: u32,
+        (columns, rows): (Range<u32>, Range<u32>),
+        held: &(Range<u32>, Range<u32>),
+        radius: u32,
+    ) -> Self {
+        let radius = usize::try_from(radius).unwrap_or(usize::MAX);
+        let mut frost = Self {
+            x,
+            y,
+            columns,
+            rows,
+            held: Band {
+                cols: 0..0,
+                rows: 0..0,
+            },
+            radius,
+            recip: Reciprocal::new(radius.saturating_mul(2).saturating_add(1)),
+        };
+        if let Some(band) = frost.local(&held.0, &held.1) {
+            frost.held = band;
+        }
+        frost
+    }
+
     fn width(&self) -> usize {
-        usize::try_from(self.columns.end - self.columns.start).unwrap_or(0)
+        usize::try_from(self.columns.end.saturating_sub(self.columns.start)).unwrap_or(0)
     }
 
     fn height(&self) -> usize {
-        usize::try_from(self.rows.end - self.rows.start).unwrap_or(0)
+        usize::try_from(self.rows.end.saturating_sub(self.rows.start)).unwrap_or(0)
     }
 
-    /// The row bands a frost writes when `keep` is left alone: the whole
-    /// rectangle when nothing is kept, otherwise the border around the kept block
-    /// as the four bands that tile it — full width above and below it, and the two
-    /// sides between.
-    fn row_bands(&self, keep: Option<(Range<u32>, Range<u32>)>) -> [Band; 4] {
-        let (width, height) = (self.width(), self.height());
-        let whole = || {
-            [
-                Band {
-                    cols: 0..width,
-                    rows: 0..height,
-                },
-                Band::none(),
-                Band::none(),
-                Band::none(),
-            ]
+    /// The destination columns `cols` and rows `rows` as a band of this
+    /// rectangle, or `None` where they land outside it.
+    fn local(&self, cols: &Range<u32>, rows: &Range<u32>) -> Option<Band> {
+        let confine = |asked: &Range<u32>, within: &Range<u32>| {
+            let start = asked.start.clamp(within.start, within.end);
+            let end = asked.end.clamp(start, within.end);
+            let offset = |at: u32| usize::try_from(at.saturating_sub(within.start)).unwrap_or(0);
+            offset(start)..offset(end)
         };
-        let Some((cols, rows)) = keep
-            .map(|(cols, rows)| (within(cols, width), within(rows, height)))
-            .filter(|(cols, rows)| !cols.is_empty() && !rows.is_empty())
-        else {
-            return whole();
+        let band = Band {
+            cols: confine(cols, &self.columns),
+            rows: confine(rows, &self.rows),
         };
-        [
-            Band {
-                cols: 0..width,
-                rows: 0..rows.start,
-            },
-            Band {
-                cols: 0..width,
-                rows: rows.end..height,
-            },
-            Band {
-                cols: 0..cols.start,
-                rows: rows.clone(),
-            },
-            Band {
-                cols: cols.end..width,
-                rows,
-            },
-        ]
+        (!band.is_empty()).then_some(band)
     }
 
-    /// Fill `out` with the independent pieces this frost splits into: each row
-    /// band `keep` leaves, divided across its columns into as many pieces as
-    /// `runner` is worth splitting it for.
+    /// The columns averaging `cols` horizontally reads: `radius` beyond them on
+    /// both sides, or the rectangle's own edge.
+    fn reach(&self, cols: &Range<usize>) -> Range<usize> {
+        cols.start.saturating_sub(self.radius)
+            ..cols.end.saturating_add(self.radius).min(self.width())
+    }
+
+    /// The rows `band`'s vertical pass reads: `radius` beyond it on both
+    /// sides, or the rectangle's own edge, whichever comes first — exactly
+    /// where the replication begins.
+    fn pass_rows(&self, band: &Band) -> Range<usize> {
+        band.rows.start.saturating_sub(self.radius)
+            ..band.rows.end.saturating_add(self.radius).min(self.height())
+    }
+
+    /// The destination row of the rectangle's own row `row`.
+    fn row(&self, row: usize) -> u32 {
+        self.rows
+            .start
+            .saturating_add(u32::try_from(row).unwrap_or(u32::MAX))
+    }
+
+    /// The destination column of the rectangle's own column `column`.
+    fn column(&self, column: usize) -> u32 {
+        self.columns
+            .start
+            .saturating_add(u32::try_from(column).unwrap_or(u32::MAX))
+    }
+
+    /// Frost `bands` of `dest` from the backdrop `dest` and `plane` hold
+    /// between them, reporting whether the scratch could hold the frost.
     ///
-    /// Dividing by *columns* is what keeps a piece independent: both of a piece's
-    /// passes read the surface and write only its own scratch, and the horizontal
-    /// pass reads the whole rectangle's row whatever part of it it writes, so the
-    /// replication at the rectangle's edges is the same for every piece.
-    fn push_pieces(
+    /// The horizontal pass is written into the plane, which keeps the scratch
+    /// free of anything the size of the rectangle. The vertical pass runs a
+    /// strip at a time, each piece sliding a running sum per column down its
+    /// band, primed once; a strip is mixed into `dest` once all of it is
+    /// written, because its pieces are split by column and its mix by row.
+    fn run(
         &self,
-        out: &mut Vec<Band>,
-        keep: Option<(Range<u32>, Range<u32>)>,
+        dest: &mut Surface,
+        (plane, origin): Plane<'_>,
+        bands: &[Band],
+        work: Work<'_>,
         runner: &dyn JobRunner,
-    ) {
-        out.clear();
-        for band in self.row_bands(keep) {
-            if band.is_empty() {
-                continue;
-            }
-            // One piece per participant and no more. Every piece primes its
-            // sliding window afresh at its own first column, which costs `radius`
-            // samples per row that the undivided pass paid once — so dividing
-            // more finely than there are participants to run the pieces buys
-            // nothing and charges for it. The pieces are equal in size and shape,
-            // so there is no imbalance for a finer division to absorb either.
-            let share = band.area().div_ceil(runner.width().max(1));
-            let count =
-                tairix_parallel::bands(runner, band.area(), share.max(MIN_PARALLEL_FROST_PX));
-            let per = band.cols.len().div_ceil(count.max(1)).max(1);
-            let mut at = band.cols.start;
-            while at < band.cols.end {
-                let end = at.saturating_add(per).min(band.cols.end);
-                if out.try_reserve(1).is_err() {
-                    // Without room for every piece the split would be partial,
-                    // and a partial split is a partial frost; keep what is there
-                    // and stop dividing.
-                    return;
-                }
-                out.push(Band {
-                    cols: at..end,
-                    rows: band.rows.clone(),
-                });
-                at = end;
-            }
+        coverage: &(impl Fn(u32, u32) -> u8 + Sync),
+    ) -> bool {
+        let width = self.width();
+        let Some(rows) = bands
+            .iter()
+            .map(|band| band.rows.clone())
+            .reduce(|a, b| a.start.min(b.start)..a.end.max(b.end))
+        else {
+            return true;
+        };
+        let Work {
+            lines,
+            sums,
+            strip,
+            pieces,
+        } = work;
+        if width == 0 || lines.len() < width || strip.len() < width {
+            return false;
         }
+        let read = PlaneRead {
+            frost: self,
+            origin,
+        };
+        read.blur_lines(plane, bands, lines, runner, dest);
+        let Some(columns) = divide(bands, pieces, runner) else {
+            return false;
+        };
+        let Some(sums) = sums.get_mut(..columns) else {
+            return false;
+        };
+        let plane: &Surface = plane;
+        let per = strip.len() / width;
+        let mut start = rows.start;
+        while start < rows.end {
+            let mut end = start.saturating_add(per).min(rows.end);
+            // Disjoint bands never need more than the strip's rows times the
+            // rectangle's width; bands that overlap are given fewer rows.
+            while strip_need(pieces, &(start..end)) > strip.len() && end > start.saturating_add(1) {
+                end = start.saturating_add((end - start) / 2);
+            }
+            if strip_need(pieces, &(start..end)) <= strip.len() {
+                read.average_strip(plane, pieces, sums, strip, &(start..end), runner);
+                self.mix_strip(dest, pieces, strip, &(start..end), runner, coverage);
+            }
+            start = end;
+        }
+        true
     }
 
-    /// Blur every piece into its own scratch. The surface is only read, so every
-    /// piece reads the same backdrop the undivided band would have.
-    fn blur_pieces(&self, surface: &Surface, pieces: &mut [BlurPiece<'_>], runner: &dyn JobRunner) {
-        tairix_parallel::for_each(runner, pieces, &|piece| {
-            let BlurPiece { band, aux, frosted } = piece;
-            self.blur_band(surface, band, aux, frosted);
-        });
-    }
-
-    /// Mix every piece's blurred pixels back over the surface.
-    ///
-    /// The blurred pixels are finished and read-only from here, so this phase is
-    /// split by the rows it *writes* rather than by the pieces that produced them:
-    /// a row band owns whole surface rows, and the pieces landing in them write
-    /// disjoint columns of those rows.
-    fn mix_pieces(
+    /// Mix every piece's averages for `rows` back over `dest`, split into
+    /// bands of whole destination rows across `runner`.
+    fn mix_strip(
         &self,
-        surface: &mut Surface,
-        pieces: &[BlurPiece<'_>],
+        dest: &mut Surface,
+        pieces: &[Piece],
+        strip: &[Pixel],
+        rows: &Range<usize>,
         runner: &dyn JobRunner,
         coverage: &(impl Fn(u32, u32) -> u8 + Sync),
     ) {
-        let span = usize::try_from(self.rows.end.saturating_sub(self.rows.start)).unwrap_or(0);
         let count = tairix_parallel::bands(
             runner,
-            span,
+            rows.len(),
             MIN_PARALLEL_FROST_PX.div_ceil(self.width().max(1)),
         );
-        let per = u32::try_from(span.div_ceil(count.max(1)))
+        let per = u32::try_from(rows.len().div_ceil(count.max(1)))
             .unwrap_or(u32::MAX)
             .max(1);
-        let mut bands = surface.row_bands_mut(self.rows.clone(), per);
+        let mut bands = dest.row_bands_mut(self.row(rows.start)..self.row(rows.end), per);
         if count <= 1 {
             if let Some(mut only) = bands.next() {
-                self.mix_rows(&mut only, pieces, coverage);
+                self.mix_rows(&mut only, pieces, strip, rows, coverage);
             }
             return;
         }
@@ -597,145 +685,456 @@ impl Frost {
             // Without room for every band the mix would be partial; run the
             // rows serially instead, which needs no split at all.
             for mut band in bands {
-                self.mix_rows(&mut band, pieces, coverage);
+                self.mix_rows(&mut band, pieces, strip, rows, coverage);
             }
             return;
         }
         split.extend(bands);
         tairix_parallel::for_each(runner, &mut split, &|band| {
-            self.mix_rows(band, pieces, coverage);
+            self.mix_rows(band, pieces, strip, rows, coverage);
         });
     }
 
-    /// The rows the horizontal pass must produce for `band`: `radius` beyond it
-    /// on both sides, or the rectangle's own edge, whichever comes first —
-    /// which is exactly where the replication begins.
-    fn pass_rows(&self, band: &Band) -> Range<usize> {
-        band.rows.start.saturating_sub(self.radius)
-            ..band.rows.end.saturating_add(self.radius).min(self.height())
-    }
-
-    /// The intermediate pixels blurring `band` needs.
-    fn intermediate(&self, band: &Band) -> usize {
-        band.cols.len().saturating_mul(self.pass_rows(band).len())
-    }
-
-    /// Blur `band` of `surface` into `blurred`, carrying the horizontal pass
-    /// over to the vertical one through `aux`. Reads `surface` and never
-    /// writes it.
-    fn blur_band(&self, surface: &Surface, band: &Band, aux: &mut [Pixel], blurred: &mut [Pixel]) {
-        let (stride, span) = (band.cols.len(), self.columns.end - self.columns.start);
-        let pass_rows = self.pass_rows(band);
-        for (offset, target) in pass_rows.clone().zip(aux.chunks_exact_mut(stride)) {
-            let Ok(offset) = u32::try_from(offset) else {
-                continue;
-            };
-            let Some((_, source)) = surface.row_span(
-                self.rows.start.saturating_add(offset),
-                self.columns.start,
-                span,
-            ) else {
-                continue;
-            };
-            blur_span(
-                source,
-                target,
-                1,
-                self.width(),
-                self.radius,
-                self.recip,
-                band.cols.clone(),
-            );
-        }
-        let vertical = band.rows.start - pass_rows.start..band.rows.end - pass_rows.start;
-        for column in 0..stride {
-            let (Some(source), Some(target)) = (aux.get(column..), blurred.get_mut(column..))
-            else {
-                continue;
-            };
-            blur_span(
-                source,
-                target,
-                stride,
-                pass_rows.len(),
-                self.radius,
-                self.recip,
-                vertical.clone(),
-            );
-        }
-    }
-
-    /// Mix back, over the surface rows `band` owns, whatever every piece of
-    /// `pieces` blurred there — each pixel weighted by its own `coverage` and
-    /// rounded at the surface's ordered dither.
+    /// Mix back, over the destination rows `band` owns, what every piece
+    /// covering them averaged there in the strip over `rows` — each pixel
+    /// weighted by its own `coverage` and rounded at the surface's ordered
+    /// dither.
     ///
-    /// A piece that reaches none of these rows contributes nothing, so this costs
-    /// one range intersection per piece plus the pixels it actually writes.
+    /// The blocks lie in the strip in piece order, each a piece's columns wide
+    /// and as tall as the rows of the strip it covers, which is how
+    /// [`average_strip`](PlaneRead::average_strip) laid them out.
     fn mix_rows(
         &self,
         band: &mut RowBand<'_>,
-        pieces: &[BlurPiece<'_>],
+        pieces: &[Piece],
+        strip: &[Pixel],
+        rows: &Range<usize>,
         coverage: &impl Fn(u32, u32) -> u8,
     ) {
-        let owned = band.rows();
-        for piece in pieces {
-            let (Ok(left), Ok(stride)) = (
-                u32::try_from(piece.band.cols.start),
-                u32::try_from(piece.band.cols.len()),
-            ) else {
+        for row in band.rows() {
+            let Some(local) = row
+                .checked_sub(self.rows.start)
+                .and_then(|local| usize::try_from(local).ok())
+            else {
                 continue;
             };
-            let (Ok(from), Ok(until)) = (
-                u32::try_from(piece.band.rows.start),
-                u32::try_from(piece.band.rows.end),
-            ) else {
-                continue;
-            };
-            if stride == 0 {
-                continue;
-            }
-            let lo = owned.start.max(self.rows.start.saturating_add(from));
-            let hi = owned.end.min(self.rows.start.saturating_add(until));
-            let lead = self.columns.start - self.x + left;
-            for row in lo..hi {
-                let Some(at) = row
-                    .checked_sub(self.rows.start)
-                    .and_then(|offset| offset.checked_sub(from))
-                    .and_then(|local| usize::try_from(local).ok())
-                    .and_then(|local| local.checked_mul(piece.band.cols.len()))
-                else {
-                    continue;
-                };
-                let Some(blurred) = piece
-                    .frosted
-                    .get(at..at.saturating_add(piece.band.cols.len()))
-                else {
-                    continue;
-                };
-                let Some((first, target)) =
-                    band.row_span_mut(row, self.columns.start.saturating_add(left), stride)
-                else {
-                    continue;
-                };
-                let ly = row - self.y;
-                let dither = DitherRow::at(row);
-                for (((dst, src), lx), column) in
-                    target.iter_mut().zip(blurred).zip(lead..).zip(first..)
-                {
-                    *dst = mix(*dst, *src, coverage(lx, ly), dither.bias(column));
+            let mut offset = 0usize;
+            for piece in pieces {
+                let covered = overlap(&piece.rows, rows);
+                let width = piece.cols.len();
+                if covered.contains(&local) {
+                    let at = offset.saturating_add((local - covered.start).saturating_mul(width));
+                    if let Some(averaged) = strip.get(at..at.saturating_add(width)) {
+                        self.mix_span(band, row, piece, averaged, coverage);
+                    }
                 }
+                offset = offset.saturating_add(width.saturating_mul(covered.len()));
             }
+        }
+    }
+
+    /// Mix one piece's averages for destination row `row` over that row of
+    /// `band`.
+    fn mix_span(
+        &self,
+        band: &mut RowBand<'_>,
+        row: u32,
+        piece: &Piece,
+        averaged: &[Pixel],
+        coverage: &impl Fn(u32, u32) -> u8,
+    ) {
+        let asked = self.column(piece.cols.start);
+        let wide = u32::try_from(piece.cols.len()).unwrap_or(u32::MAX);
+        let Some((first, target)) = band.row_span_mut(row, asked, wide) else {
+            return;
+        };
+        // A clip window that cut the span's leading columns advances the
+        // averages by as much, so the two stay aligned.
+        let skip = usize::try_from(first.saturating_sub(asked)).unwrap_or(usize::MAX);
+        let (ly, dither) = (row.saturating_sub(self.y), DitherRow::at(row));
+        for (((dst, &src), lx), column) in target
+            .iter_mut()
+            .zip(averaged.get(skip..).unwrap_or_default())
+            .zip(first.saturating_sub(self.x)..)
+            .zip(first..)
+        {
+            *dst = mix(*dst, src, coverage(lx, ly), dither.bias(column));
         }
     }
 }
 
-/// `asked` confined to `0..extent`, empty where it lands wholly outside.
-fn within(asked: Range<u32>, extent: usize) -> Range<usize> {
-    let start = usize::try_from(asked.start)
-        .unwrap_or(usize::MAX)
-        .min(extent);
-    let end = usize::try_from(asked.end).unwrap_or(usize::MAX).min(extent);
-    start..end.max(start)
+/// A frost's view of the plane it reads: the rectangle, and where the plane's
+/// own top-left sits in the destination's coordinates.
+struct PlaneRead<'a> {
+    frost: &'a Frost,
+    origin: (u32, u32),
+}
+
+impl PlaneRead<'_> {
+    /// The plane row holding the rectangle's own row `row`.
+    fn row(&self, row: usize) -> u32 {
+        self.frost.row(row).saturating_sub(self.origin.1)
+    }
+
+    /// The plane column holding the rectangle's own column `column`.
+    fn column(&self, column: usize) -> u32 {
+        self.frost.column(column).saturating_sub(self.origin.0)
+    }
+
+    /// Run the horizontal pass over every row a band's vertical pass reads,
+    /// writing the averages back into `plane` over the band's own columns.
+    ///
+    /// Rows are independent, so they are split across `runner` in bands of the
+    /// plane, each with a line of its own: a row's averages are all taken from
+    /// the backdrop before any is written back, because bands side by side
+    /// read one another's columns.
+    fn blur_lines(
+        &self,
+        plane: &mut Surface,
+        bands: &[Band],
+        lines: &mut [Pixel],
+        runner: &dyn JobRunner,
+        dest: &Surface,
+    ) {
+        let width = self.frost.width().max(1);
+        let Some(span) = bands
+            .iter()
+            .map(|band| self.frost.pass_rows(band))
+            .reduce(|a, b| a.start.min(b.start)..a.end.max(b.end))
+        else {
+            return;
+        };
+        let count =
+            tairix_parallel::bands(runner, span.len(), MIN_PARALLEL_FROST_PX.div_ceil(width))
+                .clamp(1, (lines.len() / width).max(1));
+        let per = u32::try_from(span.len().div_ceil(count))
+            .unwrap_or(u32::MAX)
+            .max(1);
+        let mut work = plane
+            .row_bands_mut(self.row(span.start)..self.row(span.end), per)
+            .zip(lines.chunks_exact_mut(width));
+        if count <= 1 {
+            if let Some((mut band, line)) = work.next() {
+                self.blur_band_lines(&mut band, line, bands, dest);
+            }
+            return;
+        }
+        let mut split: Vec<(RowBand<'_>, &mut [Pixel])> = Vec::new();
+        if !fallible::reserve(&mut split, count) {
+            for (mut band, line) in work {
+                self.blur_band_lines(&mut band, line, bands, dest);
+            }
+            return;
+        }
+        split.extend(work);
+        tairix_parallel::for_each(runner, &mut split, &|(band, line)| {
+            self.blur_band_lines(band, line, bands, dest);
+        });
+    }
+
+    /// The horizontal pass over the plane rows `rows` owns, a row at a time:
+    /// each band's averages written into the plane over the band's columns.
+    ///
+    /// A row the destination holds the whole of what its averages read is
+    /// averaged straight from the destination. Any other row's backdrop is
+    /// gathered into `line` first — the plane's own, with what the destination
+    /// holds laid over it — since its averages are written into the very row of
+    /// the plane they read.
+    fn blur_band_lines(
+        &self,
+        rows: &mut RowBand<'_>,
+        line: &mut [Pixel],
+        bands: &[Band],
+        dest: &Surface,
+    ) {
+        let frost = self.frost;
+        let width = frost.width();
+        let (Ok(span), first) = (u32::try_from(width), self.column(0)) else {
+            return;
+        };
+        for plane_row in rows.rows() {
+            let Some(local) = plane_row
+                .checked_add(self.origin.1)
+                .and_then(|row| row.checked_sub(frost.rows.start))
+                .and_then(|local| usize::try_from(local).ok())
+            else {
+                continue;
+            };
+            let reading = || {
+                bands
+                    .iter()
+                    .filter(move |band| frost.pass_rows(band).contains(&local))
+            };
+            let Some(read) = reading()
+                .map(|band| frost.reach(&band.cols))
+                .reduce(|a, b| a.start.min(b.start)..a.end.max(b.end))
+            else {
+                continue;
+            };
+            let Some((start, target)) = rows.row_span_mut(plane_row, first, span) else {
+                continue;
+            };
+            if start != first || target.len() != width {
+                continue;
+            }
+            let held = if frost.held.rows.contains(&local) {
+                overlap(&frost.held.cols, &read)
+            } else {
+                0..0
+            };
+            let source = if held == read {
+                match dest.row_span(frost.row(local), frost.column(0), span) {
+                    Some((at, row)) if at == frost.column(0) && row.len() == width => row,
+                    _ => continue,
+                }
+            } else {
+                let (Some(gathered), Some(backdrop)) =
+                    (line.get_mut(read.clone()), target.get(read.clone()))
+                else {
+                    continue;
+                };
+                gathered.copy_from_slice(backdrop);
+                if !held.is_empty() {
+                    let wide = u32::try_from(held.len()).unwrap_or(u32::MAX);
+                    let (Some(gathered), Some((_, backdrop))) = (
+                        line.get_mut(held.clone()),
+                        dest.row_span(frost.row(local), frost.column(held.start), wide),
+                    ) else {
+                        continue;
+                    };
+                    if gathered.len() != backdrop.len() {
+                        continue;
+                    }
+                    gathered.copy_from_slice(backdrop);
+                }
+                &*line
+            };
+            for band in reading() {
+                if let Some(out) = target.get_mut(band.cols.clone()) {
+                    blur_span(
+                        source,
+                        out,
+                        1,
+                        width,
+                        frost.radius,
+                        frost.recip,
+                        band.cols.clone(),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Take the vertical averages of `rows` for every piece covering any of
+    /// them into its own block of `strip`, laid out in piece order.
+    ///
+    /// A piece's running sums carry from one strip to the next, so it is
+    /// primed once, at its band's first row, however many strips its rows
+    /// span.
+    fn average_strip(
+        &self,
+        plane: &Surface,
+        pieces: &[Piece],
+        sums: &mut [PixelSum],
+        strip: &mut [Pixel],
+        rows: &Range<usize>,
+        runner: &dyn JobRunner,
+    ) {
+        let mut jobs: Vec<Averaging<'_>> = Vec::new();
+        let spread = fallible::reserve(&mut jobs, pieces.len());
+        let (mut sums, mut strip) = (sums, strip);
+        for piece in pieces {
+            let all_sums = core::mem::take(&mut sums);
+            let (held, rest) = all_sums.split_at_mut(piece.cols.len().min(all_sums.len()));
+            sums = rest;
+            let covered = overlap(&piece.rows, rows);
+            if covered.is_empty() {
+                continue;
+            }
+            let all_strip = core::mem::take(&mut strip);
+            let need = piece
+                .cols
+                .len()
+                .saturating_mul(covered.len())
+                .min(all_strip.len());
+            let (block, rest) = all_strip.split_at_mut(need);
+            strip = rest;
+            let mut job = Averaging {
+                piece,
+                rows: covered,
+                sums: held,
+                block,
+            };
+            if spread {
+                jobs.push(job);
+            } else {
+                self.average(plane, &mut job);
+            }
+        }
+        tairix_parallel::for_each(runner, &mut jobs, &|job| self.average(plane, job));
+    }
+
+    /// One piece's averages over its rows of a strip: primed at its band's
+    /// first row, then slid a row at a time — `blur_span`'s walk turned on its
+    /// side, so every output is the very sum it would have taken.
+    fn average(&self, plane: &Surface, job: &mut Averaging<'_>) {
+        let Averaging {
+            piece,
+            rows,
+            sums,
+            block,
+        } = job;
+        let width = piece.cols.len();
+        if width == 0 {
+            return;
+        }
+        for (row, out) in rows.clone().zip(block.chunks_exact_mut(width)) {
+            if row == piece.rows.start {
+                self.prime(plane, piece, row, sums);
+            }
+            for (slot, sum) in out.iter_mut().zip(sums.iter()) {
+                *slot = sum.mean(self.frost.recip);
+            }
+            if row.saturating_add(1) < piece.rows.end {
+                self.slide(plane, piece, row, sums);
+            }
+        }
+    }
+
+    /// Set `sums` to the vertical window around the rectangle's own row
+    /// `row`: `2 * radius + 1` rows, any past the rectangle's edges counted as
+    /// copies of its first or last row — arithmetically, as `blur_span` counts
+    /// them, so priming costs the rectangle's height at most whatever the
+    /// radius.
+    fn prime(&self, plane: &Surface, piece: &Piece, row: usize, sums: &mut [PixelSum]) {
+        sums.fill(PixelSum::default());
+        let Some(last) = self.frost.height().checked_sub(1) else {
+            return;
+        };
+        let radius = self.frost.radius;
+        self.gather(plane, piece, 0, sums, radius.saturating_sub(row));
+        for sample in row.saturating_sub(radius)..=row.saturating_add(radius).min(last) {
+            self.gather(plane, piece, sample, sums, 1);
+        }
+        let past = row.saturating_add(radius).saturating_sub(last);
+        self.gather(plane, piece, last, sums, past);
+    }
+
+    /// Add `times` copies of the averages the rectangle's own row `row` holds
+    /// over `piece`'s columns to `sums`.
+    fn gather(
+        &self,
+        plane: &Surface,
+        piece: &Piece,
+        row: usize,
+        sums: &mut [PixelSum],
+        times: usize,
+    ) {
+        if times == 0 {
+            return;
+        }
+        let Some(averaged) = self.averaged(plane, piece, row) else {
+            return;
+        };
+        if times == 1 {
+            for (sum, &pixel) in sums.iter_mut().zip(averaged) {
+                sum.add(pixel);
+            }
+        } else {
+            for (sum, &pixel) in sums.iter_mut().zip(averaged) {
+                sum.add_many(pixel, times);
+            }
+        }
+    }
+
+    /// Move `sums` from the window around the rectangle's own row `row` to
+    /// the one around the row after it.
+    fn slide(&self, plane: &Surface, piece: &Piece, row: usize, sums: &mut [PixelSum]) {
+        let Some(last) = self.frost.height().checked_sub(1) else {
+            return;
+        };
+        let radius = self.frost.radius;
+        let entering = row.saturating_add(radius).saturating_add(1).min(last);
+        let leaving = row.saturating_sub(radius);
+        let (Some(added), Some(removed)) = (
+            self.averaged(plane, piece, entering),
+            self.averaged(plane, piece, leaving),
+        ) else {
+            return;
+        };
+        for ((sum, &enter), &leave) in sums.iter_mut().zip(added).zip(removed) {
+            sum.add(enter);
+            sum.sub(leave);
+        }
+    }
+
+    /// The horizontal averages the rectangle's own row `row` holds over
+    /// `piece`'s columns, or `None` where the plane does not hold them.
+    fn averaged<'p>(&self, plane: &'p Surface, piece: &Piece, row: usize) -> Option<&'p [Pixel]> {
+        let first = self.column(piece.cols.start);
+        let (start, averaged) =
+            plane.row_span(self.row(row), first, u32::try_from(piece.cols.len()).ok()?)?;
+        (start == first && averaged.len() == piece.cols.len()).then_some(averaged)
+    }
+}
+
+/// The strip one pass over `rows` lays its pieces' averages out in: each
+/// piece's columns times the rows of `rows` it covers.
+fn strip_need(pieces: &[Piece], rows: &Range<usize>) -> usize {
+    pieces
+        .iter()
+        .map(|piece| {
+            piece
+                .cols
+                .len()
+                .saturating_mul(overlap(&piece.rows, rows).len())
+        })
+        .fold(0, usize::saturating_add)
+}
+
+/// Fill `pieces` with each band divided across its columns into as many
+/// pieces as `runner` is worth splitting it for and the list has room for,
+/// returning how many running sums they hold between them, or `None` when the
+/// list cannot take even a piece per band.
+///
+/// Dividing by columns is what keeps a piece independent: its sums slide down
+/// its own columns, so no piece reads or writes another's. The list is never
+/// grown past its reservation for a finer division, since how finely a band is
+/// divided changes no pixel.
+fn divide(bands: &[Band], pieces: &mut Vec<Piece>, runner: &dyn JobRunner) -> Option<usize> {
+    pieces.clear();
+    if pieces.capacity() < bands.len() && !fallible::reserve(pieces, bands.len()) {
+        return None;
+    }
+    let mut columns = 0usize;
+    for (at, band) in bands.iter().enumerate() {
+        let later = bands.len() - at - 1;
+        let spare = pieces
+            .capacity()
+            .saturating_sub(pieces.len())
+            .saturating_sub(later)
+            .max(1);
+        let count =
+            tairix_parallel::bands(runner, band.area(), MIN_PARALLEL_FROST_PX).clamp(1, spare);
+        let per = band.cols.len().div_ceil(count).max(1);
+        let mut start = band.cols.start;
+        while start < band.cols.end {
+            let end = start.saturating_add(per).min(band.cols.end);
+            pieces.push(Piece {
+                cols: start..end,
+                rows: band.rows.clone(),
+            });
+            columns = columns.checked_add(end - start)?;
+            start = end;
+        }
+    }
+    Some(columns)
+}
+
+/// The part of `a` inside `b`, empty where they do not meet.
+fn overlap(a: &Range<usize>, b: &Range<usize>) -> Range<usize> {
+    let start = a.start.max(b.start);
+    start..a.end.min(b.end).max(start)
 }
 
 /// Row `y` of `src` and of `dst`, both `width` samples wide.

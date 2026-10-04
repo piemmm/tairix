@@ -1129,10 +1129,13 @@ weaker policy:
   content all keep it. A frost is a *whole window's* rectangle, so unlike
   furniture a stack of overlapping ones can want several times the screenful
   the ceiling allows — the compositor weighs the whole set it is choosing
-  against the live ceiling (`ReclaimCache::holds`) and frosts the stack from
-  the front until the budget runs out, so it never over-commits and never
-  rebuilds all of them every frame; a window it refuses composites as the
-  plain translucent window it also is (`plans/FIX-DESKTOP-SPEEDUP.md` D.13).
+  against the live ceiling (`ReclaimCache::holds`) and retains the stack's
+  frosts from the front until the budget runs out, so it never over-commits and
+  never rebuilds all of them every frame. A window it refuses is frosted all the
+  same, recomputing what each frame needs of its frost: what pressure takes is
+  retention, never the blur (`plans/FIX-DESKTOP-SPEEDUP.md` D.13). The pass
+  looks entries up through `ReclaimCache::find`, which never enforces the band,
+  having enforced it once before the pass.
 - **The font service's glyph rasters, on both sides.** The service's own
   rasterised coverage and the client-side memoisation of what it fetched
   are `ReclaimCache`es too, built from the single

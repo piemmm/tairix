@@ -7561,18 +7561,21 @@ fn a_hidden_window_s_furniture_is_evicted_before_a_visible_one_s() {
 
 // ---- retained backdrops ----------------------------------------------
 
-/// One scene composed twice: once reusing retained frosts, once blurring
-/// afresh every frame.
+/// One scene composed three ways: reusing retained frosts, blurring afresh
+/// every frame, and with no frost budget at all, so that every frost is
+/// recomputed where each frame needs it.
 ///
-/// Every operation is applied to both compositors and every frame is compared
-/// byte for byte, so a frost the reuse path kept when something beneath it
-/// changed shows up as a differing pixel rather than as a plausible-looking
+/// Every operation is applied to all three compositors and every frame is
+/// compared byte for byte, so a frost the reuse path kept when something
+/// beneath it changed, or a local frost that read the wrong backdrop past the
+/// damage, shows up as a differing pixel rather than as a plausible-looking
 /// screenshot. The back buffer is compared as well as the scan-out frame,
 /// because a frost reads the back buffer: a difference there would go
 /// unnoticed for a frame and surface later.
 struct BothWays {
     reusing: Compositor,
     blurring: Compositor,
+    unretained: Compositor,
 }
 
 impl BothWays {
@@ -7580,11 +7583,16 @@ impl BothWays {
         let reusing = new_compositor(mode, BLUE).expect("compositor");
         let mut blurring = new_compositor(mode, BLUE).expect("compositor");
         blurring.set_frost_reuse(false);
-        Self { reusing, blurring }
+        let unretained = unbudgeted_compositor(mode);
+        Self {
+            reusing,
+            blurring,
+            unretained,
+        }
     }
 
-    /// Apply `act` to both compositors, asserting they agree on what it
-    /// returned — window ids are handed out in order, so the two stacks stay
+    /// Apply `act` to every compositor, asserting they agree on what it
+    /// returned — window ids are handed out in order, so the stacks stay
     /// identical — and hand that back.
     fn both<T>(&mut self, act: impl Fn(&mut Compositor) -> T) -> T
     where
@@ -7592,17 +7600,17 @@ impl BothWays {
     {
         let reusing = act(&mut self.reusing);
         let blurring = act(&mut self.blurring);
-        assert_eq!(
-            reusing, blurring,
-            "the two compositors took different paths"
-        );
+        let unretained = act(&mut self.unretained);
+        assert_eq!(reusing, blurring, "the compositors took different paths");
+        assert_eq!(reusing, unretained, "the compositors took different paths");
         reusing
     }
 
-    /// Composite both and require the results to be identical.
+    /// Composite all three and require the results to be identical.
     fn settle(&mut self, step: &str) {
         let reused = self.reusing.composite();
         let blurred = self.blurring.composite();
+        let local = self.unretained.composite();
         assert_eq!(
             self.reusing.frame(),
             self.blurring.frame(),
@@ -7613,7 +7621,38 @@ impl BothWays {
             self.blurring.back_buffer().pixels(),
             "back buffer differs after {step}"
         );
+        assert_eq!(
+            self.reusing.frame(),
+            self.unretained.frame(),
+            "scan-out differs with nothing retained after {step} (recomposed {local:?})"
+        );
+        assert_eq!(
+            self.reusing.back_buffer().pixels(),
+            self.unretained.back_buffer().pixels(),
+            "back buffer differs with nothing retained after {step}"
+        );
+        assert_eq!(
+            self.unretained.frost_cache_len(),
+            0,
+            "a compositor with no frost budget retained one"
+        );
     }
+}
+
+/// A compositor whose frost cache holds nothing at any band, so every frost it
+/// draws is one the ration refused.
+fn unbudgeted_compositor(mode: DisplayMode) -> Compositor {
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+    let mut compositor = Compositor::new(
+        mode,
+        Theme::dark(),
+        test_chrome_cache(),
+        frost_cache(TEST_SEAT, 0, 0, &NORMAL_PRESSURE, &TEST_SINK),
+        &NORMAL_PRESSURE,
+    )
+    .expect("compositor");
+    compositor.set_background(BLUE);
+    compositor
 }
 
 #[test]
@@ -8425,6 +8464,13 @@ fn tearing_the_seat_down_releases_every_frost() {
     c.teardown_frost();
     assert_eq!(c.frost_cache_len(), 0);
     assert_eq!(c.frost_cache_bytes(), 0);
+    assert!(
+        c.frost_plane()
+            .pixels()
+            .iter()
+            .all(|&pixel| pixel == Pixel::TRANSPARENT),
+        "the frost plane still holds what the last frost read"
+    );
 }
 
 // ---- releasable window content (Stage F) -----------------------------
@@ -9820,52 +9866,143 @@ fn settings_under_switchboard(c: &mut Compositor) -> [WindowId; 2] {
 }
 
 #[test]
-fn a_window_under_another_keeps_its_glass_on_a_machine_that_can_spare_it() {
+fn a_window_under_another_keeps_its_frost_on_a_machine_that_can_spare_it() {
     NORMAL_PRESSURE.report(PressureBand::Normal);
     let mut c = machine_frost_budget(mode(1024, 768), QEMU_MEMORY, &NORMAL_PRESSURE);
     let [settings, switchboard] = settings_under_switchboard(&mut c);
     c.composite();
-    assert!(c.window(switchboard).expect("window").is_frosted());
-    assert!(
-        c.window(settings).expect("window").is_frosted(),
-        "the window beneath is still frosted glass"
-    );
+    for id in [settings, switchboard] {
+        assert!(
+            c.window(id).expect("window").is_retained(),
+            "a machine that can spare it retains the frost beneath as well"
+        );
+    }
 
     let mut short = screenful_frost_budget(mode(1024, 768));
-    let [settings, _] = settings_under_switchboard(&mut short);
+    let [settings, switchboard] = settings_under_switchboard(&mut short);
     short.composite();
+    assert!(short.window(switchboard).expect("window").is_retained());
+    let beneath = short.window(settings).expect("window");
     assert!(
-        !short.window(settings).expect("window").is_frosted(),
+        !beneath.is_retained(),
         "the premise: the pair outgrows one screenful"
+    );
+    assert!(
+        beneath.is_frosted(),
+        "a window refused retention is frosted all the same"
     );
 }
 
+/// Pressure took the frost of the Settings window beneath the Switchboard, and
+/// with it the blur: the window drew as plain translucency until pressure
+/// eased. Pressure may take what is *retained*; the picture never changes, and
+/// a change of mind marks nothing.
 #[test]
-fn pressure_gives_up_the_glass_beneath_and_keeps_the_front_window_frosted() {
+fn pressure_takes_the_retained_glass_beneath_and_never_its_blur() {
     static PRESSURE: ReportedPressure = ReportedPressure::unknown();
     PRESSURE.report(PressureBand::Normal);
     let mut c = machine_frost_budget(mode(1024, 768), QEMU_MEMORY, &PRESSURE);
     let [settings, switchboard] = settings_under_switchboard(&mut c);
     c.composite();
+    let unpressured = c.frame().to_vec();
 
-    for band in [PressureBand::Mild, PressureBand::Moderate] {
+    for band in [
+        PressureBand::Mild,
+        PressureBand::Moderate,
+        PressureBand::Severe,
+    ] {
         PRESSURE.report(band);
-        c.composite();
         assert!(
-            c.window(switchboard).expect("window").is_frosted(),
-            "{band:?}: one layer of glass is kept"
+            c.composite().is_empty(),
+            "{band:?}: a change of the ration's mind recomposed something"
+        );
+        let beneath = c.window(settings).expect("window");
+        assert!(
+            !beneath.is_retained(),
+            "{band:?}: the stacked layer is what pressure takes"
         );
         assert!(
-            !c.window(settings).expect("window").is_frosted(),
-            "{band:?}: the stacked layer is what pressure takes"
+            beneath.is_frosted(),
+            "{band:?}: and it is frosted all the same"
+        );
+        assert!(c.window(switchboard).expect("window").is_frosted());
+        repaint_everything(&mut c);
+        assert_eq!(
+            c.frame(),
+            &unpressured[..],
+            "{band:?}: the picture changed with the band"
         );
     }
     PRESSURE.report(PressureBand::Normal);
     c.composite();
     assert!(
-        c.window(settings).expect("window").is_frosted(),
+        c.window(settings).expect("window").is_retained(),
         "and it comes back"
     );
+}
+
+/// The Switchboard dragged over Settings while pressure holds only one of
+/// their frosts. The window beneath recomputes what each frame uncovers of its
+/// frost, so every frame is the frame a machine retaining both draws — and
+/// recomposes no more of the screen than that one does.
+#[test]
+fn dragging_a_window_over_glass_pressure_could_not_retain_draws_the_same_frames() {
+    static PRESSURE: ReportedPressure = ReportedPressure::unknown();
+    PRESSURE.report(PressureBand::Mild);
+    let mut pressed = machine_frost_budget(mode(1024, 768), QEMU_MEMORY, &PRESSURE);
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+    let mut spared = machine_frost_budget(mode(1024, 768), QEMU_MEMORY, &NORMAL_PRESSURE);
+    let [settings, switchboard] = settings_under_switchboard(&mut pressed);
+    assert_eq!(
+        settings_under_switchboard(&mut spared),
+        [settings, switchboard]
+    );
+    pressed.composite();
+    spared.composite();
+    assert!(
+        !pressed.window(settings).expect("window").is_retained(),
+        "the premise: pressure took the frost beneath"
+    );
+    assert!(spared.window(settings).expect("window").is_retained());
+    assert_eq!(pressed.frame(), spared.frame());
+
+    for step in 0..10 {
+        let at = Point::new(60 + step * 23, 120 - step * 7);
+        assert!(pressed.move_window(switchboard, at));
+        assert!(spared.move_window(switchboard, at));
+        pressed.composite();
+        spared.composite();
+        assert_eq!(
+            pressed.frame(),
+            spared.frame(),
+            "step {step}: the glass beneath came out differently"
+        );
+        assert_eq!(
+            pressed.frame_stats().damaged_px,
+            spared.frame_stats().damaged_px,
+            "step {step}: recomputing the frost beneath widened what was recomposed"
+        );
+    }
+
+    // The pointer over the window beneath, clear of the one above: what each
+    // sample costs it is the cursor's own few pixels, never its whole frost.
+    for c in [&mut pressed, &mut spared] {
+        let _ = c.set_cursor(solid_cursor(4, RED), Point::new(40, 60));
+        c.composite();
+    }
+    for step in 1..6 {
+        let at = Point::new(40 + step * 9, 60 + step * 5);
+        assert!(pressed.move_cursor(at));
+        assert!(spared.move_cursor(at));
+        pressed.composite();
+        spared.composite();
+        assert_eq!(pressed.frame(), spared.frame(), "cursor step {step}");
+        let blurred = pressed.frame_stats().blur_px;
+        assert!(
+            blurred > 0 && blurred <= 64,
+            "a cursor sample over unretained glass blurred {blurred} px"
+        );
+    }
 }
 
 /// A cascade of translucent, backdrop-blurred terminals at the shipped default
@@ -9890,23 +10027,23 @@ fn frosted_cascade(c: &mut Compositor, windows: i32) -> alloc::vec::Vec<WindowId
 
 #[test]
 fn a_cascade_of_frosted_terminals_repaints_for_what_it_changed() {
-    // The defect this ration exists for: sixteen terminals opened on top of one
-    // another at the shipped translucent, blurred default. Every one of them
-    // wants its whole rectangle retained, so together they want sixteen
-    // screenfuls against a budget of one; asking "does one more fit" of each in
-    // turn granted them all, so every frame blurred, evicted and re-blurred the
-    // lot, and a single repainted cell cost several screenfuls of blur and of
-    // blending. The ration bounds it: what the budget reaches is frosted and
-    // retained, and a cell repaint then costs the cell.
+    // Sixteen terminals opened on top of one another at the shipped
+    // translucent, blurred default want sixteen screenfuls of retained frost
+    // against a budget of one. Asking "does one more fit" of each in turn
+    // granted them all, so every frame blurred, evicted and re-blurred the lot,
+    // and a single repainted cell cost several screenfuls of blur and of
+    // blending. The ration retains what the budget reaches from the front, and
+    // a cell repainted in the front window — whose retained frost replaces
+    // everything beneath it there — costs the cell.
     let mut c = screenful_frost_budget(mode(1024, 768));
     let stack = frosted_cascade(&mut c, 16);
     let top = *stack.last().expect("a front window");
     c.composite();
-    let warm = c.frame_stats();
     assert!(
-        warm.blur_px <= 1024 * 768,
-        "the first frame blurred {} px, more than the screen holds",
-        warm.blur_px
+        stack
+            .iter()
+            .all(|&id| c.window(id).expect("window").is_frosted()),
+        "every terminal is frosted, retained or not"
     );
 
     assert_eq!(present_content(&mut c, top, paint_dot), Some(true));
@@ -9914,7 +10051,7 @@ fn a_cascade_of_frosted_terminals_repaints_for_what_it_changed() {
     let repaint = c.frame_stats();
     assert_eq!(
         repaint.blur_px, 0,
-        "a repainted cell re-blurred {} px of retained frost",
+        "a repainted cell re-blurred {} px of frost",
         repaint.blur_px
     );
     assert!(
@@ -9927,32 +10064,49 @@ fn a_cascade_of_frosted_terminals_repaints_for_what_it_changed() {
         "the retained frosts outgrew the screen: {} bytes",
         c.frost_cache_bytes()
     );
+
+    // A cell repainted in a buried terminal changes every frost above it that
+    // shows it, retained or not, and the frame must be the one a full repaint
+    // draws.
+    assert_eq!(present_content(&mut c, stack[3], paint_dot), Some(true));
+    c.composite();
+    let incremental = c.frame().to_vec();
+    repaint_everything(&mut c);
+    assert_eq!(
+        c.frame(),
+        &incremental[..],
+        "a cell beneath the glass left the screen other than a full repaint draws it"
+    );
 }
 
 #[test]
-fn frosting_is_spent_on_the_front_of_the_stack() {
+fn retention_is_spent_on_the_front_of_the_stack() {
     let mut c = screenful_frost_budget(mode(1024, 768));
     let stack = frosted_cascade(&mut c, 16);
     c.composite();
-    let frosted: alloc::vec::Vec<bool> = stack
+    let retained: alloc::vec::Vec<bool> = stack
         .iter()
-        .map(|&id| c.window(id).expect("window").is_frosted())
+        .map(|&id| c.window(id).expect("window").is_retained())
         .collect();
-    let granted = frosted.iter().filter(|&&on| on).count();
+    let granted = retained.iter().filter(|&&on| on).count();
     assert!(
         (1..stack.len()).contains(&granted),
-        "{granted} of {} frosted: the ration granted none or did not bind",
+        "{granted} of {} retained: the ration granted none or did not bind",
         stack.len()
     );
     assert!(
-        frosted[stack.len() - granted..].iter().all(|&on| on),
-        "the ration was not spent on the front of the stack: {frosted:?}"
+        retained[stack.len() - granted..].iter().all(|&on| on),
+        "the ration was not spent on the front of the stack: {retained:?}"
     );
-    for (&id, frosted) in stack.iter().zip(frosted) {
+    for (&id, retained) in stack.iter().zip(retained) {
+        assert!(
+            c.window(id).expect("window").is_frosted(),
+            "every window is frosted, retained or not"
+        );
         assert_eq!(
             c.frost_resident(id),
-            frosted,
-            "a window frosted iff its backdrop is retained"
+            retained,
+            "a window's frost is resident iff it is retained"
         );
     }
 
@@ -9961,8 +10115,8 @@ fn frosting_is_spent_on_the_front_of_the_stack() {
     assert!(c.raise(buried));
     c.composite();
     assert!(
-        c.window(buried).expect("window").is_frosted(),
-        "the window the user brought to the front is not frosted"
+        c.window(buried).expect("window").is_retained(),
+        "the window the user brought to the front is not retained"
     );
 }
 
@@ -9970,7 +10124,7 @@ fn frosting_is_spent_on_the_front_of_the_stack() {
 const SCREENFUL_FROST_BYTES: usize = 1024 * 768 * 4;
 
 #[test]
-fn desktop_chrome_is_served_its_frost_before_application_windows() {
+fn desktop_chrome_is_served_its_retention_before_application_windows() {
     // The defect: the icon bar is desktop chrome, permanently on screen, and
     // deliberately not pinned topmost — so it sits at the *back* of the stack.
     // Spending the ration front to back in one sweep let the applications take
@@ -10001,13 +10155,13 @@ fn desktop_chrome_is_served_its_frost_before_application_windows() {
     c.composite();
 
     assert!(
-        c.window(bar).expect("window").is_frosted(),
-        "the icon bar lost its frost to the applications stacked over it"
+        c.window(bar).expect("window").is_retained(),
+        "the icon bar lost its retained frost to the applications stacked over it"
     );
     assert!(c.frost_resident(bar), "the bar's backdrop was not retained");
     let refused = apps
         .iter()
-        .filter(|&&id| !c.window(id).expect("window").is_frosted())
+        .filter(|&&id| !c.window(id).expect("window").is_retained())
         .count();
     assert_eq!(
         refused, 1,
@@ -10023,14 +10177,14 @@ fn desktop_chrome_is_served_its_frost_before_application_windows() {
     }
     c.composite();
     assert!(
-        c.window(bar).expect("window").is_frosted(),
-        "a deeper pile of applications rationed the bar's frost away again"
+        c.window(bar).expect("window").is_retained(),
+        "a deeper pile of applications rationed the bar's retention away again"
     );
     assert!(c.frost_resident(bar));
     assert!(
         deeper
             .iter()
-            .any(|&id| !c.window(id).expect("window").is_frosted()),
+            .any(|&id| !c.window(id).expect("window").is_retained()),
         "the ceiling reached every application window, so the tier order is untested"
     );
 }
@@ -10043,7 +10197,7 @@ fn a_lone_translucent_or_frosted_window_is_never_rationed() {
     let lone = c.add_window(Point::new(20, 20), veiled(560, 350, 204));
     assert!(c.set_backdrop_blur(lone, 12));
     c.composite();
-    assert!(c.window(lone).expect("window").is_frosted());
+    assert!(c.window(lone).expect("window").is_retained());
 
     let tiled: alloc::vec::Vec<WindowId> = (0..8)
         .map(|n| {
@@ -10058,8 +10212,8 @@ fn a_lone_translucent_or_frosted_window_is_never_rationed() {
     c.composite();
     for id in tiled {
         assert!(
-            c.window(id).expect("window").is_frosted(),
-            "a window whose frost overlaps nobody else's was refused one"
+            c.window(id).expect("window").is_retained(),
+            "a window whose frost overlaps nobody else's was refused retention"
         );
     }
 }
@@ -10067,80 +10221,205 @@ fn a_lone_translucent_or_frosted_window_is_never_rationed() {
 #[test]
 fn a_blur_takes_the_budget_ahead_of_a_plain_translucency_above_it() {
     // A blur decides how a window *looks*; a radius-zero retention only saves
-    // recomposing the stack beneath it, and its absence changes no pixel. So an
-    // unblurred translucent window in front must not take the budget the
-    // frosted window behind it needs, even though it is nearer the front.
+    // recomposing the stack beneath it. So an unblurred translucent window in
+    // front must not take the budget the frosted window behind it would
+    // retain, even though it is nearer the front.
     let mut c = screenful_frost_budget(mode(640, 480));
     let frosted = c.add_window(Point::new(8, 8), veiled(600, 440, 204));
     assert!(c.set_backdrop_blur(frosted, 12));
     let sheer = c.add_window(Point::new(16, 16), veiled(600, 440, 204));
     c.composite();
     assert!(
-        c.window(frosted).expect("window").is_frosted(),
-        "the blurred window lost its look to accelerate one that has none"
+        c.window(frosted).expect("window").is_retained(),
+        "the blurred window's retention went to one that has no blur"
+    );
+    let sheer = c.window(sheer).expect("window");
+    assert!(
+        !sheer.is_retained(),
+        "the budget stretched to both, so the order it is spent in is untested"
     );
     assert!(
-        !c.window(sheer).expect("window").is_frosted(),
-        "the budget stretched to both, so the order it is spent in is untested"
+        !sheer.is_frosted(),
+        "an unretained window with no blur composites straight through"
     );
 }
 
+/// Apply `act` to both compositors and require the same frame from each.
+fn compose_alike(
+    a: &mut Compositor,
+    b: &mut Compositor,
+    step: &str,
+    act: impl Fn(&mut Compositor),
+) {
+    act(a);
+    act(b);
+    a.composite();
+    b.composite();
+    assert_eq!(a.frame(), b.frame(), "the frames differ after {step}");
+}
+
 #[test]
-fn a_refused_backdrop_composites_exactly_as_the_translucency_it_is() {
-    // What a denial costs is the frosted *look*, never a wrong pixel: the
-    // window composites as the plain translucent window it also is, byte for
-    // byte what the same scene composites to with the blur turned off.
-    let scene = |c: &mut Compositor, blur: u16| {
+fn refusing_retention_never_changes_a_pixel() {
+    // What the ration refuses is retention, never the look: a window refused
+    // it composites byte for byte as it does with its frost retained, through
+    // whatever happens around it.
+    let scene = |c: &mut Compositor| {
         let back = c.add_window(Point::ORIGIN, opaque(1024, 768, GREEN));
         assert!(c.set_backdrop_blur(back, 0));
         let stack = frosted_cascade(c, 6);
-        for &id in &stack {
-            assert!(c.set_backdrop_blur(id, blur));
-        }
         c.composite();
         stack
     };
-
     let mut rationed = screenful_frost_budget(mode(1024, 768));
-    let stack = scene(&mut rationed, 12);
-    let refused: alloc::vec::Vec<WindowId> = stack
-        .iter()
-        .copied()
-        .filter(|&id| !rationed.window(id).expect("window").is_frosted())
-        .collect();
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+    let mut spared = machine_frost_budget(mode(1024, 768), 1 << 40, &NORMAL_PRESSURE);
+    let stack = scene(&mut rationed);
+    assert_eq!(scene(&mut spared), stack);
     assert!(
-        !refused.is_empty(),
+        stack
+            .iter()
+            .any(|&id| !rationed.window(id).expect("window").is_retained()),
         "nothing was refused, so the comparison proves nothing"
     );
+    assert!(
+        stack
+            .iter()
+            .all(|&id| spared.window(id).expect("window").is_retained()),
+        "the machine that could spare it refused something"
+    );
+    assert_eq!(rationed.frame(), spared.frame(), "the first frame differs");
 
-    // The same scene with the refused windows asking for no blur at all: the
-    // ones still frosted are unchanged, so what is left is the denial itself.
-    let mut plain = screenful_frost_budget(mode(1024, 768));
-    let same = scene(&mut plain, 12);
-    for (&id, &other) in same.iter().zip(stack.iter()) {
-        assert_eq!(id, other, "the two scenes built different windows");
-        if refused.contains(&id) {
-            assert!(plain.set_backdrop_blur(id, 0));
+    let (buried, front) = (stack[1], stack[5]);
+    let (a, b) = (&mut rationed, &mut spared);
+    compose_alike(a, b, "a present beneath the glass", |c| {
+        assert_eq!(present_content(c, buried, paint_dot), Some(true));
+    });
+    compose_alike(a, b, "a present in the front window", |c| {
+        assert_eq!(present_content(c, front, paint_dot), Some(true));
+    });
+    compose_alike(a, b, "the front window dragged", |c| {
+        assert!(c.move_window(front, Point::new(300, 220)));
+    });
+    compose_alike(a, b, "a buried window dragged", |c| {
+        assert!(c.move_window(buried, Point::new(20, 30)));
+    });
+    compose_alike(a, b, "a cursor over the glass", |c| {
+        let _ = c.set_cursor(solid_cursor(6, RED), Point::new(120, 140));
+    });
+    compose_alike(a, b, "the cursor moved", |c| {
+        assert!(c.move_cursor(Point::new(131, 147)));
+    });
+    compose_alike(a, b, "a buried window raised", |c| assert!(c.raise(buried)));
+    compose_alike(a, b, "a window faded", |c| {
+        assert!(c.set_opacity(stack[2], 128));
+    });
+    compose_alike(a, b, "a window hidden", |c| {
+        assert!(c.set_visible(stack[3], false));
+    });
+    compose_alike(a, b, "a window shown", |c| {
+        assert!(c.set_visible(stack[3], true));
+    });
+}
+
+/// A gauge that reads normal for its first `normal` samples after
+/// [`tighten_after`](Self::tighten_after) and severe from then on, so a test can
+/// tighten the band in the middle of a composite pass.
+struct TighteningGauge {
+    samples: core::sync::atomic::AtomicUsize,
+    normal: core::sync::atomic::AtomicUsize,
+}
+
+impl TighteningGauge {
+    fn tighten_after(&self, normal: usize) {
+        use core::sync::atomic::Ordering;
+        self.samples.store(0, Ordering::Relaxed);
+        self.normal.store(normal, Ordering::Relaxed);
+    }
+}
+
+impl PressureGauge for TighteningGauge {
+    fn sample(&self) -> PressureBand {
+        use core::sync::atomic::Ordering;
+        if self.samples.fetch_add(1, Ordering::Relaxed) < self.normal.load(Ordering::Relaxed) {
+            PressureBand::Normal
+        } else {
+            PressureBand::Severe
         }
     }
-    plain.composite();
+
+    fn growth_allowance(&self) -> tairix_reclaim::GrowthAllowance {
+        tairix_reclaim::GrowthAllowance::unbounded(self.sample())
+    }
+}
+
+/// The band tightening part-way through a pass — the gauge belongs to the whole
+/// process, so another thread may move it at any moment — must not evict a
+/// frost an earlier lookup of the same pass promised it would copy: the copy
+/// would then find nothing, and a whole-rectangle frost run over a rectangle
+/// whose backdrop the frame composed only where the damage fell.
+#[test]
+fn a_band_tightening_mid_pass_evicts_no_frost_the_pass_was_promised() {
+    let gauge: &'static TighteningGauge =
+        alloc::boxed::Box::leak(alloc::boxed::Box::new(TighteningGauge {
+            samples: core::sync::atomic::AtomicUsize::new(0),
+            normal: core::sync::atomic::AtomicUsize::new(usize::MAX),
+        }));
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+    let display = mode(1024, 768);
+    let screen = usize::try_from(display.width_px * display.height_px * 4).expect("a screenful");
+    let mut c = Compositor::new(
+        display,
+        Theme::dark(),
+        chrome_cache(TEST_SEAT, TEST_FB_BYTES, &NORMAL_PRESSURE, &TEST_SINK),
+        frost_cache(TEST_SEAT, screen, 64 << 20, gauge, &TEST_SINK),
+        &NORMAL_PRESSURE,
+    )
+    .expect("compositor");
+    c.set_background(BLUE);
+    // Two overlapping frosts each larger than the severe band's reserve, so
+    // tightening to it takes both.
+    let lower = c.add_window(Point::new(20, 20), veiled(600, 450, 204));
+    let upper = c.add_window(Point::new(100, 60), veiled(600, 450, 204));
+    for id in [lower, upper] {
+        assert!(c.set_backdrop_blur(id, 12));
+    }
+    let _ = c.set_cursor(solid_cursor(6, RED), Point::new(40, 40));
+    c.composite();
+    assert!(
+        c.frost_resident(lower) && c.frost_resident(upper),
+        "the premise: both retained"
+    );
+
+    // Severe from the first sample after the ration settles: the frame head
+    // enforces once and the ration weighs both windows, and every lookup after
+    // that is one a pass makes about frosts it has promised to copy.
+    gauge.tighten_after(3);
+    assert!(c.move_cursor(Point::new(660, 470)));
+    c.composite();
+    let (frame, back) = (c.frame().to_vec(), c.back_buffer().pixels().to_vec());
+    repaint_everything(&mut c);
     assert_eq!(
-        rationed.frame(),
-        plain.frame(),
-        "a refused backdrop drew something other than plain translucency"
+        c.frame(),
+        &frame[..],
+        "a frost evicted mid-pass left the screen other than a full repaint draws it"
+    );
+    assert_eq!(
+        c.back_buffer().pixels(),
+        &back[..],
+        "a frost evicted mid-pass left the back buffer other than a full repaint composes it"
     );
 }
 
 #[test]
-fn losing_and_regaining_a_frost_repaints_the_window() {
-    // The ration turns on the cache's live ceiling as well as on the scene, so
-    // it can change with nothing on screen having moved. A window that starts
-    // or stops frosting draws differently and must be repainted for it.
+fn losing_and_regaining_retention_changes_no_pixel() {
+    // The ration turns on the scene as well as on the cache's live ceiling, so
+    // it changes its mind with nothing on screen having moved. Neither answer
+    // changes what the window draws.
     let mut c = screenful_frost_budget(mode(1024, 768));
     let stack = frosted_cascade(&mut c, 16);
     c.composite();
     let buried = *stack.first().expect("a back window");
-    assert!(!c.window(buried).expect("window").is_frosted());
+    assert!(!c.window(buried).expect("window").is_retained());
 
     // Hiding everything above it leaves the ration reaching it again.
     for &id in &stack[1..] {
@@ -10148,7 +10427,7 @@ fn losing_and_regaining_a_frost_repaints_the_window() {
     }
     c.composite();
     assert!(
-        c.window(buried).expect("window").is_frosted(),
+        c.window(buried).expect("window").is_retained(),
         "the ration did not follow the windows going away"
     );
     let incremental = c.frame().to_vec();
@@ -10156,21 +10435,21 @@ fn losing_and_regaining_a_frost_repaints_the_window() {
     assert_eq!(
         c.frame(),
         &incremental[..],
-        "gaining a frost left the screen showing the unfrosted window"
+        "gaining retention left the screen other than a full repaint draws it"
     );
 
-    // And the other way: bringing them back refuses it again, repainting it.
+    // And the other way: bringing them back refuses it again.
     for &id in &stack[1..] {
         assert!(c.set_visible(id, true));
     }
     c.composite();
-    assert!(!c.window(buried).expect("window").is_frosted());
+    assert!(!c.window(buried).expect("window").is_retained());
     let incremental = c.frame().to_vec();
     repaint_everything(&mut c);
     assert_eq!(
         c.frame(),
         &incremental[..],
-        "losing a frost left the screen showing the frosted window"
+        "losing retention left the screen other than a full repaint draws it"
     );
 }
 

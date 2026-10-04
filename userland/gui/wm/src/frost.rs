@@ -44,7 +44,7 @@
 //! coordinate. Both differences are confined to a border, so the pixels
 //! `FrostedBackdrop::reuse` hands back as a core are bit-for-bit what
 //! a fresh blur would write and only the border has to be blurred again
-//! (`Surface::frost_region_around`). Without that, every sample of a drag paid
+//! (`Surface::frost_from` over the border's bands). Without that, every sample of a drag paid
 //! a full-window blur *and* a full-window composite of the layers under it, for
 //! a picture that had moved a few pixels.
 //!
@@ -76,6 +76,10 @@ pub(crate) enum FrostPlan {
     Core(Rect),
     /// Blur the whole rectangle: nothing retained applies to it.
     Blur,
+    /// Blur only the part of the rectangle the frame recomposes. The window's
+    /// frost is not retained, but nothing beneath it has changed, so the frost
+    /// on screen is still right everywhere the frame leaves alone.
+    Local,
 }
 
 /// How far into its own rectangle a shape's corners weight the mix by less
@@ -120,9 +124,9 @@ pub type FrostEpoch = (u32, u32, u32);
 /// frosted windows want a frost each over the same pixels: the ceiling is the
 /// machine's share of its memory, never below one screenful, and pressure takes
 /// it back to one screenful and then to the reserve. A stack deeper than that
-/// is frosted from the front until the ceiling runs out and the rest composite
-/// as the plain translucent windows they are, rather than all being rebuilt
-/// every frame (`Compositor::grant_backdrops`). `pressure` and `sink` are the
+/// is retained from the front until the ceiling runs out, and the rest recompute
+/// what each frame needs of their frosts rather than all being rebuilt and
+/// evicted every frame (`Compositor::grant_backdrops`). `pressure` and `sink` are the
 /// process's live pressure gauge and audit sink. The embedder — the only party
 /// that knows all of these — calls this once and hands the result to
 /// [`Compositor::new`](crate::Compositor::new).
