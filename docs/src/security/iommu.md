@@ -137,11 +137,16 @@ owner, and clears it as that owner ends. No routing or mapping step sets it.
   As each unit is enabled, the kernel stops every recorded function behind
   it still mastering without a firmware window, and reports how many it
   stopped and how many would not stop (`stopped`, `refused`).
-- **No hierarchy, no trust.** A walk whose bus numbers form no tree resolves
-  no unit's scope, so it publishes nothing and brings no unit up. A flat
-  scan of the segment stops every function mastering DMA of its own where a
-  unit covers it, firmware windows included, and every virtio function
-  elsewhere.
+- **What cannot be confined publishes nothing.** A segment whose walk forms
+  no tree, whose units the hardware tree has no room for, or whose functions'
+  DMA identities or stops fail publishes no function. A flat scan then stops,
+  where a unit covers the segment, every function mastering DMA of its own,
+  firmware windows included, and every bridge, so a root port refuses what
+  lies below it however its buses were numbered; elsewhere, every virtio
+  function. The boot log states how many it stopped and how many still read
+  back mastering. Where only the tree is missing, every unit still comes up,
+  keeping no firmware window, so it blocks every stream: a device that
+  ignores its own Bus Master Enable reaches nothing.
 - **Translated.** A function masters once its owner's domain is attached,
   and stops before that domain is destroyed, so its device is quiet before
   its streams are blocked. A stream firmware keeps a window for is handed
@@ -202,8 +207,12 @@ need hundreds of device resets, a load-dependent test.
 | `DmaGroupRefused` | 4148 | a driver's first carve was refused: another node's live owner holds its isolation group; `node`, `generation`, `group`, `holder` |
 | `PortIoRefused` | 4158 | a driver's port access reached the ports the kernel keeps (PCI configuration mechanism #1); `port`, `width`, `task` |
 
-A malformed DMAR, or unit nodes that could not be emitted, is logged at boot
-(`4103`): every device's DMA is then unconfined.
+A malformed DMAR is logged at boot (`4103`) and refused whole, and the
+machine is then treated as having no unit: every device's DMA is unconfined
+(`plans/OPEN-DEFECTS.md` D655). A segment that cannot be confined — unit
+nodes that could not be emitted, a walk that forms no tree — is logged under
+the same id, with the flat scan's `stopped` and `refused`, and publishes
+nothing.
 
 ## What is staged
 

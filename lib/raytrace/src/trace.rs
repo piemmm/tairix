@@ -62,14 +62,24 @@ const CUTOFF: f64 = 0.004;
 /// by that chance to make up for the paths ended (Russian roulette): what a
 /// dim or long path carries is never simply dropped.
 const ROULETTE: f64 = 0.1;
+/// The share of a pixel's light at which a surface's own counts as much of
+/// it: seen directly, or through clear water or a mirror, but not in a
+/// coat's faint reflection. Such a surface's bounce always goes on, so a
+/// dark surface's samples are not each all its light or none of it, and
+/// its random gather keeps the pixel from settling on its first samples.
+const GATHERED_SHARE: f64 = 0.25;
 /// The roughness a spot's highlight is drawn at however smooth the surface:
 /// a real lamp has a size, and so a highlight.
 const HIGHLIGHT_ROUGHNESS: f64 = 0.14;
 /// After the first round, how far apart its samples may lie and still be
 /// taken as settled, on the square-root scale the eye reads light on.
 const SETTLED_SPREAD: f64 = 0.024;
-/// After later rounds, the standard error of the mean they may leave, on
-/// that scale: a little over three of the display's 255 levels.
+/// The fewest samples a pixel takes whose samples lean on light gathered by
+/// random rays.
+const GATHERED_LEAST: u32 = 64;
+/// After later rounds, the standard error of the mean they may leave, and how
+/// far their brightest may move it, on that scale: a little over three of
+/// the display's 255 levels.
 const SETTLED_ERROR: f64 = 0.012;
 /// How far a ray still in a medium when it leaves the scene is taken to have
 /// travelled through it.
@@ -335,6 +345,69 @@ struct Lobes {
     spots_only: bool,
 }
 
+/// Light a ray brings back, and whether it leans on a random ray gathered by
+/// a surface whose own light is much of it: a pixel's first samples doing so
+/// can all miss the light its later ones find.
+#[derive(Copy, Clone, Debug)]
+struct Shaded {
+    light: Vec3,
+    gathered: bool,
+}
+
+impl Shaded {
+    /// `light` no random gather brought.
+    const fn ungathered(light: Vec3) -> Self {
+        Self {
+            light,
+            gathered: false,
+        }
+    }
+}
+
+impl core::ops::Add for Shaded {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        Self {
+            light: self.light + other.light,
+            gathered: self.gathered || other.gathered,
+        }
+    }
+}
+
+impl core::ops::Add<Vec3> for Shaded {
+    type Output = Self;
+
+    fn add(self, light: Vec3) -> Self {
+        Self {
+            light: self.light + light,
+            ..self
+        }
+    }
+}
+
+impl core::ops::Mul<Vec3> for Shaded {
+    type Output = Self;
+
+    fn mul(self, by: Vec3) -> Self {
+        Self {
+            light: self.light * by,
+            ..self
+        }
+    }
+}
+
+impl core::ops::Mul<f64> for Shaded {
+    type Output = Self;
+
+    fn mul(self, by: f64) -> Self {
+        Self {
+            light: self.light * by,
+            ..self
+        }
+    }
+}
+
 /// A scene's tracer for a picture of `size`, each pixel's samples hashed
 /// under the scene's `key`.
 pub struct Tracer<'a> {
@@ -385,7 +458,7 @@ impl<'a> Tracer<'a> {
             1.0 - 2.0 * (f64::from(row) + v) / f64::from(METER_ROWS),
         );
         let ray = self.scene.camera.ray(film, (0.0, 0.0));
-        let light = self.radiance(&ray, Path::EYE, &mut sampler);
+        let light = self.radiance(&ray, Path::EYE, &mut sampler).light;
         let luminance = light.luminance();
         if luminance.is_finite() {
             mathf::ln(luminance.max(1e-9))
@@ -409,7 +482,7 @@ impl<'a> Tracer<'a> {
             .scene
             .camera
             .ray((2.0 * across - 1.0, 1.0 - 2.0 * down), (0.0, 0.0));
-        let light = (self.radiance(&ray, Path::EYE, &mut sampler) + self.glare(ray.dir))
+        let light = (self.radiance(&ray, Path::EYE, &mut sampler).light + self.glare(ray.dir))
             * self.scene.exposure;
         let luminance = light.luminance();
         Sample {
@@ -452,9 +525,9 @@ impl<'a> Tracer<'a> {
                 for (((ray, film), sampler), found) in
                     rays.iter().zip(films).zip(&mut samplers).zip(found)
                 {
-                    let (light, _) = self.arrived(ray, Path::EYE, sampler, found);
-                    let exposed = (light + self.glare(ray.dir)) * self.scene.exposure;
-                    tally.add(display(self.adapted(exposed, film)));
+                    let (arrived, _) = self.arrived(ray, Path::EYE, sampler, found);
+                    let exposed = (arrived.light + self.glare(ray.dir)) * self.scene.exposure;
+                    tally.add(display(self.adapted(exposed, film)), arrived.gathered);
                 }
                 taken += PACKET_SAMPLES;
             }
@@ -554,7 +627,8 @@ impl<'a> Tracer<'a> {
                 sampler.next_2d(),
             ));
             *cell = if dir.dot(site.facing) > 0.0 {
-                let (light, distance) = self.arriving(&Ray::new(origin, dir), path, &mut sampler);
+                let (arrived, distance) = self.arriving(&Ray::new(origin, dir), path, &mut sampler);
+                let light = arrived.light;
                 if light.is_finite() {
                     Cell { light, distance }
                 } else {
@@ -585,14 +659,15 @@ impl<'a> Tracer<'a> {
         irradiance * (bloom + veil)
     }
 
-    /// The light arriving back along `ray`.
-    fn radiance(&self, ray: &Ray, path: Path, sampler: &mut Sampler) -> Vec3 {
+    /// The light arriving back along `ray`, and whether it leans on a random
+    /// gather.
+    fn radiance(&self, ray: &Ray, path: Path, sampler: &mut Sampler) -> Shaded {
         self.arriving(ray, path, sampler).0
     }
 
     /// The light arriving back along `ray`, and how far along it lies the
     /// surface it left: infinitely far for the sky.
-    fn arriving(&self, ray: &Ray, path: Path, sampler: &mut Sampler) -> (Vec3, f64) {
+    fn arriving(&self, ray: &Ray, path: Path, sampler: &mut Sampler) -> (Shaded, f64) {
         let sight = if path.scattered {
             Sight::Scattered
         } else if path.depth == 0 {
@@ -612,16 +687,19 @@ impl<'a> Tracer<'a> {
         path: Path,
         sampler: &mut Sampler,
         found: Option<(usize, Hit)>,
-    ) -> (Vec3, f64) {
+    ) -> (Shaded, f64) {
         let Some((index, hit)) = found else {
             // A medium with no far side is as good as fathomless.
             if let Some(medium) = path.medium {
                 let kept = (medium.absorb * -FATHOMLESS).exp();
                 let light =
                     self.escaped(ray, path, sampler) * kept + medium.glow * (Vec3::ONE - kept);
-                return (light, f64::INFINITY);
+                return (Shaded::ungathered(light), f64::INFINITY);
             }
-            return (self.escaped(ray, path, sampler), f64::INFINITY);
+            return (
+                Shaded::ungathered(self.escaped(ray, path, sampler)),
+                f64::INFINITY,
+            );
         };
         let Some((object, material)) = self.scene.objects.get(index).and_then(|object| {
             let made = hit.material.map_or(object.material, |part| part as usize);
@@ -630,13 +708,16 @@ impl<'a> Tracer<'a> {
                 .get(made)
                 .map(|material| (object, material))
         }) else {
-            return (Vec3::ZERO, hit.t);
+            return (Shaded::ungathered(Vec3::ZERO), hit.t);
         };
-        let light = match material.finish {
-            Finish::Glow { radiance } => self.lamp(object, radiance, ray, hit.t, path),
+        let shaded = match material.finish {
+            Finish::Glow { radiance } => {
+                Shaded::ungathered(self.lamp(object, radiance, ray, hit.t, path))
+            }
             _ => self.shade(ray, hit, object, material, path, sampler),
         };
-        (self.attenuate(light, ray, hit.t, path, sampler), hit.t)
+        let light = self.attenuate(shaded.light, ray, hit.t, path, sampler);
+        (Shaded { light, ..shaded }, hit.t)
     }
 
     /// `light` after crossing `t` of the ray's medium: absorbed and lit
@@ -666,15 +747,16 @@ impl<'a> Tracer<'a> {
     }
 
     /// How much of the sun's light reaches the air along `ray` out to `t`,
-    /// judged at one point drawn along it: what stands between that point
-    /// and the sun, and the clouds overhead. Drawn afresh for each of a
-    /// pixel's samples, the points average to the share of the air lit, so
-    /// shafts through a wood's gaps glow and its shadow does not.
+    /// judged at one point drawn along it as that air gathers its sunlight:
+    /// what stands between that point and the sun, and the clouds overhead.
+    /// Drawn afresh for each of a pixel's samples, the points average to the
+    /// share of the air lit, so shafts through a wood's gaps glow and its
+    /// shadow does not.
     fn sunlit_air(&self, ray: &Ray, t: f64, sampler: &mut Sampler) -> Vec3 {
         let Some(toward) = self.sun else {
             return Vec3::ONE;
         };
-        let at = ray.at(t * sampler.next_1d());
+        let at = ray.at(self.scene.sky.drawn(ray.dir, (0.0, t), sampler.next_1d()));
         self.scene
             .transmittance(&Ray::new(at, toward), f64::INFINITY, None)
             * self.scene.sky.clouded(at, toward)
@@ -730,6 +812,7 @@ impl<'a> Tracer<'a> {
             fine: matches!(path.arrival, Arrival::Seen) && !path.scattered,
             spread: (!path.scattered).then_some(self.pixel_angle + path.cone.spread),
             jitter: sampler.next_1d(),
+            air: sampler.next_1d(),
         };
         let mut light = sky.radiance(ray.origin, ray.dir, seeing);
         if path.scattered {
@@ -758,7 +841,7 @@ impl<'a> Tracer<'a> {
         material: &Material,
         path: Path,
         sampler: &mut Sampler,
-    ) -> Vec3 {
+    ) -> Shaded {
         let (mut surface, outside) =
             self.surface(ray, &hit, (object, material), (path.travelled, path.cone));
         surface.canopy = self.scene.canopy(surface.point);
@@ -840,7 +923,7 @@ impl<'a> Tracer<'a> {
                     self.damp(&surface, albedo, standing, path, sampler)
                 }
             }
-            Finish::Glow { radiance } => radiance,
+            Finish::Glow { radiance } => Shaded::ungathered(radiance),
         }
     }
 
@@ -854,7 +937,7 @@ impl<'a> Tracer<'a> {
         (absorb, glow, foam): (Vec3, Vec3, Option<Foam>),
         path: Path,
         sampler: &mut Sampler,
-    ) -> Vec3 {
+    ) -> Shaded {
         if let Some(foam) = foam {
             if sampler.next_1d() < foam_cover(&foam, surface) {
                 return self.coated(surface, FOAM, Microfacet::isotropic(0.9), path, sampler);
@@ -978,7 +1061,7 @@ impl<'a> Tracer<'a> {
         micro: Microfacet,
         path: Path,
         sampler: &mut Sampler,
-    ) -> Vec3 {
+    ) -> Shaded {
         let cos_eye = surface.normal.dot(surface.toward_eye).max(1e-4);
         let under = 1.0 - schlick_scalar(COAT_F0, cos_eye);
         let coat = Specular {
@@ -993,9 +1076,9 @@ impl<'a> Tracer<'a> {
             translucent: Vec3::ZERO,
             spots_only: false,
         };
-        self.direct(surface, &lobes, path, sampler)
-            + self.diffused(surface, pigment * under, path, sampler)
-            + self.coat(surface, &coat, path, sampler)
+        let direct = self.direct(surface, &lobes, path, sampler);
+        let diffused = self.diffused(surface, pigment * under, path, sampler);
+        Shaded::ungathered(direct) + diffused + self.coat(surface, &coat, path, sampler)
     }
 
     /// Ground wet over `wet` of its surface: matte beneath, and the film of
@@ -1007,7 +1090,7 @@ impl<'a> Tracer<'a> {
         wet: f64,
         path: Path,
         sampler: &mut Sampler,
-    ) -> Vec3 {
+    ) -> Shaded {
         let film = Specular {
             frame: Frame::around(surface.normal),
             micro: Microfacet::isotropic(0.55 - 0.45 * wet),
@@ -1022,20 +1105,21 @@ impl<'a> Tracer<'a> {
             translucent: Vec3::ZERO,
             spots_only: false,
         };
-        self.direct(surface, &lobes, path, sampler)
-            + self.diffused(surface, pigment * under, path, sampler)
-            + self.coat(surface, &film, path, sampler)
+        let direct = self.direct(surface, &lobes, path, sampler);
+        let diffused = self.diffused(surface, pigment * under, path, sampler);
+        Shaded::ungathered(direct) + diffused + self.coat(surface, &film, path, sampler)
     }
 
     /// A matte pigment: the lamps and the sky on it, and no reflection.
-    fn matte(&self, surface: &Surface, pigment: Vec3, path: Path, sampler: &mut Sampler) -> Vec3 {
+    fn matte(&self, surface: &Surface, pigment: Vec3, path: Path, sampler: &mut Sampler) -> Shaded {
         let lobes = Lobes {
             diffuse: pigment * (1.0 / PI),
             specular: None,
             translucent: Vec3::ZERO,
             spots_only: false,
         };
-        self.direct(surface, &lobes, path, sampler) + self.diffused(surface, pigment, path, sampler)
+        let direct = self.direct(surface, &lobes, path, sampler);
+        Shaded::ungathered(direct) + self.diffused(surface, pigment, path, sampler)
     }
 
     /// A conductor: its reflection and its highlights, nothing beneath.
@@ -1046,7 +1130,7 @@ impl<'a> Tracer<'a> {
         micro: Microfacet,
         path: Path,
         sampler: &mut Sampler,
-    ) -> Vec3 {
+    ) -> Shaded {
         let lobe = Specular {
             frame: Self::frame(surface),
             micro,
@@ -1059,8 +1143,8 @@ impl<'a> Tracer<'a> {
             translucent: Vec3::ZERO,
             spots_only: false,
         };
-        self.direct(surface, &lobes, path, sampler)
-            + self.reflection(surface, &lobe, 1.0, path, sampler)
+        let direct = self.direct(surface, &lobes, path, sampler);
+        Shaded::ungathered(direct) + self.reflection(surface, &lobe, 1.0, path, sampler)
     }
 
     /// Car paint: a mirror-smooth clear coat over a metallic base whose flakes
@@ -1073,7 +1157,7 @@ impl<'a> Tracer<'a> {
         (roughness, flakes): (f64, f64),
         path: Path,
         sampler: &mut Sampler,
-    ) -> Vec3 {
+    ) -> Shaded {
         let cos_eye = surface.normal.dot(surface.toward_eye).max(1e-4);
         let coat = schlick_scalar(COAT_F0, cos_eye);
         let flake = cells3(surface.texture * (1.0 / flakes.max(1e-4)), 0x51ab, 1.0).id;
@@ -1115,7 +1199,7 @@ impl<'a> Tracer<'a> {
         // The coat's image, followed with the chance its own reflectance
         // gives it, counts as the whole of what it adds; the base's, followed
         // otherwise, likewise.
-        light
+        Shaded::ungathered(light)
             + if sampler.next_1d() < coat {
                 self.reflection(surface, &mirror, 1.0 / coat.max(1e-6), path, sampler)
             } else {
@@ -1307,13 +1391,21 @@ impl<'a> Tracer<'a> {
     /// What a diffuse lobe of `albedo` reflects of the light reaching
     /// `surface` from all but the lamps: the radiosity records' light where
     /// they hold, in the open air, and a traced ray's elsewhere.
-    fn diffused(&self, surface: &Surface, albedo: Vec3, path: Path, sampler: &mut Sampler) -> Vec3 {
+    fn diffused(
+        &self,
+        surface: &Surface,
+        albedo: Vec3,
+        path: Path,
+        sampler: &mut Sampler,
+    ) -> Shaded {
         let recorded = self
             .radiosity
             .filter(|_| path.medium.is_none())
             .and_then(|records| records.light(surface.point, surface.smooth, surface.normal));
         match recorded {
-            Some(light) => albedo * light * surface.canopy.map_or(1.0, |canopy| canopy.diffuse()),
+            Some(light) => Shaded::ungathered(
+                albedo * light * surface.canopy.map_or(1.0, |canopy| canopy.diffuse()),
+            ),
             None => self.ambient(surface, surface.normal, albedo, path, sampler),
         }
     }
@@ -1329,17 +1421,26 @@ impl<'a> Tracer<'a> {
         albedo: Vec3,
         path: Path,
         sampler: &mut Sampler,
-    ) -> Vec3 {
+    ) -> Shaded {
         let (x, y, z) = cosine_hemisphere(sampler.next_2d());
         let dir = Frame::around(around).to_world(Vec3::new(x, y, z));
         let through = surface.canopy.map_or(1.0, |canopy| canopy.through(dir));
         let carried = path.weight * albedo.max_element() * through;
         if path.depth + 1 >= MAX_DEPTH || carried <= 0.0 {
-            return Vec3::ZERO;
+            return Shaded::ungathered(Vec3::ZERO);
         }
-        let survives = (carried / ROULETTE).min(1.0);
+        let much = path.weight >= GATHERED_SHARE;
+        let nothing = Shaded {
+            light: Vec3::ZERO,
+            gathered: much,
+        };
+        let survives = if much {
+            1.0
+        } else {
+            (carried / ROULETTE).min(1.0)
+        };
         if survives < 1.0 && sampler.next_1d() >= survives {
-            return Vec3::ZERO;
+            return nothing;
         }
         let side = if surface.facing.dot(around) >= 0.0 {
             surface.facing
@@ -1348,7 +1449,7 @@ impl<'a> Tracer<'a> {
         };
         // A direction the shading normal allows but the surface itself hides.
         if side.dot(dir) <= 0.0 {
-            return Vec3::ZERO;
+            return nothing;
         }
         let next = Path {
             scattered: true,
@@ -1360,15 +1461,24 @@ impl<'a> Tracer<'a> {
             )
         };
         let arriving = self.radiance(&Ray::new(lift(surface.point, side), dir), next, sampler);
-        albedo * arriving * (through / survives)
+        Shaded {
+            light: albedo * arriving.light * (through / survives),
+            gathered: much || arriving.gathered,
+        }
     }
 
     /// What a clear coat or film `lobe` over a diffuse base reflects of the
     /// scene: nothing on a path that has scattered, whose light the coat's
     /// few percent would add to for the cost of a ray.
-    fn coat(&self, surface: &Surface, lobe: &Specular, path: Path, sampler: &mut Sampler) -> Vec3 {
+    fn coat(
+        &self,
+        surface: &Surface,
+        lobe: &Specular,
+        path: Path,
+        sampler: &mut Sampler,
+    ) -> Shaded {
         if path.scattered {
-            return Vec3::ZERO;
+            return Shaded::ungathered(Vec3::ZERO);
         }
         self.reflection(surface, lobe, 1.0, path, sampler)
     }
@@ -1383,13 +1493,14 @@ impl<'a> Tracer<'a> {
         boost: f64,
         path: Path,
         sampler: &mut Sampler,
-    ) -> Vec3 {
+    ) -> Shaded {
+        let nothing = Shaded::ungathered(Vec3::ZERO);
         if path.depth + 1 >= MAX_DEPTH {
-            return Vec3::ZERO;
+            return nothing;
         }
         let v = lobe.frame.to_local(surface.toward_eye);
         if v.z <= 0.0 {
-            return Vec3::ZERO;
+            return nothing;
         }
         let (dir, weight, arrival) = if lobe.micro.is_mirror() {
             let dir = (-surface.toward_eye).reflect(lobe.frame.z);
@@ -1398,7 +1509,7 @@ impl<'a> Tracer<'a> {
             let h = lobe.micro.sample(v, sampler.next_2d());
             let l = (-v).reflect(h);
             if l.z <= 0.0 {
-                return Vec3::ZERO;
+                return nothing;
             }
             let density = lobe.share * lobe.micro.reflection_density(v, h);
             (
@@ -1411,20 +1522,19 @@ impl<'a> Tracer<'a> {
             )
         };
         if surface.facing.dot(dir) <= 0.0 {
-            return Vec3::ZERO;
+            return nothing;
         }
         let weight = weight * boost;
         let carried = path.weight * weight.max_element();
         if carried < CUTOFF {
-            return Vec3::ZERO;
+            return nothing;
         }
         let next = path.next(carried, arrival, path.medium, surface.travelled);
-        weight
-            * self.radiance(
-                &Ray::new(lift(surface.point, surface.facing), dir),
-                next,
-                sampler,
-            )
+        self.radiance(
+            &Ray::new(lift(surface.point, surface.facing), dir),
+            next,
+            sampler,
+        ) * weight
     }
 
     /// A clear surface: what it reflects and what it lets through, both
@@ -1440,7 +1550,7 @@ impl<'a> Tracer<'a> {
         medium: Medium,
         path: Path,
         sampler: &mut Sampler,
-    ) -> Vec3 {
+    ) -> Shaded {
         let roughness = widened(roughness, surface.unresolved);
         let glints = Lobes {
             diffuse: Vec3::ZERO,
@@ -1453,7 +1563,7 @@ impl<'a> Tracer<'a> {
             translucent: Vec3::ZERO,
             spots_only: true,
         };
-        let mut light = if outside {
+        let glinted = if outside {
             self.direct(surface, &glints, path, sampler)
         } else {
             Vec3::ZERO
@@ -1525,10 +1635,9 @@ impl<'a> Tracer<'a> {
             self.follow(surface, transmit, 1.0, passing, sampler)
         };
         if let (true, Some(channel)) = (split_here, channel) {
-            through = only(through, channel);
+            through.light = only(through.light, channel);
         }
-        light += through;
-        light
+        Shaded::ungathered(glinted) + through
     }
 
     /// A soap bubble's skin: it reflects the colours its film interferes to,
@@ -1539,7 +1648,7 @@ impl<'a> Tracer<'a> {
         (thickness, index): (f64, f64),
         path: Path,
         sampler: &mut Sampler,
-    ) -> Vec3 {
+    ) -> Shaded {
         let cos_eye = surface.normal.dot(surface.toward_eye).max(1e-4);
         let film = Reflectance::Film {
             thickness,
@@ -1558,12 +1667,12 @@ impl<'a> Tracer<'a> {
             translucent: Vec3::ZERO,
             spots_only: true,
         };
-        let mut light = self.direct(surface, &glints, path, sampler);
+        let glinted = self.direct(surface, &glints, path, sampler);
         let reflected = Some((-surface.toward_eye).reflect(surface.normal));
         let reflect = (reflected, surface.facing, path.medium);
         let pass = (Some(-surface.toward_eye), -surface.facing, path.medium);
         let share = reflectance.max_element().clamp(0.0, 1.0);
-        light += if path.depth < SPLIT_DEPTH {
+        let through = if path.depth < SPLIT_DEPTH {
             self.follow(surface, reflect, share, path, sampler) * reflectance
                 + self.follow(surface, pass, 1.0 - share, path, sampler) * (Vec3::ONE - reflectance)
         } else if sampler.next_1d() < share {
@@ -1572,7 +1681,7 @@ impl<'a> Tracer<'a> {
             self.follow(surface, pass, 1.0, path, sampler)
                 * ((Vec3::ONE - reflectance) / (1.0 - share).max(1e-6))
         };
-        light
+        Shaded::ungathered(glinted) + through
     }
 
     /// A film laid over the pigment, as oil lies on dark water or colour on
@@ -1585,7 +1694,7 @@ impl<'a> Tracer<'a> {
         (thickness, index): (f64, f64),
         path: Path,
         sampler: &mut Sampler,
-    ) -> Vec3 {
+    ) -> Shaded {
         let colour = pigment.colour(spot);
         let cos_eye = surface.normal.dot(surface.toward_eye).max(1e-4);
         let film = Reflectance::Film {
@@ -1606,9 +1715,9 @@ impl<'a> Tracer<'a> {
             translucent: Vec3::ZERO,
             spots_only: false,
         };
-        self.direct(surface, &lobes, path, sampler)
-            + self.diffused(surface, colour * under, path, sampler)
-            + self.coat(surface, &coat, path, sampler)
+        let direct = self.direct(surface, &lobes, path, sampler);
+        let diffused = self.diffused(surface, colour * under, path, sampler);
+        Shaded::ungathered(direct) + diffused + self.coat(surface, &coat, path, sampler)
     }
 
     /// A thin, waxy surface lit from either side: diffuse on its face, some
@@ -1620,7 +1729,7 @@ impl<'a> Tracer<'a> {
         translucency: f64,
         path: Path,
         sampler: &mut Sampler,
-    ) -> Vec3 {
+    ) -> Shaded {
         let sheen = Specular {
             frame: Frame::around(surface.normal),
             micro: Microfacet::isotropic(0.35),
@@ -1650,7 +1759,7 @@ impl<'a> Tracer<'a> {
             let behind = back * (1.0 / (1.0 - facing).max(1e-9));
             self.ambient(surface, -surface.normal, behind, path, sampler)
         };
-        self.direct(surface, &lobes, path, sampler) + gathered
+        Shaded::ungathered(self.direct(surface, &lobes, path, sampler)) + gathered
     }
 
     /// The light found by following `dir` from `surface`, leaving on the
@@ -1662,13 +1771,14 @@ impl<'a> Tracer<'a> {
         weight: f64,
         path: Path,
         sampler: &mut Sampler,
-    ) -> Vec3 {
+    ) -> Shaded {
+        let nothing = Shaded::ungathered(Vec3::ZERO);
         let Some(dir) = dir else {
-            return Vec3::ZERO;
+            return nothing;
         };
         let carried = path.weight * weight;
         if path.depth + 1 >= MAX_DEPTH || carried < CUTOFF {
-            return Vec3::ZERO;
+            return nothing;
         }
         let next = path.next(carried, Arrival::Seen, medium, surface.travelled);
         self.radiance(&Ray::new(lift(surface.point, side), dir), next, sampler)
@@ -2036,7 +2146,8 @@ fn sun_in_view(scene: &Scene) -> Option<Glare> {
 }
 
 /// A pixel's samples as they accumulate: their mean, and on the square-root
-/// scale the eye reads light on, their spread and variance.
+/// scale the eye reads light on, their spread and variance; and whether any
+/// gathered some of its light by a random ray.
 struct Tally {
     sum: Vec3,
     roots: Vec3,
@@ -2044,6 +2155,7 @@ struct Tally {
     low: Vec3,
     high: Vec3,
     count: u32,
+    gathered: bool,
 }
 
 impl Tally {
@@ -2055,21 +2167,19 @@ impl Tally {
             low: Vec3::splat(f64::INFINITY),
             high: Vec3::ZERO,
             count: 0,
+            gathered: false,
         }
     }
 
-    fn add(&mut self, light: Vec3) {
-        let root = Vec3::new(
-            mathf::sqrt(light.x),
-            mathf::sqrt(light.y),
-            mathf::sqrt(light.z),
-        );
+    fn add(&mut self, light: Vec3, gathered: bool) {
+        let root = roots(light);
         self.sum += light;
         self.roots += root;
         self.squares += root * root;
         self.low = self.low.min(root);
         self.high = self.high.max(root);
         self.count += 1;
+        self.gathered |= gathered;
     }
 
     fn mean(&self) -> Vec3 {
@@ -2077,16 +2187,35 @@ impl Tally {
     }
 
     /// Whether the samples agree: after the `first` round, all of them within
-    /// a spread; after later ones, their mean within a standard error.
+    /// a spread, unless some gathered their light by random rays, which can
+    /// all have missed the light the next round finds; after later ones,
+    /// their mean within a standard error, and what it shows not hanging on
+    /// its brightest sample, as it does where a few rare paths bring most of
+    /// the light.
     fn settled(&self, first: bool) -> bool {
+        if self.gathered && self.count < GATHERED_LEAST {
+            return false;
+        }
         if first {
             return (self.high - self.low).max_element() <= SETTLED_SPREAD;
         }
         let n = f64::from(self.count);
         let mean = self.roots / n;
         let variance = (self.squares / n - mean * mean) * (n / (n - 1.0));
+        let without = (self.sum - self.high * self.high) * (1.0 / (n - 1.0).max(1.0));
+        let hanging = roots(self.mean()) - roots(without.max(Vec3::ZERO));
         (variance / n).max_element() <= SETTLED_ERROR * SETTLED_ERROR
+            && hanging.max_element() <= SETTLED_ERROR
     }
+}
+
+/// Each channel of `light` on the square-root scale the eye reads it on.
+fn roots(light: Vec3) -> Vec3 {
+    Vec3::new(
+        mathf::sqrt(light.x),
+        mathf::sqrt(light.y),
+        mathf::sqrt(light.z),
+    )
 }
 
 #[cfg(test)]

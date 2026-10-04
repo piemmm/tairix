@@ -18,6 +18,7 @@ use super::architecture::Aqueduct;
 use super::plants::Dead;
 use super::plants::{self, Character, Fallen, Grassland, Grove, Kind, Stand, Tier};
 use super::stones::Stones;
+use super::waterside;
 use super::weather::{self, Climate, Cover, Hour, Outdoors};
 use super::woodland::{Beneath, Deadfall, Rooting, Wood, Woodland, ANYWHERE};
 use super::{direction, lumens, rgb, Composed, Dice, Landing, Look, Stage, View, GOLD};
@@ -1476,6 +1477,7 @@ fn meadow_scene(stage: &mut Stage, dice: &mut Dice, land: &Land, vantage: Vantag
         beneath: None,
         deadfall: None,
     })?;
+    waterside::margins(stage, dice, ((eye.x, eye.z), season, None))?;
     stage.sward = Some(Lawning {
         eye: (eye.x, eye.z),
         grassland,
@@ -1693,6 +1695,7 @@ fn forest_scene(
         deadfall: Some(deadfall),
     })?;
     let eye = vantage.eye;
+    waterside::margins(stage, dice, ((eye.x, eye.z), season, None))?;
     stage.sward = Some(Lawning {
         eye: (eye.x, eye.z),
         grassland,
@@ -1896,6 +1899,7 @@ fn alpine_scene(
     moorland(stage, dice, &vantage, season)?;
     let grassland = plants::grassland(dice, Character::Upland, season);
     let eye = vantage.eye;
+    waterside::margins(stage, dice, ((eye.x, eye.z), season, Some(lake)))?;
     stage.sward = Some(Lawning {
         eye: (eye.x, eye.z),
         grassland,
@@ -2109,6 +2113,8 @@ fn coast_scene(
         deadfall: None,
     })?;
     moorland(stage, dice, &vantage, Season::Summer)?;
+    // The rivers running down to the sea; the sea itself is salt.
+    waterside::margins(stage, dice, ((eye.x, eye.z), Season::Summer, None))?;
     let grassland = plants::grassland(dice, Character::Coast, Season::Summer);
     stage.sward = Some(Lawning {
         eye: (eye.x, eye.z),
@@ -2675,6 +2681,7 @@ fn winter_scene(
         beneath: None,
         deadfall: Some(deadfall),
     })?;
+    waterside::margins(stage, dice, ((eye.x, eye.z), Season::Winter, None))?;
     if dice.chance(0.3) {
         let at = ahead(&vantage, 5.0, 0.4);
         let base = land.height(&stage.fields, at.0, at.1);
@@ -3094,6 +3101,8 @@ fn canyon_scene(stage: &mut Stage, dice: &mut Dice, land: &Land, vantage: Vantag
         beneath: None,
         deadfall: None,
     })?;
+    let eye = vantage.eye;
+    waterside::margins(stage, dice, ((eye.x, eye.z), Season::Summer, None))?;
     let weather = weather::outdoors(stage, dice, &CANYON, vantage.heading)?;
     let fov = dice.angle(48.0, 62.0);
     let view = view(stage, land, &vantage, (fov, dice.range(0.35, 0.5)));
@@ -3209,6 +3218,7 @@ fn valley_scene(stage: &mut Stage, dice: &mut Dice, land: &Land, vantage: Vantag
         beneath: None,
         deadfall: None,
     })?;
+    waterside::margins(stage, dice, ((eye.x, eye.z), season, None))?;
     stage.sward = Some(Lawning {
         eye: (eye.x, eye.z),
         grassland,

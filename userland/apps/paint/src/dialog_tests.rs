@@ -360,3 +360,57 @@ fn a_layer_form_keeps_the_exact_opacity_until_its_slider_moves() {
         Ok(alloc::string::String::from("Mist"))
     );
 }
+
+/// A choice list hangs past the sheet, so opening one reports the whole plate
+/// it opens into, not only the sheet it was pressed on.
+#[test]
+fn an_opened_list_is_reported_past_the_sheet() {
+    let registry = ThemeRegistry::with_builtins();
+    let theme = registry.active();
+    let mut form = Form::convert(None);
+    let layout = form
+        .group_layout(WINDOW, Scale::ONE, theme)
+        .expect("laid out");
+    let row = form
+        .group
+        .row_rect(0, layout, Scale::ONE, theme)
+        .expect("the depth row");
+    let slot = form.group.rows()[0]
+        .slot_rect(
+            tairix_controls::FieldLayout::new(row, layout.column),
+            Scale::ONE,
+            theme,
+        )
+        .expect("its control");
+    let centre = Point::new(
+        slot.left() + i32::try_from(slot.width / 2).expect("narrow"),
+        slot.top() + i32::try_from(slot.height / 2).expect("short"),
+    );
+    let mut damage = Region::new();
+    for event in [
+        InputEvent::PointerMoved { to: centre },
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+        InputEvent::PointerReleased {
+            button: PointerButton::Primary,
+        },
+    ] {
+        form.on_pointer(&event, WINDOW, Scale::ONE, theme, &mut damage);
+    }
+    let popup = form
+        .group_layout(WINDOW, Scale::ONE, theme)
+        .expect("laid out")
+        .popup;
+    assert!(!popup.is_empty(), "the press opened the list");
+    let sheet = form.rect(WINDOW, Scale::ONE, theme);
+    assert_ne!(
+        sheet.intersection(&popup),
+        popup,
+        "the list hangs past the sheet"
+    );
+    assert!(
+        tairix_controls::testkit::covers(&damage, popup),
+        "{popup:?} drawn but not reported"
+    );
+}

@@ -1,6 +1,6 @@
 //! Unit tests for the integer geometry primitives.
 
-use super::{to_i32, Point, Rect, Scale, REFERENCE_DPI};
+use super::{saturate_i32, to_i32, Point, Rect, Scale, REFERENCE_DPI};
 
 #[test]
 fn rect_intersection_overlap() {
@@ -147,6 +147,15 @@ fn to_i32_carries_ordinary_extents_through() {
 #[test]
 fn to_i32_saturates_rather_than_wrapping() {
     assert_eq!(to_i32(u32::MAX), i32::MAX);
+}
+
+#[test]
+fn a_wide_coordinate_saturates_to_the_nearer_end() {
+    assert_eq!(saturate_i32(-5), -5);
+    assert_eq!(saturate_i32(i64::from(i32::MAX)), i32::MAX);
+    assert_eq!(saturate_i32(i64::from(i32::MAX) + 1), i32::MAX);
+    assert_eq!(saturate_i32(i64::MIN), i32::MIN);
+    assert_eq!(saturate_i32(i64::MAX), i32::MAX);
 }
 
 #[test]

@@ -176,12 +176,19 @@ pub fn stop_mastering(
 /// Whether a function found by a walk that formed no hierarchy is stopped
 /// mastering. No unit's scope can be resolved without the hierarchy, so
 /// where a unit covers the segment (`covered`) every function that masters
-/// DMA of its own is taken to be behind one, and no firmware window can be
-/// vouched for; elsewhere only a virtio function, which TAIRiX would have
-/// driven, is stopped, as [`stop_mastering`] stops one behind no unit.
+/// DMA of its own is taken to be behind one, no firmware window can be
+/// vouched for, and every bridge is stopped too, so nothing below it reaches
+/// memory through it however its buses were numbered; elsewhere only a
+/// virtio function, which TAIRiX would have driven, is stopped, as
+/// [`stop_mastering`] stops one behind no unit. A host bridge, the root
+/// complex's own function, is never stopped.
 #[must_use]
 pub fn stopped_unresolved(function: &PciFunction, covered: bool) -> bool {
-    function.masters_dma() && (covered || function.vendor == VIRTIO_PCI_VENDOR_ID)
+    if covered {
+        function.masters_dma() || function.is_bridge()
+    } else {
+        function.masters_dma() && function.vendor == VIRTIO_PCI_VENDOR_ID
+    }
 }
 
 /// The functions whose bus mastering the kernel owns: each one behind a unit

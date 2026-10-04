@@ -7,7 +7,7 @@
 //! air makes them so.
 
 use super::{direction, Dice, Stage};
-use crate::atmosphere::{Air, Atmosphere, AERIAL_REACH};
+use crate::atmosphere::{Air, Atmosphere};
 use crate::body;
 use crate::cloud::{Cloudbank, Deck, Matter};
 use crate::scene::Exposure;
@@ -136,7 +136,7 @@ pub(super) fn outdoors(
     };
     let low = decks(dice, cover);
     let low = if low.iter().any(Option::is_some) {
-        Some(Cloudbank::new(low, (0.0, 0.0), BANK_HALF, toward)?)
+        Some(Cloudbank::new(low, LOW_FINEST, toward, air.ground())?)
     } else {
         None
     };
@@ -146,9 +146,9 @@ pub(super) fn outdoors(
         let deck = cirrus(dice, cover == Cover::Cirrus);
         Some(Cloudbank::new(
             [Some(deck), None],
-            (0.0, 0.0),
-            HIGH_HALF,
+            HIGH_FINEST,
             toward,
+            air.ground(),
         )?)
     } else {
         None
@@ -175,12 +175,11 @@ pub(super) fn outdoors(
     })
 }
 
-/// How far the cloud bank spreads either way of the eye: far enough that
-/// its edge lies in the haze at the horizon.
-const BANK_HALF: f64 = 28_000.0;
-/// How far the high bank of cirrus spreads: as far as the air between it
-/// and the eye is tabulated, past which the haze takes it.
-const HIGH_HALF: f64 = AERIAL_REACH * 1000.0;
+/// The most a bank's finest level of cloud spans either way of the eye: the
+/// low and middle decks', and the cirrus's, whose streaks are broad enough
+/// to be mapped about twice as coarsely.
+const LOW_FINEST: f64 = 28_000.0;
+const HIGH_FINEST: f64 = 60_000.0;
 
 /// A deck of `form`, its heading about `heading`.
 fn deck(dice: &mut Dice, form: &Form, heading: f64) -> Deck {

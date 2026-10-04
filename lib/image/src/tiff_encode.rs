@@ -3,10 +3,11 @@
 //! An opaque palette picture keeps its indices and colour map at its own
 //! depth — beyond baseline TIFF at one or two bits, which allows a palette
 //! only four or eight, though readers built on libtiff take them; a palette
-//! has no opacity, so a translucent one is written as colour. Colour is written as grey where every pixel is grey, and carries
-//! an unassociated alpha sample only where a pixel needs one. Eight-bit
-//! samples under LZW or DEFLATE are differenced along the row first, which
-//! is what makes those codecs pay on photographs.
+//! has no opacity, so a translucent one is written as colour. Colour is
+//! written as grey where every pixel is grey, and carries an unassociated
+//! alpha sample only where a pixel needs one. Eight-bit samples under LZW or
+//! DEFLATE are differenced along the row first, which is what makes those
+//! codecs pay on photographs.
 
 use alloc::vec::Vec;
 
@@ -23,10 +24,10 @@ use crate::lzw::{CodeSink, Coder, Widen};
 use crate::picture::{flatten_row, IndexDepth, PictureKind, PictureSource, Rgba8};
 use crate::tiff::{
     COMPRESSION_ADOBE_DEFLATE, COMPRESSION_LZW, COMPRESSION_NONE, COMPRESSION_PACK_BITS, ENTRY_LEN,
-    LONG, PHOTOMETRIC_BLACK_ZERO, PHOTOMETRIC_PALETTE, PHOTOMETRIC_RGB, RATIONAL,
-    RESOLUTION_CENTIMETRE, RESOLUTION_INCH, RESOLUTION_NONE, SHORT, SUBFILE_PAGE,
-    TAG_BITS_PER_SAMPLE, TAG_COLOUR_MAP, TAG_COMPRESSION, TAG_EXTRA_SAMPLES, TAG_IMAGE_LENGTH,
-    TAG_IMAGE_WIDTH, TAG_NEW_SUBFILE_TYPE, TAG_PAGE_NUMBER, TAG_PHOTOMETRIC,
+    EXTRA_UNASSOCIATED_ALPHA, LONG, PHOTOMETRIC_BLACK_ZERO, PHOTOMETRIC_PALETTE, PHOTOMETRIC_RGB,
+    PREDICTOR_HORIZONTAL, RATIONAL, RESOLUTION_CENTIMETRE, RESOLUTION_INCH, RESOLUTION_NONE, SHORT,
+    SUBFILE_PAGE, TAG_BITS_PER_SAMPLE, TAG_COLOUR_MAP, TAG_COMPRESSION, TAG_EXTRA_SAMPLES,
+    TAG_IMAGE_LENGTH, TAG_IMAGE_WIDTH, TAG_NEW_SUBFILE_TYPE, TAG_PAGE_NUMBER, TAG_PHOTOMETRIC,
     TAG_PLANAR_CONFIGURATION, TAG_PREDICTOR, TAG_RESOLUTION_UNIT, TAG_ROWS_PER_STRIP,
     TAG_SAMPLES_PER_PIXEL, TAG_STRIP_BYTE_COUNTS, TAG_STRIP_OFFSETS, TAG_X_RESOLUTION,
     TAG_Y_RESOLUTION,
@@ -39,12 +40,6 @@ const STRIP_BYTES: usize = 64 * 1024;
 /// The code at which a TIFF LZW table counts as full: one short of the
 /// widest code, as every reader of the format's own schedule expects.
 const LZW_LIMIT: u16 = 4094;
-
-/// `ExtraSamples`: unassociated alpha.
-const EXTRA_UNASSOCIATED_ALPHA: u16 = 2;
-
-/// `Predictor`: horizontal differencing.
-const PREDICTOR_HORIZONTAL: u16 = 2;
 
 /// How one page's pixels are written.
 enum Plan<'a> {

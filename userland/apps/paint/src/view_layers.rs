@@ -213,8 +213,8 @@ impl View {
     }
 
     /// Lay the layer painted on over the one beneath it, the two becoming
-    /// one, on a worker. Both must show: a merge keeps the look, so a hidden
-    /// layer's pixels would have nowhere to go.
+    /// one, on a worker. Both must show: a merge keeps the look, so the pixels
+    /// of a layer hidden or wholly faint would have nowhere to go.
     pub(super) fn merge_down(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
         let active = self.active_layer();
         let Some(lowest) = active.checked_sub(1) else {
@@ -227,7 +227,7 @@ impl View {
             .is_some_and(|picture| picture.shows(lowest..active + 1))
         {
             self.state(
-                "A hidden layer is not merged: show both first",
+                "A hidden or wholly faint layer is not merged",
                 layout,
                 damage,
             );

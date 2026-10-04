@@ -3,7 +3,7 @@
 
 use super::*;
 
-const OUTLINES: [Outline; 8] = [
+const OUTLINES: [Outline; 10] = [
     Outline::Ovate { teeth: 8 },
     Outline::Lanceolate,
     Outline::Lobed { lobes: 4 },
@@ -12,6 +12,8 @@ const OUTLINES: [Outline; 8] = [
     Outline::Fascicle { count: 9 },
     Outline::Trefoil,
     Outline::Runcinate,
+    Outline::Strap { from: 0, to: 255 },
+    Outline::Pad,
 ];
 
 #[test]
@@ -66,4 +68,47 @@ fn a_leaf_covers_its_midrib_and_its_shape_leaves_its_gaps() {
         widths.iter().max().copied().unwrap_or(0),
     );
     assert!(most > least + 15, "lobes and sinuses: {least}..{most}");
+}
+
+#[test]
+fn a_strap_leaf_in_pieces_keeps_the_one_outline_drawn_to_its_point() {
+    let marks = [0u8, 85, 170, 255];
+    let pieces: alloc::vec::Vec<Outline> = marks
+        .windows(2)
+        .map(|ends| Outline::Strap {
+            from: ends[0],
+            to: ends[1],
+        })
+        .collect();
+    for pair in pieces.windows(2) {
+        for step in 0..=100u32 {
+            let v = f64::from(step) / 100.0;
+            assert_eq!(
+                pair[0].covers(1.0, v),
+                pair[1].covers(0.0, v),
+                "{pair:?} at {v}"
+            );
+        }
+    }
+    let whole = Outline::Strap { from: 0, to: 255 };
+    assert!(whole.covers(0.5, 0.95), "full width along its middle");
+    assert!(!whole.covers(1.0, 0.05), "drawn to a point");
+    assert!(!whole.covers(0.0, 0.7), "narrower where it sheathes");
+}
+
+#[test]
+fn a_pad_is_round_about_its_stalk_but_for_its_slit() {
+    let pad = Outline::Pad;
+    // On a blade half as wide as it is long, the outline is a circle.
+    for step in 0..64u32 {
+        let angle = core::f64::consts::TAU * f64::from(step) / 64.0;
+        let (x, y) = (mathf::cos(angle), mathf::sin(angle));
+        let inside = |r: f64| pad.covers(0.5 + 0.5 * r * x, r * y);
+        let in_slit = x < 0.0 && y.abs() < -0.105 * x;
+        assert_eq!(inside(0.9), !in_slit, "at {angle}");
+        assert!(!inside(1.05), "at {angle}");
+    }
+    assert!(pad.covers(0.5, 0.0), "whole at its stalk");
+    assert!(!pad.covers(0.2, 0.0), "cut to its edge on the stalk's side");
+    assert!(pad.covers(0.8, 0.0));
 }

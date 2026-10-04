@@ -24,9 +24,9 @@ fn built(air: Air, runner: &dyn JobRunner) -> Atmosphere {
 #[test]
 fn the_air_keeps_most_light_overhead_and_reddens_it_toward_the_horizon() {
     let atmosphere = built(air(40.0), &tairix_parallel::SERIAL);
-    let overhead = atmosphere.sunlight(0.0, Vec3::UP);
+    let overhead = atmosphere.sunlight(0.0, 1.0);
     assert!(overhead.min(Vec3::splat(1.0)).z > 0.6, "{overhead:?}");
-    let low = atmosphere.sunlight(0.0, Vec3::new(0.0, mathf::sin(0.05), mathf::cos(0.05)));
+    let low = atmosphere.sunlight(0.0, mathf::sin(0.05));
     assert!(low.x > low.y && low.y > low.z, "reddened: {low:?}");
     assert!(
         low.z < 0.5 * overhead.z,
@@ -51,13 +51,13 @@ fn the_sky_is_blue_overhead_by_day_and_red_by_the_setting_sun() {
 #[test]
 fn after_sunset_the_air_above_is_still_lit_while_the_ground_lies_in_shadow() {
     let dusk = built(air(-2.0), &tairix_parallel::SERIAL);
-    let toward = dusk.air().sun;
-    let ground = dusk.sunlight(0.0, toward);
+    let cosine = dusk.air().sun.y;
+    let ground = dusk.sunlight(0.0, cosine);
     assert!(
         ground.max_element() < 1e-3,
         "the ground is in the Earth's shadow: {ground:?}"
     );
-    let high = dusk.sunlight(7000.0, toward);
+    let high = dusk.sunlight(7000.0, cosine);
     assert!(
         high.max_element() > 1e-3,
         "a high cloud still sees the sun: {high:?}"
@@ -89,6 +89,56 @@ fn the_air_between_dims_what_lies_beyond_and_glows_the_more_the_further() {
         last.1.z < 0.9,
         "fifty kilometres of air dims blue: {:?}",
         last.1
+    );
+}
+
+/// The table's first 32 slices lie within 60 km, where the land is, and the
+/// rest carry it on toward the horizon's cloud, still dimming and glowing.
+#[test]
+fn the_aerial_table_keeps_its_near_slices_and_reaches_the_horizons_cloud() {
+    assert!((place_of(60_000.0) - 31.0).abs() < 1e-9);
+    assert!((place_of(AERIAL_REACH * 1000.0) - real(AERIAL.2 - 1)).abs() < 1e-9);
+    let atmosphere = built(air(20.0), &tairix_parallel::SERIAL);
+    let dir = Vec3::new(0.7, 0.004, 0.7).normalized();
+    let mut last = atmosphere.between(dir, 60_000.0);
+    for distance in [120_000.0, 220_000.0, 330_000.0, 450_000.0] {
+        let between = atmosphere.between(dir, distance);
+        assert!(between.kept.y < last.kept.y, "{distance}: dims on");
+        assert!(between.light().y > last.light().y, "{distance}: glows on");
+        last = between;
+    }
+}
+
+/// Drawn along a stretch, a point falls where the share it was drawn with
+/// of the stretch's sunlit air's light has been gathered, from its near end
+/// to its far.
+#[test]
+fn a_point_drawn_along_the_air_falls_as_its_sunlight_is_gathered() {
+    let atmosphere = built(air(6.0), &tairix_parallel::SERIAL);
+    for (dir, (from, to)) in [
+        (Vec3::new(0.0, 0.06, 1.0).normalized(), (0.0, 140_000.0)),
+        (Vec3::new(1.0, 0.3, -0.2).normalized(), (2_500.0, 9_000.0)),
+        (Vec3::new(-0.4, 0.01, -1.0).normalized(), (40.0, 400_000.0)),
+    ] {
+        let sight = atmosphere.sight(dir);
+        let green = |distance: f64| sight.between(distance).sun.y;
+        let (low, high) = (green(from), green(to));
+        assert!(high > low, "{dir:?}");
+        let mut last = from;
+        for step in 0..=40u32 {
+            let u = f64::from(step) / 40.0;
+            let at = sight.drawn((from, to), u);
+            assert!((from..=to).contains(&at) && at >= last, "{dir:?} {u}: {at}");
+            let share = (green(at) - low) / (high - low);
+            assert!((share - u).abs() < 1e-6, "{dir:?} {u}: {share} at {at}");
+            last = at;
+        }
+    }
+    let sight = atmosphere.sight(Vec3::UP);
+    assert_eq!(
+        sight.drawn((500.0, 500.0), 0.3).to_bits(),
+        500.0f64.to_bits(),
+        "an empty stretch"
     );
 }
 

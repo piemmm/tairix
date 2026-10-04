@@ -9,7 +9,7 @@
 use alloc::boxed::Box;
 use alloc::string::String;
 
-use tairix_abi::BundleId;
+use tairix_abi::{BundleId, Errno};
 use tairix_controls::{ScrollModel, ScrollRange};
 use tairix_geometry::{Rect, Scale};
 use tairix_icon::IconArtwork;
@@ -59,6 +59,10 @@ pub(crate) struct Answered<'a> {
     /// The sources the desktop said have notified, or `None` while it has
     /// not said.
     pub(crate) notify_sources: Option<&'a [BundleId]>,
+    /// Why the desktop last would not lock the screen, if it would not.
+    pub(crate) lock_refusal: Option<Errno>,
+    /// Why the desktop last would not show the screensaver, if it would not.
+    pub(crate) preview_refusal: Option<Errno>,
 }
 
 impl<'a> Answered<'a> {
@@ -76,8 +80,8 @@ impl<'a> Answered<'a> {
             staged_accounts: self.staged_accounts,
             notify_sources: self.notify_sources,
             sources_full: false,
-            lock_refusal: None,
-            preview_refusal: None,
+            lock_refusal: self.lock_refusal,
+            preview_refusal: self.preview_refusal,
         }
     }
 }

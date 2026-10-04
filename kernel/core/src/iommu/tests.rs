@@ -1432,3 +1432,57 @@ fn a_holder_whose_adoption_failed_leaves_its_group_free() {
         Err(DmaError::KernelOwned)
     );
 }
+
+/// Records, for each event written, whether `holder`'s lock was held then.
+struct HeldWitness {
+    holder: SpinLock<Option<Arc<Owner>>>,
+    held: SpinLock<Vec<bool>>,
+}
+
+impl Sink for HeldWitness {
+    fn write_event(&self, _event: &tairix_log::Event<'_>) {
+        if let Some(holder) = self.holder.lock().as_ref() {
+            self.held.lock().push(holder.state.is_locked());
+        }
+    }
+}
+
+/// A group's live holder refuses a sibling's owner, and the refusal is
+/// audited once the holder's lock is let go, so it never holds up the
+/// holder's own maps and unmaps.
+#[test]
+fn a_refused_group_is_audited_with_its_holder_let_go() {
+    let (model, tree) = rig!(Behaviour::Correct);
+    let witness: &'static HeldWitness = Box::leak(Box::new(HeldWitness {
+        holder: SpinLock::new(None),
+        held: SpinLock::new(Vec::new()),
+    }));
+    tree.add(&device_node(DEVICE, STREAM));
+    let (translation, _) = Translation::start(
+        vec![unit(model, Vec::new())],
+        vec![REGISTERS],
+        tree,
+        witness,
+        None,
+    );
+    let live = Arc::new(Owner {
+        generation: 1,
+        node: DEVICE,
+        identity: Identity {
+            unit: 0,
+            group: STREAM,
+            requester: ArrayVec::new(),
+            aliases: ArrayVec::new(),
+        },
+        streams: Vec::new(),
+        epoch: 0,
+        state: SpinLock::new(OwnerState::Adopting),
+        unconfirmed: AtomicBool::new(false),
+    });
+    *witness.holder.lock() = Some(Arc::clone(&live));
+    assert_eq!(
+        translation.free(&live, SIBLING, 2),
+        Err(DmaError::GroupBusy)
+    );
+    assert_eq!(*witness.held.lock(), [false]);
+}

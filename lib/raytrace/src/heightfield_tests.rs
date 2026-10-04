@@ -14,6 +14,19 @@ fn filled(
     wrap: bool,
     height: impl Fn(f64, f64) -> f64,
 ) -> Heightfield {
+    let mut field = unsealed(cells, origin, step, wrap, height);
+    field.seal();
+    field
+}
+
+/// `filled`, its sealing left to be done.
+fn unsealed(
+    cells: usize,
+    origin: (f64, f64),
+    step: f64,
+    wrap: bool,
+    height: impl Fn(f64, f64) -> f64,
+) -> Heightfield {
     let mut field = Heightfield::new(cells, origin, step, wrap).expect("a grid");
     let (((origin_x, origin_z), step), side) = (field.placing(), field.side());
     for (start, band) in field.bands(0..side, 3) {
@@ -24,7 +37,6 @@ fn filled(
             }
         }
     }
-    field.seal();
     field
 }
 
@@ -142,6 +154,36 @@ fn a_grid_seals_the_same_however_its_bands_are_shared() {
             )
         );
     }
+}
+
+/// Heights of every magnitude, whose sum rounds as it is grouped, keep one
+/// mean however many cores seal the grid they lie in.
+#[test]
+fn a_grids_mean_sums_alike_however_many_cores_seal_it() {
+    // The first bands sum far past what the fine heights after them can be
+    // added to without rounding.
+    let mixed = |x: f64, z: f64| {
+        if z < -12.0 {
+            1.0e8 + 64.0 * rugged(x, z)
+        } else {
+            0.37 + 1.0e-3 * rugged(x, z)
+        }
+    };
+    let mean = |runner: &dyn JobRunner| {
+        let mut field = unsealed(300, (-20.0, -20.0), 0.13, false, mixed);
+        let mut sealing = Sealing::BEGUN;
+        while !sealing.step(&mut field, runner) {}
+        field.mean.to_bits()
+    };
+    let alone = mean(&tairix_parallel::SERIAL);
+    for width in [2, 3, 4, 8] {
+        assert_eq!(
+            mean(&tairix_parallel::Threaded::new(width)),
+            alone,
+            "{width} cores"
+        );
+    }
+    assert_eq!(mean(&tairix_parallel::Reversed::new(3)), alone);
 }
 
 /// Over a grid of any size, a ray meets the nearest patch of any of its

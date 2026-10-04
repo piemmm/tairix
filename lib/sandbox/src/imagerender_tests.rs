@@ -1030,6 +1030,57 @@ fn an_abandoned_plan_lets_its_source_go() {
 }
 
 #[test]
+fn a_plan_refused_for_its_geometry_lets_its_source_go() {
+    let mut sandbox = sandbox();
+    let png = solid_png(2, 2, WALLPAPER_COLOUR);
+    super::send_document(&mut sandbox, &png).expect("uploads");
+    assert_eq!(
+        super::plan_wallpaper(&mut sandbox, (2, 2), 4, 4, WallpaperFit::Fill).err(),
+        Some(WallpaperRenderFailure::Refused(
+            WallpaperRefusal::MalformedRequest
+        ))
+    );
+    assert_eq!(
+        super::plan_wallpaper(&mut sandbox, (2, 2), 2, 2, WallpaperFit::Fill).err(),
+        Some(WallpaperRenderFailure::Refused(WallpaperRefusal::NoSource))
+    );
+}
+
+/// A worker that refuses a plan believably and then answers the release
+/// beyond belief has still shown itself broken.
+#[test]
+fn a_release_answered_beyond_belief_after_a_refused_plan_retires_the_worker() {
+    let mut sandbox = tampering::<ImageRenderService>(super::OP_WALLPAPER_RELEASE, |_| vec![0xEE]);
+    super::send_document(&mut sandbox, b"plainly not an image").expect("uploads");
+    assert_eq!(
+        super::plan_wallpaper(&mut sandbox, (2, 2), 2, 2, WallpaperFit::Fill).err(),
+        Some(WallpaperRenderFailure::Refused(
+            WallpaperRefusal::UnsupportedFormat
+        ))
+    );
+    assert!(!sandbox.is_live());
+}
+
+/// A render whose worker was retired took the source with it, so letting the
+/// plan go starts no worker just to be told.
+#[test]
+fn a_plan_whose_worker_was_retired_starts_none_to_let_it_go() {
+    let mut sandbox = tampering::<ImageRenderService>(super::OP_WALLPAPER_BAND, |mut reply| {
+        reply.push(0);
+        reply
+    });
+    let png = solid_png(2, 2, WALLPAPER_COLOUR);
+    super::send_document(&mut sandbox, &png).expect("uploads");
+    let planned =
+        super::plan_wallpaper(&mut sandbox, (2, 2), 2, 2, WallpaperFit::Stretch).expect("plans");
+    assert_eq!(
+        planned.render_into(&mut [0u8; 2 * 2 * 4]),
+        Err(WallpaperRenderFailure::ReplyMalformed)
+    );
+    assert!(!sandbox.is_live());
+}
+
+#[test]
 fn a_document_longer_than_one_run_arrives_whole() {
     let mut sandbox = sandbox();
     let bytes = vec![0x5A; super::UPLOAD_RUN * 2 + 7];

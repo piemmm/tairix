@@ -42,19 +42,28 @@ impl Detail {
 }
 
 /// The densities a detail sets.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Densities {
     /// The most objects a scene holds: a forest's trees, understory and
     /// deadwood among them.
     pub(crate) objects: usize,
     pub(crate) woods: Woods,
+    pub(crate) waterside: Waterside,
     pub(crate) records: Records,
     pub(crate) focus: Focus,
 }
 
+/// How far about the eye the plants of a scene's water's edge stand, and
+/// the most patches of them it sets out.
+#[derive(Clone, Debug)]
+pub(crate) struct Waterside {
+    pub(crate) reach: f64,
+    pub(crate) most: u32,
+}
+
 /// The most trees each wood a setting asks for may stand, which also bounds
 /// how far about the eye it is sown.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Woods {
     /// About a building, a sculpture or an aqueduct.
     pub(crate) backdrop: u32,
@@ -69,7 +78,7 @@ pub(crate) struct Woods {
 }
 
 /// How a scene's radiosity records are laid.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Records {
     /// The rows of equal cosine and the columns of azimuth a record's
     /// hemisphere is cut into, one ray a cell.
@@ -86,7 +95,7 @@ pub(crate) struct Records {
 }
 
 /// How a scene's caustics are laid.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Focus {
     /// How many pixels apart the survey of the picture looks.
     pub(crate) stride: u32,
@@ -116,6 +125,10 @@ const SIMPLE: Densities = Densities {
         cacti: 600,
         scrub: 900,
     },
+    waterside: Waterside {
+        reach: 250.0,
+        most: 8000,
+    },
     records: Records {
         rows: 8,
         columns: 32,
@@ -141,6 +154,10 @@ const MAXIMUM: Densities = Densities {
         valley: 120_000,
         cacti: 6000,
         scrub: 9000,
+    },
+    waterside: Waterside {
+        reach: 700.0,
+        most: 40_000,
     },
     records: Records {
         rows: 16,

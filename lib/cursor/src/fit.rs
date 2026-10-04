@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 
 use core::cmp::Ordering;
 
-use tairix_geometry::Point;
+use tairix_geometry::{saturate_i32, Point};
 use tairix_raster::{
     Affine, Gradient, Group, Layer, Mask, Node, Paint, Pattern, MAX_DRAWING_EXTENT, MAX_GROUP_DEPTH,
 };
@@ -407,7 +407,7 @@ impl Axis {
         } else {
             along(&self.before, distance.negated(), self.span).saturating_neg()
         };
-        saturate(self.anchor.saturating_add(offset))
+        saturate_i32(self.anchor.saturating_add(offset))
     }
 
     /// The coordinates the fit bends at strictly between `from` and `to`.
@@ -420,7 +420,7 @@ impl Axis {
 
     /// The hotspot's pixel, before any clamp.
     fn anchor_pixel(&self) -> i32 {
-        saturate(self.anchor / i64::from(FIT_UNITS))
+        saturate_i32(self.anchor / i64::from(FIT_UNITS))
     }
 
     /// The translation that undoes the plain stretch on this axis.
@@ -581,11 +581,6 @@ fn rounded(numerator: i128, denominator: i128) -> i64 {
         .saturating_add(denominator)
         .div_euclid(denominator.saturating_mul(2));
     i64::try_from(quotient).unwrap_or(if quotient < 0 { i64::MIN } else { i64::MAX })
-}
-
-/// `value` held inside `i32`; the scan converter bounds a vertex further.
-pub(crate) fn saturate(value: i64) -> i32 {
-    i32::try_from(value).unwrap_or(if value < 0 { i32::MIN } else { i32::MAX })
 }
 
 #[cfg(test)]

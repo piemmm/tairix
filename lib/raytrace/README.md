@@ -18,7 +18,7 @@ random from a seed, and a tracer that answers what one pixel of one shows.
   within about 384 MiB at its peak, or `Maximum`, all the realism a 2 GiB peak
   buys; `peak` states each one's budget for a caller weighing its memory.
 - `Draft` — a scene composed at a `Detail` but not yet traceable: its lands
-  built, its woods and swards grown, its trees and deadwood grown into
+  built, its woods, water's edge and swards grown, its trees and deadwood grown into
   prototypes, its grids and sky tables filled, its hierarchy built, the beams
   its water bends the sun's light through laid, its radiosity gathered and its
   exposure and local adaptation metered. `prepare`
@@ -57,9 +57,12 @@ random from a seed, and a tracer that answers what one pixel of one shows.
   preparation is a fixed amount of work a core, whatever the scene holds: a
   band of a grid's rows or of a shade's, a turn of a land's droplet tiles, a
   slice of a prototype's or the scene's hierarchy, a band of a wood's places
-  or a run of their ranking, a hundred or so of the caustics' survey points, a
+  or a run of their ranking, a few rows of the water's edge's lattice, a
+  hundred or so of the caustics' survey points, a
   couple of thousand of their beams or a few thousand of their pyramids'
-  nodes, a few rows of a radiosity record's hemisphere.
+  nodes, a few rows of a radiosity record's hemisphere, a few rows of a cloud
+  level's weather, of its grid of the sun's depth or of its shadow, each
+  level's maps reserved whole and written as their rows are filled.
 
 ## Tests
 
@@ -78,14 +81,28 @@ the tall, sown all about the eye near it and across the view beyond, none
 walling off the view, and a forest standing thousands of trees and its fallen
 among them clear of the eye; the shade crowns cast and the sky they hide, and
 the air beneath them roofed; fallen trunks lying along the ground, thrown or
-snapped, and stumps sawn or splintered; ferns arching from the ground; the
+snapped, and stumps sawn or splintered; ferns arching from the ground; reeds
+and reedmace standing in the shallows and on wet level banks and lilies and
+pondweed floating on still water as deep as each roots in, none in a closed
+wood's gloom and the floating ones gone over winter, each patch within its
+square and its plants' reach, in its own materials and as tall as its
+stature, a lily's pads round and flat on the water and its flowers one in
+eight in summer, the near lattice filling the far one's hole on the land's own
+grid, a lake's reeds and lilies standing only where they suit it, and a
+scene's patches kept to its detail's most, those nearest the eye; a strap leaf in pieces keeping one
+outline and a pad round but for its slit; the
 sampling, lights, materials and pigments; a limb narrowing by its level's
 taper and a fork's arms carrying its narrowing on, a scaled limb met at its
 placed girth, and a bending limb's bark starting round it alike either side of
 a joint; a straight river wandering only sideways by its own length run; the
 sky's mean weighed by its cosine over the hemisphere; a far grass cell's shoot
 heading any way round; a coarse ray reaching cloud past any number of clear
-columns; a bridge's deck and a row of arches keeping trees off the strip
+columns; a deck running on to the horizon over the Earth's curve, its levels
+meeting with no seam, every level's bands holding its cloud and a march
+standing over the cell beneath each point on every level, far cloud lit by the
+sun at its own place and shading the ground from a low sun, an overcast grey to
+the horizon, and a point drawn along the air falling as its sunlight is
+gathered; a bridge's deck and a row of arches keeping trees off the strip
 beneath them, a strip claimed with no gap at its edges, a narrow slanting
 river wet in every cell it crosses, and woods with nothing beneath them still
 casting their shade; a seed showing the same place at either detail, `Simple` standing
@@ -94,13 +111,13 @@ on any runner; local adaptation leaving a frame one exposure holds alone,
 drawing a bright window down and lifting a dark wall alike to the edge between
 them with no halo, keeping detail and letting the sun blow out, and the same
 however its measurement was divided; a grid of any size met at the
-nearest of its cells and sealed the same across any number of cores, written
-only as its rows are filled, and a canopy grid as large as its lawn and no
-larger; a shade cast in bands bit for bit the shade cast whole, and sampled
-in bands as alone; a wood's places ranked tallest first as one sort would;
-prototypes of every kind grown a core apiece a unit; radiosity records laid
-the same however their rows fall across units, holding within fifteen degrees
-of turn; a land lying as its grids hold it,
+nearest of its cells and sealed the same, its mean to the last bit, across any
+number of cores, written only as its rows are filled, and a canopy grid as
+large as its lawn and no larger; a shade cast in bands bit for bit the shade
+cast whole, and sampled in bands as alone; a wood's places ranked tallest
+first as one sort would; prototypes of every kind grown a core apiece a unit;
+radiosity records laid the same however their rows fall across units, holding
+within fifteen degrees of turn; a land lying as its grids hold it,
 its rivers running downhill and its road dry but where it bridges them; the
 composer across every setting under many seeds (lit, sound, framed, the camera
 in the open and above the water, crystals rooted in their rock, an Ionic
@@ -113,7 +130,9 @@ visits; four boxes crossed in lanes bit for bit as each alone, and a grid's
 blocks crossed four at a time reaching what one block at a time reaches,
 never descending into one with no surface; an object whose box is not
 finite tested by every ray; and the reveal order — every pass's grid whole
-before the next begins; the Gaussian
+before the next begins; a pixel settling only on samples that tell its whole
+light, and a floor seeing the sky only low down showing no black pixel, seen
+bare, through glass or in a mirror; the Gaussian
 filter's offsets distributed as their truncated Gaussian; a draft's progress
 climbing steadily to its whole only once the scene is ready; water's waves
 holding their slope variance whether they tilt the normal or roughen it,

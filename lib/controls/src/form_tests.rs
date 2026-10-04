@@ -17,7 +17,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_font::BitmapFont;
-use tairix_geometry::{to_i32, Point, Rect, Scale};
+use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_icon::IconKind;
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Pixel, Surface};
@@ -33,7 +33,7 @@ use crate::metric::StatusPill;
 use crate::selector::{Checkbox, Toggle};
 use crate::state::{AuthorityState, ControlState, PointerState, SelectionState, ValidationState};
 use crate::testkit::{
-    control_font, has_pixel, high_contrast, keystroke, marks_elision, monochrome, premul,
+    control_font, covers, has_pixel, high_contrast, keystroke, marks_elision, monochrome, premul,
     text_ladder,
 };
 use crate::text::{Keystroke, SecretField, TextAction, TextField};
@@ -591,6 +591,71 @@ fn a_resolved_layout_carries_the_column_and_the_placed_list() {
         "the list is placed by the control's own rule, not a second copy"
     );
     assert!(!open.popup.is_empty());
+}
+
+/// The press that opens a list is routed with a layout that placed none, so
+/// it reports none of the plate: the owner reports it, placing the list again,
+/// and reports what a closing list vacates the same way.
+#[test]
+fn an_opened_list_is_reported_by_the_owner_that_places_it() {
+    let theme = Theme::dark();
+    let scale = Scale::ONE;
+    let bounds = Rect::new(0, 0, W, 200);
+    let viewport = Rect::new(0, 0, W, 400);
+    let mut group = FieldGroup::new(
+        "GENERAL",
+        vec![FieldRow::new(
+            "Login",
+            FieldControl::Combo(ComboBox::new(choices(&["Text", "Graphical", "None"]))),
+        )],
+    );
+    let closed = group.layout(bounds, viewport, scale, &theme);
+    let slot = {
+        let rect = group
+            .row_rect(0, own_layout(&group, bounds, scale, &theme), scale, &theme)
+            .expect("a row rect");
+        group.rows()[0]
+            .slot_rect(FieldLayout::new(rect, closed.column), scale, &theme)
+            .expect("a slot")
+    };
+    let centre = Point::new(
+        slot.left() + to_i32(slot.width) / 2,
+        slot.top() + to_i32(slot.height) / 2,
+    );
+    let mut damage = sink();
+    for event in [
+        InputEvent::PointerMoved { to: centre },
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+        InputEvent::PointerReleased {
+            button: PointerButton::Primary,
+        },
+    ] {
+        group.on_pointer(&event, closed, scale, &theme, &mut damage);
+    }
+    let open = group.layout(bounds, viewport, scale, &theme);
+    assert!(!open.popup.is_empty());
+    let covered = |damage: &Region| covers(damage, open.popup);
+    assert!(!covered(&damage), "the opening press cannot name the plate");
+    closed.report_popup_moved(open, &mut damage);
+    assert!(covered(&damage));
+    let mut vacated = sink();
+    open.report_popup_moved(closed, &mut vacated);
+    assert!(covered(&vacated));
+    let mut unmoved = sink();
+    open.report_popup_moved(open, &mut unmoved);
+    assert!(unmoved.is_empty());
+    let opening = FieldAction::Choices { expanded: true };
+    assert!(closed.popup_may_move(&opening));
+    assert!(
+        !closed.popup_may_move(&FieldAction::Activated),
+        "no list to move"
+    );
+    assert!(
+        open.popup_may_move(&FieldAction::Activated),
+        "an open one may"
+    );
 }
 
 /// A row omitted for lack of room has no anchor, so a layout resolved for a

@@ -126,9 +126,8 @@ untrusted work imports this seam; a second per-app copy is forbidden.
   decoded, and its render validates every band's echoed geometry and exact
   length fail-closed into the caller's own buffer; the held source is
   released once the render is drawn or dropped, or when the plan is
-  refused. A prepare replaces any
-  source (and placement) an earlier prepare left held on the same
-  (reused) worker.
+  refused. A prepare replaces any source (and placement) an earlier
+  prepare left held on the same (reused) worker.
 - **The document-view service** (also `imagerender`, the same worker): a
   picture or document the user opened is held as a *session* rather than
   rendered once, because a viewer keeps a file open and moves about inside

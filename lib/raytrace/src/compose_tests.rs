@@ -178,6 +178,7 @@ fn every_scene_is_lit_and_made_of_sound_parts() {
                             fine: false,
                             spread: None,
                             jitter: 0.5,
+                            air: 0.5,
                         },
                     )
                     .max_element()
@@ -370,7 +371,13 @@ fn describe(scene: &Scene) -> alloc::string::String {
 #[test]
 fn a_seed_composes_the_same_scene_every_time_and_another_seed_another() {
     let runner = Threaded::new(8);
-    for setting in [Setting::Classic, Setting::Ruins, Setting::Meadow] {
+    // A winter's frozen pond sets out its reeds and reedmace about the eye.
+    for setting in [
+        Setting::Classic,
+        Setting::Ruins,
+        Setting::Meadow,
+        Setting::Winter,
+    ] {
         let first = corpus()
             .iter()
             .find(|built| built.setting == setting && built.seed == 1)

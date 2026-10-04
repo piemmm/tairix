@@ -5,8 +5,8 @@
 use tairix_parallel::JobRunner;
 use tairix_util::{fallible, mathf};
 
-use crate::atmosphere::{Arriving, Atmosphere, Bend, Lit};
-use crate::cloud::{sunlight_levels, Cloudbank, Lighting, SUNLIGHT_LEVELS};
+use crate::atmosphere::{Arriving, Atmosphere, Bend, Lit, Scattered};
+use crate::cloud::{sunlight_places, Cloudbank, Lighting, SUNLIGHT_LEVELS, SUN_COSINES};
 use crate::noise::smoothstep;
 use crate::stars::Starfield;
 use crate::vector::Vec3;
@@ -72,6 +72,9 @@ pub(crate) struct Seeing {
     /// In `0.0..1.0`: how a march through cloud staggers where along its
     /// steps it reads the cloud, so no two samples of a pixel band alike.
     pub(crate) jitter: f64,
+    /// In `0.0..1.0`: where along each stretch of the air below the clouds
+    /// its shade is judged.
+    pub(crate) air: f64,
 }
 
 impl Sky {
@@ -126,10 +129,13 @@ impl Sky {
                 .into_iter()
                 .flatten()
             {
-                let levels = sunlight_levels(bank.span())
-                    .map(|height| atmosphere.sunlight(height, air.sun) * air.solar);
+                let cosines = bank.sun_cosines(air.sun);
+                let sunlight = sunlight_places(bank.span(), cosines)
+                    .map(|(height, cosine)| atmosphere.sunlight(height, cosine) * air.solar);
                 bank.light_by(Lighting {
-                    sunlight: fallible::collected(SUNLIGHT_LEVELS, levels)?,
+                    sunlight: fallible::collected(SUNLIGHT_LEVELS * SUN_COSINES, sunlight)?,
+                    cosines,
+                    toward: air.sun,
                     above: atmosphere.ambient(),
                     below,
                 });
@@ -138,39 +144,110 @@ impl Sky {
         Some(true)
     }
 
+    /// How far the sky is built, as the share of its units done: the air's
+    /// tables, and each bank's.
+    pub(crate) fn done(&self) -> f64 {
+        let air = match &self.dome {
+            Dome::Air(atmosphere) => atmosphere.units(),
+            Dome::Gradient(_) => (0.0, 0.0),
+        };
+        let (done, total) = [self.high.as_ref(), self.low.as_ref()]
+            .into_iter()
+            .flatten()
+            .map(Cloudbank::units)
+            .fold(air, |(done, total), (more, of)| (done + more, total + of));
+        if total > 0.0 {
+            (done / total).min(1.0)
+        } else {
+            1.0
+        }
+    }
+
     /// What a ray escaping from `origin` along the unit `dir` sees.
     ///
     /// Before each bank's cloud lies the air between it and the ray's origin,
     /// which dims the cloud and adds its own glow; behind the last, whatever
-    /// of the clear sky's light the cloud lets through.
+    /// of the clear sky's light the cloud lets through. The air beneath the
+    /// clouds, out to where the ray leaves the highest of them, is lit by
+    /// what of the sun they let through, judged at one point of each stretch
+    /// drawn as the stretch's sunlit air gathers its light: so an overcast
+    /// horizon is grey, and shafts of sunlight show between clouds.
     pub(crate) fn radiance(&self, origin: Vec3, dir: Vec3, seeing: Seeing) -> Vec3 {
         let met = |bank: Option<&Cloudbank>| {
             bank.and_then(|bank| bank.seen(origin, dir, seeing.fine, seeing.jitter))
         };
-        let (mut near, mut far) = (met(self.low.as_ref()), met(self.high.as_ref()));
+        let (low, high) = (met(self.low.as_ref()), met(self.high.as_ref()));
+        let (mut near, mut far) = (
+            low.and_then(|seen| seen.cloud),
+            high.and_then(|seen| seen.cloud),
+        );
         if let (Some(low), Some(high)) = (near, far) {
             if high.2 < low.2 {
                 (near, far) = (far, near);
             }
         }
-        let (mut light, mut through, mut before) = (Vec3::ZERO, 1.0, Vec3::ZERO);
-        for (cloud, kept, depth) in [near, far].into_iter().flatten() {
-            let (scattered, crossed) = match &self.dome {
-                Dome::Air(atmosphere) => {
-                    let between = atmosphere.between(dir, depth);
-                    (between.light(), between.kept)
-                }
-                Dome::Gradient(_) => (Vec3::ZERO, Vec3::ONE),
-            };
-            light += ((scattered - before).max(Vec3::ZERO) + cloud * crossed) * through;
+        let clouds = [near, far].into_iter().flatten();
+        let Dome::Air(atmosphere) = &self.dome else {
+            let (mut light, mut through) = (Vec3::ZERO, 1.0);
+            for (cloud, kept, _) in clouds {
+                light += cloud * through;
+                through *= kept;
+            }
+            return light + self.clear(origin, dir, seeing.spread) * through;
+        };
+        let sight = atmosphere.sight(dir);
+        let (mut light, mut through) = (Vec3::ZERO, 1.0);
+        let (mut before, mut reached) = (Scattered::NONE, 0.0);
+        // The air from `reached` to `to`, lit beneath the clouds; and what it
+        // keeps of the light beyond.
+        let shaded = |before: &Scattered, reached: f64, to: f64| {
+            let between = sight.between(to);
+            let lit = self.sunlit(origin + dir * sight.drawn((reached, to), seeing.air));
+            let air = (between.sun - before.sun).max(Vec3::ZERO) * lit
+                + (between.sky - before.sky).max(Vec3::ZERO);
+            (air, between)
+        };
+        for (cloud, kept, depth) in clouds {
+            let (air, between) = shaded(&before, reached, depth);
+            light += (air + cloud * between.kept) * through;
             through *= kept;
-            before = scattered;
+            (before, reached) = (between, depth);
         }
         if through <= 0.0 {
             return light;
         }
+        let exit = [low, high]
+            .into_iter()
+            .flatten()
+            .map(|seen| seen.leave)
+            .fold(reached, f64::max);
+        if exit > reached {
+            let (air, between) = shaded(&before, reached, exit);
+            light += air * through;
+            before = between;
+        }
         let clear = self.clear(origin, dir, seeing.spread);
-        light + (clear - before).max(Vec3::ZERO) * through
+        light + (clear - before.light()).max(Vec3::ZERO) * through
+    }
+
+    /// What of the sun's light the clouds let reach `point`, each bank's
+    /// shadow read the way its own sunlight crosses it.
+    fn sunlit(&self, point: Vec3) -> f64 {
+        [self.low.as_ref(), self.high.as_ref()]
+            .into_iter()
+            .flatten()
+            .map(|bank| bank.sunlit(point))
+            .product()
+    }
+
+    /// Where between `from` and `to` along `dir` a point standing for the
+    /// air's sunlit stretch falls, for `u` in `0.0..1.0`: as the air gathers
+    /// its light, or evenly under a room's walls.
+    pub(crate) fn drawn(&self, dir: Vec3, (from, to): (f64, f64), u: f64) -> f64 {
+        match &self.dome {
+            Dome::Air(atmosphere) => atmosphere.sight(dir).drawn((from, to), u),
+            Dome::Gradient(_) => from + (to - from) * u,
+        }
     }
 
     /// How much of the light arriving at `point` along the unit `dir`, the

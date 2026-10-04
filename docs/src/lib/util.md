@@ -127,8 +127,10 @@ and panic-free throughout.
   than grown and no later step allocates. An owner whose bound follows what
   it serves grows and shrinks the capacity (`grow`, `shrink`), withdraws
   requests it no longer awaits (`retain_waiting`), lands the answer of a
-  job it carried out itself (`land`), and reads how many answers wait to be
-  collected (`landed`). The desk is only the
+  job it carried out itself (`carry_out`), and reads how many answers wait to
+  be collected (`landed`). A delivery owes the loop a wake when it is the
+  first since the loop last collected, so one landing while others are being
+  collected is never left without one. The desk is only the
   bookkeeping; the exclusion, the parked worker thread, and the wake that
   reaches a loop's wait-set are `tairix_rt::work`, which every app-side
   consumer drives it through. Consumed by the terminal's settings publisher

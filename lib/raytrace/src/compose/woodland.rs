@@ -23,6 +23,7 @@ use tairix_util::{fallible, mathf};
 
 use super::landscape::{self, Lawning, Vantage};
 use super::plants::{self, Dead, Grove, Grown, Kind, Laying, DEAD_VARIANTS, VARIANTS};
+use super::waterside::Margins;
 use super::{Dice, Stage};
 use crate::ground::Floor;
 use crate::heightfield::Heightfield;
@@ -187,7 +188,7 @@ const BAND: usize = 1024;
 
 /// Room kept among the stage's objects for what a scene sets out after its
 /// woods.
-const KEPT: usize = 512;
+pub(super) const KEPT: usize = 512;
 
 /// A place a tree might stand, and, once the ground there is read, the tree
 /// that would.
@@ -1039,6 +1040,9 @@ fn walls_off(open: (f64, f64), vantage: &Vantage, at: (f64, f64), height: f64) -
 #[derive(Debug)]
 pub(super) struct Growing {
     woods: Vec<Wood>,
+    /// The plants of the water's edge, set out once the woods' shade is
+    /// cast.
+    margins: Option<Margins>,
     sward: Option<Lawning>,
     /// The wood being grown, and how far.
     next: usize,
@@ -1076,23 +1080,29 @@ enum Phase {
     /// Every wood stands, and the shade they cast over the land is being
     /// cast.
     Shading { shading: Shading },
+    /// The water's edge is being set out in the light the woods leave it:
+    /// in their shade, or in the open where no wood stands.
+    Edging { shades: Option<Shades> },
     /// Every wood stands, its shade cast over the land for the sward being
     /// laid in it.
     Laying { shades: Shades, laying: Laying },
 }
 
 impl Growing {
-    /// The woods and sward `stage` has been asked for, taken from it, their
-    /// draws keyed from one of `dice`; `None` if it was asked for neither.
+    /// The woods, water's edge and sward `stage` has been asked for, taken
+    /// from it, their draws keyed from one of `dice`; `None` if it was asked
+    /// for none of them.
     pub(super) fn from(stage: &mut Stage, dice: &mut Dice) -> Option<Self> {
         let woods = core::mem::take(&mut stage.woods);
+        let margins = stage.margins.take();
         let sward = stage.sward.take();
-        if woods.is_empty() && sward.is_none() {
+        if woods.is_empty() && margins.is_none() && sward.is_none() {
             return None;
         }
         let seed = dice.wide();
         Some(Self {
             woods,
+            margins,
             sward,
             next: 0,
             phase: Phase::Sowing,
@@ -1101,12 +1111,19 @@ impl Growing {
         })
     }
 
-    /// How far the growing has come: each wood a share, and the sward laid
-    /// beneath them all one more.
+    /// How far the growing has come: each wood a share, and one more for
+    /// the shade they cast, the water's edge and the sward laid beneath
+    /// them all.
     pub(super) fn done(&self) -> f64 {
-        // The last part is the shade, and the sward laid in it where there
-        // is one.
-        let shading = if self.sward.is_some() { 0.25 } else { 1.0 };
+        // Setting out the water's edge is a small share of the last part;
+        // laying the sward is most of it.
+        let edging = if self.margins.is_some() { 0.05 } else { 0.0 };
+        let laying = if self.sward.is_some() {
+            0.75 * (1.0 - edging)
+        } else {
+            0.0
+        };
+        let shading = 1.0 - edging - laying;
         let within = match &self.phase {
             Phase::Sowing => 0.0,
             Phase::Trees { standing, .. } => 0.55 * standing.done(),
@@ -1114,7 +1131,10 @@ impl Growing {
             Phase::Beneath { standing, .. } => 0.6 + 0.3 * standing.done(),
             Phase::Deadfall { .. } => 0.9,
             Phase::Shading { shading: casting } => shading * casting.done(),
-            Phase::Laying { laying, .. } => 0.25 + 0.75 * laying.done(),
+            Phase::Edging { .. } => {
+                shading + edging * self.margins.as_ref().map_or(1.0, Margins::done)
+            }
+            Phase::Laying { laying: sward, .. } => shading + edging + laying * sward.done(),
         };
         let parts = self.woods.len() + 1;
         share(self.next.min(self.woods.len()), parts) + within / real(parts)
@@ -1181,15 +1201,16 @@ impl Growing {
                 self.dice = Dice::keyed(self.seed, self.next);
                 Phase::Sowing
             }
-            Phase::Shading { .. } | Phase::Laying { .. } => return None,
+            Phase::Shading { .. } | Phase::Edging { .. } | Phase::Laying { .. } => return None,
         };
         self.phase = next;
         Some(false)
     }
 
     /// The next step once every wood stands, out of `phase`: the woods'
-    /// shade cast over the land a unit at a time, and then the sward laid in
-    /// it; whether all is laid.
+    /// shade cast over the land a unit at a time, the water's edge set out
+    /// in the light it leaves, and then the sward laid in it; whether all is
+    /// laid.
     fn lay(
         &mut self,
         stage: &mut Stage,
@@ -1197,14 +1218,6 @@ impl Growing {
         phase: Phase,
     ) -> Option<bool> {
         let dice = &mut self.dice;
-        // The shade is cast about the sward's eye, or the first wood's where
-        // nothing grows beneath them: the crowns roof the air and strew the
-        // ground with what they shed either way.
-        let eye = match (&self.sward, self.woods.first()) {
-            (Some(lawning), _) => lawning.eye,
-            (None, Some(wood)) => (wood.vantage.eye.x, wood.vantage.eye.z),
-            (None, None) => return Some(true),
-        };
         let shades = match phase {
             Phase::Laying { shades, mut laying } => {
                 if !laying.step(stage, dice, (&shades, runner))? {
@@ -1213,12 +1226,15 @@ impl Growing {
                 }
                 shades
             }
-            Phase::Shading { mut shading } => {
-                if !shading.step(&stage.canopies, runner)? {
-                    self.phase = Phase::Shading { shading };
+            Phase::Edging { shades } => {
+                if let Some(margins) = self.margins.as_mut().filter(|margins| !margins.finished()) {
+                    margins.step(stage, (land, shades.as_ref(), runner))?;
+                    self.phase = Phase::Edging { shades };
                     return Some(false);
                 }
-                let shades = shading.finish();
+                let Some(shades) = shades else {
+                    return Some(true);
+                };
                 if let Some(lawning) = &self.sward {
                     let laying = landscape::sward(stage, dice, land, lawning)?;
                     self.phase = Phase::Laying { shades, laying };
@@ -1226,9 +1242,32 @@ impl Growing {
                 }
                 shades
             }
+            Phase::Shading { mut shading } => {
+                if shading.step(&stage.canopies, runner)? {
+                    self.phase = Phase::Edging {
+                        shades: Some(shading.finish()),
+                    };
+                } else {
+                    self.phase = Phase::Shading { shading };
+                }
+                return Some(false);
+            }
             _ => {
-                let shading = Shading::new(&stage.canopies, (land.centre, land.reach), eye)?;
-                self.phase = Phase::Shading { shading };
+                // The shade is cast about the sward's eye, or the first
+                // wood's where nothing grows beneath them: the crowns roof
+                // the air and strew the ground with what they shed either
+                // way. A land with neither has nothing to roof or strew.
+                let eye = match (&self.sward, self.woods.first()) {
+                    (Some(lawning), _) => Some(lawning.eye),
+                    (None, Some(wood)) => Some((wood.vantage.eye.x, wood.vantage.eye.z)),
+                    (None, None) => None,
+                };
+                self.phase = match eye {
+                    Some(eye) => Phase::Shading {
+                        shading: Shading::new(&stage.canopies, (land.centre, land.reach), eye)?,
+                    },
+                    None => Phase::Edging { shades: None },
+                };
                 return Some(false);
             }
         };

@@ -1,0 +1,713 @@
+//! The plants of a scene's water's edge set out about the eye: reeds and
+//! reedmace standing in the shallows and along wet, level banks, water
+//! lilies and pondweed floating where the water lies still — each only where
+//! the land's water and the light the woods leave let it grow, and in
+//! patches with gaps between.
+//!
+//! Each cell of two lattices about the eye holds a square patch of one plant
+//! or none, a clump in the fine cells near the eye and a bed in the coarse
+//! ones beyond, laid square to the lattice so neighbouring patches meet. The
+//! better a place suits its plant the taller and thicker its patch, so a bed
+//! thins and shortens toward its edges rather than ending in a wall. What a
+//! cell holds is drawn from its place and the light there alone, so a seed
+//! shows the same water's edge however its work is divided.
+
+use alloc::vec::Vec;
+use core::f64::consts::FRAC_PI_2;
+
+use tairix_parallel::JobRunner;
+use tairix_util::{fallible, mathf};
+
+use super::woodland::KEPT;
+use super::{rgb, Dice, Recipe, Stage};
+use crate::band;
+use crate::heightfield::Heightfield;
+use crate::land::Land;
+use crate::leaf::Outline;
+use crate::material::{Finish, Material};
+use crate::noise::{fbm2, hash2, smoothstep};
+use crate::pigment::{Foliage, Pigment};
+use crate::sample::{mix32, unit};
+use crate::shade::Shades;
+use crate::shape::Shape;
+use crate::tree::Season;
+use crate::vector::{real, share, Frame, Pose, Vec3};
+use crate::waterside::{Margin, Marsh};
+
+/// The plants of the water's edge.
+const KINDS: [Margin; 4] = [
+    Margin::Reed,
+    Margin::Reedmace,
+    Margin::Lily,
+    Margin::Pondweed,
+];
+/// How many clumps and beds of each are grown to choose among.
+const CLUMPS: usize = 6;
+const BEDS: usize = 3;
+/// The statures a plant's patches are grown at, from the shortest and
+/// thinnest, where a place barely suits it, to where it thrives; and how far
+/// either way of what its place gives it a patch's is drawn.
+const STATURE: (f64, f64) = (0.55, 1.1);
+const SCATTER: f64 = 0.3;
+/// The near and the far lattice's cells, and how many near cells span the
+/// near lattice: a far cell five near ones, the near lattice whole far cells.
+const NEAR_CELL: f64 = 0.75;
+const FAR_CELL: f64 = 5.0 * NEAR_CELL;
+const NEAR_CELLS: usize = 120;
+const _: () = assert!(NEAR_CELLS.is_multiple_of(10));
+/// Rows of each lattice a core reads in a unit, and patches set out in one.
+const NEAR_ROWS: usize = 16;
+const FAR_ROWS: usize = 6;
+const PLACED_A_UNIT: usize = 8192;
+/// How far apart along the water its fall is measured.
+const FALL_REACH: f64 = 2.0;
+/// The most a bank may rise above the water beside it and still be read
+/// against that water.
+const BANK: f64 = 0.5;
+
+/// One plant's prototypes, as clumps and as beds, and the material its
+/// patches are added in.
+#[derive(Copy, Clone, Debug)]
+struct Grown {
+    clumps: [u32; CLUMPS],
+    beds: [u32; BEDS],
+    material: usize,
+}
+
+/// The plants of a scene's water's edge, to be set out once its woods'
+/// shade is cast.
+#[derive(Debug)]
+pub(super) struct Margins {
+    /// What grows in the scene's season, by kind.
+    grown: [Option<Grown>; 4],
+    /// The level of the fresh lake the land's sea stands for, if it does.
+    lake: Option<f64>,
+    seed: u32,
+    eye: (f64, f64),
+    /// How far about the eye they are set out, and the most patches.
+    reach: f64,
+    most: u32,
+    /// The patches the lattices hold, gathered as their rows are read, then
+    /// kept to the nearest the eye.
+    found: Vec<Placed>,
+    pass: Pass,
+}
+
+/// How far a scene's water's edge is set out.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Pass {
+    /// Lattice `index`'s rows from `row` are to be read.
+    Reading {
+        index: usize,
+        row: usize,
+    },
+    /// Every lattice is read; the patches found are to be kept to the most
+    /// the scene holds, the nearest the eye.
+    Keeping,
+    /// The patches kept from `next` on are to be set out.
+    Placing {
+        next: usize,
+    },
+    Done,
+}
+
+/// A square lattice of cells about the eye: its first cell's corner, its
+/// cells a side and their size, and the square a finer lattice reads
+/// instead.
+#[derive(Copy, Clone, Debug)]
+struct Lattice {
+    corner: (f64, f64),
+    side: usize,
+    cell: f64,
+    hole: Option<((f64, f64), (f64, f64))>,
+}
+
+/// A patch of a plant a cell holds: its prototype and material, where its
+/// middle stands, how it is turned, and its key.
+#[derive(Copy, Clone, Debug)]
+struct Placed {
+    prototype: u32,
+    material: usize,
+    base: Vec3,
+    turn: f64,
+    key: u32,
+}
+
+/// What a place by the water is like: the ground there and the water's
+/// level, how deep it stands, negative on the bank above it, how steeply its
+/// surface falls, the ground's wetness, uprightness and the way across it,
+/// and the share of the sky no crown hides from it.
+#[derive(Copy, Clone, Debug)]
+struct Edge {
+    ground: f64,
+    level: f64,
+    depth: f64,
+    fall: f64,
+    wet: f64,
+    upright: f64,
+    way: f64,
+    lit: f64,
+}
+
+/// Ask `stage` for the plants of its water's edge about `eye` in `season`,
+/// set out once its woods' shade is cast; `lake` the level of a fresh lake
+/// its land's sea stands for, if it does. One draw of `dice` keys them, the
+/// same at either detail. `None` when the stage will not hold them.
+pub(super) fn margins(
+    stage: &mut Stage,
+    dice: &mut Dice,
+    (eye, season, lake): ((f64, f64), Season, Option<f64>),
+) -> Option<()> {
+    let mut dice = Dice::keyed(dice.wide(), 0);
+    let mut grown = [None; 4];
+    for (slot, margin) in grown.iter_mut().zip(KINDS) {
+        if !grows(margin, season) {
+            continue;
+        }
+        let marsh = marsh(stage, margin, season)?;
+        let mut plan = |side: f64, (variant, variants): (usize, usize)| {
+            let vigour = share(variant, variants - 1);
+            let count =
+                mathf::round_i32((0.4 + 0.6 * vigour) * density(margin) * side * side).max(1);
+            stage.plan(&Recipe::Margin {
+                margin,
+                side,
+                count: u16::try_from(count).ok()?,
+                stature: STATURE.0 + (STATURE.1 - STATURE.0) * vigour,
+                marsh,
+                season,
+                seed: dice.wide(),
+            })
+        };
+        let mut clumps = [0; CLUMPS];
+        for (variant, clump) in clumps.iter_mut().enumerate() {
+            *clump = plan(NEAR_CELL, (variant, CLUMPS))?;
+        }
+        let mut beds = [0; BEDS];
+        for (variant, bed) in beds.iter_mut().enumerate() {
+            *bed = plan(FAR_CELL, (variant, BEDS))?;
+        }
+        *slot = Some(Grown {
+            clumps,
+            beds,
+            material: usize::from(marsh.leaves),
+        });
+    }
+    let (reach, most) = (
+        stage.densities.waterside.reach,
+        stage.densities.waterside.most,
+    );
+    stage.margins = Some(Margins {
+        grown,
+        lake,
+        seed: dice.seed(),
+        eye,
+        reach,
+        most,
+        found: Vec::new(),
+        pass: Pass::Reading { index: 0, row: 0 },
+    });
+    Some(())
+}
+
+impl Margins {
+    /// Whether they are all set out.
+    pub(super) fn finished(&self) -> bool {
+        self.pass == Pass::Done
+    }
+
+    /// How far they are set out: their lattices' rows read, most of it, and
+    /// then the patches kept set out.
+    pub(super) fn done(&self) -> f64 {
+        let rows = |index: usize| self.lattice(index).map_or(0, |lattice| lattice.side);
+        let read = |index: usize, row: usize| (0..index).map(rows).sum::<usize>() + row;
+        let reading = 0.9 * share(read(2, 0), rows(0) + rows(1));
+        match self.pass {
+            Pass::Reading { index, row } => 0.9 * share(read(index, row), rows(0) + rows(1)),
+            Pass::Keeping => reading,
+            Pass::Placing { next } => reading + 0.1 * share(next, self.found.len()),
+            Pass::Done => 1.0,
+        }
+    }
+
+    /// Set out the next unit of the water's edge about the eye on `land`,
+    /// in the light `shades` leave it, its cells read across `runner`;
+    /// `None` when the heap will not hold it.
+    pub(super) fn step(
+        &mut self,
+        stage: &mut Stage,
+        (land, shades, runner): (&Land, Option<&Shades>, &dyn JobRunner),
+    ) -> Option<()> {
+        match self.pass {
+            Pass::Reading { index, row } => {
+                self.read(&stage.fields, (land, shades, runner), (index, row))
+            }
+            Pass::Keeping => {
+                self.keep();
+                Some(())
+            }
+            Pass::Placing { next } => self.place(stage, next),
+            Pass::Done => Some(()),
+        }
+    }
+
+    /// Read the next unit of lattice `index`'s rows from `row` on `land`,
+    /// gathering the patches its cells hold.
+    fn read(
+        &mut self,
+        fields: &[Heightfield],
+        (land, shades, runner): (&Land, Option<&Shades>, &dyn JobRunner),
+        (index, row): (usize, usize),
+    ) -> Option<()> {
+        let Some(lattice) = self.lattice(index) else {
+            self.pass = Pass::Keeping;
+            return Some(());
+        };
+        let per = if index == 0 { NEAR_ROWS } else { FAR_ROWS };
+        let end = (row + per * runner.width().max(1)).min(lattice.side);
+        let mut cells = fallible::filled((end - row) * lattice.side, None)?;
+        band::for_each(runner, &mut cells, (row, lattice.side), &|row, cells| {
+            for (column, cell) in cells.iter_mut().enumerate() {
+                *cell = self.grows_in((land, fields, shades), &lattice, (column, row));
+            }
+        });
+        // Grown by doubling, as it is extended a unit at a time.
+        self.found
+            .try_reserve(cells.iter().flatten().count())
+            .ok()?;
+        self.found.extend(cells.into_iter().flatten());
+        self.pass = if end < lattice.side {
+            Pass::Reading { index, row: end }
+        } else if index == 0 {
+            Pass::Reading { index: 1, row: 0 }
+        } else {
+            Pass::Keeping
+        };
+        Some(())
+    }
+
+    /// Keep the patches found to the most the scene holds, nearest the eye
+    /// first, so where the most cuts them short the water's edge ends at a
+    /// distance rather than wherever the reading had come to.
+    fn keep(&mut self) {
+        let eye = self.eye;
+        let nearer = |a: &Placed, b: &Placed| {
+            let apart = |placed: &Placed| {
+                let (dx, dz) = (placed.base.x - eye.0, placed.base.z - eye.1);
+                dx * dx + dz * dz
+            };
+            apart(a)
+                .total_cmp(&apart(b))
+                .then(a.base.x.total_cmp(&b.base.x))
+                .then(a.base.z.total_cmp(&b.base.z))
+        };
+        let most = usize::try_from(self.most).unwrap_or(usize::MAX);
+        if self.found.len() > most {
+            if let Some(last) = most.checked_sub(1) {
+                self.found.select_nth_unstable_by(last, nearer);
+            }
+            self.found.truncate(most);
+        }
+        self.found.sort_unstable_by(nearer);
+        self.pass = Pass::Placing { next: 0 };
+    }
+
+    /// Set out the next unit of the patches kept from `next` on, as far as
+    /// the stage has room for them.
+    fn place(&mut self, stage: &mut Stage, next: usize) -> Option<()> {
+        let end = (next + PLACED_A_UNIT).min(self.found.len());
+        for placed in self.found.get(next..end).unwrap_or(&[]) {
+            if stage.room() <= KEPT {
+                self.found = Vec::new();
+                self.pass = Pass::Done;
+                return Some(());
+            }
+            let pose = Pose::new(placed.base, Frame::turned(placed.turn, 0.0));
+            stage.add(
+                Shape::Instance {
+                    prototype: placed.prototype,
+                    pose,
+                    scale: 1.0,
+                    key: placed.key,
+                },
+                placed.material,
+                pose,
+                false,
+            )?;
+        }
+        if end < self.found.len() {
+            self.pass = Pass::Placing { next: end };
+        } else {
+            self.found = Vec::new();
+            self.pass = Pass::Done;
+        }
+        Some(())
+    }
+
+    /// Lattice `index`: the near one, then the far one about it; `None`
+    /// past them.
+    fn lattice(&self, index: usize) -> Option<Lattice> {
+        // Squared to the far lattice, so its cells and the near ones lie on
+        // the land's own grid of places whatever the eye.
+        let snap = |value: f64| mathf::floor(value / FAR_CELL) * FAR_CELL;
+        let (x, z) = (snap(self.eye.0), snap(self.eye.1));
+        let near = 0.5 * real(NEAR_CELLS) * NEAR_CELL;
+        match index {
+            0 => Some(Lattice {
+                corner: (x - near, z - near),
+                side: NEAR_CELLS,
+                cell: NEAR_CELL,
+                hole: None,
+            }),
+            1 => {
+                // A cell more than the reach spans, as its corner lies up to
+                // a cell short of it.
+                let side =
+                    usize::try_from(mathf::round_i32(mathf::ceil(2.0 * self.reach / FAR_CELL)) + 1)
+                        .ok()?;
+                Some(Lattice {
+                    corner: (snap(self.eye.0 - self.reach), snap(self.eye.1 - self.reach)),
+                    side,
+                    cell: FAR_CELL,
+                    hole: Some(((x - near, z - near), (x + near, z + near))),
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// The patch cell `(column, row)` of `lattice` holds on `land`, in the
+    /// light `shades` leave it, if any: the plant the place suits best among
+    /// those of the season, as likely as it suits.
+    fn grows_in(
+        &self,
+        (land, fields, shades): (&Land, &[Heightfield], Option<&Shades>),
+        lattice: &Lattice,
+        (column, row): (usize, usize),
+    ) -> Option<Placed> {
+        let (x, z) = (
+            lattice.corner.0 + (real(column) + 0.5) * lattice.cell,
+            lattice.corner.1 + (real(row) + 0.5) * lattice.cell,
+        );
+        if lattice
+            .hole
+            .is_some_and(|((x0, z0), (x1, z1))| (x0..x1).contains(&x) && (z0..z1).contains(&z))
+        {
+            return None;
+        }
+        let (dx, dz) = (x - self.eye.0, z - self.eye.1);
+        if dx * dx + dz * dz > self.reach * self.reach {
+            return None;
+        }
+        let far = lattice.cell > NEAR_CELL;
+        let place =
+            |value: f64| mathf::round_i32(mathf::floor(value / lattice.cell)).cast_unsigned();
+        let key = hash2(place(x), place(z), self.seed ^ u32::from(far));
+        let edge = edge_at((land, fields, shades), (x, z), self.lake)?;
+        let mut best: Option<(usize, f64)> = None;
+        for (slot, (&margin, grown)) in KINDS.iter().zip(&self.grown).enumerate() {
+            if grown.is_none() {
+                continue;
+            }
+            let held = best.map_or(0.0, |(_, held)| held);
+            // Its patches can only lower how well a plant suits the place.
+            let suits = suits(margin, &edge, far);
+            if suits <= held {
+                continue;
+            }
+            let score = suits * patchy(margin, (x, z), self.seed);
+            if score > held {
+                best = Some((slot, score));
+            }
+        }
+        let (slot, score) = best?;
+        if unit(key) >= score {
+            return None;
+        }
+        let grown = self.grown.get(slot).copied().flatten()?;
+        let variants: &[u32] = if far { &grown.beds } else { &grown.clumps };
+        // The better the place suits it, the taller and thicker its patch,
+        // so a bed thins and shortens toward its edges.
+        let vigour = (score + SCATTER * (unit(mix32(key ^ 1)) - 0.5)).clamp(0.0, 1.0);
+        let last = variants.len() - 1;
+        let pick = usize::try_from(mathf::round_i32(vigour * real(last)))
+            .ok()?
+            .min(last);
+        let floating = matches!(KINDS.get(slot), Some(Margin::Lily | Margin::Pondweed));
+        Some(Placed {
+            prototype: *variants.get(pick)?,
+            material: grown.material,
+            base: Vec3::new(x, if floating { edge.level } else { edge.ground }, z),
+            // Quarter turns keep a patch square to the lattice.
+            turn: FRAC_PI_2 * f64::from(mix32(key ^ 2) & 3),
+            key: mix32(key ^ 3),
+        })
+    }
+}
+
+/// What the place `(x, z)` of `land` is like by the water, in the light
+/// `shades` leave it: the fresh water's, or else the fresh `lake`'s; `None`
+/// where no water lies near enough to read it against.
+fn edge_at(
+    (land, fields, shades): (&Land, &[Heightfield], Option<&Shades>),
+    (x, z): (f64, f64),
+    lake: Option<f64>,
+) -> Option<Edge> {
+    // Most places lie well above any water: rule them out before reading
+    // the rest of the ground.
+    let ground = land.height(fields, x, z);
+    let river = land.water_level(fields, x, z);
+    let level = river.or(lake).filter(|&level| level - ground > -BANK)?;
+    let lie = land.lie(fields, x, z);
+    Some(Edge {
+        ground,
+        level,
+        depth: level - ground,
+        fall: if river.is_some() {
+            fall_of(land, fields, (x, z), level)
+        } else {
+            0.0
+        },
+        wet: lie.wet,
+        upright: lie.upright,
+        way: lie.road + lie.path,
+        lit: 1.0 - shades.map_or(0.0, |shades| shades.at(x, z).1),
+    })
+}
+
+/// How steeply the fresh water's surface falls about `(x, z)`, where it
+/// stands at `level`: from either side where both hold water, from the one
+/// that does at a bank.
+fn fall_of(land: &Land, fields: &[Heightfield], (x, z): (f64, f64), level: f64) -> f64 {
+    let at = |dx: f64, dz: f64| land.water_level(fields, x + dx, z + dz);
+    let slope = |before: Option<f64>, after: Option<f64>| match (before, after) {
+        (Some(before), Some(after)) => (after - before) / (2.0 * FALL_REACH),
+        (Some(before), None) => (level - before) / FALL_REACH,
+        (None, Some(after)) => (after - level) / FALL_REACH,
+        (None, None) => 0.0,
+    };
+    mathf::hypot(
+        slope(at(-FALL_REACH, 0.0), at(FALL_REACH, 0.0)),
+        slope(at(0.0, -FALL_REACH), at(0.0, FALL_REACH)),
+    )
+}
+
+/// How well `margin` grows at `edge`, `0.0..=1.0`: in water as deep as it
+/// takes and as still as it needs, in as much of the sky's light as it
+/// wants, or, for those rooting on one, on a wet, level bank off any way —
+/// more level for a far bed, whose square spans more of the slope.
+fn suits(margin: Margin, edge: &Edge, far: bool) -> f64 {
+    let ((shallowest, rooted, deepest, drowned), calm, (gloom, open)) = match margin {
+        Margin::Reed => ((-0.45, -0.15, 0.6, 1.0), 0.02, (0.35, 0.65)),
+        Margin::Reedmace => ((-0.15, 0.0, 0.45, 0.75), 0.008, (0.4, 0.7)),
+        Margin::Lily => ((0.35, 0.6, 1.8, 2.6), 0.0015, (0.45, 0.75)),
+        Margin::Pondweed => ((0.2, 0.35, 1.3, 1.8), 0.004, (0.25, 0.55)),
+    };
+    let deep = smoothstep(shallowest, rooted, edge.depth)
+        * (1.0 - smoothstep(deepest, drowned, edge.depth));
+    let still = 1.0 - smoothstep(0.5 * calm, calm, edge.fall);
+    let light = smoothstep(gloom, open, edge.lit);
+    let bank = if edge.depth < 0.0 {
+        let (sloping, level) = if far { (0.985, 0.995) } else { (0.95, 0.975) };
+        smoothstep(0.45, 0.75, edge.wet)
+            * smoothstep(sloping, level, edge.upright)
+            * (1.0 - edge.way.min(1.0))
+    } else {
+        1.0
+    };
+    deep * still * light * bank
+}
+
+/// Where `margin` gathers, `0.0..=1.0`: a field of its own beds and the
+/// gaps between them, broad for reeds and close for lilies.
+fn patchy(margin: Margin, (x, z): (f64, f64), seed: u32) -> f64 {
+    let (scale, salt) = match margin {
+        Margin::Reed => (26.0, 0x9d),
+        Margin::Reedmace => (14.0, 0x3b),
+        Margin::Lily => (11.0, 0xc1),
+        Margin::Pondweed => (18.0, 0x57),
+    };
+    smoothstep(
+        -0.2,
+        0.35,
+        fbm2(x / scale, z / scale, seed ^ salt, (3, 0.5, 2.0)),
+    )
+}
+
+/// Whether `margin` stands in `season`: the floating plants die back over
+/// winter, and the reeds and reedmace stand on, dry.
+fn grows(margin: Margin, season: Season) -> bool {
+    season != Season::Winter || matches!(margin, Margin::Reed | Margin::Reedmace)
+}
+
+/// Plants of `margin` to a square metre of its patch: reeds thick-set,
+/// reedmace in looser fans, lily pads, and pondweed's rosettes.
+fn density(margin: Margin) -> f64 {
+    match margin {
+        Margin::Reed => 55.0,
+        Margin::Reedmace => 8.0,
+        Margin::Lily => 9.0,
+        Margin::Pondweed => 6.0,
+    }
+}
+
+/// The materials `margin`'s patches are made in, as they are in `season`;
+/// `None` when the stage will not hold them.
+fn marsh(stage: &mut Stage, margin: Margin, season: Season) -> Option<Marsh> {
+    let made = |stage: &mut Stage, colours: [u32; 4], outline: Outline, finish: Finish| {
+        let material = stage.material(Material::new(
+            Pigment::Foliage(foliage(colours, outline, season)),
+            finish,
+        ))?;
+        u16::try_from(material).ok()
+    };
+    let leaf = |translucency: f64| Finish::Leaf { translucency };
+    let palette = |colours: [[u32; 4]; 4]| colours[season_index(season)];
+    let strap = Outline::Strap { from: 0, to: 255 };
+    Some(match margin {
+        Margin::Reed => {
+            let stems = made(stage, palette(REED_STEMS), strap, leaf(0.15))?;
+            let leaves = made(stage, palette(REED_LEAVES), strap, leaf(0.3))?;
+            let heads = made(
+                stage,
+                palette(PLUMES),
+                Outline::Fascicle { count: 7 },
+                leaf(0.45),
+            )?;
+            Marsh {
+                stems,
+                leaves,
+                heads,
+                hearts: heads,
+            }
+        }
+        Margin::Reedmace => {
+            let stems = made(stage, palette(MACE_STEMS), strap, leaf(0.15))?;
+            let leaves = made(stage, palette(MACE_LEAVES), strap, leaf(0.25))?;
+            let heads = made(stage, SPIKES, Outline::Lanceolate, Finish::Matte)?;
+            Marsh {
+                stems,
+                leaves,
+                heads,
+                hearts: heads,
+            }
+        }
+        Margin::Lily => {
+            let leaves = made(
+                stage,
+                palette(PADS),
+                Outline::Pad,
+                Finish::Coated { roughness: 0.3 },
+            )?;
+            let heads = made(stage, PETALS, Outline::Ovate { teeth: 0 }, leaf(0.5))?;
+            let hearts = made(
+                stage,
+                HEARTS,
+                Outline::Ovate { teeth: 0 },
+                Finish::Coated { roughness: 0.6 },
+            )?;
+            Marsh {
+                stems: leaves,
+                leaves,
+                heads,
+                hearts,
+            }
+        }
+        Margin::Pondweed => {
+            let leaves = made(
+                stage,
+                palette(PONDWEED),
+                Outline::Ovate { teeth: 0 },
+                Finish::Coated { roughness: 0.35 },
+            )?;
+            Marsh {
+                stems: leaves,
+                leaves,
+                heads: leaves,
+                hearts: leaves,
+            }
+        }
+    })
+}
+
+/// A plant's leaves of `colours` and `outline` as they are in `season`.
+fn foliage(colours: [u32; 4], outline: Outline, season: Season) -> Foliage {
+    let autumn = matches!(season, Season::Autumn { .. });
+    Foliage {
+        colours: colours.map(rgb),
+        underside: 0.15,
+        veins: 0.25,
+        edge: rgb(0x6A_5A_30),
+        browning: if autumn { 0.45 } else { 0.06 },
+        spots: if autumn { 0.3 } else { 0.03 },
+        snow: if season == Season::Winter { 0.4 } else { 0.0 },
+        outline,
+    }
+}
+
+/// Where `season`'s colours lie in a palette: spring, summer, autumn,
+/// winter.
+fn season_index(season: Season) -> usize {
+    match season {
+        Season::Spring => 0,
+        Season::Summer => 1,
+        Season::Autumn { .. } => 2,
+        Season::Winter => 3,
+    }
+}
+
+/// The plants' colours by season, spring to winter: a reed's stems green and
+/// last year's straw in spring, gold in autumn and pale in winter; its
+/// leaves; its plume, a dull mauve-brown as it flowers and buff once dry;
+/// and likewise reedmace's blue-green leaves, a lily's pads and pondweed.
+const REED_STEMS: [[u32; 4]; 4] = [
+    [0x7E_9A_44, 0xB8_A8_78, 0x86_A2_4E, 0xC4_B4_84],
+    [0x6C_8A_3A, 0x78_94_4A, 0x5E_7C_34, 0x84_A0_52],
+    [0xB4_9A_58, 0xA6_8A_4A, 0xC0_A8_66, 0x9A_80_48],
+    [0xCD_BE_90, 0xC0_B0_80, 0xD6_C8_9E, 0xB4_A2_74],
+];
+const REED_LEAVES: [[u32; 4]; 4] = [
+    [0x76_A0_40, 0x84_AC_4A, 0x6C_96_38, 0x8E_B4_56],
+    [0x5E_80_34, 0x6A_8C_3C, 0x54_74_30, 0x76_98_48],
+    [0xB8_A0_50, 0xA8_90_40, 0xC6_AE_60, 0x9E_82_38],
+    [0xC8_B8_88, 0xBC_AA_78, 0xD2_C4_98, 0xAE_9C_6C],
+];
+const PLUMES: [[u32; 4]; 4] = [
+    [0xA4_98_84, 0x9A_8C_78, 0xAE_A2_90, 0x90_82_70],
+    [0x7E_68_66, 0x8C_74_70, 0x72_5E_5C, 0x96_80_7A],
+    [0x8A_7A_6C, 0x9C_8A_7A, 0x7E_6E_60, 0xA8_96_84],
+    [0xB8_AC_9C, 0xC2_B6_A6, 0xAE_A2_90, 0xCA_BE_AE],
+];
+const MACE_STEMS: [[u32; 4]; 4] = [
+    [0x74_90_4E, 0x80_9A_58, 0x6A_86_46, 0x8A_A4_62],
+    [0x66_80_46, 0x70_8A_4E, 0x5C_76_40, 0x7A_94_58],
+    [0x9A_86_4C, 0x8A_78_42, 0xA8_94_58, 0x7C_6A_3A],
+    [0xAE_9E_78, 0xA2_92_6C, 0xBA_AA_84, 0x96_86_60],
+];
+const MACE_LEAVES: [[u32; 4]; 4] = [
+    [0x64_84_52, 0x70_90_5C, 0x5A_7A_4A, 0x7A_9A_66],
+    [0x58_76_4A, 0x62_7E_50, 0x4E_6C_42, 0x6C_88_58],
+    [0xA0_88_48, 0x8E_7A_3E, 0xB0_9A_58, 0x7E_6C_36],
+    [0xB0_A0_7A, 0xA4_94_6E, 0xBC_AC_86, 0x98_88_62],
+];
+const PADS: [[u32; 4]; 4] = [
+    [0x3A_6A_30, 0x6A_4A_30, 0x34_60_2A, 0x52_82_3E],
+    [0x2C_54_26, 0x36_62_2C, 0x28_4A_22, 0x40_6E_34],
+    [0x7A_7A_34, 0x8E_84_36, 0x5E_6A_2C, 0xA0_8E_3C],
+    [0x6A_5A_34, 0x5E_52_30, 0x74_64_3A, 0x54_4A_2C],
+];
+const PONDWEED: [[u32; 4]; 4] = [
+    [0x66_7A_34, 0x72_86_3C, 0x5C_70_2E, 0x7C_90_44],
+    [0x55_64_2A, 0x61_7032, 0x4C_5A_26, 0x6C_7C_3A],
+    [0x8A_7A_38, 0x7E_70_34, 0x96_86_40, 0x72_66_30],
+    [0x7A_6E_40, 0x6E_64_3A, 0x86_7A_48, 0x64_5A_34],
+];
+/// A reedmace's spikes, a lily's petals and the heart of its flower, the
+/// same each season.
+const SPIKES: [u32; 4] = [0x4A_2E_1C, 0x54_34_1E, 0x40_28_18, 0x5E_3C_24];
+const PETALS: [u32; 4] = [0xF2_F0_E6, 0xFA_F8_F0, 0xEA_E6_DA, 0xF6_EE_EC];
+const HEARTS: [u32; 4] = [0xE2_B8_30, 0xEA_C4_40, 0xD8_AC_28, 0xF0_CC_4C];
+
+#[cfg(test)]
+#[path = "waterside_tests.rs"]
+mod tests;

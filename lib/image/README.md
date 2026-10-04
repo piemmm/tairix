@@ -45,8 +45,9 @@ only when a real consumer needs it — never speculatively.
   spanning refused — whose stored `mimetype` entry is its signature, its stack
   read from `stack.xml` through `lib/xml`, nested stacks folded into their
   layers, and each layer a PNG placed on the canvas. `decode` shows the
-  `mergedimage.png` where it fits the canvas, else the visible layers
-  composed; `open_native` answers the layers themselves.
+  `mergedimage.png` where it fits the canvas, else the layers that show
+  composed, a hidden or wholly faint layer never read; `open_native` answers
+  the layers themselves.
 - **JPEG** (`ImageFormat::Jpeg`, ITU-T T.81): baseline sequential (`SOF0`),
   extended sequential (`SOF1`), and progressive (`SOF2`) DCT frames with
   Huffman coding at 8-bit precision; 1-component greyscale and 3-component

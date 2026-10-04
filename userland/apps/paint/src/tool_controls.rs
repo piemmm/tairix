@@ -162,6 +162,12 @@ impl ToolControls {
         bar
     }
 
+    /// The settings the bar holds, in order.
+    #[cfg(test)]
+    pub(crate) fn settings(&self) -> impl Iterator<Item = Setting> + '_ {
+        self.items.iter().map(|item| item.setting)
+    }
+
     /// Offer what lays part of a pixel, or hold it off, as the picture's
     /// pixels allow, answering whether any control changed. A control held
     /// off gives up the keyboard; its owner repaints the bar.

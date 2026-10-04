@@ -287,9 +287,10 @@ sandboxes a parse imports it:
   validating every band's echoed geometry and exact pixel length
   fail-closed into the caller's own buffer. The held source is released
   once the render is drawn or dropped, or when the plan is refused, so a
-  worker never holds a decoded wallpaper past one call. A later prepare on the same (reused) worker replaces whatever an
-  earlier one left held; `OP_RASTERISE` keeps working unchanged whether or
-  not it is interleaved with a wallpaper sequence on the same worker.
+  worker never holds a decoded wallpaper past one call. A later prepare on
+  the same (reused) worker replaces whatever an earlier one left held;
+  `OP_RASTERISE` keeps working unchanged whether or not it is interleaved
+  with a wallpaper sequence on the same worker.
 - **Handing over a file** (also `imagerender`): every untrusted file this
   service is given arrives one way — `OP_DOC_BEGIN` declares its length
   and the worker reserves it fallibly, then `OP_DOC_PUSH` carries it in

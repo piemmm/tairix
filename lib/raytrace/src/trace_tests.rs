@@ -6,7 +6,7 @@ use tairix_util::mathf;
 
 use core::f64::consts::PI;
 
-use super::{power, Quality, Tracer};
+use super::{power, Quality, Tally, Tracer, GATHERED_LEAST, SETTLED_ERROR};
 use crate::atmosphere::Air;
 use crate::camera::Camera;
 use crate::light::{Light, Limb};
@@ -443,10 +443,11 @@ fn a_ray_meeting_nothing_sees_the_sky() {
         fine: true,
         spread: Some(tracer.pixel_angle),
         jitter: 0.5,
+        air: 0.5,
     };
     for dir in [Vec3::new(1.0, -0.1, 0.0), Vec3::new(1.0, 0.5, 0.0)] {
         let ray = crate::vector::Ray::new(Vec3::ZERO, dir.normalized());
-        let seen = tracer.radiance(&ray, super::Path::EYE, &mut sampler);
+        let seen = tracer.radiance(&ray, super::Path::EYE, &mut sampler).light;
         let sky = scene.sky.radiance(Vec3::ZERO, ray.dir, seeing);
         assert!(close(seen, sky, 1e-12), "{seen:?} against {sky:?}");
     }
@@ -1113,4 +1114,109 @@ fn under_water_the_sun_reaches_a_highlight_only_by_its_reflection() {
     let in_air = tracer.direct(&surface, &lobes, super::Path::EYE, &mut sampler);
     assert!(in_water.max_element() == 0.0, "{in_water:?}");
     assert!(in_air.max_element() > 0.01, "{in_air:?}");
+}
+
+/// Samples that agree settle a pixel after its first round, but not where
+/// they gathered their light by random rays, which can all miss what a few
+/// of its paths bring; and no pixel settles while what it shows hangs on
+/// its brightest sample.
+#[test]
+fn a_pixel_settles_only_on_samples_that_tell_its_whole_light() {
+    let alike = |count: u32, gathered: bool| {
+        let mut tally = Tally::new();
+        for _ in 0..count {
+            tally.add(Vec3::splat(0.2), gathered);
+        }
+        tally
+    };
+    assert!(alike(16, false).settled(true));
+    assert!(!alike(16, true).settled(true));
+    assert!(!alike(GATHERED_LEAST - 16, true).settled(false));
+    assert!(alike(GATHERED_LEAST, true).settled(false));
+    // A dark pixel one of whose samples found a bright way out: their
+    // spread on the eye's scale passes, but the mean is mostly that one.
+    let mut hanging = Tally::new();
+    for _ in 0..63 {
+        hanging.add(Vec3::splat(0.002), false);
+    }
+    hanging.add(Vec3::splat(0.12), false);
+    let n = f64::from(hanging.count);
+    let mean = hanging.roots / n;
+    let variance = (hanging.squares / n - mean * mean) * (n / (n - 1.0));
+    assert!((variance / n).max_element() <= SETTLED_ERROR * SETTLED_ERROR);
+    assert!(!hanging.settled(false));
+}
+
+/// A dark floor under a roof, which sees the sky only low down: a fifth of
+/// the rays it gathers by.
+fn under_a_roof() -> Setup {
+    let mut setup = Setup::new(uniform_sky(1.0));
+    setup.add(
+        ground(),
+        Material::new(Pigment::Solid(Vec3::splat(0.05)), Finish::Matte),
+        None,
+    );
+    setup.add(
+        Shape::Quad {
+            corner: Vec3::new(-2.0, 1.0, -2.0),
+            edge_u: Vec3::new(0.0, 0.0, 4.0),
+            edge_v: Vec3::new(4.0, 0.0, 0.0),
+        },
+        Material::new(Pigment::Solid(Vec3::ZERO), Finish::Matte),
+        None,
+    );
+    setup
+}
+
+/// Whether every pixel of `scene` finds about its share of the light, none
+/// left black for its first samples all missing what a few of its rays find.
+fn no_pixel_black(scene: &Scene) -> bool {
+    let mut seen: Vec<f64> = (0..SIZE.1)
+        .flat_map(|y| (0..SIZE.0).map(move |x| (x, y)))
+        .map(|at| shown(scene, at).0.y)
+        .collect();
+    seen.sort_by(f64::total_cmp);
+    let median = seen[seen.len() / 2];
+    median > 0.0 && seen[0] > 0.25 * median
+}
+
+#[test]
+fn a_floor_seeing_the_sky_only_low_down_shows_no_black_pixel() {
+    let mut setup = under_a_roof();
+    setup.eye = Vec3::new(0.0, 0.5, 0.0);
+    setup.target = Vec3::new(0.0, 0.0, 0.05);
+    assert!(no_pixel_black(&setup.scene()));
+}
+
+/// The floor seen through clear glass, or in a mirror, is as much of each
+/// pixel's light as it is seen bare: its gathering still counts.
+#[test]
+fn a_floor_seen_through_glass_or_in_a_mirror_shows_no_black_pixel() {
+    let mut through = under_a_roof();
+    through.add(
+        Shape::Quad {
+            corner: Vec3::new(-0.3, 0.3, -0.3),
+            edge_u: Vec3::new(0.0, 0.0, 0.6),
+            edge_v: Vec3::new(0.6, 0.0, 0.0),
+        },
+        Material::new(Pigment::Solid(Vec3::ONE), glass()),
+        None,
+    );
+    through.eye = Vec3::new(0.0, 0.5, 0.0);
+    through.target = Vec3::new(0.0, 0.0, 0.05);
+    assert!(no_pixel_black(&through.scene()), "through glass");
+    // A mirror tilted to show the eye, looking along it, the floor below.
+    let mut mirrored = under_a_roof();
+    mirrored.add(
+        Shape::Quad {
+            corner: Vec3::new(-0.2, 0.65, 0.05),
+            edge_u: Vec3::new(0.4, 0.0, 0.0),
+            edge_v: Vec3::new(0.0, -0.3, 0.3),
+        },
+        Material::new(Pigment::Solid(Vec3::ONE), Finish::Metal { roughness: 0.0 }),
+        None,
+    );
+    mirrored.eye = Vec3::new(0.0, 0.5, -0.3);
+    mirrored.target = Vec3::new(0.0, 0.5, 0.2);
+    assert!(no_pixel_black(&mirrored.scene()), "in a mirror");
 }

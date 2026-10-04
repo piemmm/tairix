@@ -33,6 +33,14 @@ pub(crate) enum Outline {
     Trefoil,
     /// A dandelion's leaf: long, cut into teeth that point back to the base.
     Runcinate,
+    /// A long leaf of even width drawn to a point, as a reed's or a
+    /// reedmace's, from `from` to `to` 255ths of the way along it: a leaf
+    /// arching through several flat pieces keeps the one outline.
+    Strap { from: u8, to: u8 },
+    /// A round leaf lying flat, its stalk at its middle and a narrow slit
+    /// from there to its edge: a water lily's pad. Round on a blade whose
+    /// half-width is half its length.
+    Pad,
 }
 
 impl Outline {
@@ -51,6 +59,8 @@ impl Outline {
             Self::Fascicle { count } => fascicle(u, v, count),
             Self::Trefoil => trefoil(u, v),
             Self::Runcinate => across <= runcinate(u),
+            Self::Strap { from, to } => across <= strap(along(u, (from, to))),
+            Self::Pad => pad(u, v),
         }
     }
 
@@ -62,12 +72,36 @@ impl Outline {
             Self::Lanceolate => lanceolate(u),
             Self::Lobed { lobes } => lobed(u, lobes),
             Self::Runcinate => runcinate(u),
+            Self::Strap { from, to } => strap(along(u, (from, to))),
+            // A pad's veins run out from its middle.
+            Self::Pad => return (mathf::hypot(u - 0.5, 0.5 * v) / 0.5).min(1.0),
             Self::Palmate { .. } | Self::Shoot { .. } | Self::Fascicle { .. } | Self::Trefoil => {
                 1.0
             }
         };
         (v.abs() / edge.max(1e-6)).min(1.0)
     }
+}
+
+/// How far along a whole strap leaf a piece of it from `from` to `to`
+/// 255ths of the way lies at `u` of its own length.
+fn along(u: f64, (from, to): (u8, u8)) -> f64 {
+    let (from, to) = (f64::from(from) / 255.0, f64::from(to) / 255.0);
+    from + (to - from) * u
+}
+
+/// A strap leaf's half-width `w` of the way along it: full almost from its
+/// sheathing base, drawn in over its last third to its point.
+fn strap(w: f64) -> f64 {
+    let base = (0.55 + 0.45 * w / 0.06).min(1.0);
+    base * power(((1.0 - w) / 0.32).clamp(0.0, 1.0), 0.85)
+}
+
+/// A pad round its middle, a slit some twelve degrees wide cut from there to
+/// the edge the stalk side faces.
+fn pad(u: f64, v: f64) -> bool {
+    let (x, y) = (u - 0.5, 0.5 * v);
+    x * x + y * y <= 0.25 && !(x < 0.0 && y.abs() < -0.105 * x)
 }
 
 /// `x` to the power `p`, for `x` in `0.0..=1.0`.

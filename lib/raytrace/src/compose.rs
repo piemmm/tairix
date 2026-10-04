@@ -14,6 +14,7 @@ mod landscape;
 mod plants;
 mod still;
 mod stones;
+mod waterside;
 mod weather;
 mod woodland;
 mod work;
@@ -47,9 +48,11 @@ use crate::sky::{Dome, Sky};
 use crate::terrain::Sea;
 use crate::tree::{fern, palm, saguaro, Growth, Season, Species, Stock};
 use crate::vector::{real, share, Frame, Pose, Ray, Vec3};
+use crate::waterside::{patch, Margin, Marsh};
 use footprint::Footprints;
 use landscape::Lawning;
 use landscape::{Scheme, Vantage};
+use waterside::Margins;
 use woodland::{Growing, Wood};
 
 /// The settings a scene can be set in.
@@ -187,6 +190,17 @@ pub(super) enum Recipe {
         stock: u16,
         seed: u64,
     },
+    /// A square patch of a plant of the water's edge, its plants of
+    /// `stature` against their kind's.
+    Margin {
+        margin: Margin,
+        side: f64,
+        count: u16,
+        stature: f64,
+        marsh: Marsh,
+        season: Season,
+        seed: u64,
+    },
     Log {
         length: f64,
         radius: f64,
@@ -284,6 +298,15 @@ fn begun(recipe: &Recipe) -> Option<Work> {
             seed,
         } => Work::Indexing(fern(height, stock, fronds, seed)?),
         Recipe::Rock { habit, stock, seed } => Work::Indexing(rock(habit, stock, seed)?),
+        Recipe::Margin {
+            margin,
+            side,
+            count,
+            stature,
+            marsh,
+            season,
+            seed,
+        } => Work::Indexing(patch(margin, (side, count, stature), marsh, season, seed)?),
         Recipe::Log {
             length,
             radius,
@@ -497,7 +520,7 @@ impl Composition {
             .into_iter()
             .flatten()
         {
-            bank.centre_on((eye.x, eye.z));
+            bank.stand(eye)?;
         }
         if let Dome::Air(atmosphere) = &mut look.sky.dome {
             atmosphere.place_eye(eye);
@@ -543,7 +566,8 @@ impl Composition {
                 .get(fill.field)
                 .map_or(1.0, |field| fill.done(field)),
             Job::Grow(grow) => grow.done(),
-            Job::Land(_) | Job::Plant(_) | Job::Sky => 0.0,
+            Job::Sky => self.seen.as_ref().map_or(0.0, |(look, _)| look.sky.done()),
+            Job::Land(_) | Job::Plant(_) => 0.0,
         }
     }
 
@@ -814,9 +838,10 @@ struct Stage {
     /// The crowns of the trees standing, as where each trunk stands and how
     /// far its crown reaches: the shade the ground beneath them is in.
     canopies: Vec<Crown>,
-    /// The woods a scene sets out, and the sward under them, grown once the
-    /// land stands.
+    /// The woods a scene sets out, the plants of its water's edge, and the
+    /// sward under them, grown once the land stands.
     woods: Vec<Wood>,
+    margins: Option<Margins>,
     sward: Option<Lawning>,
     /// The shade the woods cast once they stand.
     shades: Option<Shades>,
@@ -871,6 +896,7 @@ impl Stage {
             footprints: Footprints::default(),
             canopies: Vec::new(),
             woods: Vec::new(),
+            margins: None,
             sward: None,
             shades: None,
             subject: Aabb::EMPTY,
@@ -2086,6 +2112,38 @@ fn softbox(stage: &mut Stage, at: Vec3, (width, height): (f64, f64), radiance: V
     // Wound so its glowing face, `edge_u × edge_v`, looks at the stage.
     let corner = at - across * 0.5 - rise * 0.5;
     stage.panel(corner, rise, across, radiance)
+}
+
+#[cfg(test)]
+impl Composition {
+    /// Run its jobs until it is seen; the land it was planted on, if it
+    /// stands on one.
+    fn run_until_seen(&mut self) -> Option<Land> {
+        let runner = tairix_parallel::Threaded::new(8);
+        let mut land = None;
+        while self.seen.is_none() {
+            let job = self
+                .jobs
+                .pop_front()
+                .expect("work remains until the scene is seen");
+            if let (Job::Plant(planting), None) = (&job, &land) {
+                land = Some(planting.land.clone());
+            }
+            if let Progress::Again(unfinished) = self.run(job, &runner).expect("runs") {
+                self.jobs.push_front(unfinished);
+            }
+        }
+        land
+    }
+}
+
+/// A composition of `setting` under `seed` for a picture `size` at
+/// `detail`, its jobs run until it is seen.
+#[cfg(test)]
+fn planted_at(setting: Setting, seed: u64, size: (u32, u32), detail: Detail) -> Composition {
+    let mut composition = Composition::new(setting, seed, size, detail).expect("composes");
+    composition.run_until_seen();
+    composition
 }
 
 #[cfg(test)]

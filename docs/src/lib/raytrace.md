@@ -43,9 +43,24 @@ colour and aerial perspective tabulated once per scene; clouds are volumetric
 decks marched as the medium they are (Schneider 2015; Hillaire 2016), dimming
 the sun and the sky they stand in front of. Each cell of a deck's weather map
 bounds the heights its cloud can reach, so a march strides straight through
-the air above and below them. A bank thins out over the last tenth of its
-breadth rather than ending in a wall of cloud. Cirrus is a deck of its own, of
-ice, in a bank high above the rest.
+the air above and below them. Cirrus is a deck of its own, of ice, in a bank
+high above the rest.
+
+A deck runs on to the horizon. Its heights are taken over the Earth's curve
+about its centre below the eye, as the air's are, so a deck seen low down
+comes down to the horizon as far off as the curve lets it be seen — some
+120 km for a cumulus base, nearly 380 km for the highest cirrus — and a ray
+below the horizon meets the Earth before any of it. Its maps lie in levels
+about the eye, each twice the last's breadth in as many columns (`cloud`,
+after Losasso and Hoppe's clipmaps), so a column spans about as many pixels
+far off as near; each level's weather is drawn only as finely as its columns
+hold, its finer octaves settling to their mean (`noise::fbm2_resolved`), and
+each level's rim is blended into the next level's own reading, so no seam
+shows where they meet. Each place of cloud takes the sunlight the air brings
+to it at the angle the sun stands there, so at dusk cloud far off toward the
+set sun is still lit after the cloud overhead has greyed, and cloud far off
+the other way darkens first. The aerial table reaches that far too, its first
+slices where they always were: 32 within 60 km over the land, 88 to 454 km.
 
 ## The sun, the moon and the stars
 
@@ -185,6 +200,33 @@ is the leaves or needles they shed, fresh or browned by a year, over humus,
 with carpets of moss, thickest under conifers and where the ground is damp;
 and the air beneath the crowns is lit only by what gets through them, so a
 wood's depths are dark rather than hazed as open air would be.
+
+## The water's edge
+
+Once the woods' shade is cast, and before the sward is laid in it, a scene
+sets out the plants of its water's edge about the eye (`compose::waterside`).
+Reeds and reedmace stand in the shallows and on banks wet, level and off any
+way, reeds the higher up the bank and in the brisker water; water lilies and
+pondweed float where the water lies still and as deep as each roots in,
+pondweed the shallower and the less still. Each wants the light the woods
+leave it, so none stands in a closed wood, pondweed bearing the most shade.
+Depth and stillness are read from the land's fresh water — its level over the
+ground, and how steeply its surface falls — or from the lake a land's sea
+stands for. Over winter the floating plants die back and the reeds stand on,
+dry.
+
+Each plant is grown into square patches (`waterside`): reeds leafy up their
+stems under nodding plumes that open over the summer, reedmace in fans of
+strap leaves with its brown spikes, round slit pads with a white flower on
+one in eight in summer, and rosettes of pondweed. Each cell of a lattice of
+0.75 m cells within about 45 m of the eye, and of 3.75 m cells beyond to the
+detail's reach, holds a patch of the plant its place suits best or none, as
+likely as the place suits it in that plant's own patches and gaps; the better
+it suits it, the taller and thicker its patch, so a bed thins and shortens
+toward its edges. `Simple` sets them out to 250 m, at most 8000 patches;
+`Maximum` to 700 m, at most 40 000 — where more would stand, those nearest
+the eye, so the water's edge ends at a distance rather than part way across
+the view.
 
 ## Geometry
 
@@ -339,7 +381,13 @@ sky's, kept apart in the aerial table: what stands in the sun's way shadows the
 one, and the crowns roofing the air the other. Each of an eye ray's samples
 tests one point drawn along it against the sun and its clouds, so the air in a
 wood's shadow does not glow toward a low sun behind it, and shafts through its
-gaps do.
+gaps do. The point is drawn where the share of the air's sunlight its sample
+was drawn with has been gathered along the ray, so a far stretch dimmed by the
+near one counts for as little as it shows. The same holds for the air beneath
+the clouds: each stretch of it up to a cloud, or to where the ray leaves the
+highest bank, is judged at one such point against the banks' shadows, so the
+air under an overcast is grey to the horizon rather than lit as a clear day's
+haze, and sunlight between clouds shows as shafts.
 
 A pixel's samples are drawn through a Gaussian reconstruction filter of half
 a pixel's deviation, cut off at three deviations: each offset is the inverse
@@ -349,7 +397,15 @@ finer than a pixel is averaged rather than aliased. At its best a pixel is
 sampled in rounds of 16, 32, 64 and 128, each a whole stratification of every
 pair (Owen-scrambled Sobol, Burley 2020), and stops after any round whose
 samples agree; `Quality` caps the rounds, and the screensaver always traces at
-the best. Each sample is toned (ACES filmic, Narkowicz) before the samples are
+the best. Agreeing is not enough where a surface gathers its light by a
+random ray, as a leaf always does and a matte surface does where no radiosity
+record holds: deep in a crown or under a roof most such rays find nothing and
+a few find the sky, so a pixel's first samples can all miss it and agree on
+black. A pixel whose samples lean on such a surface — seen directly, or
+through clear water or in a mirror, whose light is a quarter or more of the
+pixel's — takes at least 64 samples, and no pixel stops while what it shows
+would move without its brightest sample; such a surface's bounce is always
+followed, never ended by Russian roulette. Each sample is toned (ACES filmic, Narkowicz) before the samples are
 averaged, then encoded to sRGB through a lookup table and the desktop's
 ordered dither. A metered exposure
 takes the frame's trimmed log mean to its key, then pulls down by up to two
@@ -412,12 +468,12 @@ faces, 256 materials, 12 lights, 12 height grids, 96 prototypes, 16 lawns and
 A scene may take up to 160 s to prepare on a desktop-class machine across 8
 threads and hold up to 2 GB at its peak at `Maximum`, far less at `Simple`
 (`plans/RAYTRACE.md`). Measured at 1920×1080 on a 24-thread desktop preparing
-across 8 threads, a landscape prepares at `Maximum` in 0.8–33 s — a meadow
-in 24–31 s, a forest in 33 s, a desert in 6 s, a lagoon in 0.8–1.8 s, most of
-each its radiosity records and up to half of a lagoon's its caustics — holding
-at most about 580 MB at its peak and once prepared, a mountain lake's, whose
-beams are many; at `Simple` it prepares in 0.3–4.0 s, holding at most 324 MB
-and 323 MB. Laying a scene's caustics takes up to 0.25 s at `Simple` and
+across 8 threads, a landscape prepares at `Maximum` in 1.3–41 s — a meadow
+in 26–36 s, a forest in 33–34 s, snow over a frozen pond in 32–41 s, a desert
+in 7–9 s, a lagoon in 1.3–2.6 s, most of each its radiosity records and up to
+half of a lagoon's its caustics — holding at most about 640 MB at its peak and
+once prepared; at `Simple` it prepares in 0.5–4.3 s, holding at most 374 MB.
+Laying a scene's caustics takes up to 0.25 s at `Simple` and
 0.95 s at `Maximum`, and holds up to about 75 MB and 330 MB. Traced on one of its cores,
 built for the x86-64 baseline (SSE2), a sample costs from about 2.4 µs (the
 checkerboard, mostly its clouds) to about 19 µs (a meadow, mostly its eye rays
@@ -428,11 +484,14 @@ cent more, and beneath or over water the caustics about 2.5 µs.
 Every unit of preparation is a fixed amount of work a core — a band of a
 grid's rows or of a shade's, a turn of a land's droplet tiles, a band of the
 objects' boxes or a slice of a hierarchy, a ring's places drawn or a run of
-their ranking, a few rows of a radiosity record's hemisphere, a handful of
+their ranking, a few rows of the water's edge's lattice, a few rows of a
+radiosity record's hemisphere, a handful of
 the meter's samples, a hundred or so of the caustics' survey points, a couple
 of thousand of their beams or a few thousand of their pyramids' nodes — and a
 wood's places are kept in runs that never move as
 more are added, so `Draft::prepare` answers within about a frame however large
-the scene: measured, no unit takes more than about 10 ms at either detail. Under the
+the scene: measured, no unit takes more than about 10 ms at either detail, but
+for the one that begins a large scene's hierarchy, finding every object's box
+at once, which can take about 20 ms at `Maximum`. Under the
 screensaver's `idle` setting the preparation runs on one core and takes some
 eight times as long.

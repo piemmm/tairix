@@ -166,7 +166,9 @@ These are settled. A change that contradicts one stops and asks (§15.7).
 | A device presents a pre-translated address (ATS) | n/a | refused: ATS never enabled | closed (IOM10) |
 
 Residual, and named: a bug in a unit's family code (the TCB grew by it); a
-unit erratum a family must work around; a platform with no unit; the moments
+unit erratum a family must work around; a platform with no unit, and one
+whose DMAR is malformed, which is refused whole and treated as having none
+(`plans/OPEN-DEFECTS.md` D655); the moments
 between firmware's hand-off and the boot probe, which only firmware's own
 protected memory regions cover; a device below a port without ACS source
 validation presenting another's requester id, which grouping cannot stop;
@@ -360,14 +362,21 @@ owner, and clears it as it takes the function back.
   A function behind a unit is stopped whether or not its unit then comes up:
   one firmware keeps no window for has no claim on DMA after the hand-off. A
   function behind no unit that TAIRiX does not drive is left as firmware left
-  it (decision 12). A walk whose bus numbers form no tree resolves no scope,
-  so nothing is published and no unit comes up, and a flat scan
-  (`PciTopology::quiesce`) stops every function mastering DMA of its own on a
-  segment a unit covers, firmware windows included, and every virtio
-  function elsewhere. At each unit's enable, the facility stops every recorded
+  it (decision 12). At each unit's enable, the facility stops every recorded
   function behind it still mastering without a firmware window, and reports
   how many it stopped and how many would not stop (`stopped`, `refused` on
   the unit's `DmaTranslationUnit` record).
+- **What cannot be confined.** A segment whose walk forms no tree, whose
+  units the tree has no room for, or whose functions' DMA identities or
+  stops fail publishes nothing. A flat scan (`PciTopology::quiesce`) then
+  stops, on a segment a unit covers, every function mastering DMA of its
+  own, firmware windows included, and every bridge — a root port with Bus
+  Master Enable clear refuses the upstream requests of its whole subtree,
+  however its buses were numbered — and elsewhere every virtio function, and
+  logs how many it stopped and how many read back mastering. Where only the
+  tree is missing, every unit is still given its node, keeping no firmware
+  window, so it comes up blocking every stream (decision 4): a device that
+  ignores its own Bus Master Enable reaches nothing either.
 - **Translated owners.** The facility grants bus mastering once an owner's
   domain is attached, at its first carve.
   - It names the owner's streams, so a bus-published child of a device
@@ -600,7 +609,10 @@ whose updates are logarithmic rather than a sorted vector's linear moves.
     and the refusal is recorded; a node the kernel drives admits no driver.
   - **The PCI host** (epochs, the record made under its lock, the take-over
     stop) and **the probe's stop rule** (an LPC bridge stopped, no host bridge
-    and no type-1 bridge) are host-tested.
+    and no type-1 bridge, and on a segment that cannot be confined every
+    bridge) are host-tested, as are the flat scan's tally of what it stopped
+    and what would not stop, and a unit given its node with no hierarchy and
+    no firmware window.
   - **Live:** `tairix-test-dma-translation-qemu-x86-64` fails on a unit
     taking over a mastering function, or on a function granted before
     translation. It passes only on a key that arrives after the keyboard's

@@ -159,6 +159,9 @@ pub struct JobQueue<Req, Ans> {
     in_flight: usize,
     capacity: usize,
     stopping: bool,
+    /// Whether an answer has landed since the loop last collected, so the
+    /// wake it is owed is already on its way.
+    nudged: bool,
 }
 
 impl<Req, Ans> Default for JobQueue<Req, Ans> {
@@ -179,6 +182,7 @@ impl<Req, Ans> JobQueue<Req, Ans> {
             in_flight: 0,
             capacity: 0,
             stopping: false,
+            nudged: false,
         }
     }
 
@@ -198,6 +202,7 @@ impl<Req, Ans> JobQueue<Req, Ans> {
             in_flight: 0,
             capacity,
             stopping: false,
+            nudged: false,
         })
     }
 
@@ -226,7 +231,9 @@ impl<Req, Ans> JobQueue<Req, Ans> {
     }
 
     /// Record `answer` for a job in flight, answering whether the loop needs
-    /// a wake: only for the first answer it has not yet collected.
+    /// a wake: for the first answer since it last collected. A loop that
+    /// collects only what had landed when it began therefore still wakes for
+    /// one that lands meanwhile, though others wait beside it.
     ///
     /// An answer for no job in flight answers nothing a worker took, so it is
     /// dropped rather than landed past the room reserved for it.
@@ -236,11 +243,12 @@ impl<Req, Ans> JobQueue<Req, Ans> {
         };
         self.in_flight = in_flight;
         self.answered.push_back(answer);
-        self.answered.len() == 1
+        !core::mem::replace(&mut self.nudged, true)
     }
 
     /// Take the oldest landed answer, once.
     pub fn collect(&mut self) -> Option<Ans> {
+        self.nudged = false;
         self.answered.pop_front()
     }
 

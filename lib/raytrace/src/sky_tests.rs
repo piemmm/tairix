@@ -7,7 +7,7 @@ use tairix_util::mathf;
 use super::{Dome, Gradient, Seeing, Sky};
 use crate::atmosphere::{Air, Atmosphere};
 use crate::body;
-use crate::cloud::{Cloudbank, Deck, Lighting, Matter, SUNLIGHT_LEVELS};
+use crate::cloud::{Cloudbank, Deck, Lighting, Matter, SUNLIGHT_LEVELS, SUN_COSINES};
 use crate::stars::Starfield;
 use crate::vector::Vec3;
 
@@ -20,6 +20,7 @@ const CLOSE: Seeing = Seeing {
     fine: true,
     spread: Some(1e-3),
     jitter: 0.5,
+    air: 0.5,
 };
 
 fn room() -> Sky {
@@ -121,17 +122,95 @@ fn by_night_the_stars_are_points_over_the_moonlit_air_and_none_below_the_horizon
     }
 }
 
-/// A bank of one deck of `form`, built and lit evenly from the sun above.
+/// A bank of one deck of `form`, stood about the eye at the scene's middle,
+/// built, and lit evenly from the sun above.
 fn bank(deck: Deck) -> Cloudbank {
     let sun = Vec3::new(0.2, 0.9, 0.3).normalized();
-    let mut bank = Cloudbank::new([Some(deck), None], (0.0, 0.0), 12_000.0, sun).expect("fits");
+    let mut bank = Cloudbank::new([Some(deck), None], 12_000.0, sun, LEVEL).expect("fits");
+    bank.stand(Vec3::ZERO).expect("levels fit");
     while !bank.step(&tairix_parallel::SERIAL, None).expect("held") {}
     bank.light_by(Lighting {
-        sunlight: alloc::vec![Vec3::splat(20.0); SUNLIGHT_LEVELS],
+        sunlight: alloc::vec![Vec3::splat(20.0); SUNLIGHT_LEVELS * SUN_COSINES],
+        cosines: (-1.0, 1.0),
+        toward: sun,
         above: Vec3::new(0.6, 0.8, 1.2),
         below: Vec3::splat(0.3),
     });
     bank
+}
+
+/// The scene's level's distance from the Earth's centre, at the sea.
+const LEVEL: f64 = crate::atmosphere::GROUND * 1000.0;
+
+/// A day's air with the sun `elevation` degrees up, seen from an eye two
+/// metres above the sea.
+fn day(elevation: f64) -> Air {
+    let radians = elevation.to_radians();
+    Air {
+        sun: Vec3::new(0.0, mathf::sin(radians), mathf::cos(radians)),
+        solar: body::sun(Vec3::UP).irradiance(),
+        base: 0.0,
+        haze: 1.0,
+        albedo: Vec3::splat(0.2),
+        eye: Vec3::new(0.0, 2.0, 0.0),
+    }
+}
+
+/// An open sky of `air` under a bank of `deck`, stood about the eye, built
+/// and lit by the air.
+fn under(air: Air, deck: Deck) -> Sky {
+    let mut low =
+        Cloudbank::new([Some(deck), None], 28_000.0, air.sun, air.ground()).expect("fits");
+    low.stand(air.eye).expect("levels fit");
+    let mut sky = Sky {
+        dome: Dome::Air(Atmosphere::new(air).expect("tables fit")),
+        stars: None,
+        low: Some(low),
+        high: None,
+    };
+    while !sky.build(&tairix_parallel::SERIAL).expect("fits") {}
+    sky
+}
+
+/// An overcast runs on to the horizon, where the old bank stopped short of
+/// it in a band of clear sky; and the air beneath it, which its cloud
+/// shades, is grey rather than lit as a clear day's haze is.
+#[test]
+fn an_overcast_runs_on_to_the_horizon_and_greys_the_air_beneath_it() {
+    let air = day(35.0);
+    let (overcast, clear) = (under(air, CEILING), open(air, None));
+    let Some(bank) = overcast.low.as_ref() else {
+        unreachable!("built with a bank");
+    };
+    for step in 0..48u32 {
+        let around = f64::from(step) * 0.52;
+        let elevation = (0.05 + 0.25 * f64::from(step % 12)).to_radians();
+        let dir = Vec3::new(
+            mathf::cos(elevation) * mathf::cos(around),
+            mathf::sin(elevation),
+            mathf::cos(elevation) * mathf::sin(around),
+        );
+        let seen = bank
+            .seen(air.eye, dir, true, 0.5)
+            .and_then(|seen| seen.cloud);
+        let (_, kept, depth) = seen.unwrap_or_else(|| panic!("{dir:?} meets the overcast"));
+        assert!(kept < 0.05, "{dir:?}: {kept} shows through");
+        let (under, open) = (
+            overcast.radiance(air.eye, dir, CLOSE),
+            clear.radiance(air.eye, dir, CLOSE),
+        );
+        assert!(
+            under.y < 0.75 * open.y,
+            "{dir:?} at {depth}: {under:?} under the overcast, {open:?} clear"
+        );
+    }
+    // Low down the overcast lies further off than the old bank ever reached.
+    let level = Vec3::new(1.0, 0.0005, 0.0).normalized();
+    let (_, _, depth) = bank
+        .seen(air.eye, level, true, 0.5)
+        .and_then(|seen| seen.cloud)
+        .expect("meets it at the horizon");
+    assert!(depth > 60_000.0, "{depth}");
 }
 
 /// A grey ceiling nothing is seen through.

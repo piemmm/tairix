@@ -219,6 +219,13 @@ struct Placed {
     visible: bool,
 }
 
+impl Placed {
+    /// Whether any of it shows.
+    const fn shows(&self) -> bool {
+        self.visible && self.opacity > 0
+    }
+}
+
 /// The canvas `root`, a stack's `image` element, declares.
 fn canvas(root: &Element<'_>) -> Result<(u32, u32), DecodeError> {
     if root.name != "image" {
@@ -373,19 +380,18 @@ pub(crate) fn decode_native(
 ) -> Result<(OraDocument, Unkept), DecodeError> {
     let archive = open(bytes)?;
     let xml = stack_xml(&archive)?;
-    layers(&archive, &parse(&xml)?, limits)
+    layers(&archive, read_stack(&parse(&xml)?, limits)?, limits)
 }
 
-/// The document the stack under `root` lays out of `archive`'s entries: its
-/// layers, the bottom first, each as colour, with what the file held that
-/// they do not. A picture several layers name is read and decoded once, so
-/// naming one entry many times costs one decode.
+/// The document `stack` lays out of `archive`'s entries: its layers, the
+/// bottom first, each as colour, with what the file held that they do not.
+/// A picture several layers name is read and decoded once, so naming one
+/// entry many times costs one decode.
 fn layers(
     archive: &Archive<'_>,
-    root: &Element<'_>,
+    ((width, height), mut placed, mut unkept): Stack,
     limits: &DecodeLimits,
 ) -> Result<(OraDocument, Unkept), DecodeError> {
-    let ((width, height), mut placed, mut unkept) = read_stack(root, limits)?;
     let mut layers: Vec<OraLayer> = Vec::new();
     layers
         .try_reserve_exact(placed.len())
@@ -444,7 +450,8 @@ fn colour(picture: Picture) -> Result<Picture, DecodeError> {
 }
 
 /// The picture OpenRaster `bytes` shows: its merged image where it carries
-/// one of the canvas's size, and otherwise its layers composed.
+/// one of the canvas's size, and otherwise the layers that show composed, so
+/// a layer nothing of shows is never read.
 pub(crate) fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage, DecodeError> {
     let archive = open(bytes)?;
     let xml = stack_xml(&archive)?;
@@ -456,7 +463,9 @@ pub(crate) fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage,
             return Ok(image);
         }
     }
-    let (document, _) = layers(&archive, &root, limits)?;
+    let (size, mut placed, unkept) = read_stack(&root, limits)?;
+    placed.retain(Placed::shows);
+    let (document, _) = layers(&archive, (size, placed, unkept), limits)?;
     composed(&document)
 }
 
@@ -505,10 +514,10 @@ pub(crate) fn peak_bytes(bytes: &[u8], limits: &DecodeLimits) -> Result<u64, Dec
 }
 
 /// What the layers' path holds over a `canvas` holding `placed` read from a
-/// stack of `stack` bytes: the layer records, every layer kept decoded beside
-/// the costliest being read, the canvas they are composed into and one row a
-/// layer is flattened into to compose it. A layer the archive does not hold
-/// ends the path there, so it costs nothing.
+/// stack of `stack` bytes: the layer records, every layer that shows kept
+/// decoded beside the costliest being read, and the canvas they are composed
+/// into. A layer the archive does not hold ends the path there, so it costs
+/// nothing.
 fn layers_peak(
     archive: &Archive<'_>,
     ((width, height), placed, stack): ((u32, u32), &[Placed], usize),
@@ -519,17 +528,19 @@ fn layers_peak(
     let records = ((4 + 3 * placed.len()) * size_of::<Placed>() + stack) as u64;
     let mut kept = 0u64;
     let mut reading = 0u64;
+    let mut shown = 0usize;
     for view in placed
         .iter()
+        .filter(|layer| layer.shows())
         .filter_map(|layer| archive.view(&layer.src).ok().flatten())
     {
         kept = kept.saturating_add(layer_bytes(&view, limits));
         reading = reading.max(entry_peak(&view, limits));
+        shown += 1;
     }
-    let layers = (placed.len() * size_of::<OraLayer>()) as u64;
+    let layers = (shown * size_of::<OraLayer>()) as u64;
     let canvas = u64::from(width) * u64::from(height) * RGBA_BYTES as u64;
-    let row = u64::from(limits.max_width()) * RGBA_BYTES as u64;
-    [kept, reading, layers, canvas, row]
+    [kept, reading, layers, canvas]
         .into_iter()
         .fold(records, u64::saturating_add)
 }
@@ -553,7 +564,7 @@ fn layer_bytes(view: &View<'_>, limits: &DecodeLimits) -> u64 {
         .saturating_mul(RGBA_BYTES as u64)
 }
 
-/// `document`'s visible layers composed over clear, each as faint as it is.
+/// `document`'s showing layers composed over clear, each as faint as it is.
 fn composed(document: &OraDocument) -> Result<RasterImage, DecodeError> {
     let (width, height) = (document.width as usize, document.height as usize);
     let count = width
@@ -561,9 +572,16 @@ fn composed(document: &OraDocument) -> Result<RasterImage, DecodeError> {
         .and_then(|count| count.checked_mul(RGBA_BYTES))
         .ok_or(DecodeError::DimensionsOverflow)?;
     let mut out = fallible::filled(count, 0u8).ok_or(DecodeError::OutOfMemory)?;
-    let mut scratch = Vec::new();
-    for layer in document.layers.iter().filter(|layer| layer.visible) {
+    for layer in document
+        .layers
+        .iter()
+        .filter(|layer| layer.visible && layer.opacity > 0)
+    {
         let picture = &layer.picture;
+        // A layer is colour, so its rows are read where they lie.
+        let Pixels::Rgba(rgba) = picture.pixels() else {
+            return Err(DecodeError::DimensionsOverflow);
+        };
         let span = picture.width() as usize;
         let (Some((columns, across)), Some((rows, down))) = (
             landing(layer.at.0, span, width),
@@ -571,13 +589,10 @@ fn composed(document: &OraDocument) -> Result<RasterImage, DecodeError> {
         ) else {
             continue;
         };
-        if !fallible::grow_to(&mut scratch, span * RGBA_BYTES, 0) {
-            return Err(DecodeError::OutOfMemory);
-        }
         for (offset, y) in rows.enumerate() {
-            let colours = picture
-                .rgba_row(y, &mut scratch)
-                .and_then(|row| row.get(columns.start * RGBA_BYTES..columns.end * RGBA_BYTES))
+            let first = y * span;
+            let colours = rgba
+                .get((first + columns.start) * RGBA_BYTES..(first + columns.end) * RGBA_BYTES)
                 .ok_or(DecodeError::DimensionsOverflow)?;
             let start = ((down + offset) * width + across) * RGBA_BYTES;
             let targets = out

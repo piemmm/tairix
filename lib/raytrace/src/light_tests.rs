@@ -253,7 +253,7 @@ fn a_low_sun_lights_a_surface_as_it_lights_the_air_spread_as_the_air_squashes_it
     let Dome::Air(atmosphere) = &sky.dome else {
         unreachable!("an open sky");
     };
-    let air = atmosphere.sunlight(eye.y, toward);
+    let air = atmosphere.sunlight(eye.y, toward.y);
     let kept = atmosphere.arriving(eye.y, toward).expect("up").kept;
     assert!(air.y < 0.97 * kept.y, "squashed: {air:?} of {kept:?}");
     let apart = (sampled - air)

@@ -106,16 +106,16 @@ above or below, goes to one by name or number, merges one down onto the one
 beneath, flattens the picture, shows or hides a layer, and opens its
 properties (name, opacity, shown). A merge lays the two together onto nothing
 and keeps the lower one's name, which keeps the look to within the rounding of
-a level, since source-over is associative; both layers must show, since a
-hidden one's pixels would have nowhere to go. A merge or flatten runs on the
-worker. Each change is one step
-to undo, and undoing a stroke made on another layer paints on that layer again.
+a level, since source-over is associative; both layers must show, since the
+pixels of one hidden or wholly faint would have nowhere to go. A merge or
+flatten runs on the worker. Each change is one step to undo, and undoing a
+stroke made on another layer paints on that layer again.
 Adjustments, fills and strokes change the layer painted on; turns, flips,
 resizes and crops change every layer, a canvas grown being filled beneath them
 all and left clear over the bottom. A palette picture holds one layer shown
 wholly (`document::MOST_LAYERS` bounds a colour one), so a picture of layers,
-or of one layer faded or hidden, is flattened before it is made a palette
-picture.
+or of one layer faded, is flattened before it is made a palette picture, and
+one hidden layer is shown first, since flattened it would come out clear.
 
 ## Adjustments and filters
 

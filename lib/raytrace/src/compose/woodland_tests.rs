@@ -2,10 +2,8 @@ extern crate std;
 
 use alloc::vec::Vec;
 
-use tairix_parallel::Threaded;
-
 use super::*;
-use crate::compose::{Composition, Job, Progress, Recipe, Setting, Stage};
+use crate::compose::{planted_at, Composition, Recipe, Setting, Stage};
 use crate::detail::Detail;
 use crate::shape::Shape;
 
@@ -258,22 +256,6 @@ fn a_wood_keeps_out_of_its_clearing_off_the_road_and_within_its_heights() {
 /// until its woods stand and it is seen.
 fn planted(setting: Setting, seed: u64, size: (u32, u32)) -> Composition {
     planted_at(setting, seed, size, Detail::Maximum)
-}
-
-/// `planted`, at `detail`.
-fn planted_at(setting: Setting, seed: u64, size: (u32, u32), detail: Detail) -> Composition {
-    let mut composition = Composition::new(setting, seed, size, detail).expect("composes");
-    let runner = Threaded::new(8);
-    while composition.seen.is_none() {
-        let job = composition
-            .jobs
-            .pop_front()
-            .expect("work remains until the scene is seen");
-        if let Progress::Again(unfinished) = composition.run(job, &runner).expect("runs") {
-            composition.jobs.push_front(unfinished);
-        }
-    }
-    composition
 }
 
 #[test]
@@ -561,26 +543,15 @@ fn no_tree_stands_on_a_bridges_deck() {
     for seed in 0..6 {
         let mut composition =
             Composition::new(Setting::Valley, seed, (320, 180), Detail::Maximum).expect("composes");
-        let runner = Threaded::new(8);
-        let mut decks: Vec<Deck> = Vec::new();
-        while composition.seen.is_none() {
-            let job = composition
-                .jobs
-                .pop_front()
-                .expect("work remains until the scene is seen");
-            if let Job::Plant(planting) = &job {
-                let road = planting.land.road.map_or(0.0, |road| road.width);
-                decks = planting
-                    .land
-                    .crossings
-                    .iter()
-                    .map(|deck| ((deck.from.x, deck.from.z), (deck.to.x, deck.to.z), road))
-                    .collect();
-            }
-            if let Progress::Again(unfinished) = composition.run(job, &runner).expect("runs") {
-                composition.jobs.push_front(unfinished);
-            }
-        }
+        let land = composition
+            .run_until_seen()
+            .expect("a valley stands on a land");
+        let road = land.road.map_or(0.0, |road| road.width);
+        let decks: Vec<Deck> = land
+            .crossings
+            .iter()
+            .map(|deck| ((deck.from.x, deck.from.z), (deck.to.x, deck.to.z), road))
+            .collect();
         crossed += decks.len();
         for trunk in trunks(&composition) {
             for &((x0, z0), (x1, z1), width) in &decks {

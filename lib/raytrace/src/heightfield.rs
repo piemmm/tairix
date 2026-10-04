@@ -356,9 +356,15 @@ impl Heightfield {
     }
 
     /// The peaks of cell rows `rows` into the pyramid's first level, in bands
-    /// of `per` rows across `runner`, and the extremes of those rows of
-    /// vertices — and of the last row too, once they reach it.
-    fn seal_cells(&mut self, rows: Range<usize>, per: usize, runner: &dyn JobRunner) -> Extremes {
+    /// of `per` rows across `runner`, and `before`, the extremes of the rows
+    /// sealed before them, joined with those of these rows of vertices — and
+    /// of the last row too, once they reach it.
+    fn seal_cells(
+        &mut self,
+        rows: Range<usize>,
+        per: usize,
+        (runner, before): (&dyn JobRunner, Extremes),
+    ) -> Extremes {
         let (side, cells) = (self.side, cells_of(self.side));
         let Self {
             heights,
@@ -398,11 +404,13 @@ impl Heightfield {
             let last = if end >= cells { side } else { end };
             Extremes::of(heights.get(first * side..last * side).unwrap_or_default())
         };
+        // Joined onto those before band by band, so the mean sums its bands in
+        // one order however many a unit holds.
         band::fold(
             runner,
             peaks,
             (rows.start / per, per * cells),
-            Extremes::NONE,
+            before,
             &band,
             Extremes::join,
         )
@@ -961,8 +969,7 @@ impl Sealing {
             let bands = (budget / (per * blocks)).max(1);
             let rows = self.row..(self.row + bands * per).min(blocks);
             if self.level == 0 {
-                let found = field.seal_cells(rows.clone(), per, runner);
-                self.extremes = self.extremes.join(found);
+                self.extremes = field.seal_cells(rows.clone(), per, (runner, self.extremes));
             } else {
                 field.seal_blocks(self.level, rows.clone(), per, runner);
             }

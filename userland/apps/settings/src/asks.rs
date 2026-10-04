@@ -5,8 +5,10 @@
 //! Each is a round trip to the session's serve loop, which the window's own
 //! loop must not wait on, so the caller carries them on a worker and adopts
 //! each answer as it lands. At most one of each kind is outstanding: a second
-//! Lock or Preview pressed while the first is in flight asks nothing the first
-//! will not already do. It performs no I/O.
+//! Lock pressed while the first is in flight asks nothing the first will not
+//! already do, and a Preview of another document is held and asked once the
+//! first is answered, the newest replacing any held before it. It performs no
+//! I/O.
 
 use alloc::vec::Vec;
 
@@ -70,11 +72,15 @@ impl DesktopAnswer {
 /// desk carrying them must hold.
 pub const MOST_OUTSTANDING: usize = 3;
 
-/// Which kinds of [`DesktopAsk`] are outstanding.
-#[derive(Debug, Default)]
+/// Which kinds of [`DesktopAsk`] are outstanding, and the preview to ask
+/// once the one outstanding is answered.
+#[derive(Default)]
 pub struct DesktopAsks {
     lock: bool,
-    preview: bool,
+    /// The document of the preview outstanding.
+    preview: Option<PinboardDocument>,
+    /// The newest preview asked for while one was outstanding.
+    next_preview: Option<PinboardDocument>,
     sources: bool,
 }
 
@@ -84,38 +90,58 @@ impl DesktopAsks {
     pub const fn new() -> Self {
         Self {
             lock: false,
-            preview: false,
+            preview: None,
+            next_preview: None,
             sources: false,
         }
     }
 
     /// Mark `ask` outstanding, answering whether it is to be submitted:
-    /// `false` where one of its kind already is.
+    /// `false` where one of its kind already is. A preview of a document
+    /// other than the one outstanding is held for [`answered`](Self::answered)
+    /// to hand back.
     pub fn ask(&mut self, ask: &DesktopAsk) -> bool {
-        !core::mem::replace(self.outstanding(ask), true)
-    }
-
-    /// `ask` could not be submitted after all: its kind is free again.
-    pub fn withdraw(&mut self, ask: &DesktopAsk) {
-        *self.outstanding(ask) = false;
-    }
-
-    /// `answer` landed: its kind is free again.
-    pub fn answered(&mut self, answer: &DesktopAnswer) {
-        let held = match answer {
-            DesktopAnswer::Lock(_) => &mut self.lock,
-            DesktopAnswer::Preview(_) => &mut self.preview,
-            DesktopAnswer::NotifySources(_) => &mut self.sources,
-        };
-        *held = false;
-    }
-
-    fn outstanding(&mut self, ask: &DesktopAsk) -> &mut bool {
         match ask {
-            DesktopAsk::Lock => &mut self.lock,
-            DesktopAsk::Preview(_) => &mut self.preview,
-            DesktopAsk::NotifySources => &mut self.sources,
+            DesktopAsk::Lock => !core::mem::replace(&mut self.lock, true),
+            DesktopAsk::NotifySources => !core::mem::replace(&mut self.sources, true),
+            DesktopAsk::Preview(document) => match self.preview {
+                None => {
+                    self.preview = Some(*document);
+                    true
+                }
+                Some(outstanding) => {
+                    self.next_preview = (outstanding != *document).then_some(*document);
+                    false
+                }
+            },
         }
+    }
+
+    /// `ask` could not be submitted after all: its kind is free again, and
+    /// nothing of it is held to follow.
+    pub fn withdraw(&mut self, ask: &DesktopAsk) {
+        match ask {
+            DesktopAsk::Lock => self.lock = false,
+            DesktopAsk::NotifySources => self.sources = false,
+            DesktopAsk::Preview(_) => {
+                self.preview = None;
+                self.next_preview = None;
+            }
+        }
+    }
+
+    /// `answer` landed: its kind is free again, unless a preview was held
+    /// behind it, which is now outstanding and handed back to be submitted.
+    pub fn answered(&mut self, answer: &DesktopAnswer) -> Option<DesktopAsk> {
+        match answer {
+            DesktopAnswer::Lock(_) => self.lock = false,
+            DesktopAnswer::NotifySources(_) => self.sources = false,
+            DesktopAnswer::Preview(_) => {
+                self.preview = self.next_preview.take();
+                return self.preview.map(DesktopAsk::Preview);
+            }
+        }
+        None
     }
 }
 

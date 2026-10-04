@@ -268,6 +268,7 @@ fn fingerprint(scene: &Scene) -> Vec<u64> {
             fine: true,
             spread: Some(1e-3),
             jitter: 0.5,
+            air: 0.5,
         };
         let light = scene.sky.radiance(Vec3::ZERO, dir, seeing);
         marks.extend([light.x.to_bits(), light.y.to_bits(), light.z.to_bits()]);
@@ -509,6 +510,7 @@ fn the_daylight_on_the_level_is_the_suns_kept_beam_and_the_whole_skys_light() {
         fine: false,
         spread: None,
         jitter: 0.5,
+        air: 0.5,
     };
     let (rings, spokes) = (180u32, 360u32);
     let mut gathered = Vec3::ZERO;

@@ -533,7 +533,7 @@ impl Form {
         if let Some(layout) = self.group_layout(window, scale, theme) {
             let acted = self.group.on_pointer(event, layout, scale, theme, damage);
             if let Some(action) = acted {
-                return self.adopt(&action, window, scale, theme, damage);
+                return self.adopt(&action, layout, (window, scale, theme), damage);
             }
         }
         let bounds = self.rect(window, scale, theme);
@@ -571,17 +571,16 @@ impl Form {
             _ => stroke,
         };
         let acted = self.group.on_key(stroke, layout, scale, theme, damage)?;
-        self.adopt(&acted, window, scale, theme, damage)
+        self.adopt(&acted, layout, (window, scale, theme), damage)
     }
 
     /// Follow what a row asked for, keeping the rows that restate each other
-    /// in step.
+    /// in step, with the group laid out as `before` when it asked.
     fn adopt(
         &mut self,
         acted: &FieldGroupAction,
-        window: Rect,
-        scale: Scale,
-        theme: &Theme,
+        before: FieldLayout,
+        (window, scale, theme): (Rect, Scale, &Theme),
         damage: &mut Region,
     ) -> Option<Answer> {
         if let FieldAction::Text(TextAction::Submitted) = acted.action {
@@ -601,6 +600,13 @@ impl Form {
             _ => {}
         }
         damage.add(self.rect(window, scale, theme));
+        // A list hangs past the sheet, so what it opened into or vacated is
+        // reported beside it.
+        if before.popup_may_move(&acted.action) {
+            if let Some(after) = self.group_layout(window, scale, theme) {
+                before.report_popup_moved(after, damage);
+            }
+        }
         None
     }
 

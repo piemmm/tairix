@@ -1116,10 +1116,10 @@ fn a_drawn_or_refused_render_concludes_as_it_ended() {
     }
 }
 
-/// A region of `len` bytes.
-struct Sized(Vec<u8>);
+/// A granted region, holding the bytes it was made with.
+struct GrantedRegion(Vec<u8>);
 
-impl PreviewTarget for Sized {
+impl PreviewTarget for GrantedRegion {
     fn bytes_mut(&mut self) -> &mut [u8] {
         &mut self.0
     }
@@ -1132,7 +1132,7 @@ fn a_preview_is_drawn_into_exactly_its_pixels_or_not_at_all() {
     let request = request(client(7), 7, 0);
     let pixels = request.pixel_bytes().expect("a small preview");
     let drawn = |len: usize| {
-        let mut region = Sized(alloc::vec![0; len]);
+        let mut region = GrantedRegion(alloc::vec![0; len]);
         request.canvas(&mut region).map(|canvas| canvas.len())
     };
     assert_eq!(drawn(pixels + 64), Some(pixels));

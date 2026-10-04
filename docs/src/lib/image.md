@@ -505,8 +505,10 @@ name is read and decoded once, so naming one entry many times costs one
 decode.
 
 `decode` shows what a viewer should: the document's `mergedimage.png` where it
-is the canvas's size, and otherwise the visible layers composed source-over,
-each at its opacity and clipped to the canvas. `probe` reads the canvas alone.
+is the canvas's size, and otherwise the layers that show composed source-over,
+each at its opacity and clipped to the canvas. A hidden or wholly faint layer
+is neither read nor counted by `decode_peak_bytes`, since nothing of it shows.
+`probe` reads the canvas alone.
 `open_native` answers the layers themselves (`NativeDocument::Layers`), each as
 colour, which is how an editor reads them, stating what a colour layer cannot
 keep: a sixteen-bit layer narrowed (`precision`), a layer's chunks beside its

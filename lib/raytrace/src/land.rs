@@ -308,9 +308,15 @@ impl Land {
 
     /// The fresh water's surface at `(x, z)`, if water stands there.
     pub(crate) fn water(&self, fields: &[Heightfield], x: f64, z: f64) -> Option<f64> {
-        let grid = fields.get(self.water? as usize)?;
-        let level = grid.height_at(x, z);
-        (level.is_finite() && level > self.height(fields, x, z)).then_some(level)
+        self.water_level(fields, x, z)
+            .filter(|&level| level > self.height(fields, x, z))
+    }
+
+    /// The fresh water's level about `(x, z)` wherever its grid holds one,
+    /// over a bank beside the water as over the water itself.
+    pub(crate) fn water_level(&self, fields: &[Heightfield], x: f64, z: f64) -> Option<f64> {
+        let level = fields.get(self.water? as usize)?.height_at(x, z);
+        level.is_finite().then_some(level)
     }
 
     /// What one stands on at `(x, z)`: the ground, or the fresh water's

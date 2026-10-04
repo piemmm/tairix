@@ -199,6 +199,12 @@ impl Layer {
     fn plain(&self) -> bool {
         self.visible && self.opacity == u8::MAX
     }
+
+    /// Whether anything of it shows: shown, and not wholly faint.
+    #[must_use]
+    pub const fn shows(&self) -> bool {
+        self.visible && self.opacity > 0
+    }
 }
 
 /// One picture of a document: one layer or more, the bottom first, one of
@@ -362,12 +368,13 @@ impl Picture {
         })
     }
 
-    /// Whether every layer of `range` shows; `false` where one is missing.
+    /// Whether something of every layer of `range` shows; `false` where one
+    /// is missing.
     #[must_use]
     pub fn shows(&self, range: core::ops::Range<usize>) -> bool {
         self.layers
             .get(range)
-            .is_some_and(|layers| layers.iter().all(|layer| layer.visible))
+            .is_some_and(|layers| layers.iter().all(Layer::shows))
     }
 
     /// Whether it shows exactly its one layer's pixels, so its layers need

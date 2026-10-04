@@ -2335,11 +2335,14 @@ impl View {
             } | Transform::Mask { .. }
         );
         if palette && !picture.single() {
-            self.state(
-                "A palette picture holds one layer, shown wholly: flatten the picture first",
-                layout,
-                damage,
-            );
+            // A lone hidden layer flattened would come out clear.
+            let advice = match picture.layers() {
+                [only] if !only.visible => {
+                    "A palette picture holds one layer, shown wholly: show the layer first"
+                }
+                _ => "A palette picture holds one layer, shown wholly: flatten the picture first",
+            };
+            self.state(advice, layout, damage);
             return Outcome::none();
         }
         // The canvas a resize adds is filled beneath every layer, and left

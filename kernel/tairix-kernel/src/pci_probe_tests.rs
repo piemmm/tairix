@@ -302,7 +302,8 @@ fn the_record_holds_each_function_behind_a_unit_and_each_published_node() {
 
 /// A walk that formed no hierarchy resolves no unit's scope: where a unit
 /// covers the segment every function mastering DMA of its own is stopped,
-/// elsewhere only a virtio one, and a bridge or host bridge never.
+/// and every bridge, so none forwards what lies below it; elsewhere only a
+/// virtio one; and a host bridge never.
 #[test]
 fn a_walk_that_formed_no_hierarchy_stops_every_master_a_unit_could_cover() {
     let virtio = endpoint(1, 0, 0, VIRTIO_PCI_VENDOR_ID, 0x02_00_00);
@@ -312,6 +313,6 @@ fn a_walk_that_formed_no_hierarchy_stops_every_master_a_unit_could_cover() {
     let stopped = |covered: bool| {
         [&virtio, &other, &host, &forwarding].map(|function| stopped_unresolved(function, covered))
     };
-    assert_eq!(stopped(true), [true, true, false, false]);
+    assert_eq!(stopped(true), [true, true, false, true]);
     assert_eq!(stopped(false), [true, false, false, false]);
 }

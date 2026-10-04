@@ -210,7 +210,11 @@ about the machine:
   the owner supplies: `FieldGroup::layout` takes that viewport and answers the
   whole layout — the group's slot column and an expanded slot's list, placed —
   so an owner laying its groups out independently carries none of that
-  arithmetic itself.
+  arithmetic itself. The owner also reports the list's plate: the press that
+  opens a list is routed with a layout that placed none, so once a group has
+  acted the owner lays it out again and hands both layouts to
+  `FieldLayout::report_popup_moved`, which reports the plate a list opened
+  into, the one it vacated, or both where it moved.
 
 A group may also carry a **badge** on its caption's own line
 (`FieldGroup::with_badge`): the `StatusPill` naming the state of the thing the

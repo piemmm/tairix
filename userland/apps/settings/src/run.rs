@@ -176,19 +176,31 @@ mod program {
         settings
     }
 
-    /// The applier: the session round trip an apply costs, carried out on a
-    /// worker thread.
+    /// The applier: the session round trip an apply costs, and the read of
+    /// what the store then holds, carried out on a worker thread.
     ///
     /// The session answers only once its own publisher has written the
     /// store, so making the choice wait for it would freeze this window for
     /// a disk commit — and freeze it again on every further choice. The loop
     /// encodes the document (in memory, and refusable on the spot), submits,
     /// and adopts the answer on the wake it nudges.
-    type Applier = tairix_rt::work::Worker<(), PinboardDocument, ApplyOutcome>;
+    type Applier = tairix_rt::work::Worker<(), PinboardDocument, Applied>;
 
-    /// The worker's body: the shared apply client's one round trip.
-    fn send_apply(_: &mut (), document: &mut PinboardDocument) -> ApplyOutcome {
-        tairix_wallpaper::apply(*document)
+    /// What an apply answered, and the settings the rows are to show for it.
+    struct Applied {
+        outcome: ApplyOutcome,
+        /// What the store holds once the session answered; `None` for an
+        /// apply refused before it was asked, which changed nothing.
+        in_effect: Option<DesktopSettings>,
+    }
+
+    /// The worker's body: the shared apply client's one round trip, then the
+    /// store's own account of what it holds.
+    fn send_apply(_: &mut (), document: &mut PinboardDocument) -> Applied {
+        Applied {
+            outcome: tairix_wallpaper::apply(*document),
+            in_effect: Some(settings_in_effect()),
+        }
     }
 
     /// The mount walk: the system mount table, read through the one shared
@@ -492,9 +504,11 @@ mod program {
         /// whether an answer landed at once — as one does with no worker to
         /// serve it, the request made on this thread.
         fn submit(&mut self, shell: &mut Shell, ask: &DesktopAsk) -> bool {
-            if !self.asks.ask(ask) {
-                return false;
-            }
+            self.asks.ask(ask) && self.send(shell, ask)
+        }
+
+        /// Hand `ask`, already marked outstanding, to the worker.
+        fn send(&mut self, shell: &mut Shell, ask: &DesktopAsk) -> bool {
             match self.worker.submit(*ask) {
                 Ok(true) => self.settle(shell),
                 Ok(false) => false,
@@ -516,13 +530,17 @@ mod program {
         /// Adopt every answer that has landed, answering whether any had.
         fn settle(&mut self, shell: &mut Shell) -> bool {
             let mut landed = false;
+            let mut follow = None;
             let asks = &mut self.asks;
             self.worker.collect_landed(|answer| {
-                asks.answered(&answer);
+                follow = asks.answered(&answer).or(follow);
                 adopt_desktop_answer(shell, answer);
                 landed = true;
             });
-            landed
+            match follow {
+                Some(ask) => self.send(shell, &ask) || landed,
+                None => landed,
+            }
         }
     }
 
@@ -764,15 +782,16 @@ mod program {
     /// A document this program cannot even encode is refused here, where it
     /// costs nothing; everything else goes to the worker and is answered on
     /// a later wake.
-    fn submit_apply(applier: &Applier, document: &str) -> Option<ApplyOutcome> {
+    fn submit_apply(applier: &Applier, document: &str) -> Option<Applied> {
         match PinboardDocument::new(document) {
             // With no worker the call was made on this thread and its answer
             // is already on the desk.
             Ok(document) if applier.submit(document) => applier.collect(),
             Ok(_) => None,
-            Err(_) => Some(ApplyOutcome::Refused(String::from(
-                "settings document out of range",
-            ))),
+            Err(_) => Some(Applied {
+                outcome: ApplyOutcome::Refused(String::from("settings document out of range")),
+                in_effect: None,
+            }),
         }
     }
 
@@ -787,14 +806,14 @@ mod program {
         None
     }
 
-    /// Adopt what the desktop answered: state a refusal, then re-read what
-    /// the desktop actually holds into `shell`.
+    /// Adopt what the desktop answered: state a refusal, then show what the
+    /// store holds.
     ///
     /// Persist-then-adopt. The rows showed the reader's choice at once; the
-    /// durable value is whatever the session answers with, so a refusal puts
-    /// the row back rather than leaving a value on screen the next login
-    /// would not restore.
-    fn adopt_apply(shell: &mut Shell, outcome: ApplyOutcome) {
+    /// durable value is what the store answered with, read on the worker, so
+    /// a refusal puts the row back rather than leaving a value on screen the
+    /// next login would not restore.
+    fn adopt_apply(shell: &mut Shell, Applied { outcome, in_effect }: Applied) {
         match outcome {
             ApplyOutcome::Applied | ApplyOutcome::Applying => {}
             ApplyOutcome::Refused(reason) => {
@@ -807,7 +826,10 @@ mod program {
                 app::report(APP_NAME, "no desktop session answered; nothing was changed");
             }
         }
-        shell.adopt_settings(settings_in_effect());
+        match in_effect {
+            Some(settings) => shell.adopt_settings(settings),
+            None => shell.revert_settings(),
+        }
     }
 
     /// The shipped picture catalog the desktop offers, read once.
@@ -1575,8 +1597,8 @@ mod program {
     /// redraw if anything did, answering whether the window is still
     /// presentable.
     ///
-    /// Both desks land a whole new set of rows, so the client is redrawn
-    /// rather than the one row a choice reported.
+    /// An answer lands a new set of rows, so the pane is redrawn rather than
+    /// the one row a choice reported.
     fn adopt_answers(
         surface: &mut SettingsWindow,
         shell: &mut Shell,
@@ -1585,8 +1607,8 @@ mod program {
         desks: &mut Desks<'_>,
     ) -> bool {
         let mut landed = false;
-        if let Some(outcome) = desks.applier.collect() {
-            adopt_apply(shell, outcome);
+        if let Some(applied) = desks.applier.collect() {
+            adopt_apply(shell, applied);
             landed = true;
         }
         landed |= desks.mounts.settle(shell);
@@ -1601,8 +1623,16 @@ mod program {
         if !landed {
             return true;
         }
-        shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
-        present_whole(surface, shell, themes, desktop)
+        let viewport = surface.viewport();
+        shell.lay_out(viewport, desktop.scale(), themes.active());
+        let mut damage = tairix_controls::damage::sink();
+        damage.add(shell.pane_region(viewport, desktop.scale(), themes.active()));
+        let Some(area) = present_damage(&surface.mode, Repaint::Reported, &damage) else {
+            return true;
+        };
+        surface
+            .present(shell, themes, desktop.scale(), area)
+            .is_ok()
     }
 
     /// Step every password marker whose dots are due and present what moved,
@@ -1634,49 +1664,77 @@ mod program {
             .is_ok()
     }
 
-    /// Carry out what one event concluded, answering whether the program
-    /// is to end.
+    /// What carrying out an event's conclusion changed beyond what the event
+    /// itself reported.
+    #[derive(Clone, Copy, Eq, PartialEq)]
+    enum Carried {
+        /// Nothing more.
+        Nothing,
+        /// An answer landed at once and was adopted into the pane.
+        Answered,
+        /// The window moved to another pane.
+        Moved,
+        /// The program is to end.
+        Quit,
+    }
+
+    impl Carried {
+        /// `Answered` where an answer `landed`, else `Nothing`.
+        const fn answered_if(landed: bool) -> Self {
+            if landed {
+                Self::Answered
+            } else {
+                Self::Nothing
+            }
+        }
+    }
+
+    /// Carry out what one event concluded, answering what that changed.
     fn act(
         acted: &Acted,
         (surface, shell): (&mut SettingsWindow, &mut Shell),
         (themes, desktop): (&ThemeRegistry, &Desktop),
         (desks, pictures): (&mut Desks<'_>, &mut Pictures),
         damage: &mut Region,
-    ) -> bool {
-        match acted {
+    ) -> Carried {
+        let carried = match acted {
             Acted::Quit => {
                 surface.close();
-                return true;
+                return Carried::Quit;
             }
             Acted::Elevate(asked) => {
                 // Submitted, not awaited: the broker answers only once the
                 // program it started has exited, and a window that waited
                 // would stop drawing for the whole of it.
-                if let Some(verdict) = submit_elevate(desks.elevator, asked.clone()) {
+                let verdict = submit_elevate(desks.elevator, asked.clone());
+                let landed = verdict.is_some();
+                if let Some(verdict) = verdict {
                     shell.adopt_elevation(verdict);
-                    shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
                 }
+                Carried::answered_if(landed)
             }
             Acted::Apply(document) => {
                 // Submitted, not awaited: the answer arrives on the wake
                 // the worker nudges. With no worker to serve it the call
                 // was made here and its answer is already in hand.
-                if let Some(outcome) = submit_apply(desks.applier, document) {
-                    adopt_apply(shell, outcome);
-                    shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
+                let applied = submit_apply(desks.applier, document);
+                let landed = applied.is_some();
+                if let Some(applied) = applied {
+                    adopt_apply(shell, applied);
                 }
+                Carried::answered_if(landed)
             }
             Acted::LockScreen => {
                 // Submitted, not awaited: the desktop puts its own lock up
                 // from its own loop, and its answer arrives on the wake the
                 // worker nudges.
-                if desks.desktop.submit(shell, &DesktopAsk::Lock) {
-                    shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
-                }
+                Carried::answered_if(desks.desktop.submit(shell, &DesktopAsk::Lock))
             }
             Acted::Opened => {
                 if drain_open_targets(shell, surface, themes.active(), desktop.scale()) {
-                    shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
+                    Carried::Moved
+                } else {
+                    Carried::Nothing
                 }
             }
             Acted::PreviewScreensaver(document) => {
@@ -1689,9 +1747,7 @@ mod program {
                         true
                     }
                 };
-                if landed {
-                    shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
-                }
+                Carried::answered_if(landed)
             }
             Acted::Rendered {
                 subject,
@@ -1706,10 +1762,14 @@ mod program {
                     (viewport, desktop.scale(), themes.active()),
                     damage,
                 );
+                Carried::Nothing
             }
-            Acted::Idle | Acted::Changed | Acted::Whole => {}
+            Acted::Idle | Acted::Changed | Acted::Whole => Carried::Nothing,
+        };
+        if carried != Carried::Nothing {
+            shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
         }
-        false
+        carried
     }
 
     /// Ask for every reading a pane this round put on show states, answering
@@ -1717,7 +1777,7 @@ mod program {
     /// the read made here and the pane already holding its answer.
     ///
     /// Every desk is asked whatever the others answered, and a reading that
-    /// landed rebuilt its pane's rows, so any one of them is a whole redraw.
+    /// landed rebuilt its pane's rows, so any one of them redraws the pane.
     fn request_readings(shell: &mut Shell, desks: &mut Desks<'_>) -> bool {
         let landed = [
             desks.mounts.request(shell),
@@ -1823,13 +1883,14 @@ mod program {
                 &event,
                 &mut damage,
             );
-            if act(
+            let carried = act(
                 &acted,
                 (surface, shell),
                 (themes, desktop),
                 (&mut desks, pictures),
                 &mut damage,
-            ) {
+            );
+            if carried == Carried::Quit {
                 return 0;
             }
             let landed = request_readings(shell, &mut desks);
@@ -1840,25 +1901,18 @@ mod program {
                 surface.window.release_frames();
                 continue;
             }
-            // An apply re-read the desktop, so every row may have moved:
-            // the whole client is redrawn rather than the one row the
-            // choice reported.
-            let whole = redraw
-                || landed
-                || matches!(
-                    acted,
-                    Acted::Whole
-                        | Acted::Apply(_)
-                        | Acted::LockScreen
-                        | Acted::PreviewScreensaver(_)
-                        | Acted::Opened
-                );
-            // A landed picture reported the one it changed.
-            let reported = matches!(acted, Acted::Changed | Acted::Rendered { .. });
-            let repaint = match (whole, reported) {
-                (true, _) => Repaint::Whole,
-                (false, true) => Repaint::Reported,
-                (false, false) => Repaint::Nothing,
+            // An answer adopted at once rebuilt the pane's rows, which report
+            // nothing of their own; another pane moves the trail and the strip
+            // too.
+            if landed || carried == Carried::Answered {
+                damage.add(shell.pane_region(surface.viewport(), desktop.scale(), themes.active()));
+            }
+            let repaint = if redraw || carried == Carried::Moved || matches!(acted, Acted::Whole) {
+                Repaint::Whole
+            } else {
+                // A round that changed something but reported no rectangle
+                // presents the whole window rather than leave a stale frame.
+                Repaint::reported_if(!matches!(acted, Acted::Idle) || !damage.is_empty())
             };
             let Some(area) = present_damage(&surface.mode, repaint, &damage) else {
                 continue;

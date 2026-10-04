@@ -142,10 +142,10 @@ pub struct Draft {
 /// a desktop-class machine preparing across eight threads.
 const fn ends(landed: bool, detail: Detail) -> Ends {
     let (composed, built, focused, gathered) = match (landed, detail) {
-        (true, Detail::Simple) => (0.559, 0.567, 0.585, 0.943),
-        (true, Detail::Maximum) => (0.102, 0.105, 0.115, 0.984),
-        (false, Detail::Simple) => (0.084, 0.084, 0.136, 0.907),
-        (false, Detail::Maximum) => (0.016, 0.016, 0.076, 0.977),
+        (true, Detail::Simple) => (0.544, 0.555, 0.572, 0.947),
+        (true, Detail::Maximum) => (0.096, 0.098, 0.108, 0.986),
+        (false, Detail::Simple) => (0.198, 0.199, 0.223, 0.876),
+        (false, Detail::Maximum) => (0.038, 0.038, 0.074, 0.975),
     };
     Ends {
         composed,
@@ -411,6 +411,7 @@ fn daylight(sky: &Sky, lights: &[Light], eye: Vec3) -> Vec3 {
         fine: false,
         spread: None,
         jitter: 0.5,
+        air: 0.5,
     };
     for index in 0..DAYLIGHT_SKY {
         // Spread over the sky above as its cosine weighs it, two by two in

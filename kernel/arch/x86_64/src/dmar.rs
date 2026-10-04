@@ -563,7 +563,7 @@ pub trait DmaAliases {
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct UnitNodes {
     /// Units given a node, in table order: a unit past them has no node, so
-    /// nothing brings it up and the functions behind it stay untranslated.
+    /// nothing brings it up and nothing behind it can be confined.
     pub emitted: usize,
     /// Reserved windows no unit's node carries — past its room, or on a
     /// segment `bridges` does not reach: those functions lose their firmware
@@ -571,14 +571,27 @@ pub struct UnitNodes {
     pub dropped: usize,
 }
 
+impl UnitNodes {
+    /// Whether a unit of `dmar` on `segment` was left without a node, so
+    /// nothing on the segment behind it can be confined.
+    #[must_use]
+    pub fn strand(&self, dmar: &Dmar<'_>, segment: u16) -> bool {
+        dmar.units()
+            .skip(self.emitted)
+            .any(|unit| unit.segment() == segment)
+    }
+}
+
 /// Emit one [`HwDeviceClass::Iommu`] node per unit, numbered from `first_id`
 /// in table order and keyed `compatible`, carrying its register window and
 /// each firmware reserved window of a function it translates — kept for the
 /// function's own stream and for every alias of it, since firmware's DMA
-/// arrives under whichever the fabric tags it with. `bridges` and `aliases`
-/// describe `segment`, so a window on another segment is never resolved
-/// through them. A full sink ends the emission: the units before it keep
-/// their nodes.
+/// arrives under whichever the fabric tags it with. `fabric` — its bridges'
+/// buses and the aliases its DMA arrives under — describes `segment`, so a
+/// window on another segment is never resolved through it. With no fabric, a
+/// hierarchy that formed no tree, no window is kept: every unit comes up
+/// blocking every stream. A full sink ends the emission: the units before it
+/// keep their nodes.
 ///
 /// # Errors
 ///
@@ -589,8 +602,7 @@ pub fn emit_unit_nodes(
     first_id: u32,
     compatible: &[u8],
     segment: u16,
-    bridges: &dyn BridgeBuses,
-    aliases: &dyn DmaAliases,
+    fabric: Option<(&dyn BridgeBuses, &dyn DmaAliases)>,
     sink: &mut dyn HwNodeSink,
 ) -> Result<UnitNodes, DiscoveryError> {
     let key = HwMatchKey::compatible(compatible).map_err(|_| DiscoveryError::MalformedSource)?;
@@ -604,7 +616,7 @@ pub fn emit_unit_nodes(
         emitted: 0,
         dropped: dmar
             .reserved_regions()
-            .filter(|region| region.segment() != segment)
+            .filter(|region| fabric.is_none() || region.segment() != segment)
             .map(|region| endpoints(&region))
             .sum(),
     };
@@ -616,36 +628,14 @@ pub fn emit_unit_nodes(
                 node.push_resource(HwResource::mmio(unit.register_base(), unit.register_len()))
             })
             .map_err(|_| DiscoveryError::MalformedSource)?;
-        for region in dmar
-            .reserved_regions()
-            .filter(|region| region.segment() == segment)
-        {
-            for scope in region.scopes().filter(|s| s.kind() == ScopeKind::Endpoint) {
-                let Some(source) = scope.resolve(bridges) else {
-                    continue;
-                };
-                if dmar.unit_for(region.segment(), source, bridges) != Some(index) {
-                    continue;
-                }
-                let mut keep = |stream: SourceId| {
-                    let Ok(window) = IommuReservedWindow::new(
-                        u32::from(stream.raw()),
-                        region.base(),
-                        region.len(),
-                    )
-                    .map(HwResource::iommu_reserved_window) else {
-                        placed.dropped += 1;
-                        return;
-                    };
-                    // Firmware may name one window for a function twice, and
-                    // functions behind one bridge share its alias.
-                    if !node.resources().contains(&window) && node.push_resource(window).is_err() {
-                        placed.dropped += 1;
-                    }
-                };
-                keep(source);
-                aliases.aliases(source, &mut keep);
-            }
+        if let Some(fabric) = fabric {
+            keep_windows(
+                dmar,
+                (index, segment),
+                fabric,
+                &mut node,
+                &mut placed.dropped,
+            );
         }
         if sink.emit(node).is_err() {
             break;
@@ -653,6 +643,47 @@ pub fn emit_unit_nodes(
         placed.emitted += 1;
     }
     Ok(placed)
+}
+
+/// Keep on `node` each firmware reserved window on `segment` of a function
+/// unit `index` translates, for its own stream and every alias of it,
+/// counting in `dropped` each the node has no room for.
+fn keep_windows(
+    dmar: &Dmar<'_>,
+    (index, segment): (usize, u16),
+    (bridges, aliases): (&dyn BridgeBuses, &dyn DmaAliases),
+    node: &mut HwNode,
+    dropped: &mut usize,
+) {
+    for region in dmar
+        .reserved_regions()
+        .filter(|region| region.segment() == segment)
+    {
+        for scope in region.scopes().filter(|s| s.kind() == ScopeKind::Endpoint) {
+            let Some(source) = scope.resolve(bridges) else {
+                continue;
+            };
+            if dmar.unit_for(region.segment(), source, bridges) != Some(index) {
+                continue;
+            }
+            let mut keep = |stream: SourceId| {
+                let Ok(window) =
+                    IommuReservedWindow::new(u32::from(stream.raw()), region.base(), region.len())
+                        .map(HwResource::iommu_reserved_window)
+                else {
+                    *dropped += 1;
+                    return;
+                };
+                // Firmware may name one window for a function twice, and
+                // functions behind one bridge share its alias.
+                if !node.resources().contains(&window) && node.push_resource(window).is_err() {
+                    *dropped += 1;
+                }
+            };
+            keep(source);
+            aliases.aliases(source, &mut keep);
+        }
+    }
 }
 
 /// The node of the unit [`emit_unit_nodes`] numbered from `first_id` that

@@ -37,6 +37,41 @@ fn a_second_ask_of_a_kind_waits_for_the_first_to_be_answered() {
     assert!(kinds.iter().all(|ask| !fresh.ask(ask)));
 }
 
+/// A preview of another document asked while one is outstanding is held, the
+/// newest replacing any held before it, and handed back to be asked once the
+/// first is answered; asking for the one outstanding again holds nothing.
+#[test]
+fn a_preview_of_another_document_is_asked_once_the_first_is_answered() {
+    let of = |kind: &str| {
+        DesktopAsk::Preview(
+            PinboardDocument::new(&alloc::format!("screensaver.kind = {kind}\n"))
+                .expect("a document"),
+        )
+    };
+    let document = |ask: Option<DesktopAsk>| match ask {
+        Some(DesktopAsk::Preview(document)) => Some(document),
+        _ => None,
+    };
+    let mut asks = DesktopAsks::new();
+    assert!(asks.ask(&of("clock")));
+    assert!(!asks.ask(&of("ribbon")));
+    assert!(!asks.ask(&of("blank")), "the newest replaces the one held");
+    let answered = DesktopAnswer::Preview(Err(Errno::SeatBusy));
+    assert_eq!(
+        document(asks.answered(&answered)),
+        document(Some(of("blank")))
+    );
+    assert!(
+        !asks.ask(&of("blank")),
+        "the one handed back is outstanding"
+    );
+    assert_eq!(asks.answered(&answered).map(|_| ()), None, "nothing held");
+    assert!(asks.ask(&of("clock")));
+    assert!(!asks.ask(&of("ribbon")));
+    assert!(!asks.ask(&of("clock")), "back to the one outstanding");
+    assert_eq!(asks.answered(&answered).map(|_| ()), None);
+}
+
 /// An answer lands in the pane: the sources listed, a refusal stated.
 #[test]
 fn an_answer_is_adopted_into_the_pane_that_asked() {

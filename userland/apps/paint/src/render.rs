@@ -14,7 +14,7 @@ use core::ops::Range;
 use tairix_colour::Rgba;
 use tairix_controls::{blend_area, fill_area, paint_run, withheld, Checker, SwatchMark};
 use tairix_font::BitmapFont;
-use tairix_geometry::{to_i32, Point, Rect, Scale};
+use tairix_geometry::{saturate_i32, to_i32, Point, Rect, Scale};
 use tairix_icon::IconArtwork;
 use tairix_image::{IndexDepth, Rgba8, SpriteName};
 use tairix_raster::{Color, CoverageRows, Pixel, Surface};
@@ -620,12 +620,11 @@ impl<'a> Rows<'a> {
     fn compose_laid(&mut self, row: i64) {
         let map = &self.columns;
         if let Some(gradient) = &self.gradient {
+            let mut along = gradient.along(row);
             for (index, sample) in self.samples.iter_mut().enumerate() {
                 let column = map.column(index);
                 let cover = self.clip.map_or(u8::MAX, |clip| clip.at(column, row));
-                if cover > 0 {
-                    *sample = gradient.laid((column, row), *sample, cover);
-                }
+                *sample = along.laid(column, *sample, cover);
             }
         }
         let Some((entry, coat)) = self.text else {
@@ -929,7 +928,7 @@ fn text_frame(surface: &mut Surface, view: &View, layout: &Layout, theme: &Theme
     let colour = ants.dark;
     for y in from.1..to.1 {
         if let (Ok(px), Ok(py)) = (u32::try_from(from.0), u32::try_from(y)) {
-            if area.contains(Point::new(to_i32_saturating(from.0), to_i32_saturating(y))) {
+            if area.contains(Point::new(saturate_i32(from.0), saturate_i32(y))) {
                 ants.surface.fill_rect(px, py, 1, 1, colour);
             }
         }
@@ -978,10 +977,6 @@ fn clone_marker(surface: &mut Surface, view: &View, layout: &Layout, theme: &The
 
 /// How much the crop box's veil darkens what it cuts away, in 255ths.
 const CROP_VEIL: u8 = 120;
-
-fn to_i32_saturating(value: i64) -> i32 {
-    i32::try_from(value.clamp(i64::from(i32::MIN), i64::from(i32::MAX))).unwrap_or(0)
-}
 
 fn to_u32(value: i32) -> u32 {
     u32::try_from(value).unwrap_or(0)

@@ -275,8 +275,8 @@ pub enum Acquisition {
     /// It does not fit beside the renders under way: it is queued again,
     /// first, at that cost ([`WallpaperDesk::requeue_preview`]).
     Wait,
-    /// It cannot run now — memory is critical, or the desk is stopping — and
-    /// concludes unavailable.
+    /// It cannot run now — memory is critical, the desk is stopping, or its
+    /// window has closed — and concludes unavailable.
     Unavailable,
 }
 
@@ -915,9 +915,9 @@ pub trait WallpaperService {
     ///   asked for.
     /// * [`Errno::AlreadyExists`] — the window already has this picture
     ///   pending at this size.
-    /// * [`Errno::LimitExceeded`] — the window already has as many renders
-    ///   pending as the desktop runs at once; the caller asks again once one
-    ///   is answered.
+    /// * [`Errno::LimitExceeded`] — the client already has as many previews
+    ///   pending, across all its windows, as the desktop renders at once; it
+    ///   asks again once one is answered.
     fn render(
         &mut self,
         window_id: u64,

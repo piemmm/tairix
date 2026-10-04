@@ -8,7 +8,7 @@
 //! centred in it; a larger one scrolls, in screen pixels.
 
 use tairix_abi::touch::PINCH_SCALE_ONE;
-use tairix_geometry::{Point, Rect};
+use tairix_geometry::{saturate_i32, Point, Rect};
 
 use crate::shape::{Bounds, FX};
 
@@ -398,12 +398,9 @@ impl Viewport {
 /// coordinate reaches.
 #[must_use]
 pub fn screen_rect(span: Bounds) -> Rect {
-    let clamp = |value: i64| {
-        i32::try_from(value.clamp(i64::from(i32::MIN), i64::from(i32::MAX))).unwrap_or(0)
-    };
-    let (x0, y0) = (clamp(span.x0), clamp(span.y0));
-    let width = u32::try_from(clamp(span.x1).saturating_sub(x0)).unwrap_or(0);
-    let height = u32::try_from(clamp(span.y1).saturating_sub(y0)).unwrap_or(0);
+    let (x0, y0) = (saturate_i32(span.x0), saturate_i32(span.y0));
+    let width = u32::try_from(saturate_i32(span.x1).saturating_sub(x0)).unwrap_or(0);
+    let height = u32::try_from(saturate_i32(span.y1).saturating_sub(y0)).unwrap_or(0);
     Rect::new(x0, y0, width, height)
 }
 

@@ -1662,8 +1662,11 @@ fn a_tool_chosen_in_the_tool_box_brings_its_own_bar() {
     assert_eq!(window.view.tool(), Tool::Fill);
     assert_eq!(outcome.relayout, Relayout::Reported);
     assert!(window.view.tool_box.is_active(tool_index(Tool::Fill)));
+    assert_eq!(
+        window.view.bar.settings().collect::<Vec<_>>(),
+        [Setting::Tolerance, Setting::Contiguous]
+    );
     let held = Tool::Fill.settings().len();
-    assert_eq!(held, 2);
     let bar = window.layout.bar();
     assert!(
         bar.control(held - 1).is_some() && bar.control(held).is_none(),
@@ -3053,10 +3056,25 @@ fn a_hidden_layer_is_not_merged() {
         assert!(refused.request.is_none(), "no worker asked");
         assert_eq!(
             window.view.message(),
-            Some("A hidden layer is not merged: show both first")
+            Some("A hidden or wholly faint layer is not merged")
         );
         assert_eq!(layers_of(&window).len(), 2, "both kept");
         assert!(!layers_of(&window)[hidden].visible, "and as they showed");
+    }
+    for faint in [0, 1] {
+        let mut layers = two;
+        layers[faint].1 = 0;
+        let mut window = layered(&layers, 1);
+        assert!(
+            !merge_offered(&window),
+            "layer {faint} wholly faint: not offered"
+        );
+        assert!(
+            window.act(Action::MergeDown).request.is_none(),
+            "no worker asked"
+        );
+        assert_eq!(layers_of(&window).len(), 2, "both kept");
+        assert_eq!(layers_of(&window)[faint].opacity, 0, "and as they showed");
     }
 }
 
@@ -3109,7 +3127,12 @@ fn a_layer_not_shown_wholly_is_not_made_a_palette_picture() {
         palette: PaletteChoice::Desktop,
         dither: false,
     };
-    for (opacity, visible) in [(128, true), (255, false)] {
+    // One hidden layer flattened would come out clear, so it is shown instead.
+    for (opacity, visible, advice) in [
+        (128, true, "flatten the picture first"),
+        (255, false, "show the layer first"),
+        (128, false, "show the layer first"),
+    ] {
         let mut window = layered(&[([255; 4], opacity)], 0);
         if !visible {
             window.act(Action::ShowLayer);
@@ -3121,10 +3144,14 @@ fn a_layer_not_shown_wholly_is_not_made_a_palette_picture() {
             &mut Region::new(),
         );
         assert!(outcome.request.is_none(), "no worker asked");
-        assert!(window
-            .view
-            .message()
-            .is_some_and(|said| said.ends_with("flatten the picture first")));
+        assert!(
+            window
+                .view
+                .message()
+                .is_some_and(|said| said.ends_with(advice)),
+            "{opacity} shown {visible}: {:?}",
+            window.view.message()
+        );
         assert_eq!(
             window.view.document().picture().map(|p| p.layers().len()),
             Some(1)

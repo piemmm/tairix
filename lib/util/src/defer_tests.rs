@@ -172,6 +172,27 @@ fn a_queue_answers_every_request_in_turn() {
     assert_eq!(queue.collect(), None);
 }
 
+/// A loop collecting what had landed when it began, while another answer
+/// lands, is still woken for that one: it waits beside answers being
+/// collected, so it is not the first the queue holds, but it is the first
+/// since the loop last looked.
+#[test]
+fn an_answer_landing_while_others_are_collected_still_wakes_the_loop() {
+    let mut queue = JobQueue::<u32, u32>::with_capacity(4).expect("room for four");
+    for job in 1..=3 {
+        queue.submit(job).expect("room");
+        assert_eq!(queue.next_job(), Some(job));
+    }
+    assert!(queue.deliver(10));
+    assert!(!queue.deliver(20));
+    let landed = queue.landed();
+    assert_eq!(queue.collect(), Some(10));
+    assert!(queue.deliver(30), "landed after the loop looked");
+    assert_eq!(queue.collect(), Some(20));
+    assert_eq!(landed, 2, "the loop's pass ends here, with one left");
+    assert_eq!(queue.collect(), Some(30));
+}
+
 /// Everything not yet collected counts against the bound, so a burst is
 /// refused rather than grown without limit — and room returns as answers are
 /// collected.

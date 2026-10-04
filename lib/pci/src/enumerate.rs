@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::driver::bus::BusDevice;
 use tairix_abi::driver::pci::{
-    BUS_MASTER_ENABLE, COMMAND_OFFSET, MEMORY_SPACE_ENABLE, PCI_DEVICES, PCI_FUNCTIONS,
+    Quiesced, BUS_MASTER_ENABLE, COMMAND_OFFSET, MEMORY_SPACE_ENABLE, PCI_DEVICES, PCI_FUNCTIONS,
 };
 use tairix_abi::driver::virtio_pci::{
     common, VIRTIO_PCI_CFG_COMMON, VIRTIO_PCI_CFG_NOTIFY, VIRTIO_PCI_CFG_PCI,
@@ -1160,12 +1160,23 @@ impl<C: ConfigSpace> PciTopology for Pci<C> {
         Ok(Topology::new(functions)?)
     }
 
-    fn quiesce(&self, stopped: &dyn Fn(&Function) -> bool) {
+    fn quiesce(&self, stopped: &dyn Fn(&Function) -> bool) -> Quiesced {
+        let masters =
+            |address: u64| self.read_config(address, COMMAND_OFFSET) & BUS_MASTER_ENABLE != 0;
+        let mut quiesced = Quiesced::default();
         self.each_function(|addr, address, id, multifunction| {
-            if stopped(&self.read_function(addr, address, id, multifunction, AcsPolicy::Leave)) {
-                self.set_bus_master(address, false);
+            let function = self.read_function(addr, address, id, multifunction, AcsPolicy::Leave);
+            if !stopped(&function) || !masters(address) {
+                return;
+            }
+            self.set_bus_master(address, false);
+            if masters(address) {
+                quiesced.refused += 1;
+            } else {
+                quiesced.stopped += 1;
             }
         });
+        quiesced
     }
 }
 

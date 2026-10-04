@@ -72,6 +72,15 @@ pub fn config_address(id: u16) -> u64 {
     u64::from(id) << 8
 }
 
+/// What telling functions found mastering DMA to stop came to.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct Quiesced {
+    /// Stopped.
+    pub stopped: usize,
+    /// Still mastering after the write.
+    pub refused: usize,
+}
+
 /// A PCI bus that can provision a non-virtio function's resources.
 ///
 /// # Capabilities

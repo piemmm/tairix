@@ -345,8 +345,7 @@ fn every_unit_becomes_a_node_carrying_its_registers_and_reserved_windows() {
         0x800A_0000,
         b"intel,vtd",
         0,
-        NO_BRIDGES,
-        NO_ALIASES,
+        Some((NO_BRIDGES, NO_ALIASES)),
         &mut sink,
     )
     .unwrap();
@@ -395,6 +394,36 @@ fn every_unit_becomes_a_node_carrying_its_registers_and_reserved_windows() {
     );
 }
 
+/// With no hierarchy to resolve a scope through, every unit still gets its
+/// node, so it comes up, but keeps no firmware window: it blocks every stream,
+/// and every window it would have kept is counted dropped.
+#[test]
+fn without_a_hierarchy_every_unit_comes_up_keeping_no_window() {
+    let graphics = drhd(0, 0, 0, 0xFED9_0000, &scope(1, 0, 0, &[(2, 0)]));
+    let rest = drhd(DRHD_INCLUDE_PCI_ALL, 1, 0, 0xFED9_1000, &[]);
+    let usb = rmrr(0, 0x7B80_0000, 0x7B8F_FFFF, &scope(1, 0, 0, &[(0x14, 0)]));
+    let stolen = rmrr(0, 0x8000_0000, 0x83FF_FFFF, &scope(1, 0, 0, &[(2, 0)]));
+    let bytes = table(46, 0, &[graphics, rest, usb, stolen].concat());
+    let dmar = Dmar::parse(&bytes).unwrap();
+    let mut sink = Sink(Vec::new());
+    let placed = emit_unit_nodes(&dmar, 1, b"intel,vtd", 0, None, &mut sink).unwrap();
+    assert_eq!(
+        placed,
+        UnitNodes {
+            emitted: 2,
+            dropped: 2
+        }
+    );
+    let registers = [
+        HwResource::mmio(0xFED9_0000, 0x1000),
+        HwResource::mmio(0xFED9_1000, 0x2000),
+    ];
+    for (node, registers) in sink.0.iter().zip(registers) {
+        assert_eq!(node.class(), Some(HwDeviceClass::Iommu));
+        assert_eq!(node.resources(), [registers], "its registers alone");
+    }
+}
+
 #[test]
 fn reserved_windows_past_a_node_s_room_are_counted_not_forced() {
     let unit = drhd(DRHD_INCLUDE_PCI_ALL, 0, 0, 0xFED9_0000, &[]);
@@ -411,8 +440,15 @@ fn reserved_windows_past_a_node_s_room_are_counted_not_forced() {
     let bytes = table(46, 0, &structures);
     let dmar = Dmar::parse(&bytes).unwrap();
     let mut sink = Sink(Vec::new());
-    let placed =
-        emit_unit_nodes(&dmar, 1, b"intel,vtd", 0, NO_BRIDGES, NO_ALIASES, &mut sink).unwrap();
+    let placed = emit_unit_nodes(
+        &dmar,
+        1,
+        b"intel,vtd",
+        0,
+        Some((NO_BRIDGES, NO_ALIASES)),
+        &mut sink,
+    )
+    .unwrap();
     assert_eq!(
         sink.0[0].resources().len(),
         tairix_abi::HW_NODE_MAX_RESOURCES
@@ -461,8 +497,15 @@ fn a_reserved_window_is_kept_for_every_alias_of_its_function() {
     let alias = sid(2, 0, 0);
     let aliases = Aliases(vec![(sid(2, 1, 0), alias), (sid(2, 2, 0), alias)]);
     let mut sink = Sink(Vec::new());
-    let placed =
-        emit_unit_nodes(&dmar, 1, b"intel,vtd", 0, NO_BRIDGES, &aliases, &mut sink).unwrap();
+    let placed = emit_unit_nodes(
+        &dmar,
+        1,
+        b"intel,vtd",
+        0,
+        Some((NO_BRIDGES, &aliases)),
+        &mut sink,
+    )
+    .unwrap();
     assert_eq!(placed.dropped, 0);
     let streams: Vec<u32> = sink.0[0]
         .resources()
@@ -520,8 +563,15 @@ fn a_window_firmware_names_twice_takes_one_slot() {
     let bytes = table(46, 0, &twice);
     let dmar = Dmar::parse(&bytes).unwrap();
     let mut sink = Sink(Vec::new());
-    let placed =
-        emit_unit_nodes(&dmar, 1, b"intel,vtd", 0, NO_BRIDGES, NO_ALIASES, &mut sink).unwrap();
+    let placed = emit_unit_nodes(
+        &dmar,
+        1,
+        b"intel,vtd",
+        0,
+        Some((NO_BRIDGES, NO_ALIASES)),
+        &mut sink,
+    )
+    .unwrap();
     assert_eq!(placed.dropped, 0);
     let windows = sink.0[0]
         .resources()
@@ -541,8 +591,15 @@ fn a_window_on_a_segment_discovery_does_not_walk_is_never_resolved() {
     let bytes = table(46, 0, &[near, far, window].concat());
     let dmar = Dmar::parse(&bytes).unwrap();
     let mut sink = Sink(Vec::new());
-    let placed =
-        emit_unit_nodes(&dmar, 1, b"intel,vtd", 0, NO_BRIDGES, NO_ALIASES, &mut sink).unwrap();
+    let placed = emit_unit_nodes(
+        &dmar,
+        1,
+        b"intel,vtd",
+        0,
+        Some((NO_BRIDGES, NO_ALIASES)),
+        &mut sink,
+    )
+    .unwrap();
     assert_eq!(placed.dropped, 1, "counted once, not once per unit");
     assert!(sink
         .0
@@ -569,8 +626,20 @@ fn a_full_tree_keeps_the_units_it_could_hold() {
     let bytes = table(46, 0, &[graphics, rest].concat());
     let dmar = Dmar::parse(&bytes).unwrap();
     let mut room = Room(1, Vec::new());
-    let placed =
-        emit_unit_nodes(&dmar, 1, b"intel,vtd", 0, NO_BRIDGES, NO_ALIASES, &mut room).unwrap();
+    let placed = emit_unit_nodes(
+        &dmar,
+        1,
+        b"intel,vtd",
+        0,
+        Some((NO_BRIDGES, NO_ALIASES)),
+        &mut room,
+    )
+    .unwrap();
     assert_eq!(placed.emitted, 1);
     assert_eq!(room.1.len(), 1);
+    assert!(
+        placed.strand(&dmar, 0),
+        "the unit left out strands its segment"
+    );
+    assert!(!placed.strand(&dmar, 1), "and no other");
 }

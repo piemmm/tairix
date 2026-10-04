@@ -24,7 +24,7 @@ D503, D505 and D514–D520 (the tracer's open defects).
 | RT6 | Wind on water without repetition: a spectrum of many wave components under gusting patches; the open sea's grid no longer tiles in view; detail finer than a pixel becomes roughness | done |
 | RT7 | The water defects: ripples aliasing far off, reflections lost at grazing angles, the open sea stopping short of the horizon, and the noise seams under every pattern (D490–D494) | done |
 | RT8 | Caustics on and under every body of water, from the light the surface itself focuses: beams over the water the picture shows, every one gathered, refracted onto beds and what stands in the water and reflected onto what stands over it | done |
-| RT9 | Water's edge: reeds and bulrushes along banks, pondweed and water lilies in still water | planned |
+| RT9 | Water's edge: reeds and bulrushes along banks, pondweed and water lilies in still water | done |
 | RT10 | Streams close up: running water over stones worn round, slate the angular exception | planned |
 | RT11 | Deltas, beaches and eroding coasts: sand with driftwood, footprints, paw prints, shells, stones and wrack; cliffs, sandbanks, marram binding the dunes | planned |
 | RT12 | Jetties, harbours and fishing villages; gulls and other birds; shoals of fish | planned |
@@ -59,6 +59,7 @@ D503, D505 and D514–D520 (the tracer's open defects).
 | RT41 | Local adaptation, a gentle photographic HDR: a sky seen from a dark room or over a dark wood keeps its detail and the room its shadows, only the range a display cannot hold compressed, and a scene one exposure holds left exactly as it is | done |
 | RT42 | Lights as measured: the sun at its true size with its limb darkened, bent by the standard atmosphere; the full moon at its true size, brightness and colour; Allen's stars with Tycho-2's colours; lamps in lumens and candelas; the dusk and night still lifes under the open sky; cirrus lit as ice | done |
 | RT43 | Water clouds lit by multiple scattering that holds for thin cloud too, in place of the octave, powder and ambient approximations | planned |
+| RT44 | Cloud to the horizon: decks over the Earth's curve, mapped in levels about the eye out to as far as they can be seen, the air beneath them shaded by them, each place lit by the sun as it stands there | done |
 
 ## Standing rules
 
@@ -148,7 +149,8 @@ with it.
 falling back and reaching a thousand only when the scene is ready. Each stage
 carries a share of the whole measured over the settings; a land's build weighs
 its own stages by their items times the measured cost of one, so its share
-keeps pace whether droplets or wear dominate. The shares are averages: a
+keeps pace whether droplets or wear dominate, and the sky counts the units of
+its air's tables and its banks' levels as they are built. The shares are averages: a
 setting whose land is most of its work (the desert) runs behind the clock in
 its first half and catches up. Tracing reports steps traced of the reveal's
 count. The engine reports both in the trace desk's status.
@@ -188,7 +190,14 @@ loop to write from, so nothing is kept and the launch says so.
 The screensaver traces every pixel at the tracer's best quality; the governor
 that cut samples to keep a reveal under four minutes is gone. A pixel takes
 at least 16 samples, four by four over the filter, then rounds of 32, 64 and
-128 until its samples agree. Its samples are drawn from a Gaussian
+128 until its samples agree. A pixel whose samples lean on a surface that
+gathers its light by random rays — seen directly, or through clear water or
+in a mirror — takes at least 64, as its first samples can all miss the few
+paths that bring most of its light, and none stops while what it shows hangs
+on its brightest sample; such a surface's bounce is never ended by Russian
+roulette. Measured,
+this costs 2–27% more tracing, most where shaded foliage and grass fill the
+picture. Its samples are drawn from a Gaussian
 reconstruction filter of half a pixel's deviation, cut off at three, through
 the inverse of its distribution, so every sample weighs the same. Measured,
 this is about twice the samples and the time of the old best quality.
@@ -224,7 +233,8 @@ scene holds, so a caller answering a frame stops within a few milliseconds:
   sixteen adaptation samples, a core a unit.
 
 Measured at 1920×1080 across 8 threads, no unit takes more than about 10 ms
-at either detail, and bounding them changed no pixel.
+at either detail but the one that begins a large scene's hierarchy, which can
+take about 20 ms at *Maximum* (D517), and bounding them changed no pixel.
 
 At *Maximum* (RT39) the budget is spent where it measurably buys realism.
 Radiosity records hold a hemisphere of 1024 rays, are laid down to half the
@@ -326,10 +336,26 @@ one with nothing laid does not.
 
 ## RT9–RT12 — Water's edge and the coast
 
-- Banks and still water (RT9): reeds and bulrushes stand in the shallows and
-  along banks where the land is wet and level; pondweed and lilies float where
-  the flow is still and the water shallow, both read from the land's water
-  attributes.
+- Banks and still water (RT9): reeds and reedmace stand in the shallows and
+  on wet, level banks off any way; lilies and pondweed float where the water
+  is still and as deep as each roots in; none stands where the woods' shade
+  hides most of the sky, and the floating plants die back over winter. Depth
+  and stillness are the land's fresh water against the ground and how steeply
+  its surface falls (`Land::water_level`), or the lake a land's sea stands
+  for. Each plant is grown into square patches (`waterside`) at statures from
+  0.55 to 1.1 of its kind's, the shorter the thinner; a resumable job
+  (`compose::waterside`) run between the woods' shade and the sward reads a
+  lattice of 0.75 m cells within 45 m of the eye and of 3.75 m cells beyond to
+  the detail's reach (`Simple` 250 m, at most 8000 patches; `Maximum` 700 m,
+  40 000, the nearest the eye kept where more would stand), each cell a patch
+  of the plant its place suits best or none, as likely as it suits it and as
+  tall and thick, so beds thin toward their edges. A cell's patch is drawn from its place and the light there alone, so
+  it is the same on any runner; the woods differ by detail, so where their
+  shade falls the water's edge does too. Measured at 960×540 at *Simple*, a
+  frozen pond's reeds about the eye trace 10% longer and a canyon's far beds
+  14%, preparation takes about 0.1 s more, and a scene holds at most 5 MB
+  more; at *Maximum* a winter scene prepares about 3 s longer, its radiosity
+  records' rays crossing the reeds.
 - Streams close up (RT10): a close vantage on a stream; its stones rounded in
   proportion to how far water has carried them, angular only where the bed is
   slate; the water's surface shaped by the flow over them, standing waves and
@@ -443,14 +469,69 @@ Every light out of doors comes of a published measurement, nothing tuned
 - Water's glow is scaled by the light measured falling on the scene's level.
 - Cirrus is ice in a high bank of its own: single scattering by its phase,
   Hillaire's series for the rest, the sky and ground in by the phase's share,
-  its shadow on the bank beneath. Every bank thins out over the last tenth of
-  its breadth, so none ends in a wall of cloud.
+  its shadow on the bank beneath.
 
 RT43 remains: the water decks still take the production approximations —
 scattering octaves whose weights add light a thin edge has not scattered,
 powdered edges that darken it, and an ambient eased by height. They want the
 same footing as ice: a multiple-scattering term that vanishes as the cloud
 thins and holds energy as it thickens.
+
+## RT44 — Cloud to the horizon
+
+A bank of cloud reaches as far as any of it can be seen, so no band of clear
+sky ever lies between the clouds and the horizon (`cloud.rs`).
+
+- **The Earth's curve.** Heights are taken over the Earth about its centre
+  straight below the eye, as the air's are, the scene's level at the sea's
+  distance from it plus its own height (`Air::ground`). A deck seen low down
+  runs down to the horizon as the curve carries it: a cumulus base meets the
+  eye's level some 120 km off, the highest cirrus nearly 380 km off. A ray
+  stops at the sea's sphere, beyond which the Earth hides the cloud.
+- **Levels.** A bank stands about the eye (`Cloudbank::stand`) in levels, each
+  twice the last's breadth in as many columns, the coarsest reaching where the
+  eye's sight grazing the sea runs on to the ceiling, the finest no broader
+  than 28 km for the low decks and 60 km for cirrus. Each level holds every
+  deck's weather and bands, the sun's optical depth, the bank above's
+  sunlight and the shadow; the cell counts are multiples of four, so a level's
+  square lies on whole cells of the next. A level's weather is drawn only as
+  finely as its columns hold, octaves finer than two columns settling to
+  their mean (`fbm2_resolved`), and its outer eighth is blended into the next
+  coarser level's own reading, reaching it at the edge, so no field steps
+  where the levels meet. A march begins where its ray rises through the
+  bank's floor, beneath which no cloud stands, and walks the finest level
+  holding each point, onto the next past a level's edge and back within a
+  finer one's square.
+  Every map is reserved whole and written row by row, so no unit fills more
+  than its own rows; a unit is a few rows a core, some 6 ms.
+- **Light by place.** The sunlight on cloud is tabulated by height and by the
+  cosine of the sun's angle from the vertical at the place, over the range the
+  bank's places see, so cloud far off toward a low sun takes it higher and
+  cloud far off the other way lower or not at all.
+- **The air beneath.** The aerial table carries on to 454 km in 88 slices,
+  the first 32 where they were, within 60 km. The air before each cloud a ray
+  meets, and on to where it leaves the highest bank, is lit by what of the sun
+  the banks let through, judged at one point of each stretch drawn where its
+  sample's share of the stretch's sunlit air has been gathered
+  (`Sight::drawn`), the land's aerial perspective drawing its point the same
+  way. An overcast's air is grey to the horizon.
+
+Measured on Coast at 960×540, Simple, 24 threads: preparation about 0.3 s
+longer (2.0–2.2 s to 2.3–2.6 s), the longest unit unchanged at about 6 ms, the
+readout's longest hold 0.2 s, the peak 15–30 MB higher; tracing 10–16% longer,
+the far cloud's march and the shaded air between them, of which the shade's
+noise costs some sampling rounds. At *Maximum* a meadow or a valley prepares
+3–4% longer, its radiosity records' rays looking out to far cloud.
+
+Tests: a deck running on to the horizon however low a ray, the further the
+lower, past 60 km at the horizon, and none below it; heights over the curve
+and the points they lie at agreeing; the levels meeting with no seam in
+weather, light or shadow; every level's bands holding its cloud; a march
+standing over the finest level and cell beneath each point, inward and
+outward; far cloud lit by the sun at its own place; far cloud shading the
+ground from a low sun; an overcast grey to the horizon; the aerial table
+keeping its near slices; a point drawn along the air falling as its sunlight
+is gathered; and a resolved sum keeping only the octaves its footprint holds.
 
 ## RT32–RT36 — New scene families
 
@@ -491,10 +572,9 @@ session weighs against the memory band (`plans/NEW-DESKTOP-SETTINGS.md`
 DS24); each profile has its own measured progress shares.
 
 Measured at 1920×1080 on a 24-thread desktop preparing across 8 threads, a
-landscape prepares at *Simple* in 0.3–4.0 s, holding at most 324 MB at its
-peak and 323 MB once prepared, and at *Maximum* in 0.8–33 s, at most 583 MB and
-580 MB — most of *Maximum*'s time its radiosity records, and the most memory
-a mountain lake's, its caustics (RT8) beside its land. RT37's woods to the
+landscape prepares at *Simple* in 0.5–4.3 s, holding at most 374 MB at its
+peak and once prepared, and at *Maximum* in 1.3–41 s, at most 636 MB and
+634 MB — most of *Maximum*'s time its radiosity records. RT37's woods to the
 horizon, RT38's stones, and what later items buy are *Maximum*'s to spend the
 rest of its budget on.
 

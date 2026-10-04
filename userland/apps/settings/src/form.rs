@@ -2006,6 +2006,14 @@ impl Form {
         }
     }
 
+    /// Whether one of its rows offers `action`.
+    pub(crate) fn offers(&self, action: Action) -> bool {
+        self.owners
+            .iter()
+            .flatten()
+            .any(|owner| *owner == Owner::Action(action))
+    }
+
     /// Adopt what the desktop answered when asked to show the screensaver.
     pub(crate) fn adopt_preview_refusal(&mut self, refusal: Option<Errno>) {
         if self.preview_refusal != refusal {
@@ -2579,10 +2587,33 @@ impl Form {
             if let Some(action) =
                 group.on_pointer(event, layout, place.scale, place.theme, &mut own)
             {
+                self.report_popup_moved((index, &action), layout, place, &mut own);
                 acted = Some((index, action));
             }
         }
         self.concluded(acted, &own, (place, damage))
+    }
+
+    /// Report where group `index`'s choice list moved since it was laid out
+    /// as `before`, now that it has reported `action`: a list opens from a
+    /// layout that placed none, so only placing it again finds its plate.
+    fn report_popup_moved(
+        &self,
+        (index, action): (usize, &FieldGroupAction),
+        before: FieldLayout,
+        place: FormPlace<'_>,
+        damage: &mut Region,
+    ) {
+        if !before.popup_may_move(&action.action) {
+            return;
+        }
+        if let Some(after) = self
+            .layouts(place)
+            .into_iter()
+            .find_map(|(at, layout)| (at == index).then_some(layout))
+        {
+            before.report_popup_moved(after, damage);
+        }
     }
 
     /// Route one key press.
@@ -2609,6 +2640,9 @@ impl Form {
             // it resolves, so the cursor must not step out from under it.
             let listing = group.rows().iter().any(FieldRow::popup_open);
             kept = acted.is_some() || listing || group.focus() != was;
+            if let Some((index, action)) = &acted {
+                self.report_popup_moved((*index, action), layout, place, &mut own);
+            }
         }
         if !kept {
             // The group clamps at its own ends and says so by not moving:

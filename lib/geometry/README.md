@@ -31,7 +31,9 @@ used by the compositing window manager (`userland/gui/wm`), the taskbar
 
 All edge arithmetic widens through `i64`/`u32` so a pathological coordinate
 saturates rather than wrapping — it fails closed (`AGENTS.md` §2.9). `Scale`
-widens through `u64` and saturates the same way.
+widens through `u64` and saturates the same way. `to_i32` (an extent) and
+`saturate_i32` (a wide coordinate) are the one way back into an `i32`
+coordinate, for this crate and its consumers alike.
 
 ## Why it lives in `lib/`
 

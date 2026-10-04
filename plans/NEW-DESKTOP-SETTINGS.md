@@ -278,10 +278,15 @@ write path on landing.
 - **Fail closed, park never poll.** The event loop parks on the wait set; a
   pane that is not on screen samples nothing; a refused read leaves the pane
   exactly as it was and states why; a malformed or refused apply changes
-  nothing anywhere. No round trip runs on the loop: every request to another
-  service is a worker's, its answer adopted on the wake it nudges — the
-  session's lock, screensaver preview and notified-sources query included, on
-  one desk holding one of each (`asks::DesktopAsks`).
+  nothing anywhere. No store read or write and no request another service
+  answers runs on the loop: each is a worker's, its answer adopted on the
+  wake it nudges — an apply and the read of what the store then holds, the
+  readings, and the session's lock, screensaver preview and notified-sources
+  query, on one desk holding one of each, a newer preview held behind the one
+  outstanding (`asks::DesktopAsks`). What the first frame needs is read
+  before the window opens. The window channel's own requests — the present,
+  the title, the open-target pull — stay on the loop, as every
+  application's do (`plans/OPEN-DEFECTS.md` D653).
 
 - **Not in this plan:** the audio, Bluetooth, print, touch, wireless, and
   sharing subsystems themselves (§3 names each one's prerequisite); the

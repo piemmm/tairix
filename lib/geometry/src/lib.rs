@@ -292,6 +292,13 @@ pub fn to_i32(v: u32) -> i32 {
     i32::try_from(v).unwrap_or(i32::MAX)
 }
 
+/// A wide coordinate as an `i32` one, held to the nearer end of the range
+/// rather than wrapped.
+#[must_use]
+pub fn saturate_i32(v: i64) -> i32 {
+    i32::try_from(v).unwrap_or(if v < 0 { i32::MIN } else { i32::MAX })
+}
+
 #[cfg(test)]
 mod region_tests;
 #[cfg(test)]

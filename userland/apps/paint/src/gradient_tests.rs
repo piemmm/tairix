@@ -25,12 +25,16 @@ const BLACK_TO_WHITE: (Ink, Ink) = (Ink::Colour([0, 0, 0, 255]), Ink::Colour([25
 fn bands_run_along_the_drag_and_hold_past_either_end() {
     let gradient = across(GradientShape::Linear, BLACK_TO_WHITE);
     let laying = gradient.on(&Kind::Rgba);
-    assert_eq!(laying.share(0, 5), 0);
-    assert_eq!(laying.share(10, 5), 255);
-    assert_eq!(laying.share(5, 5), 127);
-    assert_eq!(laying.share(5, 40), 127, "the same band however far across");
-    assert_eq!(laying.share(-30, 5), 0, "held before its start");
-    assert_eq!(laying.share(90, 5), 255, "and past its end");
+    assert_eq!(laying.along(5).share(0), 0);
+    assert_eq!(laying.along(5).share(10), 255);
+    assert_eq!(laying.along(5).share(5), 127);
+    assert_eq!(
+        laying.along(40).share(5),
+        127,
+        "the same band however far across"
+    );
+    assert_eq!(laying.along(5).share(-30), 0, "held before its start");
+    assert_eq!(laying.along(5).share(90), 255, "and past its end");
     let click = Gradient {
         to: Point::centre_of(0, 5),
         ..gradient
@@ -38,7 +42,7 @@ fn bands_run_along_the_drag_and_hold_past_either_end() {
     assert!(!click.spans());
     assert!(gradient.spans());
     assert_eq!(
-        click.on(&Kind::Rgba).share(3, 3),
+        click.on(&Kind::Rgba).along(3).share(3),
         255,
         "a click lays its second ink"
     );
@@ -47,9 +51,13 @@ fn bands_run_along_the_drag_and_hold_past_either_end() {
 #[test]
 fn rings_spread_out_from_where_the_drag_began() {
     let laying = across(GradientShape::Radial, BLACK_TO_WHITE).on(&Kind::Rgba);
-    assert_eq!(laying.share(0, 5), 0);
-    assert_eq!(laying.share(0, 10), laying.share(5, 5), "the same ring");
-    assert_eq!(laying.share(0, 15), 255);
+    assert_eq!(laying.along(5).share(0), 0);
+    assert_eq!(
+        laying.along(10).share(0),
+        laying.along(5).share(5),
+        "the same ring"
+    );
+    assert_eq!(laying.along(15).share(0), 255);
     assert_eq!(
         Point::centre_of(10, 5).x - Point::centre_of(0, 5).x,
         10 * FX
@@ -97,7 +105,7 @@ fn a_rings_share_is_exactly_its_distance_over_the_drag() {
                 let vy = i128::from(y * FX + FX / 2 - from.y);
                 let want = ((vx * vx + vy * vy).isqrt() * 255 / radius).clamp(0, 255);
                 assert_eq!(
-                    i128::from(laying.share(x, y)),
+                    i128::from(laying.along(y).share(x)),
                     want,
                     "pixel ({x}, {y}) of the drag {from:?} to {to:?}"
                 );
@@ -112,9 +120,9 @@ fn a_colour_picture_takes_the_blend_mixed_once_for_each_share() {
     let gradient = across(GradientShape::Linear, (Ink::Colour(red), Ink::Clear));
     let laying = gradient.on(&Kind::Rgba);
     for x in -2..=12 {
-        let share = laying.share(x, 5);
+        let share = laying.along(5).share(x);
         assert_eq!(
-            laying.laid((x, 5), Sample::Rgba([0; 4]), u8::MAX),
+            laying.along(5).laid(x, Sample::Rgba([0; 4]), u8::MAX),
             Sample::Rgba(between(red, [0; 4], share)),
             "pixel {x}, {share} of the way along"
         );
@@ -122,7 +130,7 @@ fn a_colour_picture_takes_the_blend_mixed_once_for_each_share() {
     let clear = across(GradientShape::Radial, (Ink::Clear, Ink::Clear)).on(&Kind::Rgba);
     let below = Sample::Rgba([9, 9, 9, 255]);
     assert_eq!(
-        clear.laid((3, 5), below, u8::MAX),
+        clear.along(5).laid(3, below, u8::MAX),
         below,
         "clear lays nothing"
     );
@@ -183,4 +191,59 @@ fn a_palette_picture_takes_a_dither_of_its_two_entries() {
         "more of the second the further along"
     );
     assert!(lit(6, 10) > 0 && lit(6, 10) < 16, "mixed in the middle");
+}
+
+/// A row read left to right takes each pixel's own share, exactly, however
+/// far the columns read jump: a band's is its projection on the drag over
+/// the drag's squared length, a ring's its distance over the drag's.
+#[test]
+fn a_row_read_along_takes_each_pixels_exact_share() {
+    let drags = [
+        (Point::centre_of(0, 5), Point::centre_of(10, 5)),
+        (Point { x: 0, y: 0 }, Point { x: 1, y: 0 }),
+        (Point { x: 7, y: -3 }, Point { x: 7, y: 900 }),
+        (
+            Point { x: -9000, y: 400 },
+            Point {
+                x: 123_456,
+                y: -777,
+            },
+        ),
+        (Point::centre_of(40, 31), Point::centre_of(3, 4)),
+    ];
+    let steps = [1, 1, 0, 2, 1, 5, 1, 17, 3, 1, 1, 40, 1];
+    for (from, to) in drags {
+        let (dx, dy) = (i128::from(to.x - from.x), i128::from(to.y - from.y));
+        let length = dx * dx + dy * dy;
+        let radius = length.isqrt().max(1);
+        for shape in [GradientShape::Linear, GradientShape::Radial] {
+            let gradient = Gradient {
+                from,
+                to,
+                shape,
+                inks: BLACK_TO_WHITE,
+            };
+            let laying = gradient.on(&Kind::Rgba);
+            for y in -40..40 {
+                let mut along = laying.along(y);
+                let mut x = -70;
+                for step in steps.iter().cycle().take(60) {
+                    x += step;
+                    let vx = i128::from(x * FX + FX / 2 - from.x);
+                    let vy = i128::from(y * FX + FX / 2 - from.y);
+                    let want = match shape {
+                        GradientShape::Linear => (255 * (vx * dx + vy * dy) / length).clamp(0, 255),
+                        GradientShape::Radial => {
+                            ((vx * vx + vy * vy).isqrt() * 255 / radius).clamp(0, 255)
+                        }
+                    };
+                    assert_eq!(
+                        i128::from(along.share(x)),
+                        want,
+                        "{shape:?} pixel ({x}, {y}) of the drag {from:?} to {to:?}"
+                    );
+                }
+            }
+        }
+    }
 }

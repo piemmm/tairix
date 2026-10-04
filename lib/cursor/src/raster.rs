@@ -18,12 +18,13 @@
 
 use alloc::vec::Vec;
 
+use tairix_geometry::saturate_i32;
 use tairix_raster::{layer_count, FillRule, Layer, Node, Paint, Surface, MAX_GROUP_DEPTH};
 use tairix_svg::geom::{LineCap, LineJoin, StrokeStyle, SubPath};
 use tairix_svg::stroke::stroke_outline;
 use tairix_util::mathf::round_i32;
 
-use crate::fit::{saturate, Fit, FIT_UNITS};
+use crate::fit::{Fit, FIT_UNITS};
 use crate::image::CursorImage;
 use crate::vector::{Outline, VectorCursor};
 
@@ -99,7 +100,7 @@ impl VectorCursor {
 /// `None` when the band would pass [`MAX_OUTLINE_POINTS`].
 fn band(fit: &Fit, body: &[Node], outline: Outline, design: u32, side: u32) -> Option<Layer> {
     let (ax, ay) = fit.anchor();
-    let about = |value: i32, anchor: i64| f64::from(saturate(i64::from(value) - anchor));
+    let about = |value: i32, anchor: i64| f64::from(saturate_i32(i64::from(value) - anchor));
     let mut silhouette = Vec::new();
     drawn_contours(body, 0, &mut |contour| {
         silhouette.push(SubPath::closed(
@@ -121,8 +122,9 @@ fn band(fit: &Fit, body: &[Node], outline: Outline, design: u32, side: u32) -> O
     let pieces = stroke_outline(&silhouette, &style, tolerance, MAX_OUTLINE_POINTS).ok()?;
     // Rounded about the anchor, half away from it, so a band around mirrored
     // artwork is mirrored to the last sub-unit.
-    let placed =
-        |offset: f64, anchor: i64| saturate(i64::from(round_i32(offset)).saturating_add(anchor));
+    let placed = |offset: f64, anchor: i64| {
+        saturate_i32(i64::from(round_i32(offset)).saturating_add(anchor))
+    };
     let contours = pieces
         .iter()
         .map(|piece| {

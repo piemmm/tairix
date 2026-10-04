@@ -153,12 +153,35 @@ pub(crate) fn noise2(x: f64, z: f64, seed: u32) -> f64 {
 /// Octaves of plane noise summed, each `lacunarity` times finer and `gain`
 /// times fainter than the last, divided by the weight they carry: roughly
 /// `-1.0..=1.0`.
-pub(crate) fn fbm2(x: f64, z: f64, seed: u32, (octaves, gain, lacunarity): (u32, f64, f64)) -> f64 {
+pub(crate) fn fbm2(x: f64, z: f64, seed: u32, shape: (u32, f64, f64)) -> f64 {
+    fbm2_resolved(x, z, seed, shape, 0.0)
+}
+
+/// How much of a noise whose lattice cells are `lattice` across survives
+/// sampling `footprint` apart: none finer than two footprints, which would
+/// only alias, all of it by four.
+pub(crate) fn resolved(footprint: f64, lattice: f64) -> f64 {
+    smoothstep(2.0 * footprint, 4.0 * footprint, lattice)
+}
+
+/// [`fbm2`] sampled `footprint` of its own units apart: each octave
+/// [`resolved`] there, the rest settling to their mean of nought while still
+/// counting in the weight divided by, so the pattern keeps its scale.
+pub(crate) fn fbm2_resolved(
+    x: f64,
+    z: f64,
+    seed: u32,
+    (octaves, gain, lacunarity): (u32, f64, f64),
+    footprint: f64,
+) -> f64 {
     let (mut sum, mut total, mut weight, mut scale) = (0.0, 0.0, 1.0, 1.0);
     for octave in 0..octaves {
-        // Each octave turned, so no lattice lines up from one to the next.
-        let (rx, rz) = turn(x * scale, z * scale, octave);
-        sum += weight * noise2(rx, rz, seed.wrapping_add(octave));
+        let kept = resolved(footprint, 1.0 / scale);
+        if kept > 0.0 {
+            // Each octave turned, so no lattice lines up from one to the next.
+            let (rx, rz) = turn(x * scale, z * scale, octave);
+            sum += weight * kept * noise2(rx, rz, seed.wrapping_add(octave));
+        }
         total += weight;
         weight *= gain;
         scale *= lacunarity;

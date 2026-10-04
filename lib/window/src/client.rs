@@ -1123,8 +1123,9 @@ impl<T: WindowTransport> WindowClient<T> {
     /// window's conclusions waits undelivered in a full mailbox, and
     /// [`Errno::AlreadyExists`] for a picture already pending at that size —
     /// both answered by asking again once one concludes; [`Errno::NotFound`]
-    /// for a window the caller does not own or a subject the desktop does not
-    /// hold; [`Errno::LengthOutOfRange`] for a region too small for the size;
+    /// for a window the caller does not own, a subject the desktop does not
+    /// hold, or a region not granted to it; [`Errno::LengthOutOfRange`] for a
+    /// region too small for the size;
     /// [`Errno::Busy`] while the desktop is shutting down;
     /// [`Errno::OutOfMemory`] when it cannot queue the render), a transport
     /// failure, or a corrupt status frame.

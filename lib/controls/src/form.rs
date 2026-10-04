@@ -194,6 +194,28 @@ impl FieldLayout {
         self.popup = popup;
         self
     }
+
+    /// Whether `action`, reported by a group laid out as this, can have moved
+    /// its choice list — opened, closed, or one already open — so the owner
+    /// lays it out again only then.
+    #[must_use]
+    pub const fn popup_may_move(self, action: &FieldAction) -> bool {
+        !self.popup.is_empty() || matches!(action, FieldAction::Choices { .. })
+    }
+
+    /// Report into `damage` where the choice list moved between this layout,
+    /// the one an event was routed with, and `after`, the owner's once it
+    /// was: the plate a list opened into, the one it vacated, or both.
+    ///
+    /// A list opens from a layout that had none placed, so the press that
+    /// opens it cannot name the plate it opens into: only the owner, placing
+    /// the list again, can.
+    pub fn report_popup_moved(self, after: Self, damage: &mut Region) {
+        if self.popup != after.popup {
+            damage.add(self.popup);
+            damage.add(after.popup);
+        }
+    }
 }
 
 /// Test-only: the span a row laid out for `layout` gives its own words,

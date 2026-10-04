@@ -11,12 +11,23 @@
 
 use tairix_colour::Rgba;
 use tairix_font::BitmapFont;
-use tairix_geometry::Scale;
+use tairix_geometry::{Rect, Region, Scale};
 use tairix_input::{Key, Modifiers};
 use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{Contrast, Fonts, TextRole, Theme};
 
 use crate::text::Keystroke;
+
+/// Whether `drew` covers every pixel of `rect`, however the region split it.
+#[must_use]
+pub fn covers(drew: &Region, rect: Rect) -> bool {
+    let mut uncovered = Region::new();
+    uncovered.add(rect);
+    for covered in drew.rects() {
+        uncovered.subtract(*covered);
+    }
+    uncovered.is_empty()
+}
 
 /// `key` pressed with no modifier held, at the start of the clock: what a
 /// test routing a key through a container needs when timing is not its

@@ -1644,8 +1644,9 @@ fn write_resampled_band(
 /// The answer is a worker's own account of a decode it has not run, so a
 /// caller budgeting by it should still expect a render to fail for want of
 /// memory ([`WallpaperRenderFailure::out_of_memory`]). An inflated answer only
-/// holds back the render that gave it. A plan the worker refuses lets the
-/// source go, as a planned render does once it is drawn or dropped.
+/// holds back the render that gave it. A refused plan lets the source go,
+/// whether the geometry or the worker refused it, as a planned render does
+/// once it is drawn or dropped.
 ///
 /// # Errors
 ///
@@ -1659,11 +1660,12 @@ pub fn plan_wallpaper<L: Launcher, S: tairix_log::Sink>(
     fit: WallpaperFit,
 ) -> Result<PlannedWallpaper<'_, L, S>, WallpaperRenderFailure> {
     if !wallpaper_geometry_admitted(screen, width, height) {
+        let_wallpaper_go(sandbox);
         return Err(WallpaperRenderFailure::Refused(
             WallpaperRefusal::MalformedRequest,
         ));
     }
-    let peak_bytes = sandbox.ask(|sandbox| {
+    let planned = sandbox.ask(|sandbox| {
         let reply = sandbox
             .request(&wallpaper_geometry_request(
                 OP_WALLPAPER_PLAN,
@@ -1685,16 +1687,11 @@ pub fn plan_wallpaper<L: Launcher, S: tairix_log::Sink>(
                 peak.checked_add(client_render_bytes(width, height))
                     .ok_or(WallpaperRenderFailure::ReplyMalformed)
             }
-            REPLY_ERROR => {
-                let refusal = decode_wallpaper_error(&mut r);
-                // The refusal is the caller's answer; a failed release adds
-                // nothing it could act on.
-                let _ = release_wallpaper(sandbox);
-                Err(refusal)
-            }
+            REPLY_ERROR => Err(decode_wallpaper_error(&mut r)),
             _ => Err(WallpaperRenderFailure::ReplyMalformed),
         }
-    })?;
+    });
+    let peak_bytes = planned.inspect_err(|_| let_wallpaper_go(sandbox))?;
     Ok(PlannedWallpaper {
         sandbox,
         screen,
@@ -1773,10 +1770,18 @@ impl<L: Launcher, S: tairix_log::Sink> PlannedWallpaper<'_, L, S> {
 
 impl<L: Launcher, S: tairix_log::Sink> Drop for PlannedWallpaper<'_, L, S> {
     fn drop(&mut self) {
-        // The worker never holds a source or a decode past the render it was
-        // uploaded for. A failed release changes nothing the caller can act
-        // on, though a reply beyond belief still retires the worker.
-        let _ = self.sandbox.ask(release_wallpaper);
+        let_wallpaper_go(self.sandbox);
+    }
+}
+
+/// Have the live worker let its wallpaper source and document go, so none
+/// outlives the render it was uploaded for. A failed release changes nothing
+/// a caller can act on, though a reply beyond belief still retires the
+/// worker; a worker already gone took the source with it, so none is started
+/// just to be told.
+fn let_wallpaper_go<L: Launcher, S: tairix_log::Sink>(sandbox: &mut ParserSandbox<L, S>) {
+    if sandbox.is_live() {
+        let _ = sandbox.ask(release_wallpaper);
     }
 }
 

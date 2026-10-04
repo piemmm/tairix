@@ -38,7 +38,7 @@ use crate::accounts::{AccountFacts, Roster};
 use crate::body::{self, Body};
 use crate::facts::MachineFacts;
 use crate::footer::{Footer, FooterAction, Standing};
-use crate::form::{Composition, Form, FormOutcome, FormPlace, Posture, Setting};
+use crate::form::{Action, Composition, Form, FormOutcome, FormPlace, Posture, Setting};
 use crate::frame::{resolve_frame, Actions, Overflow, ShellFrame};
 use crate::network::{Addressing, NetworkFacts};
 use crate::pictures::{Chooser, PictureWanted};
@@ -406,6 +406,12 @@ pub struct Shell {
     /// The sources the desktop said have notified, or `None` while it has not
     /// said — or would not.
     notify_sources: Option<Vec<BundleId>>,
+    /// Why the desktop last would not lock the screen, held here so a refusal
+    /// landing while another pane is on show is stated once the pane that
+    /// asked is shown again.
+    lock_refusal: Option<tairix_abi::Errno>,
+    /// Why it last would not show the screensaver, held for the same reason.
+    preview_refusal: Option<tairix_abi::Errno>,
     /// A fresh salt the caller drew, held so a password can be hashed
     /// without the event loop waiting on a read.
     ///
@@ -480,6 +486,8 @@ impl Shell {
             network: NetworkFacts::default(),
             accounts: AccountFacts::default(),
             notify_sources: None,
+            lock_refusal: None,
+            preview_refusal: None,
             salt: None,
             footer: None,
             asking: None,
@@ -752,8 +760,13 @@ impl Shell {
     /// Adopt what the desktop answered when asked to lock the screen: `None`
     /// once it has, or its refusal, which the pane states.
     pub fn adopt_lock_answer(&mut self, answer: Result<(), tairix_abi::Errno>) {
-        if let Some(form) = self.body.form_mut() {
-            form.adopt_lock_refusal(answer.err());
+        self.lock_refusal = answer.err();
+        if let Some(form) = self
+            .body
+            .form_mut()
+            .filter(|form| form.offers(Action::LockNow))
+        {
+            form.adopt_lock_refusal(self.lock_refusal);
         }
     }
 
@@ -917,8 +930,13 @@ impl Shell {
     /// Adopt what the desktop answered when asked to show the screensaver:
     /// nothing once it has, or its refusal, which the pane states.
     pub fn adopt_preview_answer(&mut self, answer: Result<(), tairix_abi::Errno>) {
-        if let Some(form) = self.body.form_mut() {
-            form.adopt_preview_refusal(answer.err());
+        self.preview_refusal = answer.err();
+        if let Some(form) = self
+            .body
+            .form_mut()
+            .filter(|form| form.offers(Action::PreviewScreensaver))
+        {
+            form.adopt_preview_refusal(self.preview_refusal);
         }
     }
 
@@ -967,10 +985,9 @@ impl Shell {
 
     /// Adopt the desktop settings the session now holds.
     ///
-    /// What the window does when an apply is answered, and on regaining
-    /// focus: every composed row shows what the store actually holds, so a
-    /// refused apply reverts rather than leaving a value on screen the next
-    /// login would not restore.
+    /// What the window does when an apply is answered: every composed row
+    /// shows what the store actually holds, so a refused apply reverts rather
+    /// than leaving a value on screen the next login would not restore.
     pub fn adopt_settings(&mut self, settings: DesktopSettings) {
         // Against what the *form* shows, not against the last answer: a
         // choice the reader made moved the rows on screen without moving
@@ -990,6 +1007,12 @@ impl Shell {
         } else {
             self.restate_body();
         }
+    }
+
+    /// Put every composed row back to what the store last answered: what a
+    /// choice refused before it reached the desktop comes to.
+    pub fn revert_settings(&mut self) {
+        self.adopt_settings(self.settings.clone());
     }
 
     /// Build what the pane on show draws.
@@ -1028,6 +1051,8 @@ impl Shell {
             accounts: &self.accounts,
             staged_accounts: &staged_accounts,
             notify_sources: self.notify_sources.as_deref(),
+            lock_refusal: self.lock_refusal,
+            preview_refusal: self.preview_refusal,
         };
         self.body = match self.location.rows() {
             Some((_, pane)) => Body::of(pane, &answered),
@@ -1255,11 +1280,26 @@ impl Shell {
         )
     }
 
+    /// What adopting an answer can redraw in `viewport`: the pane's column
+    /// and everything beside and beneath it, its scrollbar and action band.
+    /// No answer moves the strip, the search field or the trail.
+    #[must_use]
+    pub fn pane_region(&self, viewport: Rect, scale: Scale, theme: &Theme) -> Rect {
+        let content = self.frame(viewport, scale, theme).content;
+        let span = |from: i32, to: i32| u32::try_from(to.saturating_sub(from)).unwrap_or(0);
+        Rect::new(
+            content.left(),
+            content.top(),
+            span(content.left(), viewport.right()),
+            span(content.top(), viewport.bottom()),
+        )
+    }
+
     /// Measure the pane for `viewport`, adopt the scroll range it implies, and
     /// re-derive the hover from where the pointer rests over what moved.
     ///
-    /// For a caller outside an input round, which redraws the whole client
-    /// afterwards: what the hover changed needs no reporting of its own.
+    /// For a caller outside an input round, which afterwards redraws all a
+    /// layout can move: what the hover changed needs no reporting of its own.
     pub fn lay_out(&mut self, viewport: Rect, scale: Scale, theme: &Theme) {
         self.measure(viewport, scale, theme);
         self.rehover(viewport, scale, theme, &mut tairix_controls::damage::sink());
@@ -2441,7 +2481,7 @@ impl Shell {
                 self.focus_on(Focus::Strip, viewport, scale, theme, damage);
                 return true;
             }
-            self.open_category_list(frame, damage);
+            self.open_category_list(&frame, (viewport, scale, theme), damage);
             return true;
         }
         // The middle crumb is the category on show: going to it shows that
@@ -2604,8 +2644,13 @@ impl Shell {
     }
 
     /// Open the category list the shed strip becomes, grouped as the strip
-    /// is.
-    fn open_category_list(&mut self, frame: ShellFrame, damage: &mut Region) {
+    /// is, reporting the plate it opens into.
+    fn open_category_list(
+        &mut self,
+        frame: &ShellFrame,
+        (viewport, scale, theme): (Rect, Scale, &Theme),
+        damage: &mut Region,
+    ) {
         let mut above = None;
         let mut menu = Menu::new(
             CATEGORIES
@@ -2622,8 +2667,8 @@ impl Shell {
                 .iter()
                 .position(|row| row.category == self.location.category),
         );
+        damage.add(Self::list_rect(&menu, frame, viewport, scale, theme));
         self.categories = Some(menu);
-        damage.add(frame.content);
     }
 
     /// Adopt what the open category list reported.

@@ -4,8 +4,8 @@
 //! A [`Draft`] composes a scene in one of the [`Setting`]s — still lifes,
 //! architecture, and landscapes of terrain, sea, trees, grass and cloud —
 //! from its seed alone. What it cannot set out at once, the height grids a
-//! terrain or a swell is traced over and the map a cloud layer is drawn from,
-//! it prepares a band of rows at a time, so a caller on an interactive loop
+//! terrain or a swell is traced over and the maps a bank of cloud is drawn
+//! from, it prepares a band of rows at a time, so a caller on an interactive loop
 //! spreads the work over as many frames as it needs. [`Draft::finish`] then
 //! builds the hierarchy a ray finds the objects through, and the [`Scene`] is
 //! read-only from there on, shared by every core tracing it.
@@ -64,6 +64,7 @@ mod tone;
 mod trace;
 mod tree;
 mod vector;
+mod waterside;
 
 pub use compose::Setting;
 pub use detail::Detail;

@@ -38,7 +38,9 @@ The desk is the worker's last type parameter, one of a sealed pair (`Desk`):
   owner seeing its work out before it ends. `collect_landed` adopts exactly the
   answers that had landed when it began (`JobQueue::landed`), so a loop's pass
   is bounded: what lands while it adopts waits for the next wake rather than
-  holding the loop from the input behind it.
+  holding the loop from the input behind it. That wake is never missing: a
+  delivery owes one when it is the first since the loop last collected, not
+  only when the queue was empty.
 
 ## A machine that grants no worker is slower, never wrong
 

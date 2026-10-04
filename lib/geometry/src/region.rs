@@ -13,7 +13,7 @@
 
 use alloc::vec::Vec;
 
-use crate::{span, Point, Rect};
+use crate::{saturate_i32, span, Point, Rect};
 
 /// A set of screen pixels, held as pairwise-disjoint rectangles.
 ///
@@ -161,8 +161,8 @@ impl Region {
             return;
         }
         let clamped = Rect::new(
-            clamp_i32(i64::from(self.bounds.left()) + i64::from(dx)),
-            clamp_i32(i64::from(self.bounds.top()) + i64::from(dy)),
+            saturate_i32(i64::from(self.bounds.left()) + i64::from(dx)),
+            saturate_i32(i64::from(self.bounds.top()) + i64::from(dy)),
             self.bounds.width,
             self.bounds.height,
         );
@@ -249,11 +249,6 @@ fn shift_fits(bounds: Rect, dx: i32, dy: i32) -> bool {
         && fits(bounds.right(), dx)
         && fits(bounds.top(), dy)
         && fits(bounds.bottom(), dy)
-}
-
-/// `v` clamped into the `i32` range.
-fn clamp_i32(v: i64) -> i32 {
-    i32::try_from(v.clamp(i64::from(i32::MIN), i64::from(i32::MAX))).unwrap_or(i32::MAX)
 }
 
 /// The index one past the band that starts at `start`: the run of rectangles

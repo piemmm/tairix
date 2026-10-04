@@ -349,7 +349,9 @@ impl DemoWidget {
                     scale,
                     theme,
                     damage,
-                    acted.is_some(),
+                    acted
+                        .as_ref()
+                        .is_some_and(|acted| before.popup_may_move(&acted.action)),
                 );
                 if let Some(action) = acted {
                     commit_field(w, action, rect, damage);
@@ -455,7 +457,9 @@ impl DemoWidget {
                     scale,
                     theme,
                     damage,
-                    acted.is_some(),
+                    acted
+                        .as_ref()
+                        .is_some_and(|acted| before.popup_may_move(&acted.action)),
                 );
                 if let Some(action) = acted {
                     commit_field(w, action, rect, damage);
@@ -485,13 +489,8 @@ impl DemoWidget {
     }
 }
 
-/// Report a choice list that has just appeared or vacated.
-///
-/// A list is drawn outside the group's own plate, so only the owner that
-/// placed it holds the rectangle it covered — and the *open* is reported from
-/// a layout that had no list in it yet, the *close* from one that no longer
-/// does. Reporting both the list that was there and the one that is now covers
-/// either transition; an absent list is an empty rectangle and covers nothing.
+/// Report a choice list that has just appeared or vacated, once the group
+/// has acted in a way that can have `moved` it.
 #[allow(clippy::too_many_arguments)] // The two layouts' inputs, threaded explicitly.
 fn field_popup_moved(
     group: &FieldGroup,
@@ -501,16 +500,12 @@ fn field_popup_moved(
     scale: Scale,
     theme: &Theme,
     damage: &mut Region,
-    acted: bool,
+    moved: bool,
 ) {
-    if !acted {
+    if !moved {
         return;
     }
-    let after = group.layout(rect, viewport, scale, theme);
-    if before.popup != after.popup {
-        damage.add(before.popup);
-        damage.add(after.popup);
-    }
+    before.report_popup_moved(group.layout(rect, viewport, scale, theme), damage);
 }
 
 /// Commit the boolean a selector asked for through `apply`, and report the

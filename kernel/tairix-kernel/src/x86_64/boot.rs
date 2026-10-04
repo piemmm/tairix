@@ -67,7 +67,7 @@ use tairix_kernel_core::{kernel_main, BootInfo, InitSpawn, IrqRouting};
 use tairix_kernel_irq::IrqController;
 use tairix_kernel_mem::{BootMemoryMap, MemoryRegion, PhysAddr, RegionKind};
 use tairix_kernel_sched_api::SchedulerConfig;
-use tairix_log::{Event, EventId, Field, Level, Sink, TeeSink};
+use tairix_log::{Event, EventId, Field, FieldValue, Level, Sink, TeeSink};
 
 use tairix_arch_x86_64::irqmask::RflagsIrqControl;
 use tairix_arch_x86_64::serial::SERIAL_SINK;
@@ -1108,9 +1108,11 @@ pub fn pci_host() -> Option<&'static crate::pci_host::PciHost> {
 ///
 /// The hierarchy is walked once, every observer reading the one walk. Where
 /// a unit covers the segment the walk turns ACS on first, so the isolation
-/// groups are as fine as the hardware allows; a hierarchy whose bus numbers
-/// form no tree has no trustworthy isolation, so nothing is published and
-/// every function that could master past a unit is stopped.
+/// groups are as fine as the hardware allows. A segment that cannot be
+/// confined — its bus numbers form no tree, or its units cannot all be
+/// given nodes — publishes nothing, and a flat scan stops every function and
+/// bridge that could master past a unit; where only the tree is missing, the
+/// units still come up, blocking every stream.
 fn own_pci<B: crate::pci_host::HostBus + tairix_pci::topology::PciTopology + Send + 'static>(
     pci: B,
     segment: u16,
@@ -1126,7 +1128,7 @@ fn own_pci<B: crate::pci_host::HostBus + tairix_pci::topology::PciTopology + Sen
     } else {
         AcsPolicy::Leave
     };
-    let functions = if let Ok(topology) = pci.topology(acs) {
+    let probed = if let Ok(topology) = pci.topology(acs) {
         probe_virtio_pci(&pci, &topology, segment, dmar, sink, log)
     } else {
         log_dmar(
@@ -1134,9 +1136,18 @@ fn own_pci<B: crate::pci_host::HostBus + tairix_pci::topology::PciTopology + Sen
             Level::Error,
             "pci hierarchy unreadable; none published",
         );
-        pci.quiesce(&|function| crate::pci_probe::stopped_unresolved(function, covered));
-        Vec::new()
+        if let Some(dmar) = dmar {
+            let _ = emit_units(dmar, segment, None, sink, log);
+        }
+        Err(Unconfined)
     };
+    let functions = probed.unwrap_or_else(|Unconfined| {
+        let stop = |function: &tairix_pci::topology::Function| {
+            crate::pci_probe::stopped_unresolved(function, covered)
+        };
+        log_quiesced(log, pci.quiesce(&stop));
+        Vec::new()
+    });
     let host = crate::pci_host::PciHost::new(Box::new(pci), functions);
     if PCI_HOST.call_once_infallible(move || host).is_err() {
         log_dmar(
@@ -1264,33 +1275,76 @@ impl tairix_arch_x86_64::dmar::DmaAliases for Fabric<'_> {
     }
 }
 
-/// Emit a node for each of `dmar`'s units on `segment`, answering the table
-/// beside what was emitted; [`None`] when none could be.
+/// A segment whose functions cannot be confined: none is published, and
+/// every one that could master past a unit is stopped.
+struct Unconfined;
+
+/// Record what the flat scan of an unconfined segment stopped, and what read
+/// back mastering still.
+fn log_quiesced(log: &dyn Sink, quiesced: tairix_abi::driver::pci::Quiesced) {
+    let count = |count: usize| FieldValue::UnsignedInt(count as u64);
+    tairix_log::log(
+        log,
+        &Event {
+            level: if quiesced.refused == 0 {
+                Level::Warn
+            } else {
+                Level::Error
+            },
+            id: KERNEL_BOOT_DMAR,
+            message: "pci functions and bridges stopped mastering over a flat scan",
+            fields: &[
+                Field {
+                    key: "stopped",
+                    value: count(quiesced.stopped),
+                },
+                Field {
+                    key: "refused",
+                    value: count(quiesced.refused),
+                },
+            ],
+        },
+    );
+}
+
+/// Emit a node for each of `dmar`'s units, keeping the firmware windows
+/// `fabric` resolves on `segment` — none without a fabric — and answer the
+/// table beside what was emitted.
+///
+/// # Errors
+///
+/// [`Unconfined`] when the nodes cannot be built, or a unit on `segment` was
+/// left without one: nothing would bring it up.
 fn emit_units<'d, 'a>(
     dmar: &'d tairix_arch_x86_64::dmar::Dmar<'a>,
     segment: u16,
-    fabric: &Fabric<'_>,
+    fabric: Option<&Fabric<'_>>,
     sink: &mut crate::boot_hwtree::CollectingHwNodeSink,
     log: &dyn Sink,
-) -> Option<(
-    &'d tairix_arch_x86_64::dmar::Dmar<'a>,
-    tairix_arch_x86_64::dmar::UnitNodes,
-)> {
+) -> Result<
+    (
+        &'d tairix_arch_x86_64::dmar::Dmar<'a>,
+        tairix_arch_x86_64::dmar::UnitNodes,
+    ),
+    Unconfined,
+> {
+    use tairix_arch_x86_64::dmar::{BridgeBuses, DmaAliases};
+
+    let fabric = fabric.map(|fabric| -> (&dyn BridgeBuses, &dyn DmaAliases) { (fabric, fabric) });
     let Ok(nodes) = tairix_arch_x86_64::dmar::emit_unit_nodes(
         dmar,
         crate::hwtree_node_ids::IOMMU_UNIT_NODE_BASE_ID,
         tairix_kernel_iommu_vtd::COMPATIBLE,
         segment,
         fabric,
-        fabric,
         sink,
     ) else {
         log_dmar(
             log,
             Level::Error,
-            "dma translation units undiscovered; dma unconfined",
+            "dma translation units undiscovered; none published",
         );
-        return None;
+        return Err(Unconfined);
     };
     if nodes.dropped != 0 {
         log_dmar(
@@ -1299,14 +1353,15 @@ fn emit_units<'d, 'a>(
             "firmware dma windows no unit's node can carry; those devices lose them",
         );
     }
-    if nodes.emitted < dmar.units().count() {
+    if nodes.strand(dmar, segment) {
         log_dmar(
             log,
-            Level::Warn,
-            "translation units past the tree's room; their devices stay untranslated",
+            Level::Error,
+            "translation units past the tree's room; none published",
         );
+        return Err(Unconfined);
     }
-    Some((dmar, nodes))
+    Ok((dmar, nodes))
 }
 
 /// Run every virtio-PCI observer over `topology`, the one walk of `pci`,
@@ -1318,6 +1373,12 @@ fn emit_units<'d, 'a>(
 /// firmware stops mastering DMA ([`crate::pci_probe::stop_mastering`]), and
 /// nothing here makes one a bus master again: its owner's attached domain, or
 /// its owner's first carve, does.
+///
+/// # Errors
+///
+/// [`Unconfined`] when the segment's units or its functions' DMA identities
+/// cannot be set out, or its functions cannot all be stopped, before
+/// anything is published.
 fn probe_virtio_pci<B: crate::pci_host::HostBus>(
     pci: &B,
     topology: &tairix_pci::topology::Topology,
@@ -1325,7 +1386,7 @@ fn probe_virtio_pci<B: crate::pci_host::HostBus>(
     dmar: Option<&tairix_arch_x86_64::dmar::Dmar<'_>>,
     sink: &mut crate::boot_hwtree::CollectingHwNodeSink,
     log: &dyn Sink,
-) -> Vec<crate::pci_host::Function> {
+) -> Result<Vec<crate::pci_host::Function>, Unconfined> {
     use tairix_arch_x86_64::dmar::{unit_node, SourceId};
 
     // A function names its stream only once its unit's node is in the tree:
@@ -1333,7 +1394,9 @@ fn probe_virtio_pci<B: crate::pci_host::HostBus>(
     // never happens.
     let fabric = Fabric(topology);
     let first_unit = sink.nodes().len();
-    let translated = dmar.and_then(|dmar| emit_units(dmar, segment, &fabric, sink, log));
+    let translated = dmar
+        .map(|dmar| emit_units(dmar, segment, Some(&fabric), sink, log))
+        .transpose()?;
     let unit = |requester: u16| {
         translated.and_then(|(dmar, nodes)| {
             unit_node(
@@ -1352,7 +1415,7 @@ fn probe_virtio_pci<B: crate::pci_host::HostBus>(
             Level::Error,
             "pci dma identities unrecorded; none published",
         );
-        return Vec::new();
+        return Err(Unconfined);
     };
     // The windows the unit nodes just emitted keep for firmware.
     let units = &sink.nodes()[first_unit..];
@@ -1373,7 +1436,7 @@ fn probe_virtio_pci<B: crate::pci_host::HostBus>(
             Level::Error,
             "pci functions left mastering; none published",
         );
-        return Vec::new();
+        return Err(Unconfined);
     }
     let dma = |address: u64| identities.of(address).cloned();
     let mut functions = Vec::new();
@@ -1386,7 +1449,7 @@ fn probe_virtio_pci<B: crate::pci_host::HostBus>(
             Level::Error,
             "pci functions unrecorded; none published",
         );
-        return Vec::new();
+        return Err(Unconfined);
     }
     functions.extend(
         topology
@@ -1404,11 +1467,13 @@ fn probe_virtio_pci<B: crate::pci_host::HostBus>(
     // regardless (fail closed).
     let _ = crate::hwdiscovery::observe_virtio_pci_block_devices(pci, &functions, &dma, sink, log);
     observe_interrupt_driven(pci, &functions, &dma, sink, log);
-    crate::pci_probe::record_functions(topology, &identities, &sink.nodes()[first..])
-        .unwrap_or_else(|_| {
-            log_dmar(log, Level::Error, "pci functions unrecorded; none masters");
-            Vec::new()
-        })
+    Ok(
+        crate::pci_probe::record_functions(topology, &identities, &sink.nodes()[first..])
+            .unwrap_or_else(|_| {
+                log_dmar(log, Level::Error, "pci functions unrecorded; none masters");
+                Vec::new()
+            }),
+    )
 }
 
 /// Discover the interrupt-driven virtio-PCI functions — virtio-net, sound

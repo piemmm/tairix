@@ -213,14 +213,17 @@ appearance change cannot undo each other.
 
 The round trip runs on a worker, never on the window's event loop: the
 session answers only once its own publisher has written the store, so waiting
-for it inline would freeze this window for a disk commit. So does every other
-request only the session answers — *Lock Now*, the screensaver's *Test*, and
-which programs have notified — on a desk of their own that holds one of each,
-so the window keeps drawing however long the session's own loop takes to
-reach them. The rows show the
-reader's choice at once and adopt the *durable* value when the answer lands,
-so a refusal states its reason and puts the row back rather than leaving a
-value on screen the next login would not restore.
+for it inline would freeze this window for a disk commit. The worker reads
+what the store then holds as well, and the rows adopt that *durable* value
+when the answer lands, so a refusal states its reason and puts the row back
+rather than leaving a value on screen the next login would not restore. So
+does every other request only the session answers — *Lock Now*, the
+screensaver's *Test*, and which programs have notified — on a desk of their
+own that holds one of each, so the window keeps drawing however long the
+session's own loop takes to reach them. A second *Test* of other settings
+pressed while the first is asked is held and asked once it is answered, and
+a refusal is stated on its pane whenever that pane is shown, even after the
+reader has moved elsewhere.
 
 Accessibility additionally carries the **pointer pair**, in a POINTER group
 of its own. *Pointer size* is a closed ladder over the desktop's

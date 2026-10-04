@@ -62,6 +62,33 @@ fn sums_of_octaves_stay_within_their_ranges() {
     }
 }
 
+/// Sampled finely enough, the resolved sum is the plain one bit for bit;
+/// sampled coarsely, an octave too fine to hold settles to nought while its
+/// weight still counts, so the pattern keeps its scale; and none survives a
+/// footprint wider than every lattice.
+#[test]
+fn a_resolved_sum_keeps_only_the_octaves_its_footprint_holds_at_their_weight() {
+    let shape = (4, 0.5, 2.0);
+    for p in spread(500) {
+        assert_eq!(
+            fbm2_resolved(p.x, p.z, 7, shape, 0.0).to_bits(),
+            fbm2(p.x, p.z, 7, shape).to_bits()
+        );
+        // Lattices of 1, ½, ¼ and ⅛: a footprint of ⅛ holds the first two
+        // whole, the third not at all.
+        let held = fbm2_resolved(p.x, p.z, 7, shape, 0.125);
+        let coarse = fbm2(p.x, p.z, 7, (2, 0.5, 2.0)) * (1.5 / 1.875);
+        assert!((held - coarse).abs() < 1e-12, "{held} against {coarse}");
+        assert_eq!(
+            fbm2_resolved(p.x, p.z, 7, shape, 0.6).to_bits(),
+            0.0f64.to_bits()
+        );
+    }
+    assert!(resolved(0.1, 0.25) > 0.0 && resolved(0.1, 0.25) < 1.0);
+    assert_eq!(resolved(0.1, 0.2).to_bits(), 0.0f64.to_bits());
+    assert_eq!(resolved(0.1, 0.4).to_bits(), 1.0f64.to_bits());
+}
+
 #[test]
 fn a_pattern_sums_only_the_octaves_coarser_than_its_footprint() {
     assert_eq!(octaves_within(1.0), 1);

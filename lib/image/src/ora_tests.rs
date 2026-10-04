@@ -440,3 +440,60 @@ fn a_layer_whose_place_or_opacity_will_not_read_is_refused() {
     };
     assert_eq!((opacity("2"), opacity("-1")), (255, 0));
 }
+
+/// A layer nothing of shows, hidden or wholly faint, is never read for the
+/// picture: the decode passes over its entry, even one the archive lacks,
+/// while the layers it is opened as for editing still need it.
+#[test]
+fn a_layer_nothing_of_shows_is_not_read_for_the_picture() {
+    let png = crate::encode_png(&flat(1, 1, [9, 8, 7, 255])).expect("encodes");
+    let stack = r#"<image w="1" h="1"><stack>
+<layer src="data/hidden.png" visibility="hidden"/>
+<layer src="data/faint.png" opacity="0"/>
+<layer src="data/l.png"/>
+</stack></image>"#;
+    let ora = archive(stack, &[("data/l.png", &png)]);
+    let shown = decode_as(ImageFormat::OpenRaster, &ora, &limits()).expect("decodes");
+    assert_eq!(shown.pixels(), &[9, 8, 7, 255]);
+    assert_eq!(
+        open_native(ImageFormat::OpenRaster, &ora, &limits()).err(),
+        Some(DecodeError::OraMissingLayer)
+    );
+}
+
+/// The estimate holds none of the pixels of a layer nothing of shows.
+#[test]
+fn the_estimate_counts_no_layer_nothing_of_shows() {
+    let small = crate::encode_png(&flat(1, 1, [9, 8, 7, 255])).expect("encodes");
+    let wide = crate::encode_png(&flat(512, 512, [1, 2, 3, 255])).expect("encodes");
+    let estimate = |shows: &str| {
+        let stack = alloc::format!(
+            r#"<image w="1" h="1"><stack><layer src="data/wide.png"{shows}/><layer src="data/l.png"/></stack></image>"#
+        );
+        let ora = archive(&stack, &[("data/l.png", &small), ("data/wide.png", &wide)]);
+        super::peak_bytes(&ora, &limits()).expect("estimated")
+    };
+    let decoded = 512 * 512 * 4;
+    let shown = estimate("");
+    assert!(shown > decoded, "{shown}");
+    for nothing in [r#" visibility="hidden""#, r#" opacity="0""#] {
+        let passed_over = estimate(nothing);
+        assert!(
+            passed_over + decoded <= shown,
+            "{nothing}: {passed_over} of {shown}"
+        );
+    }
+}
+
+/// Composing reads each layer's rows where they lie, so the estimate of a
+/// small document does not grow with the widest picture the limits admit.
+#[test]
+fn the_estimate_of_a_small_document_does_not_follow_the_widest_admitted() {
+    let png = crate::encode_png(&flat(1, 1, [9, 8, 7, 255])).expect("encodes");
+    let ora = archive(&lone_stack("", ""), &[("data/l.png", &png)]);
+    let wider = DecodeLimits::new(1 << 20, 16, 4096 * 4096, 0);
+    assert_eq!(
+        super::peak_bytes(&ora, &wider),
+        super::peak_bytes(&ora, &limits())
+    );
+}

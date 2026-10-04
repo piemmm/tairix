@@ -29,6 +29,7 @@ use crate::saver::SaverOption;
 use crate::shell::{Shell, ShellOutcome};
 use crate::test_support::{click, clicked, damage, opaque, theme, WIDE};
 use crate::volumes::VolumeReading;
+use tairix_controls::testkit::covers;
 
 /// A window too narrow to seat the strip at all.
 const NARROW: Rect = Rect::new(0, 0, 360, 640);
@@ -1012,6 +1013,45 @@ fn the_leading_crumb_opens_the_category_list_only_once_the_strip_is_shed() {
     assert!(!shell.category_list_open(), "escape dismisses it");
 }
 
+/// Opening the category list from the keyboard reports the plate it opens
+/// into, which reaches above the pane's column, so the frame presented shows
+/// the whole list.
+#[test]
+fn opening_the_category_list_reports_its_plate() {
+    let theme = theme();
+    let mut shell = shell();
+    let mut sink = damage();
+    for _ in 0..4 {
+        if shell.category_list_open() {
+            break;
+        }
+        let _ = shell.on_key(
+            keystroke(Key::Named(NamedKey::Tab)),
+            NARROW,
+            Scale::ONE,
+            &theme,
+            &mut damage(),
+        );
+        sink = damage();
+        let _ = shell.on_key(
+            keystroke(Key::Named(NamedKey::Enter)),
+            NARROW,
+            Scale::ONE,
+            &theme,
+            &mut sink,
+        );
+    }
+    let themes = ThemeRegistry::with_builtins();
+    let list = shell
+        .category_list_rect_for_test(
+            NARROW,
+            Scale::ONE,
+            themes.grounds(crate::frame::WINDOW_GROUND).popups,
+        )
+        .expect("the shed strip's list is open");
+    assert!(covers(&sink, list), "{list:?} opened unreported");
+}
+
 /// The category list stands over the window's own content, so it is drawn
 /// solid even though the window is glass: laid down translucent, it would
 /// show the desktop through the window instead of the pane beneath it.
@@ -1701,6 +1741,20 @@ fn a_refused_lock_is_stated_on_its_row() {
         .is_some_and(|text| !text.contains("would not")));
 }
 
+/// A refused lock that lands while another pane is on show is stated once
+/// the pane that asked is shown again.
+#[test]
+fn a_refused_lock_landing_on_another_pane_is_stated_when_its_pane_returns() {
+    let mut shell = crate::test_support::showing("notifications");
+    shell.adopt_lock_answer(Err(tairix_abi::Errno::NotSupported));
+    let mut sink = damage();
+    assert!(shell.go_to_pane("lock-screen", WIDE, Scale::ONE, &theme(), &mut sink));
+    let row = &shell.form_for_test().expect("a form").groups()[0].rows()[1];
+    assert!(row
+        .description()
+        .is_some_and(|text| text.starts_with("The desktop would not lock the screen")));
+}
+
 /// The two idle panes post their own keys alone.
 #[test]
 fn the_idle_panes_post_only_their_own_keys() {
@@ -1935,6 +1989,31 @@ fn a_refused_apply_reverts_the_row_to_what_the_store_holds() {
     );
 }
 
+/// A choice refused before it reached the desktop puts the row back to what
+/// the store last answered, with no store read to find out.
+#[test]
+fn a_choice_refused_before_it_was_asked_reverts_to_what_was_answered() {
+    let theme = theme();
+    let mut shell = shell_at(Location {
+        category: Category::Appearance,
+        pane: Pane::Appearance,
+    });
+    shell.focus_content_for_test(WIDE, Scale::ONE, &theme);
+    let mut sink = damage();
+    press(&mut shell, Key::Named(NamedKey::Enter), &theme, &mut sink);
+    press(&mut shell, Key::Named(NamedKey::Down), &theme, &mut sink);
+    press(&mut shell, Key::Named(NamedKey::Enter), &theme, &mut sink);
+    assert_eq!(
+        shell.form_for_test().map(|form| form.settings().appearance),
+        Some(Appearance::Dark)
+    );
+    shell.revert_settings();
+    assert_eq!(
+        shell.form_for_test().map(|form| form.settings().appearance),
+        Some(Appearance::Light)
+    );
+}
+
 /// The pointer pair is a real control now, so both rows must draw a choice
 /// list rather than the statement that stood where they are.
 #[test]
@@ -2154,16 +2233,6 @@ fn a_wheel_detent_over_the_strip_scrolls_it_the_wheel_step_and_repaints_its_bar(
         covers(&drew, sidebar),
         "the rows slid and were not repainted"
     );
-}
-
-/// Whether `drew` covers every pixel of `rect`.
-fn covers(drew: &Region, rect: Rect) -> bool {
-    let mut uncovered = Region::new();
-    uncovered.add(rect);
-    for covered in drew.rects() {
-        uncovered.subtract(*covered);
-    }
-    uncovered.is_empty()
 }
 
 #[test]
@@ -4019,4 +4088,85 @@ fn memory_growing_short_lets_go_of_the_pictures_off_screen() {
         None,
         "and nothing is asked for again while it stays short"
     );
+}
+
+/// What an answer redraws is the pane's column down to the window's foot,
+/// its action band included, and none of the strip, search field or trail.
+#[test]
+fn an_answer_redraws_the_pane_and_nothing_of_the_chrome() {
+    let theme = theme();
+    let shell = crate::test_support::showing("lock-screen");
+    let frame = shell.frame(WIDE, Scale::ONE, &theme);
+    let region = shell.pane_region(WIDE, Scale::ONE, &theme);
+    for part in [Some(frame.content), frame.footer, frame.scrollbar]
+        .into_iter()
+        .flatten()
+    {
+        assert_eq!(region.intersection(&part), part, "{part:?}");
+    }
+    for chrome in [frame.sidebar, frame.search, Some(frame.breadcrumb)]
+        .into_iter()
+        .flatten()
+    {
+        assert!(region.intersection(&chrome).is_empty(), "{chrome:?}");
+    }
+}
+
+/// Opening a choice list reports the whole plate it opens into, so the frame
+/// presented shows every choice rather than only what overlaps its field.
+#[test]
+fn opening_a_list_reports_every_choice_it_draws() {
+    let theme = theme();
+    let mut shell = shell_at(Location {
+        category: Category::Appearance,
+        pane: Pane::Appearance,
+    });
+    let combo = shell
+        .setting_rect(Setting::Appearance, WIDE, Scale::ONE, &theme)
+        .expect("the pane draws the appearance row");
+    let centre = Point::new(
+        combo.left() + to_i32(combo.width / 2),
+        combo.top() + to_i32(combo.height / 2),
+    );
+    let click = [
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+        InputEvent::PointerReleased {
+            button: PointerButton::Primary,
+        },
+    ];
+    // Opened and closed once, so the pointer rests on the field and the
+    // field holds the keyboard, as when a reader opens it again.
+    let mut settling = damage();
+    let _ = shell.on_pointer(
+        &InputEvent::PointerMoved { to: centre },
+        WIDE,
+        Scale::ONE,
+        &theme,
+        &mut settling,
+    );
+    for event in &click {
+        let _ = shell.on_pointer(event, WIDE, Scale::ONE, &theme, &mut settling);
+    }
+    let _ = press(
+        &mut shell,
+        Key::Named(NamedKey::Escape),
+        &theme,
+        &mut settling,
+    );
+    assert!(shell.choice_rect(0, WIDE, Scale::ONE, &theme).is_none());
+    let mut sink = damage();
+    for event in &click {
+        let _ = shell.on_pointer(event, WIDE, Scale::ONE, &theme, &mut sink);
+    }
+    for index in 0..Appearance::ALL.len() {
+        let choice = shell
+            .choice_rect(index, WIDE, Scale::ONE, &theme)
+            .expect("the press opened the list");
+        assert!(
+            covers(&sink, choice),
+            "choice {index} at {choice:?} was drawn but not reported"
+        );
+    }
 }

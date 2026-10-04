@@ -11,7 +11,7 @@
 use alloc::vec::Vec;
 
 use tairix_abi::driver::bus::BusDevice;
-use tairix_abi::driver::pci::{function_of, requester_id};
+use tairix_abi::driver::pci::{function_of, requester_id, Quiesced};
 use tairix_abi::DriverError;
 
 /// Buses one PCI segment holds: every value of a bus number.
@@ -592,8 +592,10 @@ pub trait PciTopology {
 
     /// Stop every function `stopped` names from mastering DMA, walking the
     /// bus flat: it needs no hierarchy and holds nothing, so it reaches every
-    /// function of a walk [`topology`](Self::topology) refuses.
-    fn quiesce(&self, stopped: &dyn Fn(&Function) -> bool);
+    /// function of a walk [`topology`](Self::topology) refuses. Answers how
+    /// many of them were found mastering and stopped, and how many read back
+    /// mastering still.
+    fn quiesce(&self, stopped: &dyn Fn(&Function) -> bool) -> Quiesced;
 }
 
 #[cfg(test)]

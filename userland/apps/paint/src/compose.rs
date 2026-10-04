@@ -54,7 +54,7 @@ pub fn compose_run(
 ) {
     out.fill([0; 4]);
     for (index, layer) in layers.iter().enumerate() {
-        if !layer.visible || layer.opacity == 0 {
+        if !layer.shows() {
             continue;
         }
         let colours: &[Rgba8] = match active {
@@ -80,9 +80,7 @@ pub fn flatten(layers: &[Layer]) -> Result<Canvas, OutOfMemory> {
     let Some(first) = layers.first() else {
         return Err(OutOfMemory);
     };
-    let mut shown = layers
-        .iter()
-        .filter(|layer| layer.visible && layer.opacity > 0);
+    let mut shown = layers.iter().filter(|layer| layer.shows());
     if let (Some(only), None) = (shown.next(), shown.next()) {
         if only.opacity == u8::MAX {
             return only.canvas.try_clone();

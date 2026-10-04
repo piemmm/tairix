@@ -131,8 +131,6 @@ const TAG_REFERENCE_BLACK_WHITE: u16 = 532;
 
 pub(crate) const COMPRESSION_NONE: u16 = 1;
 const COMPRESSION_CCITT_RLE: u16 = 2;
-/// The floating-point predictor, which shuffles each row's bytes aside.
-const PREDICTOR_FLOAT: u32 = 3;
 const COMPRESSION_GROUP3: u16 = 3;
 const COMPRESSION_GROUP4: u16 = 4;
 pub(crate) const COMPRESSION_LZW: u16 = 5;
@@ -140,6 +138,16 @@ const COMPRESSION_JPEG: u16 = 7;
 pub(crate) const COMPRESSION_ADOBE_DEFLATE: u16 = 8;
 pub(crate) const COMPRESSION_PACK_BITS: u16 = 32773;
 const COMPRESSION_DEFLATE: u16 = 32946;
+
+/// `Predictor`: none, horizontal differencing, and the floating-point
+/// predictor, which also shuffles each row's bytes aside.
+const PREDICTOR_NONE: u16 = 1;
+pub(crate) const PREDICTOR_HORIZONTAL: u16 = 2;
+const PREDICTOR_FLOAT: u16 = 3;
+
+/// `ExtraSamples`: associated (premultiplied) and unassociated alpha.
+const EXTRA_ASSOCIATED_ALPHA: u16 = 1;
+pub(crate) const EXTRA_UNASSOCIATED_ALPHA: u16 = 2;
 
 const PHOTOMETRIC_WHITE_ZERO: u16 = 0;
 pub(crate) const PHOTOMETRIC_BLACK_ZERO: u16 = 1;
@@ -471,7 +479,7 @@ struct Page<'a> {
     colour: Colour,
     samples: Samples,
     planar: bool,
-    predictor: u32,
+    predictor: u16,
     fill_lsb: bool,
     grid: Grid,
     offsets: Field,
@@ -580,15 +588,16 @@ impl<'a> Page<'a> {
             // pixel's own bits too.
             _ => return Err(DecodeError::TiffUnsupportedFillOrder),
         };
-        let predictor = ifd.value(TAG_PREDICTOR, 1)?;
+        let predictor = u16::try_from(ifd.value(TAG_PREDICTOR, PREDICTOR_NONE.into())?)
+            .map_err(|_| DecodeError::TiffInvalidPredictor)?;
         let subsampled =
             matches!(colour, Colour::YCbCr(ycbcr) if ycbcr.horizontal != 1 || ycbcr.vertical != 1);
         match predictor {
-            1 => {}
+            PREDICTOR_NONE => {}
             // A subsampled page stores blocks rather than rows of samples,
             // so there is no row for a predictor to run along.
             _ if subsampled => return Err(DecodeError::TiffInvalidPredictor),
-            2 if matches!(samples.bits, 8 | 16 | 32) => {}
+            PREDICTOR_HORIZONTAL if matches!(samples.bits, 8 | 16 | 32) => {}
             PREDICTOR_FLOAT if samples.format == SampleFormat::Float => {}
             _ => return Err(DecodeError::TiffInvalidPredictor),
         }
@@ -698,9 +707,9 @@ fn read_alpha(ifd: &Ifd<'_>, base: u32, count: u32) -> Result<Option<(u32, bool)
         return Ok(None);
     };
     for index in 0..field.count.min(count - base) {
-        let associated = match ifd.integer(&field, index)? {
-            1 => true,
-            2 => false,
+        let associated = match u16::try_from(ifd.integer(&field, index)?) {
+            Ok(EXTRA_ASSOCIATED_ALPHA) => true,
+            Ok(EXTRA_UNASSOCIATED_ALPHA) => false,
             _ => continue,
         };
         return Ok(Some((base + index, associated)));
@@ -1442,7 +1451,7 @@ impl Page<'_> {
         layout: &UnitLayout,
         rows: u32,
     ) -> Result<(), DecodeError> {
-        if self.predictor == 1 {
+        if self.predictor == PREDICTOR_NONE {
             return Ok(());
         }
         let stride =

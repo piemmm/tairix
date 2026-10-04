@@ -6,6 +6,7 @@
 //! the core a [`BusMastering`]; the core decides when, and records each
 //! change.
 
+pub use tairix_abi::driver::pci::Quiesced;
 use tairix_abi::IommuStreams;
 use tairix_log::{Field, FieldValue, Level, Sink};
 
@@ -41,16 +42,6 @@ pub struct MasterChange {
     pub changed: bool,
     /// A function still reports the other state afterwards.
     pub refused: bool,
-}
-
-/// The functions behind a unit found mastering as it was taken over, though
-/// firmware keeps no window for them.
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub struct Quiesced {
-    /// Stopped.
-    pub stopped: usize,
-    /// Still mastering after the write.
-    pub refused: usize,
 }
 
 /// The owner of functions' configuration space, which alone turns their bus

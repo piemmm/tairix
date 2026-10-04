@@ -82,3 +82,4 @@ tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0", features =
 # The engine's host tests measure and draw text, so they use the shared solid
 # test transport rather than reaching a running `fontd`.
 tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["test-util"] }
+tairix-controls = { path = "../../../lib/controls", version = "=0.0.0", features = ["test-support"] }

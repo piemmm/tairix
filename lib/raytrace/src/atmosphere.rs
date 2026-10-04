@@ -57,11 +57,11 @@ const OZONE: Vec3 = Vec3::new(0.650e-3, 1.881e-3, 0.085e-3);
 
 /// The table sizes: the bent paths' directions and heights, the
 /// multiple-scattering table's, the sky's azimuths and elevations, and the
-/// aerial table's slices of distance.
+/// aerial table's azimuths, elevations and slices of distance.
 const PATHS: (usize, usize) = (256, 48);
 const MULTIPLE: (usize, usize) = (24, 24);
 const VIEW: (usize, usize) = (96, 128);
-const AERIAL: (usize, usize, usize) = (32, 48, 32);
+const AERIAL: (usize, usize, usize) = (32, 48, 88);
 
 /// Steps taken along a sky or aerial ray.
 const VIEW_STEPS: u32 = 30;
@@ -69,9 +69,12 @@ const MULTIPLE_STEPS: u32 = 16;
 /// Directions the multiple-scattering table integrates over.
 const MULTIPLE_DIRECTIONS: u32 = 64;
 
-/// How far the aerial table reaches, in kilometres: past it the scene is
-/// the sky's.
-pub(crate) const AERIAL_REACH: f64 = 60.0;
+/// How far the aerial table reaches, in kilometres. Its slices lie as the
+/// square of their number, the first 32 within 60 km where the land is
+/// fine; the rest carry it on to the highest cirrus seen at the horizon.
+/// Past it the farthest slice stands.
+const AERIAL_REACH: f64 = 453.75;
+const _: () = assert!(453_750 * 32 * 32 == 60_000 * AERIAL.2 * AERIAL.2);
 
 /// What the atmosphere is like and where the sun stands in it.
 #[derive(Copy, Clone, Debug)]
@@ -88,6 +91,13 @@ pub(crate) struct Air {
     pub(crate) albedo: Vec3,
     /// Where the eye stands in the scene.
     pub(crate) eye: Vec3,
+}
+
+impl Air {
+    /// The scene's level's distance from the Earth's centre, in metres.
+    pub(crate) fn ground(&self) -> f64 {
+        GROUND * 1000.0 + self.base
+    }
 }
 
 /// A table of colours over the unit square, read back bilinearly.
@@ -318,6 +328,28 @@ impl Atmosphere {
         self.stage == Stage::Done
     }
 
+    /// The units of building its tables done and to do, each a core's rows.
+    pub(crate) fn units(&self) -> (f64, f64) {
+        let tables = [PATHS.1, MULTIPLE.1, VIEW.1, AERIAL.1];
+        let (finished, row) = match self.stage {
+            Stage::Paths(row) => (0, row),
+            Stage::Multiple(row) => (1, row),
+            Stage::View(row) => (2, row),
+            Stage::Aerial(row) => (3, row),
+            Stage::Done => (tables.len(), 0),
+        };
+        let units = |rows: usize| real(rows) / real(UNIT_ROWS);
+        let total = tables.iter().copied().map(units).sum();
+        let done = tables
+            .iter()
+            .take(finished)
+            .copied()
+            .map(units)
+            .sum::<f64>()
+            + units(row);
+        (done, total)
+    }
+
     /// Fill the aerial table's elevation rows `rows` across `runner`.
     fn fill_aerial(&mut self, rows: Range<usize>, runner: &dyn JobRunner) {
         let (azimuths, _, slices) = AERIAL;
@@ -381,14 +413,14 @@ impl Atmosphere {
         self.ambient
     }
 
-    /// How much of the light from the true direction `toward` reaches a
-    /// point `height` metres above the scene's level, square to the way it
-    /// arrives: kept along its bent path, and spread over the more sky or
-    /// the less the air turns it into; nothing where the Earth stands
-    /// between.
-    pub(crate) fn sunlight(&self, height: f64, toward: Vec3) -> Vec3 {
+    /// How much of the light from a true direction whose angle from the
+    /// vertical has `cosine` reaches a point `height` metres above the
+    /// scene's level, square to the way it arrives: kept along its bent
+    /// path, and spread over the more sky or the less the air turns it into;
+    /// nothing where the Earth stands between.
+    pub(crate) fn sunlight(&self, height: f64, cosine: f64) -> Vec3 {
         self.paths
-            .bent(radius(&self.air, height), toward.y.clamp(-1.0, 1.0))
+            .bent(radius(&self.air, height), cosine.clamp(-1.0, 1.0))
             .map_or(Vec3::ZERO, |bent| bent.lit())
     }
 
@@ -456,37 +488,134 @@ impl Atmosphere {
     /// The light the air scatters toward the eye along `dir` over its first
     /// `distance` metres, and how much of what lies beyond it passes.
     pub(crate) fn between(&self, dir: Vec3, distance: f64) -> Scattered {
-        let (azimuths, elevations, slices) = AERIAL;
-        let (u, v) = parametrise(dir, &self.air.sun);
-        let depth = mathf::sqrt((distance / 1000.0 / AERIAL_REACH).clamp(0.0, 1.0));
-        let place = depth * real(slices) - 1.0;
-        let (column, fx) = split(u, azimuths);
-        let (row, fy) = split(v, elevations);
-        let right = (column + 1).min(azimuths - 1);
-        let below = (row + 1).min(elevations - 1);
-        let read = |column: usize, row: usize| self.slice(column, row, place);
-        let top = read(column, row).lerp(read(right, row), fx);
-        let bottom = read(column, below).lerp(read(right, below), fx);
-        top.lerp(bottom, fy)
+        self.sight(dir).between(distance)
     }
 
-    /// The aerial table's column at `(column, row)` read `place` slices in,
-    /// before the first slice blending from the eye's nothing.
-    fn slice(&self, column: usize, row: usize, place: f64) -> Scattered {
-        let (azimuths, _, slices) = AERIAL;
-        let base = (row * azimuths + column) * slices;
-        let read = |slice: usize| {
-            self.aerial
-                .get(base + slice)
-                .map_or(Scattered::NONE, Slice::read)
-        };
-        if place < 0.0 {
-            return Scattered::NONE.lerp(read(0), (place + 1.0).clamp(0.0, 1.0));
+    /// The air seen from the eye along `dir`, to be read at any distance
+    /// along it.
+    pub(crate) fn sight(&self, dir: Vec3) -> Sight<'_> {
+        let (azimuths, elevations, slices) = AERIAL;
+        let (u, v) = parametrise(dir, &self.air.sun);
+        let (column, east) = split(u, azimuths);
+        let (row, north) = split(v, elevations);
+        let (right, below) = (
+            (column + 1).min(azimuths - 1),
+            (row + 1).min(elevations - 1),
+        );
+        let start = |column: usize, row: usize| (row * azimuths + column) * slices;
+        Sight {
+            aerial: &self.aerial,
+            starts: [
+                start(column, row),
+                start(right, row),
+                start(column, below),
+                start(right, below),
+            ],
+            across: (east, north),
         }
-        let (index, along) = cell_of(place);
-        let last = slices.saturating_sub(1);
-        read(index.min(last)).lerp(read((index + 1).min(last)), along.clamp(0.0, 1.0))
     }
+}
+
+/// The air seen from the eye along one direction: the four columns of the
+/// aerial table about it — by where each one's slices start, south-west,
+/// south-east, north-west, north-east — and how far east and north across
+/// them it lies.
+pub(crate) struct Sight<'a> {
+    aerial: &'a [Slice],
+    starts: [usize; 4],
+    across: (f64, f64),
+}
+
+impl Sight<'_> {
+    /// The light the air scatters toward the eye over the first `distance`
+    /// metres, and how much of what lies beyond passes.
+    pub(crate) fn between(&self, distance: f64) -> Scattered {
+        self.blended(
+            place_of(distance),
+            Scattered::NONE,
+            Slice::read,
+            Scattered::lerp,
+        )
+    }
+
+    /// Where between `from` and `to` metres the share `u` of the sun's
+    /// green light the air scatters toward the eye over that stretch has
+    /// been gathered: drawn with `u` even in `0.0..1.0`, a point falls along
+    /// the stretch as its sunlit air's light does.
+    pub(crate) fn drawn(&self, (from, to): (f64, f64), u: f64) -> f64 {
+        let green = |place: f64| {
+            self.blended(
+                place,
+                0.0,
+                |slice| f64::from(slice.sun[1]),
+                |a, b, t| a + (b - a) * t,
+            )
+        };
+        let (start, end) = (place_of(from), place_of(to));
+        let (low, high) = (green(start), green(end));
+        // A stretch whose air gathers no sunlight holds no point it favours.
+        if high <= low || high.is_nan() || low.is_nan() {
+            return from + (to - from) * u;
+        }
+        let target = low + (high - low) * u.clamp(0.0, 1.0);
+        // The light gathered runs straight between whole places: find the
+        // first whole place that reaches the target, then the point within.
+        let (mut least, mut most, mut reached) = (mathf::ceil(start), mathf::floor(end), None);
+        while least <= most {
+            let middle = mathf::floor(f64::midpoint(least, most));
+            if green(middle) >= target {
+                reached = Some(middle);
+                most = middle - 1.0;
+            } else {
+                least = middle + 1.0;
+            }
+        }
+        let (near, far) = reached.map_or((mathf::floor(end).max(start), end), |whole| {
+            ((whole - 1.0).max(start), whole)
+        });
+        let (before, after) = (green(near), green(far));
+        let place = if after > before {
+            near + (far - near) * ((target - before) / (after - before)).clamp(0.0, 1.0)
+        } else {
+            near
+        };
+        let depth = (place + 1.0) / real(AERIAL.2);
+        (depth * depth * AERIAL_REACH * 1000.0).clamp(from, to)
+    }
+
+    /// What `read` takes of the columns `place` slices in, blended between
+    /// the slices about it and across the columns by `lerp`: before the
+    /// first slice, from `none`, the eye's nothing.
+    fn blended<T: Copy>(
+        &self,
+        place: f64,
+        none: T,
+        read: impl Fn(&Slice) -> T,
+        lerp: impl Fn(T, T, f64) -> T,
+    ) -> T {
+        let last = AERIAL.2.saturating_sub(1);
+        let column = |start: usize| {
+            let at = |slice: usize| self.aerial.get(start + slice).map_or(none, &read);
+            if place < 0.0 {
+                return lerp(none, at(0), (place + 1.0).clamp(0.0, 1.0));
+            }
+            let (index, along) = cell_of(place);
+            lerp(
+                at(index.min(last)),
+                at((index + 1).min(last)),
+                along.clamp(0.0, 1.0),
+            )
+        };
+        let [a, b, c, d] = self.starts.map(column);
+        let (east, north) = self.across;
+        lerp(lerp(a, b, east), lerp(c, d, east), north)
+    }
+}
+
+/// Where `distance` metres lies among the aerial table's slices: before the
+/// first at `-1.0`, at the last at one short of their count.
+fn place_of(distance: f64) -> f64 {
+    mathf::sqrt((distance / 1000.0 / AERIAL_REACH).clamp(0.0, 1.0)) * real(AERIAL.2) - 1.0
 }
 
 /// The light the air scatters toward the eye over a stretch of a ray — the
@@ -504,7 +633,7 @@ pub(crate) struct Scattered {
 
 impl Scattered {
     /// No air at all: nothing scattered, everything kept.
-    const NONE: Self = Self {
+    pub(crate) const NONE: Self = Self {
         sun: Vec3::ZERO,
         sky: Vec3::ZERO,
         kept: Vec3::ONE,
@@ -681,9 +810,9 @@ fn integrated(source: Vec3, extinction: Vec3, through: Vec3) -> Vec3 {
 }
 
 /// The distance from the Earth's centre of a point `height` metres above
-/// `air`'s scene's level, in kilometres.
+/// `air`'s scene's level, in kilometres, never below the ground.
 fn radius(air: &Air, height: f64) -> f64 {
-    GROUND + ((air.base + height) / 1000.0).max(0.0)
+    ((air.ground() + height) / 1000.0).max(GROUND)
 }
 
 /// The eye's distance from the Earth's centre: at least a metre above the
