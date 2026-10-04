@@ -454,9 +454,8 @@ releases it rather than pinning the old screen's worth of pixels.
 
 `Surface::frost_region_around` frosts the same rectangle *except* a kept
 inner block, writing exactly the pixels the whole-rectangle frost would write
-around it. The kept block is either a retained frost's still-valid core or a
-core no output channel could record (see [A frost no output channel can
-record](#a-frost-no-output-channel-can-record)). The rectangle still decides the answer — samples replicate at its
+around it. The kept block is a retained frost's still-valid core
+([Retained backdrops](#retained-backdrops)). The rectangle still decides the answer — samples replicate at its
 edges and coverage is read at its own coordinates — so a border is never a
 smaller frost of a smaller rectangle, which would spread a clipped
 neighbourhood and seam against the pixels it was kept beside. The border's
@@ -716,7 +715,8 @@ pixel.
 
 **A window is dragged within a range, not down from nothing.**
 `Compositor::window_resize_bounds` answers that range as one value, and an
-interactive resize captures it at grab start.
+interactive resize reads it afresh on every sample, so the range a drag obeys
+is always the one the window declares now.
 
 Its floor is the greater of two real floors:
 
@@ -765,10 +765,14 @@ whichever is larger: the range is not a way to spread a window past the
 screen unasked. A maximized window is maximized afresh, exactly as a new
 maximize would take it. A fullscreen or fixed window is not bound, and
 restoring — from maximized or fullscreen alike — lands inside the range the
-window has by then. A drag owns the geometry while it lasts — its bounds are the ones captured when
-it began — so a range restated mid-drag binds when the drag lets go
-(`resize_drag_event`). An app that wants one particular size within its new
-range asks for it first and then restates, and so is already inside.
+window has by then. A drag in flight is held to a restated range at once,
+from where the pointer rests (`InputRouter::restate_resize`), and its app told
+as for any sample: content that grows taller as its window is narrowed raises
+the ceiling, and the same drag can then take the window as tall as the pointer
+asks. Only the axis a drag is moving is held while it runs, so its release
+settles the other inside the range (`resize_drag_event`). An app that wants one
+particular size within its new range asks for it first and then restates, and
+so is already inside.
 
 **The frame is the window manager's; the pixels are the client's.** A
 window's content buffer is sized by the frame the *client* presents, never

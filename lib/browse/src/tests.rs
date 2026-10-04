@@ -8248,7 +8248,8 @@ fn every_flag_is_seated_whole_at_the_size_the_window_opens_at() {
 fn the_narrowest_window_still_seats_every_toggle_apart() {
     let theme = Theme::dark();
     let props = props_with(Attributes::Unsupported);
-    let crate::WindowSizing::Resizable { min_width_px, .. } = crate::win_sizing(Scale::ONE, &theme)
+    let crate::WindowSizing::Resizable { min_width_px, .. } =
+        crate::properties_sizing(Scale::ONE, &theme)
     else {
         panic!("the manager's windows are resizable");
     };
@@ -8571,10 +8572,11 @@ fn a_press_on_the_gutter_scrolls_the_attribute_list_and_repaints_its_rows() {
     }
 }
 
-/// The shortest window the manager declares, at the width the Properties
-/// window opens at.
+/// The shortest Properties window the manager declares, at the width it opens
+/// at.
 fn shortest_props_window(theme: &Theme) -> Rect {
-    let crate::WindowSizing::Resizable { min_height_px, .. } = crate::win_sizing(Scale::ONE, theme)
+    let crate::WindowSizing::Resizable { min_height_px, .. } =
+        crate::properties_sizing(Scale::ONE, theme)
     else {
         panic!("the manager's windows are resizable");
     };
@@ -10288,6 +10290,96 @@ mod listing_cue {
         assert!(!LISTING_MESSAGE.is_empty(), "the cue has text to draw");
     }
 
+    /// A source whose root holds `count` files and whose every other folder is
+    /// still being read.
+    struct RootThenPending(usize);
+
+    impl DirectorySource for RootThenPending {
+        fn list(&mut self, components: &[String]) -> Result<Listing, Errno> {
+            if components.is_empty() {
+                Ok(Listing::Ready(
+                    (0..self.0)
+                        .map(|n| Entry::file(alloc::format!("f{n}")))
+                        .collect(),
+                ))
+            } else {
+                Ok(Listing::Pending)
+            }
+        }
+    }
+
+    /// The window [`painted`] draws, and the band its chrome shows.
+    const WINDOW: Rect = Rect::new(0, 0, 320, 240);
+    const BAND: crate::ToolbarBand = crate::ManagerChrome::none().toolbar;
+
+    #[test]
+    fn the_bar_stands_beside_the_cue_as_it_does_beside_an_empty_folder() {
+        let theme = Theme::dark();
+        let bar = crate::render::scrollbar_bounds(Scale::ONE, &theme, WINDOW, BAND)
+            .expect("the window has a gutter");
+        let gutter = |surface: &Surface| -> Vec<_> {
+            let (x, y) = (
+                u32::try_from(bar.left()).expect("on screen"),
+                u32::try_from(bar.top()).expect("on screen"),
+            );
+            (y..y + bar.height)
+                .flat_map(|row| (x..x + bar.width).map(move |column| (column, row)))
+                .map(|(column, row)| surface.get(column, row))
+                .collect()
+        };
+        let waiting = painted(&Browser::open_root(NeverReady).expect("open"));
+        let empty = painted(&Browser::open_root(RootThenPending(0)).expect("open"));
+        assert_eq!(
+            gutter(&waiting),
+            gutter(&empty),
+            "the cue keeps the resting bar a listed folder shows"
+        );
+        let ground = waiting.get(2, WINDOW.height - 3);
+        assert!(
+            gutter(&waiting).iter().any(|pixel| *pixel != ground),
+            "a bar is drawn there, not the bare ground"
+        );
+    }
+
+    #[test]
+    fn nothing_undrawn_answers_while_another_folder_is_read() {
+        let theme = Theme::dark();
+        let mut browser = Browser::open_root(RootThenPending(200)).expect("open");
+        browser.set_view_mode(crate::ViewMode::Grid);
+        let shown = crate::render::entry_rect(&browser, Scale::ONE, &theme, WINDOW, BAND, 0)
+            .expect("the premise: the root's entries show");
+        browser
+            .navigate_to(alloc::vec![String::from("Elsewhere")])
+            .expect("the read starts");
+        assert!(browser.is_listing(), "the other folder is still being read");
+        assert!(
+            crate::render::visible_range(&browser, Scale::ONE, &theme, WINDOW, BAND).is_empty(),
+            "the entries the cue stands in for are not on screen"
+        );
+        assert_eq!(
+            crate::render::entry_rect(&browser, Scale::ONE, &theme, WINDOW, BAND, 0),
+            None
+        );
+        assert_eq!(
+            crate::render::entry_index_at(
+                &browser,
+                Scale::ONE,
+                &theme,
+                WINDOW,
+                BAND,
+                shown.center()
+            ),
+            None,
+            "a press where an undrawn entry was finds nothing"
+        );
+        assert!(
+            !crate::render::scroll_model(&browser, Scale::ONE, &theme, WINDOW, BAND)
+                .range()
+                .is_scrollable(),
+            "and the bar beside the cue has nothing to scroll"
+        );
+    }
+
     #[test]
     fn a_reload_of_what_is_already_shown_keeps_showing_it() {
         // A re-read of the current directory must not blank the view: a
@@ -10307,11 +10399,12 @@ mod listing_cue {
 /// height a window opens at, and the glass it is drawn on.
 mod window_fit {
     use super::*;
-    use crate::render::{fitted_height, render_into};
+    use crate::render::{entry_rect, fitted_height, render_into, visible_range};
     use crate::{
-        fitted_sizing, manager_opening, win_sizing, MANAGER_TOOLBAR_BAND, MANAGER_VIEW_MODE,
-        WIN_HEIGHT, WIN_WIDTH,
+        browser_floor, fitted_sizing, manager_opening, win_floor_width, ToolbarBand,
+        MANAGER_TOOLBAR_BAND, MANAGER_VIEW_MODE, WIN_HEIGHT, WIN_WIDTH,
     };
+    use tairix_controls::testkit::text_ladder;
     use tairix_controls::{ground_fill, ChromeLayer};
 
     /// A root listing `count` files.
@@ -10373,10 +10466,76 @@ mod window_fit {
         );
     }
 
+    /// The floor a manager window opens with at `scale` in `theme`.
+    fn opening_floor(scale: Scale, theme: &Theme) -> crate::WindowSizing {
+        browser_floor(
+            win_floor_width(scale, theme),
+            MANAGER_VIEW_MODE,
+            MANAGER_TOOLBAR_BAND,
+            scale,
+            theme,
+        )
+    }
+
+    /// A root listing `count` files, shown in `view`.
+    fn viewed(count: usize, view: ViewMode) -> Browser<Files> {
+        let mut browser = Browser::open_root(Files(count)).expect("the root lists");
+        browser.set_view_mode(view);
+        browser
+    }
+
+    /// The window can be made exactly one row of its listing tall: the floor is
+    /// what a one-row listing fills, and a window at it draws one whole row and
+    /// nothing of the next — for both views, either band, at any density.
+    #[test]
+    fn the_floor_is_one_whole_row_of_the_listing_beneath_the_bands() {
+        for theme in [Theme::dark(), text_ladder(30)] {
+            for scale in [Scale::ONE, Scale::from_percent(200).expect("scale")] {
+                for view in [ViewMode::Grid, ViewMode::List] {
+                    for toolbar in [ToolbarBand::Hidden, ToolbarBand::Shown] {
+                        let width = scale.scale_length(WIN_WIDTH);
+                        let floor = browser_floor(
+                            win_floor_width(scale, &theme),
+                            view,
+                            toolbar,
+                            scale,
+                            &theme,
+                        )
+                        .min_height_px();
+                        let one_row =
+                            fitted_height(&viewed(1, view), width, scale, &theme, None, toolbar);
+                        assert_eq!(one_row, Some(floor), "{view:?} {toolbar:?} {scale:?}");
+
+                        let long = viewed(200, view);
+                        let window = Rect::new(0, 0, width, floor);
+                        let shown = visible_range(&long, scale, &theme, window, toolbar);
+                        assert!(!shown.is_empty());
+                        let first = entry_rect(&long, scale, &theme, window, toolbar, 0)
+                            .expect("the first row shows");
+                        for index in shown.clone() {
+                            let rect = entry_rect(&long, scale, &theme, window, toolbar, index)
+                                .expect("drawn");
+                            assert_eq!(
+                                (rect.top(), rect.height),
+                                (first.top(), first.height),
+                                "{view:?} {toolbar:?}: entry {index} is one whole row's"
+                            );
+                            assert!(rect.bottom() <= window.bottom());
+                        }
+                        assert!(
+                            entry_rect(&long, scale, &theme, window, toolbar, shown.end).is_none(),
+                            "{view:?} {toolbar:?}: nothing of the next row shows"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn the_ceiling_is_the_listing_and_never_below_the_floor() {
         let theme = Theme::dark();
-        let floor = win_sizing(Scale::ONE, &theme);
+        let floor = opening_floor(Scale::ONE, &theme);
         let short = fitted_sizing(floor, 1);
         assert_eq!(short.min_height_px(), floor.min_height_px());
         assert_eq!(
@@ -10394,7 +10553,7 @@ mod window_fit {
     fn a_window_opens_as_tall_as_its_listing_up_to_the_browser_height() {
         let theme = Theme::dark();
         let size = (WIN_WIDTH, WIN_HEIGHT);
-        let floor = win_sizing(Scale::ONE, &theme).min_height_px();
+        let floor = opening_floor(Scale::ONE, &theme).min_height_px();
         let (empty, sizing) = manager_opening(&grid(0), size, Scale::ONE, &theme);
         assert_eq!(
             empty,
@@ -10416,10 +10575,11 @@ mod window_fit {
             sizing.max_height_px() > WIN_HEIGHT,
             "and may be dragged taller"
         );
-        let waiting = Browser::open_root(listing_cue::NeverReady).expect("open");
+        let mut waiting = Browser::open_root(listing_cue::NeverReady).expect("open");
+        waiting.set_view_mode(MANAGER_VIEW_MODE);
         assert_eq!(
             manager_opening(&waiting, size, Scale::ONE, &theme),
-            (size, win_sizing(Scale::ONE, &theme)),
+            (size, opening_floor(Scale::ONE, &theme)),
             "a listing still being read opens at the browser height, unbounded"
         );
     }

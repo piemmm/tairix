@@ -843,7 +843,7 @@ proven by composing one scene twice — reusing frosts and blurring afresh —
 byte-identical in the scan-out frame *and* the back buffer across ~30
 mutations, plus the counter assertions for each funnel, the ceiling and
 mild-pressure trim, and teardown. Docs: `lib/raster/README.md`, the `Reciprocal`
-and `blur_line` rustdoc, `userland/gui/wm/README.md`, `frost.rs`'s module docs,
+and `blur_span` rustdoc, `userland/gui/wm/README.md`, `frost.rs`'s module docs,
 `docs/src/desktop/wm.md` (*Retained backdrops*), and `plans/SMARTRAM.md`.
 
 ### D.5 Decision (not silently taken)

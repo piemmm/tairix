@@ -2411,6 +2411,13 @@ impl DesktopShell {
         self.router.begin_move(compositor)
     }
 
+    /// Hold an in-flight resize to the range its window declares now, so a
+    /// range restated mid-drag binds the drag at once
+    /// ([`InputRouter::restate_resize`](tairix_wm::InputRouter::restate_resize)).
+    pub fn restate_resize(&mut self, compositor: &mut Compositor) -> InputResponse {
+        self.router.restate_resize(compositor)
+    }
+
     /// The modifiers the seat currently holds, for stamping onto the pointer
     /// events the session delivers to applications.
     #[must_use]

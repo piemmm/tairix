@@ -21,10 +21,11 @@ use tairix_theme::{TextRole, Theme};
 use crate::damage;
 use crate::menu::{plate_rect, Menu, MenuAction, MenuItem, PlatePlacement, PlateSide};
 use crate::paint::{
-    paint_bead, paint_chevron, paint_plate, paint_run, plate_border, resolve_bead, resolve_frame,
-    role_font, surface_rect, text_plate_height, to_i32, withheld, ChevronDir, PlateStyle,
+    paint_bead, paint_chevron, paint_plate, paint_run, plate_border, pointer_activation,
+    resolve_bead, resolve_frame, role_font, surface_rect, text_plate_height, to_i32, withheld,
+    ChevronDir, PlateStyle,
 };
-use crate::state::{ControlRole, ControlState, RenderInvariant, SelectionState};
+use crate::state::{ControlRole, ControlState, PointerState, RenderInvariant, SelectionState};
 
 /// The outcome of feeding input to a [`ComboBox`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -407,10 +408,13 @@ impl ComboBox {
     /// menu at `popup_bounds`: choosing a row selects it and collapses, and a
     /// primary press outside both the field and the popup collapses the list.
     ///
+    /// The field washes under the pointer and shows a press exactly as a
+    /// button does, and keeps following the pointer while its list is open.
+    ///
     /// The two rectangles are reported separately, because they change for
     /// different reasons: the popup when it appears or vacates (and the rows
-    /// within it as the highlight moves), the field only when the label it
-    /// shows changes.
+    /// within it as the highlight moves), the field when its pointer look or
+    /// the label it shows changes.
     pub fn on_pointer(
         &mut self,
         event: &InputEvent,
@@ -423,7 +427,16 @@ impl ComboBox {
         if let InputEvent::PointerMoved { to } = event {
             *self.pointer = *to;
         }
+        let inside = field_bounds.contains(*self.pointer);
         if self.expanded {
+            if matches!(event, InputEvent::PointerMoved { .. }) {
+                let look = if inside {
+                    PointerState::Hover
+                } else {
+                    PointerState::None
+                };
+                damage::set(&mut self.state.pointer, look, field_bounds, damage);
+            }
             match self
                 .menu
                 .on_pointer(event, popup_bounds, scale, theme, damage)
@@ -447,26 +460,17 @@ impl ComboBox {
             return None;
         }
 
-        let inside = field_bounds.contains(*self.pointer);
-        match event {
-            InputEvent::PointerPressed {
-                button: PointerButton::Primary,
-            } => {
-                *self.armed = inside && self.state.is_actionable();
-                None
-            }
-            InputEvent::PointerReleased {
-                button: PointerButton::Primary,
-            } => {
-                let fire = *self.armed && inside && self.state.is_actionable();
-                *self.armed = false;
-                if fire {
-                    self.open(popup_bounds, damage)
-                } else {
-                    None
-                }
-            }
-            _ => None,
+        if pointer_activation(
+            &mut self.state,
+            &mut self.armed,
+            event,
+            inside,
+            field_bounds,
+            damage,
+        ) {
+            self.open(popup_bounds, damage)
+        } else {
+            None
         }
     }
 

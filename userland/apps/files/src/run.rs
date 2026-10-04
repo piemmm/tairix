@@ -141,14 +141,14 @@ mod program {
         PropertiesTab, PropertiesTarget, PropertiesView, DELETE_CANCEL_INDEX, DELETE_CONFIRM_INDEX,
     };
     use tairix_browse::{
-        applications_for, association_from_manifest, context_choice_from_item, context_menu,
-        empty_trash_plan, fitted_sizing, manager_opening, paste_strategy, plan_paste,
+        applications_for, association_from_manifest, browser_floor, context_choice_from_item,
+        context_menu, empty_trash_plan, fitted_sizing, manager_opening, paste_strategy, plan_paste,
         quick_applications, suggest_new_dir_name, trash_dest_path, trash_dir, trash_strategy,
-        validate_new_name, win_sizing, Activation, AppAssociation, Attribute, Attributes, Browser,
-        BundleIntent, Clipboard, ClipboardOp, ContextChoice, ContextCommand, ContextMenuModel,
-        ContextQuick, CopyAction, CopyCursor, CopyKind, CopyWalk, DeleteAction, DeleteDisposition,
-        DeletePlan, DeleteWalk, DirectorySource, Entry, EntryKind, Listing, ListingDesk,
-        ListingJob, ManagerChrome, ManagerTool, ManagerToolModel, OpenWithCandidate,
+        validate_new_name, win_floor_width, Activation, AppAssociation, Attribute, Attributes,
+        Browser, BundleIntent, Clipboard, ClipboardOp, ContextChoice, ContextCommand,
+        ContextMenuModel, ContextQuick, CopyAction, CopyCursor, CopyKind, CopyWalk, DeleteAction,
+        DeleteDisposition, DeletePlan, DeleteWalk, DirectorySource, Entry, EntryKind, Listing,
+        ListingDesk, ListingJob, ManagerChrome, ManagerTool, ManagerToolModel, OpenWithCandidate,
         OpenWithChooser, OwnerChange, PasteItem, PasteStrategy, Places, Probe, ProgressModel,
         ProgressOp, Properties, RenameError, RowList, RtLinkReader, ScrollColumn, ToolbarBand,
         ToolbarCommand, TrashStrategy, VfsDirectorySource, Volume, VolumeId, MANAGER_MENU_TITLE,
@@ -392,9 +392,10 @@ mod program {
         location: Vec<String>,
         /// The range the window manager was last told.
         sizing: WindowSizing,
-        /// The window's floor at the desktop's scale and theme, derived when
-        /// either moves rather than per frame.
-        floor: WindowSizing,
+        /// The window's narrowest client at the desktop's scale and theme,
+        /// derived when either moves rather than per frame; the height floor
+        /// follows the view and the bands, so it is derived at each fit.
+        floor_width: u32,
         /// The height a new window opens at: the most a move to another folder
         /// grows this one to, unless its user made it taller.
         opening: u32,
@@ -792,7 +793,7 @@ mod program {
                 fit: Fit {
                     location: listed.components().to_vec(),
                     sizing,
-                    floor: win_sizing(desktop.scale(), grounds.window),
+                    floor_width: win_floor_width(desktop.scale(), grounds.window),
                     opening: opening.1,
                     restored: true,
                 },
@@ -815,8 +816,9 @@ mod program {
     /// Hold `win`'s height to what its listing fills, so no blank band opens
     /// beneath the items, answering whether the window was resized.
     ///
-    /// The ceiling is restated whenever the listing's height moves, and the
-    /// window manager brings the window down to it. A folder the window has
+    /// The range is restated whenever the listing's height or the floor of its
+    /// view and bands moves, and the window manager holds the window to it —
+    /// a drag in flight included. A folder the window has
     /// just moved to is fitted afresh, as a new window there would open —
     /// never taller than the listing, and grown back to the opening height
     /// unless its user made it taller still. A listing still being read
@@ -847,7 +849,14 @@ mod program {
         ) else {
             return false;
         };
-        let sizing = fitted_sizing(state.fit.floor, fitted);
+        let floor = browser_floor(
+            state.fit.floor_width,
+            state.browser.view_mode(),
+            state.chrome.toolbar,
+            scale,
+            grounds.window,
+        );
+        let sizing = fitted_sizing(floor, fitted);
         let moved = state.fit.location.as_slice() != state.browser.components();
         if moved {
             state.fit.location = state.browser.components().to_vec();
@@ -889,12 +898,12 @@ mod program {
         icons: &RefCell<IconPipeline>,
     ) -> Result<(), Errno> {
         let opening = desktop.window_size(WIN_WIDTH, WIN_HEIGHT).1;
-        let floor = win_sizing(desktop.scale(), grounds.window);
+        let floor_width = win_floor_width(desktop.scale(), grounds.window);
         for win in windows {
             let id = win.pane.id();
             if let Some(state) = win.browser() {
                 state.fit.opening = opening;
-                state.fit.floor = floor;
+                state.fit.floor_width = floor_width;
                 apply_backdrop(client, id, grounds);
             }
             present_whole(win, client, grounds, icons, desktop.scale())?;
@@ -6153,7 +6162,7 @@ mod program {
             report_error("window surface refused; no Properties window opened");
             return;
         };
-        let sizing = tairix_browse::win_sizing(desktop.scale(), grounds.popups);
+        let sizing = tairix_browse::properties_sizing(desktop.scale(), grounds.popups);
         let pane = match WindowPane::open(client, event_endpoint, &mode, &title, sizing) {
             Ok((pane, _)) => pane,
             Err(err) => {

@@ -2215,8 +2215,10 @@ pub enum WindowRequest {
     /// longer holds — content that shrank beneath a ceiling — is brought
     /// inside it and answered with a [`WindowEvent::Resized`], so an app
     /// states what its content needs and never resizes itself to match. A
-    /// drag in progress keeps the geometry and settles inside the range when
-    /// it ends; a fullscreen window is not bound. An app that wants one size
+    /// drag in progress is held to the new range at once, from where the
+    /// pointer rests, and answered the same way, so content that grew as the
+    /// window narrowed can be dragged taller in the same gesture; a fullscreen
+    /// window is not bound. An app that wants one size
     /// within the new range asks for it *before* restating, so it is already
     /// inside when the range arrives.
     SetSizing {

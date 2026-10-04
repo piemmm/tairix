@@ -335,10 +335,6 @@ struct ResizeGrab {
     /// the frame's hit map accepted routinely lands outside the window, and
     /// arming against the window would refuse the whole outward half.
     grab_region: Rect,
-    /// The outer extents this window may be dragged between, in physical
-    /// pixels, captured at grab start so the clamp never re-derives the
-    /// frame metrics mid-drag.
-    bounds: ResizeBounds,
 }
 
 impl ResizeGrab {
@@ -1261,10 +1257,9 @@ impl InputRouter {
         edge: ResizeEdge,
         compositor: &Compositor,
     ) -> InputResponse {
-        let (Some(start_outer), Some(grab_region), Some(bounds)) = (
+        let (Some(start_outer), Some(grab_region)) = (
             compositor.window(window).map(Window::bounds),
             compositor.window_grab_region(window),
-            compositor.window_resize_bounds(window),
         ) else {
             return InputResponse::FurniturePressed { window };
         };
@@ -1275,7 +1270,6 @@ impl InputRouter {
             start_outer,
             start_pointer: self.pointer,
             grab_region,
-            bounds,
         };
         // Prime the grabber's pointer, then begin its gesture over the frame's
         // grab region, which the press is inside by construction: the shared
@@ -1302,13 +1296,53 @@ impl InputRouter {
             };
         }
         let window = grab.window;
-        let new_outer = compute_resized_outer(grab, to);
-        if compositor.resize_window(window, new_outer) {
+        match self.resized_outer(compositor) {
+            Some(outer) if compositor.resize_window(window, outer) => {
+                InputResponse::Resized { window }
+            }
+            _ => {
+                self.resize_grab = None;
+                InputResponse::ResizeEnded { window }
+            }
+        }
+    }
+
+    /// Hold an in-flight resize to the size range its window declares *now*,
+    /// from where the pointer rests: a range its application restates mid-drag
+    /// binds the drag at once rather than when it lets go, so a window whose
+    /// content grows taller as it is narrowed can be dragged taller in the same
+    /// gesture, and one whose content shrinks leaves no blank band under it.
+    ///
+    /// Answers [`InputResponse::Resized`] when the window's geometry moved,
+    /// [`InputResponse::ResizeEnded`] — dropping the grab — when the window can
+    /// no longer be resized, and [`InputResponse::Ignored`] when no resize is
+    /// in flight or the range leaves the window where it is.
+    pub fn restate_resize(&mut self, compositor: &mut Compositor) -> InputResponse {
+        let Some(window) = self.resizing() else {
+            return InputResponse::Ignored;
+        };
+        let Some(outer) = self.resized_outer(compositor) else {
+            self.resize_grab = None;
+            return InputResponse::ResizeEnded { window };
+        };
+        if compositor.window(window).map(Window::bounds) == Some(outer) {
+            return InputResponse::Ignored;
+        }
+        if compositor.resize_window(window, outer) {
             InputResponse::Resized { window }
         } else {
             self.resize_grab = None;
             InputResponse::ResizeEnded { window }
         }
+    }
+
+    /// The outer rectangle the in-flight resize asks for with the pointer where
+    /// it is now, held to the range its window declares now — `None` with no
+    /// resize in flight or a window that is no longer there to bound.
+    fn resized_outer(&self, compositor: &Compositor) -> Option<Rect> {
+        let grab = self.resize_grab.as_ref()?;
+        let bounds = compositor.window_resize_bounds(grab.window)?;
+        Some(compute_resized_outer(grab, self.pointer, bounds))
     }
 
     /// Handle a primary-button release: end any active scrollbar thumb drag,
@@ -1395,16 +1429,16 @@ impl InputRouter {
 /// The new outer rectangle a resize-grab produces when the pointer is at `to`:
 /// the grabbed edge(s) of the captured `start_outer` move by the pointer
 /// delta, the un-grabbed edges stay put, and the resulting extent is held
-/// inside the window's captured resize bounds — no smaller than what its
-/// title bar needs to seat its commands with a drag surface between them or
-/// what its application declared it can lay out at, and no larger than a
-/// ceiling the application declared its content grows to. The top edge is
-/// never a resize edge (the title bar lives there), so it is fixed.
+/// inside `bounds`, the window's resize range as it stands — no smaller than
+/// what its title bar needs to seat its commands with a drag surface between
+/// them or what its application declared it can lay out at, and no larger
+/// than a ceiling the application declared its content grows to. The top edge
+/// is never a resize edge (the title bar lives there), so it is fixed.
 ///
 /// The clamp is applied to the *extent* and the un-grabbed edge then anchors
 /// the result, so a drag on the left edge holds the right one still whether
 /// it is the floor or the ceiling that stops it.
-fn compute_resized_outer(grab: &ResizeGrab, to: Point) -> Rect {
+fn compute_resized_outer(grab: &ResizeGrab, to: Point, bounds: ResizeBounds) -> Rect {
     let start = grab.start_outer;
     let dx = to.x - grab.start_pointer.x;
     let dy = to.y - grab.start_pointer.y;
@@ -1430,7 +1464,7 @@ fn compute_resized_outer(grab: &ResizeGrab, to: Point) -> Rect {
     } else {
         start.height
     };
-    let held = grab.bounds.clamp((wanted_width, wanted_height));
+    let held = bounds.clamp((wanted_width, wanted_height));
     // Only a dragged axis is held to the bounds. A window its application
     // created outside them is its application's choice, and a drag sideways
     // is not the moment to snap its height to a floor it never asked for.

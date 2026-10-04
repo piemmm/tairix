@@ -938,7 +938,9 @@ field takes `FixedPitch` instead — it is a fixed field, not resizable content,
 keeping the pitch anchored to the edge its icons hug means an icon stays where
 the user last saw it whatever the work area's exact extent is. A vertical
 `lib/controls` `ScrollBar` is drawn in a reserved right-edge gutter over that
-same `ScrollRange`. The wheel arrives in the seat's scroll units, already
+same `ScrollRange` — always: with nothing to scroll, or beside the "Listing…"
+cue while a folder is read, it rests its thumb the length of the track, and
+the cue lays out no entry an undrawn press or scroll could reach. The wheel arrives in the seat's scroll units, already
 accelerated, and `scroll_wheel` moves the listing through that bar a fixed
 distance a detent, carrying what is short of a pixel to the next turn and
 reporting the bar and the items it slid; a selection-moving key reveals the
@@ -2119,14 +2121,19 @@ region is allocated and granted and adopted only once the session accepts
 refused or unallocatable resize leaves the current window intact rather than
 blanking or crashing. The floor is *declared* on the window create
 (`WindowSizing`) and enforced by the window manager, so a drag simply stops
-there. It is **derived**, not hand-picked: `tairix_browse::win_sizing(scale,
-theme)` takes the larger of what a listing still reads at and what the command
-toolbar's own tools need across (`Toolbar::natural_length`), resolved at the
-desktop's density — the ABI field is *physical* pixels while every desktop
-length is authored in logical ones. That is what keeps the strip from ever
-being handed a band too narrow for its tools: the shared `Toolbar` would then
-scroll, and a browser view rebuilds its strip per frame so it holds no offset
-to scroll with. The app must not clamp a granted size itself: resizing its
+there. It is **derived**, not hand-picked. Its width,
+`tairix_browse::win_floor_width(scale, theme)`, is the larger of what a listing
+still reads at and what the command toolbar's own tools need across
+(`Toolbar::natural_length`), resolved at the desktop's density — the ABI field
+is *physical* pixels while every desktop length is authored in logical ones.
+That is what keeps the strip from ever being handed a band too narrow for its
+tools: the shared `Toolbar` would then scroll, and a browser view rebuilds its
+strip per frame so it holds no offset to scroll with. Its height,
+`tairix_browse::browser_floor`, is one whole row of the listing beneath the
+bands the window draws (`render::listing_floor_height`) — a line of tiles in
+the grid, a row in the list — so a window can be made exactly one row tall,
+and the window restates it as the view or its bands change. A Properties
+window declares its own (`properties_sizing`). The app must not clamp a granted size itself: resizing its
 own window back up while a drag keeps shrinking makes the two fight once per
 pointer sample, which is what made the listing visibly bounce as the window
 approached its minimum. An app never answers a resize with a larger size of
@@ -2136,8 +2143,11 @@ its own.
 the listing, and the places rail beside it, fill at the window's width
 (`render::fitted_height`), declared through `tairix_browse::fitted_sizing`:
 a drag stops there, a maximize grows no further, and a listing that shrinks —
-a file deleted, a narrower grid folded into fewer lines — restates it, and the
-window manager brings the window down to it. A window opens at the height its
+a file deleted, a wider grid folded into fewer lines — restates it, and the
+window manager brings the window down to it. A drag in flight follows the
+ceiling as it is restated: narrowing a window folds its grid into more lines
+and raises the ceiling, and the same drag can take the window that much
+taller. A window opens at the height its
 listing fills, up to the ordinary browser height (`manager_opening`, the one
 rule a host reconstruction of the window shares), so an empty folder opens a
 short window rather than one with a blank band beneath it; the first listing
@@ -2366,11 +2376,10 @@ A new terminal opens at **80% opacity with the backdrop blurred at half
 strength** (`Effects::default`), the five pass effects off. Translucency is
 free — it is the alpha the background is filled at, so the compositor's own
 blend does the work — and the blur is what makes the window read as frosted
-glass rather than as a hole. A screenful of them is affordable because the
-compositor stopped computing the frosts a stack of them buries: what a window
-still contributes to the screen is the destination weight of everything over
-it, and four layers of 80% opacity take that below the last bit of an 8-bit
-channel (`docs/src/desktop/wm.md`, *A frost no output channel can record*).
+glass rather than as a hole. A screenful of them is affordable because
+frosting is rationed front to back: what the frost cache's budget reaches is
+frosted, and a terminal beneath that composites as the plain translucent window
+it also is (`docs/src/desktop/wm.md`, *Frosting is rationed, front to back*).
 
 A pass is a *whole-frame* post-process by nature — wobble displaces rows,
 phosphor decays every pixel, and the glow spreads light across them — so when

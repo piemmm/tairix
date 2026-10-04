@@ -161,7 +161,8 @@ The **command surfaces** are the menu, toolbar, tab strip, and combo box:
   strip and forgetting both.
 - `combo` — `ComboBox` composes the text-field focus model and the `Menu` model
   (its popup *is* a `Menu`), opening/selecting/closing by pointer and keyboard
-  and emitting a typed `ComboAction`.
+  and emitting a typed `ComboAction`; its field washes and presses under the
+  pointer through the shared press model, as a button's plate does.
 
 A list whose sections open in place — a tab strip's disclosing entries, a
 program catalog's folders — keeps its state in `disclosure`'s `DisclosureSet`
@@ -542,7 +543,8 @@ engine), the window-manager furniture (`window` — `WindowFrame`/`TitleBar`/
 one question a document window asks before closing over changes, whose actions
 `SaveChanges::of` reads), and the form fields
 (`form` — `FieldRow`/`FieldGroup`, the one settings-form shape, composing
-the `collection` row chrome and a real control in each row's slot, a
+the `collection` row chrome — never its pointer wash, which is the slot
+control's alone — and a real control in each row's slot, a
 `FlagSet` of labelled checkboxes among them; `stack` is the one plate column
 its groups are stacked down), the picture choice (`picture` —
 `PictureChoice`, a one-of-several setting chosen by its picture, seated in a

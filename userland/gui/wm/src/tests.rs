@@ -5169,6 +5169,101 @@ fn an_application_s_declared_maximum_caps_the_resize_ceiling() {
     );
 }
 
+/// Cap `id`'s client height `extra` past where it starts, then drag its
+/// bottom-right corner far below: the dragging router, and where it rests.
+fn drag_under_a_ceiling(c: &mut Compositor, id: WindowId, extra: u32) -> (InputRouter, Point) {
+    let before = c.window(id).expect("window").bounds();
+    let client = c.window_client_rect(id).expect("decorated");
+    assert!(c.set_window_client_size_range(id, (0, 0), (0, client.height + extra)));
+    let mut router = InputRouter::new();
+    let corner = Point::new(before.right() - 1, before.bottom() - 1);
+    router.handle(moved(corner.x, corner.y), c, T0);
+    router.handle(press_primary(), c, T0);
+    let far = Point::new(corner.x, corner.y + 4000);
+    router.handle(moved(far.x, far.y), c, T0);
+    (router, far)
+}
+
+#[test]
+fn a_ceiling_raised_mid_drag_binds_the_next_sample() {
+    // A listing that grows taller as its window narrows raises its ceiling
+    // while the drag runs; the drag must follow the range as it stands, not
+    // the one it began under.
+    let (mut c, id) = decorated_compositor();
+    let (mut router, far) = drag_under_a_ceiling(&mut c, id, 10);
+    let capped = c.window(id).expect("window").bounds().height;
+    let client = c.window_client_rect(id).expect("decorated");
+    assert!(c.set_window_client_size_range(id, (0, 0), (0, client.height + 50)));
+    router.handle(moved(far.x, far.y + 1), &mut c, T0);
+    assert_eq!(c.window(id).expect("window").bounds().height, capped + 50);
+}
+
+#[test]
+fn a_restated_range_holds_the_drag_from_where_the_pointer_rests() {
+    // The range can move without the pointer moving — the application
+    // restates it after laying out the last sample — and the drag answers it
+    // there and then rather than at the next sample or the release.
+    let (mut c, id) = decorated_compositor();
+    let (mut router, _) = drag_under_a_ceiling(&mut c, id, 10);
+    let capped = c.window(id).expect("window").bounds();
+    let client = c.window_client_rect(id).expect("decorated");
+
+    assert!(c.set_window_client_size_range(id, (0, 0), (0, client.height + 50)));
+    assert_eq!(
+        router.restate_resize(&mut c),
+        InputResponse::Resized { window: id }
+    );
+    let grown = c.window(id).expect("window").bounds();
+    assert_eq!(
+        grown.height,
+        capped.height + 50,
+        "raised: it follows the pointer"
+    );
+    assert_eq!(grown.origin, capped.origin);
+
+    assert!(c.set_window_client_size_range(id, (0, 0), (0, client.height - 20)));
+    assert_eq!(
+        router.restate_resize(&mut c),
+        InputResponse::Resized { window: id }
+    );
+    assert_eq!(
+        c.window(id).expect("window").bounds().height,
+        capped.height - 20,
+        "lowered: it comes down at once"
+    );
+    assert_eq!(
+        router.restate_resize(&mut c),
+        InputResponse::Ignored,
+        "a range that leaves the window where it is reports nothing"
+    );
+    assert_eq!(router.resizing(), Some(id), "the drag goes on");
+}
+
+#[test]
+fn a_restated_range_with_no_drag_in_flight_is_not_the_router_s() {
+    let (mut c, id) = decorated_compositor();
+    let before = c.window(id).expect("window").bounds();
+    let mut router = InputRouter::new();
+    assert!(c.set_window_client_size_range(id, (0, 0), (0, 10)));
+    assert_eq!(router.restate_resize(&mut c), InputResponse::Ignored);
+    assert_eq!(c.window(id).expect("window").bounds(), before);
+}
+
+#[test]
+fn escape_still_restores_the_start_after_a_restated_range_moved_the_drag() {
+    let (mut c, id) = decorated_compositor();
+    let before = c.window(id).expect("window").bounds();
+    let (mut router, _) = drag_under_a_ceiling(&mut c, id, 10);
+    let client = c.window_client_rect(id).expect("decorated");
+    assert!(c.set_window_client_size_range(id, (0, 0), (0, client.height + 50)));
+    router.restate_resize(&mut c);
+    assert_eq!(
+        router.handle(key_pressed(Key::Named(NamedKey::Escape)), &mut c, T0),
+        InputResponse::ResizeEnded { window: id }
+    );
+    assert_eq!(c.window(id).expect("window").bounds(), before);
+}
+
 #[test]
 fn a_ceiling_stops_a_left_edge_drag_without_moving_the_right_one_or_the_height() {
     // The un-grabbed edge anchors the result, so a ceiling reached on a

@@ -475,8 +475,10 @@ reporting, and a `widgets.app` gallery tab, exactly as every other family.
 - **`form::FieldRow`** — one setting: a leading label, an optional secondary
   description line, and a trailing slot holding one control (a `Toggle`,
   `ComboBox`, `Slider`, `TextField`, `Button`, or a plain read-only value).
-  It composes `collection::ListRow`'s row chrome for hover, selection, focus
-  ring, and the leading rails rather than restating any of it, and it renders
+  It composes `collection::ListRow`'s row chrome for selection, focus ring,
+  and the leading rails rather than restating any of it — but never its hover:
+  the row is not what the pointer acts on, so only the slot's control lights
+  under it — and it renders
   the three absences of §0 distinctly: plainly disabled, Authority Mark, or a
   stated unmeasured value. Under a narrow width the description truncates
   first, then the label; the control keeps its room, because the control is
@@ -947,8 +949,8 @@ that repainted anything is presented. The keyboard cursor follows a press,
 never a hover. What is lit follows the pointer rather than the content: a round
 that scrolled a column or laid it out afresh, and every `lay_out` a caller
 drives after adopting an answer or a resize, replays the resting pointer as a
-move through the same routing, so a row, a plate or a tile the content carried
-away gives its hover to whatever now lies under the pointer. The replay is a
+move through the same routing, so a control, a plate or a tile the content
+carried away gives its hover to whatever now lies under the pointer. The replay is a
 move — it presses nothing and takes no cursor — and a window that has not yet
 seen the pointer replays nothing.
 

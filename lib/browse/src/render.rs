@@ -158,27 +158,27 @@ pub fn render_into<S: DirectorySource>(
     let content = content_viewport(area, scale, theme);
     if awaiting_listing(browser) {
         draw_listing_cue(surface, scale, theme, content);
-        return;
-    }
-    match browser.view_mode() {
-        ViewMode::List => draw_list(
-            surface,
-            scale,
-            theme,
-            browser,
-            content,
-            chrome.toolbar,
-            artwork,
-        ),
-        ViewMode::Grid => draw_grid(
-            surface,
-            scale,
-            theme,
-            browser,
-            content,
-            chrome.toolbar,
-            artwork,
-        ),
+    } else {
+        match browser.view_mode() {
+            ViewMode::List => draw_list(
+                surface,
+                scale,
+                theme,
+                browser,
+                content,
+                chrome.toolbar,
+                artwork,
+            ),
+            ViewMode::Grid => draw_grid(
+                surface,
+                scale,
+                theme,
+                browser,
+                content,
+                chrome.toolbar,
+                artwork,
+            ),
+        }
     }
     draw_scrollbar(surface, scale, theme, browser, area, chrome.toolbar);
 }
@@ -201,6 +201,17 @@ fn awaiting_listing<S: DirectorySource>(browser: &Browser<S>) -> bool {
     match browser.listing_target() {
         None => false,
         Some(target) => target != browser.components() || browser.entries().is_empty(),
+    }
+}
+
+/// How many entries the view lays out: none while [`LISTING_MESSAGE`] stands in
+/// their place, so nothing undrawn can be hit, scrolled to, or probed, and the
+/// bar beside the cue rests with nothing to scroll.
+fn laid_out<S: DirectorySource>(browser: &Browser<S>) -> usize {
+    if awaiting_listing(browser) {
+        0
+    } else {
+        browser.entries().len()
     }
 }
 
@@ -661,8 +672,9 @@ fn draw_grid<S: DirectorySource>(
 }
 
 /// Draw the vertical [`ScrollBar`] in the reserved right-edge gutter, spanning
-/// the item area below the toolbar. A viewport with no room for the gutter
-/// (or with no scrollable content) simply draws nothing there.
+/// the item area below the toolbar, whether or not there is anything to scroll
+/// — a listing that fits, or one still being read, rests its thumb the length
+/// of the track. Only a viewport with no room for the gutter draws none.
 fn draw_scrollbar<S: DirectorySource>(
     surface: &mut Surface,
     scale: Scale,
@@ -1106,7 +1118,7 @@ fn list_view<S: DirectorySource>(
         content,
         row_height(scale, theme),
         chrome_height(scale, theme, toolbar),
-        browser.entries().len(),
+        laid_out(browser),
     )
 }
 
@@ -1127,7 +1139,7 @@ fn grid_view<S: DirectorySource>(
         content,
         grid_metrics(scale, theme),
         chrome_height(scale, theme, toolbar),
-        browser.entries().len(),
+        laid_out(browser),
         GridFlow::RowsFromLeading,
         GridFill::Spread,
     )
@@ -1177,6 +1189,24 @@ pub fn fitted_height<S: DirectorySource>(
         .map_or(0, |rail| rail.content_height());
     let content = u32::try_from(items.max(rail)).unwrap_or(u32::MAX);
     Some(chrome_height(scale, theme, toolbar).saturating_add(content))
+}
+
+/// The least client height a browser window still shows its listing at: the
+/// bands `toolbar` draws, and beneath them one whole row of what `view` lists —
+/// a line of tiles, or a row of the list. A listing one row long fits it
+/// exactly ([`fitted_height`]).
+#[must_use]
+pub fn listing_floor_height(
+    view: ViewMode,
+    toolbar: ToolbarBand,
+    scale: Scale,
+    theme: &Theme,
+) -> u32 {
+    let row = match view {
+        ViewMode::Grid => grid_metrics(scale, theme).cell_height,
+        ViewMode::List => row_height(scale, theme),
+    };
+    chrome_height(scale, theme, toolbar).saturating_add(row)
 }
 
 /// Scroll by the wheel's `(dx, dy)`, in the seat's scroll units, through the

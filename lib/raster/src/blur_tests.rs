@@ -215,9 +215,10 @@ fn the_reciprocal_answers_exactly_what_the_divide_would() {
         );
     };
 
-    // Every reachable sum, exhaustively, for the radii a desktop actually
-    // frosts at (1 to 4) plus the degenerate single-sample window.
-    for radius in 0..=4u32 {
+    // Every reachable sum, exhaustively, for every window of at most 255
+    // samples: past the widest radius any desktop surface frosts at, and down
+    // to the degenerate single-sample window.
+    for radius in 0..=127u32 {
         let count = radius * 2 + 1;
         for sum in 0..=255 * count {
             checked(count, sum);

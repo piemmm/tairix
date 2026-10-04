@@ -273,7 +273,8 @@
 //! denied setting cannot hold an actionable control, and room is given out
 //! control, label, description — a narrowing row loses its words, never the
 //! control the reader came for. It composes the row chrome [`ListRow`] and
-//! [`TableRow`] already draw and restates neither that nor any control.
+//! [`TableRow`] already draw and restates neither that nor any control; the
+//! pointer lights only the control in a row's slot, never the row.
 //!
 //! The [`picture`] module is the picture choice — [`PictureChoice`]: a
 //! one-of-several setting offered as rounded pictures at one [`Aspect`] with

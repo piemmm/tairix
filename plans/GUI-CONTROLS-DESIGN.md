@@ -624,7 +624,7 @@ told separately, and none can be forgotten and left an opaque patch.
 
 `Theme::backdrop_blur` is the blur a ground reads over — `0` when opaque,
 `chrome_backdrop_blur` under floating chrome and `window_backdrop_blur`
-(twice it) under a frosted window, which covers far more of the desktop and
+(six times it) under a frosted window, which covers far more of the desktop and
 shows text — so a surface's fills and the blur it asks the compositor for are
 one answer. `ThemeRegistry::active_on` holds each
 grounded form beside the active theme and drops them with it, which is the one
@@ -888,6 +888,11 @@ field has no masked mode, because a query is not a credential.
 ### 11.9 ComboBox
 
 A combo box is a field plus disclosure action. It uses the text field focus model and the menu model for expanded choices. Selection state belongs to the choice list, not to string parsing inside the control.
+
+- **The field answers the pointer itself.** It washes under the pointer and
+  shows a press exactly as a button does (§11.1), and while its list is open
+  it keeps following the pointer, so it never stays lit for a pointer that has
+  moved into the list.
 
 - **The list's placement is the control's, not each owner's.**
   `ComboBox::popup_rect` answers where an expanded list goes for a field and
@@ -1983,13 +1988,17 @@ panes, the Date & Time window and the file manager's Permissions section all
 compose it, and none carries a layout of its own. A `FieldRow` is one setting;
 a `FieldGroup` is the captioned plate its rows sit on.
 
-- **A row composes the row chrome, it does not restate it.** The hover wash,
-  the leading pressure and selection rails, the activity Heat Seam, the
-  trailing Signal Bead band and the focus ring are the ones `ListRow` and
-  `TableRow` draw (§11.13), from one shared recipe — so a change to how a
-  selected or refused row reads cannot diverge between a list and a form. The
-  slot likewise holds a *real* control (§11.4–§11.9), never a second drawing
-  of one.
+- **A row composes the row chrome, it does not restate it.** The leading
+  pressure and selection rails, the activity Heat Seam, the trailing Signal
+  Bead band and the focus ring are the ones `ListRow` and `TableRow` draw
+  (§11.13), from one shared recipe — so a change to how a selected or refused
+  row reads cannot diverge between a list and a form. The slot likewise holds a
+  *real* control (§11.4–§11.9), never a second drawing of one.
+- **A row wears no pointer look.** A list row is the thing a reader picks, so
+  it lights under the pointer; a setting row is not — the control in its slot
+  is — so the row neither washes nor presses, and only that control answers
+  the pointer with its own look. No surface lights a whole row for holding a
+  control.
 - **A row's disposition is the setting's.** The row shares its enablement,
   authority and validation — exactly what decides actionability — with the
   control in its slot, so a denied or pending setting cannot hold an actionable
@@ -2084,9 +2093,9 @@ a `FieldGroup` is the captioned plate its rows sit on.
 - **Damage and settle point.** A row reports what the control in its slot asked
   for and commits nothing itself; the slider slot's live value and its settle
   point stay distinct (§11.6), and a durable change is made on the settle
-  alone. A pointer crossing one row reports that row; motion within it is
-  hit-testing input and reports nothing — except the motion that leaves the
-  slot's control, which reaches it so its hover look goes with the pointer.
+  alone. A pointer crossing a row reports nothing of the row's; the slot's
+  control reports its own look as the pointer enters and leaves it, and the
+  motion that leaves it still reaches it so that look goes with the pointer.
 - **A group may hold a picture choice beneath its rows** (§11.43), a setting
   too visual for a list. It is the group's item after its last row: the
   keyboard reaches it with Down from that row and leaves it with Up from its

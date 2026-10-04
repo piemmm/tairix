@@ -43,7 +43,7 @@ This crate is pure theme *data*. A `Theme` is a table of:
   consumes; `taskbar_margin`, how far the bar stands off the three screen edges
   it faces (`5`), and `chrome_backdrop_blur`, how far the backdrop behind it
   and its popups is blurred (`7`); `window_backdrop_blur`, how far the backdrop
-  behind a frosted application window is blurred (`14`); plus
+  behind a frosted application window is blurred (`43`); plus
   `selection_backdrop_blur`, how far the
   *backdrop* behind a
   selected item is blurred, in logical pixels (`6` in both themes). The fill

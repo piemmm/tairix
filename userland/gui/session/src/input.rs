@@ -297,6 +297,13 @@ impl SessionInputRouter {
         self.wm.begin_move(compositor)
     }
 
+    /// Hold an in-flight resize to the range its window declares now, from
+    /// where the pointer rests. Delegates to the window manager's router,
+    /// which owns the drag ([`InputRouter::restate_resize`]).
+    pub fn restate_resize(&mut self, compositor: &mut Compositor) -> InputResponse {
+        self.wm.restate_resize(compositor)
+    }
+
     /// The modifiers the seat currently holds.
     ///
     /// Held by the window-manager router, which every modifier edge reaches

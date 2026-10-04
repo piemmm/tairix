@@ -511,7 +511,7 @@ fn common_metrics() -> Metrics {
         window_corner_radius: 8,
         taskbar_margin: 5,
         chrome_backdrop_blur: 7,
-        window_backdrop_blur: 14,
+        window_backdrop_blur: 43,
         popup_corner_radius: 6,
         drop_shadow_reach: 6,
         border_thickness: 1,

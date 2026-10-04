@@ -609,9 +609,12 @@ fn warm_font_client() {
 /// How many pieces the "split" rows below divide a pass into.
 const BAND_WIDTH: usize = 8;
 
-/// The blur radius a desktop backdrop is actually drawn at, so the aspect-ratio
-/// rows and the composited-frame rows describe the same blur.
-const BACKDROP_RADIUS: u16 = 12;
+/// The blur a frosted window's backdrop is actually drawn at, read from the
+/// theme so the aspect-ratio rows and the composited-frame rows describe the
+/// blur the desktop pays for.
+fn backdrop_radius() -> u16 {
+    Theme::dark().frosted().backdrop_blur()
+}
 
 /// A runner that reports a width it does not have and runs every piece on the
 /// calling thread.
@@ -736,6 +739,7 @@ fn blur(harness: &BenchHarness<'_>) -> Result<Vec<Measurement>, String> {
     // striding, not the work. Two areas, because the effect can only appear once
     // the buffer outgrows cache — the small triple's middle shape is the
     // 640x360 row above, and the large triple is a screen-sized backdrop.
+    let backdrop = backdrop_radius();
     for (wide, tall) in [
         (2400u32, 96u32),
         (96, 2400),
@@ -744,13 +748,9 @@ fn blur(harness: &BenchHarness<'_>) -> Result<Vec<Measurement>, String> {
         (270, 7680),
     ] {
         rows.push(Measurement::new(
-            format!("box_blur {wide}x{tall} r{BACKDROP_RADIUS}"),
+            format!("box_blur {wide}x{tall} r{backdrop}"),
             u64::from(wide) * u64::from(tall),
-            harness.median_cycles(
-                usize::from(BACKDROP_RADIUS),
-                run_box,
-                &box_warm_of(wide, tall),
-            ),
+            harness.median_cycles(usize::from(backdrop), run_box, &box_warm_of(wide, tall)),
         ));
     }
     Ok(rows)
@@ -1060,7 +1060,7 @@ fn scene(stack: Stack, runner: &'static dyn JobRunner) -> Result<CompositeWarm, 
             }
             Stack::BackdropBlur => {
                 compositor.set_opacity(id, 200);
-                compositor.set_backdrop_blur(id, BACKDROP_RADIUS);
+                compositor.set_backdrop_blur(id, backdrop_radius());
             }
         }
         top = Some((id, origin, width, height));

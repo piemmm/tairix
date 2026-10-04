@@ -276,7 +276,7 @@ typed outcomes, entirely inside `userland/gui/wm`. What it now guarantees:
 - A title-bar press begins the existing move-grab (`begin_move` → `Moved`/
   `MoveEnded`); a resize-edge press begins a resize-grab that drives the shared
   `ResizeGrabber` (`ResizeEvent`), recomputes the clamped outer rectangle per
-  edge (minimum-client floor `MIN_CLIENT_W`/`H`), and applies it through
+  edge (held to `window_resize_bounds` as it stands), and applies it through
   `Compositor::resize_window` (client geometry, origin, and decoration
   following), reporting `Resized`/`ResizeEnded`; Escape cancels and restores
   the pre-drag geometry exactly.
@@ -465,7 +465,10 @@ it guarantees:
   and with the desktop's density, `WindowRequest::SetSizing` restates the
   range on a live window (`WindowHost::window_sizing_changed`), mirroring
   `SetTitle`; what it may not restate is *resizability*, which decided the
-  furniture, so a kind change is refused `NotSupported`.
+  furniture, so a kind change is refused `NotSupported`. The drag reads the
+  range afresh on every sample, and a restatement re-holds a drag in flight
+  from where the pointer rests (`InputRouter::restate_resize`), so content
+  that grows as its window narrows can be dragged taller in the same gesture.
 - **The picture and document viewer is the shipping resizable app.**
   `userland/apps/view` opens `WindowSizing::Resizable`, and on every
   `WindowEvent::Resized` (an interactive grab settling, or a maximize/restore)

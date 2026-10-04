@@ -6,6 +6,8 @@
 //! itself, the category list a shed strip becomes, and the scroll a pane too
 //! tall for its column gets.
 
+use alloc::vec::Vec;
+
 use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::desktop::{Appearance, Contrast, Density};
 use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
@@ -3154,8 +3156,9 @@ fn strip_row_under(shell: &Shell, at: Point, viewport: Rect, theme: &Theme) -> O
     })
 }
 
-/// The form row the window draws under `at`, as its group and row.
-fn form_row_under(
+/// The form row whose control the window draws under `at`, as its group and
+/// row.
+fn form_control_under(
     shell: &Shell,
     at: Point,
     viewport: Rect,
@@ -3165,7 +3168,7 @@ fn form_row_under(
     form.groups().iter().enumerate().find_map(|(group, plate)| {
         (0..plate.rows().len()).find_map(|row| {
             shell
-                .row_rect_for_test((group, row), viewport, Scale::ONE, theme)
+                .row_control_rect_for_test((group, row), viewport, Scale::ONE, theme)
                 .filter(|rect| rect.contains(at))
                 .map(|_| (group, row))
         })
@@ -3223,9 +3226,10 @@ fn a_wheel_turn_under_a_still_pointer_moves_the_strips_hover_to_the_row_now_unde
     assert!(covers(&drew, bar), "the thumb moved unrepainted");
 }
 
-/// The same for a form's rows under the pane's own wheel.
+/// The same for a form's controls under the pane's own wheel: a setting's row
+/// takes no hover, so what moves is the control the pointer rests on.
 #[test]
-fn a_wheel_turn_under_a_still_pointer_moves_the_panes_hover_to_the_row_now_under_it() {
+fn a_wheel_turn_under_a_still_pointer_moves_the_panes_hover_to_the_control_now_under_it() {
     let theme = theme();
     let short = Rect::new(0, 0, 900, 300);
     let accessibility = || {
@@ -3247,32 +3251,59 @@ fn a_wheel_turn_under_a_still_pointer_moves_the_panes_hover_to_the_row_now_under
     let mut shell = accessibility();
     let frame = shell.frame(short, Scale::ONE, &theme);
     let bar = frame.scrollbar.expect("the pane scrolls at this size");
-    let at = shell
-        .row_rect_for_test((0, 0), short, Scale::ONE, &theme)
-        .expect("the first row shows")
-        .center();
+    // A spot on one row's control that a detent puts on another's.
+    let controls: Vec<((usize, usize), Rect)> = {
+        let groups = shell.form_for_test().expect("a form").groups();
+        let places = groups
+            .iter()
+            .enumerate()
+            .flat_map(|(group, plate)| (0..plate.rows().len()).map(move |row| (group, row)));
+        places
+            .filter_map(|place| {
+                shell
+                    .row_control_rect_for_test(place, short, Scale::ONE, &theme)
+                    .map(|rect| (place, rect))
+            })
+            .collect()
+    };
+    let (first, at) = controls
+        .iter()
+        .find_map(|(place, rect)| {
+            controls.iter().find_map(|(other, below)| {
+                let carried = Rect::new(
+                    below.left(),
+                    below.top() - to_i32(WHEEL_STEP),
+                    below.width,
+                    below.height,
+                );
+                let both = rect.intersection(&carried);
+                (other != place && !both.is_empty()).then_some((*place, both.center()))
+            })
+        })
+        .expect("a detent carries one control onto another's place");
     let mut sink = damage();
     point_at(&mut shell, at, short, &theme, &mut sink);
+    assert_eq!(form_control_under(&shell, at, short, &theme), Some(first));
     let stale = shell.form_for_test().expect("a form").groups().to_vec();
 
     let mut drew = damage();
     detent(&mut shell, short, &theme, &mut drew);
     assert_eq!(shell.scroll_offset(), u64::from(WHEEL_STEP));
-    let now_under = form_row_under(&shell, at, short, &theme);
+    let now_under = form_control_under(&shell, at, short, &theme);
     assert!(
-        now_under.is_some_and(|row| row != (0, 0)),
-        "a detent brings another row under the pointer: {now_under:?}"
+        now_under.is_some_and(|place| place != first),
+        "a detent brings another row's control under the pointer: {now_under:?}"
     );
     let mut fresh = accessibility();
     point_at(&mut fresh, at, short, &theme, &mut sink);
     detent(&mut fresh, short, &theme, &mut sink);
     re_point(&mut fresh, at, short, &theme);
     let fresh = fresh.form_for_test().expect("a form").groups().to_vec();
-    assert_ne!(fresh, stale, "the premise: the lit row moves");
+    assert_ne!(fresh, stale, "the premise: the lit control moves");
     assert_eq!(
         shell.form_for_test().expect("a form").groups(),
         fresh.as_slice(),
-        "the hover stayed on the row the wheel carried away"
+        "the hover stayed on the control the wheel carried away"
     );
     assert!(covers(&drew, frame.content), "the rows slid unrepainted");
     assert!(covers(&drew, bar), "the thumb moved unrepainted");
@@ -3379,7 +3410,7 @@ fn a_keyboard_reveal_under_a_still_pointer_moves_the_hover_to_the_row_now_under_
 /// to hold the whole pane — re-derives the hover from where the pointer
 /// rests, as the rounds that scroll do.
 #[test]
-fn a_relayout_that_clamps_the_offset_moves_the_hover_to_the_row_now_under_it() {
+fn a_relayout_that_clamps_the_offset_moves_the_hover_to_the_control_now_under_it() {
     let theme = theme();
     let short = Rect::new(0, 0, 900, 300);
     let tall = Rect::new(0, 0, 900, 1600);
@@ -3412,7 +3443,22 @@ fn a_relayout_that_clamps_the_offset_moves_the_hover_to_the_row_now_under_it() {
         shell.scroll_offset() > 0,
         "the premise: the pane is scrolled"
     );
-    let at = shell.frame(short, Scale::ONE, &theme).content.center();
+    let content = shell.frame(short, Scale::ONE, &theme).content;
+    let rows = shell
+        .form_for_test()
+        .expect("a form")
+        .groups()
+        .iter()
+        .enumerate();
+    let at = rows
+        .flat_map(|(group, plate)| (0..plate.rows().len()).map(move |row| (group, row)))
+        .find_map(|place| {
+            shell
+                .row_control_rect_for_test(place, short, Scale::ONE, &theme)
+                .map(|rect| rect.center())
+                .filter(|centre| content.contains(*centre))
+        })
+        .expect("a control shows in the scrolled pane");
     let mut sink = damage();
     point_at(&mut shell, at, short, &theme, &mut sink);
     let stale = shell.form_for_test().expect("a form").groups().to_vec();
@@ -3424,11 +3470,11 @@ fn a_relayout_that_clamps_the_offset_moves_the_hover_to_the_row_now_under_it() {
     fresh.lay_out(tall, Scale::ONE, &theme);
     re_point(&mut fresh, at, tall, &theme);
     let fresh = fresh.form_for_test().expect("a form").groups().to_vec();
-    assert_ne!(fresh, stale, "the premise: the lit row moves");
+    assert_ne!(fresh, stale, "the premise: the lit control moves");
     assert_eq!(
         shell.form_for_test().expect("a form").groups(),
         fresh.as_slice(),
-        "the hover stayed on the row the relayout moved away"
+        "the hover stayed on the control the relayout moved away"
     );
 }
 

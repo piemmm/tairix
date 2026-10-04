@@ -16,7 +16,7 @@ use tairix_theme::Theme;
 
 use crate::combo::{ComboAction, ComboBox};
 use crate::damage::sink;
-use crate::state::{AuthorityState, ControlState};
+use crate::state::{AuthorityState, ControlState, PointerState};
 use crate::testkit::{has_pixel, marks_elision, premul};
 
 const W: u32 = 160;
@@ -369,17 +369,9 @@ fn hit_test_bookkeeping_is_invisible_to_a_combo_box() {
         "…and the two must therefore paint identically"
     );
 
-    // A press on the field only latches; the disposition a press *shows* is
-    // the owner-set `ControlState`, which is still compared.
+    // A press on the field shows the pressed look a button shows, and latches
+    // beneath it. Only the latch differs, and a latch is not drawn.
     let mut latched = combo();
-    latched.on_pointer(
-        &moved(8, 14),
-        field_bounds(),
-        none,
-        Scale::ONE,
-        &theme,
-        &mut sink(),
-    );
     latched.on_pointer(
         &PRESS,
         field_bounds(),
@@ -388,19 +380,152 @@ fn hit_test_bookkeeping_is_invisible_to_a_combo_box() {
         &theme,
         &mut sink(),
     );
-    let resting = combo();
-    assert_eq!(latched, resting, "the press latch is not a drawn property");
+    let mut shown = combo();
+    let mut state = ControlState::idle();
+    state.pointer = PointerState::Pressed;
+    shown.set_state(state);
+    assert_eq!(latched, shown, "the press latch is not a drawn property");
     assert_eq!(
         render(&latched).pixels(),
-        render(&resting).pixels(),
+        render(&shown).pixels(),
         "…and the two must therefore paint identically"
     );
+    assert_eq!(
+        latched.on_pointer(
+            &RELEASE,
+            field_bounds(),
+            none,
+            Scale::ONE,
+            &theme,
+            &mut sink()
+        ),
+        Some(ComboAction::Opened),
+        "the latch still governs opening, it is only invisible"
+    );
+}
 
-    let mut pressed = combo();
+#[test]
+fn hover_and_press_each_change_a_combo_render() {
+    let theme = Theme::dark();
+    let none = Rect::new(0, 0, 0, 0);
+    let render = |combo: &ComboBox| {
+        let mut surface = Surface::new(W, H).expect("surface");
+        combo.render(&mut surface, field_bounds(), Scale::ONE, &theme);
+        surface.pixels().to_vec()
+    };
+    let feed = |combo: &mut ComboBox, event: &InputEvent| {
+        let mut damage = sink();
+        combo.on_pointer(event, field_bounds(), none, Scale::ONE, &theme, &mut damage);
+        damage
+    };
+    let mut combo = ComboBox::new(choices()).with_selected(0);
+    feed(&mut combo, &moved(400, 60));
+    let resting = render(&combo);
+
+    let entered = feed(&mut combo, &moved(10, 14));
+    assert_eq!(combo.state().pointer, PointerState::Hover);
+    assert_eq!(
+        entered.bounds(),
+        field_bounds(),
+        "a hover enter is reported"
+    );
+    let hovered = render(&combo);
+    assert_ne!(hovered, resting, "a hover washes the field");
+    assert!(
+        feed(&mut combo, &moved(12, 14)).is_empty(),
+        "motion within the field repaints nothing"
+    );
+
+    let pressed = feed(&mut combo, &PRESS);
+    assert_eq!(combo.state().pointer, PointerState::Pressed);
+    assert_eq!(pressed.bounds(), field_bounds());
+    assert_ne!(render(&combo), hovered, "a press is visible");
+
+    feed(&mut combo, &moved(400, 60));
+    feed(&mut combo, &RELEASE);
+    assert!(
+        !combo.is_expanded(),
+        "a press let go away from the field opens nothing"
+    );
+    assert_eq!(combo.state().pointer, PointerState::None);
+    assert_eq!(render(&combo), resting, "leaving takes the look away");
+}
+
+#[test]
+fn an_open_list_leaves_the_field_following_the_pointer() {
+    let theme = Theme::dark();
+    let mut combo = combo();
+    let popup = open_and_popup(&mut combo, &theme);
+    assert!(combo.is_expanded());
+    assert_eq!(
+        combo.state().pointer,
+        PointerState::Hover,
+        "it opened under the pointer"
+    );
+
+    let mut into_list = sink();
+    let row = popup.center();
+    combo.on_pointer(
+        &moved(row.x, row.y),
+        field_bounds(),
+        popup,
+        Scale::ONE,
+        &theme,
+        &mut into_list,
+    );
+    assert_eq!(combo.state().pointer, PointerState::None);
+    assert!(
+        into_list.intersects(field_bounds()),
+        "the field's look went with the pointer"
+    );
+
+    let mut back = sink();
+    combo.on_pointer(
+        &moved(10, 14),
+        field_bounds(),
+        popup,
+        Scale::ONE,
+        &theme,
+        &mut back,
+    );
+    assert_eq!(combo.state().pointer, PointerState::Hover);
+    assert!(back.intersects(field_bounds()));
+}
+
+#[test]
+fn a_disabled_field_draws_no_pointer_look() {
+    let theme = Theme::dark();
+    let none = Rect::new(0, 0, 0, 0);
+    let mut combo = combo();
     let mut state = ControlState::idle();
-    state.pointer = crate::state::PointerState::Pressed;
-    pressed.set_state(state);
-    assert_ne!(resting, pressed, "the shown pressed disposition is visible");
+    state.enabled = false;
+    combo.set_state(state);
+    let render = |combo: &ComboBox| {
+        let mut surface = Surface::new(W, H).expect("surface");
+        combo.render(&mut surface, field_bounds(), Scale::ONE, &theme);
+        surface.pixels().to_vec()
+    };
+    let resting = render(&combo);
+    for event in [moved(10, 14), PRESS] {
+        combo.on_pointer(
+            &event,
+            field_bounds(),
+            none,
+            Scale::ONE,
+            &theme,
+            &mut sink(),
+        );
+        assert_eq!(render(&combo), resting, "{event:?}");
+    }
+    combo.on_pointer(
+        &RELEASE,
+        field_bounds(),
+        none,
+        Scale::ONE,
+        &theme,
+        &mut sink(),
+    );
+    assert!(!combo.is_expanded(), "a disabled field never opens");
 }
 
 /// Opening reports the popup that appears; the field's own plate is unchanged,

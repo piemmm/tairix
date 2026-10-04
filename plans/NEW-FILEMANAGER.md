@@ -58,6 +58,7 @@ which the drift guard enforces.
 | FM15 | A file dragged onto an application's icon-bar slot opens there, and every document open runs off the window's loop | done |
 | FM16 | The browser window is frosted glass like the Settings and Switchboard windows, with what it lays over its content opaque | done |
 | FM17 | The browser window is never taller than its listing: it opens at the height the listing fills, restates that ceiling as it moves, and the window manager holds it there | done |
+| FM18 | The browser window can be made one row of its listing tall, a drag follows the range as it is restated, and the listing's bar stands beside the "Listing…" cue | done |
 
 `plans/OPEN-DEFECTS.md` D98 is the one open block: the QEMU harness cannot
 order a typed key after a pointer click, so two guest click-throughs cannot be
@@ -121,6 +122,19 @@ ordinary browser height (`manager_opening`, which the QEMU reconstruction
 shares), measured from the listing `first_listable` already read, and a move
 to another folder fits it afresh without undoing a height its user gave it.
 A listing still being read changes nothing.
+
+**FM18 — one row, and a bar that stays.** A browser window's floor is one
+whole row of its listing beneath the bands it draws (`browser_floor`,
+`render::listing_floor_height`) — a line of tiles in the grid or a row in the
+list, under the command band when it shows — which is exactly what a one-row
+listing fills. The window restates it with the ceiling whenever its view or
+bands change, and the window manager holds a drag in flight to the range as it
+is restated (`InputRouter::restate_resize`), so narrowing a window raises its
+ceiling and the same drag can take it taller. The listing's bar is drawn beside
+the "Listing…" cue as beside any listing that fits, its thumb resting the
+track's length, and the cue lays out no entry, so nothing undrawn can be
+pressed, scrolled to or probed. A Properties window keeps its own floor
+(`properties_sizing`).
 
 **FM-dialogs — the two popup surfaces.** Three defects, one of them shared
 with every other surface on the desktop.
@@ -1512,7 +1526,7 @@ something else — and the listing stays usable while they are open, which an
 in-window modal could not offer. Its client is the fields, the permission and
 ownership controls, and the extended-attribute list; no second panel header
 inside a window that already has a title bar. A section taller than the body
-— the window may be dragged down to the floor `win_sizing` declares — is laid
+— the window may be dragged down to the floor `properties_sizing` declares — is laid
 out at its natural height and scrolled in pixels through the body, a bar beside
 it: the wheel (`render::properties_scroll_wheel`), the bar
 (`render::properties_scroll_pointer`), and the keyboard's reveal of the row a

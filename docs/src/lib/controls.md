@@ -173,10 +173,14 @@ and a trailing slot holding one real `Toggle`, `FlagSet`, `ComboBox`, `Slider`,
 `TextField`, `Button`, a read-only `Reading`, or a stated `Unmeasured` absence
 of one. A `FieldGroup` is the captioned plate those rows sit on, with an
 optional footnote beneath. Both compose the row chrome `ListRow` and `TableRow`
-draw — the hover wash, the leading pressure and selection rails, the activity
-seam, the trailing Signal Bead band, the focus ring — from the one shared
-recipe in the crate's paint core, so a change to how a selected or refused row
-reads cannot diverge between a list and a form. `FieldGroup::paint_plate` and
+draw — the leading pressure and selection rails, the activity seam, the
+trailing Signal Bead band, the focus ring — from the one shared recipe in the
+crate's paint core, so a change to how a selected or refused row reads cannot
+diverge between a list and a form. What a setting row never takes from that
+chrome is the pointer wash: a list row is the thing a reader picks, a setting
+row is not, so only the control in its slot lights under the pointer — a
+`ComboBox` field washing and pressing exactly as a button does.
+`FieldGroup::paint_plate` and
 `FieldGroup::plate_radius` are the group's plate alone, for a surface that
 must read as the same object as the groups beside it.
 

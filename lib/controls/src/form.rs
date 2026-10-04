@@ -690,9 +690,10 @@ impl FlagSet {
 ///
 /// The row draws the shared row chrome and its own two lines of text, and
 /// forwards everything else to the control in its slot. Its own state carries
-/// the setting's hover, selection, focus, pressure, activity and **authority**;
-/// the last of those is shared with the control, so a denied setting cannot
-/// hold an actionable control.
+/// the setting's selection, focus, pressure, activity and **authority**; the
+/// last of those is shared with the control, so a denied setting cannot hold
+/// an actionable control. The pointer is the slot control's alone: the row
+/// never lights under it.
 ///
 /// Equal rows draw the same pixels, so a host may use `==` as its repaint
 /// gate: the label, description, control (with the control's own state) and
@@ -802,8 +803,14 @@ impl FieldRow {
     /// separate actions with authorities of their own, a field row imposes its
     /// own — which is what makes a denied row's control keep its value and
     /// refuse activation without a caller having to remember to set both.
+    ///
+    /// A pointer look in `state` is dropped: the row never wears one, so no
+    /// owner can light a whole setting by handing back a state it read.
     pub fn set_state(&mut self, state: ControlState) {
-        self.state = state;
+        self.state = ControlState {
+            pointer: PointerState::None,
+            ..state
+        };
         self.control.adopt_authority(state);
     }
 
@@ -1021,13 +1028,12 @@ impl FieldRow {
 
     /// Feed a pointer event, reporting what the slot's control asked for.
     ///
-    /// The row's own chrome takes the hover, exactly as a list row's does, and
-    /// no press look: a setting row is not itself activatable, so a press
-    /// belongs to the control in its slot. The event reaches that control while
-    /// the pointer is over its drawn rectangle, on the motion that leaves it,
-    /// while it is holding a press — so a drag that leaves the slot still
-    /// reaches the slider it began on — and throughout while its choice list is
-    /// open.
+    /// The row itself answers no pointer: it is not what the reader acts on,
+    /// so it neither lights under the pointer nor shows a press. The event
+    /// reaches the control in its slot while the pointer is over its drawn
+    /// rectangle, on the motion that leaves it, while it is holding a press —
+    /// so a drag that leaves the slot still reaches the slider it began on —
+    /// and throughout while its choice list is open.
     pub fn on_pointer(
         &mut self,
         event: &InputEvent,
@@ -1038,12 +1044,6 @@ impl FieldRow {
     ) -> Option<FieldAction> {
         if let InputEvent::PointerMoved { to } = event {
             *self.pointer = *to;
-            let next = if layout.bounds.contains(*to) {
-                PointerState::Hover
-            } else {
-                PointerState::None
-            };
-            damage::set(&mut self.state.pointer, next, layout.bounds, damage);
         }
 
         let rect = self.control_rect(layout, scale, theme)?;
@@ -1678,8 +1678,8 @@ impl FieldGroup {
     }
 
     /// The rectangle of each *drawn* row, in order: as many whole rows as fit
-    /// beneath the caption, each spanning the plate's inner width so its hover
-    /// wash reaches the plate's edges.
+    /// beneath the caption, each spanning the plate's inner width so its rails
+    /// and ring reach the plate's edges.
     ///
     /// This is the one layout the paint, the hit test, and the focus reporting
     /// all read, so a press can never land on a row [`render`](Self::render)

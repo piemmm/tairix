@@ -227,43 +227,71 @@ pub const WIN_HEIGHT: u32 = 480;
 /// The smallest client width, in logical pixels, a *listing* still reads at.
 ///
 /// The floor a window declares is the larger of this and what its own
-/// command toolbar needs ([`win_sizing`]); below that the shared toolbar
+/// command toolbar needs ([`win_floor_width`]); below that the shared toolbar
 /// would have to scroll, and a browser view rebuilds its strip per frame so
 /// it holds no offset to scroll with.
 const MIN_LISTING_WIDTH: u32 = 240;
 
-/// The smallest client height a browser window declares, in logical pixels
-/// (see [`MIN_LISTING_WIDTH`]).
-const MIN_WIN_HEIGHT: u32 = 160;
+/// The smallest client height a Properties window declares, in logical
+/// pixels: its identity band and section strip, with a body beneath them that
+/// scrolls.
+const PROPERTIES_MIN_HEIGHT: u32 = 160;
 
-/// The sizing a browser window asks the window manager for at `scale`:
-/// resizable, down to the smallest client both a listing and the command
-/// toolbar still fit in.
+/// The narrowest client a file-manager window declares at `scale`: the larger
+/// of what a listing still reads at and what the command toolbar needs.
 ///
 /// The floor the window manager holds an interactive resize to. The app never
 /// re-imposes it — it lays out at whatever size it is given, and the content
 /// clips gracefully below its natural size. It is derived rather than
 /// hand-picked, because the toolbar's own tools are what set it and a denser
-/// theme or a larger scale changes what they need. The ABI field is
-/// *physical*, so the logical floors above are resolved here.
+/// theme or a larger scale changes what they need. Measuring it builds the
+/// toolbar, so a window derives it when its scale or theme moves, not per
+/// frame. The ABI field is *physical*, so the logical floor is resolved here.
 #[must_use]
-pub fn win_sizing(scale: Scale, theme: &Theme) -> WindowSizing {
+pub fn win_floor_width(scale: Scale, theme: &Theme) -> u32 {
+    scale
+        .scale_length(MIN_LISTING_WIDTH)
+        .max(render::toolbar_natural_width(scale, theme))
+}
+
+/// The sizing a browser window showing `view` under `toolbar` declares at
+/// `scale`: resizable, down to `width` — its [`win_floor_width`] — and to the
+/// height that still shows one whole row of its listing
+/// ([`render::listing_floor_height`]).
+///
+/// The height follows the view and the bands, so a window restates its floor
+/// as either changes.
+#[must_use]
+pub fn browser_floor(
+    width: u32,
+    view: ViewMode,
+    toolbar: ToolbarBand,
+    scale: Scale,
+    theme: &Theme,
+) -> WindowSizing {
     sizing_of(
-        scale
-            .scale_length(MIN_LISTING_WIDTH)
-            .max(render::toolbar_natural_width(scale, theme)),
-        scale.scale_length(MIN_WIN_HEIGHT),
+        width,
+        render::listing_floor_height(view, toolbar, scale, theme),
         0,
     )
 }
 
-/// `floor` — a window's [`win_sizing`] — with a height ceiling at the
+/// The sizing a Properties window declares at `scale`: resizable, down to the
+/// manager's [`win_floor_width`] and a height that seats its identity band and
+/// section strip over a body that scrolls.
+#[must_use]
+pub fn properties_sizing(scale: Scale, theme: &Theme) -> WindowSizing {
+    sizing_of(
+        win_floor_width(scale, theme),
+        scale.scale_length(PROPERTIES_MIN_HEIGHT),
+        0,
+    )
+}
+
+/// `floor` — a window's [`browser_floor`] — with a height ceiling at the
 /// `fitted` pixels its listing fills ([`render::fitted_height`]), so no drag,
 /// maximize or shrinking listing leaves a blank band beneath the items. A
 /// listing shorter than the floor is held to the floor.
-///
-/// The floor is taken rather than derived, because measuring it builds the
-/// toolbar: a window derives it when its scale or theme moves, not per frame.
 #[must_use]
 pub const fn fitted_sizing(floor: WindowSizing, fitted: u32) -> WindowSizing {
     let min_height_px = floor.min_height_px();
@@ -278,8 +306,9 @@ pub const fn fitted_sizing(floor: WindowSizing, fitted: u32) -> WindowSizing {
 /// The client extent a file-manager window opens at over `browser`, and the
 /// sizing it declares: `size` — the desktop's extent for a browser window,
 /// [`WIN_WIDTH`] × [`WIN_HEIGHT`] at its density — shortened to the height
-/// the listing fills and never below the floor, with the ceiling at that
-/// listing ([`fitted_sizing`]).
+/// the listing fills and never below the floor of its view under the bands it
+/// opens with ([`browser_floor`]), with the ceiling at that listing
+/// ([`fitted_sizing`]).
 ///
 /// The one opening rule, so the app and a host reconstruction of its window
 /// cannot place it differently. A listing still being read opens at `size`
@@ -292,7 +321,13 @@ pub fn manager_opening<S: DirectorySource>(
     theme: &Theme,
 ) -> ((u32, u32), WindowSizing) {
     let (width, height) = size;
-    let floor = win_sizing(scale, theme);
+    let floor = browser_floor(
+        win_floor_width(scale, theme),
+        browser.view_mode(),
+        MANAGER_TOOLBAR_BAND,
+        scale,
+        theme,
+    );
     match render::fitted_height(browser, width, scale, theme, None, MANAGER_TOOLBAR_BAND) {
         Some(fitted) => {
             let least = floor.min_height_px().min(height);
@@ -305,8 +340,9 @@ pub fn manager_opening<S: DirectorySource>(
     }
 }
 
-/// One spelling of the sizing variant, so [`win_sizing`], [`fitted_sizing`]
-/// and [`WIN_RESIZABLE`] cannot state different things about the decoration.
+/// One spelling of the sizing variant, so [`browser_floor`],
+/// [`properties_sizing`], [`fitted_sizing`] and [`WIN_RESIZABLE`] cannot state
+/// different things about the decoration.
 /// No width ceiling: a listing re-flows into every width it is given.
 const fn sizing_of(min_width_px: u32, min_height_px: u32, max_height_px: u32) -> WindowSizing {
     WindowSizing::Resizable {

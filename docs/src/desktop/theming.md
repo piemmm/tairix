@@ -58,9 +58,11 @@ bundles, under a stable `ThemeId`:
     brighter on dark, deeper on light — and the tests assert that separation on
     both appearances rather than trusting the authored numbers. The asserted
     floor is what "one clear step" means to a user, not the smallest difference
-    a screen can resolve: this is also the wash a menu row and a list row are
-    highlighted with, so a hover authored a few luma off its ground reads as no
-    highlight at all, everywhere at once. The tests additionally hold body text
+    a screen can resolve: this is also the wash a list row, a tab and a tile
+    are highlighted with, so a hover authored a few luma off its ground reads
+    as no highlight at all, everywhere at once. A menu's current row is not a
+    hover but the choice itself, so it takes the solid `surface_selected` band
+    instead. The tests additionally hold body text
     legible *on* both plates, so the wash can never be strengthened into the
     foreground it carries.
   - `document` is the ground a document's own *content* is drawn on: an
@@ -218,11 +220,12 @@ bundles, under a stable `ThemeId`:
     same compositor filter `selection_backdrop_blur` uses, asked for by the
     session as each chrome surface is placed.
   - `window_backdrop_blur` is how far the backdrop behind a frosted
-    application window is blurred, `14` logical pixels in both themes — twice
-    the chrome's, because a window covers far more of the desktop and shows
-    rows and text rather than a few icons, so even the larger shapes behind it
-    must dissolve into a wash. The window asks for it itself, before its first
-    frame and on every desktop change.
+    application window is blurred, `43` logical pixels in both themes — six
+    times the chrome's, because a window covers far more of the desktop and
+    shows rows and text rather than a few icons, so even the larger shapes
+    behind it must dissolve into a wash. It is one box pass whatever its
+    width, so the depth costs the frost no more per pixel. The window asks for
+    it itself, before its first frame and on every desktop change.
   - `drop_shadow_reach` is how far the shadow a floating surface casts reaches
     past it, `6` logical pixels in both themes, and `0` casts none. The light
     is overhead, so the shadow is the surface's own silhouette dropped by the

@@ -5,11 +5,11 @@
 //! its slot; the owner placing an expanded choice list — plus the slot column
 //! every group's controls line up in, the settle point a durable change is
 //! made on, the distinct rendering of a stated absence, the fail-closed
-//! refusals, the damage a pointer crossing one row reports, and both built-in
-//! themes with the heavier-contrast path. The flag-set slot is covered for the
-//! same contract: its measured width and the shrink below it, the one flag a
-//! press or a key names, the row's authority reaching every flag, and every
-//! contrast policy.
+//! refusals, the pointer lighting a row's control and never the row, and both
+//! built-in themes with the heavier-contrast path. The flag-set slot is
+//! covered for the same contract: its measured width and the shrink below it,
+//! the one flag a press or a key names, the row's authority reaching every
+//! flag, and every contrast policy.
 
 use alloc::format;
 use alloc::string::String;
@@ -1108,40 +1108,129 @@ fn an_out_of_range_focus_clears_rather_than_holding() {
 
 // --- Damage and layout agreement ---------------------------------------
 
+/// A row holding a choice, the shape of the screensaver's "Save pictures".
+fn combo_row() -> FieldRow {
+    FieldRow::new(
+        "Save pictures",
+        FieldControl::Combo(ComboBox::new(choices(&["On", "Off"])).with_selected(0)),
+    )
+}
+
+/// Move the pointer to `to` over `row` laid out at `layout`, answering what it
+/// reported.
+fn point_row_at(row: &mut FieldRow, to: Point, layout: FieldLayout, theme: &Theme) -> Region {
+    let mut damage = sink();
+    row.on_pointer(
+        &InputEvent::PointerMoved { to },
+        layout,
+        Scale::ONE,
+        theme,
+        &mut damage,
+    );
+    damage
+}
+
+/// The first pixel outside `keep` where `a` and `b` differ.
+fn changed_outside(a: &Surface, b: &Surface, keep: Rect) -> Option<Point> {
+    (0..to_i32(a.height())).find_map(|y| {
+        (0..to_i32(a.width())).find_map(|x| {
+            let at = Point::new(x, y);
+            let (xu, yu) = (u32::try_from(x).ok()?, u32::try_from(y).ok()?);
+            (!keep.contains(at) && a.get(xu, yu) != b.get(xu, yu)).then_some(at)
+        })
+    })
+}
+
 #[test]
-fn a_pointer_crossing_a_row_reports_only_that_row() {
+fn a_pointer_over_a_rows_words_lights_nothing() {
     let theme = Theme::dark();
-    let scale = Scale::ONE;
-    let bounds = Rect::new(0, 0, W, H);
-    let mut row = toggle_row("Reduce motion", false);
-    let layout = FieldLayout::new(bounds, row.slot_width(scale, &theme).unwrap_or(0));
+    for mut row in [toggle_row("Reduce motion", false), combo_row()] {
+        let layout = FieldLayout::new(
+            Rect::new(0, 0, W, H),
+            row.slot_width(Scale::ONE, &theme).unwrap_or(0),
+        );
+        let resting = row_surface(&row, &theme, Scale::ONE, W, H);
 
-    let mut enter = sink();
-    row.on_pointer(
-        &InputEvent::PointerMoved {
-            to: Point::new(10, 10),
-        },
-        layout,
-        scale,
-        &theme,
-        &mut enter,
-    );
-    assert!(!enter.is_empty(), "a hover enter changes how the row draws");
+        let over_label = point_row_at(&mut row, Point::new(10, 10), layout, &theme);
+        assert!(over_label.is_empty(), "the row's words take no hover");
+        assert_eq!(row.state().pointer, PointerState::None);
+        assert_eq!(
+            row_surface(&row, &theme, Scale::ONE, W, H).pixels(),
+            resting.pixels(),
+            "{}: the row is not washed under the pointer",
+            row.label()
+        );
+        let along = point_row_at(&mut row, Point::new(12, 12), layout, &theme);
+        assert!(
+            along.is_empty(),
+            "motion along the words is hit-testing input"
+        );
+    }
+}
 
-    let mut inside = sink();
-    row.on_pointer(
-        &InputEvent::PointerMoved {
-            to: Point::new(12, 12),
-        },
-        layout,
-        scale,
-        &theme,
-        &mut inside,
+#[test]
+fn the_pointer_lights_only_the_control_in_the_slot() {
+    let theme = Theme::dark();
+    let mut row = combo_row();
+    let layout = FieldLayout::new(
+        Rect::new(0, 0, W, H),
+        row.slot_width(Scale::ONE, &theme).unwrap_or(0),
     );
+    let control = row
+        .control_rect(layout, Scale::ONE, &theme)
+        .expect("the choice is drawn");
+    let resting = row_surface(&row, &theme, Scale::ONE, W, H);
+
+    let entered = point_row_at(&mut row, control.center(), layout, &theme);
+    assert_eq!(
+        entered.bounds(),
+        control,
+        "the control reports its own look"
+    );
+    let lit = row_surface(&row, &theme, Scale::ONE, W, H);
+    assert_ne!(lit.pixels(), resting.pixels(), "the control washes");
+    assert_eq!(
+        changed_outside(&resting, &lit, control),
+        None,
+        "nothing outside the control lights"
+    );
+
+    let beside = Point::new(control.center().x + 1, control.center().y);
+    let within = point_row_at(&mut row, beside, layout, &theme);
     assert!(
-        inside.is_empty(),
-        "motion inside one row is hit-testing input, not a repaint"
+        within.is_empty(),
+        "motion within the control repaints nothing"
     );
+
+    let left = point_row_at(&mut row, Point::new(10, 10), layout, &theme);
+    assert_eq!(
+        left.bounds(),
+        control,
+        "leaving takes the control's look away"
+    );
+    assert_eq!(
+        row_surface(&row, &theme, Scale::ONE, W, H).pixels(),
+        resting.pixels()
+    );
+}
+
+#[test]
+fn a_state_handed_back_with_a_pointer_look_lights_nothing() {
+    let theme = Theme::dark();
+    let mut row = combo_row();
+    let resting = row_surface(&row, &theme, Scale::ONE, W, H);
+    for pointer in [PointerState::Hover, PointerState::Pressed] {
+        row.set_state(ControlState {
+            pointer,
+            ..ControlState::idle()
+        });
+        assert_eq!(row.state().pointer, PointerState::None, "{pointer:?}");
+        assert_eq!(
+            row_surface(&row, &theme, Scale::ONE, W, H).pixels(),
+            resting.pixels(),
+            "{pointer:?}"
+        );
+    }
 }
 
 /// A sentence that wraps at every width the agreement tests use.

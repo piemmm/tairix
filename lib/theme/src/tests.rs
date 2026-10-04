@@ -4,6 +4,7 @@ use alloc::string::String;
 
 use tairix_abi::desktop::CURSOR_SET_NAME_MAX;
 use tairix_abi::sysinfo::VolumeHealth;
+use tairix_abi::window_ipc::WINDOW_BACKDROP_BLUR_MAX_PX;
 
 use tairix_colour::legibility::contrast_hundredths;
 use tairix_colour::Rgba;
@@ -226,9 +227,8 @@ fn pointer_plates_step_away_from_the_bar_fill_in_the_appearance_direction() {
     // The floor is what the token's own promise of "one clear step" means, not
     // the smallest difference a screen can resolve: a hover authored a few
     // luma off its ground is one a user reports as no highlight at all, which
-    // is what a floor of four admitted. It is also the shared row wash a menu
-    // and a list both highlight with, so a whisper here is a whisper
-    // everywhere.
+    // is what a floor of four admitted. It is also the wash a list row, a tab
+    // and a tile highlight with, so a whisper here is a whisper everywhere.
     const MIN_STEP: u32 = 12;
     for theme in [Theme::dark(), Theme::light()] {
         let p = theme.palette();
@@ -313,7 +313,7 @@ fn the_selected_band_reads_as_a_choice_rather_than_a_wash() {
 
 #[test]
 fn body_text_stays_legible_on_a_hovered_or_pressed_plate() {
-    // A highlighted menu row and a hovered list row both draw `on_surface` on
+    // A hovered list row and a hovered tab both draw `on_surface` on
     // `surface_hover`, so that pair is a real combination and not just an
     // incidental one — strengthening the wash must not be able to walk it into
     // the foreground it carries. The floor is the one body text already holds
@@ -680,6 +680,24 @@ fn a_frosted_window_retunes_no_colour_and_frosts_deeper_than_chrome() {
             "{}: a window's glass must dissolve what a strip of chrome may keep",
             theme.name()
         );
+    }
+}
+
+/// The window channel refuses a frost wider than it carries, and a refused one
+/// leaves the window drawn over a sharp backdrop, so every glass a built-in
+/// theme draws must be one the channel accepts.
+#[test]
+fn every_built_in_glass_blur_is_one_the_window_channel_carries() {
+    for theme in [Theme::dark(), Theme::light()] {
+        for glass in [theme.clone().floating(), theme.clone().frosted()] {
+            assert!(
+                glass.backdrop_blur() <= WINDOW_BACKDROP_BLUR_MAX_PX,
+                "{} on {:?}: {} > {WINDOW_BACKDROP_BLUR_MAX_PX}",
+                theme.name(),
+                glass.ground(),
+                glass.backdrop_blur()
+            );
+        }
     }
 }
 
