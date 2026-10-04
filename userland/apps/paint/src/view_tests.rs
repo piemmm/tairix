@@ -1662,11 +1662,13 @@ fn a_tool_chosen_in_the_tool_box_brings_its_own_bar() {
     assert_eq!(window.view.tool(), Tool::Fill);
     assert_eq!(outcome.relayout, Relayout::Reported);
     assert!(window.view.tool_box.is_active(tool_index(Tool::Fill)));
-    assert_eq!(
-        window.view.bar.settings().collect::<Vec<_>>(),
-        [Setting::Tolerance, Setting::Contiguous]
+    let held = Tool::Fill.settings().len();
+    assert_eq!(held, 2);
+    let bar = window.layout.bar();
+    assert!(
+        bar.control(held - 1).is_some() && bar.control(held).is_none(),
+        "placed with the fill's settings"
     );
-    assert!(window.layout.bar().control(0).is_some(), "and placed");
 }
 
 /// The view strip zooms, and marks the grid while it shows; the key and
@@ -2486,6 +2488,70 @@ fn the_zoom_tool_steps_by_a_click_and_frames_a_dragged_box() {
     );
 }
 
+/// Dragging the crop box repaints where the box was and is, with the
+/// handles on their edges: what lies outside both is veiled either way.
+#[test]
+fn dragging_the_crop_box_repaints_only_where_it_was_and_is() {
+    let mut window = Window::white(60, 40);
+    window.act(Action::Tool(Tool::Crop));
+    window.drag((10, 5), (29, 24));
+    let size = window.size();
+    let canvas = window.layout.canvas();
+    let held = window.view.crop_box().expect("a box");
+    let span = window.view.viewport().screen_span(held, size, canvas);
+    let grab = Point::new(
+        i32::try_from(span.x1 - 1).expect("on screen"),
+        window.screen_of((20, 15)).y,
+    );
+    window.move_to(grab);
+    window.press(PointerButton::Primary);
+    let frame = |window: &Window| {
+        let theme = window.registry.active();
+        let mut surface = tairix_raster::Surface::new(WINDOW.0, WINDOW.1).expect("a surface");
+        crate::render::render_into(
+            &mut surface,
+            &window.view,
+            &window.layout,
+            theme,
+            Scale::ONE,
+            faces(theme),
+            &mut tairix_icon::NoArtwork,
+        );
+        surface
+    };
+    let before = frame(&window);
+    let mut damage = Region::new();
+    let theme = window.registry.active();
+    let to = window.screen_of((33, 15));
+    window.view.on_pointer(
+        &InputEvent::PointerMoved { to },
+        &window.layout,
+        Scale::ONE,
+        theme,
+        &mut damage,
+    );
+    assert_eq!(window.view.crop_box().map(|b| b.x1), Some(34), "widened");
+    let after = frame(&window);
+    let mut changed = 0;
+    for y in 0..WINDOW.1 {
+        for x in 0..WINDOW.0 {
+            if before.get(x, y) != after.get(x, y) {
+                changed += 1;
+                let at = Point::new(i32::try_from(x).expect("on"), i32::try_from(y).expect("on"));
+                assert!(damage.contains(at), "({x}, {y}) changed outside the damage");
+            }
+        }
+    }
+    assert!(changed > 0, "the box was drawn anew");
+    for (x, y) in [(55, 35), (2, 35), (55, 1)] {
+        assert!(
+            !damage.contains(window.screen_of((x, y))),
+            "({x}, {y}) veiled either way"
+        );
+    }
+    window.release(PointerButton::Primary);
+}
+
 #[test]
 fn the_crop_box_is_set_out_adjusted_and_applied_with_enter() {
     let mut window = Window::white(60, 40);
@@ -2665,6 +2731,32 @@ fn text_is_typed_where_clicked_and_set_down_as_one_step() {
     window.key(Key::Named(NamedKey::Escape), plain());
     assert!(window.view.text().is_none(), "Escape turns it down");
     assert_eq!(window.view.document().history_depth(), 1);
+}
+
+/// A setting changed from the keyboard sets the text being typed again, as
+/// one changed with the pointer does.
+#[test]
+fn a_text_size_typed_into_the_bar_sets_the_text_again() {
+    let mut window = Window::white(200, 80);
+    window.act(Action::Tool(Tool::Text));
+    window.view.options.text_size = 20;
+    click(&mut window, (10, 10));
+    for ch in "Hi".chars() {
+        window.key(Key::Char(ch), plain());
+    }
+    let small = window.view.text().expect("being typed").bounds();
+    window.click_setting(0);
+    window.key(Key::Char('a'), ctrl());
+    window.key(Key::Char('4'), plain());
+    window.key(Key::Char('0'), plain());
+    assert_eq!(window.view.options.text_size, 40);
+    let entry = window.view.text().expect("still being typed");
+    assert_eq!(entry.text(), "Hi");
+    let large = entry.bounds();
+    assert!(
+        large.y1 - large.y0 > small.y1 - small.y0,
+        "set again at the size typed: {small:?} then {large:?}"
+    );
 }
 
 #[test]
@@ -2854,6 +2946,34 @@ fn a_new_layer_is_painted_on_and_the_one_beneath_kept_as_it_was() {
     );
 }
 
+/// Going to a layer by its number puts a floating selection down first, on
+/// the layer it was lifted from, as stepping to a layer does.
+#[test]
+fn going_to_a_layer_puts_the_floating_selection_down_where_it_was_lifted() {
+    let mut window = layered(&[([255; 4], 255), ([255; 4], 255)], 0);
+    window.act(Action::Tool(Tool::Pencil));
+    window.drag((2, 2), (2, 2));
+    window.lift((1, 1), (3, 3), (4, 0));
+    let id = AppMenuItemId::new(GO_TO_LAYER).expect("an id");
+    let asked = window
+        .view
+        .entered(id, "2", &window.layout, &mut Region::new());
+    assert_eq!(painted_on(&window), 0, "not gone before it is down");
+    window.run_worker(asked);
+    assert!(window.view.floating().is_none(), "down");
+    assert_eq!(painted_on(&window), 1, "then gone to");
+    assert_eq!(
+        layers_of(&window)[0].canvas.colour_at(6, 2),
+        Some([0, 0, 0, 255]),
+        "on the layer it was lifted from"
+    );
+    assert_eq!(
+        layers_of(&window)[1].canvas.colour_at(6, 2),
+        Some([255; 4]),
+        "not the one gone to"
+    );
+}
+
 #[test]
 fn the_keyboard_steps_through_the_layers_and_moves_them() {
     let mut window = layered(&[([1; 4], 255), ([2; 4], 255), ([3; 4], 255)], 0);
@@ -2900,6 +3020,46 @@ fn layers_merge_and_flatten_on_a_worker_keeping_the_look() {
     assert_eq!(layers_of(&window).len(), 1, "flattened");
 }
 
+/// A hidden layer is not merged, painted on or beneath: a merge keeps the
+/// look, so its pixels would be lost. The menu offers no merge then either.
+#[test]
+fn a_hidden_layer_is_not_merged() {
+    let merge_offered = |window: &Window| {
+        window
+            .view
+            .menu(MenuKind::Window)
+            .rows()
+            .any(|(row, _)| match row {
+                AppMenuRowView::Item(item) => {
+                    item.id.get() == Action::MergeDown.id() && item.enabled
+                }
+                _ => false,
+            })
+    };
+    let two = [([0, 0, 255, 255], 255), ([255, 0, 0, 255], 128)];
+    assert!(merge_offered(&layered(&two, 1)), "offered while both show");
+    for hidden in [0, 1] {
+        let mut window = layered(&two, hidden);
+        window.act(Action::ShowLayer);
+        if hidden == 0 {
+            window.act(Action::LayerAbove);
+        }
+        assert_eq!(painted_on(&window), 1);
+        assert!(
+            !merge_offered(&window),
+            "layer {hidden} hidden: not offered"
+        );
+        let refused = window.act(Action::MergeDown);
+        assert!(refused.request.is_none(), "no worker asked");
+        assert_eq!(
+            window.view.message(),
+            Some("A hidden layer is not merged: show both first")
+        );
+        assert_eq!(layers_of(&window).len(), 2, "both kept");
+        assert!(!layers_of(&window)[hidden].visible, "and as they showed");
+    }
+}
+
 #[test]
 fn a_palette_picture_holds_one_layer() {
     let kind = Kind::Indexed {
@@ -2934,7 +3094,56 @@ fn a_picture_of_layers_is_not_made_a_palette_picture() {
     assert!(outcome.request.is_none(), "no worker asked");
     assert_eq!(
         window.view.message(),
-        Some("A palette picture holds one layer: flatten the picture first")
+        Some("A palette picture holds one layer, shown wholly: flatten the picture first")
+    );
+}
+
+/// One layer faded or hidden is not shown wholly, so it is not made a
+/// palette picture either: its look would change, or it would hold a layer
+/// a palette picture cannot.
+#[test]
+fn a_layer_not_shown_wholly_is_not_made_a_palette_picture() {
+    use crate::transform::{Depth, PaletteChoice, Transform};
+    let convert = Transform::Convert {
+        depth: Depth::Indexed(IndexDepth::Four),
+        palette: PaletteChoice::Desktop,
+        dither: false,
+    };
+    for (opacity, visible) in [(128, true), (255, false)] {
+        let mut window = layered(&[([255; 4], opacity)], 0);
+        if !visible {
+            window.act(Action::ShowLayer);
+        }
+        let outcome = window.view.transform(
+            convert,
+            "change its colours",
+            &window.layout,
+            &mut Region::new(),
+        );
+        assert!(outcome.request.is_none(), "no worker asked");
+        assert!(window
+            .view
+            .message()
+            .is_some_and(|said| said.ends_with("flatten the picture first")));
+        assert_eq!(
+            window.view.document().picture().map(|p| p.layers().len()),
+            Some(1)
+        );
+    }
+    let mut window = layered(&[([255; 4], 255)], 0);
+    let asked = window.view.transform(
+        convert,
+        "change its colours",
+        &window.layout,
+        &mut Region::new(),
+    );
+    window.run_worker(asked);
+    assert!(
+        !matches!(
+            window.view.document().picture().map(|p| p.canvas().kind()),
+            Some(Kind::Rgba)
+        ),
+        "one layer shown wholly is converted"
     );
 }
 

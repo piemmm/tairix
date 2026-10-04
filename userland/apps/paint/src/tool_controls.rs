@@ -79,12 +79,6 @@ struct Seat {
 }
 
 impl Placement {
-    /// The bar's whole band.
-    #[must_use]
-    pub const fn bounds(&self) -> Rect {
-        self.bounds
-    }
-
     /// Where setting `index`'s control is drawn, if the bar seats it.
     #[must_use]
     pub fn control(&self, index: usize) -> Option<Rect> {
@@ -168,11 +162,6 @@ impl ToolControls {
         bar
     }
 
-    /// The settings the bar holds, in order.
-    pub fn settings(&self) -> impl Iterator<Item = Setting> + '_ {
-        self.items.iter().map(|item| item.setting)
-    }
-
     /// Offer what lays part of a pixel, or hold it off, as the picture's
     /// pixels allow, answering whether any control changed. A control held
     /// off gives up the keyboard; its owner repaints the bar.
@@ -210,20 +199,6 @@ impl ToolControls {
             }
         }
         changed
-    }
-
-    /// The width the bar needs to seat its name and every setting in one
-    /// row.
-    #[must_use]
-    pub fn natural_width(&self, faces: Faces, scale: Scale, theme: &Theme) -> u32 {
-        let (gap, near) = spacing(scale, theme);
-        self.items
-            .iter()
-            .fold(faces.heading.text_width(self.tool.name()), |width, item| {
-                width
-                    .saturating_add(gap * 2)
-                    .saturating_add(item.widths(faces.label, scale, theme).total(near))
-            })
     }
 
     /// The least width every tool's bar seats each of its settings in,
@@ -406,8 +381,8 @@ impl ToolControls {
     }
 
     /// Where an open choice's list is drawn; empty while none is open.
-    #[must_use]
-    pub fn popup_rect(&self, placement: &Placement, scale: Scale, theme: &Theme) -> Rect {
+    #[cfg(test)]
+    pub(crate) fn popup_rect(&self, placement: &Placement, scale: Scale, theme: &Theme) -> Rect {
         self.open_list(placement, scale, theme)
             .map_or(Rect::EMPTY, |(_, popup)| popup)
     }

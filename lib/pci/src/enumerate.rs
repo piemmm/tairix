@@ -11,7 +11,9 @@
 use alloc::vec::Vec;
 
 use tairix_abi::driver::bus::BusDevice;
-use tairix_abi::driver::pci::{BUS_MASTER_ENABLE, COMMAND_OFFSET, MEMORY_SPACE_ENABLE};
+use tairix_abi::driver::pci::{
+    BUS_MASTER_ENABLE, COMMAND_OFFSET, MEMORY_SPACE_ENABLE, PCI_DEVICES, PCI_FUNCTIONS,
+};
 use tairix_abi::driver::virtio_pci::{
     common, VIRTIO_PCI_CFG_COMMON, VIRTIO_PCI_CFG_NOTIFY, VIRTIO_PCI_CFG_PCI,
 };
@@ -162,13 +164,13 @@ impl<C: ConfigSpace> Pci<C> {
 
     /// Visit every responding function on every bus, in address order, with
     /// its configuration address, its identity dword and whether its slot is
-    /// multi-function. Bounded by PCI's own limits — 256 buses of 32 devices
-    /// of 8 functions — so it terminates without a timeout.
+    /// multi-function. Bounded by PCI's own numbering, so it terminates
+    /// without a timeout.
     pub(crate) fn each_function(&self, mut visit: impl FnMut(ConfigAddress, u64, u32, bool)) {
         for bus in 0u8..=255 {
-            for device in 0u8..32 {
+            for device in 0..PCI_DEVICES {
                 let multifunction = self.is_multifunction(bus, device);
-                let functions = if multifunction { 8 } else { 1 };
+                let functions = if multifunction { PCI_FUNCTIONS } else { 1 };
                 for function in 0..functions {
                     let addr = ConfigAddress {
                         bus,
@@ -1156,6 +1158,14 @@ impl<C: ConfigSpace> PciTopology for Pci<C> {
             return Err(DriverError::NoSpace);
         }
         Ok(Topology::new(functions)?)
+    }
+
+    fn quiesce(&self, stopped: &dyn Fn(&Function) -> bool) {
+        self.each_function(|addr, address, id, multifunction| {
+            if stopped(&self.read_function(addr, address, id, multifunction, AcsPolicy::Leave)) {
+                self.set_bus_master(address, false);
+            }
+        });
     }
 }
 

@@ -54,9 +54,9 @@
 //!   (`tairix-image`/`tairix-wallpaper`/`tairix-raster`) across a
 //!   prepare/band/release sequence, bounded by
 //!   [`crate::proto::MAX_FRAME`]; the caller-side
-//!   [`imagerender::render_wallpaper`] drives the sequence and validates
-//!   every band's echoed geometry and exact pixel length before trusting
-//!   the assembled RGBA8 buffer.
+//!   [`imagerender::plan_wallpaper`] costs the upload before it is decoded,
+//!   and its render validates every band's echoed geometry and exact pixel
+//!   length before trusting it.
 //! * [`imageedit`] — a picture an image editor opens is decoded inside the
 //!   same worker into the representation its file stores — a palette's
 //!   indices, a sprite area's every sprite, a sprite it cannot read as its

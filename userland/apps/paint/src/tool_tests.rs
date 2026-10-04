@@ -22,7 +22,11 @@ fn each_key_chooses_its_tool_and_names_itself_in_its_label() {
 fn the_tool_box_is_every_tool_down_a_column_the_one_in_use_marked() {
     let tools = tool_box(Tool::Brush);
     assert_eq!(tools.len(), Tool::ALL.len());
-    assert_eq!(tools.orientation(), ScrollOrientation::Vertical);
+    assert_eq!(
+        tools,
+        tool_box(Tool::Brush).with_orientation(ScrollOrientation::Vertical),
+        "already a column"
+    );
     assert!(tools.is_active(2));
     assert_eq!(
         (0..tools.len()).filter(|&at| tools.is_active(at)).count(),

@@ -130,8 +130,8 @@ impl<R> Renders<R> {
     /// The desktop declined the render of `wanted` with `err`, so its region
     /// was never used. Answers whether the picture itself is refused.
     ///
-    /// A window already holding all the renders the desktop runs at once, or
-    /// one of this very picture, is waited on rather than refused: the picture
+    /// A window already holding as many renders as the desktop has preparers,
+    /// or one of this very picture, is waited on rather than refused: the picture
     /// is asked for again once a render concludes. Anything else is a refusal
     /// the picture keeps its placeholder for.
     pub fn declined(&mut self, wanted: PictureWanted, err: Errno) -> bool {

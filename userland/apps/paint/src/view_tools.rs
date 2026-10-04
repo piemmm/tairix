@@ -19,6 +19,7 @@ use crate::stroke::Stroke;
 use crate::text::TextEntry;
 use crate::tool::Style;
 use crate::transform::Transform;
+use crate::viewport::screen_rect;
 
 /// How near a press must land to a crop box's edge to take it, in logical
 /// pixels, and how wide its handles are drawn.
@@ -495,11 +496,17 @@ impl View {
             from: pixel,
             before,
         });
-        damage.add(area);
+        self.crop_moved(before, layout, scale, damage);
     }
 
     /// The crop box dragged on to pixel `to`.
-    pub(super) fn crop_to(&mut self, to: (i64, i64), layout: &Layout, damage: &mut Region) {
+    pub(super) fn crop_to(
+        &mut self,
+        to: (i64, i64),
+        layout: &Layout,
+        scale: Scale,
+        damage: &mut Region,
+    ) {
         let size = self.picture_size();
         let within = Bounds::picture(size.0, size.1);
         let crop = match self.gesture {
@@ -510,8 +517,31 @@ impl View {
             _ => return,
         };
         if self.crop != Some(crop) {
+            let before = self.crop;
             self.crop = (!crop.is_empty()).then_some(crop);
-            damage.add(layout.canvas());
+            self.crop_moved(before, layout, scale, damage);
+        }
+    }
+
+    /// Report what the crop box moving from `before` changed: both boxes,
+    /// with the handles straddling their edges, where it was and is held;
+    /// the whole canvas where the veil over what it cuts away comes or goes.
+    fn crop_moved(
+        &self,
+        before: Option<Bounds>,
+        layout: &Layout,
+        scale: Scale,
+        damage: &mut Region,
+    ) {
+        let area = layout.canvas();
+        let (Some(before), Some(after)) = (before, self.crop) else {
+            damage.add(area);
+            return;
+        };
+        let reach = i64::from(scale.scale_length(CROP_REACH));
+        for held in [before, after] {
+            let edge = self.viewport.screen_span(held, self.picture_size(), area);
+            damage.add(screen_rect(super::grown(edge, reach)).intersection(&area));
         }
     }
 
@@ -693,30 +723,29 @@ impl View {
     /// picture's by a worker — one at a time, the last settings asked again
     /// once the one working lands.
     fn refresh_preview(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
-        let kind = self.kind().clone();
-        let clip = self.selection.clone();
-        let generation = self.document.generation();
-        let canvas = self
-            .document
-            .picture()
-            .map(|picture| picture.canvas().try_clone());
-        let job = self.next_job;
+        let Some(filter) = self.preview.as_ref().map(|preview| preview.filter) else {
+            return Outcome::none();
+        };
+        let mapped =
+            match self.kind() {
+                crate::canvas::Kind::Indexed {
+                    depth,
+                    palette,
+                    masked,
+                } => Some(filter.mapped_palette(palette).map(|palette| {
+                    crate::canvas::Kind::Indexed {
+                        depth: *depth,
+                        palette,
+                        masked: *masked,
+                    }
+                })),
+                crate::canvas::Kind::Rgba => None,
+            };
         let Some(preview) = &mut self.preview else {
             return Outcome::none();
         };
-        if let crate::canvas::Kind::Indexed {
-            depth,
-            palette,
-            masked,
-        } = &kind
-        {
-            preview.kind = preview.filter.mapped_palette(palette).map(|palette| {
-                crate::canvas::Kind::Indexed {
-                    depth: *depth,
-                    palette,
-                    masked: *masked,
-                }
-            });
+        if let Some(kind) = mapped {
+            preview.kind = kind;
             damage.add(layout.canvas());
             return Outcome::none();
         }
@@ -724,18 +753,25 @@ impl View {
             preview.stale = true;
             return Outcome::none();
         }
-        let Some(Ok(canvas)) = canvas else {
+        // Copied only once a worker is to be asked: a slider dragged while one
+        // works would otherwise copy the picture's tile table each step.
+        let Some(Ok(canvas)) = self
+            .document
+            .picture()
+            .map(|picture| picture.canvas().try_clone())
+        else {
             return Outcome::none();
         };
+        let job = self.next_job;
         self.next_job += 1;
         preview.job = Some(job);
         preview.stale = false;
-        preview.asked = Some(preview.filter);
-        preview.generation = generation;
+        preview.asked = Some(filter);
+        preview.generation = self.document.generation();
         let work = Compute::Filter {
             canvas,
-            filter: preview.filter,
-            clip,
+            filter,
+            clip: self.selection.clone(),
         };
         Outcome::asking(super::Request::Own(super::Own::Compute { job, work }))
     }

@@ -278,7 +278,10 @@ write path on landing.
 - **Fail closed, park never poll.** The event loop parks on the wait set; a
   pane that is not on screen samples nothing; a refused read leaves the pane
   exactly as it was and states why; a malformed or refused apply changes
-  nothing anywhere.
+  nothing anywhere. No round trip runs on the loop: every request to another
+  service is a worker's, its answer adopted on the wake it nudges — the
+  session's lock, screensaver preview and notified-sources query included, on
+  one desk holding one of each (`asks::DesktopAsks`).
 
 - **Not in this plan:** the audio, Bluetooth, print, touch, wireless, and
   sharing subsystems themselves (§3 names each one's prerequisite); the
@@ -776,10 +779,11 @@ renderer, and Settings asks it.
   previews on one preparer per online CPU within a memory budget: a render
   reserves its preparation, then acquires what its worker's plan reports or
   waits first in the queue until that fits, one render always going on
-  (`plans/PINBOARD.md` §5). No window holds more pending than there are
+  (`plans/PINBOARD.md` §8). No window holds more pending than there are
   preparers: the bound on how much decoding one client can set going. **A closed window
-  costs at most what is under way:** a render a preparer has taken cannot be
-  recalled and answers exactly once, freeing its slot; every close is
+  costs at most what is under way:** a render a preparer has taken is refused
+  its memory, never queued again, and answers into nothing, freeing its slot;
+  every close is
   recorded in the session's window table, and before its next park the serve
   loop withdraws that window's waiting previews from the desk and lets go of
   its regions, so reopening windows can neither queue decodes ahead of
@@ -1462,7 +1466,7 @@ What it guarantees:
   — and once it is short only those on screen are; a picture rendered at a
   size no longer drawn is let go at any band. Renders go out, each into its own
   region, until the desktop answers that the window has as many pending as it
-  runs at once, and resume as each concludes; every one is waited for even
+  has preparers, and resume as each concludes; every one is waited for even
   across a desktop change, whose answer is let go rather than mistaken for
   another's. Each request is a round trip to the session's serve loop, so it
   is carried on a worker of the pane's own, one at a time and each answered

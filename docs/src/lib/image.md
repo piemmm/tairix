@@ -500,13 +500,18 @@ fail-closed scanner (`lib/xml`): the canvas from its `image` element, then its
 layers topmost first, each a PNG at its `x`, `y` offset with its opacity and
 visibility. A nested stack is folded into its layers — hidden with it, as
 opaque as both — and what folding cannot keep exactly, or any blending other
-than plain source-over, is stated as `Unkept::extras`.
+than plain source-over, is stated as `Unkept::extras`. A picture several layers
+name is read and decoded once, so naming one entry many times costs one
+decode.
 
 `decode` shows what a viewer should: the document's `mergedimage.png` where it
 is the canvas's size, and otherwise the visible layers composed source-over,
-each at its opacity. `probe` reads the canvas alone. `open_native` answers the
-layers themselves (`NativeDocument::Layers`), each as colour, which is how an
-editor reads them.
+each at its opacity and clipped to the canvas. `probe` reads the canvas alone.
+`open_native` answers the layers themselves (`NativeDocument::Layers`), each as
+colour, which is how an editor reads them, stating what a colour layer cannot
+keep: a sixteen-bit layer narrowed (`precision`), a layer's chunks beside its
+picture or a resolution the stack states (`extras`), and a palette layer
+restated as colour (`converted`).
 
 ## Sequences and pages
 
@@ -788,7 +793,8 @@ layers (`MOST_ORA_LAYERS`) and 4 096 archive entries, a `stack.xml` of at most
 1 MiB, and a layer's PNG of at most 256 MiB. Each is weighed against the
 archive's own declared sizes before an entry is inflated, an inflated entry
 must come to exactly its declared size, and the stack's canvas is weighed
-against the caller's limits before any layer is read.
+against the caller's limits before the merged picture or any layer is read, by
+the decode and by `decode_peak_bytes` alike.
 
 A GIF's frame count carries its own **fixed containment bound** of 16 384: a
 frame block costs about ten bytes, so a small file can declare enormous

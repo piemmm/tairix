@@ -360,7 +360,11 @@ owner, and clears it as it takes the function back.
   A function behind a unit is stopped whether or not its unit then comes up:
   one firmware keeps no window for has no claim on DMA after the hand-off. A
   function behind no unit that TAIRiX does not drive is left as firmware left
-  it (decision 12). At each unit's enable, the facility stops every recorded
+  it (decision 12). A walk whose bus numbers form no tree resolves no scope,
+  so nothing is published and no unit comes up, and a flat scan
+  (`PciTopology::quiesce`) stops every function mastering DMA of its own on a
+  segment a unit covers, firmware windows included, and every virtio
+  function elsewhere. At each unit's enable, the facility stops every recorded
   function behind it still mastering without a firmware window, and reports
   how many it stopped and how many would not stop (`stopped`, `refused` on
   the unit's `DmaTranslationUnit` record).

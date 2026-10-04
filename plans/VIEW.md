@@ -1085,20 +1085,17 @@ read this paragraph first; the rustdoc on both types points here.
 
 ## Noticed and not yet fixed
 
-- **`lib/sandbox` allocates its bounded buffers infallibly.** A frame the
-  parent reads is reserved fallibly (`plans/OPEN-DEFECTS.md` D160), and the
-  document upload reserves fallibly, but `imagerender.rs`'s bands,
-  destinations and scaled icons are still `vec![0u8; n]` or `to_vec()`,
+- **`lib/sandbox` allocates some bounded buffers infallibly.** A frame the
+  parent reads is reserved fallibly (`plans/OPEN-DEFECTS.md` D160), as are
+  the document upload and a resampled wallpaper band, but `imagerender.rs`'s
+  other bands and scaled icons are still `vec![0u8; n]` or `to_vec()`,
   which abort rather than answer when the memory is not there. Inside a
   worker that is contained — the sandbox reports a typed failure and
-  replaces it — but two copies run *in the calling process*:
-  `render_wallpaper`'s assembly allocates the whole destination, up to
-  33 MiB, in the desktop session, so a session under memory pressure dies
-  rather than falling back to its backdrop colour; and `view_band` copies
-  each band out of its reply before `render_page` copies it again into the
-  caller's buffer, where one copy straight into that buffer would do. It is
-  a crate-wide allocation-discipline change and is not smuggled into
-  another; it carries its regression test when it lands.
+  replaces it — but one copy runs *in the calling process*: `view_band`
+  copies each band out of its reply before `render_page` copies it again
+  into the caller's buffer, where one copy straight into that buffer would
+  do. It is a crate-wide allocation-discipline change and is not smuggled
+  into another; it carries its regression test when it lands.
 
 - **A vector band's cost is edges × rows, because the scan converter has
   no active-edge table.** `ScanFill::coverage_row` walks every edge whose

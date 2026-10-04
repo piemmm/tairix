@@ -70,7 +70,7 @@ const DENSITY_AT: [usize; 2] = [24, 28];
 /// Where a `BITMAPV4HEADER` states its colour space, and the span of the
 /// endpoints and gamma a calibrated one carries after it.
 const COLOUR_SPACE_AT: usize = 56;
-const CALIBRATION: core::ops::Range<usize> = 60..108;
+pub(crate) const CALIBRATION: core::ops::Range<usize> = 60..108;
 
 /// `bV4CSType`: calibrated by the endpoints that follow, sRGB, and the
 /// system's own space.
@@ -123,6 +123,10 @@ enum Packing {
     Packed { bytes: u32 },
 }
 
+/// The most bytes a colour table holds once resolved: an eight-bit index's
+/// reach of RGBA entries.
+pub(crate) const RESOLVED_PALETTE_BYTES: u64 = (1 << 8) * RGBA_BYTES as u64;
+
 /// A DIB's colour table: the entries present, and how wide each is.
 struct Palette<'a> {
     entries: &'a [u8],
@@ -155,6 +159,17 @@ impl Palette<'_> {
             return Err(DecodeError::BmpPaletteIndexOutOfRange);
         };
         Ok([red, green, blue, u8::MAX])
+    }
+
+    /// Every entry as straight-alpha RGBA, resolved once.
+    fn colours(&self) -> Result<Vec<[u8; RGBA_BYTES]>, DecodeError> {
+        let count = usize::try_from(self.count).map_err(|_| DecodeError::DimensionsOverflow)?;
+        let mut colours =
+            fallible::filled(count, [0u8; RGBA_BYTES]).ok_or(DecodeError::OutOfMemory)?;
+        for (index, colour) in (0..).zip(colours.iter_mut()) {
+            *colour = self.rgba(index)?;
+        }
+        Ok(colours)
     }
 }
 
@@ -472,17 +487,22 @@ pub(crate) fn decode_pixels(
     let mut out = fallible::filled(out_len, 0u8).ok_or(DecodeError::OutOfMemory)?;
     let consumed = match dib.packing {
         Packing::Indexed { .. } => {
-            let palette = Palette {
+            let colours = Palette {
                 entries: palette,
                 count: dib.palette_entries,
                 entry_len: dib.palette_entry_len,
-            };
+            }
+            .colours()?;
             let mut canvas = Canvas {
                 out: &mut out,
                 row_bytes,
             };
             walk_indices(dib, data, rows, |x, y, index| {
-                canvas.put(x, y, palette.rgba(index)?)
+                let colour = usize::try_from(index)
+                    .ok()
+                    .and_then(|index| colours.get(index))
+                    .ok_or(DecodeError::BmpPaletteIndexOutOfRange)?;
+                canvas.put(x, y, *colour)
             })?
         }
         Packing::Packed { bytes } => read_packed(dib, bytes, data, rows, row_bytes, &mut out)?,
@@ -807,18 +827,12 @@ pub(crate) fn decode_native(
             }
             Ok(())
         })?;
-        let table = Palette {
+        let colours = Palette {
             entries: palette,
             count: dib.palette_entries,
             entry_len: dib.palette_entry_len,
-        };
-        let entries =
-            usize::try_from(dib.palette_entries).map_err(|_| DecodeError::DimensionsOverflow)?;
-        let mut colours =
-            fallible::filled(entries, [0u8; RGBA_BYTES]).ok_or(DecodeError::OutOfMemory)?;
-        for (index, colour) in (0..).zip(colours.iter_mut()) {
-            *colour = table.rgba(index)?;
         }
+        .colours()?;
         if dib.palette_entry_len == PALETTE_ENTRY_LEN {
             extras |= palette.as_chunks::<4>().0.iter().any(|entry| entry[3] != 0);
         }
@@ -919,7 +933,8 @@ pub(crate) fn probe(bytes: &[u8]) -> Result<(u32, u32), DecodeError> {
 }
 
 /// An upper bound of the bytes a [`decode`] of `bytes` holds at once: its
-/// RGBA picture, which every row is decoded straight into.
+/// RGBA picture, which every row is decoded straight into, and a palette
+/// picture's colours, resolved before the rows.
 ///
 /// # Errors
 ///
@@ -928,7 +943,7 @@ pub(crate) fn probe(bytes: &[u8]) -> Result<(u32, u32), DecodeError> {
 pub(crate) fn peak_bytes(bytes: &[u8], limits: &DecodeLimits) -> Result<u64, DecodeError> {
     let (width, height) = probe(bytes)?;
     limits.check(width, height)?;
-    Ok(u64::from(width) * u64::from(height) * RGBA_BYTES as u64)
+    Ok(u64::from(width) * u64::from(height) * RGBA_BYTES as u64 + RESOLVED_PALETTE_BYTES)
 }
 
 /// Decode a BMP file at its natural size.

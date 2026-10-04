@@ -6,6 +6,8 @@
 //! apart, the distance since the last carried from one move to the next, so a
 //! stroke drawn in many small moves is laid as one drawn in a single sweep.
 
+use tairix_colour::Fraction;
+
 use crate::canvas::{Canvas, OutOfMemory};
 use crate::mask::scale;
 use crate::shape::{Point, Shape, FX};
@@ -60,7 +62,7 @@ impl Tip {
     /// The opacity as the stroke lays it, out of 255.
     #[must_use]
     pub fn opacity_255(&self) -> u8 {
-        percent(self.opacity)
+        Fraction::from_percent(u32::from(self.opacity)).byte()
     }
 
     /// Lay one dab at `centre` on layer 0 of `stroke`, its rim smoothed when
@@ -82,7 +84,7 @@ impl Tip {
             b: centre,
             radius,
         };
-        let flow = percent(self.flow);
+        let flow = Fraction::from_percent(u32::from(self.flow)).byte();
         // A rim not smoothed is whole or nothing, so a falloff has nowhere to
         // fall.
         let inner = if aa && self.hardness < 100 {
@@ -123,11 +125,6 @@ fn falloff(distance: i64, inner: i64, radius: i64) -> u8 {
     // One less the smoothstep of how far into the fall it lies.
     let fallen = into * into * (3 * width - 2 * into) * 255 / (width * width * width);
     u8::try_from(255 - fallen).unwrap_or(0)
-}
-
-/// `value` percent, out of 255.
-fn percent(value: u8) -> u8 {
-    u8::try_from(u32::from(value.min(100)) * 255 / 100).unwrap_or(u8::MAX)
 }
 
 /// Where dabs fall along a stroke's path: the last point it reached and how
@@ -174,7 +171,9 @@ impl Path {
         let (dx, dy) = (to.x - from.x, to.y - from.y);
         let length = (dx * dx + dy * dy).isqrt();
         let step = step.max(NEAREST_STEP);
-        let mut at = step - self.run;
+        // A spacing shrunk mid-stroke can leave more run than a step: the dab
+        // it owes falls where this move begins, never behind it.
+        let mut at = (step - self.run).max(0);
         let mut outcome = Ok(());
         while at <= length {
             let point = Point {

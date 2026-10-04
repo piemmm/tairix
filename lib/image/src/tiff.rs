@@ -63,8 +63,15 @@ pub(crate) const SIGNATURES: [[u8; 4]; 4] = [
 
 /// A directory entry's fixed length, and the smallest a whole directory can
 /// be: an entry count and the offset of the next directory.
-const ENTRY_LEN: usize = 12;
+pub(crate) const ENTRY_LEN: usize = 12;
 const MIN_IFD_LEN: usize = 6;
+
+/// The field types an entry's values are held in.
+pub(crate) const BYTE: u16 = 1;
+pub(crate) const SHORT: u16 = 3;
+pub(crate) const LONG: u16 = 4;
+pub(crate) const RATIONAL: u16 = 5;
+pub(crate) const UNDEFINED: u16 = 7;
 
 /// Pages one file may declare.
 ///
@@ -320,17 +327,17 @@ impl<'a> Ifd<'a> {
         }
         let index = usize::try_from(index).map_err(|_| DecodeError::TiffInvalidTagValue)?;
         match field.kind {
-            1 | 7 => self
+            BYTE | UNDEFINED => self
                 .file
                 .get(field.at + index)
                 .map(|byte| u32::from(*byte))
                 .ok_or(DecodeError::TiffTruncated),
-            3 => self
+            SHORT => self
                 .endian
                 .u16(self.file, field.at + index * 2)
                 .map(u32::from)
                 .ok_or(DecodeError::TiffTruncated),
-            4 => self
+            LONG => self
                 .endian
                 .u32(self.file, field.at + index * 4)
                 .ok_or(DecodeError::TiffTruncated),
@@ -341,7 +348,7 @@ impl<'a> Ifd<'a> {
     /// Element `index` of a RATIONAL field, as its numerator and
     /// denominator.
     fn rational(&self, field: &Field, index: u32) -> Result<(u32, u32), DecodeError> {
-        if field.kind != 5 || index >= field.count {
+        if field.kind != RATIONAL || index >= field.count {
             return Err(DecodeError::TiffInvalidTagValue);
         }
         let at = field.at + usize::try_from(index).unwrap_or(usize::MAX) * 8;
@@ -712,7 +719,8 @@ fn read_colour(ifd: &Ifd<'_>, photometric: u16, samples: &Samples) -> Result<Col
             let field = ifd
                 .field(TAG_COLOUR_MAP)?
                 .ok_or(DecodeError::TiffMissingTag)?;
-            if field.count != entries * 3 {
+            // A map's entries are sixteen bits wide.
+            if field.kind != SHORT || field.count != entries * 3 {
                 return Err(DecodeError::TiffInvalidColourMap);
             }
             Ok(Colour::Palette)
@@ -2079,7 +2087,7 @@ fn colour_map_narrowed(ifd: &Ifd<'_>, bits: u32) -> Result<bool, DecodeError> {
         .ok_or(DecodeError::TiffMissingTag)?;
     for index in 0..(1u32 << bits) * 3 {
         let value = ifd.integer(&field, index)?;
-        if (value >> 8) * 257 != value {
+        if value >> 8 != value & 0xFF {
             return Ok(true);
         }
     }
@@ -2087,7 +2095,7 @@ fn colour_map_narrowed(ifd: &Ifd<'_>, bits: u32) -> Result<bool, DecodeError> {
 }
 
 /// `NewSubfileType`'s page bit: one page of a multi-page document.
-const SUBFILE_PAGE: u32 = 2;
+pub(crate) const SUBFILE_PAGE: u32 = 2;
 
 /// A TIFF's pages, each validated whole when the file opens and decoded as
 /// the picture it stores when it is asked for: a palette page as its indices

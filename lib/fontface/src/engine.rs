@@ -397,46 +397,7 @@ impl<'a> Face<'a> {
         Outliner::new(self, &mut sink)
             .glyph(glyph, Affine::IDENTITY, 0)
             .ok()?;
-        let (left, right) =
-            sink.segments
-                .iter()
-                .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), seg| {
-                    (
-                        mathf::fmin(lo, mathf::fmin(seg.x0, seg.x1)),
-                        mathf::fmax(hi, mathf::fmax(seg.x0, seg.x1)),
-                    )
-                });
-        let middle = f64::midpoint(left, right);
-        let mut crossings: Vec<(f64, i32)> = sink
-            .segments
-            .iter()
-            .filter_map(|seg| {
-                let down = Segment {
-                    x0: seg.y0,
-                    y0: seg.x0,
-                    x1: seg.y1,
-                    y1: seg.x1,
-                };
-                crossing(&down, middle)
-            })
-            .collect();
-        crossings.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let mut winding = 0;
-        let mut entered = 0.0;
-        let mut inked = Vec::new();
-        for (at, direction) in crossings {
-            let was = winding;
-            winding += direction;
-            if was == 0 && winding != 0 {
-                entered = at;
-            } else if was != 0 && winding == 0 {
-                inked.push(at - entered);
-            }
-        }
-        match inked[..] {
-            [bar] if bar > 0.0 => Some(bar),
-            _ => None,
-        }
+        single_bar(&sink.segments)
     }
 
     /// How far the first of `chars` the face draws reaches, in font units
@@ -883,6 +844,51 @@ pub(crate) struct Segment {
     pub(crate) y0: f64,
     pub(crate) x1: f64,
     pub(crate) y1: f64,
+}
+
+/// How thick the one bar crossing the middle column of an outline of
+/// `segments` is, in its own units: `None` where the middle crosses no ink, or
+/// more than one bar.
+pub(crate) fn single_bar(segments: &[Segment]) -> Option<f64> {
+    let (left, right) =
+        segments
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), seg| {
+                (
+                    mathf::fmin(lo, mathf::fmin(seg.x0, seg.x1)),
+                    mathf::fmax(hi, mathf::fmax(seg.x0, seg.x1)),
+                )
+            });
+    let middle = f64::midpoint(left, right);
+    let mut crossings: Vec<(f64, i32)> = segments
+        .iter()
+        .filter_map(|seg| {
+            let down = Segment {
+                x0: seg.y0,
+                y0: seg.x0,
+                x1: seg.y1,
+                y1: seg.x1,
+            };
+            crossing(&down, middle)
+        })
+        .collect();
+    crossings.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut winding = 0;
+    let mut entered = 0.0;
+    let mut inked = Vec::new();
+    for (at, direction) in crossings {
+        let was = winding;
+        winding += direction;
+        if was == 0 && winding != 0 {
+            entered = at;
+        } else if was != 0 && winding == 0 {
+            inked.push(at - entered);
+        }
+    }
+    match inked[..] {
+        [bar] if bar > 0.0 => Some(bar),
+        _ => None,
+    }
 }
 
 /// Where `segment` crosses the horizontal line `row`, and which way it runs

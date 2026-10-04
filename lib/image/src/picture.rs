@@ -8,6 +8,7 @@
 use alloc::vec::Vec;
 use core::fmt;
 
+use tairix_raster::div255;
 use tairix_util::fallible;
 
 use crate::density::Density;
@@ -27,7 +28,7 @@ pub fn over(below: Rgba8, above: Rgba8) -> Rgba8 {
         255 => return above,
         _ => {}
     }
-    let under = (u32::from(below[3]) * (255 - source) + 127) / 255;
+    let under = u32::from(div255(u32::from(below[3]) * (255 - source)));
     let alpha = source + under;
     let channel = |at: usize| {
         let sum = u32::from(above[at]) * source + u32::from(below[at]) * under;
@@ -320,26 +321,75 @@ impl Picture {
         let mut out = fallible::filled(row_bytes.checked_mul(self.height as usize)?, 0u8)?;
         match &self.pixels {
             Pixels::Rgba(rgba) => out.copy_from_slice(rgba),
+            Pixels::Indexed { .. } => {
+                for (y, row) in out.chunks_exact_mut(row_bytes).enumerate() {
+                    self.rgba_row(y, row)?;
+                }
+            }
+        }
+        Some(out)
+    }
+
+    /// Row `y` as straight-alpha RGBA8: borrowed where the picture holds it
+    /// so, and flattened into `scratch`, a row's bytes long, where it holds
+    /// indices; `None` past its last row.
+    pub(crate) fn rgba_row<'a>(&'a self, y: usize, scratch: &'a mut [u8]) -> Option<&'a [u8]> {
+        let width = usize::try_from(self.width).ok()?;
+        let row = |unit: usize| {
+            let start = y.checked_mul(width)?.checked_mul(unit)?;
+            Some(start..start.checked_add(width * unit)?)
+        };
+        match &self.pixels {
+            Pixels::Rgba(rgba) => rgba.get(row(RGBA_BYTES)?),
             Pixels::Indexed {
                 depth,
                 palette,
                 indices,
                 mask,
             } => {
+                let samples = indices.get(row(1)?)?;
+                let alpha = match mask {
+                    Some(mask) => mask.get(row(1)?)?,
+                    None => &[],
+                };
+                let out = scratch.get_mut(..width * RGBA_BYTES)?;
                 let kind = PictureKind::Indexed {
                     depth: *depth,
                     palette,
                     masked: mask.is_some(),
                 };
-                for (y, row) in out.chunks_exact_mut(row_bytes).enumerate() {
-                    let at = y * width;
-                    let samples = &indices[at..at + width];
-                    let alpha = mask.as_ref().map_or(&[][..], |mask| &mask[at..at + width]);
-                    flatten_row(kind, samples, alpha, row);
-                }
+                flatten_row(kind, samples, alpha, out);
+                Some(out)
             }
         }
-        Some(out)
+    }
+
+    /// A copy, or `None` where the allocator refuses one.
+    pub(crate) fn try_clone(&self) -> Option<Self> {
+        let copied = |bytes: &[u8]| fallible::collected(bytes.len(), bytes.iter().copied());
+        let pixels = match &self.pixels {
+            Pixels::Rgba(rgba) => Pixels::Rgba(copied(rgba)?),
+            Pixels::Indexed {
+                depth,
+                palette,
+                indices,
+                mask,
+            } => Pixels::Indexed {
+                depth: *depth,
+                palette: fallible::collected(palette.len(), palette.iter().copied())?,
+                indices: copied(indices)?,
+                mask: match mask {
+                    Some(mask) => Some(copied(mask)?),
+                    None => None,
+                },
+            },
+        };
+        Some(Self {
+            width: self.width,
+            height: self.height,
+            pixels,
+            density: self.density,
+        })
     }
 }
 
@@ -407,12 +457,11 @@ fn copy_row(plane: &[u8], row: usize, stride: usize, out: &mut [u8]) {
 /// multiply, rounded to nearest.
 #[must_use]
 pub fn masked_colour(entry: Rgba8, mask: u8) -> Rgba8 {
-    let alpha = (u32::from(entry[3]) * u32::from(mask) + 127) / 255;
     [
         entry[0],
         entry[1],
         entry[2],
-        u8::try_from(alpha).unwrap_or(u8::MAX),
+        div255(u32::from(entry[3]) * u32::from(mask)),
     ]
 }
 

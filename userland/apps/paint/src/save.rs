@@ -27,6 +27,7 @@ use crate::canvas::{Canvas, Kind, OutOfMemory};
 use crate::document::{
     free_name, sprite_area, Document, Entry, Origin, Picture, Snapshot, SpriteInfo,
 };
+use crate::mask::scale;
 use crate::quantize::palette_for;
 use crate::transform::{apply, indexed, Transform, TransformError};
 
@@ -1016,8 +1017,7 @@ impl PictureSource for OpaquePalette<'_> {
         }
         for (opacity, &index) in mask.iter_mut().zip(samples.iter()) {
             let entry = self.alpha.get(usize::from(index)).copied().unwrap_or(0);
-            *opacity = u8::try_from((u32::from(*opacity) * u32::from(entry) + 127) / 255)
-                .unwrap_or(u8::MAX);
+            *opacity = scale(*opacity, entry);
         }
     }
 }

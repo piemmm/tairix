@@ -1171,8 +1171,8 @@ fn routing_down_a_tool_box_leaves_the_same_state_as_fanning() {
 fn the_orientation_is_drawn_so_it_compares() {
     assert_ne!(grouped_toolbar(), column(grouped_toolbar()));
     assert_eq!(
-        column(grouped_toolbar()).orientation(),
-        ScrollOrientation::Vertical
+        column(grouped_toolbar()).with_orientation(ScrollOrientation::Horizontal),
+        grouped_toolbar(),
+        "a toolbar lies across a window until it is set down one"
     );
-    assert_eq!(Toolbar::new().orientation(), ScrollOrientation::Horizontal);
 }

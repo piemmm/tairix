@@ -8,7 +8,8 @@
 use alloc::vec::Vec;
 
 use crate::bmp::{
-    stride, BI_BITFIELDS, BI_RGB, FILE_HEADER_LEN, INFO_HEADER_LEN, LCS_SRGB, MAGIC, V4_HEADER_LEN,
+    stride, BI_BITFIELDS, BI_RGB, CALIBRATION, FILE_HEADER_LEN, INFO_HEADER_LEN, LCS_SRGB, MAGIC,
+    V4_HEADER_LEN,
 };
 use crate::density::DensityUnit;
 use crate::encode::{
@@ -20,10 +21,6 @@ use crate::RGBA_BYTES;
 /// The red, green, blue and alpha masks of a 32-bit pixel, in the order the
 /// header states them.
 const MASKS: [u32; RGBA_BYTES] = [0x00FF_0000, 0x0000_FF00, 0x0000_00FF, 0xFF00_0000];
-
-/// The bytes of a V4 header after its masks and colour space: the endpoints
-/// and gamma an sRGB header leaves zero.
-const V4_UNUSED: usize = 48;
 
 /// How the pixels are written.
 enum Plan<'a> {
@@ -96,7 +93,8 @@ pub(crate) fn encode(source: &dyn PictureSource) -> Result<Vec<u8>, EncodeError>
             out.le_u32(mask)?;
         }
         out.le_u32(LCS_SRGB)?;
-        out.push(&[0; V4_UNUSED])?;
+        // The endpoints and gamma an sRGB header leaves zero.
+        out.push(&[0; CALIBRATION.end - CALIBRATION.start])?;
     }
     if let Plan::Indexed { palette, .. } = &plan {
         for entry in *palette {

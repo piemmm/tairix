@@ -22,6 +22,7 @@
 extern crate alloc;
 
 mod accounts;
+mod asks;
 mod body;
 mod facts;
 mod footer;
@@ -39,6 +40,7 @@ mod statement;
 mod volumes;
 
 pub use accounts::{AccountFacts, OwnAccount, Roster};
+pub use asks::{notified, DesktopAnswer, DesktopAsk, DesktopAsks, MOST_OUTSTANDING};
 pub use facts::MachineFacts;
 pub use form::{Composition, Form, FormOutcome, FormPlace, Offered, Setting};
 pub use frame::{

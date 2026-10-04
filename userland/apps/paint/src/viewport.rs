@@ -240,14 +240,7 @@ impl Viewport {
     /// The screen pixels `bounds` of the picture fall on, clipped to `area`.
     #[must_use]
     pub fn to_screen(&self, bounds: Bounds, picture: (u32, u32), area: Rect) -> Rect {
-        let span = self.screen_span(bounds, picture, area);
-        let clamp = |value: i64| {
-            i32::try_from(value.clamp(i64::from(i32::MIN), i64::from(i32::MAX))).unwrap_or(0)
-        };
-        let (x0, y0) = (clamp(span.x0), clamp(span.y0));
-        let width = u32::try_from(clamp(span.x1).saturating_sub(x0)).unwrap_or(0);
-        let height = u32::try_from(clamp(span.y1).saturating_sub(y0)).unwrap_or(0);
-        Rect::new(x0, y0, width, height).intersection(&area)
+        screen_rect(self.screen_span(bounds, picture, area)).intersection(&area)
     }
 
     /// The screen pixels `bounds` of the picture fall on, wherever they lie
@@ -399,6 +392,19 @@ impl Viewport {
     pub fn set_aspect(&mut self, aspect: (u32, u32)) {
         self.aspect = (aspect.0.max(1), aspect.1.max(1));
     }
+}
+
+/// The screen rectangle of screen pixels `span`, held to what a screen
+/// coordinate reaches.
+#[must_use]
+pub fn screen_rect(span: Bounds) -> Rect {
+    let clamp = |value: i64| {
+        i32::try_from(value.clamp(i64::from(i32::MIN), i64::from(i32::MAX))).unwrap_or(0)
+    };
+    let (x0, y0) = (clamp(span.x0), clamp(span.y0));
+    let width = u32::try_from(clamp(span.x1).saturating_sub(x0)).unwrap_or(0);
+    let height = u32::try_from(clamp(span.y1).saturating_sub(y0)).unwrap_or(0);
+    Rect::new(x0, y0, width, height)
 }
 
 #[cfg(test)]

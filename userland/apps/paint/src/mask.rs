@@ -12,7 +12,7 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use tairix_raster::{soften_coverage, CoverageRows, SOFTEN_PASSES};
+use tairix_raster::{div255, soften_coverage, CoverageRows, SOFTEN_PASSES};
 use tairix_util::fallible;
 
 use crate::canvas::{Canvas, OutOfMemory};
@@ -442,7 +442,7 @@ impl Mask {
 /// `value` scaled by `by`, both out of 255, rounded to the nearest.
 #[must_use]
 pub fn scale(value: u8, by: u8) -> u8 {
-    u8::try_from((u32::from(value) * u32::from(by) + 127) / 255).unwrap_or(u8::MAX)
+    div255(u32::from(value) * u32::from(by))
 }
 
 #[cfg(test)]

@@ -3,7 +3,7 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{compose_run, flatten, laid};
+use super::{between, compose_run, flatten, laid};
 use crate::canvas::{Canvas, Kind, Sample};
 use crate::document::Layer;
 
@@ -128,4 +128,26 @@ fn a_merge_keeps_the_look() {
         .map(|x| (at(&apart, x, 0), at(&together, x, 0)))
         .unzip();
     assert!(a.iter().zip(&b).all(|(&p, &q)| close(p, q)), "{a:?} {b:?}");
+}
+
+#[test]
+fn a_colour_fading_to_clear_keeps_its_hue() {
+    let red = [200, 40, 10, 255];
+    let half = between(red, [0; 4], 128);
+    assert_eq!(&half[..3], &red[..3], "no darkening toward the clear end");
+    assert_eq!(half[3], 127);
+    assert_eq!(
+        between([0, 255, 0, 0], red, 50)[..3],
+        red[..3],
+        "a clear colour lends no hue"
+    );
+    assert_eq!(between([0; 4], [9, 9, 9, 0], 99), [0; 4]);
+    let (black, white) = ([0, 0, 0, 255], [255; 4]);
+    assert_eq!(between(black, white, 0), black);
+    assert_eq!(between(black, white, 255), white);
+    assert_eq!(
+        between(black, white, 51),
+        [51, 51, 51, 255],
+        "opaque colours mix plainly"
+    );
 }

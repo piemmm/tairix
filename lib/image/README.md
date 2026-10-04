@@ -474,7 +474,8 @@ even in a debug build. The crate is `no_std` + `alloc`,
 `tairix-compress` (PNG's `IDAT` stream and a ZIP entry are DEFLATE, so the
 `inflate`/`zlib` modules there are reused rather than re-implemented),
 `tairix-crc32` (PNG chunks and ZIP entries), `tairix-xml` (the OpenRaster
-stack) and `tairix-util` (fallible reservation).
+stack), `tairix-raster` (`div255`, the one rounded division an alpha product
+is taken through) and `tairix-util` (fallible reservation).
 
 This crate performs no I/O and holds no authority of its own: it is meant
 to run inside the image pipeline's parser sandbox, which supplies the

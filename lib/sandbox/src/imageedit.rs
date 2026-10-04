@@ -1042,7 +1042,10 @@ pub fn open_edit<L: Launcher, S: tairix_log::Sink>(
             }
         } && canvas.is_some() == (kind == EditKind::Layers)
             && (!unkept.precision
-                || matches!(format, ViewFormat::Png | ViewFormat::Bmp | ViewFormat::Tiff))
+                || matches!(
+                    format,
+                    ViewFormat::Png | ViewFormat::Bmp | ViewFormat::Tiff | ViewFormat::OpenRaster
+                ))
             && (!unkept.extras
                 || matches!(
                     format,
@@ -1053,7 +1056,11 @@ pub fn open_edit<L: Launcher, S: tairix_log::Sink>(
                         | ViewFormat::Tiff
                         | ViewFormat::OpenRaster
                 ))
-            && (!unkept.converted || matches!(format, ViewFormat::Jpeg | ViewFormat::Tiff))
+            && (!unkept.converted
+                || matches!(
+                    format,
+                    ViewFormat::Jpeg | ViewFormat::Tiff | ViewFormat::OpenRaster
+                ))
             && match written {
                 Written::Plain => !matches!(format, ViewFormat::Gif | ViewFormat::Tiff),
                 Written::Gif(_) => format == ViewFormat::Gif,

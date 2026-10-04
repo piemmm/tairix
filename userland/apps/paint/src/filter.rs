@@ -18,6 +18,7 @@ use tairix_raster::{box_blur, Color, SOFTEN_PASSES};
 use tairix_util::{fallible, mathf};
 
 use crate::canvas::{Canvas, Kind, OutOfMemory, Sample, Tile, TILE};
+use crate::compose::between;
 use crate::mask::Mask;
 use crate::shape::Bounds;
 use crate::stroke::Change;
@@ -441,19 +442,6 @@ fn luma([r, g, b, _]: Rgba8) -> u8 {
     u8::try_from((weighed + 500) / 1000).unwrap_or(u8::MAX)
 }
 
-/// `from` moved `share` 255ths of the way to `to`, every channel.
-fn toward(from: Rgba8, to: Rgba8, share: u8) -> Rgba8 {
-    if share == u8::MAX {
-        return to;
-    }
-    let (keep, take) = (u32::from(255 - share), u32::from(share));
-    let mut out = [0u8; 4];
-    for ((slot, &a), &b) in out.iter_mut().zip(&from).zip(&to) {
-        *slot = u8::try_from((u32::from(a) * keep + u32::from(b) * take + 127) / 255).unwrap_or(0);
-    }
-    out
-}
-
 /// Apply `filter` to colour picture `picture`, within `clip` where a
 /// selection is held: the worker's work, answering each tile written as it
 /// now stands.
@@ -499,7 +487,10 @@ pub fn apply(
                 Some(made) => made.at(column, y),
                 None => filter.map(colour, table.as_ref()),
             };
-            *sample = Sample::Rgba(toward(colour, filtered, share));
+            *sample = Sample::Rgba(match share {
+                u8::MAX => filtered,
+                share => between(colour, filtered, share),
+            });
         }
     })?;
     Ok(change.written(picture)?)

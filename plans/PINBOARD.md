@@ -426,9 +426,10 @@ backdrop and the screensaver's slides hold what their plans report without
 waiting. The pane asks for the pictures
 on screen first and keeps every one it is handed while memory is plentiful,
 only those on screen once it is short (`plans/NEW-DESKTOP-SETTINGS.md` DS19).
-A render a preparer has taken answers exactly once and frees its slot; what a
-closed window still has waiting is withdrawn with it and its regions let go,
-so a closed window costs at most the renders already under way.
+What a closed window still has waiting is withdrawn with it and its regions
+let go; a render a preparer has already taken for it is refused its memory,
+never queued again, and answers into nothing, freeing its slot, so a closed
+window costs at most the renders already under way.
 
 A picture in effect that the catalog does not hold — one set before it was
 removed from the store — is still offered and still selectable; it has no

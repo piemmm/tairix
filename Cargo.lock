@@ -2405,6 +2405,7 @@ dependencies = [
  "tairix-compress",
  "tairix-crc32",
  "tairix-fuzzseed",
+ "tairix-raster",
  "tairix-util",
  "tairix-xml",
 ]

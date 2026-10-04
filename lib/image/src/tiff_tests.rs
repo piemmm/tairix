@@ -6,16 +6,16 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use super::{
-    decode, pages, probe, COMPRESSION_ADOBE_DEFLATE, COMPRESSION_CCITT_RLE, COMPRESSION_GROUP3,
-    COMPRESSION_GROUP4, COMPRESSION_JPEG, COMPRESSION_LZW, COMPRESSION_NONE, COMPRESSION_PACK_BITS,
-    PHOTOMETRIC_BLACK_ZERO, PHOTOMETRIC_MASK, PHOTOMETRIC_PALETTE, PHOTOMETRIC_RGB,
-    PHOTOMETRIC_SEPARATED, PHOTOMETRIC_WHITE_ZERO, PHOTOMETRIC_YCBCR, TAG_BITS_PER_SAMPLE,
-    TAG_COLOUR_MAP, TAG_COMPRESSION, TAG_EXTRA_SAMPLES, TAG_FILL_ORDER, TAG_IMAGE_LENGTH,
-    TAG_IMAGE_WIDTH, TAG_INK_SET, TAG_JPEG_TABLES, TAG_NEW_SUBFILE_TYPE, TAG_ORIENTATION,
-    TAG_PHOTOMETRIC, TAG_PLANAR_CONFIGURATION, TAG_PREDICTOR, TAG_REFERENCE_BLACK_WHITE,
-    TAG_ROWS_PER_STRIP, TAG_SAMPLES_PER_PIXEL, TAG_SAMPLE_FORMAT, TAG_STRIP_BYTE_COUNTS,
-    TAG_STRIP_OFFSETS, TAG_T4_OPTIONS, TAG_TILE_BYTE_COUNTS, TAG_TILE_LENGTH, TAG_TILE_OFFSETS,
-    TAG_TILE_WIDTH, TAG_YCBCR_SUBSAMPLING,
+    decode, pages, probe, BYTE, COMPRESSION_ADOBE_DEFLATE, COMPRESSION_CCITT_RLE,
+    COMPRESSION_GROUP3, COMPRESSION_GROUP4, COMPRESSION_JPEG, COMPRESSION_LZW, COMPRESSION_NONE,
+    COMPRESSION_PACK_BITS, LONG, PHOTOMETRIC_BLACK_ZERO, PHOTOMETRIC_MASK, PHOTOMETRIC_PALETTE,
+    PHOTOMETRIC_RGB, PHOTOMETRIC_SEPARATED, PHOTOMETRIC_WHITE_ZERO, PHOTOMETRIC_YCBCR, RATIONAL,
+    SHORT, TAG_BITS_PER_SAMPLE, TAG_COLOUR_MAP, TAG_COMPRESSION, TAG_EXTRA_SAMPLES, TAG_FILL_ORDER,
+    TAG_IMAGE_LENGTH, TAG_IMAGE_WIDTH, TAG_INK_SET, TAG_JPEG_TABLES, TAG_NEW_SUBFILE_TYPE,
+    TAG_ORIENTATION, TAG_PHOTOMETRIC, TAG_PLANAR_CONFIGURATION, TAG_PREDICTOR,
+    TAG_REFERENCE_BLACK_WHITE, TAG_ROWS_PER_STRIP, TAG_SAMPLES_PER_PIXEL, TAG_SAMPLE_FORMAT,
+    TAG_STRIP_BYTE_COUNTS, TAG_STRIP_OFFSETS, TAG_T4_OPTIONS, TAG_TILE_BYTE_COUNTS,
+    TAG_TILE_LENGTH, TAG_TILE_OFFSETS, TAG_TILE_WIDTH, TAG_YCBCR_SUBSAMPLING, UNDEFINED,
 };
 use crate::{DecodeError, DecodeLimits, ImageFormat, RasterImage, Sequence, SequenceKind};
 
@@ -24,13 +24,6 @@ use crate::{DecodeError, DecodeLimits, ImageFormat, RasterImage, Sequence, Seque
 fn limits() -> DecodeLimits {
     DecodeLimits::new(4096, 4096, 4096 * 4096, 1 << 20)
 }
-
-/// Field types, as a directory entry spells them.
-const BYTE: u16 = 1;
-const SHORT: u16 = 3;
-const LONG: u16 = 4;
-const RATIONAL: u16 = 5;
-const UNDEFINED: u16 = 7;
 
 /// Bytes one element of a field type occupies.
 fn width(kind: u16) -> usize {
@@ -626,6 +619,29 @@ fn a_palette_page_reads_its_colour_map() {
     assert_eq!(pixel(&image, 1, 0), [255, 0, 0, 255]);
     assert_eq!(pixel(&image, 2, 0), [0, 0, 0, 255]);
     assert_eq!(pixel(&image, 3, 0), [0, 255, 0, 255]);
+}
+
+/// A colour map is sixteen bits an entry. One held as LONGs, whose entries
+/// overflowed the editor door's reading of them, is refused by that door and
+/// by the decoder alike.
+#[test]
+fn a_colour_map_held_in_longs_is_refused() {
+    let page = PageSpec::new()
+        .tag(TAG_IMAGE_WIDTH, LONG, &[1])
+        .tag(TAG_IMAGE_LENGTH, LONG, &[1])
+        .tag(TAG_BITS_PER_SAMPLE, SHORT, &[1])
+        .tag(TAG_COMPRESSION, SHORT, &[u32::from(COMPRESSION_NONE)])
+        .tag(TAG_PHOTOMETRIC, SHORT, &[u32::from(PHOTOMETRIC_PALETTE)])
+        .tag(TAG_SAMPLES_PER_PIXEL, SHORT, &[1])
+        .tag(TAG_ROWS_PER_STRIP, LONG, &[1])
+        .tag(TAG_COLOUR_MAP, LONG, &[u32::MAX; 6])
+        .unit(vec![0]);
+    assert_eq!(refusal(page.clone()), DecodeError::TiffInvalidColourMap);
+    let bytes = build(false, &[page]);
+    assert!(matches!(
+        crate::open_native(ImageFormat::Tiff, &bytes[..], &limits()),
+        Err(DecodeError::TiffInvalidColourMap)
+    ));
 }
 
 #[test]

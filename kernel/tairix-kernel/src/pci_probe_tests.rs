@@ -299,3 +299,19 @@ fn the_record_holds_each_function_behind_a_unit_and_each_published_node() {
         "no bridge or host bridge, and an untranslated node with no stream"
     );
 }
+
+/// A walk that formed no hierarchy resolves no unit's scope: where a unit
+/// covers the segment every function mastering DMA of its own is stopped,
+/// elsewhere only a virtio one, and a bridge or host bridge never.
+#[test]
+fn a_walk_that_formed_no_hierarchy_stops_every_master_a_unit_could_cover() {
+    let virtio = endpoint(1, 0, 0, VIRTIO_PCI_VENDOR_ID, 0x02_00_00);
+    let other = endpoint(1, 1, 0, 0x8086, 0x02_00_00);
+    let host = endpoint(0, 0, 0, 0x8086, 0x06_00_00);
+    let forwarding = bridge(0, 0x1c, 1, 2);
+    let stopped = |covered: bool| {
+        [&virtio, &other, &host, &forwarding].map(|function| stopped_unresolved(function, covered))
+    };
+    assert_eq!(stopped(true), [true, true, false, false]);
+    assert_eq!(stopped(false), [true, false, false, false]);
+}

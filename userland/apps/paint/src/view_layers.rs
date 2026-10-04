@@ -213,13 +213,26 @@ impl View {
     }
 
     /// Lay the layer painted on over the one beneath it, the two becoming
-    /// one, on a worker.
+    /// one, on a worker. Both must show: a merge keeps the look, so a hidden
+    /// layer's pixels would have nowhere to go.
     pub(super) fn merge_down(&mut self, layout: &Layout, damage: &mut Region) -> Outcome {
         let active = self.active_layer();
         let Some(lowest) = active.checked_sub(1) else {
             self.state("There is no layer beneath this one", layout, damage);
             return Outcome::none();
         };
+        if !self
+            .document
+            .picture()
+            .is_some_and(|picture| picture.shows(lowest..active + 1))
+        {
+            self.state(
+                "A hidden layer is not merged: show both first",
+                layout,
+                damage,
+            );
+            return Outcome::none();
+        }
         self.compose(lowest..active + 1, "merge the layers", layout, damage)
     }
 

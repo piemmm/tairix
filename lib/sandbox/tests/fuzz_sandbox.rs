@@ -44,8 +44,8 @@ use tairix_sandbox::imageedit::{
     EditKind, EditPicture, EditPixels, KeptReason,
 };
 use tairix_sandbox::imagerender::{
-    close_view, open_view, rasterise_icon, render_page, render_wallpaper, select_page,
-    send_document, ImageRenderService, ViewFormat, MAX_DESTINATION_WIDTH, MAX_ICON_SIDE,
+    close_view, open_view, plan_wallpaper, rasterise_icon, render_page, select_page, send_document,
+    ImageRenderService, ViewFormat, WallpaperRenderFailure, MAX_DESTINATION_WIDTH, MAX_ICON_SIDE,
 };
 use tairix_sandbox::loopback::{LoopbackLauncher, LoopbackSession};
 use tairix_sandbox::proto::Channel;
@@ -65,6 +65,22 @@ const SMOKE_ITERATIONS: u64 = 2_000;
 
 /// Largest arbitrary byte string fed as an input file or a hostile reply.
 const MAX_NOISE: usize = 2048;
+
+/// Draw `image` under `fit` onto a `width`×`height` destination the way the
+/// desktop draws a wallpaper: upload, plan, render.
+fn drawn<L: Launcher, S: tairix_log::Sink>(
+    sandbox: &mut ParserSandbox<L, S>,
+    width: u32,
+    height: u32,
+    fit: WallpaperFit,
+    image: &[u8],
+) -> Result<Vec<u8>, WallpaperRenderFailure> {
+    send_document(sandbox, image).map_err(WallpaperRenderFailure::Document)?;
+    let planned = plan_wallpaper(sandbox, (width, height), width, height, fit)?;
+    let mut out = vec![0u8; width as usize * height as usize * 4];
+    planned.render_into(&mut out)?;
+    Ok(out)
+}
 
 /// A well-formed stratum-2 NTP server reply echoing `nonce`, reporting an
 /// instant inside the plausibility window — the template mutations start from.
@@ -399,14 +415,14 @@ fn fuzz_wallpaper_iteration(
         let pos = rng.below(png.len());
         png[pos] ^= rng.next_u8();
     }
-    let _ = render_wallpaper(honest, width, height, fit, &png);
+    let _ = drawn(honest, width, height, fit, &png);
     let cut = rng.at_most(png.len());
-    let _ = render_wallpaper(honest, width, height, fit, &png[..cut]);
-    let _ = render_wallpaper(honest, width, height, fit, noise);
-    // Also exercise a destination one past the ceiling: always refused
-    // locally, before any request is even sent, so this is cheap to run
+    let _ = drawn(honest, width, height, fit, &png[..cut]);
+    let _ = drawn(honest, width, height, fit, noise);
+    // Also exercise a destination one past the ceiling: refused by the
+    // plan's own check before anything is decoded, so it is cheap to run
     // every iteration unlike a genuine ceiling-sized render.
-    let _ = render_wallpaper(honest, MAX_DESTINATION_WIDTH + 1, height, fit, &png);
+    let _ = drawn(honest, MAX_DESTINATION_WIDTH + 1, height, fit, &png);
     (width, height, fit)
 }
 
@@ -956,7 +972,7 @@ fn decode_surface_never_panics_for_any_input_or_reply() {
         let _ = disassemble(&mut hostile, isa, 0, 0, 8, b"\x90\x90");
         let _ = render_help(&mut hostile, mode, Styling::Colour, "en-US", HELP_TEMPLATE);
         let _ = rasterise_icon(&mut hostile, side, SVG_TEMPLATE, &mut NoFonts);
-        let _ = render_wallpaper(&mut hostile, wallpaper_w, wallpaper_h, fit, &png_template());
+        let _ = drawn(&mut hostile, wallpaper_w, wallpaper_h, fit, &png_template());
         hostile_document_iteration(&mut hostile);
         let hostile_txn = tairix_net::ntp::Transaction {
             server: 0,

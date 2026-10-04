@@ -7,6 +7,8 @@
 //! whether the field positions were read from the file or fixed by the
 //! format.
 
+use tairix_raster::div255;
+
 /// One colour channel's bits within a packed pixel.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Channel {
@@ -66,8 +68,7 @@ impl Channel {
         let narrowed = if self.width >= 8 {
             u32::from(value) << (self.width - 8)
         } else {
-            let max = (1u32 << self.width) - 1;
-            (u32::from(value) * max + 127) / 255
+            u32::from(div255(u32::from(value) * ((1 << self.width) - 1)))
         };
         narrowed << self.shift & self.mask
     }

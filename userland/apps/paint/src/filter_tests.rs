@@ -119,6 +119,50 @@ fn a_blur_spreads_a_pixel_and_is_held_to_the_selection() {
     );
 }
 
+/// A pixel the selection only partly chooses takes that share of the
+/// filtered colour, weighed by alpha: a clear pixel the blur reaches turns
+/// the colour spread onto it, never a darkening of the clear it was.
+#[test]
+fn a_blur_through_a_soft_selection_keeps_the_colour_it_spreads() {
+    let mut built = CanvasBuilder::new(21, 21, Kind::Rgba, Sample::Rgba([0; 4])).expect("fits");
+    for x in 0..10 {
+        for y in 0..21 {
+            built.set(x, y, Sample::Rgba([255, 0, 0, 255]));
+        }
+    }
+    let mut canvas = built.finish();
+    let mut whole = canvas.try_clone().expect("room");
+    let blur = Filter::Blur { radius: 3 };
+    apply(&mut whole, &blur, None).expect("room");
+    let picture = Bounds {
+        x0: 0,
+        y0: 0,
+        x1: 21,
+        y1: 21,
+    };
+    let held = Bounds { x1: 12, ..picture };
+    let soft = Mask::rect(held)
+        .expect("pixels")
+        .feathered(4, picture)
+        .expect("room")
+        .expect("pixels");
+    apply(&mut canvas, &blur, Some(&soft)).expect("room");
+    let mut reached = 0;
+    for x in 10..21 {
+        let share = soft.at(i64::from(x), 10);
+        let spread = rgba(&whole, x, 10);
+        if !(1..u8::MAX).contains(&share) || spread[3] == 0 {
+            continue;
+        }
+        reached += 1;
+        let [r, g, b, a] = rgba(&canvas, x, 10);
+        assert_eq!([r, g, b], spread[..3], "pixel {x} takes the colour spread");
+        let laid = (u32::from(spread[3]) * u32::from(share) + 127) / 255;
+        assert_eq!(u32::from(a), laid, "pixel {x} as opaque as its share");
+    }
+    assert!(reached > 0, "the blur reached a partly chosen clear pixel");
+}
+
 #[test]
 fn pixelating_makes_squares_of_their_mean() {
     let mut built =

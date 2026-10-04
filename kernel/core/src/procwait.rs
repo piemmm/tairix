@@ -93,7 +93,8 @@ pub trait ProcessWait: Sync {
     /// # Errors
     ///
     /// Returns [`Errno::NotFound`] when `pid` does not name a child of
-    /// `parent` (and `parent` has no children, for [`tairix_abi::WAIT_PID_ANY`]).
+    /// `parent` (and `parent` has no [`ChildListing::Listed`] child, for
+    /// [`tairix_abi::WAIT_PID_ANY`]).
     /// The default producer ([`NullProcessWait`]) returns
     /// [`Errno::NotImplemented`] to mark an inert interface.
     fn wait(
@@ -397,7 +398,7 @@ pub enum ChildPeek {
     /// A matching child exists but has not exited yet.
     Running,
     /// `pid` names no child of the calling parent (and the parent has no
-    /// children at all, for [`tairix_abi::WAIT_PID_ANY`]).
+    /// [`ChildListing::Listed`] child, for [`tairix_abi::WAIT_PID_ANY`]).
     NoChild,
 }
 
@@ -412,7 +413,7 @@ pub enum Reap {
     /// block and retry.
     Blocked,
     /// `pid` names no child of the calling parent (and the parent has no
-    /// children at all, for [`tairix_abi::WAIT_PID_ANY`]).
+    /// [`ChildListing::Listed`] child, for [`tairix_abi::WAIT_PID_ANY`]).
     NoChild,
 }
 

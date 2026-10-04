@@ -271,8 +271,9 @@ waits behind a thumbnail.
 
 A conclusion says how the render ended (`PreviewOutcome`). A render that runs
 out of memory beside others is queued again to run alone; one that runs out of
-memory alone, or whose plan cannot be met at critical pressure, is answered
-`Unavailable`, and Settings asks for it again once memory may have been freed
+memory alone, or whose plan the desk withholds memory from — at critical
+pressure, or as the desk stops — is answered `Unavailable` at once, and
+Settings asks for it again once memory may have been freed
 — another picture fitting, or the pressure band moving. A picture the session
 cannot read or decode is answered `Refused` and keeps its placeholder.
 
@@ -281,8 +282,9 @@ bounds how much decoding a browsing application can set going. A request past
 that is answered `LimitExceeded`, and the application asks again when a render
 concludes. Settings carries each request to the session on a worker of its own,
 one round trip at a time, so its window never waits on the session's serve
-loop. A window that closes takes what it still has waiting with it; only
-renders already under way finish, into nothing. Every picture is requested and
+loop. A window that closes takes what it still has waiting with it; a render
+already under way for it is refused its memory, never queued again, and
+finishes into nothing. Every picture is requested and
 never awaited — a paint draws what has come back and a placeholder for what has
 not — so the pane is usable from its first frame and fills in as the answers
 land, those on screen first.

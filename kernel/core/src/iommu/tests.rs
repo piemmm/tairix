@@ -1358,3 +1358,77 @@ fn owners_change_a_shared_function_in_the_order_they_began() {
         "the parent began after the child ended"
     );
 }
+
+/// Owners published together hold room for every stream each will attach,
+/// so laying their streams at their nodes' doors allocates nothing, whatever
+/// order their adoptions end in.
+#[test]
+fn owners_published_together_attach_their_streams_without_allocating() {
+    let mut owners = Owners {
+        nodes: HashMap::with_hasher(BuildFastHash::new()),
+        groups: HashMap::with_hasher(BuildFastHash::new()),
+        streams: HashMap::with_hasher(BuildFastHash::new()),
+        awaited: 0,
+    };
+    let owner = |node: u32, first: u32| {
+        Arc::new(Owner {
+            generation: 1,
+            node,
+            identity: Identity {
+                unit: 0,
+                group: node,
+                requester: ArrayVec::new(),
+                aliases: ArrayVec::new(),
+            },
+            streams: (first..first + 8).collect(),
+            epoch: 0,
+            state: SpinLock::new(OwnerState::Adopting),
+            unconfirmed: AtomicBool::new(false),
+        })
+    };
+    let (first, second, failed) = (owner(1, 0), owner(2, 100), owner(3, 200));
+    for published in [&first, &second, &failed] {
+        assert_eq!(owners.publish(published, None, None), Ok(true));
+    }
+    owners.restore(&failed, None, None);
+    let room = owners.streams.capacity();
+    owners.attached(&second);
+    owners.attached(&first);
+    assert_eq!(owners.streams.capacity(), room, "an attach allocated");
+    assert_eq!((owners.streams.len(), owners.awaited), (16, 0));
+}
+
+/// A holder whose adoption failed holds its group for no one: before its
+/// records are put back a sibling's owner finds the group free, and the
+/// kernel's own and an unconfirmed holder never do.
+#[test]
+fn a_holder_whose_adoption_failed_leaves_its_group_free() {
+    let (model, tree) = rig!(Behaviour::Correct);
+    let translation = started(model, tree, Vec::new());
+    let holder = |generation: u64, state: OwnerState| Owner {
+        generation,
+        node: DEVICE,
+        identity: Identity {
+            unit: 0,
+            group: STREAM,
+            requester: ArrayVec::new(),
+            aliases: ArrayVec::new(),
+        },
+        streams: Vec::new(),
+        epoch: 0,
+        state: SpinLock::new(state),
+        unconfirmed: AtomicBool::new(false),
+    };
+    let failed = holder(1, OwnerState::Unadopted(DmaError::Translation));
+    assert_eq!(translation.free(&failed, SIBLING, 2), Ok(()));
+    let unconfirmed = holder(1, OwnerState::Revoked { confirmed: false });
+    assert_eq!(
+        translation.free(&unconfirmed, SIBLING, 2),
+        Err(DmaError::Translation)
+    );
+    let kernel = holder(KERNEL_OWNER, OwnerState::Adopting);
+    assert_eq!(
+        translation.free(&kernel, SIBLING, 2),
+        Err(DmaError::KernelOwned)
+    );
+}

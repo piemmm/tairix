@@ -649,18 +649,13 @@ fn async_load_failure(code: i32) -> Option<(&'static str, i32)> {
     })
 }
 
-/// The shell exit status a task killed by an unresolvable memory fault
-/// carries: `128 + SIGSEGV (11)`, the conventional "segmentation fault"
-/// code. The kernel records it for every user-fault kill.
-const FAULT_KILL_STATUS: i32 = 139;
-
 /// If `code` is the fault-kill status, the terse "why" to state on the
 /// crashed command's `stderr` so a segfault is never a silent, opaque `$?`
 /// (fail loud). The breadcrumb states only the class every user understands;
 /// the precise cause (read vs write, near-null vs wild) and the backtrace
 /// live in the capability-gated crash record, never on the terminal.
 fn fault_kill_reason(code: i32) -> Option<&'static str> {
-    (code == FAULT_KILL_STATUS).then_some("killed by fault (segmentation fault)")
+    (code == tairix_abi::FAULT_EXIT_STATUS).then_some("killed by fault (segmentation fault)")
 }
 
 /// Negate an exit status when `negated` (the `!` pipeline prefix): 0 becomes

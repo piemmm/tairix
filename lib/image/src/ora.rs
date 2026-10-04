@@ -11,14 +11,16 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
+use core::ops::Range;
 
-use tairix_util::cnum;
+use tairix_raster::div255;
+use tairix_util::{cnum, fallible};
 use tairix_xml::Element;
 
 use crate::encode::EncodeError;
-use crate::picture::{over, Picture, PictureSource};
+use crate::picture::{masked_colour, over, Picture, PictureSource, Pixels};
 use crate::zip::{Archive, View, Writer, ZipError};
-use crate::{png, rgba_picture, DecodeError, DecodeLimits, RasterImage, Unkept, RGBA_BYTES};
+use crate::{png, DecodeError, DecodeLimits, RasterImage, Unkept, RGBA_BYTES};
 
 /// What the first entry holds, which names the archive OpenRaster.
 const MIMETYPE: &str = "image/openraster";
@@ -204,8 +206,8 @@ impl From<ZipError> for DecodeError {
     }
 }
 
-/// A stack as read: its canvas, its layers topmost first, and what folding
-/// it left out.
+/// A stack as read: its canvas, its layers topmost first, and what it held
+/// that reading it did not keep.
 type Stack = ((u32, u32), Vec<Placed>, Unkept);
 
 /// A layer as the stack places it, before its pixels are read.
@@ -231,39 +233,39 @@ fn canvas(root: &Element<'_>) -> Result<(u32, u32), DecodeError> {
     Ok((side("w")?, side("h")?))
 }
 
+/// The canvas `root` declares, refused where it passes `limits`.
+fn checked_canvas(root: &Element<'_>, limits: &DecodeLimits) -> Result<(u32, u32), DecodeError> {
+    let (width, height) = canvas(root)?;
+    limits.check(width, height)?;
+    Ok((width, height))
+}
+
 /// The canvas OpenRaster `bytes` declare, reading no layer.
 pub(crate) fn probe(bytes: &[u8]) -> Result<(u32, u32), DecodeError> {
-    canvas_of(&open(bytes)?)
+    canvas(&parse(&stack_xml(&open(bytes)?)?)?)
 }
 
-/// The canvas `archive`'s stack declares.
-fn canvas_of(archive: &Archive<'_>) -> Result<(u32, u32), DecodeError> {
-    let xml = stack_xml(archive)?;
-    canvas(&tairix_xml::parse(&xml, "").map_err(|_| DecodeError::OraBadStack)?)
+/// The stack `xml` spells, as far as its root element.
+fn parse(xml: &str) -> Result<Element<'_>, DecodeError> {
+    tairix_xml::parse(xml, "").map_err(|_| DecodeError::OraBadStack)
 }
 
-/// Read the stack in `xml`: its canvas and layers, topmost first, with
-/// what folding it left out.
-fn read_stack(xml: &str, limits: &DecodeLimits) -> Result<Stack, DecodeError> {
-    let root = tairix_xml::parse(xml, "").map_err(|_| DecodeError::OraBadStack)?;
-    let (width, height) = canvas(&root)?;
-    if width > limits.max_width() {
-        return Err(DecodeError::WidthExceedsLimit);
-    }
-    if height > limits.max_height() {
-        return Err(DecodeError::HeightExceedsLimit);
-    }
-    if u64::from(width) * u64::from(height) > limits.max_pixels() {
-        return Err(DecodeError::PixelCountExceedsLimit);
-    }
+/// The stack under `root`: its canvas, refused where it passes `limits`, and
+/// its layers topmost first.
+fn read_stack(root: &Element<'_>, limits: &DecodeLimits) -> Result<Stack, DecodeError> {
+    let size = checked_canvas(root, limits)?;
     let top = root
         .children()
         .find(|child| child.name == "stack")
         .ok_or(DecodeError::OraBadStack)?;
     let mut placed = Vec::new();
-    let mut unkept = Unkept::default();
+    // The writer here states no resolution, so a stated one is not kept.
+    let mut unkept = Unkept {
+        extras: root.attr("xres").is_some() || root.attr("yres").is_some(),
+        ..Unkept::default()
+    };
     fold(top, (u8::MAX, true), &mut placed, &mut unkept)?;
-    Ok(((width, height), placed, unkept))
+    Ok((size, placed, unkept))
 }
 
 /// Fold `stack`'s layers, topmost first, into `placed`, each as hidden and
@@ -280,7 +282,10 @@ fn fold(
         if composite != SRC_OVER {
             unkept.extras = true;
         }
-        let laid = (scale(opacity, own.0), visible && own.1);
+        let laid = (
+            div255(u32::from(opacity) * u32::from(own.0)),
+            visible && own.1,
+        );
         match child.name {
             "layer" => {
                 if placed.len() >= MOST_LAYERS {
@@ -340,11 +345,6 @@ fn attr_visible(element: &Element<'_>) -> bool {
     element.attr("visibility") != Some("hidden")
 }
 
-/// `a` scaled by `b`, both out of 255.
-fn scale(a: u8, b: u8) -> u8 {
-    u8::try_from((u32::from(a) * u32::from(b) + 127) / 255).unwrap_or(u8::MAX)
-}
-
 /// Open `bytes` as an OpenRaster archive, refusing one that does not name
 /// itself so.
 fn open(bytes: &[u8]) -> Result<Archive<'_>, DecodeError> {
@@ -373,18 +373,49 @@ pub(crate) fn decode_native(
 ) -> Result<(OraDocument, Unkept), DecodeError> {
     let archive = open(bytes)?;
     let xml = stack_xml(&archive)?;
-    let ((width, height), placed, unkept) = read_stack(&xml, limits)?;
-    let mut layers = Vec::new();
+    layers(&archive, &parse(&xml)?, limits)
+}
+
+/// The document the stack under `root` lays out of `archive`'s entries: its
+/// layers, the bottom first, each as colour, with what the file held that
+/// they do not. A picture several layers name is read and decoded once, so
+/// naming one entry many times costs one decode.
+fn layers(
+    archive: &Archive<'_>,
+    root: &Element<'_>,
+    limits: &DecodeLimits,
+) -> Result<(OraDocument, Unkept), DecodeError> {
+    let ((width, height), mut placed, mut unkept) = read_stack(root, limits)?;
+    let mut layers: Vec<OraLayer> = Vec::new();
     layers
         .try_reserve_exact(placed.len())
         .map_err(|_| DecodeError::OutOfMemory)?;
-    for layer in placed.into_iter().rev() {
-        let png = archive
-            .read(&layer.src, MOST_LAYER_BYTES)?
-            .ok_or(DecodeError::OraMissingLayer)?;
-        let picture = rgba_picture(png::decode(&png, limits)?)?;
+    for index in (0..placed.len()).rev() {
+        // The layers already read are those beneath this one, nearest last.
+        let shared = placed
+            .get(index + 1..)
+            .unwrap_or_default()
+            .iter()
+            .zip(layers.iter().rev())
+            .find(|(beneath, _)| beneath.src == placed[index].src)
+            .map(|(_, read)| read.picture.try_clone().ok_or(DecodeError::OutOfMemory));
+        let picture = if let Some(copy) = shared {
+            copy?
+        } else {
+            let png = archive
+                .read(&placed[index].src, MOST_LAYER_BYTES)?
+                .ok_or(DecodeError::OraMissingLayer)?;
+            let (picture, held) = png::decode_native(&png, limits)?;
+            let indexed = matches!(picture.pixels(), Pixels::Indexed { .. });
+            unkept.precision |= held.precision;
+            unkept.extras |= held.extras;
+            // A layer is colour, so a palette is restated rather than kept.
+            unkept.converted |= held.converted || indexed;
+            colour(picture)?
+        };
+        let layer = &mut placed[index];
         layers.push(OraLayer {
-            name: layer.name,
+            name: core::mem::take(&mut layer.name),
             picture,
             at: layer.at,
             opacity: layer.opacity,
@@ -401,18 +432,31 @@ pub(crate) fn decode_native(
     ))
 }
 
+/// `picture` as colour, a palette's indices looked up.
+fn colour(picture: Picture) -> Result<Picture, DecodeError> {
+    if matches!(picture.pixels(), Pixels::Rgba(_)) {
+        return Ok(picture);
+    }
+    let rgba = picture.to_rgba().ok_or(DecodeError::OutOfMemory)?;
+    Picture::rgba(picture.width(), picture.height(), rgba)
+        .map(|colour| colour.with_density(picture.density()))
+        .map_err(|_| DecodeError::DimensionsOverflow)
+}
+
 /// The picture OpenRaster `bytes` shows: its merged image where it carries
 /// one of the canvas's size, and otherwise its layers composed.
 pub(crate) fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage, DecodeError> {
     let archive = open(bytes)?;
-    let size = canvas_of(&archive)?;
+    let xml = stack_xml(&archive)?;
+    let root = parse(&xml)?;
+    let size = checked_canvas(&root, limits)?;
     if let Some(merged) = archive.read("mergedimage.png", MOST_LAYER_BYTES)? {
         let image = png::decode(&merged, limits)?;
         if (image.width(), image.height()) == size {
             return Ok(image);
         }
     }
-    let (document, _) = decode_native(bytes, limits)?;
+    let (document, _) = layers(&archive, &root, limits)?;
     composed(&document)
 }
 
@@ -426,7 +470,7 @@ pub(crate) fn decode(bytes: &[u8], limits: &DecodeLimits) -> Result<RasterImage,
 /// # Errors
 ///
 /// What [`decode`] would refuse before decoding: a malformed archive, or a
-/// stack whose canvas will not read.
+/// stack whose canvas will not read or passes `limits`.
 pub(crate) fn peak_bytes(bytes: &[u8], limits: &DecodeLimits) -> Result<u64, DecodeError> {
     let archive = open(bytes)?;
     let stack = archive
@@ -434,16 +478,27 @@ pub(crate) fn peak_bytes(bytes: &[u8], limits: &DecodeLimits) -> Result<u64, Dec
         .ok_or(DecodeError::OraBadStack)?
         .size;
     let xml = stack_xml(&archive)?;
-    canvas(&tairix_xml::parse(&xml, "").map_err(|_| DecodeError::OraBadStack)?)?;
+    let root = parse(&xml)?;
+    let size = checked_canvas(&root, limits)?;
     let directory = 2 * (archive.held_bytes() + MIMETYPE.len()) as u64;
     let parsed = (stack as u64).saturating_add(tairix_xml::parse_peak_bytes(stack));
-    let merged = archive
-        .view("mergedimage.png")?
-        .map_or(0, |view| entry_peak(&view, limits));
+    let merged = archive.view("mergedimage.png")?;
+    // A stored merged image the canvas's size is shown, or refuses the
+    // decode, before any layer is read.
+    let answers = merged
+        .as_ref()
+        .and_then(|view| view.stored)
+        .and_then(|png| png::probe(png).ok())
+        == Some(size);
+    let merged = merged.map_or(0, |view| entry_peak(&view, limits));
     // A stack the layers' path refuses ends that path before any layer is read.
-    let layered = read_stack(&xml, limits).map_or(0, |(size, placed, _)| {
-        layers_peak(&archive, (size, &placed, stack), limits)
-    });
+    let layered = if answers {
+        0
+    } else {
+        read_stack(&root, limits).map_or(0, |(size, placed, _)| {
+            layers_peak(&archive, (size, &placed, stack), limits)
+        })
+    };
     Ok([parsed, merged, layered]
         .into_iter()
         .fold(directory, u64::saturating_add))
@@ -451,9 +506,9 @@ pub(crate) fn peak_bytes(bytes: &[u8], limits: &DecodeLimits) -> Result<u64, Dec
 
 /// What the layers' path holds over a `canvas` holding `placed` read from a
 /// stack of `stack` bytes: the layer records, every layer kept decoded beside
-/// the costliest being read, the canvas they are composed into and one
-/// layer's colours copied out to compose it. A layer the archive does not
-/// hold ends the path there, so it costs nothing.
+/// the costliest being read, the canvas they are composed into and one row a
+/// layer is flattened into to compose it. A layer the archive does not hold
+/// ends the path there, so it costs nothing.
 fn layers_peak(
     archive: &Archive<'_>,
     ((width, height), placed, stack): ((u32, u32), &[Placed], usize),
@@ -463,20 +518,18 @@ fn layers_peak(
     // The records grow by doubling; their names are copied out of the stack.
     let records = ((4 + 3 * placed.len()) * size_of::<Placed>() + stack) as u64;
     let mut kept = 0u64;
-    let mut widest = 0u64;
     let mut reading = 0u64;
     for view in placed
         .iter()
         .filter_map(|layer| archive.view(&layer.src).ok().flatten())
     {
-        let picture = layer_bytes(&view, limits);
-        kept = kept.saturating_add(picture);
-        widest = widest.max(picture);
+        kept = kept.saturating_add(layer_bytes(&view, limits));
         reading = reading.max(entry_peak(&view, limits));
     }
     let layers = (placed.len() * size_of::<OraLayer>()) as u64;
     let canvas = u64::from(width) * u64::from(height) * RGBA_BYTES as u64;
-    [kept, reading, layers, canvas, widest]
+    let row = u64::from(limits.max_width()) * RGBA_BYTES as u64;
+    [kept, reading, layers, canvas, row]
         .into_iter()
         .fold(records, u64::saturating_add)
 }
@@ -505,31 +558,38 @@ fn composed(document: &OraDocument) -> Result<RasterImage, DecodeError> {
     let (width, height) = (document.width as usize, document.height as usize);
     let count = width
         .checked_mul(height)
-        .and_then(|count| count.checked_mul(4))
+        .and_then(|count| count.checked_mul(RGBA_BYTES))
         .ok_or(DecodeError::DimensionsOverflow)?;
-    let mut out = tairix_util::fallible::filled(count, 0u8).ok_or(DecodeError::OutOfMemory)?;
+    let mut out = fallible::filled(count, 0u8).ok_or(DecodeError::OutOfMemory)?;
+    let mut scratch = Vec::new();
     for layer in document.layers.iter().filter(|layer| layer.visible) {
-        let colours = layer.picture.to_rgba().ok_or(DecodeError::OutOfMemory)?;
-        let (lw, lh) = (
-            layer.picture.width() as usize,
-            layer.picture.height() as usize,
-        );
-        for row in 0..lh {
-            let Some(down) = offset(layer.at.1, row, height) else {
-                continue;
-            };
-            for column in 0..lw {
-                let Some(across) = offset(layer.at.0, column, width) else {
-                    continue;
-                };
-                let from = (row * lw + column) * 4;
-                let mut above = [0u8; 4];
-                above.copy_from_slice(&colours[from..from + 4]);
-                above[3] = scale(above[3], layer.opacity);
-                let into = (down * width + across) * 4;
-                let mut below = [0u8; 4];
-                below.copy_from_slice(&out[into..into + 4]);
-                out[into..into + 4].copy_from_slice(&over(below, above));
+        let picture = &layer.picture;
+        let span = picture.width() as usize;
+        let (Some((columns, across)), Some((rows, down))) = (
+            landing(layer.at.0, span, width),
+            landing(layer.at.1, picture.height() as usize, height),
+        ) else {
+            continue;
+        };
+        if !fallible::grow_to(&mut scratch, span * RGBA_BYTES, 0) {
+            return Err(DecodeError::OutOfMemory);
+        }
+        for (offset, y) in rows.enumerate() {
+            let colours = picture
+                .rgba_row(y, &mut scratch)
+                .and_then(|row| row.get(columns.start * RGBA_BYTES..columns.end * RGBA_BYTES))
+                .ok_or(DecodeError::DimensionsOverflow)?;
+            let start = ((down + offset) * width + across) * RGBA_BYTES;
+            let targets = out
+                .get_mut(start..start + colours.len())
+                .ok_or(DecodeError::DimensionsOverflow)?;
+            for (below, above) in targets
+                .as_chunks_mut::<RGBA_BYTES>()
+                .0
+                .iter_mut()
+                .zip(colours.as_chunks::<RGBA_BYTES>().0)
+            {
+                *below = over(*below, masked_colour(*above, layer.opacity));
             }
         }
     }
@@ -540,11 +600,22 @@ fn composed(document: &OraDocument) -> Result<RasterImage, DecodeError> {
     ))
 }
 
-/// Where a layer's pixel `along` from its edge at `start` falls on a canvas
-/// `length` long, if it falls on it at all.
-fn offset(start: i32, along: usize, length: usize) -> Option<usize> {
-    let at = i64::from(start) + i64::try_from(along).ok()?;
-    usize::try_from(at).ok().filter(|&at| at < length)
+/// Of `length` pixels along one axis from a layer's edge at `start`, the run
+/// that falls on a canvas `canvas` long and where its first falls; `None`
+/// where none does.
+fn landing(start: i32, length: usize, canvas: usize) -> Option<(Range<usize>, usize)> {
+    let start = i64::from(start);
+    let first = (-start).max(0);
+    let end = i64::try_from(length)
+        .ok()?
+        .min(i64::try_from(canvas).ok()? - start);
+    if first >= end {
+        return None;
+    }
+    Some((
+        usize::try_from(first).ok()?..usize::try_from(end).ok()?,
+        usize::try_from(start + first).ok()?,
+    ))
 }
 
 #[cfg(test)]

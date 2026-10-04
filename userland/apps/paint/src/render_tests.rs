@@ -345,13 +345,12 @@ fn the_bar_names_its_tool_and_draws_its_settings() {
     };
     assert!(ink(size), "the size field is drawn");
     assert!(ink(name.control(1).expect("the switch is seated")));
+    let band = layout.controls();
     let caption = tairix_geometry::Rect::new(
-        name.bounds().left(),
-        name.bounds().top(),
-        size.left()
-            .saturating_sub(name.bounds().left())
-            .unsigned_abs(),
-        name.bounds().height,
+        band.left(),
+        band.top(),
+        size.left().saturating_sub(band.left()).unsigned_abs(),
+        band.height,
     );
     assert!(ink(caption), "the tool is named before its settings");
 }

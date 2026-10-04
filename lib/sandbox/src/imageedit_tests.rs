@@ -741,6 +741,33 @@ fn layered() -> Vec<u8> {
     encode_ora((5, 4), &layers, &ground, &ground).expect("encodes")
 }
 
+/// Reading a layered document can narrow a layer's samples and restates a
+/// palette layer as colour, so a reply saying either is believed.
+#[test]
+fn a_layered_document_said_to_be_narrowed_or_restated_is_believed() {
+    let said = |tamper: fn(Vec<u8>) -> Vec<u8>| {
+        let mut sandbox = tampering::<ImageRenderService>(OP_EDIT_OPEN, tamper);
+        send_document(&mut sandbox, &layered()).expect("uploads");
+        open_edit(&mut sandbox, Some(ViewFormat::OpenRaster))
+            .expect("believed")
+            .unkept
+    };
+    assert!(
+        said(|mut reply| {
+            reply[7] = 1;
+            reply
+        })
+        .precision
+    );
+    assert!(
+        said(|mut reply| {
+            reply[9] = 1;
+            reply
+        })
+        .converted
+    );
+}
+
 #[test]
 fn a_layered_document_claiming_more_layers_than_are_read_is_not_believed() {
     let mut sandbox = tampering::<ImageRenderService>(OP_EDIT_OPEN, |mut reply| {

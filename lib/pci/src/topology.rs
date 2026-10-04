@@ -14,8 +14,8 @@ use tairix_abi::driver::bus::BusDevice;
 use tairix_abi::driver::pci::{function_of, requester_id};
 use tairix_abi::DriverError;
 
-/// Buses one PCI segment holds.
-const BUSES: usize = 256;
+/// Buses one PCI segment holds: every value of a bus number.
+pub const BUSES: usize = u8::MAX as usize + 1;
 
 /// The base class and subclass of a host bridge (PCI Code and ID Assignment
 /// Specification rev. 1.11 §1.7).
@@ -589,6 +589,11 @@ pub trait PciTopology {
     /// [`DriverError::NoSpace`] when the walk cannot be held, and
     /// [`DriverError::DeviceFault`] for functions that form no hierarchy.
     fn topology(&self, acs: AcsPolicy) -> Result<Topology, DriverError>;
+
+    /// Stop every function `stopped` names from mastering DMA, walking the
+    /// bus flat: it needs no hierarchy and holds nothing, so it reaches every
+    /// function of a walk [`topology`](Self::topology) refuses.
+    fn quiesce(&self, stopped: &dyn Fn(&Function) -> bool);
 }
 
 #[cfg(test)]

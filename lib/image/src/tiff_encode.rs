@@ -1,8 +1,9 @@
-//! A baseline TIFF encoder: every picture a page, little-endian, in strips.
+//! A TIFF encoder: every picture a page, little-endian, in strips.
 //!
 //! An opaque palette picture keeps its indices and colour map at its own
-//! depth; a palette has no opacity, so a translucent one is written as
-//! colour. Colour is written as grey where every pixel is grey, and carries
+//! depth — beyond baseline TIFF at one or two bits, which allows a palette
+//! only four or eight, though readers built on libtiff take them; a palette
+//! has no opacity, so a translucent one is written as colour. Colour is written as grey where every pixel is grey, and carries
 //! an unassociated alpha sample only where a pixel needs one. Eight-bit
 //! samples under LZW or DEFLATE are differenced along the row first, which
 //! is what makes those codecs pay on photographs.
@@ -21,13 +22,14 @@ use crate::encode::{
 use crate::lzw::{CodeSink, Coder, Widen};
 use crate::picture::{flatten_row, IndexDepth, PictureKind, PictureSource, Rgba8};
 use crate::tiff::{
-    COMPRESSION_ADOBE_DEFLATE, COMPRESSION_LZW, COMPRESSION_NONE, COMPRESSION_PACK_BITS,
-    PHOTOMETRIC_BLACK_ZERO, PHOTOMETRIC_PALETTE, PHOTOMETRIC_RGB, RESOLUTION_CENTIMETRE,
-    RESOLUTION_INCH, RESOLUTION_NONE, TAG_BITS_PER_SAMPLE, TAG_COLOUR_MAP, TAG_COMPRESSION,
-    TAG_EXTRA_SAMPLES, TAG_IMAGE_LENGTH, TAG_IMAGE_WIDTH, TAG_NEW_SUBFILE_TYPE, TAG_PAGE_NUMBER,
-    TAG_PHOTOMETRIC, TAG_PLANAR_CONFIGURATION, TAG_PREDICTOR, TAG_RESOLUTION_UNIT,
-    TAG_ROWS_PER_STRIP, TAG_SAMPLES_PER_PIXEL, TAG_STRIP_BYTE_COUNTS, TAG_STRIP_OFFSETS,
-    TAG_X_RESOLUTION, TAG_Y_RESOLUTION,
+    COMPRESSION_ADOBE_DEFLATE, COMPRESSION_LZW, COMPRESSION_NONE, COMPRESSION_PACK_BITS, ENTRY_LEN,
+    LONG, PHOTOMETRIC_BLACK_ZERO, PHOTOMETRIC_PALETTE, PHOTOMETRIC_RGB, RATIONAL,
+    RESOLUTION_CENTIMETRE, RESOLUTION_INCH, RESOLUTION_NONE, SHORT, SUBFILE_PAGE,
+    TAG_BITS_PER_SAMPLE, TAG_COLOUR_MAP, TAG_COMPRESSION, TAG_EXTRA_SAMPLES, TAG_IMAGE_LENGTH,
+    TAG_IMAGE_WIDTH, TAG_NEW_SUBFILE_TYPE, TAG_PAGE_NUMBER, TAG_PHOTOMETRIC,
+    TAG_PLANAR_CONFIGURATION, TAG_PREDICTOR, TAG_RESOLUTION_UNIT, TAG_ROWS_PER_STRIP,
+    TAG_SAMPLES_PER_PIXEL, TAG_STRIP_BYTE_COUNTS, TAG_STRIP_OFFSETS, TAG_X_RESOLUTION,
+    TAG_Y_RESOLUTION,
 };
 use crate::RGBA_BYTES;
 
@@ -38,22 +40,11 @@ const STRIP_BYTES: usize = 64 * 1024;
 /// widest code, as every reader of the format's own schedule expects.
 const LZW_LIMIT: u16 = 4094;
 
-/// `NewSubfileType`: one page of a multi-page document.
-const SUBFILE_PAGE: u32 = 2;
-
 /// `ExtraSamples`: unassociated alpha.
 const EXTRA_UNASSOCIATED_ALPHA: u16 = 2;
 
 /// `Predictor`: horizontal differencing.
 const PREDICTOR_HORIZONTAL: u16 = 2;
-
-/// Field types an entry is written in.
-const SHORT: u16 = 3;
-const LONG: u16 = 4;
-const RATIONAL: u16 = 5;
-
-/// Bytes of a directory entry, and of a directory's count and link.
-const ENTRY_LEN: usize = 12;
 
 /// How one page's pixels are written.
 enum Plan<'a> {
@@ -554,9 +545,9 @@ impl<'w> Directory<'w> {
     }
 }
 
-/// Pack one row as `PackBits` runs: a run of three or more equal bytes is
-/// repeated, anything else is literal, each at most 128 bytes, and no run
-/// crosses the row's end.
+/// Pack one row as `PackBits` runs, each at most 128 bytes and none crossing
+/// the row's end: equal bytes are repeated, two or more where a run begins and
+/// three or more amid literal bytes, which a repeated pair would lengthen.
 fn pack_bits(row: &[u8], out: &mut Output) -> Result<(), EncodeError> {
     const MOST: usize = 128;
     let mut at = 0;

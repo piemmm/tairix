@@ -376,6 +376,30 @@ fn layer_changes_are_refused_where_a_picture_cannot_take_them() {
     assert_eq!(ink.generation(), 0, "nothing changed");
 }
 
+/// A layer shown as it already was is no change: nothing to undo, and the
+/// document is as it was saved.
+#[test]
+fn a_layer_shown_as_it_already_shows_takes_no_step() {
+    use super::Shown;
+    let mut document = Document::new(plain());
+    document
+        .insert_layer(1, colour_layer([0; 4], "over"))
+        .expect("room");
+    let generation = document.generation();
+    let undo = document.can_undo_redo();
+    let picture = document.picture().expect("a picture");
+    let same = Shown::of(&picture.layers()[0]).expect("room");
+    assert_eq!(picture.active(), 1);
+    assert_eq!(document.show_layer(0, same), Ok(()));
+    assert_eq!(document.generation(), generation, "nothing changed");
+    assert_eq!(document.can_undo_redo(), undo, "no step taken");
+    assert_eq!(
+        document.picture().map(super::Picture::active),
+        Some(0),
+        "painted on, as a change to it would be"
+    );
+}
+
 #[test]
 fn a_new_layer_is_named_for_a_number_no_layer_has() {
     use super::{copy_name, new_layer_name};

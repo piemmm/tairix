@@ -5,7 +5,7 @@ use core::cmp::Ordering;
 
 use alloc::vec::Vec;
 
-use crate::engine::Segment;
+use crate::engine::{single_bar, Segment};
 use crate::gridfit::{fit, Axes, FitMetrics, Zone};
 use crate::tests::asset;
 use crate::{AxisSetting, CellGeometry, Face, ATLAS_EM_PX};
@@ -739,4 +739,51 @@ fn the_console_hash_draws_parallel_solid_legs() {
         !apart.is_empty() && apart.iter().all(|&gap| gap == apart[0]),
         "the legs wander apart: {apart:?}"
     );
+}
+
+/// Two sides that each wander past the firm fuzz are near-misses, and two
+/// near-misses never make a stroke: a bar drawn with both is left where it
+/// is, while one firm side beside a near-miss is a stroke and is fitted.
+#[test]
+fn two_sides_both_short_of_firm_are_not_a_stroke() {
+    let bar = |top_rise: f64| {
+        alloc::vec![
+            seg(1.0, 3.3, 9.0, 3.3 + top_rise),
+            seg(9.0, 3.3 + top_rise, 9.0, 4.62),
+            seg(9.0, 4.62, 1.0, 4.2),
+            seg(1.0, 4.2, 1.0, 3.3),
+        ]
+    };
+    let near_misses = bar(0.42);
+    let mut fitted = near_misses.clone();
+    fit_unzoned(&mut fitted, Axes::Rows);
+    assert!(
+        unmoved(&near_misses, &fitted, |s| (s.y0, s.y1)),
+        "two near-misses were fitted as a stroke"
+    );
+    let one_firm = bar(0.0);
+    let mut fitted = one_firm.clone();
+    fit_unzoned(&mut fitted, Axes::Rows);
+    assert!(
+        !unmoved(&one_firm, &fitted, |s| (s.y0, s.y1)),
+        "a firm side and its facing near-miss were not fitted"
+    );
+}
+
+/// The bar a face's `H` holds is the one stroke crossing its middle column;
+/// a middle that crosses no ink, or more than one bar, gives no thickness.
+#[test]
+fn only_one_bar_across_the_middle_is_a_reference_bar() {
+    let mut stems = rect(0.0, 0.0, 2.0, 10.0);
+    stems.extend(rect(8.0, 0.0, 10.0, 10.0));
+    let mut h = stems.clone();
+    h.extend(rect(2.0, 4.0, 8.0, 6.5));
+    assert_eq!(single_bar(&h), Some(2.5));
+    let mut e = Vec::new();
+    for top in [0.0, 4.0, 8.0] {
+        e.extend(rect(0.0, top, 10.0, top + 2.0));
+    }
+    assert_eq!(single_bar(&e), None, "three bars");
+    assert_eq!(single_bar(&stems), None, "no ink at the middle");
+    assert_eq!(single_bar(&[]), None);
 }

@@ -13,6 +13,7 @@ use tairix_image::Rgba8;
 
 use crate::canvas::{Canvas, Kind, OutOfMemory, Sample, Tile, TILE};
 use crate::colour::Ink;
+use crate::compose::between;
 use crate::mask::Mask;
 use crate::shape::{Bounds, Point, FX};
 use crate::stroke::{lay_over, Blend, Change, Coat};
@@ -20,6 +21,9 @@ use crate::tool::GradientShape;
 
 /// The 4×4 ordered-dither thresholds, out of 16.
 const BAYER: [[u8; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
+
+/// The shares along a gradient a pixel can lie at: one for each byte value.
+const SHARES: usize = u8::MAX as usize + 1;
 
 /// A gradient dragged across the picture.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -41,74 +45,117 @@ impl Gradient {
         self.from != self.to
     }
 
-    /// How far from the first ink to the second pixel `(x, y)` lies, out of
-    /// 255: along the drag for bands, out from its start for rings.
+    /// The gradient made ready to lay over a picture of `kind`.
     #[must_use]
-    pub fn at(&self, x: i64, y: i64) -> u8 {
+    pub fn on(&self, kind: &Kind) -> Laying {
+        let shades = matches!(kind, Kind::Rgba).then(|| {
+            let [from, to] = [self.inks.0, self.inks.1].map(|ink| match ink {
+                Ink::Clear => [0; 4],
+                ink => ink.shown(kind),
+            });
+            core::array::from_fn(|share| between(from, to, u8::try_from(share).unwrap_or(u8::MAX)))
+        });
+        Laying {
+            gradient: *self,
+            spread: self.spread(),
+            masked: kind.masked(),
+            shades,
+        }
+    }
+
+    /// How a pixel's share is measured; `None` for a drag spanning nothing,
+    /// which lays its second ink everywhere.
+    fn spread(&self) -> Option<Spread> {
         let (dx, dy) = (
             i128::from(self.to.x - self.from.x),
             i128::from(self.to.y - self.from.y),
         );
-        let (vx, vy) = (
-            i128::from(x * FX + FX / 2 - self.from.x),
-            i128::from(y * FX + FX / 2 - self.from.y),
-        );
         let length = dx * dx + dy * dy;
         if length == 0 {
-            return u8::MAX;
+            return None;
         }
-        let share = match self.shape {
-            GradientShape::Linear => (vx * dx + vy * dy) * 255 / length,
-            GradientShape::Radial => (vx * vx + vy * vy).isqrt() * 255 / length.isqrt().max(1),
+        Some(match self.shape {
+            GradientShape::Linear => Spread::Bands { dx, dy, length },
+            GradientShape::Radial => {
+                let radius = length.isqrt().max(1);
+                Spread::Rings(core::array::from_fn(|share| {
+                    let reach = (i128::try_from(share).unwrap_or(0) * radius + 254) / 255;
+                    reach * reach
+                }))
+            }
+        })
+    }
+}
+
+/// How far along a gradient a pixel lies is measured.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "built once a lay or a frame and never moved on a pixel's path; boxing would allocate a frame"
+)]
+#[derive(Clone, Debug)]
+enum Spread {
+    /// Along the drag `(dx, dy)`, whose squared length is `length`.
+    Bands { dx: i128, dy: i128, length: i128 },
+    /// Out from its start: the squared distance at which each share begins.
+    /// A share is `⌊√d²⌋·255 / ⌊√length⌋`, so comparing `d²` against where
+    /// each begins finds it with no root taken a pixel.
+    Rings([i128; SHARES]),
+}
+
+/// A gradient ready to lay over a picture of one kind.
+#[derive(Clone, Debug)]
+pub struct Laying {
+    gradient: Gradient,
+    spread: Option<Spread>,
+    masked: bool,
+    /// A colour picture's blend at each share along the gradient, mixed once
+    /// so a pixel costs a lookup; a palette picture has none, taking a dither
+    /// of the two entries instead.
+    shades: Option<[Rgba8; SHARES]>,
+}
+
+impl Laying {
+    /// How far from the first ink to the second pixel `(x, y)` lies, out of
+    /// 255: along the drag for bands, out from its start for rings.
+    #[must_use]
+    pub fn share(&self, x: i64, y: i64) -> u8 {
+        let Some(spread) = &self.spread else {
+            return u8::MAX;
         };
-        u8::try_from(share.clamp(0, 255)).unwrap_or(u8::MAX)
+        let (vx, vy) = (
+            i128::from(x * FX + FX / 2 - self.gradient.from.x),
+            i128::from(y * FX + FX / 2 - self.gradient.from.y),
+        );
+        match spread {
+            Spread::Bands { dx, dy, length } => {
+                let share = ((vx * dx + vy * dy) * 255 / length).clamp(0, 255);
+                u8::try_from(share).unwrap_or(u8::MAX)
+            }
+            Spread::Rings(begins) => {
+                let reach = vx * vx + vy * vy;
+                let past = begins.partition_point(|&begin| begin <= reach);
+                u8::try_from(past.saturating_sub(1)).unwrap_or(u8::MAX)
+            }
+        }
     }
 
-    /// `below`, pixel `(x, y)` of a picture of `kind`, with the gradient
-    /// laid over it covering `cover` of it.
+    /// `below`, pixel `(x, y)`, with the gradient laid over it covering
+    /// `cover` of it.
     #[must_use]
-    pub fn laid(&self, (x, y): (i64, i64), below: Sample, cover: u8, kind: &Kind) -> Sample {
-        let share = self.at(x, y);
-        let (ink, blend) = if matches!(kind, Kind::Rgba) {
-            (Ink::Colour(mix(self.inks, share, kind)), Blend::Over)
+    pub fn laid(&self, (x, y): (i64, i64), below: Sample, cover: u8) -> Sample {
+        let share = self.share(x, y);
+        let (ink, blend) = if let Some(shades) = &self.shades {
+            (Ink::Colour(shades[usize::from(share)]), Blend::Over)
         } else {
             let row = usize::try_from(y.rem_euclid(4)).unwrap_or(0);
             let column = usize::try_from(x.rem_euclid(4)).unwrap_or(0);
             let threshold = BAYER[row][column] * 16 + 8;
-            let ink = if share > threshold {
-                self.inks.1
-            } else {
-                self.inks.0
-            };
+            let inks = self.gradient.inks;
+            let ink = if share > threshold { inks.1 } else { inks.0 };
             (ink, Blend::Replace)
         };
-        lay_over(below, Coat { ink, blend }, cover, kind.masked())
+        lay_over(below, Coat { ink, blend }, cover, self.masked)
     }
-}
-
-/// The colour `share` of the way from the first of `inks` to the second,
-/// mixed with each one's alpha weighed in.
-fn mix(inks: (Ink, Ink), share: u8, kind: &Kind) -> Rgba8 {
-    let [a, b] = [inks.0, inks.1].map(|ink| match ink {
-        Ink::Clear => [0; 4],
-        ink => ink.shown(kind),
-    });
-    let (near, far) = (u32::from(255 - share), u32::from(share));
-    let alpha = (u32::from(a[3]) * near + u32::from(b[3]) * far + 127) / 255;
-    if alpha == 0 {
-        return [0; 4];
-    }
-    let channel = |index: usize| {
-        let weighed = u32::from(a[index]) * u32::from(a[3]) * near
-            + u32::from(b[index]) * u32::from(b[3]) * far;
-        u8::try_from((weighed / 255 + alpha / 2) / alpha).unwrap_or(u8::MAX)
-    };
-    [
-        channel(0),
-        channel(1),
-        channel(2),
-        u8::try_from(alpha).unwrap_or(u8::MAX),
-    ]
 }
 
 /// Lay `gradient` over `picture`, within `clip` where a selection is held:
@@ -122,7 +169,7 @@ pub fn lay(
     gradient: &Gradient,
     clip: Option<&Mask>,
 ) -> Result<Vec<(usize, Arc<Tile>)>, OutOfMemory> {
-    let kind = picture.kind().clone();
+    let laying = gradient.on(picture.kind());
     let area = clip.map_or(
         Bounds::picture(picture.width(), picture.height()),
         Mask::bounds,
@@ -136,7 +183,7 @@ pub fn lay(
         }
         for ((column, sample), &cover) in (x..).zip(run.iter_mut()).zip(chosen.iter()) {
             if cover > 0 {
-                *sample = gradient.laid((column, y), *sample, cover, &kind);
+                *sample = laying.laid((column, y), *sample, cover);
             }
         }
     })?;

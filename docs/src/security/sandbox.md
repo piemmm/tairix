@@ -282,12 +282,12 @@ sandboxes a parse imports it:
   not cover the destination (a letterboxed fit, a source smaller than the
   screen), those pixels are left fully transparent — this service never
   draws the desktop's backdrop colour, only the wallpaper. The
-  parent-side `render_wallpaper` drives the whole prepare/band/release
-  sequence, validates every band's echoed geometry and exact pixel length
-  fail-closed before trusting it, assembles the final buffer, and always
-  releases the held source afterwards, on the success path and every
-  error path alike, so a worker never holds a decoded wallpaper past one
-  call. A later prepare on the same (reused) worker replaces whatever an
+  parent-side `plan_wallpaper` costs an uploaded source before it is
+  decoded, and its render drives the prepare/band/release sequence,
+  validating every band's echoed geometry and exact pixel length
+  fail-closed into the caller's own buffer. The held source is released
+  once the render is drawn or dropped, or when the plan is refused, so a
+  worker never holds a decoded wallpaper past one call. A later prepare on the same (reused) worker replaces whatever an
   earlier one left held; `OP_RASTERISE` keeps working unchanged whether or
   not it is interleaved with a wallpaper sequence on the same worker.
 - **Handing over a file** (also `imagerender`): every untrusted file this

@@ -12,10 +12,12 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use tairix_image::Rgba8;
+use tairix_raster::ROUND_NEAREST;
 use tairix_util::fallible;
 
 use crate::canvas::{read_sample, write_sample, Canvas, OutOfMemory, Planes, Sample, Tile, TILE};
 use crate::colour::Ink;
+use crate::compose::laid;
 use crate::mask::{scale, Mask};
 use crate::shape::{polygon_rows, Bounds, Point, Shape, ShapeScratch};
 
@@ -214,36 +216,94 @@ pub struct Coat {
 /// Most coats one stroke lays down: a shape's fill and its outline.
 pub const MAX_COATS: usize = 2;
 
-/// How passes over one pixel within a stroke add up.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum Build {
+/// How passes over one pixel within a stroke add up, and what the stroke
+/// keeps of each tile it writes to add them, by tile index.
+#[derive(Debug)]
+enum Coverage {
     /// A pixel keeps the most any pass covered it, so a line crossing itself
-    /// does not darken: a pencil, a line, a shape, a fill.
-    Most,
-    /// Each pass lays its share over what the stroke has laid, and the whole
-    /// is laid at `opacity`: a brush's dabs building up.
-    Up {
-        /// The most of a pixel the whole stroke lays.
-        opacity: u8,
-    },
+    /// does not darken: a pencil, a line, a shape, a fill. Each coat's pixels
+    /// follow the coat before's.
+    Most(Kept<Vec<u8>>),
+    /// Each pass lays its share over what the stroke has built, and the whole
+    /// is laid at `opacity`: a brush's dabs building up. Held in 65535ths,
+    /// where a byte would round the faintest dab's share of what is left to
+    /// nothing long before the stroke reached its opacity.
+    Up { opacity: u8, built: Kept<Vec<u16>> },
 }
 
-impl Build {
-    /// What the stroke lays of a pixel it has built up `held` of.
-    fn laid(self, held: u8) -> u8 {
-        match self {
-            Self::Most => held,
-            Self::Up { opacity } => scale(held, opacity),
-        }
+impl Coverage {
+    /// Tile `index`'s share, of `pixels` pixels and `coats` coats, made when
+    /// it has none yet.
+    fn tile(
+        &mut self,
+        index: usize,
+        pixels: usize,
+        coats: usize,
+    ) -> Result<TileCoverage<'_>, OutOfMemory> {
+        Ok(match self {
+            Self::Most(kept) => TileCoverage::Most {
+                coats: kept.get_or_try_insert(index, || {
+                    fallible::filled(pixels * coats, 0u8).ok_or(OutOfMemory)
+                })?,
+                pixels,
+            },
+            Self::Up { opacity, built } => TileCoverage::Up {
+                built: built.get_or_try_insert(index, || {
+                    fallible::filled(pixels, 0u16).ok_or(OutOfMemory)
+                })?,
+                opacity: *opacity,
+            },
+        })
     }
+}
 
-    /// What `held` comes to once a pass covers `cover` of the pixel.
-    fn after(self, held: u8, cover: u8) -> u8 {
+/// One tile's share of a stroke's [`Coverage`].
+enum TileCoverage<'a> {
+    Most { coats: &'a mut [u8], pixels: usize },
+    Up { built: &'a mut [u16], opacity: u8 },
+}
+
+impl TileCoverage<'_> {
+    /// Add a pass covering `cover` of pixel `at` of coat `coat`, answering
+    /// what each coat now lays there, or `None` where that is unchanged.
+    fn pass(&mut self, coat: usize, at: usize, cover: u8) -> Option<[u8; MAX_COATS]> {
         match self {
-            Self::Most => held.max(cover),
-            Self::Up { .. } => held.saturating_add(scale(cover, u8::MAX - held)),
+            Self::Most { coats, pixels } => {
+                let held = coats.get_mut(coat * *pixels + at)?;
+                if cover <= *held {
+                    return None;
+                }
+                *held = cover;
+                let of = |coat: usize| coats.get(coat * *pixels + at).copied().unwrap_or(0);
+                Some([of(0), of(1)])
+            }
+            Self::Up { built, opacity } => {
+                let held = built.get_mut(at).filter(|_| coat == 0)?;
+                let next = built_after(*held, cover);
+                if next == *held {
+                    return None;
+                }
+                let before = laid_built(core::mem::replace(held, next), *opacity);
+                let laid = laid_built(next, *opacity);
+                (laid != before).then_some([laid, 0])
+            }
         }
     }
+}
+
+/// What a pixel built `held` 65535ths comes to once a pass covers `cover`,
+/// out of 255, of it: that share of what is not yet built.
+fn built_after(held: u16, cover: u8) -> u16 {
+    let left = u32::from(u16::MAX - held);
+    let added = (u32::from(cover) * left + ROUND_NEAREST) / 255;
+    held.saturating_add(u16::try_from(added).unwrap_or(u16::MAX))
+}
+
+/// What a stroke laying `opacity` lays of a pixel it has built `held`
+/// 65535ths of, out of 255.
+fn laid_built(held: u16, opacity: u8) -> u8 {
+    let full = u32::from(u16::MAX);
+    u8::try_from((u32::from(held) * u32::from(opacity) + full / 2) / full).unwrap_or(u8::MAX)
 }
 
 /// A change laying down coverage.
@@ -251,10 +311,7 @@ impl Build {
 pub struct Stroke {
     coats: [Option<Coat>; MAX_COATS],
     change: Change,
-    /// For each tile written, the coverage of each coat it lays down, a
-    /// coat's pixels after the one before.
-    coverage: Kept<Vec<u8>>,
-    build: Build,
+    coverage: Coverage,
     /// How far a clone stroke's source lies from each pixel it lays, in
     /// pixels: what it lays is the picture there as it stood when the
     /// stroke began.
@@ -274,8 +331,7 @@ impl Stroke {
         Self {
             coats: [Some(fill), over],
             change: Change::new(),
-            coverage: Kept::new(),
-            build: Build::Most,
+            coverage: Coverage::Most(Kept::new()),
             source: None,
             clip,
             scratch: Vec::new(),
@@ -288,7 +344,10 @@ impl Stroke {
     #[must_use]
     pub fn building(coat: Coat, opacity: u8, clip: Option<Mask>) -> Self {
         Self {
-            build: Build::Up { opacity },
+            coverage: Coverage::Up {
+                opacity,
+                built: Kept::new(),
+            },
             ..Self::new(coat, None, clip)
         }
     }
@@ -516,9 +575,7 @@ impl Stroke {
         let rect = canvas.tile_rect(index);
         let pixels = (rect.width * rect.height) as usize;
         let coats = self.coats.iter().flatten().count();
-        let coverage = self.coverage.get_or_try_insert(index, || {
-            fallible::filled(pixels * coats, 0u8).ok_or(OutOfMemory)
-        })?;
+        let mut coverage = self.coverage.tile(index, pixels, coats)?;
         let tile = self.change.touch(canvas, index)?;
         let Some(before) = self.change.before.get(index) else {
             return Ok(());
@@ -526,22 +583,17 @@ impl Stroke {
         let masked = planes == Planes::Indexed { masked: true };
         let row_start = ((py - rect.y) * rect.width + (px - rect.x)) as usize;
         let (samples, mask) = tile.planes_mut();
-        let build = self.build;
         for (step, &cover) in covers.iter().enumerate() {
             let at = row_start + step;
             let chosen = chosen.map_or(u8::MAX, |chosen| chosen[step]);
-            let held = &mut coverage[coat * pixels + at];
-            let next = build.after(*held, cover);
-            if chosen == 0 || next == *held {
+            if chosen == 0 {
                 continue;
             }
-            *held = next;
+            let Some(lays) = coverage.pass(coat, at, cover) else {
+                continue;
+            };
+            let stack = lays.map(|lays| scale(lays, chosen));
             let first = before.sample(planes, at);
-            let laid = |held: u8| scale(build.laid(held), chosen);
-            let stack = [
-                laid(coverage[at]),
-                laid(coverage.get(pixels + at).copied().unwrap_or(0)),
-            ];
             let composed = match sources {
                 None => compose(first, &self.coats, stack, masked),
                 Some(sources) => match (sources.get(step).copied().flatten(), self.coats[0]) {
@@ -600,7 +652,7 @@ pub fn lay_over(sample: Sample, coat: Coat, cover: u8, masked: bool) -> Sample {
     match (sample, coat.ink, coat.blend) {
         (Sample::Rgba(_), Ink::Colour(ink), Blend::Replace) if most => Sample::Rgba(ink),
         (Sample::Rgba(below), Ink::Colour(ink), Blend::Over) => {
-            Sample::Rgba(over(ink, cover, below))
+            Sample::Rgba(laid(below, ink, cover))
         }
         (Sample::Rgba(_), Ink::Clear, Blend::Replace) if most => Sample::Rgba([0; 4]),
         (Sample::Rgba(below), Ink::Clear, Blend::Over) => Sample::Rgba(erase(below, cover)),
@@ -610,29 +662,11 @@ pub fn lay_over(sample: Sample, coat: Coat, cover: u8, masked: bool) -> Sample {
     }
 }
 
-/// `value * weight / 255`, rounded.
-fn scaled(value: u8, weight: u8) -> u32 {
-    (u32::from(value) * u32::from(weight) + 127) / 255
-}
-
-/// `ink`, covering `cover` of the pixel, composited over `below`.
-fn over(ink: Rgba8, cover: u8, below: Rgba8) -> Rgba8 {
-    let alpha = u8::try_from(scaled(ink[3], cover)).unwrap_or(u8::MAX);
-    tairix_image::over(below, [ink[0], ink[1], ink[2], alpha])
-}
-
 /// `below` with `cover` of its opacity taken away.
 fn erase(below: Rgba8, cover: u8) -> Rgba8 {
-    let alpha = scaled(below[3], 255 - cover);
-    if alpha == 0 {
-        [0; 4]
-    } else {
-        [
-            below[0],
-            below[1],
-            below[2],
-            u8::try_from(alpha).unwrap_or(u8::MAX),
-        ]
+    match scale(below[3], u8::MAX - cover) {
+        0 => [0; 4],
+        alpha => [below[0], below[1], below[2], alpha],
     }
 }
 

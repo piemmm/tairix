@@ -109,6 +109,24 @@ fn place(bar: &ToolControls, width: u32, theme: &Theme) -> Placement {
     )
 }
 
+/// The settings `bar` holds, in order.
+fn settings(bar: &ToolControls) -> alloc::vec::Vec<Setting> {
+    bar.items.iter().map(|item| item.setting).collect()
+}
+
+/// The width `bar` needs to seat its name and every setting in one row,
+/// reckoned apart from the placement it is checked against.
+fn natural_width(bar: &ToolControls, faces: Faces, scale: Scale, theme: &Theme) -> u32 {
+    let (gap, near) = super::spacing(scale, theme);
+    bar.items
+        .iter()
+        .fold(faces.heading.text_width(bar.tool.name()), |width, item| {
+            width
+                .saturating_add(gap * 2)
+                .saturating_add(item.widths(faces.label, scale, theme).total(near))
+        })
+}
+
 fn ctrl() -> Modifiers {
     Modifiers {
         ctrl: true,
@@ -128,14 +146,12 @@ fn a_bar_holds_the_settings_its_tool_offers_in_order() {
     let options = Options::default();
     let ellipse = ToolControls::new(Tool::Ellipse, options, true);
     assert_eq!(
-        ellipse.settings().collect::<alloc::vec::Vec<_>>(),
+        settings(&ellipse),
         [Setting::Size, Setting::Style, Setting::Smooth]
     );
     assert_eq!(ellipse.tool, Tool::Ellipse);
     assert_eq!(
-        ToolControls::new(Tool::Eyedropper, options, true)
-            .settings()
-            .count(),
+        settings(&ToolControls::new(Tool::Eyedropper, options, true)).len(),
         0
     );
 }
@@ -143,7 +159,7 @@ fn a_bar_holds_the_settings_its_tool_offers_in_order() {
 #[test]
 fn the_bar_is_set_out_left_to_right_inside_its_bounds() {
     let bar = Bar::new(Tool::Ellipse);
-    let bounds = bar.placement.bounds();
+    let bounds = bar.placement.bounds;
     let mut edge = bar.placement.caption.right();
     assert_eq!(bar.placement.caption.left(), bounds.left());
     for index in 0..3 {
@@ -164,7 +180,7 @@ fn the_bar_is_set_out_left_to_right_inside_its_bounds() {
     let faces = Faces::of(bar.theme(), Scale::ONE);
     assert_eq!(
         u32::try_from(edge - bounds.left()).expect("a width"),
-        bar.controls.natural_width(faces, Scale::ONE, bar.theme()),
+        natural_width(&bar.controls, faces, Scale::ONE, bar.theme()),
         "the natural width is what the placement uses"
     );
 }
@@ -347,7 +363,7 @@ fn the_style_list_owns_the_pointer_and_keyboard_until_it_closes() {
     let popup = bar
         .controls
         .popup_rect(&bar.placement, Scale::ONE, bar.registry.active());
-    assert!(!popup.is_empty() && popup.top() >= bar.placement.bounds().bottom());
+    assert!(!popup.is_empty() && popup.top() >= bar.placement.bounds.bottom());
     assert_eq!(
         bar.key(Key::Char('b')),
         BarOutcome::Taken,
@@ -425,7 +441,7 @@ fn each_setting_carries_its_tip_and_the_name_none() {
 #[test]
 fn a_press_on_the_bar_away_from_a_setting_is_taken_and_moves_no_keyboard() {
     let mut bar = Bar::new(Tool::Brush);
-    let empty = Point::new(bar.placement.bounds().right() - 4, bar.control(0).y);
+    let empty = Point::new(bar.placement.bounds.right() - 4, bar.control(0).y);
     assert_eq!(bar.click(empty), BarOutcome::Taken);
     assert!(bar.controls.focus().is_none());
     let outside = Point::new(empty.x, empty.y + 100);
@@ -457,7 +473,7 @@ fn every_bar_seats_each_setting_across_the_least_width_in_its_rows() {
                 "{tool:?} {index} inside"
             );
         }
-        let wide = bar.natural_width(faces, Scale::ONE, theme);
+        let wide = natural_width(&bar, faces, Scale::ONE, theme);
         assert_eq!(
             bar.rows(wide, faces, Scale::ONE, theme),
             1,
@@ -470,7 +486,7 @@ fn every_bar_seats_each_setting_across_the_least_width_in_its_rows() {
 fn a_setting_with_no_room_left_in_its_row_starts_the_next() {
     let wide = Bar::new(Tool::Brush);
     let faces = Faces::of(wide.theme(), Scale::ONE);
-    let natural = wide.controls.natural_width(faces, Scale::ONE, wide.theme());
+    let natural = natural_width(&wide.controls, faces, Scale::ONE, wide.theme());
     let first_row =
         u32::try_from(wide.placement.seat(2).expect("seated").cell.right() - 8).expect("a width");
     let height = Button::height(Scale::ONE, wide.theme());

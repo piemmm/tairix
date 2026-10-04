@@ -156,8 +156,9 @@ fn peak_of<R>(f: impl FnOnce() -> R) -> (R, u64) {
     (out, (peak - before) as u64)
 }
 
-/// Decode with `decode`, asserting that a success held no more than
-/// [`decode_peak_bytes`] answered for `fit` beforehand.
+/// Decode with `decode`, asserting that it held no more than
+/// [`decode_peak_bytes`] answered for `fit` beforehand, whether it succeeded
+/// or refused partway, and that a file the bound refuses it refuses too.
 fn decoded_within_bound(
     bytes: &[u8],
     limits: &DecodeLimits,
@@ -166,12 +167,16 @@ fn decoded_within_bound(
 ) -> Result<RasterImage, DecodeError> {
     let bound = decode_peak_bytes(bytes, limits, fit);
     let (decoded, held) = peak_of(decode);
-    if decoded.is_ok() {
-        let bound = bound.expect("a file that decodes is costed");
-        assert!(
+    match bound {
+        Ok(bound) => assert!(
             held <= bound,
-            "a decode held {held} bytes past a bound of {bound}"
-        );
+            "a decode ({:?}) held {held} bytes past a bound of {bound}",
+            decoded.as_ref().err()
+        ),
+        Err(refusal) => assert!(
+            decoded.is_err(),
+            "a decode the bound refused ({refusal:?}) succeeded"
+        ),
     }
     decoded
 }
@@ -3275,6 +3280,210 @@ fn mutated_valid_ora_fixtures_never_panic() {
             break;
         }
     }
+}
+
+/// A ZIP of `entries`, each stored or, where its flag says, deflated through
+/// stored blocks: framed here, so an entry's bytes may be anything at all
+/// and the archive still holds, its sizes and CRCs true.
+fn zip_of(entries: &[(&str, &[u8], bool)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut directory = Vec::new();
+    for &(name, data, deflated) in entries {
+        let payload = if deflated {
+            let wrapped = zlib_wrap(data);
+            wrapped[2..wrapped.len() - 4].to_vec()
+        } else {
+            data.to_vec()
+        };
+        let mut crc = tairix_crc32::Crc32::new();
+        crc.update(data);
+        let crc = crc.finish();
+        let method: u16 = if deflated { 8 } else { 0 };
+        let name_len = u16::try_from(name.len()).expect("a short name");
+        let sized = |value: usize| u32::try_from(value).expect("a small entry");
+        let offset = sized(out.len());
+        let mut common = Vec::new();
+        common.extend_from_slice(&20u16.to_le_bytes());
+        common.extend_from_slice(&0u16.to_le_bytes());
+        common.extend_from_slice(&method.to_le_bytes());
+        common.extend_from_slice(&[0; 4]);
+        common.extend_from_slice(&crc.to_le_bytes());
+        common.extend_from_slice(&sized(payload.len()).to_le_bytes());
+        common.extend_from_slice(&sized(data.len()).to_le_bytes());
+        common.extend_from_slice(&name_len.to_le_bytes());
+        common.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+        out.extend_from_slice(&common);
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(&payload);
+        directory.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+        directory.extend_from_slice(&20u16.to_le_bytes());
+        directory.extend_from_slice(&common);
+        // Comment length, disk, internal and external attributes.
+        directory.extend_from_slice(&[0; 10]);
+        directory.extend_from_slice(&offset.to_le_bytes());
+        directory.extend_from_slice(name.as_bytes());
+    }
+    let count = u16::try_from(entries.len()).expect("few entries");
+    let at = u32::try_from(out.len()).expect("a small archive");
+    let size = u32::try_from(directory.len()).expect("a small directory");
+    out.extend_from_slice(&directory);
+    out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+    out.extend_from_slice(&[0; 4]);
+    out.extend_from_slice(&count.to_le_bytes());
+    out.extend_from_slice(&count.to_le_bytes());
+    out.extend_from_slice(&size.to_le_bytes());
+    out.extend_from_slice(&at.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out
+}
+
+/// A PNG of `width`×`height` sixteen-bit RGBA, its samples random.
+fn deep_png(rng: &mut Prng, width: u32, height: u32) -> Vec<u8> {
+    let mut header = Vec::new();
+    header.extend_from_slice(&width.to_be_bytes());
+    header.extend_from_slice(&height.to_be_bytes());
+    header.extend_from_slice(&[16, 6, 0, 0, 0]);
+    let row = 1 + width as usize * 8;
+    let mut raw = vec![0u8; row * height as usize];
+    rng.fill(&mut raw);
+    for line in raw.chunks_mut(row) {
+        line[0] = 0;
+    }
+    let mut out = SIGNATURE.to_vec();
+    out.extend(chunk(*b"IHDR", &header));
+    out.extend(chunk(*b"IDAT", &zlib_wrap(&raw)));
+    out.extend(chunk(*b"IEND", &[]));
+    out
+}
+
+/// An OpenRaster document framed whole here: a stack of layers that may share
+/// a picture, lie off the canvas, nest, or carry odd attributes; layer
+/// pictures in eight or sixteen bits or a palette; a merged picture that fits,
+/// does not, or is absent; each entry stored or deflated; and with `mutate`,
+/// bytes of the stack or one layer changed before the archive is framed, so
+/// the change reaches the reader rather than its checksums.
+fn framed_ora(rng: &mut Prng, mutate: bool) -> Vec<u8> {
+    let side = |rng: &mut Prng| u32::try_from(1 + rng.below(6)).expect("small");
+    let (width, height) = (side(rng), side(rng));
+    let mut pictures: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut layers = String::new();
+    for index in 0..=rng.below(4) {
+        let src = if !pictures.is_empty() && rng.below(3) == 0 {
+            pictures[rng.below(pictures.len())].0.clone()
+        } else {
+            let (across, down) = (side(rng), side(rng));
+            let png = match rng.below(3) {
+                0 => deep_png(rng, across, down),
+                1 => {
+                    let indices = (0..across * down).map(|_| rng.next_u8() & 1).collect();
+                    let palette = vec![[rng.next_u8(), 0, 0, 255], [0, rng.next_u8(), 0, 255]];
+                    let ink =
+                        Picture::indexed(across, down, IndexDepth::One, palette, indices, None)
+                            .expect("valid");
+                    encode_png(&ink).expect("encodes")
+                }
+                _ => encode_png(&random_rgba(rng, across, down)).expect("encodes"),
+            };
+            let src = format!("data/layer{index}.png");
+            pictures.push((src.clone(), png));
+            src
+        };
+        let offset = |rng: &mut Prng| i32::try_from(rng.below(9)).expect("small") - 4;
+        let opacity = ["0.5", "1", "0", "0.25", "2", "-1", "x", ""][rng.below(8)];
+        let line = format!(
+            r#"<layer name="L{index}" src="{src}" x="{}" y="{}" opacity="{opacity}" visibility="{}"/>"#,
+            offset(rng),
+            offset(rng),
+            if rng.below(4) == 0 {
+                "hidden"
+            } else {
+                "visible"
+            },
+        );
+        if rng.below(4) == 0 {
+            layers.push_str(r#"<stack opacity="0.5">"#);
+            layers.push_str(&line);
+            layers.push_str("</stack>");
+        } else {
+            layers.push_str(&line);
+        }
+    }
+    let resolution = if rng.below(4) == 0 {
+        r#" xres="300""#
+    } else {
+        ""
+    };
+    let mut stack = format!(
+        r#"<?xml version="1.0"?><image w="{width}" h="{height}"{resolution}><stack>{layers}</stack></image>"#
+    )
+    .into_bytes();
+    if mutate {
+        let target = rng.below(pictures.len() + 1);
+        let bytes = match pictures.get_mut(target) {
+            Some((_, png)) => png,
+            None => &mut stack,
+        };
+        for _ in 0..=rng.below(4) {
+            let at = rng.below(bytes.len());
+            bytes[at] = rng.next_u8();
+        }
+    }
+    let merged = match rng.below(3) {
+        0 => None,
+        1 => Some(encode_png(&random_rgba(rng, width, height)).expect("encodes")),
+        _ => Some(encode_png(&random_rgba(rng, width + 1, height)).expect("encodes")),
+    };
+    let deflated = |rng: &mut Prng| rng.below(2) == 0;
+    let mut entries: Vec<(&str, &[u8], bool)> = vec![
+        ("mimetype", b"image/openraster".as_slice(), false),
+        ("stack.xml", stack.as_slice(), deflated(rng)),
+    ];
+    for (src, png) in &pictures {
+        entries.push((src.as_str(), png.as_slice(), deflated(rng)));
+    }
+    if let Some(merged) = &merged {
+        entries.push(("mergedimage.png", merged.as_slice(), deflated(rng)));
+    }
+    zip_of(&entries)
+}
+
+#[test]
+fn mutated_framed_ora_documents_never_panic() {
+    let mut rng = Prng::new(tairix_fuzzseed::start(
+        "mutated_framed_ora_documents_never_panic",
+        tairix_fuzzseed::FUZZ_SEED_ENV,
+    ));
+    let deadline = tairix_fuzzseed::budget_deadline(tairix_fuzzseed::FUZZ_BUDGET_ENV);
+    loop {
+        for _ in 0..SMOKE_ITERATIONS / 4 {
+            decode_never_panics_and_respects_limits(&framed_ora(&mut rng, true));
+        }
+        if !tairix_fuzzseed::within_budget(deadline) {
+            break;
+        }
+    }
+}
+
+#[test]
+fn the_framed_ora_generator_produces_documents_that_open() {
+    let mut rng = Prng::new(tairix_fuzzseed::start(
+        "the_framed_ora_generator_produces_documents_that_open",
+        tairix_fuzzseed::FUZZ_SEED_ENV,
+    ));
+    let mut opened = 0;
+    for _ in 0..256 {
+        let bytes = framed_ora(&mut rng, false);
+        assert_eq!(sniff(&bytes), Some(ImageFormat::OpenRaster));
+        // A stack the generator gave an unreadable opacity is refused whole.
+        if let Ok(NativeDocument::Layers { document, .. }) =
+            open_native(ImageFormat::OpenRaster, &bytes[..], &limits())
+        {
+            assert!(!document.layers.is_empty());
+            opened += 1;
+        }
+    }
+    assert!(opened > 64, "{opened} of 256 pristine documents opened");
 }
 
 #[test]

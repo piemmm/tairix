@@ -188,12 +188,6 @@ impl Toolbar {
         self
     }
 
-    /// The axis the tools are seated and scrolled along.
-    #[must_use]
-    pub const fn orientation(&self) -> ScrollOrientation {
-        self.orientation
-    }
-
     /// This toolbar with an icon-button tool appended to `group`.
     #[must_use]
     pub fn with_icon(mut self, button: IconButton, group: u16) -> Self {

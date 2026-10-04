@@ -698,7 +698,8 @@ fn a_render_under_way_when_its_window_closes_finishes_into_nothing() {
         rendering(&mut desk).is_none(),
         "more rendered at once than there are slots"
     );
-    assert!(answer(&mut desk, &job));
+    assert!(!answer(&mut desk, &job), "its answer is kept for no one");
+    assert!(desk.take_preview().is_none());
     assert_eq!(
         rendering(&mut desk).map(|job| job.request.window_id),
         Some(8)
@@ -1041,4 +1042,100 @@ fn a_preview_short_of_memory_on_its_own_is_concluded_unavailable() {
     assert_eq!(desk.want_preview(preview(7, 0)), Ok(()));
     let job = rendering(&mut desk).expect("a render");
     assert!(desk.retry_preview(job).is_some());
+}
+
+/// A closed window's renders a preparer had already taken are refused their
+/// memory, are never queued again however they end, and answer into nothing.
+#[test]
+fn a_closed_windows_renders_under_way_run_no_further_and_answer_into_nothing() {
+    let mut desk = WallpaperDesk::new();
+    desk.set_budget(roomy(3));
+    for index in 0..2 {
+        assert_eq!(desk.want_preview(preview(7, index)), Ok(()));
+    }
+    let short = rendering(&mut desk).expect("a render");
+    let crowded = rendering(&mut desk).expect("a render");
+    assert!(desk.forget_window(7).is_empty(), "both were under way");
+    assert_eq!(
+        desk.acquire_preview(&short.request, PREPARATION),
+        Acquisition::Unavailable
+    );
+    let ended = [
+        (short, PreviewRun::Concluded(PreviewOutcome::Unavailable)),
+        (crowded, PreviewRun::Deferred(PREPARATION)),
+    ];
+    for (job, run) in ended {
+        let (outcome, back) = desk.after_preview(job, run);
+        let back = back.expect("handed back to conclude, not queued again");
+        assert!(!desk.deliver_preview(land_preview(back, outcome)));
+    }
+    assert!(desk.take_preview().is_none());
+    assert!(
+        rendering(&mut desk).is_none(),
+        "the closed window ran again"
+    );
+}
+
+/// A render the desk withheld memory from — memory critical, or the desk
+/// stopping — concludes unavailable at once rather than waiting to retry.
+#[test]
+fn a_render_withheld_its_memory_concludes_unavailable_at_once() {
+    let mut desk = WallpaperDesk::new();
+    desk.set_budget(roomy(3));
+    for index in 0..2 {
+        assert_eq!(desk.want_preview(preview(7, index)), Ok(()));
+    }
+    let withheld = rendering(&mut desk).expect("a render");
+    let _beside = rendering(&mut desk).expect("a render");
+    desk.set_budget(machine(1 << 30, PressureBand::Critical, 3));
+    assert_eq!(
+        desk.acquire_preview(&withheld.request, PREPARATION),
+        Acquisition::Unavailable
+    );
+    let (outcome, back) = desk.after_preview(withheld, PreviewRun::Withheld);
+    let back = back.expect("concluded, not queued again");
+    assert!(desk.deliver_preview(land_preview(back, outcome)));
+    assert_eq!(
+        desk.take_preview().map(|done| done.outcome),
+        Some(PreviewOutcome::Unavailable)
+    );
+}
+
+/// A drawn or refused render concludes as it ended.
+#[test]
+fn a_drawn_or_refused_render_concludes_as_it_ended() {
+    let mut desk = WallpaperDesk::new();
+    desk.set_budget(roomy(3));
+    for outcome in [PreviewOutcome::Rendered, PreviewOutcome::Refused] {
+        assert_eq!(desk.want_preview(preview(7, 0)), Ok(()));
+        let job = rendering(&mut desk).expect("a render");
+        let (concluded, back) = desk.after_preview(job, PreviewRun::Concluded(outcome));
+        assert_eq!(concluded, outcome);
+        assert!(desk.deliver_preview(land_preview(back.expect("concluded"), concluded)));
+        assert_eq!(desk.take_preview().map(|done| done.outcome), Some(outcome));
+    }
+}
+
+/// A region of `len` bytes.
+struct Sized(Vec<u8>);
+
+impl PreviewTarget for Sized {
+    fn bytes_mut(&mut self) -> &mut [u8] {
+        &mut self.0
+    }
+}
+
+/// A picture is drawn into exactly its request's pixels, and a region granted
+/// too small for them is drawn into not at all.
+#[test]
+fn a_preview_is_drawn_into_exactly_its_pixels_or_not_at_all() {
+    let request = request(client(7), 7, 0);
+    let pixels = request.pixel_bytes().expect("a small preview");
+    let drawn = |len: usize| {
+        let mut region = Sized(alloc::vec![0; len]);
+        request.canvas(&mut region).map(|canvas| canvas.len())
+    };
+    assert_eq!(drawn(pixels + 64), Some(pixels));
+    assert_eq!(drawn(pixels), Some(pixels));
+    assert_eq!(drawn(pixels - 1), None);
 }

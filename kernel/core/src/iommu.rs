@@ -235,13 +235,17 @@ struct Owners {
     /// so a fault is laid at its device's door. Written only once an
     /// adoption has attached the stream.
     streams: HashMap<(usize, u32), u32, BuildFastHash>,
+    /// Streams of owners published and not yet attached or restored, which
+    /// `streams` holds room for beside its own.
+    awaited: usize,
 }
 
 impl Owners {
     /// Record `owner` for its node and its group if neither record has moved
     /// since it was read — still `predecessor` and `holder` — answering
     /// whether it did. Room for every stream the owner will attach is taken
-    /// here, so indexing them once attached cannot fail.
+    /// here, beside that of every owner published before it and still
+    /// adopting, so indexing them once attached cannot fail.
     fn publish(
         &mut self,
         owner: &Arc<Owner>,
@@ -255,9 +259,9 @@ impl Owners {
         let out_of_memory = |_| DmaError::Alloc(AllocError::OutOfMemory);
         self.nodes.try_reserve(1).map_err(out_of_memory)?;
         self.groups.try_reserve(1).map_err(out_of_memory)?;
-        self.streams
-            .try_reserve(owner.streams.len())
-            .map_err(out_of_memory)?;
+        let awaited = self.awaited + owner.streams.len();
+        self.streams.try_reserve(awaited).map_err(out_of_memory)?;
+        self.awaited = awaited;
         let _ = self.nodes.try_insert(owner.node, Arc::clone(owner));
         let _ = self.groups.try_insert(key, Arc::clone(owner));
         Ok(true)
@@ -271,6 +275,7 @@ impl Owners {
                 .streams
                 .try_insert((owner.identity.unit, stream), owner.node);
         }
+        self.awaited = self.awaited.saturating_sub(owner.streams.len());
     }
 
     /// Put each record `owner`, whose adoption failed, holds back as it was.
@@ -282,6 +287,7 @@ impl Owners {
     ) {
         put_back(&mut self.nodes, owner.node, owner, predecessor);
         put_back(&mut self.groups, owner.identity.group_key(), owner, holder);
+        self.awaited = self.awaited.saturating_sub(owner.streams.len());
     }
 
     /// Forget `owner`, whose node left the tree and whose end the unit
@@ -395,6 +401,7 @@ impl Translation {
                 nodes: HashMap::with_hasher(BuildFastHash::new()),
                 groups: HashMap::with_hasher(BuildFastHash::new()),
                 streams: HashMap::with_hasher(BuildFastHash::new()),
+                awaited: 0,
             }),
             firmware: SpinLock::new(HashMap::with_hasher(BuildFastHash::new())),
         };
@@ -640,16 +647,17 @@ impl Translation {
     /// Waits for an adoption or an end in flight, holding nothing else.
     fn free(&self, holder: &Owner, node: u32, generation: u64) -> Result<(), DmaError> {
         match &*holder.state.lock() {
-            OwnerState::Revoked { confirmed: true } | OwnerState::Unadopted(_) => Ok(()),
-            OwnerState::Revoked { confirmed: false } => Err(DmaError::Translation),
-            OwnerState::Live(_) | OwnerState::Adopting => {
-                if holder.generation == KERNEL_OWNER {
-                    return Err(DmaError::KernelOwned);
-                }
-                audit_group_refused(self.audit, node, generation, holder);
-                Err(DmaError::GroupBusy)
-            }
+            OwnerState::Revoked { confirmed: true } | OwnerState::Unadopted(_) => return Ok(()),
+            OwnerState::Revoked { confirmed: false } => return Err(DmaError::Translation),
+            OwnerState::Live(_) | OwnerState::Adopting => {}
         }
+        if holder.generation == KERNEL_OWNER {
+            return Err(DmaError::KernelOwned);
+        }
+        // Written once the holder's lock is let go, so a refusal never holds
+        // up the live owner's maps and unmaps.
+        audit_group_refused(self.audit, node, generation, holder);
+        Err(DmaError::GroupBusy)
     }
 
     /// The domain of `node`'s owner admitted as `generation`, created and

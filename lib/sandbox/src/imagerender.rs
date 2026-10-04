@@ -9,7 +9,7 @@
 //! module is the parser-sandbox service for all three: the worker side
 //! sniffs the format, decodes it, draws it, and replies with validated
 //! straight-alpha RGBA8 pixels; the parent side ([`rasterise_icon`],
-//! [`render_wallpaper`], [`render_page`]) trusts nothing about a reply
+//! [`plan_wallpaper`], [`render_page`]) trusts nothing about a reply
 //! beyond its length and echoed geometry before handing the bytes to the
 //! compositor. A crashed or misbehaving worker is contained and replaced
 //! by the [`crate::host::ParserSandbox`] seam, and either failure mode — a
@@ -942,7 +942,7 @@ impl core::fmt::Display for WallpaperRefusal {
     }
 }
 
-/// Typed failure [`render_wallpaper`] can report.
+/// Typed failure [`plan_wallpaper`] and its render can report.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum WallpaperRenderFailure {
     /// The sandbox itself failed (crash, launch failure, oversize).
@@ -955,8 +955,6 @@ pub enum WallpaperRenderFailure {
     /// geometry: it cannot be believed, so the caller gets nothing
     /// (fail closed).
     ReplyMalformed,
-    /// There was no memory here for the pixels the worker would answer with.
-    NoMemory,
 }
 
 impl WallpaperRenderFailure {
@@ -969,7 +967,6 @@ impl WallpaperRenderFailure {
             Self::Sandbox(failure) => failure.out_of_memory(),
             Self::Document(failure) => failure.out_of_memory(),
             Self::Refused(refusal) => matches!(refusal, WallpaperRefusal::OutOfMemory),
-            Self::NoMemory => true,
             Self::ReplyMalformed => false,
         }
     }
@@ -980,7 +977,7 @@ impl Unbelieved for WallpaperRenderFailure {
         match self {
             Self::ReplyMalformed => true,
             Self::Document(upload) => upload.unbelieved(),
-            Self::Sandbox(_) | Self::Refused(_) | Self::NoMemory => false,
+            Self::Sandbox(_) | Self::Refused(_) => false,
         }
     }
 }
@@ -992,7 +989,6 @@ impl core::fmt::Display for WallpaperRenderFailure {
             Self::Document(inner) => write!(f, "source upload failed: {inner}"),
             Self::Refused(refusal) => write!(f, "worker refused: {refusal}"),
             Self::ReplyMalformed => f.write_str("worker reply violated the reply grammar"),
-            Self::NoMemory => f.write_str("no memory for the rendered wallpaper"),
         }
     }
 }
@@ -1131,7 +1127,9 @@ impl ImageRenderService {
         .map_err(|err| refusal_of_decode(&err))?;
         let (nominal_w, nominal_h) = plan.nominal;
         let tiled = if plan.placement.tiled() {
-            u64::from(nominal_w) * u64::from(nominal_h) * 4
+            (u64::from(nominal_w) * u64::from(nominal_h))
+                .checked_mul(4)
+                .ok_or(WallpaperRefusal::MalformedImage)?
         } else {
             0
         };
@@ -1386,10 +1384,7 @@ fn hold_wallpaper(
         let source = Rgba8Image::new(decoded.0, decoded.1, image.pixels())
             .map_err(|_| WallpaperRefusal::Unrenderable)?;
         let scaled =
-            resample(&source, source.whole(), nominal.0, nominal.1).map_err(|err| match err {
-                ResampleError::OutOfMemory => WallpaperRefusal::OutOfMemory,
-                _ => WallpaperRefusal::Unrenderable,
-            })?;
+            resample(&source, source.whole(), nominal.0, nominal.1).map_err(refusal_of_resample)?;
         (nominal.0, nominal.1, scaled)
     } else {
         (decoded.0, decoded.1, image.into_pixels())
@@ -1579,6 +1574,15 @@ fn write_tiled_band(
     }
 }
 
+/// The refusal a resample the worker could not do answers: for want of
+/// memory, which may pass, or of geometry it had already validated.
+const fn refusal_of_resample(err: ResampleError) -> WallpaperRefusal {
+    match err {
+        ResampleError::OutOfMemory => WallpaperRefusal::OutOfMemory,
+        _ => WallpaperRefusal::Unrenderable,
+    }
+}
+
 /// Draw rows `[band_start, band_end)` of a resampled (non-tiled) placement
 /// into `out` (a band starting at canvas row `canvas_first_row`), through
 /// the crate's one shared resampler.
@@ -1602,7 +1606,8 @@ fn write_resampled_band(
     let local_first = band_start - dest_top;
     let local_rows = band_end - band_start;
 
-    let mut band_buf = vec![0u8; pixel_buffer_len(dest_rect.width, local_rows)];
+    let mut band_buf = fallible::filled(pixel_buffer_len(dest_rect.width, local_rows), 0u8)
+        .ok_or(WallpaperRefusal::OutOfMemory)?;
     resample_window(
         &image,
         region,
@@ -1616,7 +1621,7 @@ fn write_resampled_band(
         },
         &mut band_buf,
     )
-    .map_err(|_| WallpaperRefusal::Unrenderable)?;
+    .map_err(refusal_of_resample)?;
 
     let out_row_offset = band_start - canvas_first_row;
     splice_rows(
@@ -1631,83 +1636,6 @@ fn write_resampled_band(
     Ok(())
 }
 
-/// Ask the sandboxed worker to decode `image`, place it under `fit` onto a
-/// `width`×`height` destination, and return the placed straight-alpha
-/// RGBA8 pixels: exactly `width * height * 4` bytes, assembled from
-/// however many `OP_WALLPAPER_BAND` replies the worker's reply-size answer
-/// required.
-///
-/// The `screen == (width, height)` case of [`render_wallpaper_for_screen`]:
-/// the destination models no screen other than the surface it is itself
-/// written onto — the desktop's own wallpaper, never a preview.
-///
-/// # Errors
-///
-/// [`WallpaperRenderFailure`]: the sandbox failed, the worker refused the
-/// request (bad shape, an unrecognised format, a decode failure, or an
-/// out-of-range band), or a reply could not be believed.
-pub fn render_wallpaper<L: Launcher, S: tairix_log::Sink>(
-    sandbox: &mut ParserSandbox<L, S>,
-    width: u32,
-    height: u32,
-    fit: WallpaperFit,
-    image: &[u8],
-) -> Result<Vec<u8>, WallpaperRenderFailure> {
-    render_wallpaper_for_screen(sandbox, (width, height), width, height, fit, image)
-}
-
-/// Ask the sandboxed worker to decode `image` and place it under `fit` as
-/// if composing the whole `screen` extent, but render only a
-/// `width`×`height` **destination** that models that screen at its own
-/// scale — a true scale model when `(width, height)` is smaller than
-/// `screen` (a preview), or the screen itself when they are equal (see
-/// [`render_wallpaper`]). Returns the placed straight-alpha RGBA8 pixels:
-/// exactly `width * height * 4` bytes, assembled from however many
-/// `OP_WALLPAPER_BAND` replies the worker's reply-size answer required.
-///
-/// `screen`, `width`, `height`, and `image.len()` are checked locally
-/// against [`MAX_DESTINATION_WIDTH`]/[`MAX_DESTINATION_HEIGHT`]/
-/// [`tairix_wallpaper::MAX_WALLPAPER_BYTES`] before anything is sent, so an
-/// out-of-bounds request never round-trips through the sandbox just to be
-/// refused; the destination may never exceed the screen it models (a
-/// preview never magnifies past the real display). Every reply is
-/// validated fail-closed exactly as [`rasterise_icon`]'s is: a compromised
-/// worker can lie about a band's geometry, never hand the caller
-/// mismatched or wrongly-sized bytes.
-///
-/// The held source is always released before this returns — on the
-/// success path and on every error path alike — so a worker never holds a
-/// decoded wallpaper past one call; a failure while releasing is discarded
-/// rather than overriding this call's own more specific outcome.
-///
-/// # Errors
-///
-/// [`WallpaperRenderFailure`]: the sandbox failed, the worker refused the
-/// request (bad shape, an unrecognised format, a decode failure, or an
-/// out-of-range band), or a reply could not be believed.
-pub fn render_wallpaper_for_screen<L: Launcher, S: tairix_log::Sink>(
-    sandbox: &mut ParserSandbox<L, S>,
-    screen: (u32, u32),
-    width: u32,
-    height: u32,
-    fit: WallpaperFit,
-    image: &[u8],
-) -> Result<Vec<u8>, WallpaperRenderFailure> {
-    if !wallpaper_geometry_admitted(screen, width, height)
-        || image.len() > tairix_wallpaper::MAX_WALLPAPER_BYTES
-    {
-        return Err(WallpaperRenderFailure::Refused(
-            WallpaperRefusal::MalformedRequest,
-        ));
-    }
-    send_document(sandbox, image).map_err(WallpaperRenderFailure::Document)?;
-    let planned = plan_wallpaper(sandbox, screen, width, height, fit)?;
-    let mut out = fallible::filled(pixel_buffer_len(width, height), 0u8)
-        .ok_or(WallpaperRenderFailure::NoMemory)?;
-    planned.render_into(&mut out)?;
-    Ok(out)
-}
-
 /// Ask the worker what drawing the source already uploaded to it
 /// ([`upload_document`], [`send_document`]) onto a `width`×`height`
 /// destination modelling `screen` under `fit` would hold at its peak, before
@@ -1716,7 +1644,8 @@ pub fn render_wallpaper_for_screen<L: Launcher, S: tairix_log::Sink>(
 /// The answer is a worker's own account of a decode it has not run, so a
 /// caller budgeting by it should still expect a render to fail for want of
 /// memory ([`WallpaperRenderFailure::out_of_memory`]). An inflated answer only
-/// holds back the render that gave it.
+/// holds back the render that gave it. A plan the worker refuses lets the
+/// source go, as a planned render does once it is drawn or dropped.
 ///
 /// # Errors
 ///
@@ -1756,7 +1685,13 @@ pub fn plan_wallpaper<L: Launcher, S: tairix_log::Sink>(
                 peak.checked_add(client_render_bytes(width, height))
                     .ok_or(WallpaperRenderFailure::ReplyMalformed)
             }
-            REPLY_ERROR => Err(decode_wallpaper_error(&mut r)),
+            REPLY_ERROR => {
+                let refusal = decode_wallpaper_error(&mut r);
+                // The refusal is the caller's answer; a failed release adds
+                // nothing it could act on.
+                let _ = release_wallpaper(sandbox);
+                Err(refusal)
+            }
             _ => Err(WallpaperRenderFailure::ReplyMalformed),
         }
     })?;
@@ -1976,7 +1911,7 @@ fn decode_wallpaper_error(r: &mut Reader<'_>) -> WallpaperRenderFailure {
 /// worker holds *resident*, which is what an untrusted file costs before a
 /// single pixel of it is decoded. Sixty-four mebibytes admits an
 /// uncompressed 4K RGBA TIFF page (33 MiB) and a large multi-page scan, and
-/// takes nine [`MAX_DOCUMENT_CHUNK`] pushes, so the number of pushes a
+/// takes 256 pushes of a client's 256 KiB runs, so the number of pushes a
 /// document takes is bounded as well as its size.
 ///
 /// Every decoder in `tairix_image` reads a whole file rather than a

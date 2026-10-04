@@ -27,21 +27,21 @@
 //! The Settings application browses the shipped pictures through the desktop
 //! rather than reading them itself — the wallpapers, and each screensaver's
 //! preview — so a chooser's picture is prepared here too: the same read and
-//! the same sandboxed decode. The desktop runs a preparer per CPU and renders
-//! as many previews at once as it has preparers, fewer while memory is short;
-//! a client may have no more than that pending across all its windows, which
-//! bounds how much decoding any one application can set going, and the
-//! backdrop is always handed out first: the picture the user is actually
-//! looking at never waits behind a thumbnail. A request is admitted before its
+//! the same sandboxed decode. The desktop runs a preparer per CPU, and its
+//! renders share a memory budget, so as many run at once as fit it — one alone
+//! while memory is short; a client may have no more pending than it has
+//! preparers across all its windows, which bounds how much decoding any one
+//! application can set going, and the backdrop is always handed out first: the
+//! picture the user is actually looking at never waits behind a thumbnail. A request is admitted before its
 //! region is mapped, and the preparer draws straight into that region, so a
 //! refusal costs no mapping and the serve loop copies no pixels.
 //!
-//! A render a preparer has taken is never recalled: it finishes, answers
-//! exactly once, and frees its slot. What a closed window still has waiting is
-//! withdrawn with it and the regions it granted are let go, so closing and
-//! reopening windows can neither queue decodes ahead of another window's nor
-//! pin regions in the desktop: a closed window costs at most the renders
-//! already under way.
+//! What a closed window still has waiting is withdrawn with it and the regions
+//! it granted are let go. A render a preparer has already taken for it is
+//! refused its memory, never queued again, and answers into nothing, freeing
+//! its slot, so closing and reopening windows can neither queue decodes ahead
+//! of another window's nor pin regions in the desktop: a closed window costs at
+//! most the renders already under way.
 //!
 //! # A wallpaper is never load-bearing
 //!
@@ -145,6 +145,12 @@ impl PreviewRequest {
         usize::from(self.size.width)
             .checked_mul(usize::from(self.size.height))?
             .checked_mul(4)
+    }
+
+    /// The bytes of `target` its picture is drawn into: exactly its pixels,
+    /// or `None` where the region holds fewer.
+    pub fn canvas<'a>(&self, target: &'a mut dyn PreviewTarget) -> Option<&'a mut [u8]> {
+        target.bytes_mut().get_mut(..self.pixel_bytes()?)
     }
 }
 
@@ -294,6 +300,22 @@ struct Rendering {
     /// Nothing starts beside it: it is retrying with the machine to itself,
     /// or its plan was granted past the budget.
     alone: bool,
+    /// Its window has closed: it runs no further than it has, and its answer
+    /// is dropped.
+    forgotten: bool,
+}
+
+/// How a preparer's render of a preview ended.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum PreviewRun {
+    /// It concluded.
+    Concluded(PreviewOutcome),
+    /// Its plan, of the carried bytes, did not fit beside the renders under
+    /// way: it waits in the queue for room.
+    Deferred(u64),
+    /// The desk withheld the memory its plan needs ([`Acquisition::Unavailable`]):
+    /// memory is critical, the desk is stopping, or its window has closed.
+    Withheld,
 }
 
 /// A slideshow picture a preparer has taken and not yet answered.
@@ -472,12 +494,6 @@ impl WallpaperDesk {
         Prepared::Pending
     }
 
-    /// Whether a preparer could take a job now.
-    #[must_use]
-    pub fn ready(&self) -> bool {
-        !self.stopping && (self.has_work() || self.has_slide_work() || self.has_preview_work())
-    }
-
     /// Whether a wallpaper is wanted that no preparer has taken.
     #[must_use]
     pub fn has_work(&self) -> bool {
@@ -546,6 +562,7 @@ impl WallpaperDesk {
             request: job.request,
             reserved: cost.unwrap_or(self.budget.preparation),
             alone,
+            forgotten: false,
         });
         Some(WallpaperJob::Preview(job))
     }
@@ -555,7 +572,7 @@ impl WallpaperDesk {
     /// It holds that if it fits beside the renders under way, or if nothing
     /// else is under way — then running with nothing beside it, so one render
     /// always makes progress. Otherwise it waits for room, unless memory is
-    /// critical.
+    /// critical. One whose window has closed is refused.
     pub fn acquire_preview(&mut self, request: &PreviewRequest, planned: u64) -> Acquisition {
         let running = self.running();
         let reserved = self.reserved();
@@ -569,7 +586,7 @@ impl WallpaperDesk {
             return Acquisition::Unavailable;
         };
         let others = reserved.saturating_sub(render.reserved);
-        if stopping {
+        if stopping || render.forgotten {
             return Acquisition::Unavailable;
         }
         if others.saturating_add(planned) <= budget.bytes {
@@ -620,13 +637,13 @@ impl WallpaperDesk {
 
     /// Take `job`'s render off the list under way and queue it first again,
     /// to start holding `cost`, with nothing beside it when `alone`. Answers
-    /// `job` back when the desk is not rendering it, is stopping, or cannot
-    /// queue it.
+    /// `job` back when the desk is not rendering it, its window has closed,
+    /// the desk is stopping, or it cannot be queued.
     fn requeue_first(&mut self, job: PreviewJob, cost: u64, alone: bool) -> Option<PreviewJob> {
         let Some(at) = self
             .rendering
             .iter()
-            .position(|render| render.request == job.request)
+            .position(|render| render.request == job.request && !render.forgotten)
         else {
             return Some(job);
         };
@@ -724,7 +741,8 @@ impl WallpaperDesk {
     /// kept it (and so owes the serve loop a wake).
     ///
     /// An answer to a request the desk is not rendering is dropped, so a
-    /// preparer answering twice cannot conclude a request nobody made.
+    /// preparer answering twice cannot conclude a request nobody made, and so
+    /// is one for a window that has closed, its slot freed.
     pub fn deliver_preview(&mut self, done: PreviewDone) -> bool {
         let Some(at) = self
             .rendering
@@ -733,9 +751,36 @@ impl WallpaperDesk {
         else {
             return false;
         };
-        self.rendering.swap_remove(at);
+        if self.rendering.swap_remove(at).forgotten {
+            return false;
+        }
         self.rendered.push_back(done);
         true
+    }
+
+    /// Where `job`'s render, ended as `run`, goes next: the outcome it
+    /// concludes with and the job to land it with, or `None` where the desk
+    /// queued it to run again.
+    ///
+    /// A render short of memory beside others runs again alone, one that did
+    /// not fit beside them waits for room, and one the desk withheld memory
+    /// from concludes unavailable at once.
+    pub fn after_preview(
+        &mut self,
+        job: PreviewJob,
+        run: PreviewRun,
+    ) -> (PreviewOutcome, Option<PreviewJob>) {
+        match run {
+            PreviewRun::Concluded(PreviewOutcome::Unavailable) => {
+                (PreviewOutcome::Unavailable, self.retry_preview(job))
+            }
+            PreviewRun::Concluded(outcome) => (outcome, Some(job)),
+            PreviewRun::Deferred(planned) => (
+                PreviewOutcome::Unavailable,
+                self.requeue_preview(job, planned),
+            ),
+            PreviewRun::Withheld => (PreviewOutcome::Unavailable, Some(job)),
+        }
     }
 
     /// Take the oldest rendered preview waiting to be handed over, if any.
@@ -747,8 +792,8 @@ impl WallpaperDesk {
     /// rendered for it but not yet handed over, answering the withdrawn jobs
     /// so the caller lets their regions go outside whatever guards the desk.
     ///
-    /// Its renders a preparer has already taken finish into nothing and free
-    /// their slots.
+    /// Its renders a preparer has already taken are refused their memory,
+    /// never queued again, and finish into nothing, freeing their slots.
     #[must_use]
     pub fn forget_window(&mut self, window_id: u64) -> Vec<PreviewJob> {
         let (withdrawn, kept): (Vec<_>, Vec<_>) = core::mem::take(&mut self.previews)
@@ -757,6 +802,9 @@ impl WallpaperDesk {
         self.previews = kept.into();
         self.rendered
             .retain(|done| done.request.window_id != window_id);
+        for render in &mut self.rendering {
+            render.forgotten |= render.request.window_id == window_id;
+        }
         withdrawn.into_iter().map(|queued| queued.job).collect()
     }
 

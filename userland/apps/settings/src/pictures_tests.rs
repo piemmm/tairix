@@ -481,3 +481,30 @@ fn every_picture_a_chooser_asks_for_is_one_the_desktop_accepts_at_every_scale() 
         }
     }
 }
+
+/// A picture the desktop had no memory for is passed over until memory may
+/// have been freed, then asked for again; one it refused is never asked for
+/// again.
+#[test]
+fn a_picture_short_of_memory_waits_for_a_retry_and_a_refused_one_is_never_asked_again() {
+    let mut laid = Laid::new(&nature(40));
+    let seen = Rect::new(0, 0, 600, laid.tile(1).bottom().unsigned_abs());
+    let short = laid
+        .round(seen, false)
+        .expect("a picture on screen")
+        .subject;
+    assert!(laid.pictures.unavailable(short));
+    assert!(!laid.pictures.unavailable(short), "no news twice");
+    let refused = laid.round(seen, false).expect("another on screen").subject;
+    assert_ne!(refused, short, "a picture short of memory is passed over");
+    assert!(laid.pictures.refuse(refused));
+    assert!(laid.pictures.retry_unavailable());
+    assert!(!laid.pictures.retry_unavailable(), "nothing left to retry");
+    assert_eq!(
+        laid.round(seen, false).map(|wanted| wanted.subject),
+        Some(short),
+        "asked for again once memory may be free"
+    );
+    let next = laid.round_passing(seen, false, |subject| subject == short);
+    assert!(next.is_some_and(|wanted| wanted.subject != refused));
+}

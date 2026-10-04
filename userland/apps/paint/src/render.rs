@@ -25,7 +25,7 @@ use crate::canvas::{Canvas, Kind, Sample};
 use crate::colour::Ink;
 use crate::compose::compose_run;
 use crate::document::{Entry, Layer, Picture};
-use crate::gradient::Gradient;
+use crate::gradient::Laying;
 use crate::layout::{Faces, Layout};
 use crate::mask::Mask;
 use crate::selection::Floating;
@@ -33,7 +33,7 @@ use crate::shape::{line_pixels, Bounds, Point as Fx, Shape, ShapeScratch, FX};
 use crate::stroke::{lay_over, Blend, Coat};
 use crate::text::TextEntry;
 use crate::view::{Marking, View};
-use crate::viewport::Viewport;
+use crate::viewport::{screen_rect, Viewport};
 
 /// How much a modal question darkens the window behind it, in 255ths.
 const VEIL_ALPHA: u8 = 110;
@@ -407,7 +407,7 @@ struct Rows<'a> {
     /// The selection the shape is held to, as it will be when it lands.
     clip: Option<&'a Mask>,
     /// The gradient being dragged.
-    gradient: Option<Gradient>,
+    gradient: Option<Laying>,
     /// The text being typed, and the layer it will be set down as.
     text: Option<(&'a TextEntry, Coat)>,
     /// The picture row whose colours are held.
@@ -453,11 +453,12 @@ impl<'a> Rows<'a> {
                 }
             }
         }
+        let kind = view.preview_kind().unwrap_or_else(|| canvas.kind());
         Self {
             view,
             canvas,
             layers,
-            kind: view.preview_kind().unwrap_or_else(|| canvas.kind()),
+            kind,
             origin,
             span: view.viewport().span(),
             columns,
@@ -465,7 +466,7 @@ impl<'a> Rows<'a> {
             grid,
             preview,
             clip: view.selection(),
-            gradient: view.gradient(),
+            gradient: view.gradient().map(|gradient| gradient.on(kind)),
             text: view.text().map(|entry| {
                 let kind = canvas.kind();
                 let (ink, _) = view.inks();
@@ -623,7 +624,7 @@ impl<'a> Rows<'a> {
                 let column = map.column(index);
                 let cover = self.clip.map_or(u8::MAX, |clip| clip.at(column, row));
                 if cover > 0 {
-                    *sample = gradient.laid((column, row), *sample, cover, self.kind);
+                    *sample = gradient.laid((column, row), *sample, cover);
                 }
             }
         }
@@ -977,16 +978,6 @@ fn clone_marker(surface: &mut Surface, view: &View, layout: &Layout, theme: &The
 
 /// How much the crop box's veil darkens what it cuts away, in 255ths.
 const CROP_VEIL: u8 = 120;
-
-/// The screen rectangle of screen pixels `bounds`.
-fn screen_rect(bounds: Bounds) -> Rect {
-    Rect::new(
-        to_i32_saturating(bounds.x0),
-        to_i32_saturating(bounds.y0),
-        u32::try_from(bounds.x1 - bounds.x0).unwrap_or(0),
-        u32::try_from(bounds.y1 - bounds.y0).unwrap_or(0),
-    )
-}
 
 fn to_i32_saturating(value: i64) -> i32 {
     i32::try_from(value.clamp(i64::from(i32::MIN), i64::from(i32::MAX))).unwrap_or(0)

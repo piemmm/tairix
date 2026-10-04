@@ -37,10 +37,10 @@ fn stored_entries_read_back_in_order() {
     );
 }
 
-#[test]
-fn a_deflated_entry_is_inflated() {
-    let mut zip = written(&[("a", b"hello")]);
-    // Rewrite the entry as one deflate stored block: the same bytes framed.
+/// An archive of one entry, `a`, holding `hello` deflated as one stored
+/// block: the same bytes framed.
+fn deflated_hello() -> Vec<u8> {
+    let zip = written(&[("a", b"hello")]);
     let block: &[u8] = &[0x01, 5, 0, !5u8, 0xFF, b'h', b'e', b'l', b'l', b'o'];
     let mut deflated = Vec::new();
     deflated.extend_from_slice(&zip[..30]);
@@ -56,12 +56,47 @@ fn a_deflated_entry_is_inflated() {
     let end = central.len() - 22;
     central[end + 16..end + 20].copy_from_slice(&offset.to_le_bytes());
     deflated.extend_from_slice(&central);
-    zip = deflated;
+    deflated
+}
+
+#[test]
+fn a_deflated_entry_is_inflated() {
+    let zip = deflated_hello();
     let archive = Archive::open(&zip).expect("readable");
     assert_eq!(
         archive.read("a", 10).expect("good").as_deref(),
         Some(&b"hello"[..])
     );
+}
+
+/// A view names an entry's size, and its bytes in place only where they are
+/// stored as they read; a name no entry carries has none.
+#[test]
+fn a_view_shows_a_stored_entry_in_place_and_a_deflated_one_by_its_size() {
+    let stored = written(&[("a", b"hello"), ("b", b"!")]);
+    let archive = Archive::open(&stored).expect("readable");
+    let view = archive.view("a").expect("good").expect("named");
+    assert_eq!((view.size, view.stored), (5, Some(&b"hello"[..])));
+    assert!(archive.view("c").expect("good").is_none());
+    let packed = deflated_hello();
+    let archive = Archive::open(&packed).expect("readable");
+    let view = archive.view("a").expect("good").expect("named");
+    assert_eq!((view.size, view.stored), (5, None));
+}
+
+/// What the directory's record holds covers every entry it records.
+#[test]
+fn the_directory_held_covers_every_entry() {
+    let names: Vec<alloc::string::String> = (0..64).map(|at| alloc::format!("e{at}")).collect();
+    let entries: Vec<(&str, &[u8])> = names
+        .iter()
+        .map(|name| (name.as_str(), &b"x"[..]))
+        .collect();
+    let (few, many) = (written(&entries[..1]), written(&entries));
+    let held = |zip: &[u8]| Archive::open(zip).expect("readable").held_bytes();
+    let entry = core::mem::size_of::<super::Entry>();
+    assert!(held(&few) >= entry);
+    assert!(held(&many) >= 64 * entry, "{}", held(&many));
 }
 
 #[test]

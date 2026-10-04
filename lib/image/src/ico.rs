@@ -249,7 +249,7 @@ pub(crate) fn decode_fitted(
 
 /// An upper bound of the bytes a [`decode_fitted`] of `bytes` to `fit` holds
 /// at once: what the page it chooses costs — a PNG page as a PNG, a DIB page
-/// its RGBA picture, the mask being applied in place.
+/// its RGBA picture and resolved colours, the mask being applied in place.
 ///
 /// # Errors
 ///
@@ -266,7 +266,7 @@ pub(crate) fn peak_bytes(
     if picture.starts_with(&crate::PNG_SIGNATURE) {
         return png::peak_bytes(picture, limits);
     }
-    Ok(area(width, height) * RGBA_BYTES as u64)
+    Ok(area(width, height) * RGBA_BYTES as u64 + crate::bmp::RESOLVED_PALETTE_BYTES)
 }
 
 /// An icon container's directory, as the pages a walk decodes.

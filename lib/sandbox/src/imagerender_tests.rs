@@ -20,8 +20,8 @@ use tairix_svg::font::NoFonts;
 use tairix_wallpaper::WallpaperFit;
 
 use super::{
-    render_wallpaper, render_wallpaper_for_screen, IconRasterFailure, IconRefusal,
-    ImageRenderService, WallpaperRefusal, WallpaperRenderFailure, MAX_ICON_SIDE,
+    IconRasterFailure, IconRefusal, ImageRenderService, WallpaperRefusal, WallpaperRenderFailure,
+    MAX_ICON_SIDE,
 };
 use crate::host::ParserSandbox;
 use crate::loopback::LoopbackLauncher;
@@ -35,6 +35,34 @@ type TestSandbox = ParserSandbox<LoopbackLauncher<fn() -> ImageRenderService>, N
 
 fn sandbox() -> TestSandbox {
     loopback()
+}
+
+/// Draw `image` under `fit` onto a `width`×`height` destination that is its
+/// own screen, the way the desktop draws one: upload, plan, render.
+fn drawn(
+    sandbox: &mut TestSandbox,
+    width: u32,
+    height: u32,
+    fit: WallpaperFit,
+    image: &[u8],
+) -> Result<Vec<u8>, WallpaperRenderFailure> {
+    drawn_for(sandbox, (width, height), width, height, fit, image)
+}
+
+/// [`drawn`], the destination modelling a `screen` of its own.
+fn drawn_for(
+    sandbox: &mut TestSandbox,
+    screen: (u32, u32),
+    width: u32,
+    height: u32,
+    fit: WallpaperFit,
+    image: &[u8],
+) -> Result<Vec<u8>, WallpaperRenderFailure> {
+    super::send_document(sandbox, image).map_err(WallpaperRenderFailure::Document)?;
+    let planned = super::plan_wallpaper(sandbox, screen, width, height, fit)?;
+    let mut out = vec![0u8; width as usize * height as usize * 4];
+    planned.render_into(&mut out)?;
+    Ok(out)
 }
 
 /// A minimal SVG icon: one opaque-coloured square covering the whole
@@ -495,8 +523,7 @@ fn a_wallpaper_drawn_larger_than_its_source_is_interpolated_not_blocked() {
         [level, level, level, 255]
     });
     let mut sandbox = sandbox();
-    let pixels =
-        render_wallpaper(&mut sandbox, 16, 1, WallpaperFit::Stretch, &source).expect("renders");
+    let pixels = drawn(&mut sandbox, 16, 1, WallpaperFit::Stretch, &source).expect("renders");
     let reds: Vec<u8> = (0..16).map(|x| rgba_at(&pixels, 16, x, 0)[0]).collect();
     assert!(
         reds.windows(2).all(|pair| pair[0] <= pair[1]),
@@ -520,7 +547,7 @@ fn a_thumbnail_of_a_large_master_is_placed_exactly_as_the_screen_would_be() {
         [level, 255 - level, 128, 255]
     });
     let mut sandbox = sandbox();
-    let tile = render_wallpaper(&mut sandbox, 8, 8, WallpaperFit::Fill, &source).expect("renders");
+    let tile = drawn(&mut sandbox, 8, 8, WallpaperFit::Fill, &source).expect("renders");
     assert_eq!(tile.len(), 8 * 8 * 4);
     // Fill covers the whole square: no pixel is left transparent.
     for y in 0..8 {
@@ -539,7 +566,7 @@ fn wallpaper_round_trips_for_every_fit_with_correct_placement() {
     // source therefore fills every pixel, corners and centre alike.
     for fit in [WallpaperFit::Fill, WallpaperFit::Stretch] {
         let mut sandbox = sandbox();
-        let pixels = render_wallpaper(&mut sandbox, 4, 2, fit, &source).expect("renders");
+        let pixels = drawn(&mut sandbox, 4, 2, fit, &source).expect("renders");
         assert_eq!(pixels.len(), 4 * 2 * 4);
         for y in 0..2 {
             for x in 0..4 {
@@ -558,7 +585,7 @@ fn wallpaper_round_trips_for_every_fit_with_correct_placement() {
     // are the source colour.
     for fit in [WallpaperFit::Fit, WallpaperFit::Centre] {
         let mut sandbox = sandbox();
-        let pixels = render_wallpaper(&mut sandbox, 4, 2, fit, &source).expect("renders");
+        let pixels = drawn(&mut sandbox, 4, 2, fit, &source).expect("renders");
         for y in 0..2 {
             assert_eq!(
                 rgba_at(&pixels, 4, 0, y),
@@ -597,8 +624,7 @@ fn wallpaper_tile_repeats_the_source_at_native_scale() {
         2,
         |x, y| if (x + y) % 2 == 0 { colour_a } else { colour_b },
     );
-    let pixels =
-        render_wallpaper(&mut sandbox, 4, 4, WallpaperFit::Tile, &source).expect("renders");
+    let pixels = drawn(&mut sandbox, 4, 4, WallpaperFit::Tile, &source).expect("renders");
     for y in 0..4 {
         for x in 0..4 {
             let expected = if (x + y) % 2 == 0 { colour_a } else { colour_b };
@@ -618,8 +644,7 @@ fn a_screen_larger_than_the_destination_shrinks_a_centred_source_proportionally(
     // desktop's own path, and the naive preview this fixes) could never
     // produce for a screen this much larger than what is drawn.
     let pixels =
-        render_wallpaper_for_screen(&mut sandbox, (4, 4), 2, 2, WallpaperFit::Centre, &source)
-            .expect("renders");
+        drawn_for(&mut sandbox, (4, 4), 2, 2, WallpaperFit::Centre, &source).expect("renders");
     assert_eq!(pixels.len(), 2 * 2 * 4);
     assert_eq!(
         rgba_at(&pixels, 2, 0, 0),
@@ -650,46 +675,11 @@ fn a_screen_larger_than_the_destination_shrinks_a_tiled_source_before_repeating(
     // `screen == destination` render draws instead (see
     // `wallpaper_tile_repeats_the_source_at_native_scale` above).
     let pixels =
-        render_wallpaper_for_screen(&mut sandbox, (8, 8), 4, 4, WallpaperFit::Tile, &source)
-            .expect("renders");
+        drawn_for(&mut sandbox, (8, 8), 4, 4, WallpaperFit::Tile, &source).expect("renders");
     assert_eq!(pixels.len(), 4 * 4 * 4);
     let (chunks, _tail) = pixels.as_chunks::<4>();
     for chunk in chunks {
         assert_eq!(*chunk, [128, 128, 128, 255]);
-    }
-}
-
-#[test]
-fn a_screen_equal_to_the_destination_matches_render_wallpaper_exactly() {
-    // The desktop's own path is `render_wallpaper`, a thin wrapper over
-    // `render_wallpaper_for_screen` with `screen == (width, height)`; this
-    // proves the two are still byte-for-byte identical for every fit,
-    // rather than asserting it in prose, so the desktop's own wallpaper
-    // rendering is provably untouched by the screen-aware preview path.
-    let source = png_with(3, 3, |x, y| {
-        if (x + y) % 2 == 0 {
-            [10, 20, 30, 255]
-        } else {
-            [200, 210, 220, 255]
-        }
-    });
-    for fit in [
-        WallpaperFit::Fill,
-        WallpaperFit::Fit,
-        WallpaperFit::Stretch,
-        WallpaperFit::Centre,
-        WallpaperFit::Tile,
-    ] {
-        let mut via_render_wallpaper = sandbox();
-        let plain = render_wallpaper(&mut via_render_wallpaper, 6, 4, fit, &source)
-            .unwrap_or_else(|failure| panic!("{fit:?}: {failure}"));
-
-        let mut via_screen = sandbox();
-        let screen_modelled =
-            render_wallpaper_for_screen(&mut via_screen, (6, 4), 6, 4, fit, &source)
-                .unwrap_or_else(|failure| panic!("{fit:?}: {failure}"));
-
-        assert_eq!(plain, screen_modelled, "{fit:?}");
     }
 }
 
@@ -706,7 +696,7 @@ fn wallpaper_row_budget_requires_banding_at_4k_but_not_1080p() {
 fn a_4k_wallpaper_assembles_identically_across_many_bands() {
     let mut sandbox = sandbox();
     let source = solid_png(2, 2, WALLPAPER_COLOUR);
-    let pixels = render_wallpaper(
+    let pixels = drawn(
         &mut sandbox,
         super::MAX_DESTINATION_WIDTH,
         super::MAX_DESTINATION_HEIGHT,
@@ -757,8 +747,7 @@ fn a_wallpaper_far_larger_than_the_destination_prepares_at_a_reduced_scale() {
     // End to end: the destination extent is the requested one, and every
     // pixel of it is the master's own flat mid-grey.
     let mut sandbox = sandbox();
-    let pixels =
-        render_wallpaper(&mut sandbox, 320, 180, WallpaperFit::Fill, &source).expect("renders");
+    let pixels = drawn(&mut sandbox, 320, 180, WallpaperFit::Fill, &source).expect("renders");
     assert_eq!(pixels.len(), 320 * 180 * 4);
     let (chunks, _tail) = pixels.as_chunks::<4>();
     for chunk in chunks {
@@ -819,7 +808,7 @@ fn an_oversize_destination_is_refused_before_any_request() {
     let mut sandbox = sandbox();
     let png = solid_png(2, 2, WALLPAPER_COLOUR);
     assert_eq!(
-        render_wallpaper(
+        drawn(
             &mut sandbox,
             super::MAX_DESTINATION_WIDTH + 1,
             100,
@@ -831,7 +820,7 @@ fn an_oversize_destination_is_refused_before_any_request() {
         ))
     );
     assert_eq!(
-        render_wallpaper(
+        drawn(
             &mut sandbox,
             100,
             super::MAX_DESTINATION_HEIGHT + 1,
@@ -843,7 +832,7 @@ fn an_oversize_destination_is_refused_before_any_request() {
         ))
     );
     assert_eq!(
-        render_wallpaper(&mut sandbox, 0, 100, WallpaperFit::Fill, &png),
+        drawn(&mut sandbox, 0, 100, WallpaperFit::Fill, &png),
         Err(WallpaperRenderFailure::Refused(
             WallpaperRefusal::MalformedRequest
         ))
@@ -851,11 +840,11 @@ fn an_oversize_destination_is_refused_before_any_request() {
 }
 
 #[test]
-fn an_oversize_source_is_refused_locally_before_any_request() {
+fn an_oversize_source_is_refused_as_a_wallpaper() {
     let mut sandbox = sandbox();
     let oversize = vec![0u8; tairix_wallpaper::MAX_WALLPAPER_BYTES + 1];
     assert_eq!(
-        render_wallpaper(&mut sandbox, 4, 4, WallpaperFit::Fill, &oversize),
+        drawn(&mut sandbox, 4, 4, WallpaperFit::Fill, &oversize),
         Err(WallpaperRenderFailure::Refused(
             WallpaperRefusal::MalformedRequest
         ))
@@ -869,7 +858,7 @@ fn a_malformed_wallpaper_image_is_a_typed_refusal() {
     let last = png.len() - 1;
     png[last] ^= 0xFF; // corrupt the trailing IEND CRC
     assert_eq!(
-        render_wallpaper(&mut sandbox, 4, 4, WallpaperFit::Fill, &png),
+        drawn(&mut sandbox, 4, 4, WallpaperFit::Fill, &png),
         Err(WallpaperRenderFailure::Refused(
             WallpaperRefusal::MalformedImage
         ))
@@ -880,7 +869,7 @@ fn a_malformed_wallpaper_image_is_a_typed_refusal() {
 fn an_unrecognised_wallpaper_format_is_a_typed_refusal() {
     let mut sandbox = sandbox();
     assert_eq!(
-        render_wallpaper(
+        drawn(
             &mut sandbox,
             4,
             4,
@@ -897,7 +886,7 @@ fn an_unrecognised_wallpaper_format_is_a_typed_refusal() {
 fn the_icon_op_still_round_trips_after_a_wallpaper_sequence() {
     let mut sandbox = sandbox();
     let png = solid_png(2, 2, WALLPAPER_COLOUR);
-    render_wallpaper(&mut sandbox, 4, 4, WallpaperFit::Fill, &png).expect("wallpaper renders");
+    drawn(&mut sandbox, 4, 4, WallpaperFit::Fill, &png).expect("wallpaper renders");
     let svg = svg_square("#3070f0");
     let pixels =
         rasterise_icon(&mut sandbox, 4, &svg, &mut NoFonts).expect("icon still rasterises");
@@ -938,6 +927,30 @@ fn a_plan_costs_the_source_and_a_thumbnail_far_below_a_full_screen() {
     assert!(thumbnail * 16 < full, "{thumbnail} against {full}");
 }
 
+/// A layered document whose canvas is past every limit, tiled, is refused
+/// as a picture: its tile's size overflowed the plan's arithmetic once.
+#[test]
+fn a_tiled_plan_of_a_canvas_past_the_limits_is_refused() {
+    let mut sandbox = sandbox();
+    let pixel = tairix_image::Picture::rgba(1, 1, vec![1, 2, 3, 255]).expect("valid");
+    let layer = tairix_image::OraLayerSource {
+        name: "huge",
+        picture: &pixel,
+        at: (0, 0),
+        opacity: 255,
+        visible: true,
+    };
+    let side = 2_200_000_000;
+    let ora = tairix_image::encode_ora((side, side), &[layer], &pixel, &pixel).expect("encodes");
+    super::send_document(&mut sandbox, &ora).expect("uploads");
+    assert_eq!(
+        super::plan_wallpaper(&mut sandbox, (64, 64), 64, 64, WallpaperFit::Tile).err(),
+        Some(WallpaperRenderFailure::Refused(
+            WallpaperRefusal::MalformedImage
+        ))
+    );
+}
+
 #[test]
 fn a_plan_with_no_source_uploaded_is_refused() {
     let mut sandbox = sandbox();
@@ -964,6 +977,43 @@ fn a_planned_source_renders_into_the_buffer_and_is_let_go_after() {
         Err(WallpaperRenderFailure::Refused(
             WallpaperRefusal::NoPreparedSource
         ))
+    );
+}
+
+/// A planned render draws only into a buffer exactly its destination's size.
+#[test]
+fn a_planned_render_refuses_a_buffer_of_any_other_size() {
+    let mut sandbox = sandbox();
+    let png = solid_png(2, 2, WALLPAPER_COLOUR);
+    for wrong in [0, 2 * 2 * 4 - 1, 2 * 2 * 4 + 4] {
+        super::send_document(&mut sandbox, &png).expect("uploads");
+        let planned = super::plan_wallpaper(&mut sandbox, (2, 2), 2, 2, WallpaperFit::Stretch)
+            .expect("plans");
+        assert_eq!(
+            planned.render_into(&mut vec![0u8; wrong]),
+            Err(WallpaperRenderFailure::Refused(
+                WallpaperRefusal::MalformedRequest
+            )),
+            "{wrong} bytes"
+        );
+    }
+}
+
+/// A plan the worker refuses lets the source go: a refused upload is not
+/// left resident in an idle worker for the next caller to find.
+#[test]
+fn a_refused_plan_lets_its_source_go() {
+    let mut sandbox = sandbox();
+    super::send_document(&mut sandbox, b"plainly not an image").expect("uploads");
+    assert_eq!(
+        super::plan_wallpaper(&mut sandbox, (2, 2), 2, 2, WallpaperFit::Fill).err(),
+        Some(WallpaperRenderFailure::Refused(
+            WallpaperRefusal::UnsupportedFormat
+        ))
+    );
+    assert_eq!(
+        super::plan_wallpaper(&mut sandbox, (2, 2), 2, 2, WallpaperFit::Fill).err(),
+        Some(WallpaperRenderFailure::Refused(WallpaperRefusal::NoSource))
     );
 }
 
@@ -999,9 +1049,17 @@ fn a_decode_refused_its_memory_is_a_refusal_worth_trying_again() {
         super::refusal_of_decode(&tairix_image::DecodeError::OutOfMemory),
         WallpaperRefusal::OutOfMemory
     );
+    assert_eq!(
+        super::refusal_of_resample(tairix_raster::ResampleError::OutOfMemory),
+        WallpaperRefusal::OutOfMemory,
+        "a band short of memory may draw later"
+    );
+    assert_eq!(
+        super::refusal_of_resample(tairix_raster::ResampleError::EmptyDestination),
+        WallpaperRefusal::Unrenderable
+    );
     let transient = [
         WallpaperRenderFailure::Refused(WallpaperRefusal::OutOfMemory),
-        WallpaperRenderFailure::NoMemory,
         WallpaperRenderFailure::Document(super::DocumentFailure::Refused(
             super::DocumentRefusal::OutOfMemory,
         )),
@@ -1198,7 +1256,7 @@ fn a_source_filling_the_whole_wallpaper_bound_is_placed_rather_than_refused_by_t
     let png = png_padded_to(tairix_wallpaper::MAX_WALLPAPER_BYTES);
     assert_eq!(png.len(), tairix_wallpaper::MAX_WALLPAPER_BYTES);
     let mut sandbox = sandbox();
-    let pixels = render_wallpaper(&mut sandbox, 2, 2, WallpaperFit::Stretch, &png)
+    let pixels = drawn(&mut sandbox, 2, 2, WallpaperFit::Stretch, &png)
         .expect("a source at the bound is placed");
     assert_eq!(pixels.len(), 2 * 2 * 4);
 }

@@ -137,6 +137,11 @@ owner, and clears it as that owner ends. No routing or mapping step sets it.
   As each unit is enabled, the kernel stops every recorded function behind
   it still mastering without a firmware window, and reports how many it
   stopped and how many would not stop (`stopped`, `refused`).
+- **No hierarchy, no trust.** A walk whose bus numbers form no tree resolves
+  no unit's scope, so it publishes nothing and brings no unit up. A flat
+  scan of the segment stops every function mastering DMA of its own where a
+  unit covers it, firmware windows included, and every virtio function
+  elsewhere.
 - **Translated.** A function masters once its owner's domain is attached,
   and stops before that domain is destroyed, so its device is quiet before
   its streams are blocked. A stream firmware keeps a window for is handed

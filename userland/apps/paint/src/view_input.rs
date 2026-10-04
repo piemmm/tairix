@@ -261,6 +261,18 @@ impl View {
             (scale, theme),
             damage,
         );
+        self.after_bar(outcome, theme, layout, damage)
+    }
+
+    /// What `outcome` of the bar means past it, however the bar was worked:
+    /// a setting changed sets the text being typed again as it now stands.
+    fn after_bar(
+        &mut self,
+        outcome: BarOutcome,
+        theme: &Theme,
+        layout: &Layout,
+        damage: &mut Region,
+    ) -> BarOutcome {
         if outcome == BarOutcome::Changed && self.text.is_some() {
             self.reset_text(theme, layout, damage);
         }
@@ -803,7 +815,7 @@ impl View {
                 outcome
             }
             InputEvent::PointerMoved { .. } => {
-                self.drag(layout, damage);
+                self.drag(layout, scale, damage);
                 Outcome::none()
             }
             InputEvent::PointerReleased { button } if self.dragging == Some(*button) => {
@@ -1084,7 +1096,7 @@ impl View {
     }
 
     /// The pointer moved with a drag under way.
-    fn drag(&mut self, layout: &Layout, damage: &mut Region) {
+    fn drag(&mut self, layout: &Layout, scale: Scale, damage: &mut Region) {
         let at = self.at(layout);
         match self.gesture {
             Some(Gesture::Stroke { .. }) => self.stroke_to(at, layout, damage),
@@ -1129,7 +1141,7 @@ impl View {
             Some(Gesture::Pan { from, scroll }) => self.pan_to((from, scroll), layout, damage),
             Some(Gesture::ZoomBox { .. }) => self.zoom_box_to(layout, damage),
             Some(Gesture::CropNew { .. } | Gesture::CropAdjust { .. }) => {
-                self.crop_to(at.pixel(), layout, damage);
+                self.crop_to(at.pixel(), layout, scale, damage);
             }
             None => self.follow_draft(at, layout, damage),
         }
@@ -1887,6 +1899,7 @@ impl View {
             Then::Act(action) => self.act(action, layout, damage),
             Then::Float(floating) => self.float(floating, layout, damage),
             Then::SaveThenClose => Outcome::asking(Request::SaveThenClose),
+            Then::Enter(id, text) => self.carry_out_entry(id, &text, layout, damage),
         }
     }
 
@@ -2321,9 +2334,9 @@ impl View {
                 ..
             } | Transform::Mask { .. }
         );
-        if palette && picture.layers().len() > 1 {
+        if palette && !picture.single() {
             self.state(
-                "A palette picture holds one layer: flatten the picture first",
+                "A palette picture holds one layer, shown wholly: flatten the picture first",
                 layout,
                 damage,
             );
@@ -2551,7 +2564,7 @@ impl View {
             (scale, theme),
             damage,
         );
-        match outcome {
+        match self.after_bar(outcome, theme, layout, damage) {
             BarOutcome::Taken | BarOutcome::Changed => Some(Outcome::none()),
             BarOutcome::Left { forward } => {
                 self.walk_keyboard(Keyboard::Bar, forward, layout, scale, theme, damage);
@@ -2653,7 +2666,31 @@ impl View {
         damage: &mut Region,
     ) -> Outcome {
         self.end_gesture(layout, damage);
-        match id.get() {
+        self.settle_tool(layout, damage);
+        let id = id.get();
+        // Renaming touches no pixel, so a floating selection rides it out.
+        if self.held.is_none() || id == RENAME_ENTRY {
+            return self.carry_out_entry(id, text, layout, damage);
+        }
+        let mut held = String::new();
+        if held.try_reserve_exact(text.len()).is_err() {
+            self.state("There is not enough memory to do that", layout, damage);
+            return Outcome::none();
+        }
+        held.push_str(text);
+        self.put_down_then(Then::Enter(id, held), layout, damage)
+    }
+
+    /// Carry out what entry field `id` was committed holding: a floating
+    /// selection was put down before this was reached, but for a rename.
+    fn carry_out_entry(
+        &mut self,
+        id: u16,
+        text: &str,
+        layout: &Layout,
+        damage: &mut Region,
+    ) -> Outcome {
+        match id {
             GO_TO_ENTRY => self.go_to(text, layout, damage),
             GO_TO_LAYER => self.go_to_layer(text, layout, damage),
             RENAME_ENTRY => {
@@ -2721,6 +2758,19 @@ impl View {
         }
     }
 
+    /// Turn down what the tool is in the middle of — a polygon's corners, a
+    /// crop box — and set down text being typed: what every action but the
+    /// view's own, and every entry committed, does first.
+    fn settle_tool(&mut self, layout: &Layout, damage: &mut Region) {
+        if self.draft.is_some() {
+            self.drop_draft(layout, damage);
+        }
+        if self.crop.take().is_some() {
+            damage.add(layout.canvas());
+        }
+        self.commit_text(layout, damage);
+    }
+
     /// Carry out `action`.
     #[allow(
         clippy::too_many_lines,
@@ -2730,7 +2780,6 @@ impl View {
         // Whatever the action, a drag under way is finished first: none acts
         // on a picture a stroke is still being laid on.
         self.end_gesture(layout, damage);
-        let spared = action.spares(self.tool);
         if self.draft.is_some() {
             match action {
                 Action::PutDown => return self.close_draft(layout, damage),
@@ -2738,22 +2787,14 @@ impl View {
                     self.unplace_corner(layout, damage);
                     return Outcome::none();
                 }
-                _ if spared => {}
-                _ => self.drop_draft(layout, damage),
+                _ => {}
             }
         }
-        if self.crop.is_some() {
-            match action {
-                Action::PutDown => return self.apply_crop(layout, damage),
-                _ if spared => {}
-                _ => {
-                    self.crop = None;
-                    damage.add(layout.canvas());
-                }
-            }
+        if self.crop.is_some() && action == Action::PutDown {
+            return self.apply_crop(layout, damage);
         }
-        if !spared {
-            self.commit_text(layout, damage);
+        if !action.spares(self.tool) {
+            self.settle_tool(layout, damage);
         }
         if self.held.is_some() && !action.leaves_floating() {
             return self.put_down_then(Then::Act(action), layout, damage);
@@ -3376,7 +3417,9 @@ impl View {
             below,
             plate,
         );
-        menu.item(Action::MergeDown, "Merge down", "Ctrl+E", below, plate);
+        let mergeable =
+            below && picture.is_some_and(|picture| picture.shows(active - 1..active + 1));
+        menu.item(Action::MergeDown, "Merge down", "Ctrl+E", mergeable, plate);
         let flat = picture.is_none_or(Picture::single);
         menu.item(Action::Flatten, "Flatten", "Ctrl+Shift+E", !flat, plate);
         menu.separator(plate);

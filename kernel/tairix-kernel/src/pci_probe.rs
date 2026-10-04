@@ -10,7 +10,7 @@ use tairix_abi::driver::pci::{config_address, PciBus, BUS_MASTER_ENABLE, COMMAND
 use tairix_abi::driver::virtio_pci::VIRTIO_PCI_VENDOR_ID;
 use tairix_abi::{DriverError, HwNode, IommuGroup, IommuStreams, HW_NODE_MAX_RESOURCES};
 use tairix_inline::ArrayVec;
-use tairix_pci::topology::Topology;
+use tairix_pci::topology::{Function as PciFunction, Topology};
 
 use crate::pci_host::Function;
 
@@ -171,6 +171,17 @@ pub fn stop_mastering(
         }
     }
     Ok(())
+}
+
+/// Whether a function found by a walk that formed no hierarchy is stopped
+/// mastering. No unit's scope can be resolved without the hierarchy, so
+/// where a unit covers the segment (`covered`) every function that masters
+/// DMA of its own is taken to be behind one, and no firmware window can be
+/// vouched for; elsewhere only a virtio function, which TAIRiX would have
+/// driven, is stopped, as [`stop_mastering`] stops one behind no unit.
+#[must_use]
+pub fn stopped_unresolved(function: &PciFunction, covered: bool) -> bool {
+    function.masters_dma() && (covered || function.vendor == VIRTIO_PCI_VENDOR_ID)
 }
 
 /// The functions whose bus mastering the kernel owns: each one behind a unit

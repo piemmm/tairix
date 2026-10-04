@@ -3,10 +3,11 @@
 //!
 //! Each visible layer is laid over those beneath it source-over, its opacity
 //! weighing its alpha. Source-over is associative, so layers laid together
-//! onto nothing and then over the rest show exactly as they did apart, which
-//! is what lets a merge keep the picture's look.
+//! onto nothing and then over the rest show as they did apart, to within the
+//! rounding of a level, which is what lets a merge keep the picture's look.
 
 use tairix_image::{over, Rgba8};
+use tairix_raster::div255;
 use tairix_util::fallible;
 
 use crate::canvas::{Canvas, CanvasBuilder, Kind, OutOfMemory, Sample};
@@ -20,6 +21,24 @@ pub fn laid(below: Rgba8, above: Rgba8, opacity: u8) -> Rgba8 {
         below,
         [above[0], above[1], above[2], scale(above[3], opacity)],
     )
+}
+
+/// The colour `share` 255ths of the way from `from` to `to`, each colour
+/// weighed by its alpha, so one fading to clear keeps its hue rather than
+/// taking the clear one's meaningless colour.
+#[must_use]
+pub fn between(from: Rgba8, to: Rgba8, share: u8) -> Rgba8 {
+    let (near, far) = (u32::from(u8::MAX - share), u32::from(share));
+    let weight = u32::from(from[3]) * near + u32::from(to[3]) * far;
+    if weight == 0 {
+        return [0; 4];
+    }
+    let channel = |at: usize| {
+        let sum = u32::from(from[at]) * u32::from(from[3]) * near
+            + u32::from(to[at]) * u32::from(to[3]) * far;
+        u8::try_from((sum + weight / 2) / weight).unwrap_or(u8::MAX)
+    };
+    [channel(0), channel(1), channel(2), div255(weight)]
 }
 
 /// What `layers` show together across a run of pixels, into `out`: each

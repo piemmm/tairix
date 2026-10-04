@@ -3,7 +3,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use tairix_abi::driver::pci::function_address;
+use tairix_abi::driver::pci::{function_address, BUS_MASTER_ENABLE, COMMAND_OFFSET};
 
 use super::*;
 use crate::config::{ConfigAddress, ConfigSpace, EXTENDED_REGISTER};
@@ -685,4 +685,35 @@ fn a_walk_over_bridges_that_form_no_tree_is_a_device_fault() {
         Pci::new(space).topology(AcsPolicy::Leave).unwrap_err(),
         DriverError::DeviceFault
     );
+}
+
+/// Bus numbers that form no tree refuse the walk, and a flat quiesce still
+/// reaches every function on the bus: it stops exactly those it is told to,
+/// writing only a command whose bit is set.
+#[test]
+fn a_walk_refused_its_hierarchy_still_quiesces_every_function_it_is_told_to() {
+    let space = Space::new();
+    let mastering = (COMMAND_OFFSET >> 2, BUS_MASTER_ENABLE);
+    // A host bridge, whose bit chipsets hardwire on.
+    space.put((0, 0, 0), &[(0, 0x1237_8086), (2, 0x0600_0000), mastering]);
+    space.function((0, 2, 0), 0x00);
+    space.put((0, 2, 0), &[mastering]);
+    space.put((0, 3, 0), &[(0, 0x10d3_8086), (2, 0x0200_0000), mastering]);
+    space.put((0, 4, 0), &[(0, 0x10d3_8086), (2, 0x0200_0000)]);
+    // A bridge forwarding to a bus above its own.
+    space.bridge((2, 0, 0), 1, 1);
+    let pci = Pci::new(space);
+    assert_eq!(
+        pci.topology(AcsPolicy::Leave).unwrap_err(),
+        DriverError::DeviceFault
+    );
+    pci.quiesce(&Function::masters_dma);
+    let command = |device: u8| pci.read_config(at(0, device, 0), COMMAND_OFFSET) & 0xFFFF;
+    assert_eq!(command(0), BUS_MASTER_ENABLE, "a host bridge is left alone");
+    assert_eq!((command(2), command(3), command(4)), (0, 0, 0));
+    let stopped: Vec<_> = writes_of(&pci)
+        .iter()
+        .map(|(addr, _)| (addr.bus, addr.device))
+        .collect();
+    assert_eq!(stopped, [(0, 2), (0, 3)], "only a set bit is written");
 }

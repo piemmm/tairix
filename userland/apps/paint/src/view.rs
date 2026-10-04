@@ -755,6 +755,8 @@ enum Then {
     Float(Floating),
     /// The save a close asked for.
     SaveThenClose,
+    /// A menu's entry field committed: its id and the text it held.
+    Enter(u16, String),
 }
 
 /// A modal question over the window.

@@ -362,6 +362,14 @@ impl Picture {
         })
     }
 
+    /// Whether every layer of `range` shows; `false` where one is missing.
+    #[must_use]
+    pub fn shows(&self, range: core::ops::Range<usize>) -> bool {
+        self.layers
+            .get(range)
+            .is_some_and(|layers| layers.iter().all(|layer| layer.visible))
+    }
+
     /// Whether it shows exactly its one layer's pixels, so its layers need
     /// no composing.
     #[must_use]
@@ -1221,13 +1229,21 @@ impl Document {
     }
 
     /// Show the showing picture's layer `index` as `shown` says, painting on
-    /// it.
+    /// it; a layer already shown so takes no step to undo.
     ///
     /// # Errors
     ///
     /// [`LayerRefusal`]; nothing changed.
     pub fn show_layer(&mut self, index: usize, shown: Shown) -> Result<(), LayerRefusal> {
         let (entry, picture) = self.layered_mut()?;
+        let unchanged = picture.layers().get(index).is_some_and(|layer| {
+            (&layer.name, layer.opacity, layer.visible)
+                == (&shown.name, shown.opacity, shown.visible)
+        });
+        if unchanged {
+            picture.set_active(index);
+            return Ok(());
+        }
         let before = picture.show_layer(index, shown)?;
         self.record(Step::LayerShown {
             entry,

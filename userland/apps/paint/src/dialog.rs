@@ -9,6 +9,7 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
+use tairix_colour::Fraction;
 use tairix_controls::{
     Button, ButtonContent, ComboBox, ControlRole, Dialog, DialogAction, FieldAction, FieldControl,
     FieldGroup, FieldGroupAction, FieldLayout, FieldRow, Keystroke, Slider, TextAction, TextField,
@@ -222,7 +223,8 @@ impl Form {
     /// The form showing a layer as `shown` says.
     #[must_use]
     pub fn layer(shown: &Shown) -> Self {
-        let percent = percent_of(shown.opacity);
+        let percent =
+            i32::try_from(Fraction::from_byte(shown.opacity).percent()).unwrap_or(OPACITY.most);
         let rows = vec![
             text_row("Name", &shown.name, MAX_LAYER_NAME),
             slider_row(opacity_label(percent), &OPACITY, percent),
@@ -683,7 +685,7 @@ impl Form {
         };
         let permille = *permille;
         let percent = value_of(&OPACITY, permille);
-        self.opacity = u8::try_from((percent * 255 + 50) / 100).unwrap_or(u8::MAX);
+        self.opacity = Fraction::from_percent(u32::try_from(percent).unwrap_or(0)).byte();
         self.relabel(1, opacity_label(percent));
     }
 
@@ -882,11 +884,6 @@ fn slider_row(label: String, parameter: &Parameter, value: i32) -> FieldRow {
 /// What a filter's slider says: its number's name and value.
 fn slider_label(parameter: &Parameter, value: i32) -> String {
     alloc::format!("{}: {value}", parameter.label)
-}
-
-/// `opacity`, out of 255, in percent to the nearest.
-fn percent_of(opacity: u8) -> i32 {
-    (i32::from(opacity) * 100 + 127) / 255
 }
 
 /// What the opacity slider says.

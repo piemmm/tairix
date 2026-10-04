@@ -122,10 +122,11 @@ untrusted work imports this seam; a second per-app copy is forbidden.
   pixel the placement does not cover (a letterboxed fit, a source smaller
   than the screen) is left fully transparent so the desktop's own
   backdrop colour shows through — this service never draws a backdrop.
-  The caller-side `render_wallpaper` drives the whole sequence, validates
-  every band's echoed geometry and exact length fail-closed, assembles
-  the final buffer, and always releases the held source afterwards — on
-  the success path and on every error path alike. A prepare replaces any
+  The caller-side `plan_wallpaper` costs an uploaded source before it is
+  decoded, and its render validates every band's echoed geometry and exact
+  length fail-closed into the caller's own buffer; the held source is
+  released once the render is drawn or dropped, or when the plan is
+  refused. A prepare replaces any
   source (and placement) an earlier prepare left held on the same
   (reused) worker.
 - **The document-view service** (also `imagerender`, the same worker): a

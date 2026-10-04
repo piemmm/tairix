@@ -120,14 +120,17 @@ pixel's aspect, so a mode 12 sprite shows its tall pixels.
   (`compose::compose_run`, the one routine the paint, the status band, the
   eyedropper and a flatten share), the layer painted on carrying the strokes,
   shapes, text, gradient, preview and floating selection being drawn on it.
-  A merge lays its layers together onto nothing, which keeps the look because
-  source-over is associative. Adding, removing, moving and reshowing a layer
+  A merge lays its layers together onto nothing, which keeps the look to
+  within a level's rounding because source-over is associative; it merges
+  only layers that show, a hidden one's pixels having nowhere to go. Adding, removing, moving and reshowing a layer
   are steps of their own (`Step::Layer*`) holding only what left the picture;
   a merge or flatten is a picture step. A tile step names its layer, and
   undoing one paints on that layer again (`Damage::Layers`).
 - **Strokes and shapes**: coverage is composited from the state before the
-  stroke (`stroke::Build`: the most of the opacity a stroke builds to, each
-  dab adding its flow), so a stroke never darkens where it crosses itself;
+  stroke (`stroke::Coverage`: a line or shape keeps the most any pass
+  covered, a brush's dabs build up to its opacity, held in 65535ths so the
+  faintest flow still reaches it), so a stroke never darkens where it crosses
+  itself;
   dabs (`brush::Tip`: size, hardness, opacity, flow, spacing) are laid along
   the path with the spacing carried between segments, the airbrush on a timer
   while held still; the clone tool reads from the stroke's starting picture

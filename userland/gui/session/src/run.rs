@@ -137,14 +137,14 @@ mod program {
         InputPolicy, KeyboardInputSource, Launch, LaunchDocument, LaunchHost, LaunchTable,
         LaunchTarget, LayerDecision, LayerFeed, LoadedPinboard, LoadedPrograms, MachineWatch,
         OwnerBundleGate, OwnerWindow, PickAccess, PickEnd, PickStep, Prepared, PresentedOwners,
-        PreviewBudget, PreviewDone, PreviewJob, PreviewRequest, PreviewTarget, PromptOutcome,
-        Routed, SaverIdentity, SaverSetup, ScreenFade, ScreenLock, Screensaver, Seat, SeatDrain,
-        SeatEventReader, SeatInputChannel, SeatRouter, SeatWake, SessionClock, SessionFileReader,
-        SessionPicker, SessionWindows, ShellWindowHost, SizedRecord, SwitchboardMailbox,
-        SwitchboardOutcome, SwitchboardServe, WallpaperDesk, WallpaperJob, WallpaperService,
-        WallpaperSource, APP_ATTACH, APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE, APP_BAR_SLOT_SHOWN,
-        APP_BAR_SLOT_SHOWN_MESSAGE, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, DATETIME_RUN_PATH,
-        DESKTOP_RESTYLED, DESKTOP_RESTYLED_MESSAGE, ELEVATE_PROMPT_SHOWN,
+        PreviewBudget, PreviewDone, PreviewJob, PreviewRequest, PreviewRun, PreviewTarget,
+        PromptOutcome, Routed, SaverIdentity, SaverSetup, ScreenFade, ScreenLock, Screensaver,
+        Seat, SeatDrain, SeatEventReader, SeatInputChannel, SeatRouter, SeatWake, SessionClock,
+        SessionFileReader, SessionPicker, SessionWindows, ShellWindowHost, SizedRecord,
+        SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, WallpaperDesk, WallpaperJob,
+        WallpaperService, WallpaperSource, APP_ATTACH, APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE,
+        APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE,
+        DATETIME_RUN_PATH, DESKTOP_RESTYLED, DESKTOP_RESTYLED_MESSAGE, ELEVATE_PROMPT_SHOWN,
         ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, FILES_RUN_PATH, LAYER_FEEDS,
         LAYER_FEEDS_RESUMED_MESSAGE, LAYER_FEEDS_STOPPED_MESSAGE, LAYER_OPENED,
         LAYER_OPENED_MESSAGE, LAYER_REFUSED, LAYER_REFUSED_MESSAGE, LAYER_RETIRED,
@@ -3879,7 +3879,7 @@ mod program {
                         if let Some(job) = desk.next_job() {
                             // The budget may admit more than this one: pass the
                             // wake on rather than leave it to the next arrival.
-                            if desk.ready() {
+                            if desk.has_work() {
                                 self.work.notify_one();
                             }
                             break Some(job);
@@ -3920,17 +3920,7 @@ mod program {
                         let run = render_wallpaper_preview(&mut sandbox, &mut job, |planned| {
                             self.desk.lock().acquire_preview(&request, planned)
                         });
-                        let (outcome, unanswered) = match run {
-                            PreviewRun::Concluded(PreviewOutcome::Unavailable) => (
-                                PreviewOutcome::Unavailable,
-                                self.desk.lock().retry_preview(job),
-                            ),
-                            PreviewRun::Concluded(outcome) => (outcome, Some(job)),
-                            PreviewRun::Deferred(planned) => (
-                                PreviewOutcome::Unavailable,
-                                self.desk.lock().requeue_preview(job, planned),
-                            ),
-                        };
+                        let (outcome, unanswered) = self.desk.lock().after_preview(job, run);
                         // Drawn and its region let go before the desk hears,
                         // with no lock held.
                         if let Some(job) = unanswered {
@@ -4195,7 +4185,7 @@ mod program {
     /// Read the shipped picture `job` names and render it at the size it asks
     /// for, for one chooser.
     ///
-    /// Every refusal answers `None`: the asking window draws its
+    /// A refusal concludes the preview unrendered: the asking window draws its
     /// placeholder rather than waiting for pixels that are not coming, and
     /// nothing about the store is disclosed beyond the catalog the session
     /// already answered. The reason is not written here — this runs on a
@@ -4210,11 +4200,7 @@ mod program {
             u32::from(job.request.size.width),
             u32::from(job.request.size.height),
         );
-        let Some(out) = job
-            .request
-            .pixel_bytes()
-            .and_then(|len| job.target.bytes_mut().get_mut(..len))
-        else {
+        let Some(out) = job.request.canvas(&mut *job.target) else {
             return PreviewRun::Concluded(PreviewOutcome::Refused);
         };
         let geometry = RenderGeometry {
@@ -4222,40 +4208,25 @@ mod program {
             dest: size,
             fit: PREVIEW_FIT,
         };
-        let mut deferred = None;
-        let rendered =
-            render_file_into(
-                sandbox,
-                &job.path,
-                job.bound,
-                geometry,
-                out,
-                |planned| match acquire(planned) {
-                    Acquisition::Granted => true,
-                    Acquisition::Wait => {
-                        deferred = Some(planned);
-                        false
-                    }
-                    Acquisition::Unavailable => false,
-                },
-            );
-        match (rendered, deferred) {
+        let mut asked = None;
+        let rendered = render_file_into(sandbox, &job.path, job.bound, geometry, out, |planned| {
+            let answer = acquire(planned);
+            asked = Some((answer, planned));
+            answer == Acquisition::Granted
+        });
+        match (rendered, asked) {
             (Ok(()), _) => PreviewRun::Concluded(PreviewOutcome::Rendered),
-            (Err(FileRenderFailure::Withheld), Some(planned)) => PreviewRun::Deferred(planned),
+            (Err(FileRenderFailure::Withheld), Some((Acquisition::Wait, planned))) => {
+                PreviewRun::Deferred(planned)
+            }
+            (Err(FileRenderFailure::Withheld), Some((Acquisition::Unavailable, _))) => {
+                PreviewRun::Withheld
+            }
             (Err(failure), _) if failure.out_of_memory() => {
                 PreviewRun::Concluded(PreviewOutcome::Unavailable)
             }
             (Err(_), _) => PreviewRun::Concluded(PreviewOutcome::Refused),
         }
-    }
-
-    /// How a preparer's render of a preview ended.
-    enum PreviewRun {
-        /// It concluded.
-        Concluded(PreviewOutcome),
-        /// Its plan, of the carried bytes, did not fit beside the renders
-        /// under way: it waits in the queue for room.
-        Deferred(u64),
     }
 
     /// Why drawing a picture from its file stopped.

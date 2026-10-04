@@ -9,6 +9,8 @@
 
 use alloc::vec::Vec;
 
+use tairix_raster::div255;
+
 use crate::encode::{
     indices_fit, palette_fits, scratch, EncodeError, JpegOptions, Output, RowBuffers,
 };
@@ -437,9 +439,7 @@ impl Reading<'_> {
                 continue;
             }
             for (channel, &under) in pixel.iter_mut().zip(&self.background) {
-                let mixed =
-                    (u32::from(*channel) * alpha + u32::from(under) * (255 - alpha) + 127) / 255;
-                *channel = u8::try_from(mixed).unwrap_or(u8::MAX);
+                *channel = div255(u32::from(*channel) * alpha + u32::from(under) * (255 - alpha));
             }
             pixel[3] = u8::MAX;
         }

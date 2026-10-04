@@ -1109,7 +1109,8 @@ pub fn pci_host() -> Option<&'static crate::pci_host::PciHost> {
 /// The hierarchy is walked once, every observer reading the one walk. Where
 /// a unit covers the segment the walk turns ACS on first, so the isolation
 /// groups are as fine as the hardware allows; a hierarchy whose bus numbers
-/// form no tree has no trustworthy isolation, so nothing is published.
+/// form no tree has no trustworthy isolation, so nothing is published and
+/// every function that could master past a unit is stopped.
 fn own_pci<B: crate::pci_host::HostBus + tairix_pci::topology::PciTopology + Send + 'static>(
     pci: B,
     segment: u16,
@@ -1133,6 +1134,7 @@ fn own_pci<B: crate::pci_host::HostBus + tairix_pci::topology::PciTopology + Sen
             Level::Error,
             "pci hierarchy unreadable; none published",
         );
+        pci.quiesce(&|function| crate::pci_probe::stopped_unresolved(function, covered));
         Vec::new()
     };
     let host = crate::pci_host::PciHost::new(Box::new(pci), functions);

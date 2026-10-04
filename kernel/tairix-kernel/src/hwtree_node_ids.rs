@@ -118,7 +118,7 @@ const _: () = assert!(
 );
 
 /// Functions one PCI segment holds.
-const PCI_SEGMENT_FUNCTIONS: usize = 256
+const PCI_SEGMENT_FUNCTIONS: usize = tairix_pci::topology::BUSES
     * tairix_abi::driver::pci::PCI_DEVICES as usize
     * tairix_abi::driver::pci::PCI_FUNCTIONS as usize;
 

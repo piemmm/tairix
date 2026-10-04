@@ -264,3 +264,179 @@ fn a_merged_picture_that_does_not_fit_the_canvas_is_passed_over() {
         "the layers, composed"
     );
 }
+
+/// One layer, `data/l.png`, on a canvas a pixel square, with `image` and
+/// `layer` carrying further attributes.
+fn lone_stack(image: &str, layer: &str) -> String {
+    alloc::format!(
+        r#"<image w="1" h="1"{image}><stack><layer src="data/l.png"{layer}/></stack></image>"#
+    )
+}
+
+/// A canvas past the limits is refused before anything is decoded, by the
+/// decode and by the estimate a caller admits the decode on alike.
+#[test]
+fn a_canvas_past_the_limits_is_refused_by_the_decode_and_its_estimate() {
+    let ora = archive(
+        r#"<image w="4294967295" h="4294967295"><stack/></image>"#,
+        &[],
+    );
+    assert_eq!(
+        super::peak_bytes(&ora, &limits()),
+        Err(DecodeError::WidthExceedsLimit)
+    );
+    assert_eq!(
+        decode_as(ImageFormat::OpenRaster, &ora, &limits()).err(),
+        Some(DecodeError::WidthExceedsLimit)
+    );
+}
+
+/// Layers naming one picture each take it whole, wherever and however
+/// faintly each lays it.
+#[test]
+fn layers_naming_one_picture_each_take_it() {
+    let shared = flat(2, 1, [10, 20, 30, 255]);
+    let other = flat(1, 1, [1, 1, 1, 255]);
+    let stack = r#"<image w="4" h="2"><stack>
+<layer src="data/a.png" x="2" y="1" opacity="0.5"/>
+<layer src="data/b.png"/>
+<layer src="data/a.png" visibility="hidden"/>
+</stack></image>"#;
+    let a = crate::encode_png(&shared).expect("encodes");
+    let b = crate::encode_png(&other).expect("encodes");
+    let (read, unkept) = native(&archive(stack, &[("data/a.png", &a), ("data/b.png", &b)]));
+    assert_eq!(unkept, crate::Unkept::default());
+    let pictures: Vec<_> = read.layers.iter().map(|layer| &layer.picture).collect();
+    assert_eq!(pictures, [&shared, &other, &shared], "the bottom first");
+    assert!(!read.layers[0].visible);
+    assert_eq!((read.layers[2].at, read.layers[2].opacity), ((2, 1), 128));
+}
+
+/// What a layer's PNG holds that a colour layer cannot keep is stated: its
+/// sixteen-bit samples, a chunk beside its picture and its palette, and a
+/// resolution the stack states.
+#[test]
+fn what_a_layer_cannot_keep_is_stated() {
+    use crate::png_fixture::{build_png, chunk};
+    let plain = crate::encode_png(&flat(1, 1, [1, 2, 3, 255])).expect("encodes");
+    let deep = build_png(1, 1, 16, 6, 0, None, None, &[0, 1, 2, 3, 4, 5, 6, 255, 255]);
+    let mut noted = deep.clone();
+    let after_header = crate::PNG_SIGNATURE.len() + 25;
+    let text = chunk(*b"tEXt", b"Comment\0kept elsewhere");
+    noted.splice(after_header..after_header, text);
+    let ink = Picture::indexed(
+        1,
+        1,
+        crate::IndexDepth::One,
+        vec![[9, 8, 7, 255]; 2],
+        vec![1],
+        None,
+    )
+    .expect("valid");
+    let palette = crate::encode_png(&ink).expect("encodes");
+    let held = |image: &str, png: &[u8]| {
+        native(&archive(&lone_stack(image, ""), &[("data/l.png", png)])).1
+    };
+    assert_eq!(held("", &plain), crate::Unkept::default());
+    let narrowed = held("", &deep);
+    assert!(narrowed.precision && !narrowed.extras, "{narrowed:?}");
+    assert!(held("", &noted).extras);
+    let restated = held("", &palette);
+    assert!(restated.converted && !restated.precision, "{restated:?}");
+    assert!(held(r#" xres="300" yres="300""#, &plain).extras);
+}
+
+/// A stored merged picture of the canvas's size is shown, or refuses the
+/// decode, before any layer is read: the estimate counts no layer for it.
+#[test]
+fn the_estimate_counts_no_layer_a_fitting_merged_picture_answers_for() {
+    let mut document = document();
+    let merged = flat(4, 3, [255, 0, 0, 255]);
+    let thumbnail = flat(1, 1, [0; 4]);
+    let few =
+        super::peak_bytes(&written(&document, &merged, &thumbnail), &limits()).expect("estimated");
+    document.layers.push(OraLayer {
+        name: String::from("Wide"),
+        picture: flat(512, 512, [1, 2, 3, 255]),
+        at: (0, 0),
+        opacity: 255,
+        visible: true,
+    });
+    let ora = written(&document, &merged, &thumbnail);
+    let more = super::peak_bytes(&ora, &limits()).expect("estimated");
+    // The archive it holds grows by the layer's PNG; its pixels are not held.
+    let decoded = 512 * 512 * 4;
+    assert!(more < few + decoded, "{few} then {more}");
+    let passed_over = written(&document, &flat(2, 2, [0; 4]), &thumbnail);
+    let layered = super::peak_bytes(&passed_over, &limits()).expect("estimated");
+    assert!(layered > few + decoded, "{layered}");
+}
+
+/// A layer is composed clipped to the canvas wherever it lies: over its left
+/// and top edges, past its right and bottom, or wholly off it.
+#[test]
+fn a_layer_is_composed_clipped_to_the_canvas_wherever_it_lies() {
+    let layer = |at: (i32, i32), colour: [u8; 4], opacity: u8| OraLayer {
+        name: String::new(),
+        picture: flat(2, 2, colour),
+        at,
+        opacity,
+        visible: true,
+    };
+    let document = OraDocument {
+        width: 3,
+        height: 3,
+        layers: vec![
+            layer((-1, -1), [255, 0, 0, 255], 255),
+            layer((2, 2), [0, 255, 0, 255], 255),
+            layer((1, 0), [0, 0, 255, 255], 128),
+            layer((3, 0), [9, 9, 9, 255], 255),
+            layer((0, -2), [9, 9, 9, 255], 255),
+            layer((-2, 1), [9, 9, 9, 255], 255),
+        ],
+    };
+    let shown = composed(&document).expect("composes");
+    let pixel = |x: usize, y: usize| {
+        let at = (y * 3 + x) * 4;
+        <[u8; 4]>::try_from(&shown.pixels()[at..at + 4]).expect("a pixel")
+    };
+    assert_eq!(pixel(0, 0), [255, 0, 0, 255]);
+    assert_eq!(pixel(2, 2), [0, 255, 0, 255]);
+    assert_eq!(pixel(1, 1), [0, 0, 255, 128], "half seen over clear");
+    assert_eq!(pixel(2, 0), [0, 0, 255, 128]);
+    for (x, y) in [(1, 2), (0, 2), (0, 1)] {
+        assert_eq!(pixel(x, y), [0; 4], "({x}, {y}) is clear");
+    }
+}
+
+/// A layer whose place or opacity will not read refuses the stack; an
+/// opacity outside the whole is held to it.
+#[test]
+fn a_layer_whose_place_or_opacity_will_not_read_is_refused() {
+    let png = crate::encode_png(&flat(1, 1, [1, 2, 3, 255])).expect("encodes");
+    let opened = |layer: &str| {
+        open_native(
+            ImageFormat::OpenRaster,
+            &archive(&lone_stack("", layer), &[("data/l.png", &png)])[..],
+            &limits(),
+        )
+        .err()
+    };
+    for bad in [
+        r#" opacity="half""#,
+        r#" opacity="NaN""#,
+        r#" opacity="""#,
+        r#" x="1.5""#,
+        r#" y="9999999999""#,
+    ] {
+        assert_eq!(opened(bad), Some(DecodeError::OraBadStack), "{bad}");
+    }
+    let opacity = |value: &str| {
+        let ora = archive(
+            &lone_stack("", &alloc::format!(r#" opacity="{value}""#)),
+            &[("data/l.png", &png)],
+        );
+        native(&ora).0.layers[0].opacity
+    };
+    assert_eq!((opacity("2"), opacity("-1")), (255, 0));
+}

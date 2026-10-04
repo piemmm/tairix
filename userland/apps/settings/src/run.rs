@@ -65,9 +65,10 @@ mod program {
     use tairix_procinfo::{for_each_mount, IpcTransport, WalkStep};
     use tairix_reclaim::PressureBand;
     use tairix_settings::{
-        win_sizing, AccountFacts, ElevateRefusal, Elevated, Elevation, MachineFacts, OwnAccount,
-        Pane, PictureWanted, Renders, Roster, RunMode, Shell, ShellOutcome, VolumeReading,
-        WINDOW_GROUND, WIN_HEIGHT, WIN_WIDTH,
+        notified, win_sizing, AccountFacts, DesktopAnswer, DesktopAsk, DesktopAsks, ElevateRefusal,
+        Elevated, Elevation, MachineFacts, OwnAccount, Pane, PictureWanted, Renders, Roster,
+        RunMode, Shell, ShellOutcome, VolumeReading, MOST_OUTSTANDING, WINDOW_GROUND, WIN_HEIGHT,
+        WIN_WIDTH,
     };
     use tairix_sysconfig::SystemConfig;
     use tairix_theme::{CursorSetId, Theme, ThemeRegistry};
@@ -128,6 +129,11 @@ mod program {
     /// The wait-set token of the preview asker's wake: readable exactly when
     /// the desktop has answered a render this window asked for.
     const ASK_TOKEN: u64 = app::FIRST_APP_TOKEN + 6;
+
+    /// The wait-set token of the desktop asker's wake: readable exactly when
+    /// the session has answered a lock, a screensaver preview, or which
+    /// sources have notified.
+    const DESKTOP_TOKEN: u64 = app::FIRST_APP_TOKEN + 7;
 
     /// The desktop settings in effect for the launching user, so every
     /// composed row opens on what the desktop is actually drawn with.
@@ -430,6 +436,94 @@ mod program {
             (wanted.width, wanted.height),
         );
         (*ask, answer)
+    }
+
+    /// The worker that carries what only the desktop answers, each request in
+    /// turn and at most one of each kind outstanding.
+    type DesktopAsker = tairix_rt::work::Worker<
+        tairix_window::WindowClient<app::RtWindowTransport>,
+        DesktopAsk,
+        DesktopAnswer,
+        tairix_util::defer::JobQueue<DesktopAsk, DesktopAnswer>,
+    >;
+
+    /// Carry one request to the desktop's serve loop, which the event loop
+    /// must not wait on.
+    fn ask_desktop(
+        client: &mut tairix_window::WindowClient<app::RtWindowTransport>,
+        ask: &mut DesktopAsk,
+    ) -> DesktopAnswer {
+        match ask {
+            DesktopAsk::Lock => DesktopAnswer::Lock(client.lock_screen()),
+            DesktopAsk::Preview(document) => {
+                DesktopAnswer::Preview(client.preview_screensaver(document.as_str()))
+            }
+            DesktopAsk::NotifySources => {
+                let mut frame = [0u8; tairix_abi::window_ipc::WINDOW_NOTIFY_SOURCES_REPLY_MAX];
+                DesktopAnswer::NotifySources(
+                    client
+                        .notify_sources(&mut frame)
+                        .map(|answered| notified(&answered)),
+                )
+            }
+        }
+    }
+
+    /// Adopt what the desktop answered into `shell`, stating a refusal.
+    fn adopt_desktop_answer(shell: &mut Shell, answer: DesktopAnswer) {
+        if let Some((what, err)) = answer.refusal() {
+            app::report(
+                APP_NAME,
+                format_args!("the desktop would not {what} ({err})"),
+            );
+        }
+        answer.adopt(shell);
+    }
+
+    /// The desktop asker's client half: its desk, and which kinds of request
+    /// are outstanding.
+    struct DesktopDesk<'a> {
+        worker: &'a DesktopAsker,
+        asks: DesktopAsks,
+    }
+
+    impl DesktopDesk<'_> {
+        /// Submit `ask` unless one of its kind is outstanding, answering
+        /// whether an answer landed at once — as one does with no worker to
+        /// serve it, the request made on this thread.
+        fn submit(&mut self, shell: &mut Shell, ask: &DesktopAsk) -> bool {
+            if !self.asks.ask(ask) {
+                return false;
+            }
+            match self.worker.submit(*ask) {
+                Ok(true) => self.settle(shell),
+                Ok(false) => false,
+                // The desk holds one of each kind, so this is never reached;
+                // were it, the kind is free to be asked again.
+                Err(ask) => {
+                    self.asks.withdraw(&ask);
+                    false
+                }
+            }
+        }
+
+        /// Ask which sources have notified if the pane that lists them has
+        /// come on show, answering whether an answer landed at once.
+        fn request_sources(&mut self, shell: &mut Shell) -> bool {
+            shell.notify_sources_wanted() && self.submit(shell, &DesktopAsk::NotifySources)
+        }
+
+        /// Adopt every answer that has landed, answering whether any had.
+        fn settle(&mut self, shell: &mut Shell) -> bool {
+            let mut landed = false;
+            let asks = &mut self.asks;
+            self.worker.collect_landed(|answer| {
+                asks.answered(&answer);
+                adopt_desktop_answer(shell, answer);
+                landed = true;
+            });
+            landed
+        }
     }
 
     /// The elevated run's body: one posted request, one verdict.
@@ -1442,6 +1536,8 @@ mod program {
         elevator: &'a Elevator,
         /// The render requests the panes' pictures cost.
         asker: &'a Asker,
+        /// What only the desktop answers.
+        desktop: DesktopDesk<'a>,
     }
 
     impl<'a> Desks<'a> {
@@ -1467,6 +1563,10 @@ mod program {
                 },
                 elevator: &workers.elevator,
                 asker: &workers.asker,
+                desktop: DesktopDesk {
+                    worker: &workers.desktop,
+                    asks: DesktopAsks::new(),
+                },
             }
         }
     }
@@ -1497,6 +1597,7 @@ mod program {
             shell.adopt_elevation(verdict);
             landed = true;
         }
+        landed |= desks.desktop.settle(shell);
         if !landed {
             return true;
         }
@@ -1539,7 +1640,7 @@ mod program {
         acted: &Acted,
         (surface, shell): (&mut SettingsWindow, &mut Shell),
         (themes, desktop): (&ThemeRegistry, &Desktop),
-        (desks, pictures): (&Desks<'_>, &mut Pictures),
+        (desks, pictures): (&mut Desks<'_>, &mut Pictures),
         damage: &mut Region,
     ) -> bool {
         match acted {
@@ -1566,17 +1667,12 @@ mod program {
                 }
             }
             Acted::LockScreen => {
-                // The desktop answers from memory and puts its own lock up
-                // once it has, so the round trip costs no I/O either side.
-                let answer = surface.window.client().lock_screen();
-                if let Err(err) = answer {
-                    app::report(
-                        APP_NAME,
-                        format_args!("the desktop would not lock the screen ({err})"),
-                    );
+                // Submitted, not awaited: the desktop puts its own lock up
+                // from its own loop, and its answer arrives on the wake the
+                // worker nudges.
+                if desks.desktop.submit(shell, &DesktopAsk::Lock) {
+                    shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
                 }
-                shell.adopt_lock_answer(answer);
-                shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
             }
             Acted::Opened => {
                 if drain_open_targets(shell, surface, themes.active(), desktop.scale()) {
@@ -1584,18 +1680,18 @@ mod program {
                 }
             }
             Acted::PreviewScreensaver(document) => {
-                // The desktop reads the document from memory and puts the
-                // screensaver up in its own loop, so the round trip costs no
-                // I/O either side.
-                let answer = surface.window.client().preview_screensaver(document);
-                if let Err(err) = answer {
-                    app::report(
-                        APP_NAME,
-                        format_args!("the desktop would not show the screensaver ({err})"),
-                    );
+                // Submitted, not awaited, as the lock is; a document the wire
+                // cannot carry is refused here, in memory.
+                let landed = match PinboardDocument::new(document) {
+                    Ok(document) => desks.desktop.submit(shell, &DesktopAsk::Preview(document)),
+                    Err(err) => {
+                        adopt_desktop_answer(shell, DesktopAnswer::Preview(Err(err)));
+                        true
+                    }
+                };
+                if landed {
+                    shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
                 }
-                shell.adopt_preview_answer(answer);
-                shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
             }
             Acted::Rendered {
                 subject,
@@ -1622,18 +1718,13 @@ mod program {
     ///
     /// Every desk is asked whatever the others answered, and a reading that
     /// landed rebuilt its pane's rows, so any one of them is a whole redraw.
-    fn request_readings(
-        shell: &mut Shell,
-        surface: &mut SettingsWindow,
-        desks: &mut Desks<'_>,
-    ) -> bool {
+    fn request_readings(shell: &mut Shell, desks: &mut Desks<'_>) -> bool {
         let landed = [
             desks.mounts.request(shell),
             desks.machine.request(shell),
             desks.network.request(shell),
             desks.accounts.request(shell),
-            // The session answers these from memory.
-            settle_notify_sources(shell, surface.window.client()),
+            desks.desktop.request_sources(shell),
         ];
         landed.contains(&true)
     }
@@ -1736,12 +1827,12 @@ mod program {
                 &acted,
                 (surface, shell),
                 (themes, desktop),
-                (&desks, pictures),
+                (&mut desks, pictures),
                 &mut damage,
             ) {
                 return 0;
             }
-            let landed = request_readings(shell, surface, &mut desks);
+            let landed = request_readings(shell, &mut desks);
             if landed {
                 shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
             }
@@ -1826,48 +1917,16 @@ mod program {
         shell.adopt_machine(facts);
         // And the sources that have notified, should the launch have named
         // the pane that lists them.
-        settle_notify_sources(shell, surface.window.client());
-        shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
-    }
-
-    /// Ask the desktop which sources have notified, if the pane that lists
-    /// them has come on show, answering whether an answer landed.
-    ///
-    /// The session answers from memory, so the round trip costs no I/O on
-    /// either side. A name this build would not accept as a bundle identity
-    /// is dropped rather than offered: a policy for it could never be kept.
-    fn settle_notify_sources(
-        shell: &mut Shell,
-        client: &mut tairix_window::WindowClient<app::RtWindowTransport>,
-    ) -> bool {
-        if !shell.notify_sources_wanted() {
-            return false;
+        if shell.notify_sources_wanted() {
+            let answer = ask_desktop(surface.window.client(), &mut DesktopAsk::NotifySources);
+            adopt_desktop_answer(shell, answer);
         }
-        let mut frame = [0u8; tairix_abi::window_ipc::WINDOW_NOTIFY_SOURCES_REPLY_MAX];
-        let sources = match client.notify_sources(&mut frame) {
-            Ok(answered) => Some(
-                answered
-                    .names()
-                    .filter_map(|name| core::str::from_utf8(name).ok())
-                    .filter(|name| tairix_abi::validate_bundle_id(name).is_ok())
-                    .filter_map(|name| tairix_abi::BundleId::new(name).ok())
-                    .collect(),
-            ),
-            Err(err) => {
-                app::report(
-                    APP_NAME,
-                    format_args!("the desktop would not say which programs have notified ({err})"),
-                );
-                None
-            }
-        };
-        shell.adopt_notify_sources(sources);
-        true
+        shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
     }
 
     /// Every worker desk this window runs, started and owned together.
     ///
-    /// One desk per kind of work rather than one shared desk: the seven
+    /// One desk per kind of work rather than one shared desk: the eight
     /// carry different jobs and a latest-wins desk would let any of them
     /// evict another's answer. Each would otherwise stall the window for a
     /// round trip.
@@ -1879,6 +1938,7 @@ mod program {
         accounts: Arc<Accounts>,
         elevator: Arc<Elevator>,
         asker: Arc<Asker>,
+        desktop: Arc<DesktopAsker>,
     }
 
     impl Workers {
@@ -1901,6 +1961,18 @@ mod program {
                     APP_NAME,
                     app::EXIT_NO_EVENTS,
                     "no room for the preview queue",
+                ));
+            };
+            let Ok(desktop) = DesktopAsker::queued(
+                ask_desktop,
+                tairix_window::WindowClient::new(app::RtWindowTransport),
+                tairix_rt::sync::WorkerWake::create(),
+                MOST_OUTSTANDING,
+            ) else {
+                return Err(app::fail(
+                    APP_NAME,
+                    app::EXIT_NO_EVENTS,
+                    "no room for the desktop's requests",
                 ));
             };
             Ok(Self {
@@ -1929,12 +2001,13 @@ mod program {
                     "elevated-run",
                 ),
                 asker: started(asker, "preview-request"),
+                desktop: started(desktop, "desktop-request"),
             })
         }
 
         /// Each desk's wake, the token it is watched under, and how a refused
         /// watch is stated.
-        fn wakes(&self) -> [(&tairix_rt::sync::WorkerWake, u64, &'static str); 7] {
+        fn wakes(&self) -> [(&tairix_rt::sync::WorkerWake, u64, &'static str); 8] {
             [
                 (self.applier.wake(), APPLY_TOKEN, "apply wake refused"),
                 (self.mounts.wake(), MOUNTS_TOKEN, "mount-table wake refused"),
@@ -1959,6 +2032,11 @@ mod program {
                     "elevated-run wake refused",
                 ),
                 (self.asker.wake(), ASK_TOKEN, "preview-request wake refused"),
+                (
+                    self.desktop.wake(),
+                    DESKTOP_TOKEN,
+                    "desktop-request wake refused",
+                ),
             ]
         }
 
@@ -2011,6 +2089,7 @@ mod program {
             self.accounts.stop();
             self.elevator.stop();
             self.asker.stop();
+            self.desktop.stop();
         }
     }
 
