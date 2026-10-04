@@ -1831,6 +1831,12 @@ mod program {
         // They are this process's memory like the shell's three caches, so
         // they join them in the report before the compositor takes them: a
         // ledger is a shared handle to the figures, not the cache itself.
+        //
+        // The machine's memory bounds what one client may map here, what a
+        // ray-traced scene may hold, and how much stacked frosted glass is
+        // retained.
+        let memory_total =
+            tairix_procinfo::memory_total_bytes(&tairix_procinfo::IpcTransport).unwrap_or(0);
         let chrome = chrome_cache(
             SEAT_PRIMARY,
             frame_len,
@@ -1840,6 +1846,7 @@ mod program {
         let frost = frost_cache(
             SEAT_PRIMARY,
             frame_len,
+            usize::try_from(memory_total).unwrap_or(usize::MAX),
             tairix_rt::pressure::gauge(),
             &LOG_SINK,
         );
@@ -1861,10 +1868,6 @@ mod program {
         };
         let online = online_cpus();
         compositor.set_job_runner(composite_pool(online));
-        // What bounds both what one client may map here and what a ray-traced
-        // scene may hold.
-        let memory_total =
-            tairix_procinfo::memory_total_bytes(&tairix_procinfo::IpcTransport).unwrap_or(0);
         let screen = Rect::new(0, 0, mode.width_px, mode.height_px);
         let Ok(mut pointer) = DeviceInputSource::new(
             SeatInputChannel::new(PointerReader),

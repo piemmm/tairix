@@ -913,9 +913,9 @@ frosted window *itself* changes nothing beneath it either, and that is the third
 case the cache answers.
 
 The compositor keeps each frosted window's backdrop instead, in a bounded,
-pressure-governed cache on the same terms as the window furniture above:
-ceilinged at one screenful of pixels, released when the memory-pressure band
-tightens, and **wiped** on release,
+pressure-governed cache: ceilinged at the machine's share of its memory and
+never below one screenful, given back to one screenful when the memory-pressure
+band tightens and to the reserve when it is severe, and **wiped** on release,
 because a frost is a blurred image of whatever the user had on screen — and an
 unblurred backdrop is a plain one, so the wipe matters more, not less. The same
 repaint now costs 26 µs.
@@ -1064,20 +1064,28 @@ saves recomposing the stack beneath it and changes no pixel.
 
 Depth is bounded by the one fact that matters — what can be retained — rather
 than by a window count that a large screen would waste and a small one could not
-afford. Frosts that do not overlap all fit, since together they cover no more
-than the screen, so an ordinary desktop is never rationed; only a pile of them
-on the same pixels is, which is exactly the pathology. Because the frame never
+afford. One screenful is not that bound: a window beneath translucent glass
+still shows through it, so two overlapping frosted windows want two frosts of
+the same pixels, and on a 1024×768 output a Settings window under the
+Switchboard already wants more than a screenful. The ceiling is therefore the
+machine's share of its memory, never below one screenful
+(`tairix_reclaim::stacked_ui_cache`), so an ordinary stack of windows is never
+rationed. Mild and moderate pressure take it back to one screenful — every
+window's glass in a single layer, giving up what is stacked beneath it first —
+and severe pressure to the shared reserve. Because the frame never
 over-commits the budget, nothing is admitted only to be evicted.
 
 Measured on that cascade as a host unit test — sixteen 80%-opaque blurred
-terminals on eight positions over a 1024×768 output, retained backdrops wanting
-some thirteen screenfuls against a budget of one — the first frame blurs 640 680
+terminals on eight positions over a 1024×768 output on a machine that reports
+no memory, retained backdrops wanting some thirteen screenfuls against a budget
+of one — the first frame blurs 640 680
 pixels (four fifths of the screen) and three of the sixteen windows are frosted
 within the ceiling. A terminal then repainting one cell of itself blurs **0**
 pixels and recomposes **1**, where the same repaint over an ungoverned stack
 blurred some 4.7 M and blended some 4.9 M.
 
-What it costs is that a window buried under a pile of frosted ones reads as
+What it costs is that a window buried under a pile of frosted ones deeper than
+the machine's share holds, or under any stack while memory is short, reads as
 translucent rather than as frosted glass where it still shows. That is the
 deliberate trade, and it is bounded: nothing is ever drawn wrong, only less
 prettily than an unbounded machine would draw it.

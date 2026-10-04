@@ -480,8 +480,9 @@ ceiling. That is deliberately not scaled with the machine, because it is not a
 capacity: the ceiling is what scales, and this only says how little is too
 little. A cache whose ceiling is already below it reserves all of itself, which
 is the right answer for a cache that small — on the 1024×768 boot console that
-is the whole cursor, notification and artwork budget, and a mebibyte of the
-three-mebibyte chrome and frost ceilings. The figure is what one screenful of
+is the whole cursor, notification and artwork budget, a mebibyte of the
+three-mebibyte chrome ceiling, and a mebibyte of the screenful the frost
+ceiling never falls below. The figure is what one screenful of
 drawing needs: a window's four furniture strips across a 1920-pixel output are
 some 300 KiB, the visible glyph repertoire at one size well under 100 KiB, a
 desktop's visible icons at 32 physical pixels some 160 KiB. No kernel cache

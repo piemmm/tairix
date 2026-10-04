@@ -31,9 +31,9 @@
 //!   detected ledger defect emits.
 //! - [`desktop`] — the one desktop-session disposable-UI cache policy:
 //!   the classification a rasterised cursor or icon glyph shares, and the
-//!   two constructors (wired to a real backing size and pressure gauge, or
-//!   an unwired fallback) both the window manager's cursor cache and the
-//!   taskbar's icon cache build from.
+//!   constructors, each wired to the real output, gauge and audit sink, that
+//!   the window manager's, the taskbar's and the session's UI caches build
+//!   from.
 //!
 //! # Why a shared crate and not a kernel module
 //!
@@ -67,7 +67,8 @@ pub mod pressure;
 pub use audit::{log_cache_poisoned, log_cache_refused, ReclaimAuditEvent};
 pub use cache::{CachedBytes, ReclaimCache, Served};
 pub use desktop::{
-    disposable_ui_cache, disposable_ui_candidate, screenful_ui_cache, working_set_ui_cache,
+    disposable_ui_cache, disposable_ui_candidate, screenful_ui_cache, stacked_ui_cache,
+    working_set_ui_cache,
 };
 pub use ledger::CacheLedger;
 pub use model::{

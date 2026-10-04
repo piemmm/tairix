@@ -18,7 +18,7 @@ use crate::{Compositor, PointerCatch, Presentation, WindowId};
 use tairix_cursor::CursorImage;
 use tairix_hash::BuildFastHash;
 use tairix_log::{Event, Sink};
-use tairix_reclaim::{CachedBytes, PressureBand, ReclaimCache, ReportedPressure};
+use tairix_reclaim::{CachedBytes, PressureBand, PressureGauge, ReclaimCache, ReportedPressure};
 use tairix_theme::{Contrast, Theme, ThemeId, ThemeRegistry};
 
 use crate::chrome::{chrome_cache, ChromeEpoch, WindowChrome};
@@ -6635,7 +6635,16 @@ fn test_chrome_cache() -> ReclaimCache<WindowId, WindowChrome, ChromeEpoch, Buil
 /// pressure and sized from a 1080p output.
 fn test_frost_cache() -> ReclaimCache<WindowId, FrostedBackdrop, FrostEpoch, BuildFastHash> {
     NORMAL_PRESSURE.report(PressureBand::Normal);
-    frost_cache(TEST_SEAT, TEST_FB_BYTES, &NORMAL_PRESSURE, &TEST_SINK)
+    screenful_frost_cache(TEST_FB_BYTES, &NORMAL_PRESSURE)
+}
+
+/// The frost cache over an output of `fb_bytes` on a machine that reports no
+/// memory, whose ceiling is therefore that one screenful.
+fn screenful_frost_cache(
+    fb_bytes: usize,
+    pressure: &'static (dyn PressureGauge + 'static),
+) -> ReclaimCache<WindowId, FrostedBackdrop, FrostEpoch, BuildFastHash> {
+    frost_cache(TEST_SEAT, fb_bytes, 0, pressure, &TEST_SINK)
 }
 
 #[test]
@@ -7360,7 +7369,7 @@ fn no_band_drops_the_chrome_cache_below_its_reserve() {
         mode(320, 240),
         Theme::dark(),
         chrome_cache(TEST_SEAT, TEST_FB_BYTES, &PRESSURE, &TEST_SINK),
-        frost_cache(TEST_SEAT, TEST_FB_BYTES, &PRESSURE, &TEST_SINK),
+        screenful_frost_cache(TEST_FB_BYTES, &PRESSURE),
         &PRESSURE,
     )
     .expect("compositor");
@@ -8320,18 +8329,19 @@ fn a_window_that_stops_frosting_retains_nothing() {
 }
 
 #[test]
-fn retained_frosts_never_exceed_the_one_screenful_ceiling() {
-    // Far more frosted windows than a screenful of frost can hold: the frame
-    // frosts what fits and composites the rest as the plain translucent windows
-    // they are, so a machine's retained frost is bounded by its output rather
-    // than by how many frosted windows are open — and bounded without ever
-    // over-committing the cache, so no entry is admitted only to be evicted.
+fn retained_frosts_never_exceed_the_ceiling() {
+    // Far more frosted windows than the frost ceiling can hold — here a machine
+    // reporting no memory, so one screenful: the frame frosts what fits and
+    // composites the rest as the plain translucent windows they are, so retained
+    // frost is bounded by the ceiling rather than by how many frosted windows
+    // are open — and bounded without ever over-committing the cache, so no
+    // entry is admitted only to be evicted.
     let ceiling = 64 * 64 * 4;
     let mut c = Compositor::new(
         mode(64, 64),
         Theme::dark(),
         test_chrome_cache(),
-        frost_cache(TEST_SEAT, ceiling, &NORMAL_PRESSURE, &TEST_SINK),
+        screenful_frost_cache(ceiling, &NORMAL_PRESSURE),
         &NORMAL_PRESSURE,
     )
     .expect("compositor");
@@ -8372,7 +8382,7 @@ fn no_band_gives_the_frost_back_and_the_frame_is_unchanged() {
         mode(40, 24),
         Theme::dark(),
         chrome_cache(TEST_SEAT, TEST_FB_BYTES, &PRESSURE, &TEST_SINK),
-        frost_cache(TEST_SEAT, TEST_FB_BYTES, &PRESSURE, &TEST_SINK),
+        screenful_frost_cache(TEST_FB_BYTES, &PRESSURE),
         &PRESSURE,
     )
     .expect("compositor");
@@ -8440,7 +8450,7 @@ fn releasable_compositor(
         mode,
         Theme::dark(),
         test_chrome_cache(),
-        frost_cache(TEST_SEAT, TEST_FB_BYTES, pressure, &TEST_SINK),
+        screenful_frost_cache(TEST_FB_BYTES, pressure),
         pressure,
     )
     .expect("compositor");
@@ -9761,21 +9771,101 @@ fn veiled(w: u32, h: u32, alpha: u8) -> Surface {
     opaque(w, h, Color::rgba(20, 24, 30, alpha))
 }
 
-/// A compositor whose frost cache is ceilinged at one screenful of the mode it
-/// scans out, which is the shipping desktop policy.
-fn screenful_frost_budget(mode: DisplayMode) -> Compositor {
-    NORMAL_PRESSURE.report(PressureBand::Normal);
+/// A compositor over `mode` on a machine of `memory` bytes, its caches
+/// answering to `pressure`: the shipping desktop policy.
+fn machine_frost_budget(
+    mode: DisplayMode,
+    memory: usize,
+    pressure: &'static (dyn PressureGauge + 'static),
+) -> Compositor {
     let bytes = usize::try_from(mode.width_px * mode.height_px * 4).expect("a screenful");
     let mut compositor = Compositor::new(
         mode,
         Theme::dark(),
-        chrome_cache(TEST_SEAT, TEST_FB_BYTES, &NORMAL_PRESSURE, &TEST_SINK),
-        frost_cache(TEST_SEAT, bytes, &NORMAL_PRESSURE, &TEST_SINK),
-        &NORMAL_PRESSURE,
+        chrome_cache(TEST_SEAT, TEST_FB_BYTES, pressure, &TEST_SINK),
+        frost_cache(TEST_SEAT, bytes, memory, pressure, &TEST_SINK),
+        pressure,
     )
     .expect("compositor");
     compositor.set_background(BLUE);
     compositor
+}
+
+/// A compositor on a machine that reports no memory, so its frost cache is
+/// ceilinged at one screenful of the mode it scans out — the least the
+/// shipping policy ever allows at normal pressure.
+fn screenful_frost_budget(mode: DisplayMode) -> Compositor {
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+    machine_frost_budget(mode, 0, &NORMAL_PRESSURE)
+}
+
+/// The QEMU desktop's figures: a 1024×768 output on a 256 MiB machine.
+const QEMU_MEMORY: usize = 256 << 20;
+
+/// Settings opened, then the Switchboard opened over it: two frosted windows
+/// each covering more than half the screen, front-most last.
+fn settings_under_switchboard(c: &mut Compositor) -> [WindowId; 2] {
+    let radius = Theme::dark().frosted().backdrop_blur();
+    [
+        (Point::new(20, 40), 780, 600),
+        (Point::new(60, 120), 928, 560),
+    ]
+    .map(|(at, w, h)| {
+        let id = c.add_window(at, veiled(w, h, 204));
+        assert!(c.set_window_frame(id, WindowFrame::new(decorated())));
+        assert!(c.set_backdrop_blur(id, radius));
+        assert!(c.set_app_presented(id, true));
+        id
+    })
+}
+
+#[test]
+fn a_window_under_another_keeps_its_glass_on_a_machine_that_can_spare_it() {
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+    let mut c = machine_frost_budget(mode(1024, 768), QEMU_MEMORY, &NORMAL_PRESSURE);
+    let [settings, switchboard] = settings_under_switchboard(&mut c);
+    c.composite();
+    assert!(c.window(switchboard).expect("window").is_frosted());
+    assert!(
+        c.window(settings).expect("window").is_frosted(),
+        "the window beneath is still frosted glass"
+    );
+
+    let mut short = screenful_frost_budget(mode(1024, 768));
+    let [settings, _] = settings_under_switchboard(&mut short);
+    short.composite();
+    assert!(
+        !short.window(settings).expect("window").is_frosted(),
+        "the premise: the pair outgrows one screenful"
+    );
+}
+
+#[test]
+fn pressure_gives_up_the_glass_beneath_and_keeps_the_front_window_frosted() {
+    static PRESSURE: ReportedPressure = ReportedPressure::unknown();
+    PRESSURE.report(PressureBand::Normal);
+    let mut c = machine_frost_budget(mode(1024, 768), QEMU_MEMORY, &PRESSURE);
+    let [settings, switchboard] = settings_under_switchboard(&mut c);
+    c.composite();
+
+    for band in [PressureBand::Mild, PressureBand::Moderate] {
+        PRESSURE.report(band);
+        c.composite();
+        assert!(
+            c.window(switchboard).expect("window").is_frosted(),
+            "{band:?}: one layer of glass is kept"
+        );
+        assert!(
+            !c.window(settings).expect("window").is_frosted(),
+            "{band:?}: the stacked layer is what pressure takes"
+        );
+    }
+    PRESSURE.report(PressureBand::Normal);
+    c.composite();
+    assert!(
+        c.window(settings).expect("window").is_frosted(),
+        "and it comes back"
+    );
 }
 
 /// A cascade of translucent, backdrop-blurred terminals at the shipped default

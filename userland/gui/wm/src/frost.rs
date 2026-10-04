@@ -57,7 +57,7 @@ use core::mem::size_of;
 
 use tairix_hash::BuildFastHash;
 use tairix_log::Sink;
-use tairix_reclaim::{screenful_ui_cache, CachedBytes, PressureGauge, ReclaimCache};
+use tairix_reclaim::{stacked_ui_cache, CachedBytes, PressureGauge, ReclaimCache};
 
 use crate::color::Pixel;
 use crate::geometry::Rect;
@@ -111,30 +111,34 @@ pub type FrostEpoch = (u32, u32, u32);
 
 /// Build the one [`ReclaimCache`] a [`Compositor`](crate::Compositor) retains
 /// frosted backdrops in, classified through the shared desktop cache policy
-/// (`tairix_reclaim::screenful_ui_cache`).
+/// (`tairix_reclaim::stacked_ui_cache`).
 ///
-/// `seat` is the seat the output belongs to and `fb_bytes` is the real
-/// output's backing byte size, which is also this cache's ceiling: what the
-/// desktop may hold in frosted backdrops is one screen's worth of pixels. A
-/// frost is a whole window's rectangle, so a stack of overlapping ones can want
-/// several times that; a frame therefore frosts the stack from the front until
-/// this ceiling runs out and composites the rest as the plain translucent
-/// windows they are, rather than rebuilding all of them every frame
-/// (`Compositor::grant_backdrops`). `pressure` and `sink` are the process's
-/// live pressure gauge and audit sink. The embedder — the only party that
-/// knows all four — calls this once and hands the result to
+/// `seat` is the seat the output belongs to, `fb_bytes` the real output's
+/// backing byte size, and `memory_bytes` the machine's physical memory (`0`
+/// where it cannot be read). A frost is a whole window's rectangle, and a
+/// window beneath a translucent one still shows through it, so overlapping
+/// frosted windows want a frost each over the same pixels: the ceiling is the
+/// machine's share of its memory, never below one screenful, and pressure takes
+/// it back to one screenful and then to the reserve. A stack deeper than that
+/// is frosted from the front until the ceiling runs out and the rest composite
+/// as the plain translucent windows they are, rather than all being rebuilt
+/// every frame (`Compositor::grant_backdrops`). `pressure` and `sink` are the
+/// process's live pressure gauge and audit sink. The embedder — the only party
+/// that knows all of these — calls this once and hands the result to
 /// [`Compositor::new`](crate::Compositor::new).
 #[must_use]
 pub fn frost_cache(
     seat: u64,
     fb_bytes: usize,
+    memory_bytes: usize,
     pressure: &'static (dyn PressureGauge + 'static),
     sink: &'static (dyn Sink + Sync),
 ) -> ReclaimCache<WindowId, FrostedBackdrop, FrostEpoch, BuildFastHash> {
-    screenful_ui_cache(
+    stacked_ui_cache(
         "wm.frost",
         seat,
         fb_bytes,
+        memory_bytes,
         ENTRY_METADATA_BYTES,
         pressure,
         sink,

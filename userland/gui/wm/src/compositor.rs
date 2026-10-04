@@ -830,7 +830,8 @@ impl Compositor {
     /// ones it does not.
     ///
     /// Stacked windows that read their backdrop all read the same pixels, so
-    /// `n` of them want `n` screenfuls of retention against a budget of one.
+    /// `n` of them want `n` frosts of them against a ceiling that may not hold
+    /// them all.
     /// Asking "does one more fit?" of each in turn answers yes for every window
     /// in such a stack, which blurs, evicts and re-blurs the lot every frame —
     /// cost climbing with the depth of the stack while the cache serves nobody.

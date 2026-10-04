@@ -1091,12 +1091,18 @@ the **front** of the stack, once per frame, before the frame takes its damage:
   refused ones have given back.
 
 Depth is bounded by the one fact that matters — what can be retained — not by a
-window count a large screen would waste and a small one could not afford. Frosts
-that do not overlap all fit, since together they cover no more than the screen,
-so an ordinary desktop is never rationed. Because the frame never over-commits,
-nothing is admitted only to be evicted (asserted).
+window count a large screen would waste and a small one could not afford. The
+ceiling is the machine's share of its memory, never below one screenful
+(`tairix_reclaim::stacked_ui_cache`, fed the session's `memory_total`): a
+window beneath translucent glass still shows through it, so overlapping frosted
+windows want a frost each over the same pixels, and one screenful does not hold
+even a Settings window under the Switchboard at 1024×768. Mild and moderate
+pressure take it back to one screenful, giving up the glass stacked beneath
+first; severe takes it to the shared reserve. Because the frame never
+over-commits, nothing is admitted only to be evicted (asserted).
 
-**The trade, stated.** A window buried under a pile of frosted ones reads as
+**The trade, stated.** A window buried under a pile of frosted ones deeper than
+the machine's share holds, or under any stack while memory is short, reads as
 translucent rather than as frosted glass where it still shows. That is the third
 rendering decision this plan records, after B.5's dither and D.3's arithmetic,
 and it is bounded: nothing is drawn *wrong*, and a refused window's pixels are
@@ -1104,8 +1110,8 @@ byte-identical to the same window with its blur turned off (asserted by composin
 one scene both ways).
 
 **Measured.** On the cascade as a host unit test (sixteen 80%-opaque blurred
-terminals on eight positions over 1024×768, retained backdrops wanting some
-thirteen screenfuls against a budget of one) the first frame blurs 640 680 px
+terminals on eight positions over 1024×768 on a machine that reports no memory,
+retained backdrops wanting some thirteen screenfuls against a budget of one) the first frame blurs 640 680 px
 and frosts three of the sixteen within the ceiling. A terminal then repainting
 one cell of itself blurs **0** px and recomposes **1**, against the 4 664 760
 blurred px and 4 920 035 blends the same repaint cost over an ungoverned stack.

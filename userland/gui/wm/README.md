@@ -66,10 +66,12 @@ router**:
   function of the layers
   beneath it, the window's whole rectangle, its physical radius and the
   window's shape — and of *nothing at or above its own layer*. So it is kept in
-  a `ReclaimCache` (`frost_cache`, one screenful, `lib/reclaim`'s shared
-  desktop policy — a frost is a whole window's rectangle, so a stack of
-  overlapping ones can want several times that, which is what the ration below
-  bounds) and a window's own repaint copies it back instead of
+  a `ReclaimCache` (`frost_cache`, `lib/reclaim`'s shared desktop policy,
+  ceilinged at the machine's share of its memory and never below one
+  screenful — a frost is a whole window's rectangle and a window beneath
+  translucent glass still shows, so overlapping ones want a frost each; a stack
+  deeper than the ceiling is what the ration below bounds) and a window's own
+  repaint copies it back instead of
   composing that stack again. A blur of radius zero leaves the composed layers
   exactly as it found them, so an unblurred translucent window retains its
   backdrop through the very same path (`Window::reads_backdrop`) rather than a
@@ -106,8 +108,8 @@ router**:
   same pass had already decided to reuse. A frost is a blurred image of the
   user's desktop, so a released entry is wiped, not merely dropped.
 - Frosting is rationed, front to back (`Compositor::grant_backdrops`): stacked
-  frosted windows all read the same pixels, so `n` of them want `n` screenfuls
-  of retention against a budget of one. Granting each in turn — "does one more
+  frosted windows all read the same pixels, so `n` of them want `n` frosts of
+  them against a ceiling that may not hold them all. Granting each in turn — "does one more
   fit?" — is true of every window in such a stack, so each frame blurred,
   evicted and re-blurred the lot: sixteen cascaded terminals at the shipped
   translucent, blurred default took the desktop to a crawl, one repainted cell

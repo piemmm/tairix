@@ -31,12 +31,13 @@
 //!
 //! # Every one of them keeps a reserve
 //!
-//! All three constructors declare
+//! Every constructor declares
 //! [`UI_CACHE_RESERVE_BYTES`] irreducible,
-//! clamped by each cache's own display-derived ceiling. The three differ in
-//! how much they hold above that — a cursor fraction for pixels a rasterise
-//! rebuilds, a screenful for the bulkier kinds bounded by what can be seen —
-//! and in which bands take it; none of them is ever emptied outright, because
+//! clamped by each cache's own derived ceiling. They differ in how much they
+//! hold above that — a cursor fraction for pixels a rasterise rebuilds, a
+//! screenful for the bulkier kinds bounded by what can be seen, the machine's
+//! share for glass stacked deeper than that — and in which bands take it;
+//! none of them is ever emptied outright, because
 //! a session with no rasterised
 //! pixels left redraws the same screen through a filesystem read, a
 //! sandbox round trip, or an IPC call per element, every repaint.
@@ -204,6 +205,55 @@ where
         disposable_ui_candidate(seat, entry_metadata_bytes),
         budget
             .with_working_set_floor(budget.hard() / WORKING_SET_DIVISOR)
+            .with_reserved_floor(UI_CACHE_RESERVE_BYTES),
+        pressure,
+        sink,
+        hasher,
+    )
+}
+
+/// Build a desktop-session cache of pixels every surface in a stack of
+/// translucent ones needs whole: a frosted window's backdrop.
+///
+/// [`screenful_ui_cache`]'s bound is what can be seen, and stacked glass breaks
+/// it: a frost is its window's whole rectangle, and a window beneath a
+/// translucent one still shows through it, so two overlapping windows want two
+/// frosts of the same pixels. The ceiling is therefore the larger of one
+/// screenful and the standard share of the machine's memory
+/// ([`CacheBudget::from_backing`] over `memory_bytes`; `0`, a machine that
+/// cannot report it, leaves the screenful).
+///
+/// Mild and moderate pressure take it back to one screenful — every window's
+/// glass in a single layer, giving up only what is stacked beneath — and
+/// severe and critical to the shared reserve, like every UI cache.
+#[must_use]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the screenful constructors' arguments plus the memory figure \
+              this ceiling is the machine's share of"
+)]
+pub fn stacked_ui_cache<K, V, E, S>(
+    label: &'static str,
+    seat: u64,
+    fb_bytes: usize,
+    memory_bytes: usize,
+    entry_metadata_bytes: usize,
+    pressure: &'static (dyn PressureGauge + 'static),
+    sink: &'static (dyn Sink + Sync),
+    hasher: S,
+) -> ReclaimCache<K, V, E, S>
+where
+    K: Eq + Hash,
+    V: CachedBytes,
+    E: PartialEq + Clone,
+    S: BuildHasher,
+{
+    let ceiling = fb_bytes.max(CacheBudget::from_backing(memory_bytes).hard());
+    ReclaimCache::new(
+        label,
+        disposable_ui_candidate(seat, entry_metadata_bytes),
+        CacheBudget::from_ceiling(ceiling)
+            .with_working_set_floor(fb_bytes)
             .with_reserved_floor(UI_CACHE_RESERVE_BYTES),
         pressure,
         sink,
@@ -542,6 +592,89 @@ mod tests {
             shrink_target(PressureBand::Critical, ReclaimClass::DisposableUi, large),
             UI_CACHE_RESERVE_BYTES
         );
+    }
+
+    /// A 1024×768 output and a 256 MiB machine, the QEMU desktop's figures.
+    const SCREEN: usize = 1024 * 768 * 4;
+    const MACHINE: usize = 256 << 20;
+
+    fn stacked(memory: usize, gauge: &'static ReportedPressure) -> GlyphCache {
+        let sink: &'static DiscardSink = Box::leak(Box::new(DiscardSink));
+        stacked_ui_cache(
+            "test.frost",
+            1,
+            SCREEN,
+            memory,
+            32,
+            gauge,
+            sink,
+            BuildFastHash::new(),
+        )
+    }
+
+    /// Two overlapping windows each wider than half the screen want two frosts
+    /// of the same pixels, which one screenful cannot hold and the machine's
+    /// share can.
+    #[test]
+    fn the_stacked_ceiling_is_the_machines_share_and_never_below_a_screenful() {
+        let gauge: &'static ReportedPressure = Box::leak(Box::new(ReportedPressure::unknown()));
+        gauge.report(PressureBand::Normal);
+        let frost = 930 * 590 * 4;
+        assert!(
+            2 * frost > SCREEN,
+            "the premise: the pair outgrows a screenful"
+        );
+
+        assert!(stacked(MACHINE, gauge).holds(2, 2 * frost));
+        assert!(
+            !stacked(MACHINE, gauge).holds(1, CacheBudget::from_backing(MACHINE).hard() + 1),
+            "and the share is a ceiling"
+        );
+        for memory in [0, SCREEN] {
+            let cache = stacked(memory, gauge);
+            assert!(
+                cache.holds(1, frost),
+                "{memory}: a screenful still holds one"
+            );
+            assert!(
+                !cache.holds(2, 2 * frost),
+                "{memory}: a machine whose share is under a screenful keeps the screenful"
+            );
+        }
+    }
+
+    /// Pressure gives the stacked glass back first: mild and moderate keep one
+    /// screenful of it, every window's glass in a single layer, and severe the
+    /// shared reserve.
+    #[test]
+    fn pressure_takes_the_stacked_glass_and_keeps_one_layer_until_severe() {
+        let gauge: &'static ReportedPressure = Box::leak(Box::new(ReportedPressure::unknown()));
+        gauge.report(PressureBand::Normal);
+        let mut cache = stacked(MACHINE, gauge);
+        let frost = SCREEN / 2;
+        for key in 0..3u32 {
+            let _ = cache.get_or_build(&1, key, || {
+                Some(Glyph {
+                    bytes: vec![0x66; frost],
+                })
+            });
+        }
+        assert_eq!(
+            cache.len(),
+            3,
+            "three half-screen frosts are one and a half screenfuls"
+        );
+
+        for band in [PressureBand::Mild, PressureBand::Moderate] {
+            gauge.report(band);
+            cache.enforce_pressure();
+            assert!(cache.charged_bytes() <= SCREEN, "{band:?}");
+            assert!(!cache.is_empty(), "{band:?} kept a layer of glass");
+            assert!(cache.holds(1, frost), "{band:?} still frosts a window");
+        }
+        gauge.report(PressureBand::Severe);
+        cache.enforce_pressure();
+        assert!(cache.charged_bytes() <= UI_CACHE_RESERVE_BYTES);
     }
 
     #[test]

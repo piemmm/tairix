@@ -180,6 +180,10 @@ const TEST_SEAT: u64 = 1;
 /// real derivation rather than a number invented for the test.
 const TEST_FRAME_BYTES: usize = 1920 * 1080 * 4;
 
+/// The memory the test machine reports: none, so its frost ceiling is the one
+/// screenful a machine that cannot read its memory keeps.
+const TEST_MEMORY: usize = 0;
+
 /// Discards audit records. These tests assert session behaviour; the
 /// caches' audit path is covered where it is defined.
 struct SilentSink;
@@ -216,7 +220,13 @@ pub(crate) fn test_chrome_cache() -> ReclaimCache<WindowId, WindowChrome, Chrome
 pub(crate) fn test_frost_cache(
 ) -> ReclaimCache<WindowId, FrostedBackdrop, FrostEpoch, BuildFastHash> {
     NORMAL_PRESSURE.report(PressureBand::Normal);
-    frost_cache(TEST_SEAT, TEST_FRAME_BYTES, &NORMAL_PRESSURE, &TEST_SINK)
+    frost_cache(
+        TEST_SEAT,
+        TEST_FRAME_BYTES,
+        TEST_MEMORY,
+        &NORMAL_PRESSURE,
+        &TEST_SINK,
+    )
 }
 
 /// The pressure gauge every compositor under test is built over — the same
@@ -325,7 +335,13 @@ pub(crate) fn desktop_over(
         display,
         shell.session().active_theme().clone(),
         chrome_cache(TEST_SEAT, TEST_FRAME_BYTES, pressure, &TEST_SINK),
-        frost_cache(TEST_SEAT, TEST_FRAME_BYTES, pressure, &TEST_SINK),
+        frost_cache(
+            TEST_SEAT,
+            TEST_FRAME_BYTES,
+            TEST_MEMORY,
+            pressure,
+            &TEST_SINK,
+        ),
         pressure,
     )
     .expect("the compositor allocates");

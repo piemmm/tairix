@@ -332,8 +332,8 @@ compositor can do it.
   containing a blurred window falls back to the software composite rather than
   presenting a wrong frame.
 - Frosting is rationed from the front of the stack, so a pile of blurred
-  terminals costs one screenful of frost rather than one per window
-  (`plans/FIX-DESKTOP-SPEEDUP.md` D.13). That is what lets the blur ship on by
+  terminals costs at most the machine's frost ceiling rather than one frost per
+  window, however deep (`plans/FIX-DESKTOP-SPEEDUP.md` D.13). That is what lets the blur ship on by
   default: a cell repaint under sixteen cascaded terminals blurs nothing, where
   it blurred some 4.7 M pixels.
 

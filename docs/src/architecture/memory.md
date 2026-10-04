@@ -2446,9 +2446,15 @@ reclaim policy anyway (`plans/SMARTRAM.md` SMART5, section 6.4).
   session, and that is the only crate all three already share. The window
   manager's rendered window furniture and its frosted backdrops are two
   further caches of the same class and owner, differing only in their
-  ceiling (`tairix_reclaim::desktop::screenful_ui_cache`): one screenful of
-  pixels rather than the small fraction a cursor or a glyph is allowed,
-  because no more of either than fills the screen can be visible at once.
+  ceiling. Furniture takes one screenful of pixels rather than the small
+  fraction a cursor or a glyph is allowed
+  (`tairix_reclaim::desktop::screenful_ui_cache`), because no more of it than
+  fills the screen can be visible at once. Frosts take the machine's share of
+  its memory, never below a screenful
+  (`tairix_reclaim::desktop::stacked_ui_cache`), because a window beneath
+  translucent glass still shows through it, so overlapping windows want a frost
+  each over the same pixels; mild and moderate pressure keep one screenful of
+  them, a single layer of glass.
 - **Every one of them keeps an irreducible reserve.** A desktop holding none
   of its rasterised pixels does not draw a cheaper frame — it draws the same
   frame, re-deriving every element through a rasterisation, a blur, a
