@@ -34,6 +34,7 @@ fn room() -> Sky {
         stars: None,
         low: None,
         high: None,
+        moon: None,
     }
 }
 
@@ -63,6 +64,17 @@ fn sun(toward: Vec3, limb: Limb) -> Light {
 }
 
 const DARKENING: Limb = Limb::Darkening(Vec3::new(0.40, 0.51, 0.66));
+
+/// `limb`'s profile on a disc straight up a hundredth of a radian across,
+/// each channel's light coming from `fractions` of the way to its edge.
+fn across(limb: Limb, fractions: [f64; 3]) -> Vec3 {
+    let radius = 0.01;
+    let sources = fractions.map(|fraction: f64| {
+        let off = fraction * radius;
+        Vec3::new(off, mathf::sqrt(1.0 - off * off), 0.0)
+    });
+    limb.profile((Vec3::UP, radius), sources)
+}
 
 #[test]
 fn a_spot_lights_its_cone_alone_and_softens_at_the_edge() {
@@ -97,7 +109,7 @@ fn the_sun_is_sampled_within_its_disc_at_its_own_density() {
         toward,
         cos_radius,
         radiance: Vec3::splat(1000.0),
-        limb: Limb::Even,
+        limb: Limb::Darkening(Vec3::ZERO),
     };
     for pair in grid(12) {
         let incidence = sun
@@ -126,23 +138,23 @@ fn a_darkening_limb_spreads_the_discs_light_and_keeps_all_of_it() {
     let mut held = Vec3::ZERO;
     for step in 0..steps {
         let fraction = (f64::from(step) + 0.5) / f64::from(steps);
-        held += DARKENING.across([fraction; 3]) * (2.0 * fraction / f64::from(steps));
+        held += across(DARKENING, [fraction; 3]) * (2.0 * fraction / f64::from(steps));
     }
     assert!((held - Vec3::ONE).max_element().abs() < 1e-4, "{held:?}");
-    let (middle, rim) = (DARKENING.across([0.0; 3]), DARKENING.across([0.95; 3]));
+    let (middle, rim) = (across(DARKENING, [0.0; 3]), across(DARKENING, [0.95; 3]));
     assert!(
         middle.x.min(middle.y).min(middle.z) > 1.0,
         "the middle outshines the mean"
     );
     assert!(rim.z / middle.z < rim.x / middle.x, "blue darkens most");
-    assert_eq!(Limb::Even.across([0.7; 3]), Vec3::ONE);
-    let apart = DARKENING.across([0.2, 0.5, 0.9]);
+    assert_eq!(across(Limb::Darkening(Vec3::ZERO), [0.7; 3]), Vec3::ONE);
+    let apart = across(DARKENING, [0.2, 0.5, 0.9]);
     assert!(
-        (apart.x - DARKENING.across([0.2; 3]).x).abs() < 1e-15,
+        (apart.x - across(DARKENING, [0.2; 3]).x).abs() < 1e-15,
         "each its own"
     );
     assert!(
-        (apart.z - DARKENING.across([0.9; 3]).z).abs() < 1e-15,
+        (apart.z - across(DARKENING, [0.9; 3]).z).abs() < 1e-15,
         "each its own"
     );
     // So the light the disc's samples bring is its irradiance still.
@@ -241,7 +253,7 @@ fn a_low_sun_lights_a_surface_as_it_lights_the_air_spread_as_the_air_squashes_it
         mathf::sin(elevation.to_radians()),
         mathf::cos(elevation.to_radians()),
     );
-    let light = sun(toward, Limb::Even);
+    let light = sun(toward, Limb::Darkening(Vec3::ZERO));
     let eye = Vec3::new(0.0, 2.0, 0.0);
     let count = 256;
     let sampled = light
@@ -336,6 +348,8 @@ fn an_orb_is_sampled_on_its_near_side_and_lights_as_its_solid_angle_says() {
                     fields: &[],
                     prototypes: &[],
                     lawns: &[],
+                    materials: &[],
+                    view: None,
                 },
             )
             .expect("every sampled direction meets the orb");

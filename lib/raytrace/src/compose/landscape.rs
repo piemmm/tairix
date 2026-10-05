@@ -18,7 +18,9 @@ use tairix_util::{fallible, mathf};
 use super::architecture::Aqueduct;
 use super::plants::{self, Character, Fallen, Grassland, Grove, Kind, Stand, Tier};
 use super::plants::{Dead, Drift};
-use super::stones::{self, Brook, Stones};
+use super::snowman;
+use super::stones::{self, Brook};
+use super::strewn::{self, Strewing};
 use super::waterside;
 use super::weather::{self, Climate, Cover, Hour, Outdoors};
 use super::woodland::{Beneath, Deadfall, Rooting, Wood, Woodland, ANYWHERE};
@@ -40,6 +42,7 @@ use crate::rock::Lithology;
 use crate::scene::Exposure;
 use crate::shade::Rect;
 use crate::shape::Shape;
+use crate::snow::Snowpack;
 use crate::terrain::{Landform, Sea, Terrain};
 use crate::tree::Season;
 use crate::vector::{real, Frame, Pose, Vec3};
@@ -148,16 +151,17 @@ const DUNE: Soil = Soil {
     sand: 0xE4_C0_88,
     snow: 0xF4_F6_FA,
 };
-const SNOWFIELD: Soil = Soil {
-    grass: 0xE8_EC_F2,
-    dry: 0xF0_F2_F6,
-    moss: 0xD0_D8_E0,
-    earth: 0xD8_DC_E4,
-    silt: 0xE0_E4_EA,
+/// Ground frozen under snow: its grass dead and bleached, its earth dark.
+const FROZEN: Soil = Soil {
+    grass: 0x7A_70_52,
+    dry: 0xA8_9A_74,
+    moss: 0x4A_58_3A,
+    earth: 0x4A_3E_34,
+    silt: 0x6A_62_56,
     rock: 0x5A_5C_60,
     strata: 0x3A_3C_40,
     lichen: 0x8A_8C_80,
-    sand: 0xE0_E4_EA,
+    sand: 0x9A_90_80,
     snow: 0xF6_F8_FC,
 };
 const VOLCANIC: Soil = Soil {
@@ -725,9 +729,12 @@ impl Set {
     }
 }
 
+/// How far about the eye a scattering of woods keeps its trunks.
+const EYE_ROOM: f64 = 4.0;
+
 /// A lawn as `lawning` has it, if any, and a scattering of woods of `grove`
-/// over the land seen from `vantage`, on the ground `rooting` says suits
-/// them.
+/// over the land seen from `vantage`, clear of the eye, on the ground
+/// `rooting` says suits them.
 pub(super) fn plant(
     stage: &mut Stage,
     dice: &mut Dice,
@@ -735,6 +742,8 @@ pub(super) fn plant(
     lawning: Option<&Lawning>,
     rooting: Rooting,
 ) -> Option<()> {
+    // No trunk stands where the eye does, whichever way it looks.
+    stage.keep_open((vantage.eye.x, vantage.eye.z), EYE_ROOM)?;
     let woodland = Woodland {
         cover: dice.range(0.15, 0.35),
         patch: 220.0,
@@ -851,6 +860,7 @@ pub(super) fn backdrop(
         near_water: None,
         horizon: Some(horizon(reach)),
         snow_line: None,
+        snowpack: None,
         pond: None,
         growth: 1.0,
         seed: dice.seed(),
@@ -1190,7 +1200,7 @@ pub(super) fn ground_of<'a>(stage: &'a mut Stage, land: &Land) -> Option<&'a mut
 
 /// The rock `land`'s ground is made of, as its pigment has it; `None` for
 /// a land whose ground is not a land's.
-fn rock_of(stage: &Stage, land: &Land) -> Option<Rock> {
+pub(super) fn rock_of(stage: &Stage, land: &Land) -> Option<Rock> {
     let material = ground_material(stage, land)?;
     let Pigment::Ground(ground) = &stage.materials.get(material)?.pigment else {
         return None;
@@ -1202,45 +1212,6 @@ fn rock_of(stage: &Stage, land: &Land) -> Option<Rock> {
         bedding: 0.25 * ground.bedding.min(4.0),
         seed: ground.seed,
     })
-}
-
-/// Stones of the land's own rock strewn on `land` ahead of `vantage`:
-/// `count` of them `sizes` across, `reach` off and `spread` either side of
-/// the view, the smaller far the commoner, wherever `lies` says a stone can
-/// lie.
-fn strew(
-    stage: &mut Stage,
-    dice: &mut Dice,
-    (land, vantage): (&Land, &Vantage),
-    (count, sizes, reach, spread): (u32, (f64, f64), (f64, f64), f64),
-    lies: &dyn Fn(&Lie) -> bool,
-) -> Option<()> {
-    let stones = Stones::new(stage, dice, rock_of(stage, land)?)?;
-    let Vantage { eye, heading } = *vantage;
-    for _ in 0..count {
-        let angle = heading + dice.range(-spread, spread);
-        // The nearer ground holds more of them, as the eye would see them.
-        let near = dice.unit();
-        let distance = reach.0 + (reach.1 - reach.0) * near * mathf::sqrt(near);
-        let at = (
-            eye.x + mathf::sin(angle) * distance,
-            eye.z + mathf::cos(angle) * distance,
-        );
-        let size = sizes.0 + (sizes.1 - sizes.0) * dice.unit() * dice.unit();
-        let lie = land.lie(&stage.fields, at.0, at.1);
-        if !lies(&lie) || land.wet_at(&stage.fields, at.0, at.1) || !stage.clear(at, 0.5 * size) {
-            continue;
-        }
-        stage.claim(at, 0.5 * size)?;
-        let normal = land.normal(&stage.fields, at.0, at.1);
-        stones.lay(
-            stage,
-            dice,
-            (Vec3::new(at.0, lie.height, at.1), normal),
-            size,
-        )?;
-    }
-    Some(())
 }
 
 /// Heather and gorse scattered over the open ground ahead of `vantage`,
@@ -1442,6 +1413,7 @@ pub(super) fn meadow(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
         near_water: None,
         horizon: Some(horizon(reach)),
         snow_line: None,
+        snowpack: None,
         pond: None,
         growth: 1.0,
         seed: dice.seed(),
@@ -1574,6 +1546,7 @@ pub(super) fn forest(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
         near_water: None,
         horizon: Some(horizon(reach)),
         snow_line: None,
+        snowpack: None,
         pond: None,
         growth: 1.0,
         seed: dice.seed(),
@@ -1816,6 +1789,7 @@ pub(super) fn alpine(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
             ..horizon(reach)
         }),
         snow_line: Some(snow_line),
+        snowpack: None,
         pond: None,
         growth: 1.0,
         seed: dice.seed(),
@@ -1897,11 +1871,15 @@ fn alpine_scene(
     let grove = Grove::new(stage, dice, (kinds, season), Stand::Close)?;
     stage.keep_open((vantage.eye.x, vantage.eye.z), 5.0)?;
     let count = dice.count(30, 70);
-    strew(
+    strewn::strew(
         stage,
         dice,
         (land, &vantage),
-        (count, (0.2, 2.4), (4.0, 110.0), 0.9),
+        Strewing {
+            boulders: (count, (0.2, 2.4)),
+            reach: (4.0, 110.0),
+            spread: 0.9,
+        },
         &lies_still,
     )?;
     // Forest on the lower slopes, from the lake's shore up to the tree line.
@@ -2019,6 +1997,7 @@ pub(super) fn coast(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
         near_water: None,
         horizon: None,
         snow_line: None,
+        snowpack: None,
         pond: None,
         growth: 1.0,
         seed: dice.seed(),
@@ -2114,11 +2093,15 @@ fn coast_scene(
     ocean(stage, dice, out)?;
     let count = dice.count(20, 50);
     let beach = |lie: &Lie| lie.upright > 0.6 && lie.height < 6.0;
-    strew(
+    strewn::strew(
         stage,
         dice,
         (land, &vantage),
-        (count, (0.3, 3.5), (6.0, 150.0), 0.8),
+        Strewing {
+            boulders: (count, (0.3, 3.5)),
+            reach: (6.0, 150.0),
+            spread: 0.8,
+        },
         &beach,
     )?;
     let grove = Grove::new(
@@ -2369,6 +2352,7 @@ fn desert_of(stage: &mut Stage, dice: &mut Dice, dunes: bool) -> Option<Composed
         near_water: None,
         horizon: Some(horizon(reach)),
         snow_line: None,
+        snowpack: None,
         pond: None,
         growth: if dunes { 0.0 } else { 0.12 },
         seed: dice.seed(),
@@ -2521,11 +2505,15 @@ fn erg(stage: &mut Stage, dice: &mut Dice, land: &Land, vantage: &Vantage) -> Op
         }
     }
     let count = dice.count(25, 60);
-    strew(
+    strewn::strew(
         stage,
         dice,
         (land, vantage),
-        (count, (0.15, 1.4), (4.0, 150.0), 0.8),
+        Strewing {
+            boulders: (count, (0.15, 1.4)),
+            reach: (4.0, 150.0),
+            spread: 0.8,
+        },
         &lies_still,
     )
 }
@@ -2533,11 +2521,15 @@ fn erg(stage: &mut Stage, dice: &mut Dice, land: &Land, vantage: &Vantage) -> Op
 /// What grows and lies on the badlands: saguaros, boulders, and scrub.
 fn badlands(stage: &mut Stage, dice: &mut Dice, land: &Land, vantage: &Vantage) -> Option<()> {
     let count = dice.count(40, 90);
-    strew(
+    strewn::strew(
         stage,
         dice,
         (land, vantage),
-        (count, (0.15, 2.6), (4.0, 130.0), 0.9),
+        Strewing {
+            boulders: (count, (0.15, 2.6)),
+            reach: (4.0, 130.0),
+            spread: 0.9,
+        },
         &lies_still,
     )?;
     // Saguaros stand far apart over the flats, scrub between them, on ground
@@ -2643,12 +2635,17 @@ pub(super) fn winter(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
         nests: nests((700.0, 72.0), (0.015, 0.0)),
         near_water: None,
         horizon: Some(horizon(reach)),
-        snow_line: Some(-1e3),
+        snow_line: None,
+        snowpack: Some(Snowpack {
+            heading: dice.range(0.0, TAU),
+            fallen: dice.range(0.2, 0.6),
+            seed: dice.seed(),
+        }),
         pond: Some(((0.0, 0.0), 1.3 * pond)),
         growth: 1.0,
         seed: dice.seed(),
     };
-    let material = ground(stage, dice, &SNOWFIELD, (-1e3, -1e3, 0.6), 2.0)?;
+    let material = ground(stage, dice, &FROZEN, (-1e3, NO_SNOW, 0.6), 2.0)?;
     let ice = stage.material(
         Material::new(
             Pigment::Solid(Vec3::ONE),
@@ -2716,60 +2713,20 @@ fn winter_scene(
         deadfall: Some(deadfall),
     })?;
     waterside::margins(stage, dice, ((eye.x, eye.z), Season::Winter, None))?;
+    // Only where the wind left the snow too thin to bury it does the dead
+    // grass show.
+    stage.sward = Some(Lawning {
+        eye: (eye.x, eye.z),
+        grassland: plants::grassland(dice, Character::Upland, Season::Winter),
+    });
     if dice.chance(0.3) {
         let at = ahead(&vantage, 5.0, 0.4);
-        let base = land.height(&stage.fields, at.0, at.1);
-        snowman(
-            stage,
-            dice,
-            Vec3::new(at.0, base, at.1),
-            vantage.heading + PI,
-        )?;
+        snowman::snowman(stage, dice, land, (at, vantage.heading + PI))?;
     }
     let weather = weather::outdoors(stage, dice, &WINTER, vantage.heading)?;
     let fov = dice.angle(46.0, 60.0);
     let view = level_view(&vantage, fov, dice.angle(-4.0, 4.0));
     Some(look(weather, view, 0.72))
-}
-
-/// A snowman at `base`, looking toward `facing`.
-fn snowman(stage: &mut Stage, dice: &mut Dice, base: Vec3, facing: f64) -> Option<()> {
-    let snow =
-        stage.material(
-            Material::new(Pigment::Solid(rgb(0xF4_F6_FA)), Finish::Matte)
-                .with_relief(Relief::grain(0.105, 8.0, dice.seed())),
-        )?;
-    stage.claim((base.x, base.z), 0.6)?;
-    let mut level = base.y - 0.1;
-    let mut head = Vec3::ZERO;
-    for radius in [0.5, 0.36, 0.25] {
-        stage.ball(Vec3::new(base.x, level, base.z), radius, snow, dice)?;
-        head = Vec3::new(base.x, level + radius, base.z);
-        level += 1.7 * radius;
-    }
-    let look = direction(facing, 0.0, 0.0);
-    let side = look.cross(Vec3::UP).normalized();
-    let coal = stage.coated(Pigment::Solid(rgb(0x10_10_12)), 0.4)?;
-    for sign in [-1.0, 1.0] {
-        let eye = head + look * 0.21 + side * (0.08 * sign) + Vec3::UP * 0.06;
-        stage.add(
-            Shape::Sphere {
-                centre: eye,
-                radius: 0.028,
-            },
-            coal,
-            Pose::new(eye, Frame::WORLD),
-            true,
-        )?;
-    }
-    let carrot = stage.coated(Pigment::Solid(rgb(0xE0_6A_1A)), 0.5)?;
-    stage.frustum(
-        Pose::new(head + look * 0.2, Frame::WORLD.aligning(Vec3::UP, look)),
-        (0.035, 0.0, 0.2),
-        carrot,
-        true,
-    )?;
-    Some(())
 }
 
 const LAGOON: Climate = Climate {
@@ -2920,6 +2877,7 @@ fn island(stage: &mut Stage, dice: &mut Dice, facing: f64) -> Option<Build> {
         near_water: None,
         horizon: None,
         snow_line: None,
+        snowpack: None,
         pond: None,
         growth: 1.0,
         seed: dice.seed(),
@@ -3023,6 +2981,7 @@ pub(super) fn canyon(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
         near_water: None,
         horizon: Some(horizon(reach)),
         snow_line: None,
+        snowpack: None,
         pond: None,
         growth: 0.15,
         seed: dice.seed(),
@@ -3099,11 +3058,15 @@ fn terrace_vantage(survey: &Survey<'_>, dice: &mut Dice, terrace: f64, rise: f64
 fn canyon_scene(stage: &mut Stage, dice: &mut Dice, land: &Land, vantage: Vantage) -> Option<Look> {
     stage.keep_open((vantage.eye.x, vantage.eye.z), 4.0)?;
     let count = dice.count(40, 90);
-    strew(
+    strewn::strew(
         stage,
         dice,
         (land, &vantage),
-        (count, (0.2, 3.2), (4.0, 120.0), 0.8),
+        Strewing {
+            boulders: (count, (0.2, 3.2)),
+            reach: (4.0, 120.0),
+            spread: 0.8,
+        },
         &lies_still,
     )?;
     // Olives and scrub on the benches, and along the watercourses.
@@ -3197,6 +3160,7 @@ pub(super) fn valley(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
         near_water: None,
         horizon: Some(horizon(reach)),
         snow_line: None,
+        snowpack: None,
         pond: None,
         growth: 1.0,
         seed: dice.seed(),
@@ -3262,11 +3226,15 @@ fn valley_scene(stage: &mut Stage, dice: &mut Dice, land: &Land, vantage: Vantag
     });
     let count = dice.count(8, 24);
     let riverside = |lie: &Lie| lies_still(lie) && lie.wet > 0.3;
-    strew(
+    strewn::strew(
         stage,
         dice,
         (land, &vantage),
-        (count, (0.2, 1.4), (6.0, 200.0), 1.0),
+        Strewing {
+            boulders: (count, (0.2, 1.4)),
+            reach: (6.0, 200.0),
+            spread: 1.0,
+        },
         &riverside,
     )?;
     let weather = weather::outdoors(stage, dice, &MEADOW, vantage.heading)?;
@@ -3349,6 +3317,7 @@ pub(super) fn stream(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
         }),
         horizon: Some(horizon(reach)),
         snow_line: None,
+        snowpack: None,
         pond: None,
         growth: 1.0,
         seed: dice.seed(),

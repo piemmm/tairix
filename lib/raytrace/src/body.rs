@@ -1,8 +1,9 @@
-//! The sun and the full moon as they are seen from the Earth: how large
-//! their discs are, how bright and what colour their light is, and how the
-//! sun's disc darkens toward its edge.
+//! The sun and the moon as they are seen from the Earth: how large their
+//! discs are, how bright and what colour their light is, how the sun's disc
+//! darkens toward its edge, and how the moon waxes and wanes, its dark part
+//! lit by the Earth.
 
-use core::f64::consts::LN_10;
+use core::f64::consts::{LN_10, PI};
 
 use tairix_util::mathf;
 
@@ -35,6 +36,14 @@ const MOON_DISTANCE: f64 = 384_400.0;
 /// Spectral Irradiance of the Moon", 2005, version 311g) at 3° of phase,
 /// fitted by a line over its bands from 405 to 745 nm.
 const LUNAR_TINT: Vec3 = Vec3::new(1.187, 1.0, 0.842);
+
+/// The Earth's geometric albedo, its radius in kilometres, and so the share
+/// of the sunlight the full Earth sends the moon (Allen's Astrophysical
+/// Quantities): what lights the moon's dark part, and the colour it is,
+/// bluer than the sunlight for the air and the seas that send it.
+const EARTH_ALBEDO: f64 = 0.367;
+const EARTH_RADIUS: f64 = 6371.0;
+const EARTHSHINE_TINT: Vec3 = Vec3::new(0.86, 1.0, 1.24);
 
 /// Sunlight's illuminance above the air at its mean distance, in lux
 /// (Darula, Kittler and Gueymard, "Reference luminous solar constant and
@@ -89,21 +98,65 @@ pub(crate) fn sun(toward: Vec3) -> Light {
     )
 }
 
-/// The full moon toward the unit `toward`: sunlight the moon's grey
-/// reflects, the brighter and wider the nearer the moon stands, which is
-/// the higher in the sky. Lit square on, its disc is evenly bright.
-pub(crate) fn full_moon(toward: Vec3) -> Light {
+/// The moon toward the unit `toward`, the sun toward the unit `sun`: the
+/// sunlight its grey reflects, as much as its phase lets it (Allen's phase
+/// law, `0.026|α| + 4·10⁻⁹α⁴` magnitudes fainter than full at a phase of α
+/// degrees), the brighter and wider the nearer the moon stands, which is the
+/// higher in the sky; its lit part facing the sun, and all of it lit by the
+/// Earth, full as the moon sees it at new moon and waning as a Lambert sphere
+/// does.
+pub(crate) fn moon(toward: Vec3, sun: Vec3) -> Light {
     let rise = toward.y;
     let distance = -GROUND * rise
         + mathf::sqrt(MOON_DISTANCE * MOON_DISTANCE - GROUND * GROUND * (1.0 - rise * rise));
     let nearer = MOON_DISTANCE / distance;
-    let share = fainter(FULL_MOON_MAGNITUDE - SUN_MAGNITUDE) * nearer * nearer;
+    // Seen from so far, the sun–moon–Earth angle is all but the elongation's
+    // supplement.
+    let elongation = mathf::acos(toward.dot(sun).clamp(-1.0, 1.0));
+    let degrees = (PI - elongation).to_degrees();
+    // Each as a share of the full moon's radiance: the sunlight the phase
+    // leaves, and the Earth's light, which the moon returns as it does the
+    // full moon's sunlight, both lit and seen square on. Allen's law outruns
+    // the moon's own geometry near new moon, so no part shines brighter than
+    // the full moon would lit as that part is.
+    let waned = fainter(0.026 * degrees + 4e-9 * degrees * degrees * degrees * degrees);
+    let lit = lit_mean(PI - elongation);
+    let sunlit = (waned / lit).min(1.0 / EVENLY_LIT);
+    let earth = EARTH_ALBEDO * (EARTH_RADIUS / MOON_DISTANCE) * (EARTH_RADIUS / MOON_DISTANCE);
+    let gibbous = (mathf::sin(elongation) + (PI - elongation) * mathf::cos(elongation)) / PI;
+    let earthlit = EARTHSHINE_TINT * (earth * gibbous);
+    let mean = Vec3::splat(sunlit * lit) + earthlit;
+    let over_mean = Vec3::new(1.0 / mean.x, 1.0 / mean.y, 1.0 / mean.z);
+    let full = fainter(FULL_MOON_MAGNITUDE - SUN_MAGNITUDE) * nearer * nearer;
     disc(
         toward,
         mathf::asin(MOON_RADIUS / distance),
-        sunlight() * LUNAR_TINT * share,
-        Limb::Even,
+        sunlight() * LUNAR_TINT * mean * full,
+        Limb::Phase {
+            sun,
+            sunlit: over_mean * sunlit,
+            earthlit: earthlit * over_mean,
+        },
     )
+}
+
+/// How brightly the Lommel–Seeliger law lights every part of a full moon's
+/// disc alike.
+const EVENLY_LIT: f64 = 0.5;
+
+/// The mean across a moon's disc, at a phase of `phase` radians, of how
+/// brightly the Lommel–Seeliger law lights it: the full disc's even mean
+/// times the law's integrated phase function, `1 − sin(α/2) tan(α/2)
+/// ln cot(α/4)`.
+fn lit_mean(phase: f64) -> f64 {
+    let half = 0.5 * phase.clamp(0.0, PI - 1e-9);
+    if half < 1e-9 {
+        return EVENLY_LIT;
+    }
+    let quarter = 0.5 * half;
+    let falling =
+        mathf::sin(half) * mathf::tan(half) * mathf::ln(mathf::cos(quarter) / mathf::sin(quarter));
+    EVENLY_LIT * (1.0 - falling).max(0.0)
 }
 
 /// A disc `radius` radians across toward `toward` whose light is

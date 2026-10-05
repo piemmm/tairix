@@ -42,7 +42,7 @@ fn a_rock_is_met_from_outside_whichever_way_it_is_looked_at() {
             let toward = Vec3::new(level * mathf::cos(turn), rise, level * mathf::sin(turn));
             let ray = Ray::new(toward * 5.0, -toward);
             let hit = stone
-                .intersect(&ray, 0.0, f64::INFINITY)
+                .intersect(&ray, (0.0, f64::INFINITY), None)
                 .expect("a closed rock is met");
             assert!(
                 hit.normal.dot(ray.dir) < 0.0,

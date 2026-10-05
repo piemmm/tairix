@@ -334,9 +334,6 @@ impl Relief {
             Self::Waves(waves) => waves.tilt(normal, p, bump.stretch),
             &Self::Grain { depth, scale, seed } => grained(normal, bump, (depth, scale, seed)),
             Self::Bark { bark, depth } => {
-                // The height's slope along the limb and round it is read a
-                // millimetre apart.
-                const STEP: f64 = 1e-3;
                 let along_limb = bump.tangent - normal * bump.tangent.dot(normal);
                 if along_limb.length() < 1e-9 {
                     return tilted(normal);
@@ -350,9 +347,7 @@ impl Relief {
                     bump.girth,
                     (bump.instance, bump.width),
                 );
-                let here = bark.height(&at);
-                let slope_along = (bark.height(&at.moved(STEP, 0.0)) - here) / STEP;
-                let slope_round = (bark.height(&at.moved(0.0, STEP)) - here) / STEP;
+                let (_, slope_along, slope_round) = bark.sloped(&at);
                 let slope = (along_limb * slope_along + round * slope_round) * *depth;
                 let steep = slope.length();
                 let slope = if steep > STEEPEST {

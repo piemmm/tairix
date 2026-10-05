@@ -34,8 +34,9 @@ use tairix_util::{fallible, mathf};
 use crate::band;
 use crate::channel::{self, Banked, Form, Section, Station, BROADEST};
 use crate::course::{smoothed, Courses, Mark, Nearest, Reach};
-use crate::heightfield::{apart, Heightfield, Sealing, ABSENT};
+use crate::heightfield::{apart, Attributes, Heightfield, Sealing, ABSENT};
 use crate::noise::{fbm2, noise2, ridged2, smoothstep};
+use crate::snow::{self, Snowpack};
 use crate::terrain::Terrain;
 use crate::vector::{byte, power, real, share, single, Vec3};
 
@@ -153,6 +154,8 @@ pub(crate) struct Plan {
     pub(crate) horizon: Option<Horizon>,
     /// The height snow lies from, if any does.
     pub(crate) snow_line: Option<f64>,
+    /// The snow lying over the whole land as the wind laid it, if it does.
+    pub(crate) snowpack: Option<Snowpack>,
     /// A hollow water keeps, sediment never filling it: its middle, and how
     /// far about it the infill spares.
     pub(crate) pond: Option<((f64, f64), f64)>,
@@ -310,6 +313,8 @@ pub(crate) struct Lie {
     pub(crate) path: f64,
     /// How much can grow there, `0.0..=1.0`.
     pub(crate) green: f64,
+    /// How deep snow lies there, in metres.
+    pub(crate) snow: f64,
 }
 
 impl Land {
@@ -402,7 +407,7 @@ fn lie_on(grid: &Heightfield, x: f64, z: f64) -> Lie {
     let height = grid.height_at(x, z);
     let dx = (grid.height_at(x + step, z) - grid.height_at(x - step, z)) / (2.0 * step);
     let dz = (grid.height_at(x, z + step) - grid.height_at(x, z - step)) / (2.0 * step);
-    let [wet, sediment, lane, green] = grid.attributes_at(x, z);
+    let [wet, sediment, lane, green, snow] = grid.attributes_at(x, z);
     let (road, path) = decode_lane(lane);
     Lie {
         height,
@@ -412,6 +417,7 @@ fn lie_on(grid: &Heightfield, x: f64, z: f64) -> Lie {
         road,
         path,
         green,
+        snow: snow::depth_of(snow),
     }
 }
 
@@ -570,6 +576,12 @@ enum Step {
         network: Network,
         router: Router,
     },
+    /// Reading how sheltered from the wind each coarse sample stands, from
+    /// row `row`, where snow lies.
+    Shelter {
+        network: Network,
+        row: usize,
+    },
     /// Filling the far grid.
     Far {
         network: Network,
@@ -648,6 +660,9 @@ pub(crate) struct Build {
     /// The lakes: the water surface standing at or beside each coarse
     /// sample, where one does.
     lakes: Vec<f32>,
+    /// How sheltered from the wind each coarse sample stands, if snow lies
+    /// on the land.
+    shelter: Vec<f64>,
     far: u32,
     /// The finer grids, placed once the scene sites them.
     nests: [Option<Laid>; NESTS],
@@ -680,6 +695,8 @@ const FILL_NS: f64 = 60.0;
 const DROPLET_NS: f64 = 1_040.0;
 const SETTLE_NS: f64 = 50.0;
 const WATER_NS: f64 = 30.0;
+/// A coarse sample's shelter from the wind read, where snow lies.
+const SHELTER_NS: f64 = 280.0;
 
 impl Build {
     /// A land of `plan`, built into the scene's grids `fields`; `None` when
@@ -742,6 +759,7 @@ impl Build {
             deltas: Vec::new(),
             crossings: Vec::new(),
             lakes: Vec::new(),
+            shelter: Vec::new(),
             far: fields.far,
             nests,
             water: fields.water,
@@ -765,7 +783,11 @@ impl Build {
             .horizon
             .map_or(0.0, |horizon| vertices(horizon.cells) * RELIEF_NS);
         let pass = real(self.square.area()) * WEAR_NS;
-        let worn = relief + horizon + pass * (f64::from(self.plan.wear.passes) + 1.0);
+        let sheltered = f64::from(u8::from(self.plan.snowpack.is_some()))
+            * real(self.square.area())
+            * SHELTER_NS;
+        let read = relief + horizon + pass * (f64::from(self.plan.wear.passes) + 1.0);
+        let worn = read + sheltered;
         let far_side = self.plan.cells.1 + 1;
         let far = vertices(self.plan.cells.1);
         let (far_fill, far_drops, far_settle) =
@@ -792,11 +814,7 @@ impl Build {
         };
         let sited = worn + far_fill + far_drops + far_settle;
         let laid = sited + nests_before(NESTS);
-        let water = if self.water.is_some() {
-            far * WATER_NS
-        } else {
-            0.0
-        };
+        let water = f64::from(u8::from(self.water.is_some())) * far * WATER_NS;
         let (near_side, near_water) = self.plan.near_water.map_or((1, 0.0), |near| {
             (near.cells + 1, vertices(near.cells) * WATER_NS)
         });
@@ -828,7 +846,8 @@ impl Build {
                 5.0,
                 f64::from(u8::from(*settle)).midpoint(coarse(*row)),
             ),
-            Step::Waters { .. } | Step::Road { .. } => worn,
+            Step::Waters { .. } | Step::Road { .. } => read,
+            Step::Shelter { row, .. } => read + sheltered * share(*row, coarse_side),
             Step::Far { row, .. } => worn + far_fill * share(*row, far_side),
             Step::FarDroplets { erosion, .. } => worn + far_fill + far_drops * ran(erosion),
             Step::FarSettle { row, .. } => {
@@ -1087,6 +1106,7 @@ impl Build {
             } => self.slumping(pass, row, (before, sheds), settle)?,
             Step::Waters { network } => self.reading_waters(network)?,
             Step::Road { network, router } => self.routing_road(network, router)?,
+            Step::Shelter { network, row } => self.sheltering(network, row, runner)?,
             Step::Far { network, row } => self.filling_far(fields, network, row, runner)?,
             Step::FarDroplets {
                 erosion,
@@ -1339,7 +1359,7 @@ impl Build {
     fn reading_waters(&mut self, network: Network) -> Option<Step> {
         self.waters(&network)?;
         let Some(ends) = self.plan.road.and_then(|roadway| self.road_ends(roadway)) else {
-            return Some(Step::Far { network, row: 0 });
+            return Some(self.toward_far(network));
         };
         let mut router = Router::new(self.square.area()).ok()?;
         router
@@ -1357,10 +1377,49 @@ impl Build {
             Routed::Pending => Some(Step::Road { network, router }),
             Routed::Found(path) => {
                 self.grade_road(&path)?;
-                Some(Step::Far { network, row: 0 })
+                Some(self.toward_far(network))
             }
-            Routed::Unreachable => Some(Step::Far { network, row: 0 }),
+            Routed::Unreachable => Some(self.toward_far(network)),
         }
+    }
+
+    /// The far grid begun, once how sheltered the land stands from the wind
+    /// is read if snow lies on it.
+    fn toward_far(&self, network: Network) -> Step {
+        if self.plan.snowpack.is_some() {
+            Step::Shelter { network, row: 0 }
+        } else {
+            Step::Far { network, row: 0 }
+        }
+    }
+
+    /// A unit of the coarse grid's shelter from the wind read from `row`,
+    /// and the far grid begun once all of it is.
+    fn sheltering(&mut self, network: Network, row: usize, runner: &dyn JobRunner) -> Option<Step> {
+        let Some(pack) = self.plan.snowpack else {
+            return Some(Step::Far { network, row: 0 });
+        };
+        let side = self.square.side() as usize;
+        let mut shelter = core::mem::take(&mut self.shelter);
+        if shelter.is_empty() {
+            shelter = fallible::filled(side * side, 0.0)?;
+        }
+        let end = (row + UNIT_ROWS * 2 * runner.width().max(1)).min(side);
+        let (origin, step) = (self.origin, self.step);
+        let ground = |x: f64, z: f64| self.worn(x, z);
+        let rows = shelter.get_mut(row * side..end * side)?;
+        band::for_each(runner, rows, (row, side), &|row, band| {
+            let z = origin.1 + real(row) * step;
+            for (column, slot) in band.iter_mut().enumerate() {
+                *slot = pack.shelter(&ground, (origin.0 + real(column) * step, z));
+            }
+        });
+        self.shelter = shelter;
+        Some(if end < side {
+            Step::Shelter { network, row: end }
+        } else {
+            Step::Far { network, row: 0 }
+        })
     }
 
     /// A unit of the far grid's rows from `row`, and its droplets readied
@@ -1831,24 +1890,31 @@ impl Build {
 
     /// The worn land's height at `(x, z)`, and its slope along x and z.
     fn worn_sloped(&self, x: f64, z: f64) -> (f64, f64, f64) {
+        self.coarse_spline(&self.height, (x, z))
+    }
+
+    /// What `values`, one to each coarse sample, read at `(x, z)` through a
+    /// Catmull–Rom patch so no crease of the coarse cells shows, and its rate
+    /// of change along x and z; nought where it holds no value.
+    fn coarse_spline(&self, values: &[f64], (x, z): (f64, f64)) -> (f64, f64, f64) {
         let side = self.square.side() as usize;
         let at = |column: i64, row: i64| {
             let clamp = |value: i64| {
                 usize::try_from(value.clamp(0, i64::try_from(side).unwrap_or(1) - 1)).unwrap_or(0)
             };
-            self.height
+            values
                 .get(clamp(row) * side + clamp(column))
                 .copied()
                 .unwrap_or(0.0)
         };
-        let (height, du, dv) = catmull_rom_2d(
+        let (value, du, dv) = catmull_rom_2d(
             &at,
             (
                 (x - self.origin.0) / self.step,
                 (z - self.origin.1) / self.step,
             ),
         );
-        (height, du / self.step, dv / self.step)
+        (value, du / self.step, dv / self.step)
     }
 
     /// Hold the rows `rows` of `field` level in the relief's clearing, if it
@@ -2176,7 +2242,7 @@ impl Build {
         }
         let side = field.side();
         let ((origin_x, origin_z), step) = field.placing();
-        let mut values = fallible::filled(rows.len() * side, (0.0f32, [0u8; 4]))?;
+        let mut values = fallible::filled(rows.len() * side, (0.0f32, Attributes::default()))?;
         let far = self.far_laid();
         band::for_each(runner, &mut values, (rows.start, side), &|row, band| {
             let z = origin_z + real(row) * step;
@@ -2200,7 +2266,7 @@ impl Build {
     }
 
     /// The far grid's vertex at `(x, z)`, its neighbours `step` away.
-    fn far_vertex(&self, network: &Network, (x, z): (f64, f64), step: f64) -> (f32, [u8; 4]) {
+    fn far_vertex(&self, network: &Network, (x, z): (f64, f64), step: f64) -> (f32, Attributes) {
         let (worn, dx, dz) = self.worn_sloped(x, z);
         let slope = mathf::hypot(dx, dz);
         // The relief holds its clearing already; what this grid adds to it
@@ -2208,7 +2274,12 @@ impl Build {
         let keep = self.plan.relief.keep(x, z);
         let natural = worn + keep * self.detail((x, z), slope, self.band(0));
         let (carved, lie, channel) = self.carve((x, z), natural, step);
-        let height = natural + keep * (self.shelve(carved) - natural);
+        // Snow lies down to the clearing's water, unlike the land's own detail.
+        let snow = self.plan.snowpack.map_or(0.0, |pack| {
+            let (shelter, _, _) = self.coarse_spline(&self.shelter, (x, z));
+            pack.depth(shelter, (x, z), slope)
+        });
+        let height = natural + keep * (self.shelve(carved) - natural) + snow;
         let height = self.plan.relief.pin(x, z, height);
         // Read between the coarse samples, so neither steps from one to the
         // next along the coarse grid's lines.
@@ -2231,6 +2302,7 @@ impl Build {
             wet,
             sediment: sediment + (channel.0 - sediment) * channel.1,
             upright: 1.0 / mathf::sqrt(1.0 + slope * slope),
+            snow,
             ..lie
         };
         (single(height), self.attributes(&lie, height))
@@ -2306,12 +2378,13 @@ impl Build {
     }
 
     /// Encode what a vertex at `height` is like as its four bytes.
-    fn attributes(&self, lie: &Lie, height: f64) -> [u8; 4] {
+    fn attributes(&self, lie: &Lie, height: f64) -> Attributes {
         let steep = smoothstep(0.62, 0.45, lie.upright);
         let snowed = self
             .plan
             .snow_line
-            .map_or(0.0, |line| smoothstep(line - 40.0, line + 40.0, height));
+            .map_or(0.0, |line| smoothstep(line - 40.0, line + 40.0, height))
+            .max(snow::buries(lie.snow, GRASS_BURIED));
         let shore = self
             .plan
             .sea
@@ -2331,6 +2404,7 @@ impl Build {
             byte(0.5 + 0.5 * lie.sediment),
             encode_lane(lie.road, lie.path),
             byte(green),
+            snow::kept(lie.snow),
         ]
     }
 
@@ -2351,7 +2425,7 @@ impl Build {
         let side = grid.side();
         let ((origin_x, origin_z), step) = grid.placing();
         let detail = self.band(level + 1);
-        let mut values = fallible::filled(rows.len() * side, (0.0f32, [0u8; 4]))?;
+        let mut values = fallible::filled(rows.len() * side, (0.0f32, Attributes::default()))?;
         band::for_each(runner, &mut values, (rows.start, side), &|row, band| {
             let z = origin_z + real(row) * step;
             for (column, slot) in band.iter_mut().enumerate() {
@@ -2373,25 +2447,32 @@ impl Build {
         parent: &Heightfield,
         (x, z): (f64, f64),
         (step, detail): (f64, (f64, u32)),
-    ) -> (f64, [u8; 4]) {
+    ) -> (f64, Attributes) {
         let (_, parent_step) = parent.placing();
         let flat = parent.height_at(x, z);
         let (smooth, dx, dz) = cubic_on(parent, (x, z));
         let slope = mathf::hypot(dx, dz);
         let keep = self.plan.relief.keep(x, z);
-        let own = smooth + keep * self.detail((x, z), slope, detail);
+        let [wet, sediment, _, _, snow] = parent.attributes_at(x, z);
+        let lying = snow::depth_of(snow);
+        let windworn = self
+            .plan
+            .snowpack
+            .map_or(0.0, |pack| pack.carved((x, z), lying, step));
+        let own = smooth + keep * self.detail((x, z), slope, detail) + windworn;
         let (carved, lie, channel) = self.carve((x, z), own, step);
         let carved = self
             .plan
             .relief
             .pin(x, z, own + keep * (self.shelve(carved) - own));
-        let height = flat + (carved - flat) * border_blend(laid, (x, z), (parent_step, NEST_BAND));
-        let [wet, sediment, _, _] = parent.attributes_at(x, z);
+        let blend = border_blend(laid, (x, z), (parent_step, NEST_BAND));
+        let height = flat + (carved - flat) * blend;
         let sediment = (2.0 * sediment - 1.0).max(lie.sediment);
         let lie = Lie {
             wet: wet.max(lie.wet),
             sediment: sediment + (channel.0 - sediment) * channel.1,
             upright: 1.0 / mathf::sqrt(1.0 + slope * slope),
+            snow: lying + windworn * blend,
             ..lie
         };
         (height, self.attributes(&lie, height))
@@ -2610,6 +2691,10 @@ pub(crate) const DAMP_BANK: f64 = 0.55;
 
 /// How much of its bars' tops pioneer plants take, at most.
 const PIONEERS: f64 = 0.3;
+
+/// How tall the winter grass stands that snow buries, in metres: thinner
+/// snow than this leaves its tops showing.
+const GRASS_BURIED: f64 = 0.14;
 
 /// How far up a river's banks its floods thin the plants, as a share of its
 /// breadth, and how far apart the turns of that fringe's edge lie, in
@@ -2863,7 +2948,7 @@ fn cubic_on(grid: &Heightfield, (x, z): (f64, f64)) -> (f64, f64, f64) {
 
 /// Set `field`'s vertices from row `start` on to `values`, each a height and
 /// the attributes there.
-fn store(field: &mut Heightfield, start: usize, values: &[(f32, [u8; 4])]) {
+fn store(field: &mut Heightfield, start: usize, values: &[(f32, Attributes)]) {
     let rows = values.len().div_ceil(field.side().max(1));
     let (heights, attributes) = field.rows_mut(start..start + rows);
     for (index, &(height, kept)) in values.iter().enumerate() {
@@ -2920,7 +3005,7 @@ fn catmull_rom_2d(at: &dyn Fn(i64, i64) -> f64, (across, down): (f64, f64)) -> (
 /// carried across it say: what they wore away or laid down, and where their
 /// water ran.
 fn settle_row(
-    (heights, attributes): (&[f32], &mut [[u8; 4]]),
+    (heights, attributes): (&[f32], &mut [Attributes]),
     (before, flux): (&[f32], &[f32]),
     roughness: f64,
 ) {

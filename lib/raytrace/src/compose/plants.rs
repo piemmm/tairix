@@ -14,10 +14,14 @@ use tairix_util::{fallible, mathf};
 
 use super::{rgb, Dice, Recipe, Stage};
 use crate::bark::{Bark, BarkKind};
-use crate::deadwood::Top;
-use crate::grass::{Cover, Grass, GrassKind, Habit, Head, Lawn, Litter, Seen, Weeds, GRASS_KINDS};
+use crate::deadwood::{Decay, Fungus, Habit, Sprouting, Top, Woods};
+use crate::fracture::Grain;
+use crate::grass::{
+    Cover, Grass, GrassKind, Habit as Tufting, Head, Lawn, Litter, Seen, Weeds, GRASS_KINDS,
+};
 use crate::leaf::Outline;
 use crate::material::{Finish, Material, Relief};
+use crate::noise::smoothstep;
 use crate::pigment::{Blades, Crowd, Foliage, Pigment};
 use crate::shade::{Rect, Sampling, Shade, Shades};
 use crate::shape::Shape;
@@ -203,7 +207,9 @@ pub(super) const DEAD_VARIANTS: usize = 3;
 
 /// What a kind leaves dead: its fallen trunks, each its length and how thick
 /// it is at its foot; its stumps, each how tall and thick; and its standing
-/// dead. Their bark is weathered and mossed.
+/// dead. They have lain as long as the wood's dead of their kind have, their
+/// bark weathered, mossed and sloughing, their hearts rotting, rot fruiting
+/// on them in brackets, and a broadleaf's stumps sending up shoots.
 #[derive(Copy, Clone, Debug)]
 pub(super) struct Dead {
     pub(super) logs: [(u32, f64, f64); DEAD_VARIANTS],
@@ -220,9 +226,8 @@ impl Dead {
         dice: &mut Dice,
         (kind, season): (Kind, Season),
     ) -> Option<Self> {
-        let bark = dead_bark_material(stage, dice, (kind, season))?;
-        let wood = dead_wood_material(stage)?;
-        let (bark_stock, wood_stock) = (u16::try_from(bark).ok()?, u16::try_from(wood).ok()?);
+        let age = dice.range(0.15, 0.95);
+        let rotting = Rotting::new(stage, dice, (kind, season), age)?;
         let species = species(kind);
         let typical = f64::midpoint(species.height.0, species.height.1);
         let girth = typical * species.girth;
@@ -236,9 +241,9 @@ impl Dead {
             let recipe = Recipe::Log {
                 length,
                 radius,
-                bark: bark_stock,
-                wood: wood_stock,
+                woods: rotting.torn,
                 thrown: dice.chance(0.5),
+                decay: rotting.decay(dice),
                 seed: dice.wide(),
             };
             *log = (stage.plan(&recipe)?, length, radius);
@@ -246,16 +251,26 @@ impl Dead {
         let mut stumps = [(0, 0.0, 0.0); DEAD_VARIANTS];
         for stump in &mut stumps {
             let (height, radius) = (dice.range(0.25, 1.1), girth * dice.range(0.7, 1.2));
+            let top = if dice.chance(0.5) {
+                Top::Snapped
+            } else {
+                Top::Sawn
+            };
+            let decay = rotting.decay(dice);
+            // A cut stump sprouts more readily than a snapped one, and a
+            // rotting one not at all.
+            let sprouts = match top {
+                Top::Sawn => 0.5,
+                Top::Snapped => 0.3,
+            } * (1.0 - smoothstep(0.5, 0.75, decay.age));
+            let sprouting = rotting.sprouting.filter(|_| dice.chance(sprouts));
             let recipe = Recipe::Stump {
                 height,
                 radius,
-                top: if dice.chance(0.5) {
-                    Top::Snapped
-                } else {
-                    Top::Sawn
-                },
-                bark: bark_stock,
-                wood: wood_stock,
+                top,
+                woods: rotting.sawn,
+                decay,
+                sprouting,
                 seed: dice.wide(),
             };
             *stump = (stage.plan(&recipe)?, height, radius);
@@ -264,7 +279,7 @@ impl Dead {
             logs,
             stumps,
             snags: grow(stage, dice, (kind, Stand::Dead), season)?,
-            bark,
+            bark: rotting.bark,
         })
     }
 
@@ -279,6 +294,191 @@ impl Dead {
     ) -> Option<()> {
         lay_dead(stage, self.bark, (prototype, scale), (pose, key))
     }
+}
+
+/// How a kind's dead rot in a wood: the bark they wear, the materials their
+/// torn and their sawn wood is made in, how long they have lain, the fungus
+/// fruiting on them, and the shoots a broadleaf's stumps send up.
+#[derive(Copy, Clone, Debug)]
+struct Rotting {
+    bark: usize,
+    torn: Woods,
+    sawn: Woods,
+    age: f64,
+    fungus: Fungus,
+    sprouting: Option<Sprouting>,
+}
+
+impl Rotting {
+    /// How `kind`'s dead rot in `season`, having lain about `age`, in
+    /// materials of `stage`'s; `None` when the stage will not hold them.
+    fn new(
+        stage: &mut Stage,
+        dice: &mut Dice,
+        (kind, season): (Kind, Season),
+        age: f64,
+    ) -> Option<Self> {
+        let bark = dead_bark_material(stage, dice, (kind, season), age)?;
+        let stock = u16::try_from(bark).ok()?;
+        let rot = u16::try_from(rot_material(stage, dice)?).ok()?;
+        // The soil a thrown trunk tore up.
+        let edge = u16::try_from(edge_material(stage, dice)?).ok()?;
+        // Dark topsoil flecked with the paler subsoil and grit it held.
+        let soil = u16::try_from(
+            stage.material(
+                Material::new(
+                    Pigment::Speckle {
+                        base: rgb(0x34_28_1E),
+                        flecks: [rgb(0x5A_48_36), rgb(0x22_1A_14)],
+                        scale: 40.0,
+                        seed: dice.seed(),
+                    },
+                    Finish::Matte,
+                )
+                .with_relief(Relief::grain(0.45, 30.0, dice.seed())),
+            )?,
+        )
+        .ok()?;
+        let torn = Woods {
+            bark: stock,
+            wood: u16::try_from(dead_wood_material(stage, age)?).ok()?,
+            rot,
+            edge,
+            soil,
+        };
+        // A sawn face shows the tree's rings about its own axis, tan where it
+        // is fresh, weathering grey-brown and darker.
+        let weathered = smoothstep(0.0, 0.6, age);
+        let rings = stage.material(
+            Material::new(
+                Pigment::Wood {
+                    light: rgb(0x9A_86_6A).lerp(rgb(0x6A_62_58), weathered),
+                    dark: rgb(0x6E_5A_44).lerp(rgb(0x4A_44_3C), weathered),
+                    scale: dice.range(150.0, 300.0),
+                    seed: dice.seed(),
+                },
+                Finish::Matte,
+            )
+            .with_relief(Relief::grain(0.05, 90.0, dice.seed())),
+        )?;
+        let sawn = Woods {
+            wood: u16::try_from(rings).ok()?,
+            ..torn
+        };
+        Some(Self {
+            bark,
+            torn,
+            sawn,
+            age,
+            fungus: fungus(stage, dice, kind)?,
+            sprouting: if coppices(kind) {
+                Some(sprouts(stage, dice, (kind, season))?)
+            } else {
+                None
+            },
+        })
+    }
+
+    /// One piece's decay, drawn about the wood's: older or younger by a few
+    /// seasons, and fruiting the likelier the longer it has lain.
+    fn decay(&self, dice: &mut Dice) -> Decay {
+        let age = (self.age + dice.range(-0.2, 0.2)).clamp(0.0, 1.0);
+        Decay {
+            age,
+            fungus: dice.chance(0.15 + 0.6 * age).then_some(self.fungus),
+        }
+    }
+}
+
+/// The bracket fungus rot fruits in on `kind`'s dead, as materials of
+/// `stage`'s: a birch's own polypore, pale and thick, or elsewhere as often
+/// turkey tail's thin banded tiers as an artist's bracket's woody shelves;
+/// `None` when the stage will not hold them.
+fn fungus(stage: &mut Stage, dice: &mut Dice, kind: Kind) -> Option<Fungus> {
+    let (habit, [first, second], margin, pores) = if kind == Kind::Birch {
+        (
+            Habit::Thick,
+            [0xB8_A0_80, 0xC8_B4_98],
+            0xD8_CC_B4,
+            0xF2_EE_E4,
+        )
+    } else if dice.chance(0.6) {
+        let zones = dice.pick(&[
+            [0x6A_5A_4A, 0x9A_8E_7A],
+            [0x5A_4A_3A, 0xA8_8A_5A],
+            [0x4E_56_5E, 0x8A_8E_88],
+        ])?;
+        (Habit::Thin, zones, 0xE8_E0_CC, 0xD8_D0_BC)
+    } else {
+        (
+            Habit::Thick,
+            [0x006A_4A32, 0x8A_6A_4A],
+            0xE0_D8_C8,
+            0xF0_EC_E0,
+        )
+    };
+    let made = |colour: u32, stage: &mut Stage| {
+        u16::try_from(stage.material(Material::new(Pigment::Solid(rgb(colour)), Finish::Matte))?)
+            .ok()
+    };
+    Some(Fungus {
+        habit,
+        zones: [made(first, stage)?, made(second, stage)?],
+        margin: made(margin, stage)?,
+        pores: made(pores, stage)?,
+    })
+}
+
+/// Whether `kind`'s stumps send up shoots from their foot, as a broadleaf's
+/// do.
+fn coppices(kind: Kind) -> bool {
+    !matches!(
+        kind,
+        Kind::Pine | Kind::Spruce | Kind::Palm | Kind::Saguaro | Kind::Fern
+    )
+}
+
+/// The young shoots `kind`'s stumps send up from their foot in `season`, in
+/// their own bark, leafy but in winter; `None` when the stage will not hold
+/// their materials.
+fn sprouts(
+    stage: &mut Stage,
+    dice: &mut Dice,
+    (kind, season): (Kind, Season),
+) -> Option<Sprouting> {
+    let young = Bark {
+        kind: BarkKind::Smooth,
+        light: rgb(0x6A_5A_3A),
+        dark: rgb(0x3E_34_22),
+        accent: rgb(0x5A_6A_3A),
+        rise: 0.0,
+        snow: if season == Season::Winter { 0.6 } else { 0.0 },
+        moss: 0.0,
+        bare: 0.0,
+        seed: dice.seed(),
+    };
+    let bark = stage.material(Material::new(
+        Pigment::Bark(young),
+        Finish::Coated { roughness: 0.7 },
+    ))?;
+    let leaves = if season == Season::Winter || species(kind).leafing.per_twig == 0 {
+        None
+    } else {
+        Some(
+            u16::try_from(stage.material(Material::new(
+                Pigment::Foliage(foliage(kind, season)),
+                Finish::Leaf {
+                    translucency: translucency(kind),
+                },
+            ))?)
+            .ok()?,
+        )
+    };
+    Some(Sprouting {
+        bark: u16::try_from(bark).ok()?,
+        leaves,
+        leafing: species(kind).leafing,
+    })
 }
 
 /// How many branches, and trunks, of a kind a stream's floods leave in it to
@@ -312,21 +512,24 @@ impl Drift {
         dice: &mut Dice,
         (kind, season): (Kind, Season),
     ) -> Option<Self> {
-        let bark = dead_bark_material(stage, dice, (kind, season))?;
-        let (stock, wood) = (
-            u16::try_from(bark).ok()?,
-            u16::try_from(dead_wood_material(stage)?).ok()?,
-        );
+        // What the floods carried was broken from the living or lately
+        // dead: weathered, but not yet rotten.
+        let age = dice.range(0.1, 0.4);
+        let rotting = Rotting::new(stage, dice, (kind, season), age)?;
         let species = species(kind);
         let typical = f64::midpoint(species.height.0, species.height.1);
         let girth = typical * species.girth;
+        let bark = rotting.bark;
         let mut log = |stage: &mut Stage, (length, radius): (f64, f64)| {
             let recipe = Recipe::Log {
                 length,
                 radius,
-                bark: stock,
-                wood,
+                woods: rotting.torn,
                 thrown: false,
+                decay: Decay {
+                    age: rotting.age,
+                    fungus: None,
+                },
                 seed: dice.wide(),
             };
             Some(Piece {
@@ -384,14 +587,22 @@ impl Drift {
     }
 }
 
-/// The weathered, mossed bark `kind`'s dead wear in `season`, as a material
-/// of `stage`'s; `None` when the stage will not hold it.
+/// The weathered, mossed bark `kind`'s dead wear in `season`, having lain
+/// `age`, as a material of `stage`'s; `None` when the stage will not hold
+/// it.
 fn dead_bark_material(
     stage: &mut Stage,
     dice: &mut Dice,
     (kind, season): (Kind, Season),
+    age: f64,
 ) -> Option<usize> {
-    let pattern = dead_bark(kind, dice.seed());
+    // Bark loosens once the wood beneath has begun to rot, and sloughs away;
+    // moss takes it the longer it lies.
+    let pattern = Bark {
+        bare: sloughs(kind) * smoothstep(0.2, 0.9, age),
+        moss: 0.5 * smoothstep(0.3, 0.95, age),
+        ..dead_bark(kind, dice.seed())
+    };
     let snow = if season == Season::Winter { 0.85 } else { 0.0 };
     stage.material(
         Material::new(
@@ -408,10 +619,40 @@ fn dead_bark_material(
     )
 }
 
-/// The wood where dead wood broke or was sawn, weathered grey, as a
-/// material of `stage`'s; `None` when the stage will not hold it.
-fn dead_wood_material(stage: &mut Stage) -> Option<usize> {
-    stage.material(Material::new(Pigment::Solid(rgb(0x7E_7464)), Finish::Matte))
+/// The rotten wood a dead heart crumbles to, as a material of `stage`'s;
+/// `None` when the stage will not hold it.
+fn rot_material(stage: &mut Stage, dice: &mut Dice) -> Option<usize> {
+    stage.material(
+        Material::new(Pigment::Solid(rgb(0x3A_28_1A)), Finish::Matte).with_relief(Relief::grain(
+            0.12,
+            60.0,
+            dice.seed(),
+        )),
+    )
+}
+
+/// The bark's own edge where it was torn or cut through, darker than the
+/// bark's face or the wood within, as a material of `stage`'s; `None` when
+/// the stage will not hold it.
+fn edge_material(stage: &mut Stage, dice: &mut Dice) -> Option<usize> {
+    stage.material(
+        Material::new(Pigment::Solid(rgb(0x2A_20_18)), Finish::Matte).with_relief(Relief::grain(
+            0.2,
+            70.0,
+            dice.seed(),
+        )),
+    )
+}
+
+/// The wood where dead wood broke, `age` as long as it has lain: tan where
+/// it is fresh, weathering grey-brown; as a material of `stage`'s, `None`
+/// when the stage will not hold it.
+fn dead_wood_material(stage: &mut Stage, age: f64) -> Option<usize> {
+    let colour = rgb(0x8A_74_58).lerp(rgb(0x5E_56_4C), smoothstep(0.0, 0.6, age));
+    stage.material(
+        Material::new(Pigment::Solid(colour), Finish::Matte)
+            .with_relief(Relief::grain(0.15, 120.0, 0x3d)),
+    )
 }
 
 /// Lay dead wood `prototype`, `scale` times its size, in `bark`, posed at
@@ -552,9 +793,16 @@ fn grow(
             translucency: translucency(kind),
         },
     ))?;
+    // Where its limbs snapped, the wood within and the bark's torn edge.
+    let grain = Grain {
+        wood: u16::try_from(dead_wood_material(stage, 0.4)?).ok()?,
+        rot: u16::try_from(rot_material(stage, dice)?).ok()?,
+        edge: u16::try_from(edge_material(stage, dice)?).ok()?,
+    };
     let stock = Stock {
         bark: u16::try_from(bark).ok()?,
         leaves: u16::try_from(leaves).ok()?,
+        grain,
     };
     let mut prototypes = [0u32; VARIANTS];
     let mut heights = [0.0f64; VARIANTS];
@@ -641,11 +889,15 @@ fn stood(kind: Kind, stand: Stand) -> Species {
             species.stubs *= 1.5;
             species.depth = 2;
             species.evergreen = false;
+            species.snapped = true;
             if let Some(trunk) = species.levels.get_mut(0) {
                 trunk.taper *= 0.5;
             }
+            // Its limbs broken back to a third of their length, as thick
+            // where they broke as a third of the way out along a whole one.
             if let Some(limbs) = species.levels.get_mut(1) {
                 limbs.length.0 *= 0.35;
+                limbs.taper *= 0.35;
                 limbs.branches *= 0.5;
             }
         }
@@ -759,6 +1011,7 @@ fn species(kind: Kind) -> Species {
                 toward_light: 0.6,
             },
             evergreen: false,
+            snapped: false,
         },
         Kind::Maple | Kind::Cherry => Species {
             envelope: Envelope::Spherical,
@@ -822,6 +1075,7 @@ fn species(kind: Kind) -> Species {
                 toward_light: 0.7,
             },
             evergreen: false,
+            snapped: false,
         },
         Kind::Birch => Species {
             envelope: Envelope::TendFlame,
@@ -877,6 +1131,7 @@ fn species(kind: Kind) -> Species {
                 toward_light: 0.5,
             },
             evergreen: false,
+            snapped: false,
         },
         Kind::Beech => Species {
             envelope: Envelope::Spherical,
@@ -932,6 +1187,7 @@ fn species(kind: Kind) -> Species {
                 toward_light: 0.85,
             },
             evergreen: false,
+            snapped: false,
         },
         Kind::Willow => Species {
             envelope: Envelope::Hemispherical,
@@ -987,6 +1243,7 @@ fn species(kind: Kind) -> Species {
                 toward_light: 0.2,
             },
             evergreen: false,
+            snapped: false,
         },
         Kind::Poplar => Species {
             envelope: Envelope::TaperedCylindrical,
@@ -1042,6 +1299,7 @@ fn species(kind: Kind) -> Species {
                 toward_light: 0.5,
             },
             evergreen: false,
+            snapped: false,
         },
         Kind::Pine => Species {
             envelope: Envelope::TendFlame,
@@ -1097,6 +1355,7 @@ fn species(kind: Kind) -> Species {
                 toward_light: 0.5,
             },
             evergreen: true,
+            snapped: false,
         },
         Kind::Spruce => Species {
             envelope: Envelope::Conical,
@@ -1152,6 +1411,7 @@ fn species(kind: Kind) -> Species {
                 toward_light: 0.3,
             },
             evergreen: true,
+            snapped: false,
         },
         Kind::Olive => Species {
             envelope: Envelope::Hemispherical,
@@ -1207,6 +1467,7 @@ fn species(kind: Kind) -> Species {
                 toward_light: 0.5,
             },
             evergreen: true,
+            snapped: false,
         },
         Kind::Hazel
         | Kind::Box
@@ -1286,6 +1547,7 @@ fn shrub(kind: Kind) -> Species {
             toward_light: 0.6,
         },
         evergreen: !matches!(kind, Kind::Hazel),
+        snapped: false,
     }
 }
 
@@ -1315,21 +1577,37 @@ fn bark(kind: Kind, seed: u32) -> Bark {
         rise,
         snow: 0.0,
         moss: 0.0,
+        bare: 0.0,
         seed,
     }
 }
 
-/// `kind`'s bark on its dead: weathered grey, gone dark in its cracks, and
-/// taken by moss.
+/// `kind`'s bark on its dead: greyed a little by the weather and gone dark in
+/// its cracks.
 fn dead_bark(kind: Kind, seed: u32) -> Bark {
     let live = bark(kind, seed);
     let weathered = rgb(0x7E_7A_70);
     Bark {
-        light: live.light.lerp(weathered, 0.45),
+        light: live.light.lerp(weathered, 0.25),
         dark: live.dark * 0.8,
         accent: live.accent.lerp(rgb(0x8A_94_6A), 0.5),
-        moss: 0.85,
         ..live
+    }
+}
+
+/// How much of `kind`'s bark has sloughed from its dead by the time they
+/// have all but rotted: a thick, corky bark stays on in its plates for years,
+/// a birch's outlasts the wood it wraps, a thin one falls away in sheets.
+fn sloughs(kind: Kind) -> f64 {
+    match kind {
+        Kind::Birch => 0.1,
+        Kind::Oak | Kind::Olive => 0.25,
+        Kind::Palm | Kind::Saguaro | Kind::Fern | Kind::Box | Kind::Heather | Kind::Gorse => 0.3,
+        Kind::Cherry => 0.4,
+        Kind::Maple | Kind::Hazel => 0.45,
+        Kind::Pine | Kind::Willow | Kind::Poplar => 0.5,
+        Kind::Spruce => 0.65,
+        Kind::Beech => 0.75,
     }
 }
 
@@ -1465,7 +1743,7 @@ const RYE: Sort = Sort {
         tufted: 0.45,
         stems: 0.1,
         head: Head::Spike,
-        habit: Habit::Open,
+        habit: Tufting::Open,
         share: 1.0,
     },
     leaves: [0x3E_6E_26, 0x4E_7E_2E],
@@ -1495,7 +1773,7 @@ const FESCUE: Sort = Sort {
         tufted: 0.2,
         stems: 0.04,
         head: Head::Plume,
-        habit: Habit::Dry,
+        habit: Tufting::Dry,
         share: 0.5,
     },
     leaves: [0x4A_6A_3A, 0x56_76_42],
@@ -1512,7 +1790,7 @@ const BENT: Sort = Sort {
         tufted: 0.3,
         stems: 0.16,
         head: Head::Plume,
-        habit: Habit::Trodden,
+        habit: Tufting::Trodden,
         share: 0.35,
     },
     leaves: [0x56_78_34, 0x66_84_3C],
@@ -1529,7 +1807,7 @@ const HAIR_GRASS: Sort = Sort {
         tufted: 1.0,
         stems: 0.08,
         head: Head::Plume,
-        habit: Habit::Wet,
+        habit: Tufting::Wet,
         share: 0.6,
     },
     leaves: [0x3A_58_26, 0x46_62_2C],
@@ -1546,7 +1824,7 @@ const RUSH: Sort = Sort {
         tufted: 0.9,
         stems: 0.05,
         head: Head::Spike,
-        habit: Habit::Wet,
+        habit: Tufting::Wet,
         share: 0.45,
     },
     leaves: [0x30_50_20, 0x3A_5A_24],
@@ -1563,7 +1841,7 @@ const MARRAM: Sort = Sort {
         tufted: 0.7,
         stems: 0.1,
         head: Head::Spike,
-        habit: Habit::Dry,
+        habit: Tufting::Dry,
         share: 0.7,
     },
     leaves: [0x7A_8A_60, 0x8A_96_6C],
@@ -1580,7 +1858,7 @@ const MOWN: Sort = Sort {
         tufted: 0.05,
         stems: 0.0,
         head: Head::Spike,
-        habit: Habit::Open,
+        habit: Tufting::Open,
         share: 1.0,
     },
     leaves: [0x3A_6E_24, 0x46_7A_2C],

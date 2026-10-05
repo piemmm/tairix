@@ -371,7 +371,7 @@ impl Margins {
             let patch = usize::from(placed.patch);
             let prototype = match sown.planned(patch) {
                 Some(prototype) => prototype,
-                None if stage.plans_more() => sown.plan(stage, patch)?,
+                None if stage.plannable() > 0 => sown.plan(stage, patch)?,
                 // Once the stage plans no more, a patch never planned is
                 // left out.
                 None => continue,

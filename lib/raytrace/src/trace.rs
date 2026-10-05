@@ -808,17 +808,19 @@ impl<'a> Tracer<'a> {
     /// it into.
     fn escaped(&self, ray: &Ray, path: Path, sampler: &mut Sampler) -> Vec3 {
         let sky = &self.scene.sky;
+        let discs = || self.scene.lights.iter().chain(sky.moon.as_ref());
         let seeing = Seeing {
             fine: matches!(path.arrival, Arrival::Seen) && !path.scattered,
             spread: (!path.scattered).then_some(self.pixel_angle + path.cone.spread),
             jitter: sampler.next_1d(),
             air: sampler.next_1d(),
+            occulted: discs().any(|disc| disc.covers(ray.dir, sky)),
         };
         let mut light = sky.radiance(ray.origin, ray.dir, seeing);
         if path.scattered {
             return light;
         }
-        for sun in &self.scene.lights {
+        for sun in discs() {
             let disc = sun.disc(ray.origin, ray.dir, sky);
             if disc.max_element() <= 0.0 {
                 continue;
@@ -979,13 +981,14 @@ impl<'a> Tracer<'a> {
             width,
             stretch: along_view(width, hit.shading, toward_eye),
         };
-        let tilt = material.relief.as_ref().map_or(
-            Tilt {
-                normal: hit.shading,
-                unresolved: 0.0,
-            },
-            |relief| relief.tilt(hit.shading, &bump),
-        );
+        let untilted = Tilt {
+            normal: hit.shading,
+            unresolved: 0.0,
+        };
+        let tilt = match material.relief.as_ref() {
+            Some(relief) if !hit.relieved => relief.tilt(hit.shading, &bump),
+            _ => untilted,
+        };
         let side = if outside { 1.0 } else { -1.0 };
         let surface = Surface {
             point,

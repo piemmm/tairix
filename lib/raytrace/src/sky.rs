@@ -7,6 +7,7 @@ use tairix_util::{fallible, mathf};
 
 use crate::atmosphere::{Arriving, Atmosphere, Bend, Lit, Scattered};
 use crate::cloud::{sunlight_places, Cloudbank, Lighting, SUNLIGHT_LEVELS, SUN_COSINES};
+use crate::light::Light;
 use crate::noise::smoothstep;
 use crate::stars::Starfield;
 use crate::vector::Vec3;
@@ -57,6 +58,8 @@ pub(crate) struct Sky {
     /// them a high deck of cirrus.
     pub(crate) low: Option<Cloudbank>,
     pub(crate) high: Option<Cloudbank>,
+    /// A moon standing in a sky it does not light: by day, or at dusk.
+    pub(crate) moon: Option<Light>,
 }
 
 /// How a ray escaping the scene sees the sky.
@@ -75,6 +78,9 @@ pub(crate) struct Seeing {
     /// In `0.0..1.0`: where along each stretch of the air below the clouds
     /// its shade is judged.
     pub(crate) air: f64,
+    /// Whether the sun's disc or the moon's stands in the way, which hides the
+    /// stars behind it.
+    pub(crate) occulted: bool,
 }
 
 impl Sky {
@@ -193,7 +199,7 @@ impl Sky {
                 light += cloud * through;
                 through *= kept;
             }
-            return light + self.clear(origin, dir, seeing.spread) * through;
+            return light + self.clear(origin, dir, (seeing.spread, seeing.occulted)) * through;
         };
         let sight = atmosphere.sight(dir);
         let (mut light, mut through) = (Vec3::ZERO, 1.0);
@@ -226,7 +232,7 @@ impl Sky {
             light += air * through;
             before = between;
         }
-        let clear = self.clear(origin, dir, seeing.spread);
+        let clear = self.clear(origin, dir, (seeing.spread, seeing.occulted));
         light + (clear - before.light()).max(Vec3::ZERO) * through
     }
 
@@ -359,13 +365,14 @@ impl Sky {
     /// The sky without its clouds: the air's light and, past it, the stars
     /// bright enough to show against it that the air lets through, each where
     /// the air bends its light from.
-    fn clear(&self, origin: Vec3, dir: Vec3, spread: Option<f64>) -> Vec3 {
+    fn clear(&self, origin: Vec3, dir: Vec3, (spread, occulted): (Option<f64>, bool)) -> Vec3 {
         match &self.dome {
             Dome::Air(atmosphere) => {
                 let air = atmosphere.sky(dir);
                 let Some((stars, glimpse)) = self
                     .stars
                     .as_ref()
+                    .filter(|_| !occulted)
                     .and_then(|stars| Some((stars, stars.glimpse(spread, air)?)))
                 else {
                     return air;

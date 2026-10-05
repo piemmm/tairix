@@ -57,8 +57,10 @@ random from a seed, and a tracer that answers what one pixel of one shows.
   preparation is a fixed amount of work a core, whatever the scene holds: a
   band of a grid's rows or of a shade's, a turn of a land's droplet tiles, a
   slice of a prototype's or the scene's hierarchy, a band of a wood's places
-  or a run of their ranking, a few rows of the water's edge's lattice, a
-  hundred or so of the caustics' survey points, a
+  or a run of their ranking, a few rows of the water's edge's lattice, a band
+  of the coarse grid's shelter from the wind where snow lies, a few thousand
+  of a snowball's vertices shaped, a hundred or so of the caustics' survey
+  points, a
   couple of thousand of their beams or a few thousand of their pyramids'
   nodes, 48 steps of a stone's wear, a few rows of a stream's flow, a few rows
   of a radiosity record's hemisphere, a few rows of a cloud
@@ -70,11 +72,25 @@ random from a seed, and a tracer that answers what one pixel of one shows.
 `cargo test -p tairix-raytrace`: every shape and grid met where it lies and
 nearest first; trees of every kind grown sound however they stood, their
 crowns as wide as reckoned, and a frame kept rigid through thousands of
-turns; a trunk holding its girth, flared at its foot but not at a fork's
-arm, gripped by roots and carrying its stubs; bark closing round its limb
+turns; a trunk holding its girth, its foot swelling further toward each
+root than between them, each root leaving from within its lobe with its back
+above the ground and ending buried, and no foot spreading more roots than a
+flare holds lobes; a flare swelling most toward a lobe at the ground, fading
+smoothly to round, never past its most, rising no faster than its bound and
+refusing what is not one; a bole's stubs and a snag's snapped top and limbs
+ending torn, the snag thick where it broke; bark closing round its limb
 with no seam, at its real size on any girth, darker in its fissures, its own
 on every tree, white on a birch over its black foot, orange up a pine, and
-settling far off to its mean, with its relief leaning the right way; the air
+settling far off to its mean, with its relief leaning the right way; bark
+cut in true relief near the eye — never met outside its tube, sunk to its
+depth, its outline ridged, every hit on the cut surface, a shadow wherever a
+ray meets it, a bending limb's joint closed and its free end round, a flared
+foot met where it swells from near, from far off and unseen, and a hit at an
+open end's rim facing out of its side — and a limb far off or too thin to
+have fissured its tube, each bark's steepest bounding how fast it rises; the
+moon waning by its phase with its lit part toward the sun, its dark part
+glowing bluer with the Earth's light, only the Earth's left at new moon, its
+disc bringing its whole light at any phase, and no star shining through it; the air
 lit by the sun only where the sun reaches it, and a meter that holds a sky
 below white but lets the sun blow out; a wood covering the share of ground asked, its gaps opening where its
 lattice holds them, its trees spaced by their crowns with the short beneath
@@ -82,8 +98,31 @@ the tall, sown all about the eye near it and across the view beyond, none
 walling off the view, and a forest standing thousands of trees and its fallen
 among them clear of the eye; the shade crowns cast and the sky they hide, and
 the air beneath them roofed; fallen trunks lying along the ground, thrown or
-snapped, each break torn wood bristling with fibres, and stumps sawn or
-splintered; ferns arching from the ground; reeds and reedmace standing in the
+snapped, each break torn wood bristling with laths, every stub and torn root
+ending in a break, a thrown trunk's plate of soil with its roots torn off
+past its rim, and stumps sawn or splintered, a sawn face ringed in the bark
+it cut through and a snapped top torn jagged, never capped in bark; a break
+fraying no further than its laths and tatters reach, climbing toward where
+its fibres pulled out, facing out everywhere, and hollow and splinterless
+when old; a sawn face checked from its rim and a felled one stepped from
+notch to back cut, an old stump's heart rotted hollow, brackets shelving from
+dead wood with their pores beneath, a broadleaf stump's shoots rising leafy
+but in winter, and dead bark sloughing in sheets about as much as asked, the
+wood it bares sunk below it, brown and checked dark;
+stones gathered in fields and fanned in scree below crags, the larger
+rolled the further, pebbles drifting only where water washed the ground, and
+a richer detail strewing more without shifting another draw; leaf litter as
+thick as the crowns above shed; snow drifting deep in the lee of a rise and scoured from its crest
+and the slopes the wind climbs, sloughing off steep ground, cut along the wind
+from the snow alone and only as finely as a grid resolves, a land under snow
+standing above the same land bare by the depth its grids keep, the ground
+showing and grass growing only where the snow lies thin, a shoot showing only
+what stands above it; a snowman's balls never round, narrower along their
+roll axis, ridged by the sheets they took up and streaked round their drums,
+standing on a flat foot and carrying a flat seat, stacked foot to seat each
+smaller than the last, leaning as hands set them, its face on its head, a
+carrot and a stick ending in fine tips, never balls, and none built where
+its prototypes would not fit; ferns arching from the ground; reeds and reedmace standing in the
 shallows and on wet level banks off scoured ground, lilies and pondweed
 floating on still water as deep as each roots in, and crowfoot streaming
 where the water runs over gravel, none in a closed wood's gloom and the

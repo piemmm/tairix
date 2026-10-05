@@ -470,6 +470,7 @@ fn pool(slope_variance: f64) -> crate::scene::Scene {
         stars: None,
         low: None,
         high: None,
+        moon: None,
     };
     let waves = Relief::waves(
         Wind {
@@ -520,7 +521,7 @@ fn pool(slope_variance: f64) -> crate::scene::Scene {
             toward,
             cos_radius,
             radiance: Vec3::splat(3.0 / solid),
-            limb: Limb::Even,
+            limb: Limb::Darkening(Vec3::ZERO),
         }],
         sky,
         shades: None,
@@ -531,6 +532,7 @@ fn pool(slope_variance: f64) -> crate::scene::Scene {
             1.0,
             (0.0, 1.0),
         ),
+        height: 1080,
         exposure: Exposure::Fixed(0.6),
     })
     .expect("a pool")

@@ -1,14 +1,14 @@
 use alloc::vec::Vec;
 
 use super::*;
-use crate::heightfield::Heightfield;
+use crate::heightfield::{Attributes, Heightfield};
 use crate::shade::{Crown, Shade};
 use crate::shape::Shape;
 use crate::vector::PACKET;
 
 /// A level field at height nought over `-4..4` each way, its every vertex
 /// carrying `attributes`.
-fn level(attributes: Option<[u8; 4]>) -> Heightfield {
+fn level(attributes: Option<Attributes>) -> Heightfield {
     let mut field = Heightfield::new(16, (-4.0, -4.0), 0.5, false).expect("a grid");
     let side = field.side();
     for (_, band) in field.bands(0..side, side) {
@@ -105,6 +105,8 @@ fn met(lawn: &Lawn, field: Heightfield, (rays, height): (u32, f64)) -> Vec<(Ray,
         fields: &fields,
         prototypes: &[],
         lawns: &[],
+        materials: &[],
+        view: None,
     };
     (0..rays)
         .filter_map(|index| {
@@ -224,6 +226,8 @@ fn what_a_cover_holds_is_met_nearest_first() {
         fields: &fields,
         prototypes: &[],
         lawns: &[],
+        materials: &[],
+        view: None,
     };
     for lawn in &covers {
         for index in 0..1500 {
@@ -276,6 +280,8 @@ fn rays_crossing_a_lawn_together_meet_what_each_meets_alone() {
         fields: &fields,
         prototypes: &[],
         lawns: &[],
+        materials: &[],
+        view: None,
     };
     let asked = (0..PACKET)
         .filter(|&lane| lane != 5)
@@ -385,11 +391,29 @@ fn weeds_lie_low_and_fallen_leaves_flat_on_the_ground() {
     }
 }
 
+/// Rooted on snow, a shoot shows only what stands above it: thin snow
+/// leaves the grass standing nearly as tall, snow deeper than the grass
+/// grows hides it.
+#[test]
+fn grass_shows_only_what_stands_above_the_snow() {
+    let tallest = |depth: f64| {
+        let kept = crate::snow::kept(depth);
+        let hits = met(&lawn(0.0), level(Some([0, 128, 0, 255, kept])), (3000, 0.6));
+        hits.iter()
+            .map(|(ray, hit)| ray.at(hit.t).y)
+            .fold(0.0f64, f64::max)
+    };
+    let (bare, thin, deep) = (tallest(0.0), tallest(0.05), tallest(1.0));
+    assert!(bare > 0.15, "{bare}");
+    assert!(thin < bare && thin > 0.5 * bare, "{thin} against {bare}");
+    assert!(deep.abs() < 1e-12, "buried: {deep}");
+}
+
 #[test]
 fn nothing_grows_on_a_road_and_less_on_a_path() {
-    let open = met(&lawn(0.0), level(Some([0, 128, 0, 255])), (3000, 0.6)).len();
-    let road = met(&lawn(0.0), level(Some([0, 128, 255, 255])), (3000, 0.6)).len();
-    let path = met(&lawn(0.0), level(Some([0, 128, 120, 255])), (3000, 0.6)).len();
+    let open = met(&lawn(0.0), level(Some([0, 128, 0, 255, 0])), (3000, 0.6)).len();
+    let road = met(&lawn(0.0), level(Some([0, 128, 255, 255, 0])), (3000, 0.6)).len();
+    let path = met(&lawn(0.0), level(Some([0, 128, 120, 255, 0])), (3000, 0.6)).len();
     assert_eq!(road, 0, "no grass on a road");
     assert!(
         path < open && path > 0,
@@ -429,8 +453,8 @@ fn grass_thins_and_leaves_gather_under_the_trees() {
     let fallen_open = met(&litter(None), level(None), (3000, 0.6)).len();
     let fallen_shaded = met(&litter(Some(shade)), level(None), (3000, 0.6)).len();
     assert!(
-        fallen_shaded > fallen_open,
-        "{fallen_shaded} under trees, {fallen_open} in the open"
+        fallen_shaded > 4 * fallen_open,
+        "as thick as the crowns shed: {fallen_shaded} under trees, {fallen_open} in the open"
     );
 }
 
@@ -442,6 +466,8 @@ fn nothing_is_met_above_the_shoots_or_beside_the_lawn() {
         fields: &fields,
         prototypes: &[],
         lawns: &[],
+        materials: &[],
+        view: None,
     };
     let lawn = lawn(0.1);
     let over = Ray::new(Vec3::new(-3.0, 1.2, 0.0), Vec3::new(1.0, 0.0, 0.0));
@@ -468,6 +494,8 @@ fn a_finer_lawn_keeps_the_ground_it_covers_to_itself() {
         fields: &fields,
         prototypes: &[],
         lawns: &[],
+        materials: &[],
+        view: None,
     };
     for index in 0..600u32 {
         let x = -0.45 + 0.9 * unit(mix32(index));
@@ -709,7 +737,7 @@ fn greening(edge: f64) -> Heightfield {
     let attributes = field.rows_mut(0..side).1;
     for (index, slot) in attributes.iter_mut().enumerate() {
         let x = -4.0 + 0.5 * f64::from(u32::try_from(index % side).expect("a column"));
-        *slot = [0, 128, 0, if x < edge { 255 } else { 0 }];
+        *slot = [0, 128, 0, if x < edge { 255 } else { 0 }, 0];
     }
     field.seal();
     field
@@ -746,7 +774,7 @@ fn a_swards_shade_on_the_ground_runs_smoothly_from_cell_to_cell() {
 fn grass_thinning_out_grows_short_as_well_as_sparse() {
     let lawn = lawn(0.0);
     let statures = |green: u8| {
-        let field = level(Some([0, 128, 0, green]));
+        let field = level(Some([0, 128, 0, green, 0]));
         let (count, total) = (0..60)
             .filter_map(|index| {
                 let at = (-0.95 + 0.032 * f64::from(index), 0.3);
@@ -769,7 +797,7 @@ fn grass_thinning_out_grows_short_as_well_as_sparse() {
 fn canopy_grid(
     lawn: &Lawn,
     block: u32,
-    keep: &(dyn Fn((f64, f64)) -> (f64, [u8; 4]) + Sync),
+    keep: &(dyn Fn((f64, f64)) -> (f64, Attributes) + Sync),
 ) -> Heightfield {
     let spacing = lawn.cell * f64::from(block);
     let blocks = (lawn.to.0 - lawn.from.0) / spacing;
@@ -804,7 +832,7 @@ fn canopy_grid(
 #[test]
 fn a_blocks_canopy_is_read_from_its_own_vertex() {
     let block = 2u32;
-    let ground = || level(Some([0, 128, 0, 255]));
+    let ground = || level(Some([0, 128, 0, 255, 0]));
     let green = ground();
     let mut lawn = lawn(0.0);
     let grid = canopy_grid(&lawn, block, &|at| lawn.canopy_at(&green, at, block));
@@ -847,7 +875,7 @@ fn a_blocks_canopy_is_read_from_its_own_vertex() {
 #[test]
 fn a_large_lawns_canopy_is_read_from_its_grid() {
     let block = 2u32;
-    let green = level(Some([0, 128, 0, 255]));
+    let green = level(Some([0, 128, 0, 255, 0]));
     let mut lawn = lawn(0.0);
     let grid = canopy_grid(&lawn, block, &|at| lawn.canopy_at(&green, at, block));
     lawn.tops = Some(Tops { field: 1, block });
@@ -856,7 +884,7 @@ fn a_large_lawns_canopy_is_read_from_its_grid() {
     let grown = lawn.canopy(at, &fields).expect("grass over the point");
     let [_, grid] = fields;
     let kept = lawn
-        .canopy(at, &[level(Some([0, 128, 0, 0])), grid])
+        .canopy(at, &[level(Some([0, 128, 0, 0, 0])), grid])
         .expect("the grid still keeps it");
     assert_eq!(grown.density.to_bits(), kept.density.to_bits());
     assert_eq!(grown.up.to_bits(), kept.up.to_bits());

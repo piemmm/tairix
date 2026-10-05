@@ -6,6 +6,8 @@
 //! orange and the dusk after it violet because the light's path through the
 //! air makes them so.
 
+use tairix_util::mathf;
+
 use super::{direction, Dice, Stage};
 use crate::atmosphere::{Air, Atmosphere};
 use crate::body;
@@ -87,7 +89,7 @@ fn weighted<T: Copy>(dice: &mut Dice, choices: &[(T, u32)]) -> Option<T> {
 ///
 /// The sun stands where it truly is: whether its light reaches the scene,
 /// lifted by the air near the horizon, the air says once its tables are
-/// built. By night it is the full moon's light that fills the air.
+/// built. By night it is the moon's light, at its phase, that fills the air.
 pub(super) fn outdoors(
     stage: &mut Stage,
     dice: &mut Dice,
@@ -110,10 +112,13 @@ pub(super) fn outdoors(
     };
     let toward = direction(facing, turn.to_radians(), elevation.to_radians());
     let night = hour == Hour::Night;
-    let light = if night {
-        body::full_moon(toward)
+    // By night the moon lights the scene, the sun set below it as far as its
+    // phase has it; by day and at dusk a moon may stand in the sky, lighting
+    // nothing beside the sun's light.
+    let (light, moon) = if night {
+        (body::moon(toward, set_beneath(dice, toward)), None)
     } else {
-        body::sun(toward)
+        (body::sun(toward), risen(dice, hour, toward))
     };
     let solar = light.irradiance();
     stage.light(light)?;
@@ -158,6 +163,7 @@ pub(super) fn outdoors(
         stars: Some(Starfield::new()),
         low,
         high,
+        moon,
     };
     // Where a photographer would set the scene's middle tone: bright at noon,
     // lower as the light goes so a sunset keeps its colour and night its dark.
@@ -172,6 +178,54 @@ pub(super) fn outdoors(
         sky,
         exposure: Exposure::Metered { key },
         hour,
+    })
+}
+
+/// Where the sun stands by night beneath a moon toward the unit `moon`: at
+/// the elongation a phase drawn from full to a waxing or waning crescent
+/// leaves it, the brighter phases the likelier, and at least 15° below the
+/// horizon, which a moon high in the sky lets only its fuller phases have.
+fn set_beneath(dice: &mut Dice, moon: Vec3) -> Vec3 {
+    let height = mathf::asin(moon.y.clamp(-1.0, 1.0)).to_degrees();
+    let unit = dice.unit();
+    let phase = (150.0 * unit * unit).min(165.0 - height - 1.0).max(0.0);
+    let elongation = (180.0 - phase).to_radians();
+    // Down from the moon along its vertical, the sun lies lowest; either side
+    // of it as far as keeps it below the horizon.
+    let down = (Vec3::UP * -1.0 - moon * (-moon.y)).normalized();
+    let across = moon.cross(down).normalized();
+    let deepest = (-mathf::sin(15.0f64.to_radians()) - moon.y * mathf::cos(elongation))
+        / (down.y * mathf::sin(elongation)).min(-1e-9);
+    let swing = mathf::acos(deepest.clamp(-1.0, 1.0)) * dice.range(-1.0, 1.0);
+    let around = down * mathf::cos(swing) + across * mathf::sin(swing);
+    (moon * mathf::cos(elongation) + around * mathf::sin(elongation)).normalized()
+}
+
+/// A moon standing in the sky with the sun toward the unit `sun` at `hour`,
+/// if one does: by day now and then, most often near its quarters, and at
+/// dusk as a young or an old crescent above where the sun has set, its dark
+/// part lit by the Earth.
+fn risen(dice: &mut Dice, hour: Hour, sun: Vec3) -> Option<crate::light::Light> {
+    let (chance, (least, most), lowest): (f64, (f64, f64), f64) = match hour {
+        Hour::Noon | Hour::Day | Hour::Golden => (0.3, (45.0, 150.0), 8.0),
+        Hour::Sunset | Hour::Dusk => (0.45, (12.0, 55.0), 3.0),
+        Hour::Night => return None,
+    };
+    if !dice.chance(chance) {
+        return None;
+    }
+    let elongation = dice.angle(least, most);
+    let (first, second) = {
+        let frame = crate::vector::Frame::around(sun);
+        (frame.x, frame.y)
+    };
+    let start = dice.range(0.0, core::f64::consts::TAU);
+    let lowest = mathf::sin(lowest.to_radians());
+    (0..16u32).find_map(|step| {
+        let around = start + core::f64::consts::TAU * f64::from(step) / 16.0;
+        let side = first * mathf::cos(around) + second * mathf::sin(around);
+        let toward = (sun * mathf::cos(elongation) + side * mathf::sin(elongation)).normalized();
+        (toward.y >= lowest).then(|| body::moon(toward, sun))
     })
 }
 
@@ -367,3 +421,7 @@ const STREAKS: Form = Form {
     cover: (0.12, 0.3),
     ..CIRRUS
 };
+
+#[cfg(test)]
+#[path = "weather_tests.rs"]
+mod tests;

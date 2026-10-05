@@ -4,9 +4,11 @@ use core::f64::consts::TAU;
 
 use tairix_util::mathf::{self, fmin};
 
+use crate::cut::{Cutting, Viewpoint};
 use crate::grass::Lawn;
 use crate::heightfield::Heightfield;
 use crate::lanes::Corners;
+use crate::material::Material;
 use crate::prototype::Prototype;
 use crate::vector::{Pose, Ray, Vec3};
 
@@ -38,6 +40,9 @@ pub(crate) struct Hit {
     /// The surface's grain, where it has one: the way a limb runs, or a
     /// leaf's midrib; nought where it has none.
     pub(crate) tangent: Vec3,
+    /// Whether its normal is already its relief's, as a limb's bark cut in
+    /// true relief is: no relief is to tilt it again.
+    pub(crate) relieved: bool,
 }
 
 impl Hit {
@@ -53,19 +58,23 @@ impl Hit {
             girth: 0.0,
             material: None,
             tangent: Vec3::ZERO,
+            relieved: false,
         }
     }
 }
 
 /// What the shapes of a scene share: the faces its hulls are cut by, the
-/// grids its land and sea are traced over, and the prototypes its instances
-/// place.
+/// grids its land and sea are traced over, the prototypes its instances
+/// place, the materials their limbs' bark is cut by, and where the scene is
+/// seen from, once it is: how near a limb must stand for its bark to be cut.
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct Geometry<'a> {
     pub(crate) faces: &'a [Face],
     pub(crate) fields: &'a [Heightfield],
     pub(crate) prototypes: &'a [Prototype],
     pub(crate) lawns: &'a [Lawn],
+    pub(crate) materials: &'a [Material],
+    pub(crate) view: Option<Viewpoint>,
 }
 
 /// One face of a convex hull in the hull's own frame: the points `p` with
@@ -384,7 +393,9 @@ impl Shape {
             } => {
                 let prototype = geometry.prototypes.get(prototype as usize)?;
                 let local = placed(ray, &pose, scale);
-                let mut hit = prototype.intersect(&local, near / scale, far / scale)?;
+                let cutting = geometry.cutting((pose, scale, key));
+                let mut hit =
+                    prototype.intersect(&local, (near / scale, far / scale), cutting.as_ref())?;
                 hit.t *= scale;
                 // A limb's bark is laid at its real size, so its girth and the
                 // way along its stem are the placed tree's, not its prototype's.
@@ -409,12 +420,17 @@ impl Shape {
                 prototype,
                 pose,
                 scale,
-                ..
+                key,
             } => geometry
                 .prototypes
                 .get(prototype as usize)
                 .is_some_and(|prototype| {
-                    prototype.occludes(&placed(ray, &pose, scale), near / scale, far / scale)
+                    let cutting = geometry.cutting((pose, scale, key));
+                    prototype.occludes(
+                        &placed(ray, &pose, scale),
+                        (near / scale, far / scale),
+                        cutting.as_ref(),
+                    )
                 }),
             _ => self.intersect(ray, near, far, geometry).is_some(),
         }
@@ -425,6 +441,21 @@ impl Shape {
     /// shaded as though they did.
     pub(crate) const fn casts_shadow(&self) -> bool {
         !matches!(self, Self::Lawn { .. })
+    }
+}
+
+impl Geometry<'_> {
+    /// How a prototype placed at `pose`, `scale` times its size under `key`,
+    /// has its limbs cut, once the scene is seen from somewhere.
+    fn cutting(&self, (pose, scale, key): (Pose, f64, u32)) -> Option<Cutting<'_>> {
+        let view = self.view?;
+        Some(Cutting {
+            materials: self.materials,
+            key,
+            scale,
+            eye: pose.point_to_local(view.eye) * (1.0 / scale),
+            pixel: view.pixel,
+        })
     }
 }
 

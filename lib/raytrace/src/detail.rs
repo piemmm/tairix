@@ -52,6 +52,17 @@ pub(crate) struct Densities {
     pub(crate) bed: Bed,
     pub(crate) records: Records,
     pub(crate) focus: Focus,
+    pub(crate) strewn: Strewn,
+}
+
+/// How thickly a land's stones are strewn: as many times the boulders its
+/// setting asks for, and how many drifts of pebbles are looked for out to
+/// how far from the eye.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct Strewn {
+    pub(crate) boulders: f64,
+    pub(crate) drifts: u32,
+    pub(crate) pebbles: f64,
 }
 
 /// How a stream's bed and its water are set out about the eye.
@@ -164,6 +175,11 @@ const SIMPLE: Densities = Densities {
         texel: 1.0,
         cells: 1 << 21,
     },
+    strewn: Strewn {
+        boulders: 1.0,
+        drifts: 40,
+        pebbles: 15.0,
+    },
 };
 
 const MAXIMUM: Densities = Densities {
@@ -200,5 +216,10 @@ const MAXIMUM: Densities = Densities {
         stride: 2,
         texel: 0.5,
         cells: 1 << 23,
+    },
+    strewn: Strewn {
+        boulders: 3.0,
+        drifts: 160,
+        pebbles: 30.0,
     },
 };

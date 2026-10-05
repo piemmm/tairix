@@ -21,6 +21,7 @@ const CLOSE: Seeing = Seeing {
     spread: Some(1e-3),
     jitter: 0.5,
     air: 0.5,
+    occulted: false,
 };
 
 fn room() -> Sky {
@@ -33,6 +34,7 @@ fn room() -> Sky {
         stars: None,
         low: None,
         high: None,
+        moon: None,
     }
 }
 
@@ -76,6 +78,7 @@ pub(crate) fn open(air: Air, stars: Option<Starfield>) -> Sky {
         stars,
         low: None,
         high: None,
+        moon: None,
     };
     while !sky.build(&tairix_parallel::SERIAL).expect("fits") {}
     sky
@@ -87,7 +90,7 @@ fn night() -> (Sky, Vec3) {
     let eye = Vec3::new(0.0, 2.0, 0.0);
     let air = Air {
         sun: toward,
-        solar: body::full_moon(toward).irradiance(),
+        solar: body::moon(toward, -toward).irradiance(),
         base: 100.0,
         haze: 1.0,
         albedo: Vec3::splat(0.15),
@@ -167,6 +170,7 @@ fn under(air: Air, deck: Deck) -> Sky {
         stars: None,
         low: Some(low),
         high: None,
+        moon: None,
     };
     while !sky.build(&tairix_parallel::SERIAL).expect("fits") {}
     sky
@@ -256,10 +260,12 @@ fn the_nearer_bank_hides_the_farther_and_both_shade_the_ground() {
     let both = Sky {
         low: Some(ceiling),
         high: Some(cirrus.clone()),
+        moon: None,
         ..room()
     };
     let high = Sky {
         high: Some(cirrus),
+        moon: None,
         ..room()
     };
     let up = Vec3::new(0.1, 0.9, 0.2).normalized();
@@ -285,4 +291,43 @@ fn the_nearer_bank_hides_the_farther_and_both_shade_the_ground() {
             "{together} {one} {other}"
         );
     }
+}
+
+/// What stands in the way of the sky hides the stars behind it: looked
+/// through a disc, the night sky shows its moonlit air and no star.
+#[test]
+fn no_star_shines_through_a_disc_in_the_way() {
+    let (sky, eye) = night();
+    let Dome::Air(atmosphere) = &sky.dome else {
+        unreachable!("an open sky");
+    };
+    let (mut starry, mut through) = (0u32, 0u32);
+    for i in 0..200u32 {
+        for j in 0..200u32 {
+            let dir = Vec3::new(
+                0.002 * (f64::from(i) - 100.0),
+                1.0,
+                0.002 * (f64::from(j) - 100.0),
+            )
+            .normalized();
+            let air = atmosphere.sky(dir);
+            let open = sky.radiance(eye, dir, CLOSE);
+            let hidden = sky.radiance(
+                eye,
+                dir,
+                Seeing {
+                    occulted: true,
+                    ..CLOSE
+                },
+            );
+            if (open - air).max_element() > 1e-3 * air.max_element() {
+                starry += 1;
+            }
+            if (hidden - air).max_element() > 1e-9 {
+                through += 1;
+            }
+        }
+    }
+    assert!(starry > 0, "stars about the zenith");
+    assert_eq!(through, 0, "{through} stars through the disc");
 }

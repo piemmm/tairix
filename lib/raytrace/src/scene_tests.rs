@@ -71,9 +71,11 @@ fn parts(objects: Vec<Object>) -> Parts {
             stars: None,
             low: None,
             high: None,
+            moon: None,
         },
         shades: None,
         camera: Camera::looking(Vec3::new(0.0, 1.0, -5.0), Vec3::ZERO, 0.8, 1.0, (0.0, 1.0)),
+        height: 1080,
         exposure: Exposure::Fixed(1.0),
     }
 }
@@ -269,6 +271,7 @@ fn fingerprint(scene: &Scene) -> Vec<u64> {
             spread: Some(1e-3),
             jitter: 0.5,
             air: 0.5,
+            occulted: false,
         };
         let light = scene.sky.radiance(Vec3::ZERO, dir, seeing);
         marks.extend([light.x.to_bits(), light.y.to_bits(), light.z.to_bits()]);
@@ -511,6 +514,7 @@ fn the_daylight_on_the_level_is_the_suns_kept_beam_and_the_whole_skys_light() {
         spread: None,
         jitter: 0.5,
         air: 0.5,
+        occulted: false,
     };
     let (rings, spokes) = (180u32, 360u32);
     let mut gathered = Vec3::ZERO;
@@ -569,7 +573,7 @@ fn ever_less_light_falls_as_the_sun_sinks_and_once_set_only_the_twilights() {
 /// would give it, which is what darkens a deep pool's glow at night.
 #[test]
 fn by_the_full_moon_the_level_takes_the_moons_share_of_daylight() {
-    let moon = body::full_moon(raised(60.0));
+    let moon = body::moon(raised(60.0), -raised(60.0));
     let sky = open_under(raised(60.0), &moon);
     let share = of_sunlight(moon.irradiance());
     let moonlit = daylight(&sky, &[moon], EYE);

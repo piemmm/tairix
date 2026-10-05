@@ -12,6 +12,8 @@ use alloc::vec::Vec;
 use tairix_util::mathf;
 
 use crate::bvh::{Builder, Bvh, Walk};
+use crate::cut::{meet_relieved, Cutting, Seeking};
+use crate::flare::Flare;
 use crate::leaf::Outline;
 use crate::shape::{Aabb, Hit};
 use crate::vector::{single, singles, Ray, Vec3};
@@ -32,9 +34,11 @@ pub(crate) struct Tube {
     /// How far round it, in radians, its bark's angle starts from where the
     /// world alone would start it: toward the side its stem carries along
     /// it, so a bending stem's segments agree on it.
-    turn: f32,
+    pub(crate) turn: f32,
     /// Which of its ends are open rather than rounded.
-    open: [bool; 2],
+    pub(crate) open: [bool; 2],
+    /// The flare its foot swells in, among its prototype's, if it does.
+    pub(crate) flare: Option<u16>,
 }
 
 impl Tube {
@@ -64,6 +68,7 @@ impl Tube {
             key,
             turn: single(turn),
             open: [false; 2],
+            flare: None,
         }
     }
 
@@ -71,12 +76,43 @@ impl Tube {
     pub(crate) const fn opened(self, open: [bool; 2]) -> Self {
         Self { open, ..self }
     }
+
+    /// The same limb, its foot swelling in its prototype's flare `flare`.
+    pub(crate) const fn flared(self, flare: u16) -> Self {
+        Self {
+            flare: Some(flare),
+            ..self
+        }
+    }
+
+    /// The unit way out from the limb's axis at `angle` round it, as its bark
+    /// reckons angles.
+    pub(crate) fn way(&self, angle: f64) -> Vec3 {
+        let (first, second) = round((point(self.b) - point(self.a)).normalized());
+        let turned = angle + f64::from(self.turn);
+        first * mathf::cos(turned) + second * mathf::sin(turned)
+    }
+
+    /// The limb's radius `up` along its axis from its first end, before any
+    /// flare swells it.
+    pub(crate) fn round_radius(&self, up: f64) -> f64 {
+        let length = (point(self.b) - point(self.a)).length().max(1e-12);
+        let (ra, rb) = (f64::from(self.radii[0]), f64::from(self.radii[1]));
+        ra + (rb - ra) * (up / length).clamp(0.0, 1.0)
+    }
+
+    /// The angle round the limb, as its bark reckons angles, that `way`
+    /// points out from its axis toward.
+    pub(crate) fn angle_of(&self, way: Vec3) -> f64 {
+        let (first, second) = round((point(self.b) - point(self.a)).normalized());
+        mathf::atan2(way.dot(second), way.dot(first)) - f64::from(self.turn)
+    }
 }
 
 /// The two directions about a limb running along the unit `axis` its angle
 /// is measured between, fixed by the world alone: what a limb's own `turn` is
 /// reckoned from.
-fn round(axis: Vec3) -> (Vec3, Vec3) {
+pub(crate) fn round(axis: Vec3) -> (Vec3, Vec3) {
     let reference = if axis.x.abs() < 0.9 {
         Vec3::new(1.0, 0.0, 0.0)
     } else {
@@ -125,8 +161,111 @@ pub(crate) struct Prototype {
     parts: Vec<Part>,
     vertices: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
+    flares: Vec<Flare>,
     bvh: Bvh,
     bounds: Aabb,
+}
+
+/// A mesh to add to an assembly: its points, and its faces, each three of
+/// its points and a material.
+#[derive(Debug, Default)]
+pub(crate) struct Mesh {
+    pub(crate) points: Vec<Vec3>,
+    pub(crate) faces: Vec<([u32; 3], u16)>,
+}
+
+/// A prototype as it is put together: its parts, the vertices and normals
+/// its facets are cut from, and the flares its limbs' feet swell in.
+#[derive(Debug, Default)]
+pub(crate) struct Assembly {
+    parts: Vec<Part>,
+    vertices: Vec<[f32; 3]>,
+    normals: Vec<[f32; 3]>,
+    flares: Vec<Flare>,
+}
+
+impl Assembly {
+    /// An assembly with room made for `parts` parts and `vertices`
+    /// vertices; `None` when the heap will not hold them.
+    pub(crate) fn with_room(parts: usize, vertices: usize) -> Option<Self> {
+        let mut assembly = Self::default();
+        assembly.parts.try_reserve(parts).ok()?;
+        assembly.vertices.try_reserve(vertices).ok()?;
+        assembly.normals.try_reserve(vertices).ok()?;
+        Some(assembly)
+    }
+
+    /// How many parts it holds.
+    pub(crate) fn parts(&self) -> usize {
+        self.parts.len()
+    }
+
+    pub(crate) fn push(&mut self, part: Part) -> Option<()> {
+        self.parts.try_reserve(1).ok()?;
+        self.parts.push(part);
+        Some(())
+    }
+
+    /// `flare` among the assembly's flares, and its index there.
+    pub(crate) fn flare(&mut self, flare: Flare) -> Option<u16> {
+        let index = u16::try_from(self.flares.len()).ok()?;
+        self.flares.try_reserve(1).ok()?;
+        self.flares.push(flare);
+        Some(index)
+    }
+
+    /// The mesh of `points` whose `faces` each name three of them and a
+    /// material, shaded smooth where they share a point.
+    pub(crate) fn mesh(&mut self, points: &[Vec3], faces: &[([u32; 3], u16)]) -> Option<()> {
+        let mut corners = Vec::new();
+        corners.try_reserve_exact(faces.len()).ok()?;
+        corners.extend(faces.iter().map(|&(corners, _)| corners));
+        let normals = normals_of(points, &corners)?;
+        let first = u32::try_from(self.vertices.len()).ok()?;
+        self.vertices.try_reserve(points.len()).ok()?;
+        self.normals.try_reserve(points.len()).ok()?;
+        self.vertices
+            .extend(points.iter().map(|&point| singles(point)));
+        self.normals.extend_from_slice(&normals);
+        self.parts.try_reserve(faces.len()).ok()?;
+        for &([a, b, c], material) in faces {
+            self.parts.push(Part::Facet(Facet {
+                corners: [first + a, first + b, first + c],
+                material: Some(material),
+            }));
+        }
+        Some(())
+    }
+
+    /// The prototype it makes, its hierarchy still to build; `None` when the
+    /// heap will not hold it, or a part names what the assembly lacks.
+    pub(crate) fn finish(self) -> Option<Building> {
+        Prototype::flared(self.parts, (self.vertices, self.normals), self.flares)
+    }
+}
+
+/// Each vertex's normal: the sum of its faces' area-weighted normals, made
+/// unit.
+pub(crate) fn normals_of(vertices: &[Vec3], faces: &[[u32; 3]]) -> Option<Vec<[f32; 3]>> {
+    let mut sums = Vec::new();
+    sums.try_reserve_exact(vertices.len()).ok()?;
+    sums.resize(vertices.len(), Vec3::ZERO);
+    for &[a, b, c] in faces {
+        let (pa, pb, pc) = (
+            *vertices.get(a as usize)?,
+            *vertices.get(b as usize)?,
+            *vertices.get(c as usize)?,
+        );
+        let weighted = (pb - pa).cross(pc - pa);
+        for index in [a, b, c] {
+            let sum = sums.get_mut(index as usize)?;
+            *sum += weighted;
+        }
+    }
+    let mut normals = Vec::new();
+    normals.try_reserve_exact(sums.len()).ok()?;
+    normals.extend(sums.iter().map(|&sum| singles(sum.normalized())));
+    Some(normals)
 }
 
 /// A point held in single precision, back in double.
@@ -140,6 +279,7 @@ pub(crate) struct Building {
     parts: Vec<Part>,
     vertices: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
+    flares: Vec<Flare>,
     builder: Builder,
     bounds: Aabb,
 }
@@ -167,6 +307,7 @@ impl Building {
             parts: self.parts,
             vertices: self.vertices,
             normals: self.normals,
+            flares: self.flares,
             bvh: self.builder.finish(),
             bounds: self.bounds,
         }
@@ -194,6 +335,16 @@ impl Prototype {
         vertices: Vec<[f32; 3]>,
         normals: Vec<[f32; 3]>,
     ) -> Option<Building> {
+        Self::flared(parts, (vertices, normals), Vec::new())
+    }
+
+    /// [`Self::building`], its limbs' feet swelling in `flares`; `None` too
+    /// when a limb names a flare it lacks.
+    pub(crate) fn flared(
+        parts: Vec<Part>,
+        (vertices, normals): (Vec<[f32; 3]>, Vec<[f32; 3]>),
+        flares: Vec<Flare>,
+    ) -> Option<Building> {
         if normals.len() != vertices.len() {
             return None;
         }
@@ -203,7 +354,7 @@ impl Prototype {
         }
         let mut bounds = Aabb::EMPTY;
         for (index, part) in parts.iter().enumerate() {
-            let extent = part_bounds(part, &vertices)?;
+            let extent = part_bounds(part, &vertices, &flares)?;
             bounds = bounds.union(extent);
             boxes.push((u32::try_from(index).ok()?, extent));
         }
@@ -216,6 +367,7 @@ impl Prototype {
             parts,
             vertices,
             normals,
+            flares,
             builder,
             bounds,
         })
@@ -232,15 +384,32 @@ impl Prototype {
         &self.parts
     }
 
+    /// Where its vertex `index` lies, if it has one.
+    #[cfg(test)]
+    pub(crate) fn vertex(&self, index: u32) -> Option<Vec3> {
+        self.vertices.get(index as usize).copied().map(point)
+    }
+
+    /// The flare `tube`'s foot swells in, if it does.
+    pub(crate) fn flare_of(&self, tube: &Tube) -> Option<&Flare> {
+        tube.flare
+            .and_then(|flare| self.flares.get(usize::from(flare)))
+    }
+
     /// The nearest part `ray`, given in the prototype's frame, meets within
-    /// `(near, far)`.
-    pub(crate) fn intersect(&self, ray: &Ray, near: f64, far: f64) -> Option<Hit> {
+    /// `(near, far)`, its limbs cut as `cutting` has them, if it does.
+    pub(crate) fn intersect(
+        &self,
+        ray: &Ray,
+        (near, far): (f64, f64),
+        cutting: Option<&Cutting<'_>>,
+    ) -> Option<Hit> {
         let mut best: Option<Hit> = None;
         self.bvh.walk(ray, far, |index, reach| {
             match self
                 .parts
                 .get(index as usize)
-                .and_then(|part| self.meet(part, ray, (near, reach)))
+                .and_then(|part| self.meet(part, ray, ((near, reach), Seeking::Nearest), cutting))
             {
                 Some(hit) => {
                     let t = hit.t;
@@ -253,14 +422,20 @@ impl Prototype {
         best
     }
 
-    /// Whether `ray` meets any part within `(near, far)`.
-    pub(crate) fn occludes(&self, ray: &Ray, near: f64, far: f64) -> bool {
+    /// Whether `ray` meets any part within `(near, far)`, its limbs cut as
+    /// `cutting` has them, if it does.
+    pub(crate) fn occludes(
+        &self,
+        ray: &Ray,
+        (near, far): (f64, f64),
+        cutting: Option<&Cutting<'_>>,
+    ) -> bool {
         let mut blocked = false;
         self.bvh.walk(ray, far, |index, reach| {
             let met = self
                 .parts
                 .get(index as usize)
-                .and_then(|part| self.meet(part, ray, (near, reach)))
+                .and_then(|part| self.meet(part, ray, ((near, reach), Seeking::Any), cutting))
                 .is_some();
             if met {
                 blocked = true;
@@ -272,9 +447,29 @@ impl Prototype {
         blocked
     }
 
-    fn meet(&self, part: &Part, ray: &Ray, span: (f64, f64)) -> Option<Hit> {
+    fn meet(
+        &self,
+        part: &Part,
+        ray: &Ray,
+        (span, seeking): ((f64, f64), Seeking),
+        cutting: Option<&Cutting<'_>>,
+    ) -> Option<Hit> {
         match part {
-            Part::Tube(tube) => meet_tube(tube, ray, span),
+            Part::Tube(tube) => {
+                let flare = self.flare_of(tube);
+                let cut = cutting.and_then(|cutting| Some((cutting, cutting.of(tube)?)));
+                if flare.is_none() && cut.is_none() {
+                    meet_tube(tube, ray, span)
+                } else {
+                    meet_relieved(
+                        tube,
+                        ray,
+                        (span, seeking),
+                        (cutting, cut.map(|(_, cut)| cut)),
+                        flare,
+                    )
+                }
+            }
             Part::Leaf(blade) => meet_blade(blade, ray, span),
             Part::Facet(facet) => self.meet_facet(facet, ray, span),
         }
@@ -330,17 +525,22 @@ impl Prototype {
             girth: 0.0,
             material: facet.material.map(u32::from),
             tangent: Vec3::ZERO,
+            relieved: false,
         })
     }
 }
 
 /// The box a part lies in.
-fn part_bounds(part: &Part, vertices: &[[f32; 3]]) -> Option<Aabb> {
+fn part_bounds(part: &Part, vertices: &[[f32; 3]], flares: &[Flare]) -> Option<Aabb> {
     Some(match part {
         Part::Tube(tube) => {
             let (a, b) = (point(tube.a), point(tube.b));
+            let most = match tube.flare {
+                Some(flare) => flares.get(usize::from(flare))?.most(),
+                None => 1.0,
+            };
             let (ra, rb) = (f64::from(tube.radii[0]), f64::from(tube.radii[1]));
-            Aabb::around(a, ra).union(Aabb::around(b, rb))
+            Aabb::around(a, ra * most).union(Aabb::around(b, rb * most))
         }
         Part::Leaf(blade) => {
             let (base, axis, normal) = (point(blade.base), point(blade.axis), point(blade.normal));
@@ -438,6 +638,7 @@ fn limb_hit(t: f64, normal: Vec3, (stem, along): (f64, f64), tube: &Tube) -> Hit
         girth: radius,
         material: Some(u32::from(tube.material)),
         tangent: axis,
+        relieved: false,
     }
 }
 
@@ -476,6 +677,7 @@ fn meet_blade(blade: &Blade, ray: &Ray, (near, far): (f64, f64)) -> Option<Hit> 
         girth: 0.0,
         material: Some(u32::from(blade.material)),
         tangent: axis,
+        relieved: false,
     })
 }
 

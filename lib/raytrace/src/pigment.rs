@@ -11,8 +11,10 @@ use tairix_util::mathf;
 use crate::bark::Bark;
 use crate::grass::{grass_kind, vigour, FLOWER, GRASS_KINDS, HEAD, LITTER, WEED};
 use crate::ground::{Ground, Rock};
+use crate::heightfield::CHANNELS;
 use crate::noise::{cell, cells2, cells3, noise3, octaves_within, smoothstep, turbulence3};
 use crate::sample::{mix32, unit};
+use crate::snowman::Rolled;
 use crate::vector::Vec3;
 
 /// Where a pigment is looked up.
@@ -43,9 +45,10 @@ pub(crate) struct Spot {
     /// Whether the ray met the surface's front: a leaf's upper side.
     pub(crate) front: bool,
     /// What a land is like where it was met — wet, worn or built up, on a
-    /// road or a path, how much grows there — each `0.0..=1.0`; off the land,
-    /// and on one carrying none of this, plain ground's.
-    pub(crate) ground: [f64; 4],
+    /// road or a path, how much grows there, how deep its snow — each
+    /// `0.0..=1.0`; off the land, and on one carrying none of this, plain
+    /// ground's.
+    pub(crate) ground: [f64; CHANNELS],
     /// How much of the sky a sward's blades hide from the point, `0.0` in the
     /// open: ground under it shows the thatch at its roots.
     pub(crate) thatch: f64,
@@ -136,6 +139,9 @@ pub(crate) enum Pigment {
     },
     /// Bark, laid over a limb by its distance along and round it.
     Bark(Bark),
+    /// Snow rolled up from the ground about the texture's x axis, streaked
+    /// with what it took up.
+    Rolled(Rolled),
     /// Leaves: veined, paler beneath, and in autumn browning at their edges
     /// and spotted.
     Foliage(Foliage),
@@ -236,6 +242,7 @@ impl Pigment {
                 mossed(stone, spot, moss, key)
             }
             Self::Bark(bark) => bark.colour(spot),
+            Self::Rolled(rolled) => rolled.colour(spot),
             Self::Foliage(foliage) => foliage.colour(spot),
             &Self::Stripes { a, b, width: band } => {
                 a.lerp(b, 0.5 - 0.5 * square_wave(p.y / band, width / band))

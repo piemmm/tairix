@@ -19,6 +19,7 @@ use crate::noise::{cell, cells2, fbm2, hash3, noise2, octaves_within, smoothstep
 use crate::pigment::Spot;
 use crate::sample::{mix32, unit};
 use crate::shade::Shades;
+use crate::snow;
 use crate::vector::Vec3;
 
 /// The grains of ground too fine to model, to a metre, coarsest first: a
@@ -32,6 +33,12 @@ const GRIT_MEAN: f64 = 0.96;
 const GRANULES: f64 = 90.0;
 const COBBLES: f64 = 14.0;
 const MOTTLES: f64 = 9.0;
+
+/// How deep snow must lie to hide the ground's colour beneath it, and by
+/// what share of itself the broad patches of the ground thin it or deepen
+/// it, so a scoured stretch bares in patches rather than along a line.
+const GROUND_BURIED: f64 = 0.06;
+const SNOW_EDGES: f64 = 0.6;
 
 /// How thick the beds a cut bank shows lie, and its gravel's pebbles to a
 /// metre.
@@ -119,7 +126,7 @@ impl Ground {
     /// but the most saturated ground and covers the soil, and snow lies over
     /// whatever is beneath it.
     pub(crate) fn moisture(&self, spot: &Spot) -> Moisture {
-        let [wet, _, _, green] = spot.ground;
+        let [wet, _, _, green, _] = spot.ground;
         let bare = (1.0 - green) * (1.0 - self.snowed(spot, 0.0));
         Moisture {
             standing: smoothstep(0.82, 1.0, wet) * bare,
@@ -128,14 +135,21 @@ impl Ground {
     }
 
     /// How much of the ground at `spot` snow covers, `patch` the broad
-    /// patches its line wanders by.
+    /// patches its line wanders by: above its line on all but steep ground,
+    /// and wherever the wind left it lying deep enough to hide the ground,
+    /// thinning to bare in patches where it scoured it.
     fn snowed(&self, spot: &Spot, patch: f64) -> f64 {
         let lying = smoothstep(
             self.snow_line - 30.0,
             self.snow_line + 30.0,
             spot.height + 45.0 * patch,
+        ) * smoothstep(0.5, 0.78, spot.normal.y);
+        let [.., channel] = spot.ground;
+        let drifted = snow::buries(
+            snow::depth_of(channel) * (1.0 + SNOW_EDGES * patch),
+            GROUND_BURIED,
         );
-        lying * smoothstep(0.5, 0.78, spot.normal.y)
+        lying.max(drifted)
     }
 }
 
@@ -263,7 +277,7 @@ impl Ground {
     pub(crate) fn colour(&self, spot: &Spot) -> Vec3 {
         let palette = &self.palette;
         let (p, width) = (spot.p, spot.width.max(1e-5));
-        let [wet, laid, lane, green] = spot.ground;
+        let [wet, laid, lane, green, _] = spot.ground;
         let laid = 2.0 * laid - 1.0;
         let upright = spot.normal.y;
         let seed = self.seed;

@@ -6,7 +6,7 @@ use core::ops::Range;
 use tairix_parallel::JobRunner;
 
 use crate::grass::Lawn;
-use crate::heightfield::{apart, Heightfield, Sealing};
+use crate::heightfield::{apart, Attributes, Heightfield, Sealing};
 use crate::terrain::Sea;
 use crate::vector::{real, share, single};
 
@@ -121,7 +121,7 @@ fn canopy(
     tops: &mut Heightfield,
     row: &mut usize,
     runner: &dyn JobRunner,
-    value: &(dyn Fn(f64, f64) -> (f64, [u8; 4]) + Sync),
+    value: &(dyn Fn(f64, f64) -> (f64, Attributes) + Sync),
 ) {
     let side = tops.side().max(1);
     let unit = crate::band::unit_rows(side) * runner.width().max(1);

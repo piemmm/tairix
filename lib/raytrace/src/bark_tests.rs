@@ -1,8 +1,9 @@
 use core::f64::consts::PI;
 
 use super::*;
+use crate::heightfield::CHANNELS;
 
-const KINDS: [BarkKind; 8] = [
+const KINDS: [BarkKind; 9] = [
     BarkKind::Furrowed,
     BarkKind::Papery,
     BarkKind::Plated,
@@ -10,6 +11,7 @@ const KINDS: [BarkKind; 8] = [
     BarkKind::Banded,
     BarkKind::Scaly,
     BarkKind::Ringed,
+    BarkKind::Taproot,
     BarkKind::Ribbed,
 ];
 
@@ -22,6 +24,7 @@ fn bark(kind: BarkKind) -> Bark {
         rise: 6.0,
         snow: 0.0,
         moss: 0.0,
+        bare: 0.0,
         seed: 7,
     }
 }
@@ -43,7 +46,7 @@ fn spot(at: (f64, f64), girth: f64, (key, width): (u32, f64)) -> Spot {
         girth,
         instance: key,
         front: true,
-        ground: [0.0; 4],
+        ground: [0.0; CHANNELS],
         thatch: 0.0,
     }
 }
@@ -303,4 +306,86 @@ fn a_scar_is_found_the_short_way_round_from_either_side() {
     }
     assert!(found > 300, "{found}");
     assert_eq!(found, agreed);
+}
+
+/// How fast a bark may rise, a metre along its limb or round it, bounds
+/// every rise found over a dense sampling of it, its finest detail and all,
+/// so a march that steps by it never steps over the surface it cuts. A
+/// palm's rings step, and are left out.
+#[test]
+fn a_barks_steepest_bounds_how_fast_it_rises() {
+    // Read finer than a shading normal reads it, to catch its sharpest.
+    const STEP: f64 = 2e-4;
+    for kind in KINDS.into_iter().filter(|&kind| kind != BarkKind::Ringed) {
+        let bark = Bark {
+            seed: 23,
+            ..bark(kind)
+        };
+        let mut steepest = 0.0f64;
+        for step in 0..30_000u32 {
+            let along = 0.05 + f64::from(step % 300) * 0.0191;
+            let angle = f64::from(step / 300) * 0.0617;
+            let girth = [0.07, 0.25, 0.55][(step % 3) as usize];
+            let at = OnLimb::new(along, angle, girth, (step % 11, 0.0));
+            let here = bark.height(&at);
+            let along_limb = (bark.height(&at.moved(STEP, 0.0)) - here) / STEP;
+            let round_it = (bark.height(&at.moved(0.0, STEP)) - here) / STEP;
+            steepest = steepest.max(along_limb.abs()).max(round_it.abs());
+        }
+        assert!(
+            steepest < bark.steepest(),
+            "{kind:?} rises {steepest} a metre against {}",
+            bark.steepest()
+        );
+    }
+}
+
+/// Bark sloughs off dead wood in sheets about as much of it as asked, the
+/// wood it bares sunk below the bark it fell from and brown, never a pale,
+/// smooth plane: checked dark along its grain; sound bark keeps all of itself.
+#[test]
+fn dead_bark_sloughs_away_in_sheets_baring_the_wood_beneath() {
+    let samples = |bare: f64| {
+        let bark = Bark {
+            bare,
+            ..bark(BarkKind::Furrowed)
+        };
+        let (mut gone, mut bared, mut checks) = (0u32, Vec3::ZERO, (0.0, 0u32));
+        for step in 0..4000u32 {
+            let at = on(
+                0.3 + f64::from(step % 80) * 0.05,
+                f64::from(step / 80) * 0.126,
+                0.3,
+                3,
+            );
+            if bark.gone(&at) < 0.99 {
+                continue;
+            }
+            gone += 1;
+            let colour = bark.colour(&spot((at.along, at.angle), 0.3, (3, 1e-4)));
+            let height = bark.height(&at);
+            assert!(height <= BARED + 0.05, "sunk below the bark: {height}");
+            bared += colour;
+            if height < 0.5 * BARED {
+                checks = (checks.0 + colour.luminance(), checks.1 + 1);
+            }
+        }
+        (
+            f64::from(gone) / 4000.0,
+            bared * (1.0 / f64::from(gone.max(1))),
+            checks,
+        )
+    };
+    let ((sound, ..), (half, bared, (checked, cracks))) = (samples(0.0), samples(0.5));
+    assert!(sound < 0.02, "sound bark keeps itself: {sound}");
+    assert!((0.25..0.75).contains(&half), "about half sloughed: {half}");
+    assert!(
+        bared.x > bared.z && bared.luminance() < 0.25,
+        "brown, not silvered: {bared:?}"
+    );
+    assert!(cracks > 10, "{cracks} cracks");
+    assert!(
+        checked / f64::from(cracks) < 0.7 * bared.luminance(),
+        "checks read dark"
+    );
 }

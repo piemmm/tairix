@@ -414,6 +414,7 @@ fn room(zenith: u32, horizon: u32, ground: u32) -> Sky {
         stars: None,
         low: None,
         high: None,
+        moon: None,
     }
 }
 

@@ -33,6 +33,7 @@ fn gradient(zenith: Vec3, horizon: Vec3, ground: Vec3) -> Sky {
         stars: None,
         low: None,
         high: None,
+        moon: None,
     }
 }
 
@@ -88,6 +89,7 @@ impl Setup {
             sky: self.sky,
             shades: self.shades,
             camera: Camera::looking(self.eye, self.target, 0.3, 1.0, (0.0, 1.0)),
+            height: 1080,
             exposure: Exposure::Fixed(1.0),
         })
         .expect("a scene")
@@ -444,6 +446,7 @@ fn a_ray_meeting_nothing_sees_the_sky() {
         spread: Some(tracer.pixel_angle),
         jitter: 0.5,
         air: 0.5,
+        occulted: false,
     };
     for dir in [Vec3::new(1.0, -0.1, 0.0), Vec3::new(1.0, 0.5, 0.0)] {
         let ray = crate::vector::Ray::new(Vec3::ZERO, dir.normalized());
@@ -478,7 +481,7 @@ fn the_light_a_floor_gives_back_lights_the_roof_above_it() {
             toward: Vec3::new(0.8, 0.6, 0.0),
             cos_radius: 0.9999,
             radiance: Vec3::splat(5000.0),
-            limb: Limb::Even,
+            limb: Limb::Darkening(Vec3::ZERO),
         });
         setup.eye = Vec3::new(0.0, 0.3, 0.0);
         setup.target = Vec3::new(0.0, 1.0, 0.1);
@@ -614,7 +617,7 @@ fn the_sun_lights_only_the_air_it_reaches() {
         toward: Vec3::new(1.0, 0.12, 0.0).normalized(),
         cos_radius: 0.9999,
         radiance: Vec3::splat(5000.0),
-        limb: Limb::Even,
+        limb: Limb::Darkening(Vec3::ZERO),
     });
     let scene = setup.scene();
     let encoder = Encoder::new().expect("an encoder");
@@ -673,7 +676,7 @@ fn a_set_sun_shadows_none_of_the_air_the_eye_looks_through() {
         toward,
         cos_radius: mathf::cos(0.004_65),
         radiance: Vec3::splat(1000.0),
-        limb: Limb::Even,
+        limb: Limb::Darkening(Vec3::ZERO),
     });
     let scene = setup.scene();
     let encoder = Encoder::new().expect("an encoder");
@@ -883,7 +886,7 @@ fn sun_at(elevation: f64, irradiance: f64) -> Light {
         toward: Vec3::new(mathf::cos(elevation), mathf::sin(elevation), 0.0),
         cos_radius,
         radiance: Vec3::splat(irradiance / solid),
-        limb: Limb::Even,
+        limb: Limb::Darkening(Vec3::ZERO),
     }
 }
 

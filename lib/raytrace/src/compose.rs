@@ -14,8 +14,10 @@ mod footprint;
 mod landscape;
 mod lattice;
 mod plants;
+mod snowman;
 mod still;
 mod stones;
+mod strewn;
 mod waterside;
 mod weather;
 mod woodland;
@@ -32,7 +34,7 @@ use tairix_util::mathf;
 
 use crate::body;
 use crate::camera::Camera;
-use crate::deadwood::{log, stump, Top};
+use crate::deadwood::{log, stump, Decay, Sprouting, Top, Woods};
 use crate::detail::{Densities, Detail};
 use crate::grass::{Lawn, Tops};
 use crate::heightfield::Heightfield;
@@ -47,6 +49,7 @@ use crate::scene::{Exposure, Object, Parts};
 use crate::shade::{Crown, Shades};
 use crate::shape::{Aabb, Face, Geometry, Shape};
 use crate::sky::{Dome, Sky};
+use crate::snowman::{carrot, stick, Ball, Rolling};
 use crate::terrain::Sea;
 use crate::tree::{fern, palm, saguaro, Growth, Season, Species, Stock};
 use crate::vector::{real, share, Frame, Pose, Ray, Vec3};
@@ -209,17 +212,33 @@ pub(super) enum Recipe {
     Log {
         length: f64,
         radius: f64,
-        bark: u16,
-        wood: u16,
+        woods: Woods,
         thrown: bool,
+        decay: Decay,
         seed: u64,
     },
     Stump {
         height: f64,
         radius: f64,
         top: Top,
+        woods: Woods,
+        decay: Decay,
+        sprouting: Option<Sprouting>,
+        seed: u64,
+    },
+    /// A ball of snow rolled for a snowman.
+    Snowball { ball: Ball },
+    Carrot {
+        length: f64,
+        radius: f64,
+        skin: u16,
+        seed: u64,
+    },
+    /// A stick picked up for a snowman's arm.
+    Stick {
+        length: f64,
+        radius: f64,
         bark: u16,
-        wood: u16,
         seed: u64,
     },
 }
@@ -247,6 +266,8 @@ enum Work {
     Growing(Growth),
     /// A rock, being worn before its hierarchy is built.
     Wearing(Wearing),
+    /// A ball of snow, being shaped before its hierarchy is built.
+    Rolling(Rolling),
     /// Its parts made, its hierarchy being built.
     Indexing(Building),
     Grown(Prototype),
@@ -271,6 +292,13 @@ impl Work {
                 Some(false) => Self::Wearing(wearing),
                 None => Self::Refused,
             },
+            Self::Rolling(mut rolling) => {
+                if rolling.step() {
+                    rolling.finish().map_or(Self::Refused, Self::Indexing)
+                } else {
+                    Self::Rolling(rolling)
+                }
+            }
             Self::Indexing(mut building) => {
                 if building.step(BUILD_UNIT) {
                     Self::Grown(building.finish())
@@ -323,19 +351,39 @@ fn begun(recipe: &Recipe) -> Option<Work> {
         Recipe::Log {
             length,
             radius,
-            bark,
-            wood,
+            woods,
             thrown,
+            decay,
             seed,
-        } => Work::Indexing(log(length, radius, (bark, wood, thrown), seed)?),
+        } => Work::Indexing(log(length, radius, (woods, thrown), decay, seed)?),
         Recipe::Stump {
             height,
             radius,
             top,
-            bark,
-            wood,
+            woods,
+            decay,
+            sprouting,
             seed,
-        } => Work::Indexing(stump(height, radius, (top, bark, wood), seed)?),
+        } => Work::Indexing(stump(
+            height,
+            radius,
+            (top, woods),
+            (decay, sprouting),
+            seed,
+        )?),
+        Recipe::Snowball { ball } => Work::Rolling(Rolling::new(&ball)?),
+        Recipe::Carrot {
+            length,
+            radius,
+            skin,
+            seed,
+        } => Work::Indexing(carrot(length, radius, skin, seed)?),
+        Recipe::Stick {
+            length,
+            radius,
+            bark,
+            seed,
+        } => Work::Indexing(stick(length, radius, bark, seed)?),
     })
 }
 
@@ -387,7 +435,11 @@ impl Grow {
                 refused = true;
                 false
             }
-            Work::Planned(_) | Work::Growing(_) | Work::Wearing(_) | Work::Indexing(_) => true,
+            Work::Planned(_)
+            | Work::Growing(_)
+            | Work::Wearing(_)
+            | Work::Rolling(_)
+            | Work::Indexing(_) => true,
         });
         if refused {
             return None;
@@ -707,7 +759,7 @@ impl Composition {
             return None;
         }
         let (look, camera) = self.seen?;
-        Some(self.stage.finish(look, camera))
+        Some(self.stage.finish(look, camera, self.height))
     }
 }
 
@@ -936,6 +988,8 @@ impl Stage {
             fields: &self.fields,
             prototypes: &self.prototypes,
             lawns: &self.lawns,
+            materials: &self.materials,
+            view: None,
         }
     }
 
@@ -949,9 +1003,9 @@ impl Stage {
         u32::try_from(push(&mut self.recipes, MAX_PROTOTYPES, *recipe)?).ok()
     }
 
-    /// Whether the stage plans another prototype.
-    const fn plans_more(&self) -> bool {
-        self.recipes.len() < MAX_PROTOTYPES
+    /// How many more prototypes the stage plans.
+    const fn plannable(&self) -> usize {
+        MAX_PROTOTYPES.saturating_sub(self.recipes.len())
     }
 
     /// Add `shape` in `material`, its pattern fixed in `texture`; `framed`
@@ -1236,7 +1290,9 @@ impl Stage {
         }
     }
 
-    fn finish(self, look: Look, camera: Camera) -> Parts {
+    /// Everything the scene is, seen through `camera` in a picture `height`
+    /// pixels tall.
+    fn finish(self, look: Look, camera: Camera, height: u32) -> Parts {
         Parts {
             objects: self.objects,
             faces: self.faces,
@@ -1248,6 +1304,7 @@ impl Stage {
             sky: look.sky,
             shades: self.shades,
             camera,
+            height,
             exposure: look.exposure,
         }
     }

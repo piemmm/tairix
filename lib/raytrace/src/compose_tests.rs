@@ -17,6 +17,7 @@ use tairix_parallel::Threaded;
 use tairix_util::mathf;
 
 use super::*;
+use crate::deadwood::{Fungus, Habit};
 use crate::sample::{mix32, unit};
 use crate::scene::{Draft, Scene, Sight};
 use crate::tone::Encoder;
@@ -193,6 +194,7 @@ fn every_scene_is_lit_and_made_of_sound_parts() {
                             spread: None,
                             jitter: 0.5,
                             air: 0.5,
+                            occulted: false,
                         },
                     )
                     .max_element()
@@ -348,6 +350,8 @@ fn every_hull_lies_within_its_extent() {
             fields: &scene.fields,
             prototypes: &scene.prototypes,
             lawns: &scene.lawns,
+            materials: &[],
+            view: None,
         };
         for object in &scene.objects {
             let Shape::Hull { pose, extent, .. } = object.shape else {
@@ -385,7 +389,10 @@ fn describe(scene: &Scene) -> alloc::string::String {
                 .iter()
                 .fold(0, |held, height| mix32(held ^ height.to_bits()));
             let held = (0..side * side).fold(heights, |held, at| {
-                mix32(held ^ u32::from_le_bytes(field.attributes_of(at % side, at / side)))
+                field
+                    .attributes_of(at % side, at / side)
+                    .iter()
+                    .fold(held, |held, &byte| mix32(held ^ u32::from(byte)))
             });
             (side, held)
         })
@@ -698,6 +705,8 @@ fn the_pieces_stand_in_the_frame() {
             fields: &scene.fields,
             prototypes: &scene.prototypes,
             lawns: &scene.lawns,
+            materials: &[],
+            view: None,
         };
         let framed = scene
             .objects
@@ -801,11 +810,39 @@ fn a_canopy_grid_is_as_large_as_its_lawn_and_no_larger() {
 /// the runner runs and never more — a rock, a log, a stump, a fern or a palm
 /// made on a core of its own rather than all on the caller's — and each
 /// comes out as it does grown alone.
-#[test]
-fn prototypes_grow_a_core_apiece_a_unit_as_each_grows_alone() {
+/// Dead wood's bark, wood, rot, cut edge and soil as the tests' materials.
+const WOODS: Woods = Woods {
+    bark: 0,
+    wood: 1,
+    rot: 1,
+    edge: 0,
+    soil: 1,
+};
+
+/// A fungus fruiting in the tests' materials.
+const FUNGUS: Fungus = Fungus {
+    habit: Habit::Thin,
+    zones: [0, 1],
+    margin: 0,
+    pores: 1,
+};
+
+/// A tree's materials as the tests' materials.
+const STOCK: crate::tree::Stock = crate::tree::Stock {
+    bark: 0,
+    leaves: 0,
+    grain: crate::fracture::Grain {
+        wood: 0,
+        rot: 0,
+        edge: 0,
+    },
+};
+
+/// One of every kind of prototype a scene plans: rocks, a log and a stump,
+/// a snowball, a carrot and a stick, a fern and a palm.
+fn every_recipe() -> Vec<Recipe> {
     use crate::rock::Habit;
-    use crate::tree::Stock;
-    let stock = Stock { bark: 0, leaves: 0 };
+    let stock = STOCK;
     let mut recipes: Vec<Recipe> = (0..5)
         .map(|seed| Recipe::Rock {
             habit: Habit {
@@ -822,18 +859,60 @@ fn prototypes_grow_a_core_apiece_a_unit_as_each_grows_alone() {
         Recipe::Log {
             length: 9.0,
             radius: 0.3,
-            bark: 0,
-            wood: 1,
+            woods: WOODS,
             thrown: true,
+            decay: Decay {
+                age: 0.7,
+                fungus: Some(FUNGUS),
+            },
             seed: 7,
         },
         Recipe::Stump {
             height: 0.6,
             radius: 0.4,
             top: Top::Sawn,
-            bark: 0,
-            wood: 0,
+            woods: WOODS,
+            decay: Decay {
+                age: 0.3,
+                fungus: Some(FUNGUS),
+            },
+            sprouting: Some(Sprouting {
+                bark: 0,
+                leaves: Some(1),
+                leafing: crate::tree::Leafing {
+                    outline: crate::leaf::Outline::Ovate { teeth: 10 },
+                    per_twig: 8,
+                    length: 0.06,
+                    breadth: 0.4,
+                    fold: 0.2,
+                    angle: 45.0,
+                    toward_light: 0.6,
+                },
+            }),
             seed: 8,
+        },
+        Recipe::Snowball {
+            ball: crate::snowman::Ball::made(
+                0.4,
+                crate::snowman::Making {
+                    rolled: true,
+                    pressed: 0.12,
+                    seat: Some(0.05),
+                },
+                11,
+            ),
+        },
+        Recipe::Carrot {
+            length: 0.12,
+            radius: 0.015,
+            skin: 0,
+            seed: 12,
+        },
+        Recipe::Stick {
+            length: 0.6,
+            radius: 0.015,
+            bark: 0,
+            seed: 13,
         },
         Recipe::Fern {
             height: 0.9,
@@ -848,6 +927,12 @@ fn prototypes_grow_a_core_apiece_a_unit_as_each_grows_alone() {
             seed: 10,
         },
     ]);
+    recipes
+}
+
+#[test]
+fn prototypes_grow_a_core_apiece_a_unit_as_each_grows_alone() {
+    let recipes = every_recipe();
     let grown = |runner: &dyn tairix_parallel::JobRunner| {
         let mut grow = Grow::new(recipes.len()).expect("room to grow");
         let mut was = 0;

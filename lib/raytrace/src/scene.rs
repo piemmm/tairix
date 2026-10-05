@@ -20,6 +20,7 @@ use crate::bvh::{Builder, Bvh, Cursor, Walk};
 use crate::camera::Camera;
 use crate::caustic::{Caustics, Focusing};
 use crate::compose::{Composition, Setting};
+use crate::cut::Viewpoint;
 use crate::detail::Detail;
 use crate::grass::{Canopy, Cover, Lawn};
 use crate::heightfield::Heightfield;
@@ -117,6 +118,8 @@ pub(crate) struct Parts {
     /// The shade a land's woods cast, which roofs the air beneath them.
     pub(crate) shades: Option<Shades>,
     pub(crate) camera: Camera,
+    /// How many pixels tall the picture it is seen in is.
+    pub(crate) height: u32,
     pub(crate) exposure: Exposure,
 }
 
@@ -343,6 +346,8 @@ pub struct Scene {
     pub(crate) sky: Sky,
     pub(crate) shades: Option<Shades>,
     pub(crate) camera: Camera,
+    /// Where it is seen from, and the angle a pixel of its picture spans.
+    pub(crate) view: Viewpoint,
     /// What a radiance is scaled by before it is toned for the screen.
     pub(crate) exposure: f64,
     /// The sun the lens spreads glare about, once measured.
@@ -412,6 +417,7 @@ fn daylight(sky: &Sky, lights: &[Light], eye: Vec3) -> Vec3 {
         spread: None,
         jitter: 0.5,
         air: 0.5,
+        occulted: false,
     };
     for index in 0..DAYLIGHT_SKY {
         // Spread over the sky above as its cosine weighs it, two by two in
@@ -467,6 +473,10 @@ impl Building {
             lights: parts.lights,
             sky: parts.sky,
             shades: parts.shades,
+            view: Viewpoint {
+                eye: parts.camera.eye(),
+                pixel: parts.camera.pixel_angle(parts.height),
+            },
             camera: parts.camera,
             exposure: match parts.exposure {
                 Exposure::Fixed(exposure) => exposure,
@@ -502,11 +512,15 @@ impl Scene {
         u32::try_from(count).ok()?;
         let mut bounded = fallible::filled(count, (0u32, Aabb::EMPTY))?;
         let mut unbounded = Vec::new();
+        // A limb's cut lies within its tube, so its box is the tube's whether
+        // or not it is cut.
         let geometry = Geometry {
             faces: &parts.faces,
             fields: &parts.fields,
             prototypes: &parts.prototypes,
             lawns: &parts.lawns,
+            materials: &parts.materials,
+            view: None,
         };
         // An object whose box is not finite is tested by every ray rather
         // than trusted to the slab test, which a non-finite box defeats: it
@@ -562,6 +576,8 @@ impl Scene {
             fields: &self.fields,
             prototypes: &self.prototypes,
             lawns: &self.lawns,
+            materials: &self.materials,
+            view: Some(self.view),
         }
     }
 

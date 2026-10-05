@@ -1,6 +1,7 @@
 extern crate std;
 
 use super::*;
+use crate::detail::Detail;
 use crate::prototype::Prototype;
 use crate::tree::Growth;
 
@@ -25,7 +26,15 @@ const KINDS: [Kind; 13] = [
 fn grown(kind: Kind, stand: Stand, seed: u64) -> (Prototype, f64) {
     let species = stood(kind, stand);
     let height = f64::midpoint(species.height.0, species.height.1);
-    let stock = Stock { bark: 0, leaves: 1 };
+    let stock = Stock {
+        bark: 0,
+        leaves: 1,
+        grain: crate::fracture::Grain {
+            wood: 2,
+            rot: 3,
+            edge: 4,
+        },
+    };
     let mut growth = Growth::new(&species, height, (Season::Summer, stock), seed).expect("grows");
     while !growth.step().expect("grows") {}
     (growth.finish().expect("a tree"), height)
@@ -119,4 +128,41 @@ fn a_kinds_crown_reaches_as_far_as_its_grown_trees_spread() {
             );
         }
     }
+}
+
+#[test]
+fn only_a_broadleafs_stumps_send_up_shoots() {
+    for (kind, broadleaf) in [
+        (Kind::Oak, true),
+        (Kind::Birch, true),
+        (Kind::Hazel, true),
+        (Kind::Gorse, true),
+        (Kind::Pine, false),
+        (Kind::Spruce, false),
+        (Kind::Palm, false),
+        (Kind::Saguaro, false),
+        (Kind::Fern, false),
+    ] {
+        let mut stage = Stage::new(Detail::Simple.densities()).expect("a stage");
+        let rotting = Rotting::new(
+            &mut stage,
+            &mut Dice::keyed(7, 0),
+            (kind, Season::Summer),
+            0.3,
+        )
+        .expect("its rot");
+        assert_eq!(rotting.sprouting.is_some(), broadleaf, "{kind:?}");
+    }
+}
+
+#[test]
+fn a_stumps_shoots_are_leafy_but_in_winter() {
+    let leaves = |season| {
+        let mut stage = Stage::new(Detail::Simple.densities()).expect("a stage");
+        sprouts(&mut stage, &mut Dice::keyed(7, 0), (Kind::Oak, season))
+            .expect("its shoots")
+            .leaves
+    };
+    assert!(leaves(Season::Summer).is_some());
+    assert!(leaves(Season::Winter).is_none());
 }

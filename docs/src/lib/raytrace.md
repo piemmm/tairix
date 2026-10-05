@@ -26,7 +26,7 @@ takes, a seed shows the same place at either detail.
   stacks under the open sky; a studio's plinth under softboxes, high or low
   key; crystal clusters, or crystals grown out of a stone, on black glass at
   dusk, under display spots; glass and chrome among garden lamps under the
-  full moon; soap bubbles drifting over a meadow. Only the studio is indoors:
+  moon; soap bubbles drifting over a meadow. Only the studio is indoors:
   the others stand under the open sky's weather, dusk and night included.
 - **Buildings** stand on a paved plaza, on tiles to the horizon or on open land
   with woods about it: a colonnade in three orders, a loggia of arches or a
@@ -89,12 +89,21 @@ Every light out of doors is measured, not chosen (`body`, `stars`,
   and dimmed along that ray, so the lower limb of a setting sun is redder
   than its upper. The eye's own rays, which cross only the level scene, stay
   straight.
-- **The full moon** lights the night: the sunlight its grey reflects, 14
-  magnitudes fainter than the sun (−12.74 against −26.74) and warmer, as the
-  ROLO lunar model (Kieffer and Stone 2005) gives its reflectance across the
-  channels. It is reckoned from the eye, nearer and so larger and brighter
-  the higher it stands; lit square on, its disc is evenly bright. The night
-  sky is the atmosphere lit by it.
+- **The moon** lights the night at its phase: full, 14 magnitudes fainter
+  than the sun (−12.74 against −26.74), waning by Allen's phase law
+  (0.026|α| + 4·10⁻⁹α⁴ magnitudes at a phase of α degrees), and warmer than
+  sunlight, as the ROLO lunar model (Kieffer and Stone 2005) gives its
+  reflectance across the channels. Its disc is lit by the Lommel–Seeliger
+  law, μ₀/(μ₀ + μ), evenly at full and toward the sun otherwise, so a
+  crescent's horns face the sun, and no part brighter than the full moon lit
+  as it is; and all of it by the Earth's light — the full Earth's, waning as a
+  Lambert sphere does, about a ten-thousandth of the sun's — bluer than its
+  sunlit part, which a thin crescent's dark side shows. It is reckoned from
+  the eye, nearer and so larger and brighter the higher it stands. By night
+  the sun lies set beneath it, at least 15° down, as far as its phase has it;
+  by day now and then, and at dusk as a young or an old crescent, a moon
+  stands in the sky lighting nothing beside the sun, and no star shows
+  through its disc. The night sky is the atmosphere lit by it.
 - **The stars** are Allen's census, star by star to magnitude 12 — in three
   tiers by brightness, each cut into cube cells of its own, coarse for the few
   bright and fine for the many faint; each cell holds a Poisson draw of its
@@ -112,7 +121,7 @@ Every light out of doors is measured, not chosen (`body`, `stars`,
 - **Lamps** shine in real units: a garden globe in lumens, a spotlight in
   candelas, turned to the scene's light by the sunlight's illuminance above
   the air (133 334 lx, Darula, Kittler and Gueymard 2005). Beside them the
-  full moon gives the faint light it does.
+  moon gives the faint light it does.
 
 What deep water glows with is scaled by the light falling on the scene's
 level, measured channel by channel once the sky is built — the sun's disc
@@ -146,6 +155,36 @@ course crosses; what lies past the banks lies under the ground, unseen. Grass is
 coarser cells the further they lie, merging leaves finer than a pixel and
 fading into the ground's own colour far off.
 
+Snow on a land lies as the wind laid it (`snow`), never as an even mantle.
+How sheltered each place stands is read once from the worn relief at the
+coarse grid's samples, a band of rows a core, and carried to every finer
+vertex through the same Catmull–Rom patch the relief is: the steepest slope up
+to the ground within 100 m upwind, the mean of it over the wind's heading and
+fifteen degrees either side (Winstral, Elder and Davis 2002), less what the
+wind quickens by over a crest curving up 50 m about a place and up a slope it
+climbs (MicroMet, Liston and Elder 2006). The fall, uneven by fifteen per cent
+in patches some 70 m across, is moved by up to 1.4 of itself by that shelter:
+deep in the lee of every rise, scoured to a crust on crests and up the slopes
+the wind climbs, and sloughing off ground steeper than it rests on. On the
+finer grids, where the wind has scoured it, it is cut into snow dunes 9 m
+apart and sastrugi 1.6 m apart running along the wind, each only as fine as
+the grid resolves and never through the snow (Filhol and Sturm 2015). Each
+vertex carries the snow's depth beside what else the land is like, kept to
+the millimetre about nought, where a few centimetres decide what shows: the
+ground's colour shows where less than about 6 cm lies, in patches, and grass
+grows only where it lies thinner than the grass stands, a shoot rooted on the
+snow showing only what stands above it.
+
+Stones lie on a land as it would have them (`compose::strewn`), from eight
+rocks of its own stone a scene and draws of their own, so a detail strewing
+more shifts nothing else: gathered in boulder fields where a broad noise some
+70 m across has them, each boulder among up to three smaller ones; fanned in
+scree on the talus below a crag found within 22 m uphill, likelier the nearer
+it and the larger stones the further they rolled; a few strays elsewhere;
+and drifts of four to a dozen pebbles washed into the wet or silted hollows
+within 15 m of the eye at `Simple` and 30 m at `Maximum`, which strews three
+times the boulders too.
+
 ## Woods
 
 A scene asks for its woods (`compose::woodland`) and they are grown once its
@@ -176,8 +215,9 @@ land stands, a bounded step at a time.
   youngest to its tallest, and a place stands the one nearest the height it
   wants, scaled from three quarters of its own size to a third larger. A tree grown close among
   others sheds the limbs its neighbours shade and grows narrow; a young one is
-  short and less branched; a dead one keeps its trunk, snapped short, and the
-  stubs of its biggest limbs.
+  short and less branched; a dead one stands snapped off where its trunk was
+  still thick, its biggest limbs broken back to a third of their length, as
+  thick where they broke, every break torn.
 - **Beneath.** Shrubs, ferns and young trees are sown in the shade the canopy
   casts: next to none under a closed canopy, most in its gaps and along its
   edges, fewer again out in the open, where grass takes the ground.
@@ -185,7 +225,35 @@ land stands, a bounded step at a time.
   their limbs broken to stubs, in weathered bark taken by moss — lie about the
   eye, three times as thickly where the canopy has opened and those lying the
   way the wind threw them; stumps, sawn or snapped, and standing dead trees
-  stand among the living.
+  stand among the living, each stump's foot flaring into the roots it stands
+  on. A thrown trunk tore up the plate of soil its roots held: a bulbous mass
+  of crumbling clods standing on edge across its foot, the trunk flaring into
+  it, its roots running out through its underside with their backs bared and
+  broken off past its rim, those that sank deep broken short of its
+  underside every way, a mat of fine roots bristling from it and fine roots
+  hanging from its rim.
+- **Decaying.** A kind's dead have lain as long as each other, a few seasons
+  either way (`deadwood::Decay`). Their bark loosens once the wood has begun
+  to rot and sloughs away in sheets, by their kind: an oak's thick corky bark
+  stays on in its plates for years, a birch's outlasts the wood it wraps, a
+  beech's falls early. The wood it bares lies sunk below it, tan where it fell
+  lately and weathering grey-brown, its grain raised, checked along it and in
+  places engraved by the galleries of the beetles that fed beneath the bark;
+  where a sheet broke away its edge is dark. Moss takes dead wood the longer
+  it lies, in crisp cushions that take its furrows before its crests. A sawn
+  face, ringed with its years and weathering from tan to grey-brown, its bark
+  cut through in a dark ring about its rim and following the lobes a low cut
+  shows, dries into checks running in from its rim, more and wider the older
+  it is, and a felled stump keeps the step from its notch to its back cut and
+  the hinge it tore across, until the hinge rots away; past about half its
+  span a heart rots hollow, a pit of crumbling brown in a stump's face and in
+  a log's broken ends. Rot fruits in brackets the likelier the longer wood has
+  lain — turkey tail's thin banded tiers, an artist's bracket's woody shelves,
+  a birch's own polypore — shelving out level from a log's flanks or a stump's
+  sides, pale margins round them and their pores beneath. A broadleaf's stump
+  sends up shoots from below its cut or about its root collar, arching out
+  and up toward the light, leafy but in winter; a pine's or a spruce's never
+  does.
 
 Each crown's reach is recorded, and once the woods stand their **shade** is
 cast over the land (`shade`), whether or not a sward is laid beneath them: how far under a crown a place lies, and how much
@@ -337,27 +405,90 @@ each where three faces meet within the rest.
 - **Prototypes** are built once and placed as often as a scene wants: trees
   grown after Weber and Penn (SIGGRAPH 1995), palms and ferns of fronds,
   saguaros, rocks cut from noised icospheres, fallen trunks and stumps. Each
-  is a list of parts — tapering limbs with rounded or open ends, leaves cut
-  to an outline, triangles — under a hierarchy of its own, built a slice at a
-  time. A triangle with no material of its own takes the one its placing is
-  made in, so one rock is laid wet, dry or mossed.
+  is a list of parts — tapering limbs with rounded or open ends, a limb's
+  foot flaring, leaves cut to an outline, triangles — under a hierarchy of
+  its own, built a slice at a time. A triangle with no material of its own
+  takes the one its placing is made in, so one rock is laid wet, dry or
+  mossed.
   A trunk holds its girth up its bole by its kind's form before narrowing into
-  its crown, bows in one gentle sweep, swells at its foot over a metre or so —
-  drawn in short segments so the swell curves — and is gripped by roots that
-  spur out of the flare and run along the ground into the soil; its bare bole
-  carries the stubs of the branches it shed as its crown rose.
+  its crown and bows in one gentle sweep. Its foot (`foot`) swells all round
+  and out toward each of its roots as a buttress, the trunk deforming toward
+  each, and each root runs on out of its lobe where the lobe comes down to
+  the root's back, just under half buried, wandering to one side as it
+  narrows, forking now and then, and diving into the soil, a rootlet carrying
+  it on down, so no end of it shows. Its bare bole carries the stubs of the
+  branches it shed as its crown rose, each broken off torn.
+- **Flares** (`flare`). A limb's foot swells by a share of its radius all
+  round and by a lobe toward each root, each falling away up the limb and the
+  whole faded to round before the limb's flare ends, so the limb above meets
+  it in round. A flared limb is met at any distance by the march that cuts
+  bark (below), its radius the flare's at each height and angle; its bark is
+  the limb's own, laid at the swollen girth, so its pattern runs on down into
+  the lobes. Its bounds are read round it where its lobes are fullest, widened
+  by as much as they could rise between readings.
+- **Breaks** (`fracture`). Wood snapped across its grain is torn, never
+  rounded. Bent until it gave, it failed in tension on the side bent away
+  from and crushed on the other: the face climbs toward a crest where its
+  fibres pulled out, ragged in fibres a centimetre apart, the more so on its
+  pulled side; laths stand from it, slabs split along the wood's rays with
+  sharp faces, leaning out a little, narrowing and splitting at their tips,
+  most where the wood was pulled and toward the rim, and those torn from the
+  rim keep the bark's dark edge on their outer face; the bark tears about
+  level, a thin dark edge about the rim, and hangs in a tatter or two. A break
+  that has lain long has lost its finer splinters and its heart has rotted
+  hollow. However broad, a break is torn as deep as its wood is thick across
+  its narrowest. Stumps, fallen trunks' ends, their limbs' stubs, a bole's
+  stubs, a dead tree's top and limbs, and the roots a thrown trunk tore up all
+  end in one.
+- **Snowmen** are built as children build them (`snowman`): two balls or
+  three, each smaller than the last, rolled from the snow, so none is round.
+  A rolled ball is a drum, narrower along its roll axis than round it, lumped,
+  wrapped in the sheets it took up — each sheet's end a lip a centimetre or so
+  proud, thinning behind it — and streaked round its drum with the earth, dead
+  grass and leaf it picked up; a head is as often packed by hand, rounder and
+  lumpier with no sheets. Each is dented where it was patted, flattened where
+  it was set down and where the next was pressed onto it, snow packed about
+  the join, settled under its weight, and stacked leaning a few degrees and set
+  a little off its seat. Lumps of coal, broken fresh along their fractures, are
+  pressed in for its eyes, a mouth and buttons; a carrot ringed where its fine
+  roots grew, tapering away to the thread of root it ends in, is pushed in for
+  its nose, drooping as it may; and forked sticks narrowing out to fine twig
+  tips are pushed into its sides for arms. Each ball is a mesh about a centimetre to
+  a facet, shaped a few thousand vertices a unit.
 - **Bark** is laid on each limb along its stem and round its girth at real
   size, the circle round the limb carried onto a circle through the
   pattern's space so it closes with no seam, and each tree placed under its
   own key wears its own. Ridged barks are nets of fissures running up the
-  trunk, parting and joining, their ridges shaped rounded or flat-topped and
-  broken across here and there, knobbly and fibrous on their faces; pine
+  trunk, parting and joining, their ridges broken across into blocks: an
+  oak's, a willow's or a poplar's furrows are sharp at their floors and
+  red-brown down their walls, climbing to narrow crests that crumble into
+  corky scales, cracked along their grain and knobbly; pine
   thins from plates to orange flakes at a height each tree and each side of it
   reaches for itself, birch is white with lenticels over a black fissured
   foot, beech smooth, cherry banded, spruce scaled. Scars mark where limbs
   fell, lichen crusts what stands out, rain streaks it, soil splashes its foot,
   and its hollows darken with the walls about them. Detail finer than a pixel
   settles to its mean, in colour and in relief.
+- **Bark in true relief** (`cut`). Near the eye a limb thick enough to have
+  fissured — from 3 cm in radius, fully by 12 cm — is cut by its own bark:
+  its ridges stand at its radius and its fissures are sunk the bark's depth
+  into it, so its outline is ridged and its furrows shadow one another. It is
+  cut in full where the cut spans three pixels or more, fading to none where
+  it would span one and a half; farther off it is its tube again, its bark
+  tilting the light. The cut surface depends only on where a point lies and
+  where the eye stands, so every ray meets the same one: it is found by sphere
+  tracing (Hart 1996) against twice the steepest each bark was found to rise,
+  never in steps shorter than three quarters of a pixel there, and the
+  crossing bisected to a hundredth of that; a shadow ray stops at the first
+  crossing. Past each end it rounds, the cut limb runs on within that end's
+  sphere, so a bending limb's joints stay closed and a free end stays round.
+  Beyond the bark's outer surface, and deeper than its cut, the bark cannot
+  change which side of the cut surface a point stands, so it is read only in
+  the shell between, and outside it the march steps by the limb's own far
+  gentler rise. Its normal is the gradient of the surface it crossed, read
+  either side of the hit, so it faces whatever ray crossed into it however
+  steep the bark's walls or the flare's lobes; an end, rounded or open, is not
+  read, so a hit at an open end's rim faces out of the limb's side.
 - **Lawns** root a few blades in each cell of a grid over the ground, each
   leaning no further than its cell's walls; a ray walks the cells it crosses
   low enough to reach anything, and the first thing met in the first cell is

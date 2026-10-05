@@ -39,12 +39,15 @@ pub(crate) enum BarkKind {
     Ringed,
     /// Ribs running its length: a cactus.
     Ribbed,
+    /// Shallow rings across it where its fine roots grew: a carrot.
+    Taproot,
 }
 
 /// A bark: its pattern; the colours of its ridges and of its hollows; the
 /// colour lichen, or on a plated bark the upper trunk, takes it toward, and
 /// from what height up the trunk that upper colour shows; how much snow lies
-/// on its limbs; and how much of it moss takes, at most.
+/// on its limbs; how much of it moss takes, at most; and how much of it has
+/// sloughed away from dead wood.
 #[derive(Clone, Debug)]
 pub(crate) struct Bark {
     pub(crate) kind: BarkKind,
@@ -54,6 +57,7 @@ pub(crate) struct Bark {
     pub(crate) rise: f64,
     pub(crate) snow: f64,
     pub(crate) moss: f64,
+    pub(crate) bare: f64,
     pub(crate) seed: u32,
 }
 
@@ -131,8 +135,9 @@ impl OnLimb {
 /// Crustose lichen: its paler and its greener crust.
 const LICHEN: [Vec3; 2] = [Vec3::new(0.46, 0.5, 0.42), Vec3::new(0.36, 0.44, 0.24)];
 
-/// Moss in its shade, and where it catches the light.
-const MOSS: [Vec3; 2] = [Vec3::new(0.055, 0.1, 0.018), Vec3::new(0.19, 0.27, 0.045)];
+/// Moss in its shade, and where it catches the light: a dark olive, never
+/// the yellow-green of new leaves.
+const MOSS: [Vec3; 2] = [Vec3::new(0.035, 0.06, 0.014), Vec3::new(0.1, 0.15, 0.032)];
 
 /// Soil splashed up a trunk's foot.
 const SOIL: Vec3 = Vec3::new(0.12, 0.095, 0.07);
@@ -145,6 +150,55 @@ const BIRCH_TWIG: Vec3 = Vec3::new(0.2, 0.12, 0.1);
 /// Metres between the rows a trunk's scars are strewn in.
 const SCAR_ROW: f64 = 0.8;
 
+/// The wood where bark sloughed from dead wood: tan sapwood where it lately
+/// fell, grey-brown where the weather has had it long; how high it lies, as
+/// the bark's own height, sunk below all but the floors of its fissures; and
+/// how widely the sheets' noise spreads about nought.
+const SAPWOOD: Vec3 = Vec3::new(0.16, 0.11, 0.065);
+const WEATHERED_WOOD: Vec3 = Vec3::new(0.1, 0.09, 0.078);
+const BARED: f64 = 0.12;
+const SLOUGH_SPREAD: f64 = 0.4;
+
+/// A net of fissures running up a limb: `round` and `up` of its meshes to a
+/// metre round and along it, how far from a fissure in its noise a ridge's
+/// middle lies, how jagged its fissures' edges are, and the breaks crossing
+/// its ridges — how much of the bark they cross, and `every` to a metre up it.
+#[derive(Copy, Clone, Debug)]
+struct Net {
+    round: f64,
+    up: f64,
+    crest: f64,
+    jagged: f64,
+    breaks: f64,
+    every: f64,
+}
+
+/// A pine's plates, an oak's furrows and the crust about a birch's foot.
+const PLATES: Net = Net {
+    round: 9.0,
+    up: 0.7,
+    crest: 0.45,
+    jagged: 0.0,
+    breaks: 0.9,
+    every: 4.9,
+};
+const FURROWS: Net = Net {
+    round: 17.0,
+    up: 3.0,
+    crest: 0.5,
+    jagged: 0.14,
+    breaks: 0.85,
+    every: 7.0,
+};
+const BIRCH_FOOT: Net = Net {
+    round: 16.0,
+    up: 2.0,
+    crest: 0.45,
+    jagged: 0.0,
+    breaks: 0.6,
+    every: 14.0,
+};
+
 impl Bark {
     /// How far the bark stands out at `at`, from `0.0` in its deepest cracks
     /// to `1.0` on its plates and ridges.
@@ -152,16 +206,45 @@ impl Bark {
         self.surface(at, false).0
     }
 
+    /// The bark's height at `at`, and how fast it rises along the limb and
+    /// round it, a metre each way, read a millimetre apart.
+    pub(crate) fn sloped(&self, at: &OnLimb) -> (f64, f64, f64) {
+        const STEP: f64 = 1e-3;
+        let here = self.height(at);
+        (
+            here,
+            (self.height(&at.moved(STEP, 0.0)) - here) / STEP,
+            (self.height(&at.moved(0.0, STEP)) - here) / STEP,
+        )
+    }
+
+    /// The most the bark's height rises a metre along or round its limb,
+    /// however fine its detail: twice the steepest found over a dense
+    /// sampling of each pattern. A palm's rings step, so theirs bounds only
+    /// the smooth stretches between the steps.
+    pub(crate) const fn steepest(&self) -> f64 {
+        match self.kind {
+            BarkKind::Furrowed => 1_800.0,
+            BarkKind::Plated | BarkKind::Scaly => 720.0,
+            BarkKind::Papery => 460.0,
+            BarkKind::Smooth | BarkKind::Banded => 330.0,
+            BarkKind::Ribbed => 230.0,
+            BarkKind::Taproot => 2_200.0,
+            BarkKind::Ringed => 1_000.0,
+        }
+    }
+
     /// The colour of the bark at `spot`, with the moss and snow on it.
     pub(crate) fn colour(&self, spot: &Spot) -> Vec3 {
         let at = OnLimb::of(spot);
         let (height, colour) = self.surface(&at, true);
-        let hollow = (1.0 - height) * (1.0 - height);
+        // Where a sheet sloughed away the wood lies open, no fissure's floor.
+        let hollow = (1.0 - height) * (1.0 - height) * (1.0 - self.gone(&at));
         let colour = colour * (1.0 - self.cavity() * hollow);
         colour
             .lerp(
                 self.moss_colour(&at, spot.normal),
-                self.mossed(&at, spot.normal),
+                self.mossed(&at, spot.normal, height),
             )
             .lerp(SNOW, lying(self.snow, spot.normal))
     }
@@ -175,6 +258,7 @@ impl Bark {
             BarkKind::Papery => 0.55,
             BarkKind::Scaly => 0.45,
             BarkKind::Ringed | BarkKind::Ribbed => 0.3,
+            BarkKind::Taproot => 0.25,
             BarkKind::Banded => 0.2,
             BarkKind::Smooth => 0.15,
         }
@@ -192,12 +276,64 @@ impl Bark {
             BarkKind::Scaly => self.scaly(at, paint),
             BarkKind::Ringed => return self.ringed(at, paint),
             BarkKind::Ribbed => return self.ribbed(at, paint),
+            BarkKind::Taproot => return self.taproot(at, paint),
         };
         let (height, colour) = self.scarred(at, (height, colour), paint);
+        let (height, colour) = if paint {
+            (height, self.weathered(at, colour, height))
+        } else {
+            (height, colour)
+        };
+        self.sloughed(at, (height, colour), paint)
+    }
+
+    /// How much of the bark at `at` has sloughed away, in sheets with sharp
+    /// edges where each broke from the wood.
+    fn gone(&self, at: &OnLimb) -> f64 {
+        if self.bare <= 0.0 {
+            return 0.0;
+        }
+        let seed = self.seed;
+        let sheets = noise3(at.at((2.2, 0.9)), seed ^ 0x5f)
+            + 0.35 * noise3(at.at((7.0, 2.5)), seed ^ 0x60) * at.shows(0.05);
+        // Noise lies about nought, as narrowly as this: the share of it above
+        // the threshold is about the share asked.
+        let threshold = SLOUGH_SPREAD * (1.0 - 2.0 * self.bare.min(1.0));
+        smoothstep(threshold - 0.03, threshold + 0.03, sheets) * at.shows(0.03)
+    }
+
+    /// `surface` where its bark has sloughed off dead wood in sheets: the
+    /// wood beneath, sunk below the bark it fell from, its grain standing in
+    /// fine ridges where the weather wore the softer wood between, split in
+    /// checks along it and engraved by the galleries of the beetles that fed
+    /// beneath the bark; tan where it lately fell, weathering grey-brown.
+    fn sloughed(&self, at: &OnLimb, (height, colour): (f64, Vec3), paint: bool) -> (f64, Vec3) {
+        let gone = self.gone(at);
+        if gone <= 0.0 {
+            return (height, colour);
+        }
+        let seed = self.seed;
+        let grain = noise3(at.at((160.0, 3.0)), seed ^ 0x61) * at.shows(0.003);
+        let checked = smoothstep(0.0, 0.3, noise3(at.at((6.0, 1.0)), seed ^ 0x63));
+        let check = (1.0 - smoothstep(0.0, 0.04, noise3(at.at((22.0, 1.2)), seed ^ 0x62).abs()))
+            * checked
+            * at.shows(0.006);
+        // Beetles fed in a few places, never all over.
+        let fed = smoothstep(0.35, 0.6, noise3(at.at((3.0, 1.5)), seed ^ 0x65));
+        let gallery = (1.0
+            - smoothstep(0.0, 0.025, noise3(at.at((30.0, 18.0)), seed ^ 0x64).abs()))
+            * fed
+            * at.shows(0.004);
+        let wood = (BARED + 0.04 * grain - 0.12 * check.max(0.6 * gallery)).max(0.0);
+        let height = height + (wood - height) * gone;
         if !paint {
             return (height, colour);
         }
-        (height, self.weathered(at, colour, height))
+        // Most bared wood has lain long enough to grey.
+        let weathered = 0.45 + 0.55 * smoothstep(-0.3, 0.5, noise3(at.at((2.0, 0.6)), seed ^ 0x66));
+        let tone = SAPWOOD.lerp(WEATHERED_WOOD, weathered) * (0.92 + 0.1 * grain);
+        let bared = tone.lerp(tone * 0.35, check).lerp(tone * 0.6, gallery);
+        (height, colour.lerp(bared, gone))
     }
 
     /// A pine's bark. Low on the trunk, long rough plates split up its length
@@ -210,7 +346,7 @@ impl Bark {
         let turn = self.rise * (1.0 + 0.35 * noise3(at.at((0.05, 0.01)), seed ^ 0x71))
             + 1.6 * noise3(at.at((2.0, 0.3)), seed ^ 0x6d);
         let upper = smoothstep(turn - 1.2, turn + 2.2, at.along);
-        let (ridge, cut) = self.fissures(at, (9.0, 0.7), 0.9);
+        let (ridge, cut) = self.fissures(at, &PLATES);
         let plate = smoothstep(0.22, 0.42, ridge) * (0.8 + 0.2 * ridge) * (1.0 - 0.55 * cut);
         let (sheets, sheet_edge) =
             terraced(0.5 + 0.5 * noise3(at.at((10.0, 22.0)), seed ^ 0x2a), 2.0);
@@ -260,20 +396,27 @@ impl Bark {
         (height, low.lerp(paper, upper))
     }
 
-    /// Where `at` lies in a net of fissures running up the limb, `round` to a
-    /// metre round it and `up` to a metre along it, parting and joining as
-    /// they climb: how far toward the middle of the ridge between two it
-    /// lies, from `0.0` in a fissure's floor to `1.0`; and how deep in one of
-    /// the broad, shallow breaks crossing the ridges it lies, `breaks` how
-    /// often they come.
-    fn fissures(&self, at: &OnLimb, (round, up): (f64, f64), breaks: f64) -> (f64, f64) {
+    /// Where `at` lies in `net`: how far toward the middle of the ridge
+    /// between two fissures it lies, from `0.0` in a fissure's floor to
+    /// `1.0`; and how deep in one of the broad, shallow breaks crossing the
+    /// ridges.
+    fn fissures(&self, at: &OnLimb, net: &Net) -> (f64, f64) {
         let seed = self.seed;
+        let (round, up) = (net.round, net.up);
         let warp = 0.45 * noise3(at.at((0.45 * round, 0.8 * up)), seed ^ 0x11);
         let fine = noise3(at.at((2.7 * round, 2.9 * up)), seed ^ 0x12) * at.shows(0.35 / round);
-        let net = noise3(at.at((round, up)) + Vec3::new(warp, 0.0, -warp), seed) + 0.25 * fine;
-        let ridge = (net.abs() / 0.45).min(1.0);
+        let jag = if net.jagged > 0.0 {
+            net.jagged
+                * noise3(at.at((7.0 * round, 6.5 * up)), seed ^ 0x13)
+                * at.shows(0.12 / round)
+        } else {
+            0.0
+        };
+        let value =
+            noise3(at.at((round, up)) + Vec3::new(warp, 0.0, -warp), seed) + 0.25 * fine + jag;
+        let ridge = (value.abs() / net.crest).min(1.0);
         let across = noise3(
-            at.at((0.55 * round, 7.0 * up)) + Vec3::new(0.0, warp, 0.0),
+            at.at((0.55 * round, net.every)) + Vec3::new(0.0, warp, 0.0),
             seed ^ 0x1b,
         );
         let patches = smoothstep(
@@ -281,8 +424,10 @@ impl Bark {
             0.5,
             noise3(at.at((0.7 * round, 2.2 * up)), seed ^ 0x1c),
         );
-        let cut =
-            (1.0 - smoothstep(0.0, 0.2, across.abs())) * patches * breaks * at.shows(0.5 / round);
+        let cut = (1.0 - smoothstep(0.0, 0.2, across.abs()))
+            * patches
+            * net.breaks
+            * at.shows(0.5 / round);
         (ridge, cut)
     }
 
@@ -302,43 +447,63 @@ impl Bark {
         (knobs - 0.8 * cracks * at.shows(0.6 / round)) * at.shows(1.0 / round)
     }
 
-    /// Furrows parting and joining up the trunk between long rounded ridges,
-    /// broken across here and there, the ridges' faces fibrous.
+    /// Furrows parting and joining up the trunk in a long net, sharp at their
+    /// floors and red-brown down their walls, between narrow ridges broken
+    /// across into blocks, their crests crumbling into corky scales, cracked
+    /// along the grain and knobbly.
     fn furrowed(&self, at: &OnLimb, paint: bool) -> (f64, Vec3) {
         let seed = self.seed;
-        let (ridge, cut) = self.fissures(at, (14.0, 1.0), 0.7);
-        let rounded =
-            smoothstep(0.18, 0.5, ridge) * (0.7 + 0.3 * (1.0 - (1.0 - ridge) * (1.0 - ridge)));
-        let fibre = noise3(at.at((130.0, 6.0)), seed ^ 0x3d) * at.shows(0.005);
-        let rough = self.rough(at, (45.0, 14.0));
-        let height = mix(
-            0.62,
-            rounded * (0.88 - 0.4 * cut + 0.08 * rough + 0.05 * fibre),
-            at.shows(0.08),
-        )
-        .clamp(0.0, 1.0);
+        let (ridge, cut) = self.fissures(at, &FURROWS);
+        // A furrow's walls climb from a sharp floor to a narrow crest.
+        let profile = ridge * (2.0 - ridge);
+        let near = at.shows(0.012);
+        let (scale, seam) = if near > 0.0 {
+            let scales = cells3(at.at((70.0, 30.0)), seed ^ 0x54, 0.9);
+            let seam = 1.0 - smoothstep(0.0, 0.12, scales.wall());
+            // Each scale stands at its own height, easing down into its seam
+            // so its neighbours meet there.
+            (unit(scales.id) * (1.0 - seam), seam * near)
+        } else {
+            (0.5, 0.0)
+        };
+        let (knobs, crack) = self.cork(at);
+        let skin = 0.74 + 0.2 * near * scale + 0.08 * knobs - 0.3 * seam - 0.25 * crack;
+        let height = mix(0.5, profile * (1.0 - 0.6 * cut) * skin, at.shows(0.06)).clamp(0.0, 1.0);
         if !paint {
             return (height, Vec3::ZERO);
         }
-        let tone = smoothstep(-0.5, 0.6, noise3(at.at((4.0, 0.7)), seed ^ 0x77));
-        let ridge_colour = self
+        let tone = smoothstep(-0.5, 0.6, noise3(at.at((3.0, 0.8)), seed ^ 0x77));
+        let crest = smoothstep(0.55, 0.9, profile);
+        let face = self
             .light
-            .lerp(self.light * Vec3::new(0.9, 0.92, 0.95), tone)
+            .lerp(self.light * Vec3::new(0.86, 0.9, 0.95), tone)
             .lerp(
-                Vec3::splat(self.light.max_element()),
-                0.3 * smoothstep(0.8, 1.0, height),
+                Vec3::splat(self.light.max_element() * 0.92),
+                0.4 * crest * (0.4 + 0.6 * scale),
             )
-            * (0.9 + 0.1 * fibre);
-        let wall = self
+            * (0.9 + 0.1 * knobs);
+        let inner = self
             .dark
-            .lerp(self.light * 0.5, smoothstep(0.12, 0.4, ridge));
-        (
-            height,
-            wall.lerp(
-                ridge_colour,
-                smoothstep(0.3, 0.65, ridge) * (1.0 - 0.4 * cut),
-            ),
-        )
+            .lerp(self.light * Vec3::new(1.05, 0.76, 0.58), 0.5);
+        let walls = self.dark.lerp(inner, smoothstep(0.05, 0.45, ridge));
+        let colour = walls
+            .lerp(face, smoothstep(0.45, 0.85, ridge) * (1.0 - 0.5 * cut))
+            .lerp(self.dark, 0.75 * seam.max(crack));
+        (height, colour)
+    }
+
+    /// The corky skin of a furrowed bark's ridges at `at`: how knobbly it
+    /// stands there, from about `-1.0` to `1.0`, and how deep in one of the
+    /// cracks running along its grain, `0.0` to `1.0`.
+    fn cork(&self, at: &OnLimb) -> (f64, f64) {
+        let seed = self.seed;
+        let knobs = (noise3(at.at((42.0, 26.0)), seed ^ 0x4e)
+            + 0.5 * noise3(at.at((97.0, 61.0)), seed ^ 0x4f) * at.shows(0.004))
+            * at.shows(0.012);
+        let along = noise3(at.at((64.0, 6.0)), seed ^ 0x50).abs();
+        let patchy = smoothstep(-0.1, 0.3, noise3(at.at((12.0, 3.0)), seed ^ 0x52));
+        let crack = (1.0 - smoothstep(0.0, 0.05, along)) * patchy * at.shows(0.004);
+        (knobs, crack)
     }
 
     /// A birch's bark: white, with its dark lenticels running across it and
@@ -358,7 +523,7 @@ impl Bark {
             terraced(0.5 + 0.5 * noise3(at.at((5.0, 40.0)), seed ^ 0x62), 2.0);
         let peeling = at.shows(0.02);
         let white = 0.9 + 0.06 * strip * peeling + 0.04 * (1.0 - dash);
-        let (ridge, cut) = self.fissures(at, (16.0, 2.0), 0.6);
+        let (ridge, cut) = self.fissures(at, &BIRCH_FOOT);
         let crust = (1.0 - (1.0 - ridge) * (1.0 - ridge)) * (1.0 - 0.5 * cut);
         let height = mix(white, mix(0.62, crust, at.shows(0.06)), black);
         if !paint {
@@ -463,6 +628,26 @@ impl Bark {
         (height, if paint { colour } else { Vec3::ZERO })
     }
 
+    /// A taproot's skin: shallow rings across it where its fine roots grew,
+    /// a few millimetres apart and broken round it, and faint streaks along
+    /// it.
+    fn taproot(&self, at: &OnLimb, paint: bool) -> (f64, Vec3) {
+        let seed = self.seed;
+        let ring = at.along * 180.0 + 1.5 * noise3(at.at((30.0, 6.0)), seed);
+        let within = ring - mathf::floor(ring);
+        let broken = smoothstep(-0.3, 0.3, noise3(at.at((60.0, 40.0)), seed ^ 0x2e));
+        let groove =
+            (1.0 - smoothstep(0.0, 0.15, within.min(1.0 - within))) * broken * at.shows(0.004);
+        let streak = noise3(at.at((90.0, 3.0)), seed ^ 0x4f) * at.shows(0.003);
+        let height = (0.9 - 0.55 * groove + 0.05 * streak).clamp(0.0, 1.0);
+        if !paint {
+            return (height, Vec3::ZERO);
+        }
+        let tone = smoothstep(-0.5, 0.6, noise3(at.at((8.0, 2.0)), seed ^ 0x77));
+        let skin = self.light.lerp(self.accent, 0.35 * tone);
+        (height, skin.lerp(self.dark, 0.7 * groove))
+    }
+
     /// `surface` marked where limbs once grew: an eye with a ridge about it,
     /// and on a birch the black chevron below it, on a beech the brows above.
     fn scarred(&self, at: &OnLimb, (height, colour): (f64, Vec3), paint: bool) -> (f64, Vec3) {
@@ -537,16 +722,21 @@ impl Bark {
             .lerp(SOIL, 0.75 * soiled)
     }
 
-    /// How much of the bark at `at`, facing `normal`, moss covers: in
-    /// patches, over what faces the sky and about the foot of a trunk.
-    fn mossed(&self, at: &OnLimb, normal: Vec3) -> f64 {
+    /// How much of the bark at `at`, facing `normal` and standing `height`
+    /// out of its fissures, moss covers: in patches, over what faces the sky
+    /// and about the foot of a trunk, the fissures taken before the crests.
+    fn mossed(&self, at: &OnLimb, normal: Vec3, height: f64) -> f64 {
         if self.moss <= 0.0 {
             return 0.0;
         }
+        // Moss lies in cushions, crisp at their edges: the more of it, the
+        // more of the bark it takes, never a green wash over all of it.
         let facing = smoothstep(0.05, 0.65, normal.y);
         let foot = 0.8 * (1.0 - smoothstep(0.3, 1.6, at.along));
-        let patch = smoothstep(-0.25, 0.35, noise3(at.at((3.5, 1.7)), self.seed ^ 0x3d));
-        self.moss * facing.max(foot) * patch
+        let spread = 0.25 + 0.3 * height - 0.5 * self.moss * facing.max(foot);
+        let cushions = noise3(at.at((7.0, 3.5)), self.seed ^ 0x3d)
+            + 0.3 * noise3(at.at((18.0, 10.0)), self.seed ^ 0x3e);
+        smoothstep(spread - 0.06, spread + 0.06, cushions) * f64::from(u8::from(self.moss > 0.0))
     }
 
     /// Moss's own colour at `at`: its tufts, lit where they face the sky.

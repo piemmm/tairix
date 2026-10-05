@@ -313,7 +313,7 @@ fn a_patch_is_planned_once_when_first_set_out_and_left_out_past_the_most() {
     assert_eq!(stage.recipes.len(), 1);
     assert_eq!(stage.objects.len(), 2);
     let mut filler = margins.sown[0].expect("summer reeds");
-    while stage.plans_more() {
+    while stage.plannable() > 0 {
         filler.plan(&mut stage, 0).expect("planned");
     }
     margins.found = alloc::vec![at(3, 5.0), at(2, 6.0)];
@@ -375,11 +375,12 @@ fn a_lake_sets_reeds_in_its_shallows_and_floats_lilies_on_it_in_the_light() {
             }
             let ground = land.height(&stage.fields, at.x, at.z);
             let level = land.water_level(&stage.fields, at.x, at.z).unwrap_or(lake);
-            let floating = matches!(margin, Margin::Lily | Margin::Pondweed);
-            let (stands, (shallowest, deepest)) = if floating {
-                (level, (0.2, 2.6))
-            } else {
-                (ground, (-0.45, 1.0))
+            // Crowfoot streams beneath the surface of the water running into
+            // the lake, as the floating plants lie on its still water.
+            let (stands, (shallowest, deepest)) = match margin {
+                Margin::Lily | Margin::Pondweed => (level, (0.2, 2.6)),
+                Margin::Crowfoot => (level, (0.06, 1.1)),
+                Margin::Reed | Margin::Reedmace => (ground, (-0.45, 1.0)),
             };
             assert_eq!(
                 at.y.to_bits(),
@@ -391,6 +392,17 @@ fn a_lake_sets_reeds_in_its_shallows_and_floats_lilies_on_it_in_the_light() {
                 depth > shallowest && depth < deepest,
                 "{seed}: {margin:?} {depth} deep, far {far}"
             );
+            if margin == Margin::Crowfoot {
+                // Never on the lake's still water: only where a river runs
+                // into it or out of it does its surface fall.
+                let level_at =
+                    |x: f64, z: f64| land.water_level(&stage.fields, x, z).unwrap_or(level);
+                let fall = mathf::hypot(
+                    level_at(at.x + 1.0, at.z) - level_at(at.x - 1.0, at.z),
+                    level_at(at.x, at.z + 1.0) - level_at(at.x, at.z - 1.0),
+                ) / 2.0;
+                assert!(fall > 1e-3, "{seed}: crowfoot on still water at {at:?}");
+            }
             let hidden = stage
                 .shades
                 .as_ref()
@@ -402,9 +414,7 @@ fn a_lake_sets_reeds_in_its_shallows_and_floats_lilies_on_it_in_the_light() {
         }
     }
     for (&kind, &count) in KINDS.iter().zip(&set) {
-        if kind == Margin::Crowfoot {
-            assert_eq!(count, 0, "crowfoot, which wants running water, on a lake");
-        } else {
+        if kind != Margin::Crowfoot {
             assert!(count > 10, "{kind:?} too seldom: {set:?}");
         }
     }

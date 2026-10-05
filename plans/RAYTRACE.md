@@ -41,25 +41,26 @@ D503, D505 and D514–D520 (the tracer's open defects).
 | RT23 | Villages: houses on plots along their roads, front and back gardens, closeboard, post-and-rail or no fences with garden gates, chimneys with smoke now and then | planned |
 | RT24 | Night in a village: lit windows, curtains drawn or left open, interiors lit behind them | planned |
 | RT25 | Farmhouse interiors: kitchen, range, sink, table and chairs, dressers, stone floors and rugs, by day and by night, the air dusty enough to show a sunbeam | planned |
-| RT26 | Bark in true relief: ridges, plates and corrugation as displaced geometry near the eye | planned |
-| RT27 | Stumps, sawn and splintered, some with new shoots at the foot | planned |
+| RT26 | Bark in true relief: ridges, plates and corrugation as displaced geometry near the eye | done |
+| RT27 | Stumps, sawn and splintered, some with new shoots at the foot | done |
 | RT28 | Mud cracks as modelled geometry: polygonal plates with curled edges and real depth | planned |
-| RT29 | Snow that lies unevenly and drifts; snowmen never quite round | planned |
+| RT29 | Snow that lies unevenly and drifts; snowmen never quite round | done |
 | RT30 | Mountains near and far, ridged and eroded, some snow-capped | planned |
 | RT31 | Weathered stone everywhere: erosion, chips, cracks, lichen and moss on every stone structure | planned |
-| RT32 | The moon by day or by night, at its phase and lit by earthshine, or not at all | planned |
+| RT32 | The moon by day or by night, at its phase and lit by earthshine, or not at all | done |
 | RT33 | Aerial views: landscapes from altitude, and detailed abstract views | planned |
 | RT34 | Planetary scenes: gas giants, ringed planets, earthlike and Mars-like worlds, views from icy moons, nebulae, stars, and the sun with its corona and spots | planned |
 | RT35 | Macro shots: a leaf with a drop hanging from it, focused on the drop over a blurred landscape, in many variations | planned |
 | RT36 | Caves: stalactites, stalagmites, pools, iridescent water, crystal outcrops that glow | planned |
 | RT37 | Woods to the horizon: at *Maximum* a wood reaches as far as its trees still span a pixel, its places sown coarser the further they lie wherever they would not otherwise fit the budget | planned |
-| RT38 | Stones in patches: boulder fields, scree below crags and pebbles in drifts, strewn by noise and slope from eight rocks a scene, and leaf litter as thick as the canopy sheds | planned |
+| RT38 | Stones in patches: boulder fields, scree below crags and pebbles in drifts, strewn by noise and slope from eight rocks a scene, and leaf litter as thick as the canopy sheds | done |
 | RT39 | Scene detail: one generator at two profiles, *Simple* (low memory, every setting, the screensaver's default) and *Maximum* (up to 2 GB, all the realism the budget buys), chosen by `screensaver.raytrace.detail` | done |
 | RT40 | One land generator, the tracer's and WinterSun's: the land's stages renderer-neutral, keyed by place and seam-free, in crates WinterSun builds its realm's land with at *Maximum* | planned |
 | RT41 | Local adaptation, a gentle photographic HDR: a sky seen from a dark room or over a dark wood keeps its detail and the room its shadows, only the range a display cannot hold compressed, and a scene one exposure holds left exactly as it is | done |
 | RT42 | Lights as measured: the sun at its true size with its limb darkened, bent by the standard atmosphere; the full moon at its true size, brightness and colour; Allen's stars with Tycho-2's colours; lamps in lumens and candelas; the dusk and night still lifes under the open sky; cirrus lit as ice | done |
 | RT43 | Water clouds lit by multiple scattering that holds for thin cloud too, in place of the octave, powder and ambient approximations | planned |
 | RT44 | Cloud to the horizon: decks over the Earth's curve, mapped in levels about the eye out to as far as they can be seen, the air beneath them shaded by them, each place lit by the sun as it stands there | done |
+| RT45 | No primitive stand-ins: every limb's foot flares into the roots it grows out of, every break torn, every end tapered, cut or broken as the real thing's is — trees, snags, stumps, fallen trunks and their root plates, the snowman's carrot and sticks done; saguaro ribs, spines and areoles, a palm's and a shrub's foot, a reed's tip and a lily's heart remaining | in progress |
 
 ## Standing rules
 
@@ -76,6 +77,12 @@ These bind every item, done or planned.
   is fibres, a mud crack is a gap between plates, bark relief near the eye is
   displaced. A pattern may stand in only where the detail is finer than a
   pixel, and there it settles to its mean in colour *and* in relief.
+- **No primitive stand-ins.** Nothing a scene sets out reads as a capsule,
+  cone, cylinder, sphere or box. A thing's ends, breaks and joins are
+  modelled as the real one's form: wood snapped across its grain is torn and
+  splintered, a root grows out of the flare its trunk swells in, a twig and a
+  root taper to fine tips, a cut is a face with its bark cut through. Nature
+  is never regular, and it ages: decay, rot, weathering and drying show.
 - **Variety by construction.** Every repeated element — stone, brick, plant,
   wave, cloud — is drawn from its own key, so no two match. Nothing tiles in
   view, and no scene is uniformly covered by any one thing: cover comes in
@@ -624,8 +631,9 @@ shrub masses of leaf-bearing prototypes, varying in height and width, with a
 standard tree now and then and a repaired gap of post and rail where one
 collapsed; dry-stone walls coursed from individual stones with a batter and
 coping, collapsing here and there, lichen on their faces and grass at their
-foot; fences of posts and rails, true where kept and leaning, moss-green and
-missing rails where not; gates hung on posts, open, shut or off a hinge, with
+foot, snow drifting against a wall's lee face and scoured from its windward
+one where a land lies under snow (RT29); fences of posts and rails, true where
+kept and leaning, moss-green and missing rails where not; gates hung on posts, open, shut or off a hinge, with
 mud and hoof-churned ruts in a pasture's gateway. Crops are lawns of their own
 blades and heads in drilled rows with tramlines; cut fields stand stubble and
 bales of one kind. Flowers and weeds are drawn per species in patches seeded
@@ -642,16 +650,150 @@ scene holds, so a window glows because a room is lit.
 
 ## RT26–RT31 — Nature detail
 
-Bark near the eye becomes a displaced shell over its limb, intersected
-exactly, so ridges catch light at the silhouette; far off the existing
-normal-only relief settles to its mean. Mud cracks are plates of a Voronoi
-desiccation pattern with curled, undercut rims. Snow is accumulated by wind
-over the land's shape, drifting into lee hollows and against walls.
+Mud cracks are plates of a Voronoi desiccation pattern with curled,
+undercut rims.
 
 Mountains (RT30) need an erosion law that carves as it gathers: channels
 deepening where droplets converge and branching up every slope, the beds of
 rivers and roads kept, and talus below crags — so that the budget can then be
 spent on droplets, which today only smooth the land.
+
+## RT26 — Bark in true relief
+
+A limb is cut by its own bark (`cut`) where it stands near enough the eye for
+the cut to show: ridges at its radius, fissures sunk the bark's depth
+(`bark_depth`, 2.4 cm for oak and pine down to 2 mm for beech). Its girth
+gates it, from 3 cm to 12 cm in radius, so twigs and young branches stay
+smooth tubes; and how many pixels the cut spans fades it, in full from three
+and none below one and a half, against the scene's `Viewpoint` (the eye and
+the angle a pixel spans), which `Geometry` carries for every ray alike.
+
+- **Met exactly.** The cut limb is the limb's cone run on within each rounded
+  end's sphere, its surface `reach = radius − cut · (1 − height)`. A ray's
+  stretch within the cone is sphere-traced (Hart 1996): each step the height
+  above the surface over 1.25 × (1 + taper + depth × `Bark::steepest`), twice
+  the steepest each bark kind rises over a dense sampling (a test holds every
+  kind but a palm's stepped rings to it), never shorter than ¾ of a pixel at
+  the point or 0.4 mm, and at most 256 steps to its stretch; a crossing is
+  bisected to a hundredth of the shortest step. A shadow ray (`Seeking::Any`)
+  stops at the first crossing. A ray leaving the bark from within a hollow it
+  rounds off is let out before it looks again.
+- **Marched lean.** Beyond the bark's outer surface or deeper than its cut the
+  bark cannot change which side of the cut surface a point stands, so it is
+  read only within the shell, and outside it a step is the height over the
+  limb's own bound, without the bark's steepness.
+- **Shaded.** A cut hit's normal is the gradient of the surface the march
+  crossed, read four bisection tolerances either side, so it faces whatever
+  ray crossed into it however steep the bark; the ends are not read, so a hit
+  at an open end's rim faces out of the side. `Hit::relieved` keeps the
+  material's relief from tilting it again.
+- **Flared feet** are met the same way at any distance (RT45), the round cone
+  swollen by the flare and run on within the cone of its most.
+- **Measured.** A furrowed height costs about 550 ns against the plainer
+  pattern's 265 ns, mostly its corky scales' cellular lookup, which is read
+  only where a pixel is finer than about a centimetre; reading the bark only
+  within its shell takes a fifth off a cut ray (12.7 µs to 10.5 µs), so a
+  near-eye cut ray costs about 1.7 times the plainer bark's, a trunk filling a
+  close-up half again as long to trace, and a forest about as long as before.
+
+## RT27 — Stumps and decay
+
+Dead wood decays (`deadwood`). A kind's dead in a wood have lain an age
+drawn from 0.15 to 0.95 (`plants::Rotting`), each piece within 0.2 of it;
+drift a stream carried, 0.1 to 0.4.
+
+- **Bark** sloughs (`Bark::bare`, `sloughs(kind) × smoothstep(0.2, 0.9, age)`:
+  0.1 for birch, 0.25 for oak and olive, up to 0.75 for beech) in sheets of
+  two octaves of noise thresholded to the share asked, sharp-edged and dark
+  at their edges. The wood it bares lies at a bark height of 0.12, tan sapwood
+  weathering grey-brown, its grain raised, checked along it and engraved by
+  beetles' galleries in patches; moss, `0.5 × smoothstep(0.3, 0.95, age)`,
+  lies in crisp cushions taking the furrows before the crests.
+- **Stumps** stand on a foot flared toward five to eight roots (`foot`), its
+  flare carrying on past a low cut so the face follows its lobes, the bole a
+  flared limb from a fifth of its radius below the ground.
+- **Sawn faces** are a polar mesh of eight rings and 32 spokes, with every
+  check's two edges and floor and the notch's two ends among them, the last
+  band, from 0.9 of the outline, the bark cut through in its dark edge. Felled
+  (three in five) the back cut stands 0.12–0.25 of the radius above the notch
+  over a chord 4–8 % of the radius from the middle, the two faces meshed on
+  their own and joined by a riser, the hinge torn across along the riser's top
+  in a narrow unbarked break of laths until the heart rots. Each face checks
+  `1 + 6 × age` times, from 0.15–0.45 of the radius out, opening at the rim
+  0.4–1.2 % of the radius times `1 + age` and cut 6–20 % times `0.5 + age`
+  deep. Its wood weathers from tan to grey-brown by `smoothstep(0, 0.6, age)`.
+- **Breaks** (`fracture`) tear snapped stumps, a log's ends, its limbs' stubs,
+  a bole's stubs, a snag's top and limbs and a plate's roots: a polar face of
+  ten rings and 10–56 spokes climbing up to its narrowest radius toward its
+  tension side, ragged in fibres 1.1 cm apart, falling to a bark rim ragged by
+  6 % of it, the last 3 % the bark's dark edge; 2–22 laths scaled to that
+  narrowest, those beyond 0.85 of the way out barked on their outer face; up
+  to two tatters. Past an age of 0.55 its heart hollows out to 0.3–0.75 of the
+  radius, and it loses three quarters of its laths by the last.
+- **Fallen trunks** are ten tubes sunk 18 % into the ground, each limb stub an
+  open limb narrowing to three quarters and torn, shorter the longer it has
+  lain. Thrown, the foot flares into its root plate: a slab 2.4–3.6 radii out
+  and 1.6–2.6 deep at the trunk, its rim uneven by two octaves, its faces 30
+  rings and 144 spokes of crumbling clods in speckled topsoil; its five to
+  eight lateral roots, one to four branches each, run along its underside
+  half bared and are torn past its rim; 18–32 sinker roots torn short every
+  way, 30–60 fine roots bristling and 6–14 hanging from the rim.
+- **Brackets** fruit with a chance of `0.15 + 0.6 × age`: tiers of three to
+  seven thin shelves 2.5–6 cm out, or one to three thick ones 6–18 cm, on one
+  to three of a log's flanks or a stump's sides, level, a shelf 1.3–1.9 times
+  as broad as it reaches, its margin uneven, ridged in 4–10 zones, a thick
+  one hoof-shaped, a thin one waving, banded to a pale margin, pores beneath.
+- **Shoots** rise from a broadleaf's stump (not a pine's, a spruce's, a
+  palm's, a saguaro's or a fern's), half of sawn ones and three in ten
+  snapped, fewer as it rots: four to eleven 0.35–1.6 m long, from just below
+  the cut or about the root collar, arching toward the light, in young
+  smooth bark, leaves of their kind's own shape a third larger along their
+  upper three quarters (`tree::leaf`, which a tree's twigs bear theirs by too),
+  none in winter.
+
+## RT29 — Snow and snowmen
+
+- **Drifted** (`snow`). A land under snow (`Plan::snowpack`) carries a fall
+  0.2–0.6 m deep moved by one wind. How sheltered each place stands is read
+  at the coarse grid's samples, a band of rows a core (`Step::Shelter`), and
+  read back through the relief's own Catmull–Rom patch: the steepest slope up
+  to the ground 4–100 m upwind, the mean over the wind's heading and 15°
+  either side (Winstral, Elder and Davis 2002), less 2.0 times the curvature
+  over 50 m and 0.3 times the slope the wind climbs (MicroMet, Liston and
+  Elder 2006). The depth is the fall, uneven by 15 % in 70 m patches, times
+  `1 + 1.4 tanh(shelter / 0.2)`, never under the 6 % crust the wind cannot
+  lift, and none on slopes past 1.1. The far grid adds it to the ground under
+  it everywhere but beneath a clearing's water; the finer grids cut snow dunes
+  (9 m apart, 22 cm deep) and sastrugi (1.6 m, 16 cm) along the wind where it
+  scoured the snow, each only where the grid resolves it, never through the
+  snow (Filhol and Sturm 2015).
+- **Carried.** A land's grid keeps five channels a vertex, the fifth the
+  snow's depth, square-root coded to 6 m so a few millimetres tell about
+  nought. Snow buries what grows thinner than the 14 cm of winter grass; the
+  ground's colour shows through less than about 6 cm, in patches; a lawn's
+  shoot rooted on the snow shows only what stands above it. Winter's ground
+  beneath is frozen earth and dead grass, and its sward a winter upland's.
+- **Measured.** At 8 threads a coarse sample's shelter costs about 260 ns, its
+  longest unit 4.5 ms; a far vertex under snow 51 ns against 38 bare.
+- **Snowmen** (`snowman`, `compose::snowman`). Two balls (one in five) or
+  three, 0.3–0.5 m the foot's radius, each 0.55–0.8 of the one beneath. A
+  rolled ball is a drum (0.06–0.17 narrower along its roll axis, a gentler
+  second roll across it), lumped by 3–6 % of its radius in three octaves,
+  wrapped in two to four sheets whose lips stand 1.2–3.5 % of its radius
+  proud, and streaked round its drum with earth, dead grass and leaf; a head
+  is packed by hand as often as rolled, with no sheets. It is patted into three
+  to ten dents a palm or a few fingers broad, flattened where it was set down
+  (10–18 % of its radius at the foot) and where the next was pressed on, the
+  join packed with snow, settled to 0.9–0.98 of its height, and stacked
+  leaning 1.5–7° and set off its seat by up to a quarter of the seat's
+  breadth; the lowest is pressed into the snow and down a slope far enough to
+  leave no gap. Its eyes, mouth and buttons are lumps of one coal prototype
+  broken along six fresh fractures, pressed a third to a half in; its nose a
+  carrot 9–16 cm long, its skin ringed every few millimetres where its fine
+  roots grew (`BarkKind::Taproot`); its arms two forked sticks pushed into the
+  body's sides. Each ball is a mesh about a centimetre to a facet, shaped 8192
+  vertices a unit. A snowman needs seven prototypes, and is not built where
+  they would not fit.
 
 ## RT37, RT38 — Woods and stones by the budget
 
@@ -660,10 +802,18 @@ spent on droplets, which today only smooth the land.
   the eye and coarser beyond only where their candidates — about 80 bytes a
   place, a dozen places a tree — would not otherwise fit the budget, and never
   coarser than its trees keep apart.
-- Stones in patches (RT38): eight rocks a scene, strewn where a noise field
-  and the slope say — boulder fields, scree fanning below crags, pebbles in
-  the hollows — never an even sprinkle; leaf litter as thick as the crowns
-  above shed.
+- Stones in patches (RT38, `compose::strewn`): eight rocks a scene, strewn
+  from draws of their own. A place takes a stone with a chance of
+  `0.04 + 0.96 × max(field, scree)`: `field` the boulder fields, a 70 m noise
+  thresholded from 0.1 to 0.45, each boulder there among up to three stones a
+  quarter to two thirds its size; `scree` up to 0.85 on talus (its normal's
+  upward part 0.62–0.92) below a crag (under 0.6) within 22 m uphill, less
+  the further the crag, its stones graded larger the further they rolled.
+  Pebbles 4–14 cm lie in drifts of four to twelve within 0.6 m, washed into
+  ground at least a quarter wet or silted, in 8 m patches, out to 15 m from
+  the eye at *Simple* (40 drifts looked for) and 30 m at *Maximum* (160),
+  which also strews three times the boulders. Leaf litter is as thick as the
+  crowns above shed, the open keeping 8 % of it, what the wind carried out.
 
 ## RT42, RT43 — Lights as measured
 
@@ -678,9 +828,8 @@ Every light out of doors comes of a published measurement, nothing tuned
   about the way it arrives, and the same paths say where a ray seen leaving a
   point comes from, with the solid angle's change for a sample's density.
   Each channel bends by its own refractivity.
-- By night the light is the full moon's, as RT32 has yet to give other
-  phases: its true size from the eye, 14 magnitudes below the sun, the ROLO
-  model's colour, its disc even.
+- By night the light is the moon's at its phase (RT32): its true size from
+  the eye, 14 magnitudes below the sun at full, the ROLO model's colour.
 - The stars are Allen's census to magnitude 12 in three tiers by brightness,
   each a cube cell's Poisson share of its tier, their colours Tycho-2's, the
   fainter a glow; seen through the ray's footprint, through the air and never
@@ -756,10 +905,32 @@ ground from a low sun; an overcast grey to the horizon; the aerial table
 keeping its near slices; a point drawn along the air falling as its sunlight
 is gathered; and a resolved sum keeping only the octaves its footprint holds.
 
-## RT32–RT36 — New scene families
+## RT32 — The moon
+
+`body::moon` sets the moon toward any direction with the sun toward another.
+Its light is the full moon's (−12.74 against the sun's −26.74, nearer and so
+larger and brighter with height) times Allen's phase law,
+`0.026|α| + 4·10⁻⁹α⁴` magnitudes at a phase of α degrees, plus the Earth's
+light: the full Earth's at the moon (geometric albedo 0.367 over the
+Earth–moon distance squared, about 10⁻⁴ of the sun's), waning as a Lambert
+sphere's phase, `(sin ψ + (π − ψ) cos ψ)/π`, bluer (0.86, 1, 1.24). Its disc
+(`Limb::Phase`) is each channel the sunlit share times the Lommel–Seeliger
+law `μ₀/(μ₀ + μ)` plus the earthlit share, both as shares of its mean; the
+law's own disc mean is half its integrated phase function,
+`1 − sin(α/2) tan(α/2) ln cot(α/4)`, and the sunlit share is capped where
+Allen's law would light a part brighter than the full moon lit as it is.
+
+The weather sets it (`compose::weather`): by night the moon is the light,
+20–50° up, its phase drawn as `150u²` degrees, capped so the sun lies at
+least 15° below the horizon; by day three scenes in ten, 45–150° from the
+sun and 8° up, and at sunset or dusk nearly half, a young or old crescent
+12–55° from where the sun went down and 3° up, lighting nothing beside the
+sun. A star never shows through its disc (`Seeing::occulted`).
+
+## RT33–RT36 — New scene families
 
 Each is a `Setting` of its own, composed and traced by the same tracer:
-the moon as a lit body in the sky; aerial vantages over the lands the
+aerial vantages over the lands the
 countryside lays out; planets with atmospheres from the existing physical
 model at their own radius and composition, gas giants as banded flow fields,
 rings as a thin particle disc casting and catching shadow; macro scenes with

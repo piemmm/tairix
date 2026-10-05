@@ -48,7 +48,7 @@ use crate::stream::{Flow, Stone, Stretch};
 use crate::vector::{byte, real, share, single, Frame, Pose, Vec3};
 
 /// How many rocks a scene grows to strew, choosing among them.
-const KINDS: usize = 4;
+const KINDS: usize = 8;
 
 /// A scene's rocks, planned.
 #[derive(Copy, Clone, Debug)]

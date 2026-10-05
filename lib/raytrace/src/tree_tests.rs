@@ -4,7 +4,15 @@
 use super::*;
 use crate::prototype::{point, Part};
 
-const STOCK: Stock = Stock { bark: 0, leaves: 1 };
+const STOCK: Stock = Stock {
+    bark: 0,
+    leaves: 1,
+    grain: Grain {
+        wood: 2,
+        rot: 3,
+        edge: 4,
+    },
+};
 
 fn species() -> Species {
     let level = |branches: f64, length: f64, down: f64, segments: u32| Level {
@@ -45,11 +53,16 @@ fn species() -> Species {
             toward_light: 0.7,
         },
         evergreen: false,
+        snapped: false,
     }
 }
 
 fn grown(season: Season, seed: u64) -> Prototype {
-    let mut growth = Growth::new(&species(), 12.0, (season, STOCK), seed).expect("grows");
+    grown_as(&species(), season, seed)
+}
+
+fn grown_as(species: &Species, season: Season, seed: u64) -> Prototype {
+    let mut growth = Growth::new(species, 12.0, (season, STOCK), seed).expect("grows");
     let mut steps = 0;
     while !growth.step().expect("grows") {
         steps += 1;
@@ -83,10 +96,14 @@ fn a_tree_grows_to_its_height_with_limbs_and_leaves_within_its_budget() {
         "{tubes} limbs, {leaves} leaves"
     );
     assert!(tree.parts().len() <= MOST_PARTS);
+    let grain = [STOCK.grain.wood, STOCK.grain.rot, STOCK.grain.edge];
     assert!(tree.parts().iter().all(|part| match part {
         Part::Tube(tube) => tube.material == STOCK.bark,
         Part::Leaf(leaf) => leaf.material == STOCK.leaves,
-        Part::Facet(_) => false,
+        // The breaks its stubs snapped in.
+        Part::Facet(facet) => facet
+            .material
+            .is_some_and(|material| grain.contains(&material)),
     }));
 }
 
@@ -184,21 +201,11 @@ const TRUNK: Level = Level {
 };
 
 #[test]
-fn a_trunk_holds_its_girth_up_its_bole_swells_at_its_foot_and_narrows_in_its_crown() {
+fn a_trunk_holds_its_girth_up_its_bole_and_narrows_in_its_crown() {
     let (radius, length) = (0.4, 20.0);
     let trunk = bole(radius, length, false);
-    let at = |metres: f64| radius_at(trunk, &TRUNK, metres / length, 0.6);
+    let at = |metres: f64| radius_at(trunk, &TRUNK, metres / length);
     let breast = at(1.3);
-    assert!(
-        at(0.0) > 1.45 * breast,
-        "a flare at the ground: {} against {breast}",
-        at(0.0)
-    );
-    assert!(
-        at(1.0) < 1.12 * breast,
-        "gone within a metre or so: {}",
-        at(1.0)
-    );
     assert!(
         at(10.0) > 0.62 * breast,
         "a bole, not a spike: {} halfway up",
@@ -218,46 +225,92 @@ fn a_trunk_holds_its_girth_up_its_bole_swells_at_its_foot_and_narrows_in_its_cro
     );
     let cone = Level { form: 1.0, ..TRUNK };
     assert!(
-        at(10.0) > 1.15 * radius_at(trunk, &cone, 0.5, 0.0),
+        at(10.0) > 1.15 * radius_at(trunk, &cone, 0.5),
         "fuller than a cone halfway up"
     );
-    // The arms of a fork carry on the trunk's girth: they swell at no foot.
+    // The arms of a fork carry on the trunk's girth.
     let arm = bole(radius, length, true);
-    assert!(
-        (radius_at(arm, &TRUNK, 0.0, 0.6) - radius).abs() < 1e-12,
-        "a fork's arm does not flare"
-    );
+    assert!((radius_at(arm, &TRUNK, 0.0) - radius).abs() < 1e-12);
+}
+
+/// The tubes each of `tree`'s roots is made of, by the key they share: every
+/// limb low at the foot but the flared trunk itself.
+fn roots_of(tree: &Prototype, radius: f64) -> Vec<Vec<Tube>> {
+    let mut roots: Vec<Vec<Tube>> = Vec::new();
+    for part in tree.parts() {
+        let Part::Tube(tube) = part else { continue };
+        if tube.flare.is_some() || f64::from(tube.a[1]) > 0.6 * radius {
+            continue;
+        }
+        match roots
+            .iter_mut()
+            .find(|root| root.first().is_some_and(|first| first.key == tube.key))
+        {
+            Some(root) => root.push(*tube),
+            None => roots.push(alloc::vec![*tube]),
+        }
+    }
+    roots
 }
 
 #[test]
-fn a_trees_foot_is_gripped_by_roots_spreading_along_the_ground() {
+fn a_trees_foot_swells_out_toward_each_root_and_each_runs_out_of_its_lobe() {
     let species = species();
+    let radius = 12.0 * species.girth;
     for seed in 0..4 {
         let tree = grown(Season::Winter, seed);
-        let radius = 12.0 * species.girth;
-        let roots: Vec<&Tube> = tree
+        let foot = tree
             .parts()
             .iter()
-            .filter_map(|part| match part {
-                Part::Tube(tube)
-                    if tube.b[1] < 0.0
-                        && f64::from(tube.b[0]).hypot(f64::from(tube.b[2])) > 2.0 * radius =>
-                {
-                    Some(tube)
-                }
+            .find_map(|part| match part {
+                Part::Tube(tube) if tube.flare.is_some() => Some(*tube),
                 _ => None,
             })
-            .collect();
+            .expect("a flared foot");
+        let flare = tree.flare_of(&foot).expect("its flare");
+        let ground = -f64::from(foot.a[1]);
+        let roots = roots_of(&tree, radius);
         assert!(
             (5..=8).contains(&roots.len()),
             "{seed}: {} roots",
             roots.len()
         );
-        for root in roots {
-            let top = f64::from(root.a[1]) + f64::from(root.radii[0]);
+        for root in &roots {
+            let first = root.first().expect("a root");
+            let start = point(first.a);
+            let out = Vec3::new(start.x, 0.0, start.z);
+            let angle = foot.angle_of(out.normalized());
+            // Toward its root the foot swells well beyond its swell between.
+            let toward = flare.factor(ground, angle);
+            let between = (0..36u32)
+                .map(|step| flare.factor(ground, core::f64::consts::TAU * f64::from(step) / 36.0))
+                .fold(f64::INFINITY, f64::min);
             assert!(
-                top > 0.2 * radius,
-                "{seed}: a root shows above the ground: {root:?}"
+                toward > between + 0.25 * species.flare,
+                "{seed}: {toward} against {between}"
+            );
+            // It leaves from within its lobe, its back above the ground there,
+            let up = start.y + ground;
+            let lobe = f64::from(foot.radii[0]) * flare.factor(up, angle);
+            assert!(
+                out.length() < lobe,
+                "{seed}: starts {} out, its lobe {lobe}",
+                out.length()
+            );
+            assert!(start.y + f64::from(first.radii[0]) > 0.2 * f64::from(first.radii[0]));
+            // and every end it runs out to is buried deeper than it is thick.
+            let deepest = root
+                .iter()
+                .map(|tube| f64::from(tube.b[1]) + f64::from(tube.radii[1]))
+                .fold(f64::INFINITY, f64::min);
+            assert!(deepest < 0.0, "{seed}: a root's end shows: {deepest}");
+            let reach = root
+                .iter()
+                .map(|tube| f64::from(tube.b[0]).hypot(f64::from(tube.b[2])))
+                .fold(0.0, f64::max);
+            assert!(
+                (1.5 * radius..5.5 * radius).contains(&reach),
+                "{seed}: reaches {reach}"
             );
         }
     }
@@ -307,7 +360,7 @@ fn a_limb_narrows_by_its_levels_taper_and_a_forks_arm_carries_its_stems_on() {
     };
     // A limb holds no bole and no crown apart: its tip is what its level's
     // taper and form leave of its girth, not a twentyfifth of it.
-    let tip = radius_at(limb, &level, 1.0, 0.0);
+    let tip = radius_at(limb, &level, 1.0);
     let wanted = 0.05 * mathf::exp(0.8 * mathf::ln(0.4));
     assert!((tip - wanted).abs() < 1e-12, "{tip} against {wanted}");
     // A trunk forked a third of the way up its bole: what grows on is its
@@ -317,7 +370,7 @@ fn a_limb_narrows_by_its_levels_taper_and_a_forks_arm_carries_its_stems_on() {
     let forked_at = 0.3;
     let rest = Stem {
         length: length * (1.0 - forked_at),
-        radius: radius_at(trunk, &TRUNK, forked_at, 0.0),
+        radius: radius_at(trunk, &TRUNK, forked_at),
         forked: true,
         from: forked_at,
         ..trunk
@@ -325,10 +378,98 @@ fn a_limb_narrows_by_its_levels_taper_and_a_forks_arm_carries_its_stems_on() {
     for step in 0..=20u32 {
         let s = f64::from(step) / 20.0;
         let whole = forked_at + s * (1.0 - forked_at);
-        let (arm, stem) = (
-            radius_at(rest, &TRUNK, s, 0.6),
-            radius_at(trunk, &TRUNK, whole, 0.0),
-        );
+        let (arm, stem) = (radius_at(rest, &TRUNK, s), radius_at(trunk, &TRUNK, whole));
         assert!((arm - stem).abs() < 1e-12, "{s}: {arm} against {stem}");
+    }
+}
+
+/// Every limb of `tree` that ends free, rather than running on into another
+/// or swelling into its foot: where it ends, how thick, and whether it ends
+/// open, for a break to close.
+fn free_ends(tree: &Prototype) -> Vec<(Vec3, f64, bool)> {
+    let tubes: Vec<&Tube> = tree
+        .parts()
+        .iter()
+        .filter_map(|part| match part {
+            Part::Tube(tube) => Some(tube),
+            _ => None,
+        })
+        .collect();
+    tubes
+        .iter()
+        .filter(|tube| {
+            let end = point(tube.b);
+            !tubes.iter().any(|other| {
+                (point(other.a) - end).length() < 0.5 * f64::from(tube.radii[1]).max(1e-4)
+            })
+        })
+        .map(|tube| (point(tube.b), f64::from(tube.radii[1]), tube.open[1]))
+        .collect()
+}
+
+#[test]
+fn a_bare_boles_stubs_end_torn_never_in_a_ball() {
+    for seed in 0..4 {
+        let tree = grown(Season::Winter, seed);
+        let crown = species().base * 12.0;
+        let stubs: Vec<_> = free_ends(&tree)
+            .into_iter()
+            .filter(|&(end, thick, _)| end.y > 0.15 * crown && end.y < crown && thick > 0.008)
+            .collect();
+        assert!(stubs.len() >= 3, "{seed}: {} stubs", stubs.len());
+        for (end, _, open) in stubs {
+            assert!(open, "{seed}: a stub at {end:?} ends rounded");
+        }
+        let torn = tree
+            .parts()
+            .iter()
+            .filter(|part| matches!(part, Part::Facet(facet) if facet.material == Some(STOCK.grain.wood)))
+            .count();
+        assert!(torn > 30, "{seed}: {torn} faces of torn wood");
+    }
+}
+
+#[test]
+fn a_snag_stands_snapped_off_thick_its_limbs_broken() {
+    let mut snag = Species {
+        snapped: true,
+        depth: 2,
+        ..species()
+    };
+    if let Some(trunk) = snag.levels.get_mut(0) {
+        trunk.taper *= 0.5;
+    }
+    if let Some(limbs) = snag.levels.get_mut(1) {
+        limbs.length.0 *= 0.35;
+        limbs.taper *= 0.35;
+    }
+    for seed in 0..4 {
+        let tree = grown_as(&snag, Season::Winter, seed);
+        let ends = free_ends(&tree);
+        // Its trunk's is the thickest end it has.
+        let top = ends
+            .iter()
+            .copied()
+            .fold((Vec3::ZERO, 0.0, false), |best, end| {
+                if end.1 > best.1 {
+                    end
+                } else {
+                    best
+                }
+            });
+        // Broken where its trunk was still a good part of its girth.
+        let radius = 12.0 * snag.girth;
+        assert!(
+            top.1 > 0.35 * radius,
+            "{seed}: snapped at {} of {radius}",
+            top.1
+        );
+        // Nothing above the ground ends rounded; its roots end buried.
+        for (end, thick, open) in ends.into_iter().filter(|&(end, thick, _)| end.y > thick) {
+            assert!(
+                open || thick < 0.004,
+                "{seed}: a limb at {end:?} ends rounded"
+            );
+        }
     }
 }

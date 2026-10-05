@@ -93,13 +93,13 @@ fn a_grid_holds_the_rows_written_and_seals_the_rest_level() {
     let (heights, attributes) = field.rows_mut(4..6);
     assert_eq!((heights.len(), attributes.len()), (20, 20));
     heights.fill(3.0);
-    attributes.fill([9; 4]);
+    attributes.fill([9; CHANNELS]);
     field.seal();
     assert_eq!(field.heights().len(), 100);
     assert_eq!((field.low, field.high), (0.0, 3.0));
     assert!((field.mean - (40.0 * 2.0 + 20.0 * 3.0) / 100.0).abs() < 1e-12);
-    assert_eq!(field.attributes_of(3, 5), [9; 4]);
-    assert_eq!(field.attributes_of(3, 7), [0; 4]);
+    assert_eq!(field.attributes_of(3, 5), [9; CHANNELS]);
+    assert_eq!(field.attributes_of(3, 7), [0; CHANNELS]);
 }
 
 /// A grid sealed across many cores, in whatever order they take its bands,

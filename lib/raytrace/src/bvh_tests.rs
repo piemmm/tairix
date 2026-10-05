@@ -13,6 +13,8 @@ const NOTHING: Geometry<'static> = Geometry {
     fields: &[],
     prototypes: &[],
     lawns: &[],
+    materials: &[],
+    view: None,
 };
 
 /// The hierarchy over `bounds`, built a slice at a time as a scene's is.

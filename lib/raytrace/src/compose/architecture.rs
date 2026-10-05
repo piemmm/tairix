@@ -663,6 +663,7 @@ fn aqueduct(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
         near_water: None,
         horizon: Some(landscape::horizon(reach)),
         snow_line: None,
+        snowpack: None,
         pond: None,
         growth: 1.0,
         seed: dice.seed(),

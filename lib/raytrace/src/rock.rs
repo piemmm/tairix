@@ -18,7 +18,7 @@ use tairix_rng::{NonCryptoRng, RandU64};
 use tairix_util::{fallible, mathf};
 
 use crate::noise::noise3;
-use crate::prototype::{Building, Facet, Part, Prototype};
+use crate::prototype::{normals_of, Building, Facet, Part, Prototype};
 use crate::vector::{singles, Vec3};
 
 /// How many times the icosahedron is subdivided: 5120 facets.
@@ -484,7 +484,7 @@ fn proportioned(mut points: Vec<Vec3>, habit: Habit) -> Option<Vec<Vec3>> {
 
 /// The twelve corners of an icosahedron on the unit sphere, and its twenty
 /// faces wound outward.
-fn icosahedron() -> Option<(Vec<Vec3>, Vec<[u32; 3]>)> {
+pub(crate) fn icosahedron() -> Option<(Vec<Vec3>, Vec<[u32; 3]>)> {
     let phi = crate::sample::GOLDEN_RATIO;
     let corners = [
         (-1.0, phi, 0.0),
@@ -537,7 +537,10 @@ fn icosahedron() -> Option<(Vec<Vec3>, Vec<[u32; 3]>)> {
 
 /// Each face of a sphere's mesh split into four, the new corners at its
 /// edges' middles pushed out to the sphere.
-fn subdivide(vertices: &[Vec3], faces: &[[u32; 3]]) -> Option<(Vec<Vec3>, Vec<[u32; 3]>)> {
+pub(crate) fn subdivide(
+    vertices: &[Vec3],
+    faces: &[[u32; 3]],
+) -> Option<(Vec<Vec3>, Vec<[u32; 3]>)> {
     // Every edge once, its ends in order, so a face finds its neighbours'
     // midpoints by search rather than through a map.
     let mut edges: Vec<(u32, u32)> = Vec::new();
@@ -568,30 +571,6 @@ fn subdivide(vertices: &[Vec3], faces: &[[u32; 3]]) -> Option<(Vec<Vec3>, Vec<[u
         split.extend_from_slice(&[[a, ab, ca], [b, bc, ab], [c, ca, bc], [ab, bc, ca]]);
     }
     Some((grown, split))
-}
-
-/// Each vertex's normal: the sum of its faces' area-weighted normals, made
-/// unit.
-fn normals_of(vertices: &[Vec3], faces: &[[u32; 3]]) -> Option<Vec<[f32; 3]>> {
-    let mut sums = Vec::new();
-    sums.try_reserve_exact(vertices.len()).ok()?;
-    sums.resize(vertices.len(), Vec3::ZERO);
-    for &[a, b, c] in faces {
-        let (pa, pb, pc) = (
-            *vertices.get(a as usize)?,
-            *vertices.get(b as usize)?,
-            *vertices.get(c as usize)?,
-        );
-        let weighted = (pb - pa).cross(pc - pa);
-        for index in [a, b, c] {
-            let sum = sums.get_mut(index as usize)?;
-            *sum += weighted;
-        }
-    }
-    let mut normals = Vec::new();
-    normals.try_reserve_exact(sums.len()).ok()?;
-    normals.extend(sums.iter().map(|&sum| singles(sum.normalized())));
-    Some(normals)
 }
 
 #[cfg(test)]

@@ -296,6 +296,7 @@ fn courtyard() -> Scene {
         stars: None,
         low: None,
         high: None,
+        moon: None,
     };
     Scene::new(Parts {
         objects: alloc::vec![
@@ -332,7 +333,7 @@ fn courtyard() -> Scene {
             toward: Vec3::new(-0.6, 0.5, 0.2).normalized(),
             cos_radius: 0.99999,
             radiance: Vec3::splat(4000.0),
-            limb: Limb::Even,
+            limb: Limb::Darkening(Vec3::ZERO),
         }],
         sky,
         shades: None,
@@ -343,6 +344,7 @@ fn courtyard() -> Scene {
             1.5,
             (0.0, 1.0),
         ),
+        height: 1080,
         exposure: Exposure::Fixed(1.0),
     })
     .expect("a scene")

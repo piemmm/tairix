@@ -25,18 +25,22 @@ fn a_limb_is_met_on_its_body_and_its_rounded_ends() {
     )
     .expect("a limb");
     let side = Ray::new(Vec3::new(-5.0, 1.0, 0.0), Vec3::new(1.0, 0.0, 0.0));
-    let hit = limb.intersect(&side, 1e-9, f64::INFINITY).expect("met");
+    let hit = limb
+        .intersect(&side, (1e-9, f64::INFINITY), None)
+        .expect("met");
     // The radius halfway up a taper from 0.5 to 0.25, less the slope's lean.
     assert!((hit.t - (5.0 - 0.375)).abs() < 0.02, "{}", hit.t);
     assert!(hit.normal.x < -0.9 && hit.material == Some(3) && hit.mark == 9);
     assert!((hit.tangent - Vec3::UP).length() < 1e-6);
     let top = Ray::new(Vec3::new(0.0, 5.0, 0.0), -Vec3::UP);
     let cap = limb
-        .intersect(&top, 1e-9, f64::INFINITY)
+        .intersect(&top, (1e-9, f64::INFINITY), None)
         .expect("the top end");
     assert!((cap.t - (5.0 - 2.25)).abs() < 1e-3, "{}", cap.t);
     let beside = Ray::new(Vec3::new(-5.0, 1.0, 0.6), Vec3::new(1.0, 0.0, 0.0));
-    assert!(limb.intersect(&beside, 1e-9, f64::INFINITY).is_none());
+    assert!(limb
+        .intersect(&beside, (1e-9, f64::INFINITY), None)
+        .is_none());
 }
 
 #[test]
@@ -54,10 +58,10 @@ fn a_bent_chain_of_limbs_leaves_no_gap_at_its_joint() {
     // Straight at the outside of the bend, where two frusta would part.
     let outside = Ray::new(Vec3::new(-3.0, 1.2, 0.0), Vec3::new(1.0, 0.0, 0.0));
     let hit = chain
-        .intersect(&outside, 1e-9, f64::INFINITY)
+        .intersect(&outside, (1e-9, f64::INFINITY), None)
         .expect("the joint is closed");
     assert!(hit.t < 3.0);
-    assert!(chain.occludes(&outside, 1e-9, f64::INFINITY));
+    assert!(chain.occludes(&outside, (1e-9, f64::INFINITY), None));
 }
 
 #[test]
@@ -80,7 +84,7 @@ fn a_leaf_is_met_within_its_outline_and_missed_outside_it() {
     .expect("a leaf");
     let down = |x: f64, z: f64| Ray::new(Vec3::new(x, 1.0, z), -Vec3::UP);
     let hit = leaf
-        .intersect(&down(0.05, 0.005), 1e-9, 2.0)
+        .intersect(&down(0.05, 0.005), (1e-9, 2.0), None)
         .expect("on the blade");
     assert!((hit.t - 1.0).abs() < 1e-6 && hit.material == Some(5));
     assert!((hit.uv.0 - 0.5).abs() < 1e-3);
@@ -89,11 +93,15 @@ fn a_leaf_is_met_within_its_outline_and_missed_outside_it() {
         "folded"
     );
     assert!(
-        leaf.intersect(&down(0.05, 0.039), 1e-9, 2.0).is_none()
-            || leaf.intersect(&down(0.099, 0.03), 1e-9, 2.0).is_none()
+        leaf.intersect(&down(0.05, 0.039), (1e-9, 2.0), None)
+            .is_none()
+            || leaf
+                .intersect(&down(0.099, 0.03), (1e-9, 2.0), None)
+                .is_none()
     );
     assert!(
-        leaf.intersect(&down(0.12, 0.0), 1e-9, 2.0).is_none(),
+        leaf.intersect(&down(0.12, 0.0), (1e-9, 2.0), None)
+            .is_none(),
         "past its tip"
     );
 }
@@ -110,7 +118,11 @@ fn a_facet_is_shaded_by_its_corners_normals_blended() {
     )
     .expect("a facet");
     let hit = rock
-        .intersect(&Ray::new(Vec3::new(0.25, 2.0, 0.25), -Vec3::UP), 1e-9, 10.0)
+        .intersect(
+            &Ray::new(Vec3::new(0.25, 2.0, 0.25), -Vec3::UP),
+            (1e-9, 10.0),
+            None,
+        )
         .expect("on the facet");
     assert!((hit.t - 2.0).abs() < 1e-9);
     assert!(hit.normal.y.abs() > 0.999);
@@ -145,6 +157,8 @@ fn a_placed_prototype_is_met_where_its_placing_puts_it() {
         fields: &[],
         prototypes: &prototypes,
         lawns: &[],
+        materials: &[],
+        view: None,
     };
     let placed = Shape::Instance {
         prototype: 0,
@@ -179,6 +193,8 @@ fn a_scaled_limb_is_met_at_its_placed_girth_and_its_placed_way_along_its_stem() 
         fields: &[],
         prototypes: &prototypes,
         lawns: &[],
+        materials: &[],
+        view: None,
     };
     let placed = |scale: f64| Shape::Instance {
         prototype: 0,

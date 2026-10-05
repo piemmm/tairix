@@ -15,7 +15,8 @@
 //! corner marked absent: water lies only where there is water. A land's grid
 //! carries what the land is like at each vertex beside its height — how wet,
 //! what the water laid down or wore away, whether a road or a path runs
-//! there, how much grows — read back blended as its heights are.
+//! there, how much grows, how deep snow lies — read back blended as its
+//! heights are.
 
 use alloc::vec::Vec;
 use core::ops::Range;
@@ -64,9 +65,9 @@ pub(crate) struct Heightfield {
     mean: f64,
     /// The columns and rows of cells a finer grid covers instead.
     absent: Option<(Range<usize>, Range<usize>)>,
-    /// What the land is like at each vertex written so far, four bytes of it,
-    /// if the grid carries them.
-    attributes: Vec<[u8; 4]>,
+    /// What the land is like at each vertex written so far, if the grid
+    /// carries it.
+    attributes: Vec<Attributes>,
     carries: bool,
 }
 
@@ -83,7 +84,15 @@ struct Waiting {
 
 /// A row of a grid being written: its number, its heights, and the
 /// attributes there, empty for a grid that carries none.
-pub(crate) type Row<'a> = (usize, &'a mut [f32], &'a mut [[u8; 4]]);
+pub(crate) type Row<'a> = (usize, &'a mut [f32], &'a mut [Attributes]);
+
+/// The channels of what a land is like that a grid carries at each vertex:
+/// how wet, what the water laid down or wore away, the road or path there,
+/// how much grows, and how deep snow lies.
+pub(crate) const CHANNELS: usize = 5;
+
+/// What a land is like at one vertex, a byte to a channel.
+pub(crate) type Attributes = [u8; CHANNELS];
 
 /// The grid `written` of `fields` to write, and the grid `read` it is
 /// written from; `None` unless both are there and apart.
@@ -108,8 +117,9 @@ pub(crate) fn apart(
 pub(crate) const ABSENT: f32 = f32::NEG_INFINITY;
 
 /// What a grid carrying no attributes is like everywhere: dry, neither worn
-/// nor built up, on no road or path, and green enough for anything to grow.
-pub(crate) const PLAIN: [f64; 4] = [0.0, 0.5, 0.0, 1.0];
+/// nor built up, on no road or path, green enough for anything to grow, and
+/// bare of snow.
+pub(crate) const PLAIN: [f64; CHANNELS] = [0.0, 0.5, 0.0, 1.0, 0.0];
 
 impl Heightfield {
     /// Its rows `range`, as disjoint bands `rows` rows high, each with the
@@ -210,8 +220,8 @@ impl Heightfield {
         self.absent = Some((columns, rows));
     }
 
-    /// Carry four bytes of attributes at every vertex, as the rows already
-    /// written do; `false` when the heap will not hold them.
+    /// Carry what the land is like at every vertex, as the rows already
+    /// written do; `false` when the heap will not hold it.
     pub(crate) fn carry_attributes(&mut self) -> bool {
         if self.carries {
             return true;
@@ -233,7 +243,7 @@ impl Heightfield {
             self.heights.resize(length, 0.0);
         }
         if self.carries && self.attributes.len() < length {
-            self.attributes.resize(length, [0; 4]);
+            self.attributes.resize(length, [0; CHANNELS]);
         }
     }
 
@@ -250,7 +260,7 @@ impl Heightfield {
 
     /// The heights and the attributes both of `rows`, to set together; the
     /// attributes empty for a grid that carries none.
-    pub(crate) fn rows_mut(&mut self, rows: Range<usize>) -> (&mut [f32], &mut [[u8; 4]]) {
+    pub(crate) fn rows_mut(&mut self, rows: Range<usize>) -> (&mut [f32], &mut [Attributes]) {
         let end = rows.end.min(self.side);
         self.reach(end);
         let span = rows.start.min(end) * self.side..end * self.side;
@@ -281,14 +291,14 @@ impl Heightfield {
 
     /// The attributes vertex `(column, row)` carries, as set; nought for a
     /// grid that carries none or a vertex beyond it.
-    pub(crate) fn attributes_of(&self, column: usize, row: usize) -> [u8; 4] {
+    pub(crate) fn attributes_of(&self, column: usize, row: usize) -> Attributes {
         if column >= self.side {
-            return [0; 4];
+            return [0; CHANNELS];
         }
         self.attributes
             .get(row * self.side + column)
             .copied()
-            .unwrap_or([0; 4])
+            .unwrap_or([0; CHANNELS])
     }
 
     /// Vertices along each side.
@@ -309,7 +319,7 @@ impl Heightfield {
 
     /// The attributes at world `(x, z)`, blended from the vertices about it,
     /// each `0.0..=1.0`; [`PLAIN`] for a grid that carries none.
-    pub(crate) fn attributes_at(&self, x: f64, z: f64) -> [f64; 4] {
+    pub(crate) fn attributes_at(&self, x: f64, z: f64) -> [f64; CHANNELS] {
         if !self.carries {
             return PLAIN;
         }
@@ -319,7 +329,7 @@ impl Heightfield {
             self.attributes
                 .get(r.min(self.side - 1) * self.side + c.min(self.side - 1))
                 .copied()
-                .unwrap_or([0; 4])
+                .unwrap_or([0; CHANNELS])
         };
         let corners = [
             at(column, row),
@@ -327,9 +337,9 @@ impl Heightfield {
             at(column, row + 1),
             at(column + 1, row + 1),
         ];
-        let mut out = [0.0; 4];
+        let mut out = [0.0; CHANNELS];
         for (channel, slot) in out.iter_mut().enumerate() {
-            let value = |corner: [u8; 4]| f64::from(corner[channel]) / 255.0;
+            let value = |corner: Attributes| f64::from(corner[channel]) / 255.0;
             *slot = bilinear(corners.map(value), (across, down));
         }
         out
@@ -888,6 +898,7 @@ impl Heightfield {
             girth: 0.0,
             material: None,
             tangent: Vec3::ZERO,
+            relieved: false,
         })
     }
 

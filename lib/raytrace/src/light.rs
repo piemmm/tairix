@@ -53,37 +53,81 @@ pub(crate) enum Light {
     },
 }
 
-/// How a disc's brightness falls toward its edge.
+/// How a disc's brightness falls across it: a disc with no darkening is
+/// evenly bright.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub(crate) enum Limb {
-    /// Evenly bright: the full moon, lit square on.
-    Even,
     /// As `μ^α` of the cosine `μ` of the angle the line of sight meets its
     /// surface at, each channel with its own `α`: the sun.
     Darkening(Vec3),
+    /// A moon's, lit from the unit `sun`, the way toward the sun from it: each
+    /// channel `sunlit` times the Lommel–Seeliger law, `μ₀/(μ₀ + μ)`, and
+    /// `earthlit` more all over for the Earth's light, as shares of the
+    /// disc's mean.
+    Phase {
+        sun: Vec3,
+        sunlit: Vec3,
+        earthlit: Vec3,
+    },
 }
 
 impl Limb {
-    /// The radiance of each channel the share of the way from the disc's
-    /// centre to its edge `fractions` says, as a share of its mean.
-    pub(crate) fn across(self, fractions: [f64; 3]) -> Vec3 {
-        let Self::Darkening(power) = self else {
-            return Vec3::ONE;
-        };
-        let channel = |alpha: f64, fraction: f64| {
-            let cosine = mathf::sqrt((1.0 - fraction * fraction).max(0.0));
-            // `μ^α` over its mean across the disc, `2/(α + 2)`.
-            if cosine > 0.0 {
-                mathf::exp(alpha * mathf::ln(cosine)) * (0.5 * alpha + 1.0)
-            } else {
-                0.0
+    /// The radiance of each channel of a disc toward the unit `toward`,
+    /// `radius` the sine of its angular radius, where that channel's light
+    /// truly comes from `sources`, as a share of the disc's mean.
+    pub(crate) fn profile(self, (toward, radius): (Vec3, f64), sources: [Vec3; 3]) -> Vec3 {
+        match self {
+            Self::Darkening(power) => {
+                let channel = |alpha: f64, source: Vec3| {
+                    let fraction = (sine(source.dot(toward)) / radius).min(1.0);
+                    let cosine = mathf::sqrt((1.0 - fraction * fraction).max(0.0));
+                    // `μ^α` over its mean across the disc, `2/(α + 2)`.
+                    if cosine > 0.0 {
+                        mathf::exp(alpha * mathf::ln(cosine)) * (0.5 * alpha + 1.0)
+                    } else {
+                        0.0
+                    }
+                };
+                Vec3::new(
+                    channel(power.x, sources[0]),
+                    channel(power.y, sources[1]),
+                    channel(power.z, sources[2]),
+                )
             }
-        };
-        Vec3::new(
-            channel(power.x, fractions[0]),
-            channel(power.y, fractions[1]),
-            channel(power.z, fractions[2]),
-        )
+            Self::Phase {
+                sun,
+                sunlit,
+                earthlit,
+            } => {
+                let frame = Frame::around(toward);
+                let channel = |index: usize| {
+                    let source = sources[index];
+                    let place = (source.dot(frame.x) / radius, source.dot(frame.y) / radius);
+                    sunlit.along(index) * phase_lit(place, (frame, toward), sun)
+                        + earthlit.along(index)
+                };
+                Vec3::new(channel(0), channel(1), channel(2))
+            }
+        }
+    }
+}
+
+/// How brightly the sun lights the moon's face seen at `(u, v)` across its
+/// disc, in its radii along `frame`'s x and y, the moon toward `toward` and
+/// the sun toward the unit `sun`: as the Lommel–Seeliger law scatters it off
+/// regolith, `μ₀/(μ₀ + μ)`, none beyond its terminator or its edge.
+pub(crate) fn phase_lit((u, v): (f64, f64), (frame, toward): (Frame, Vec3), sun: Vec3) -> f64 {
+    let outward = 1.0 - u * u - v * v;
+    if outward < 0.0 {
+        return 0.0;
+    }
+    let seen = mathf::sqrt(outward);
+    let normal = frame.x * u + frame.y * v - toward * seen;
+    let lit = normal.dot(sun);
+    if lit > 0.0 {
+        lit / (lit + seen)
+    } else {
+        0.0
     }
 }
 
@@ -260,6 +304,17 @@ impl Light {
             .map_or(Vec3::ZERO, |(sources, kept)| self.shine(sources) * kept)
     }
 
+    /// Whether a ray along the unit `dir` meets this light's disc, which hides
+    /// whatever lies beyond it.
+    pub(crate) fn covers(&self, dir: Vec3, sky: &Sky) -> bool {
+        match *self {
+            Self::Sun {
+                toward, cos_radius, ..
+            } => dir.dot(toward) >= sky.reach(cos_radius),
+            Self::Spot { .. } | Self::Orb { .. } | Self::Panel { .. } => false,
+        }
+    }
+
     /// The radiance this disc shows of light whose channels truly come from
     /// `sources`: as its limb has it, and none past its edge.
     fn shine(&self, sources: [Vec3; 3]) -> Vec3 {
@@ -274,7 +329,7 @@ impl Light {
         };
         let radius = sine(cos_radius);
         let cosines = sources.map(|source| source.dot(toward));
-        let profile = limb.across(cosines.map(|cos| (sine(cos) / radius).min(1.0)));
+        let profile = limb.profile((toward, radius), sources);
         let shown = |channel: usize| {
             if cosines[channel] >= cos_radius {
                 radiance.along(channel) * profile.along(channel)

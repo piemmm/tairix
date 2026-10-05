@@ -66,6 +66,7 @@ fn plan(rivers: bool, seed: u32) -> Plan {
         near_water: None,
         horizon: None,
         snow_line: None,
+        snowpack: None,
         pond: None,
         growth: 1.0,
         seed: seed ^ 0x55,
@@ -79,8 +80,15 @@ fn built(plan: Plan) -> (Land, Vec<Heightfield>, Courses, bool) {
         plan.relief.centre.0 - plan.reach,
         plan.relief.centre.1 - plan.reach,
     );
+    let far = Heightfield::new(1, origin, 1.0, false).expect("a grid");
+    built_on(plan, far)
+}
+
+/// `plan` built as [`built`] builds it, its far land into `far`.
+fn built_on(plan: Plan, far: Heightfield) -> (Land, Vec<Heightfield>, Courses, bool) {
+    let origin = far.placing().0;
     let placeholder = || Heightfield::new(1, origin, 1.0, false).expect("a grid");
-    let mut fields = alloc::vec![placeholder(), placeholder(), placeholder(), placeholder()];
+    let mut fields = alloc::vec![far, placeholder(), placeholder(), placeholder()];
     let grids = Fields {
         far: 0,
         nests: [Some(1), None],
@@ -457,7 +465,7 @@ fn a_channel_stands_as_carved_against_the_droplets() {
                 "({x}, {z}): {height} against the bed's {}",
                 section.bed(across)
             );
-            let [_, sediment, _, _] = grid.attributes_of(column, row);
+            let [_, sediment, _, _, _] = grid.attributes_of(column, row);
             let sediment = 2.0 * f64::from(sediment) / 255.0 - 1.0;
             assert!(
                 (sediment - banked.laid(across)).abs() < 0.01,
@@ -608,4 +616,83 @@ fn a_water_grids_units_reach_only_their_own_rows() {
             "the land never filled its water"
         );
     }
+}
+
+/// A land under snow stands above the same land bare by the depth the wind
+/// left lying there, which its grids carry: deep in the lee of its hills and
+/// thin where it scoured them, so the land is drifted, not evenly mantled,
+/// and grows only where the snow lies too thin to bury its grass.
+#[test]
+fn snow_lies_on_a_land_as_the_wind_drifted_it() {
+    let reach = 1500.0;
+    let bare = Plan {
+        relief: Terrain {
+            form: Landform::Hills {
+                scale: 260.0,
+                height: 50.0,
+                seed: 7,
+            },
+            datum: 0.0,
+            centre: (0.0, 0.0),
+            radius: reach,
+            rim: None,
+            tilt: (0.0, 0.0),
+            clearing: None,
+        },
+        reach,
+        rivers: None,
+        road: None,
+        ridges: 0.0,
+        roughness: 0.6,
+        droplets: 0.0,
+        ..plan(false, 7)
+    };
+    let pack = Snowpack {
+        heading: 0.6,
+        fallen: 0.4,
+        seed: 3,
+    };
+    let snowy = Plan {
+        snowpack: Some(pack),
+        ..bare.clone()
+    };
+    let whole = |plan: &Plan| {
+        let origin = (-plan.reach, -plan.reach);
+        Heightfield::new(plan.cells.1, origin, plan.far_step(), false).expect("a grid")
+    };
+    let (_, bare_fields, _, _) = built_on(bare.clone(), whole(&bare));
+    let (_, snowy_fields, _, _) = built_on(snowy.clone(), whole(&snowy));
+    let (bare, snowy) = (&bare_fields[0], &snowy_fields[0]);
+    let side = snowy.side();
+    let (mut depths, mut deepest, mut thinnest) = (Vec::new(), 0.0f64, f64::INFINITY);
+    for row in (8..side - 8).step_by(7) {
+        for column in (8..side - 8).step_by(7) {
+            let [_, _, _, green, kept] = snowy.attributes_of(column, row);
+            let depth = snow::depth_of(f64::from(kept) / 255.0);
+            let at = row * side + column;
+            let risen = f64::from(snowy.heights()[at] - bare.heights()[at]);
+            assert!(
+                (risen - depth).abs() < 0.01 + 0.03 * depth,
+                "({column}, {row}): risen {risen} by snow {depth}"
+            );
+            // The least depth the byte kept stands for buries the least.
+            let least = snow::depth_of((f64::from(kept) - 0.5).max(0.0) / 255.0);
+            let showing = 1.0 - snow::buries(least, GRASS_BURIED);
+            assert!(
+                f64::from(green) / 255.0 <= showing + 0.01,
+                "({column}, {row}): {green} grows through {depth} of snow"
+            );
+            deepest = deepest.max(depth);
+            thinnest = thinnest.min(depth);
+            depths.push(depth);
+        }
+    }
+    assert!(deepest > 1.6 * pack.fallen, "drifts: {deepest}");
+    assert!(thinnest < 0.5 * pack.fallen, "scoured: {thinnest}");
+    let mean =
+        depths.iter().sum::<f64>() / f64::from(u32::try_from(depths.len()).expect("a count"));
+    assert!(
+        (0.6 * pack.fallen..1.5 * pack.fallen).contains(&mean),
+        "{mean}"
+    );
 }

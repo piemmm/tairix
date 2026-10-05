@@ -30,13 +30,14 @@ use core::f64::consts::TAU;
 
 use tairix_util::mathf::{self, fmax, fmin};
 
-use crate::heightfield::{Heightfield, ABSENT};
+use crate::heightfield::{Attributes, Heightfield, ABSENT, CHANNELS};
 use crate::land::decode_lane;
 use crate::leaf::Outline;
 use crate::noise::{cell, cells2, hash2, noise2, smoothstep};
 use crate::sample::{mix32, mix64, unit};
 use crate::shade::Shade;
 use crate::shape::{reciprocal, Aabb, Geometry, Hit};
+use crate::snow;
 use crate::vector::{byte, whole, Members, Ray, Vec3};
 
 /// The most cells a ray walks across one cover: past any a lawn holds along
@@ -282,6 +283,10 @@ pub(crate) struct Weeds {
     pub(crate) share: f64,
     pub(crate) leaves: (u32, u32),
 }
+
+/// How many of the leaves fallen under the crowns the wind carries out to
+/// the open, as a share.
+const BLOWN: f64 = 0.08;
 
 /// Fallen leaves: the most lying in a cell, the shortest and longest, the
 /// outline of the tree they fell from, and how long ago the most of them
@@ -536,11 +541,17 @@ impl Lawn {
         if thrives <= THRIVES {
             return None;
         }
-        let [wet, _, lane, _] = field.attributes_at(middle.0, middle.1);
+        let [wet, _, lane, _, snow] = field.attributes_at(middle.0, middle.1);
         let (_, path) = decode_lane(lane);
         let (index, kind) = self.kind(grass, (middle, hash2(cx, cz, self.seed)), (wet, path))?;
         let sward = self.sward(middle);
-        let (thickness, stature) = sward.growth(kind.tufted);
+        let (thickness, grown) = sward.growth(kind.tufted);
+        // Rooted on the snow, a shoot shows only what stands above it.
+        let buried = snow::depth_of(snow) / (kind.height.1 * grown).max(1e-6);
+        let stature = grown * (1.0 - buried);
+        if stature <= 0.0 {
+            return None;
+        }
         let share = grass.shoots * kind.thickness * self.cell * self.cell;
         let vigour =
             u32::try_from(mathf::round_i32(sward.vigour() * f64::from(VIGOUR_STEPS))).unwrap_or(0);
@@ -577,11 +588,12 @@ impl Lawn {
         grass.shoots * kind.thickness * self.cell * self.cell * THICKEST
     }
 
-    /// `stand`, in the four bytes a canopy grid's vertex keeps: its kind,
-    /// vigour and splay; its shoots, as a share of the most its kind holds;
-    /// its stature, as a share of the rankest; and the way out from its
-    /// tussock, in 256ths of a turn. No shoots at all packs as none.
-    fn pack(&self, grass: &Grass, stand: &Stand) -> [u8; 4] {
+    /// `stand`, in the bytes a canopy grid's vertex keeps: its kind, vigour
+    /// and splay; its shoots, as a share of the most its kind holds; its
+    /// stature, as a share of the rankest; and the way out from its tussock,
+    /// in 256ths of a turn. The channel a land keeps its snow in stays
+    /// empty. No shoots at all packs as none.
+    fn pack(&self, grass: &Grass, stand: &Stand) -> Attributes {
         let kind = (stand.marks >> KIND_SHIFT) & KIND_MASK;
         let vigour = (stand.marks >> VIGOUR_SHIFT) & VIGOUR_STEPS;
         let splay = u32::try_from(mathf::round_i32(stand.splay * f64::from(SPLAY_STEPS)))
@@ -594,12 +606,13 @@ impl Lawn {
             byte(stand.shoots / self.most(grass, &stand.kind).max(1e-9)),
             byte(stand.stature / RANKEST),
             u8::try_from(heading & 0xff).unwrap_or(0),
+            0,
         ]
     }
 
-    /// The stand the four bytes `packed` keep for the cell about `middle`.
-    fn unpack(&self, grass: &Grass, packed: [u8; 4], middle: (f64, f64)) -> Option<Stand> {
-        let [head, shoots, stature, heading] = packed;
+    /// The stand the bytes `packed` keep for the cell about `middle`.
+    fn unpack(&self, grass: &Grass, packed: Attributes, middle: (f64, f64)) -> Option<Stand> {
+        let [head, shoots, stature, heading, _] = packed;
         if shoots == 0 {
             return None;
         }
@@ -655,8 +668,8 @@ impl Lawn {
         ground: &Heightfield,
         (x, z): (f64, f64),
         block: u32,
-    ) -> (f64, [u8; 4]) {
-        let none = (f64::from(ABSENT), [0; 4]);
+    ) -> (f64, Attributes) {
+        let none = (f64::from(ABSENT), [0; CHANNELS]);
         let Cover::Grass(grass) = self.cover else {
             return none;
         };
@@ -674,7 +687,7 @@ impl Lawn {
         if (bx - kept_x).abs() > 1.0 || (bz - kept_z).abs() > 1.0 {
             return none;
         }
-        let (mut top, mut packed) = (f64::NEG_INFINITY, [0; 4]);
+        let (mut top, mut packed) = (f64::NEG_INFINITY, [0; CHANNELS]);
         for dz in 0..block {
             for dx in 0..block {
                 let corner = (
@@ -822,7 +835,7 @@ impl Lawn {
         if near <= 0.0 {
             return 0.0;
         }
-        let [_, _, lane, green] = field.attributes_at(x, z);
+        let [_, _, lane, green, _] = field.attributes_at(x, z);
         let (road, path) = decode_lane(lane);
         let (under, hidden) = self
             .shade
@@ -841,8 +854,12 @@ impl Lawn {
                     * (0.4 + 0.9 * gap)
             }
             Cover::Litter(_) => {
+                // As thick as the crowns above shed: in the open only what
+                // the wind carried out.
                 let gap = 1.0 - self.sward((x, z)).clump;
-                (1.0 - 0.4 * path) * (0.3 + 0.7 * fmax(under, hidden)) * (0.6 + 0.6 * gap)
+                (1.0 - 0.4 * path)
+                    * (BLOWN + (1.0 - BLOWN) * fmax(under, hidden))
+                    * (0.6 + 0.6 * gap)
             }
         };
         grows * (1.0 - road) * near
@@ -1650,6 +1667,7 @@ fn member(t: f64, normal: Vec3, mark: u32, along: f64, uv: (f64, f64)) -> Hit {
         girth: 0.0,
         material: None,
         tangent: Vec3::ZERO,
+        relieved: false,
     }
 }
 
