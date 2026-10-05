@@ -16,7 +16,7 @@ D503, D505 and D514–D520 (the tracer's open defects).
 
 | ID | Item | Status |
 |---|---|---|
-| RT1 | Smooth reveal: a cubic B-spline over the reveal's grids, a blur coming into focus with no point a peak or a cross; each paint repaints and marks only what its steps change, the paints a scene frame apart while the picture forms and slowing with the share shown to at most 3 s; the finished picture is every pixel's own trace | done |
+| RT1 | Smooth reveal: a cubic B-spline over the reveal's grids, a blur coming into focus with no point a peak or a cross; each paint repaints and marks only what its steps change, the paints half a second apart while the picture forms and slowing with the share shown to at most 3 s, each change crossfaded in over the wait until the next, only the tiles it touches, until a twentieth of the picture is shown; the finished picture is every pixel's own trace | done |
 | RT2 | Progress readout: *Generating scene... N%* while a scene is prepared, then *Rendering... N%*, small and mid-grey in the lower right, gone once the picture is whole | done |
 | RT3 | Saving finished pictures: `screensaver.raytrace.save` keeps each whole picture as a PNG in the user's `Documents/Pictures/Raytracing/`, with no limit on how many | done |
 | RT4 | Highest quality, always: no sample governor; a reconstruction filter and sampling rounds that leave no jagged or noisy edge | done |
@@ -133,15 +133,31 @@ nothing is traced again.
 Paints come further apart as the picture fills in
 (`saver::raytrace::paint_wait`). The wait after a paint is in proportion to
 the steps shown, so each pass, four times as long as the one before, is shown
-in about as many paints: a scene frame while the coarse passes form the
+in about as many paints: half a second while the coarse passes form the
 picture, 1.5 s as the 2 px pass begins (every point of the 4 px grid shown),
-and never more than 3 s. Fine detail changes too little between paints for a quicker cadence to
-show, and every paint costs a wake, a compositor pass and a present whatever
-it carries; over a 1080p reveal this cuts the paints about sixty-fold and,
-traced across 8 cores or more, the pixels composited eighteen- to fortyfold.
-A buffer to lay afresh and a picture's last steps are painted at once. Steps
-collected between paints wait for the next, and those of a refused scene go
-with it.
+and never more than 3 s; until the first steps come, the loop looks again a
+scene frame later. Fine detail changes too little between paints for a
+quicker cadence to show, and every paint costs a wake, a compositor pass and a
+present whatever it carries. A buffer to lay afresh and a picture's last steps
+are painted at once. Steps collected between paints wait for the next, and
+those of a refused scene go with it.
+
+Each paint's change is crossfaded in over the wait until the next
+(`saver::raytrace::crossfade`), so the picture moves on continuously rather
+than in steps, until a twentieth of the picture is shown: past it a change is
+dots too small for a fade to show, and each paint is laid straight on. The
+painter paints into a picture of the crossfade's own; a fade keeps what the
+screen showed over the 16-pixel tiles its change touches and blends only
+those, a scene frame at a time (`lib/raster`'s `mix_span`, one pass, about
+half the cost of a copy and a composite), marking their cover. Its two
+screen-sized pictures are taken only where the heap and the memory band let a
+disposable cache of the machine's share hold them, and let go once the
+twentieth is passed or the band wants the memory back, the change under way
+first laid on whole; once the compositor lets the window's buffer go, which is
+then painted afresh whole; and with a refused scene, whose rest is black.
+Under reduced motion every change is laid straight on. Measured, a
+fade frame blends about 2 ns a pixel on one core, 4.5 ms for a whole 1080p
+screen before the pool shares it out.
 
 ## RT2 — Progress readout
 
@@ -158,8 +174,9 @@ count. The engine reports both in the trace desk's status.
 The readout is its own small window over the screensaver's, a transient of
 it so it rises with it: *Generating scene... N%* while the scene is prepared,
 *Rendering... N%* while it is traced, in mid-grey at the theme's caption size,
-a margin in from the lower-right corner. It is brought up to date at each
-paint, and four times a second while a scene is prepared on its own thread,
+a margin in from the lower-right corner. It is brought up to date each time
+the loop collects — at each paint and each frame of a fade — and four times a
+second while a scene is prepared on its own thread,
 which wakes the serve loop through the session's worker wake the moment the
 scene is ready, so its first passes are shown as they come. It is repainted
 only when the whole percentage changes and taken down once the picture is

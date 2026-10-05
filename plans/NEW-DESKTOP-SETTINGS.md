@@ -1556,10 +1556,13 @@ What it guarantees (its scenes, sampling and reveal are `plans/RAYTRACE.md`'s):
   spacing, every pixel traced once at the tracer's best and each pass
   scattered over the picture. The picture shown is a cubic B-spline over the
   current pass's grid, a blur coming into focus and exact once whole, and a
-  paint repaints and marks only what its steps change. Paints come a scene
-  frame apart while the coarse passes form the picture, then further apart
-  with the share shown, at most 3 s (`plans/RAYTRACE.md` RT1). It is held a
-  minute, faded over three seconds (cut under reduced motion), and replaced.
+  paint repaints and marks only what its steps change. Paints come half a
+  second apart while the coarse passes form the picture, then further apart
+  with the share shown, at most 3 s, each change crossfaded in over the wait
+  until the next, blending only the tiles it touches, until a twentieth of
+  the picture is shown, and laid straight on from there and under reduced
+  motion (`plans/RAYTRACE.md` RT1). It is held a minute, faded over three
+  seconds (cut under reduced motion), and replaced.
 - **Told as it goes.** A readout window above the picture reads *Generating
   scene... N%* from `Draft::progress` while the scene is prepared, then
   *Rendering... N%* while it is traced, mid-grey in the lower right, and goes
@@ -1616,11 +1619,17 @@ thread handing its keeper each picture once; the album's folder chain, names,
 numbered suffixes, the file decoding to the picture, and its refusals; the
 readout's words, place and teardown; the hold, fade and next scene, the cut
 under reduced motion, the rest after a refusal or with nowhere to paint, a
-lost buffer painted afresh without tracing again, a paint marking only the
-tiles about its steps, the paints' wait growing with the share shown from a
-scene frame to at most 3 s over a steadily traced reveal, a readied scene
-shown from its first steps, steps collected early painted with the next, a
-refused scene leaving nothing to the next, the options a crew is launched
+lost buffer painted afresh without tracing again, a change marking only the
+tiles about its steps and its fade writing nothing beyond them, the paints'
+wait growing with the share shown from half a second to at most 3 s over a
+steadily traced reveal, a change fading in over the wait until the next paint
+to just what laying it straight on shows, changes laid straight on past a
+twentieth of the picture, once the band wants the memory back, on a machine
+too small for the room and after a buffer let go mid-fade, a scene refused
+once shown resting black, the crossfade's blend writing only its tiles alike
+on any runner, a readied scene shown from its first steps, steps collected
+early painted with the next, a refused scene leaving nothing to the next, the
+options a crew is launched
 with, and on the loop a slice traced each frame and painted on the cadence,
 `idle` keeping to its own thread while `performance` uses the pool.
 

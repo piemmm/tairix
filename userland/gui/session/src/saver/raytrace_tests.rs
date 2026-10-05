@@ -1,8 +1,9 @@
 //! Host tests of the ray-traced screensaver as the serve loop runs it: what a
-//! paint paints and marks and when paints come, the readout over it, the hold,
-//! the fade, the rest and the next scene, a lost buffer painted afresh, the
-//! options a reveal is launched with, and a whole reveal ending as a reveal
-//! traced alone ends.
+//! paint paints and marks and when paints come, a change fading in over the
+//! wait until the next and laid straight on once the picture is formed or the
+//! memory is wanted back, the readout over it, the hold, the fade, the rest
+//! and the next scene, a lost buffer painted afresh, the options a reveal is
+//! launched with, and a whole reveal ending as a reveal traced alone ends.
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
@@ -10,23 +11,27 @@ use alloc::rc::Rc;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
 
+use tairix_abi::time::NANOS_PER_MILLI as MS;
 use tairix_parallel::Reversed;
 use tairix_raster::Pixel;
 use tairix_raytrace::{Reveal, Step};
+use tairix_reclaim::pressure::{ReportedPressure, Unpressured};
+use tairix_reclaim::PressureBand;
 use tairix_theme::Theme;
 use tairix_wallpaper::{CpuUse, RaytraceOptions, SceneDetail};
-use tairix_wm::{Color, Compositor, Point, Scale, Surface, WindowId};
+use tairix_wm::{Color, Compositor, Point, Region, Scale, Surface, WindowId};
 
+use super::crossfade::Crossfade;
+use super::tiles::Tiles;
 use super::{
-    paint_wait, Engine, Phase, Raytrace, Status, TraceHost, TraceLink, Traced, DETAIL_WAIT_NS,
-    FADE_MS, HOLD_NS, MOST_WAIT_NS, PLAIN, READOUT_WAIT_NS,
+    paint_wait, Engine, Laying, Memory, Phase, Raytrace, Status, TraceHost, TraceLink, Traced,
+    DETAIL_WAIT_NS, FADE_MS, FIRST_WAIT_NS, HOLD_NS, MOST_WAIT_NS, PLAIN, READOUT_WAIT_NS,
 };
 use crate::saver::seed_from;
 use crate::tests::compositor;
 use tairix_theme::motion::SceneClock;
 
 const SIZE: (u32, u32) = (48, 27);
-const MS: u64 = 1_000_000;
 const LIT: Pixel = Pixel {
     r: 200,
     g: 180,
@@ -83,6 +88,35 @@ fn every_step_lit() -> Vec<Traced> {
         .collect()
 }
 
+/// A screen whose first pass is a sliver of its picture, so a reveal of it
+/// starts at the shortest wait.
+const SCREEN: (u32, u32) = (320, 180);
+
+/// The steps `range` of a reveal of `SCREEN`, each traced to `LIT`.
+fn screen_steps(range: core::ops::Range<u32>) -> Vec<Traced> {
+    let order = Reveal::new(SCREEN, 1).expect("a picture");
+    range
+        .map(|index| Traced {
+            step: order.step(index).expect("a step"),
+            pixel: LIT,
+        })
+        .collect()
+}
+
+/// Every step of the first pass of a reveal of `SCREEN`, each traced to
+/// `LIT`: a change to the whole picture.
+fn first_pass_lit() -> Vec<Traced> {
+    let order = Reveal::new(SCREEN, 1).expect("a picture");
+    screen_steps(0..order.pass_end(0))
+}
+
+/// A black window of `SCREEN` for a reveal to draw in.
+fn screen_canvas(comp: &mut Compositor) -> WindowId {
+    let mut surface = Surface::new(SCREEN.0, SCREEN.1).expect("a surface");
+    surface.fill(Color::rgb(0, 0, 0));
+    comp.add_window(Point::ORIGIN, surface)
+}
+
 /// A saver for `size` traced as `options` ask on `host`.
 fn launched(
     size: (u32, u32),
@@ -90,13 +124,51 @@ fn launched(
     options: RaytraceOptions,
     host: Option<&dyn TraceHost>,
 ) -> Option<Raytrace> {
+    launched_on(size, calm, (options, PLAIN.memory), host)
+}
+
+/// A saver for `size` traced as `options` ask on `host`, `memory` sparing its
+/// crossfade the room.
+fn launched_on(
+    size: (u32, u32),
+    calm: bool,
+    (options, memory): (RaytraceOptions, Memory),
+    host: Option<&dyn TraceHost>,
+) -> Option<Raytrace> {
     Raytrace::new(
         size,
         (calm, 0),
-        (options, PLAIN.memory, PLAIN.tell),
+        (options, memory, PLAIN.tell),
         host,
         (&Theme::dark(), Scale::ONE),
     )
+}
+
+/// The change fading in, if one is.
+fn fading(saver: &Raytrace) -> Option<&Crossfade> {
+    match &saver.laying {
+        Laying::Fading(fade) if !fade.settled() => Some(fade),
+        _ => None,
+    }
+}
+
+/// Carry `saver` on frame by frame from `now` until no change is fading in;
+/// the time it then stands at.
+fn faded_in(
+    saver: &mut Raytrace,
+    wm: WindowId,
+    comp: &mut Compositor,
+    clock: &mut dyn FnMut() -> u64,
+    mut now: u64,
+) -> u64 {
+    for _ in 0..10_000 {
+        if fading(saver).is_none() {
+            return now;
+        }
+        now = saver.due_ns().max(now);
+        saver.advance(now, wm, comp, clock);
+    }
+    panic!("the change never faded in");
 }
 
 fn idle() -> RaytraceOptions {
@@ -156,6 +228,37 @@ impl TraceLink for ScriptedLink {
 /// A saver traced by a crew playing `script`.
 fn scripted(script: &Rc<RefCell<Script>>, calm: bool) -> Raytrace {
     launched(SIZE, calm, idle(), Some(&Scripted(Rc::clone(script)))).expect("a reveal")
+}
+
+/// A saver of `SCREEN` traced by a crew playing `script`, `calm` under
+/// reduced motion and `memory` sparing its crossfade the room.
+fn on_screen(script: &Rc<RefCell<Script>>, calm: bool, memory: Memory) -> Raytrace {
+    launched_on(
+        SCREEN,
+        calm,
+        (idle(), memory),
+        Some(&Scripted(Rc::clone(script))),
+    )
+    .expect("a reveal")
+}
+
+/// What the paints of `paints`, one batch each and laid straight on over
+/// black, leave on `SCREEN`.
+fn laid_straight(paints: &[Vec<Traced>]) -> Surface {
+    let mut comp = compositor();
+    let wm = screen_canvas(&mut comp);
+    let frames = paints
+        .iter()
+        .map(|steps| (steps.clone(), Status::Tracing(0)));
+    let mut saver = on_screen(&Script::shared(frames), true, PLAIN.memory);
+    let mut clock = ticking(MS);
+    let mut now = 0;
+    for _ in paints {
+        saver.advance(now, wm, &mut comp, &mut clock);
+        now = saver.due_ns();
+    }
+    assert!(matches!(saver.laying, Laying::Straight));
+    content(&comp, wm).clone()
 }
 
 /// A whole picture is held a minute, costing nothing meanwhile, then fades to
@@ -255,8 +358,9 @@ fn a_picture_with_nowhere_to_paint_rests_the_saver() {
     assert_eq!(script.borrow().asked, 1);
 }
 
-/// A buffer the compositor let go is painted afresh from what the painter
-/// kept — the picture a kept buffer shows — and nothing is traced again.
+/// Laid straight on, a buffer the compositor let go is painted afresh from
+/// what the painter kept — the picture a kept buffer shows — and nothing is
+/// traced again.
 #[test]
 fn a_lost_buffer_is_painted_afresh_without_tracing_again() {
     let frames = || {
@@ -267,18 +371,20 @@ fn a_lost_buffer_is_painted_afresh_without_tracing_again() {
     };
     let mut kept_comp = compositor();
     let kept_wm = canvas(&mut kept_comp, Color::rgb(0, 0, 0));
-    let mut kept = scripted(&Script::shared(frames()), false);
+    let mut kept = scripted(&Script::shared(frames()), true);
     let mut comp = compositor();
     let wm = canvas(&mut comp, Color::rgb(0, 0, 0));
     let script = Script::shared(frames());
-    let mut saver = scripted(&script, false);
+    let mut saver = scripted(&script, true);
     let mut clock = ticking(MS);
-    for now in [0, SceneClock::FRAME_NS] {
-        if now > 0 {
+    let mut now = 0;
+    for frame in 0..2 {
+        if frame > 0 {
             let _ = comp.set_surface(wm, Surface::new(4, 4).expect("a small surface"));
         }
         saver.advance(now, wm, &mut comp, &mut clock);
         kept.advance(now, kept_wm, &mut kept_comp, &mut clock);
+        now = saver.due_ns();
     }
     assert_eq!(script.borrow().asked, 0, "nothing is traced again");
     let picture = content(&comp, wm);
@@ -291,48 +397,80 @@ fn a_lost_buffer_is_painted_afresh_without_tracing_again() {
     );
 }
 
-/// A frame repaints what its steps change and marks only the tiles about
-/// them: the steps' own neighbourhoods, never the box they span.
+/// A change marks only the tiles about its steps, laid straight on or faded
+/// in — the steps' own neighbourhoods, never the box they span — and no frame
+/// of its fade writes beyond them.
 #[test]
-fn a_frame_marks_the_tiles_about_its_steps_and_only_them() {
+fn a_change_marks_the_tiles_about_its_steps_and_only_them() {
     let screen = (320u32, 180u32);
-    let mut comp = compositor();
-    let mut surface = Surface::new(screen.0, screen.1).expect("a surface");
-    surface.fill(Color::rgb(0, 0, 0));
-    let wm = comp.add_window(Point::ORIGIN, surface);
-    // Points of the last pass, far apart.
-    let few: Vec<Traced> = [(21, 41), (101, 41), (181, 121), (261, 161)]
-        .into_iter()
-        .map(|(x, y)| lit(x, y, 1))
-        .collect();
-    let script = Script::shared([(few.clone(), Status::Tracing(0))]);
-    let mut saver =
-        launched(screen, false, idle(), Some(&Scripted(Rc::clone(&script)))).expect("a reveal");
-    saver.advance(0, wm, &mut comp, &mut ticking(MS));
-    let covered: u32 = saver
-        .damage
-        .rects()
-        .iter()
-        .map(|rect| rect.width * rect.height)
-        .sum();
-    // A step of the last pass reaches two pixels each way, so touches at most
-    // four of the finest tiles.
-    assert!(covered <= 4 * 4 * 16 * 16, "{:?}", saver.damage.rects());
-    for traced in &few {
-        let at = Point::new(
-            i32::try_from(traced.step.x).expect("small"),
-            i32::try_from(traced.step.y).expect("small"),
+    for calm in [true, false] {
+        let mut comp = compositor();
+        let black = Surface::filled(screen.0, screen.1, Color::rgb(0, 0, 0).premultiply())
+            .expect("a surface");
+        let wm = comp.add_window(Point::ORIGIN, black.clone());
+        // Points of the last pass, far apart.
+        let few: Vec<Traced> = [(21, 41), (101, 41), (181, 121), (261, 161)]
+            .into_iter()
+            .map(|(x, y)| lit(x, y, 1))
+            .collect();
+        let script = Script::shared([(few.clone(), Status::Tracing(0))]);
+        let mut saver =
+            launched(screen, calm, idle(), Some(&Scripted(Rc::clone(&script)))).expect("a reveal");
+        let mut clock = ticking(MS);
+        saver.advance(0, wm, &mut comp, &mut clock);
+        assert_eq!(fading(&saver).is_some(), !calm, "faded in unless calm");
+        let mut marked = Region::new();
+        let mut room = Tiles::new(screen).expect("room");
+        saver.preview.changed().cover(&mut room, &mut marked);
+        let covered: u32 = marked
+            .rects()
+            .iter()
+            .map(|rect| rect.width * rect.height)
+            .sum();
+        // A step of the last pass reaches two pixels each way, so touches at
+        // most four of the finest tiles.
+        assert!(covered <= 4 * 4 * 16 * 16, "{:?}", marked.rects());
+        for traced in &few {
+            let at = Point::new(
+                i32::try_from(traced.step.x).expect("small"),
+                i32::try_from(traced.step.y).expect("small"),
+            );
+            assert!(marked.contains(at), "{at:?} not repainted");
+        }
+        assert!(
+            !marked.contains(Point::new(160, 100)),
+            "between them is left alone"
         );
-        assert!(saver.damage.contains(at), "{at:?} not repainted");
+        assert!(
+            !marked.contains(Point::new(300, 10)),
+            "far off is left alone"
+        );
+        let mut now = 0;
+        loop {
+            for y in 0..screen.1 {
+                for x in 0..screen.0 {
+                    let at = Point::new(
+                        i32::try_from(x).expect("small"),
+                        i32::try_from(y).expect("small"),
+                    );
+                    if !marked.contains(at) {
+                        assert_eq!(content(&comp, wm).get(x, y), black.get(x, y), "{at:?}");
+                    }
+                }
+            }
+            if fading(&saver).is_none() {
+                break;
+            }
+            now = saver.due_ns().max(now);
+            saver.advance(now, wm, &mut comp, &mut clock);
+        }
+        assert!(
+            content(&comp, wm)
+                .get(21, 41)
+                .is_some_and(|pixel| pixel.r > 0),
+            "the change is shown"
+        );
     }
-    assert!(
-        !saver.damage.contains(Point::new(160, 100)),
-        "between them is left alone"
-    );
-    assert!(
-        !saver.damage.contains(Point::new(300, 10)),
-        "far off is left alone"
-    );
 }
 
 /// While the scene is prepared, and then traced, a readout above the picture
@@ -458,25 +596,26 @@ fn a_frame_with_nothing_traced_repaints_nothing() {
 }
 
 /// The wait between paints grows with the share of the picture shown: a scene
-/// frame while the coarse passes form it, a quarter of the detail's wait as
-/// the 4 px pass begins and all of it as the 2 px pass does, never shrinking
-/// and never past the most.
+/// frame until anything is, half a second while the coarse passes form it,
+/// half the detail's wait half way through the 4 px pass and all of it as the
+/// 2 px pass begins, never shrinking and never past the most.
 #[test]
 fn the_wait_between_paints_grows_with_the_picture_shown() {
     // A 1920 × 1080 picture's 4 px grid, and its 32 px grid.
     let detail_from = 480 * 270;
     let formed = 60 * 34;
     assert_eq!(paint_wait(0, detail_from), SceneClock::FRAME_NS);
-    assert_eq!(paint_wait(formed, detail_from), SceneClock::FRAME_NS);
-    assert_eq!(paint_wait(detail_from / 4, detail_from), DETAIL_WAIT_NS / 4);
+    assert_eq!(paint_wait(1, detail_from), FIRST_WAIT_NS);
+    assert_eq!(paint_wait(formed, detail_from), FIRST_WAIT_NS);
+    assert_eq!(paint_wait(detail_from / 2, detail_from), DETAIL_WAIT_NS / 2);
     assert_eq!(paint_wait(detail_from, detail_from), DETAIL_WAIT_NS);
     assert_eq!(paint_wait(4 * detail_from, detail_from), MOST_WAIT_NS);
     assert_eq!(paint_wait(u64::MAX, detail_from), MOST_WAIT_NS);
     let mut last = 0;
-    for shown in (0..=8 * detail_from).step_by(997) {
+    for shown in (1..=8 * detail_from).step_by(997) {
         let wait = paint_wait(shown, detail_from);
         assert!(wait >= last, "{shown}: {wait} after {last}");
-        assert!((SceneClock::FRAME_NS..=MOST_WAIT_NS).contains(&wait));
+        assert!((FIRST_WAIT_NS..=MOST_WAIT_NS).contains(&wait));
         last = wait;
     }
 }
@@ -525,13 +664,13 @@ impl TraceHost for SteadyHost {
     }
 }
 
-/// Traced at a steady pace, a reveal is painted a scene frame apart while its
+/// Traced at a steady pace, a reveal is painted half a second apart while its
 /// coarse passes form the picture, then further apart in step with the share
 /// shown — never closer than the last two, at least the detail's wait once
 /// the fine detail is under way, and never more than the most — in a small
 /// share of the frames it takes, ending on the whole picture.
 #[test]
-fn paints_come_a_frame_apart_as_the_picture_forms_then_slow_to_the_most() {
+fn paints_come_half_a_second_apart_as_the_picture_forms_then_slow_to_the_most() {
     let screen = (320u32, 180u32);
     let now = Rc::new(Cell::new(0u64));
     let handed = Rc::new(Cell::new(0u32));
@@ -572,8 +711,8 @@ fn paints_come_a_frame_apart_as_the_picture_forms_then_slow_to_the_most() {
         };
         let wait = next - at;
         assert!(wait >= last && wait <= MOST_WAIT_NS, "{wait} after {last}");
-        if *shown * 45 < detail_from {
-            assert_eq!(wait, SceneClock::FRAME_NS, "{shown} shown");
+        if *shown * 3 < detail_from {
+            assert_eq!(wait, FIRST_WAIT_NS, "{shown} shown");
         }
         if *shown >= detail_from && *shown < u64::from(screen.0 * screen.1) {
             assert!(wait >= DETAIL_WAIT_NS, "{shown} shown: {wait}");
@@ -589,9 +728,197 @@ fn paints_come_a_frame_apart_as_the_picture_forms_then_slow_to_the_most() {
     );
 }
 
+/// A paint's change fades in a scene frame at a time over the wait until the
+/// next paint, brighter every frame, from the black the reveal began over to
+/// just what laying it straight on shows: all of it once the wait is up.
+#[test]
+fn a_paints_change_fades_in_over_the_wait_until_the_next_paint() {
+    let first = first_pass_lit();
+    let whole = laid_straight(core::slice::from_ref(&first));
+    let mut comp = compositor();
+    let wm = screen_canvas(&mut comp);
+    let mut saver = on_screen(
+        &Script::shared([(first, Status::Tracing(0))]),
+        false,
+        PLAIN.memory,
+    );
+    let mut clock = ticking(MS);
+    saver.advance(0, wm, &mut comp, &mut clock);
+    assert_eq!(brightness(&comp, wm), 0, "nothing of it at once");
+    let (mut now, mut last) = (0, 0);
+    while fading(&saver).is_some() {
+        let next = saver.due_ns();
+        assert_eq!(
+            next,
+            (now + SceneClock::FRAME_NS).min(FIRST_WAIT_NS),
+            "a scene frame on"
+        );
+        now = next;
+        saver.advance(now, wm, &mut comp, &mut clock);
+        let lit = brightness(&comp, wm);
+        assert!(lit > last, "brighter at {now}");
+        last = lit;
+    }
+    assert_eq!(now, FIRST_WAIT_NS, "all of it once the wait is up");
+    assert_eq!(content(&comp, wm), &whole);
+}
+
+/// The paints that leave less than a twentieth of the picture shown fade
+/// their changes in; from there each is laid straight on, at once, and the
+/// crossfade's room let go.
+#[test]
+fn past_a_twentieth_of_the_picture_changes_are_laid_straight_on() {
+    let twentieth = SCREEN.0 * SCREEN.1 / 20;
+    let paints = [
+        screen_steps(0..twentieth / 2),
+        screen_steps(twentieth / 2..twentieth + 10),
+        screen_steps(twentieth + 10..twentieth + 400),
+    ];
+    let mut comp = compositor();
+    let wm = screen_canvas(&mut comp);
+    let script = Script::shared([(paints[0].clone(), Status::Tracing(0))]);
+    let mut saver = on_screen(&script, false, PLAIN.memory);
+    let mut clock = ticking(MS);
+    saver.advance(0, wm, &mut comp, &mut clock);
+    for (painted, steps) in paints.iter().enumerate().skip(1) {
+        assert!(fading(&saver).is_some(), "paint {painted} fades in");
+        let mut now = saver.due_ns();
+        while now < saver.paint_due_ns {
+            saver.advance(now, wm, &mut comp, &mut clock);
+            now = saver.due_ns();
+        }
+        script
+            .borrow_mut()
+            .frames
+            .push_back((steps.clone(), Status::Tracing(0)));
+        saver.advance(now, wm, &mut comp, &mut clock);
+    }
+    assert!(
+        matches!(saver.laying, Laying::Straight),
+        "the room is let go"
+    );
+    assert_eq!(
+        content(&comp, wm),
+        &laid_straight(&paints),
+        "laid on at once"
+    );
+}
+
+/// A band wanting the memory back has the change fading in laid on whole at
+/// the next frame and its room let go, and a reveal whose first change comes
+/// under such a band lays it, and every change after, straight on.
+#[test]
+fn a_band_wanting_the_memory_back_ends_the_crossfade() {
+    static TIGHTENING: ReportedPressure = ReportedPressure::unknown();
+    static TIGHT: ReportedPressure = ReportedPressure::unknown();
+    TIGHTENING.report(PressureBand::Normal);
+    TIGHT.report(PressureBand::Mild);
+    let first = first_pass_lit();
+    let whole = laid_straight(core::slice::from_ref(&first));
+    let mut comp = compositor();
+    let wm = screen_canvas(&mut comp);
+    let tightening = Memory {
+        total: u64::MAX,
+        gauge: &TIGHTENING,
+    };
+    let script = Script::shared([(first.clone(), Status::Tracing(0))]);
+    let mut saver = on_screen(&script, false, tightening);
+    let mut clock = ticking(MS);
+    saver.advance(0, wm, &mut comp, &mut clock);
+    saver.advance(SceneClock::FRAME_NS, wm, &mut comp, &mut clock);
+    assert!(fading(&saver).is_some());
+    assert_ne!(content(&comp, wm), &whole, "part way in");
+    TIGHTENING.report(PressureBand::Mild);
+    saver.advance(2 * SceneClock::FRAME_NS, wm, &mut comp, &mut clock);
+    assert!(matches!(saver.laying, Laying::Straight));
+    assert_eq!(content(&comp, wm), &whole, "laid on whole");
+
+    let mut comp = compositor();
+    let wm = screen_canvas(&mut comp);
+    let tight = Memory {
+        total: u64::MAX,
+        gauge: &TIGHT,
+    };
+    let mut pressed = on_screen(&Script::shared([(first, Status::Tracing(0))]), false, tight);
+    pressed.advance(0, wm, &mut comp, &mut ticking(MS));
+    assert!(matches!(pressed.laying, Laying::Straight));
+    assert_eq!(content(&comp, wm), &whole, "laid straight on at once");
+}
+
+/// A machine whose share of memory cannot hold a crossfade's room lays every
+/// change straight on.
+#[test]
+fn a_machine_too_small_for_the_room_lays_changes_straight_on() {
+    let first = first_pass_lit();
+    let small = Memory {
+        total: Crossfade::bytes(SCREEN) * 8,
+        gauge: &Unpressured,
+    };
+    let mut comp = compositor();
+    let wm = screen_canvas(&mut comp);
+    let mut saver = on_screen(
+        &Script::shared([(first.clone(), Status::Tracing(0))]),
+        false,
+        small,
+    );
+    saver.advance(0, wm, &mut comp, &mut ticking(MS));
+    assert!(matches!(saver.laying, Laying::Straight));
+    assert_eq!(content(&comp, wm), &laid_straight(&[first]));
+}
+
+/// A buffer the compositor lets go while a change fades in is painted afresh,
+/// whole, from what the painter keeps, and the rest of the reveal laid
+/// straight on: the crossfade's room goes with it.
+#[test]
+fn a_buffer_let_go_mid_fade_is_painted_afresh_and_the_rest_laid_straight_on() {
+    let first = first_pass_lit();
+    let mut comp = compositor();
+    let wm = screen_canvas(&mut comp);
+    let mut saver = on_screen(
+        &Script::shared([(first.clone(), Status::Tracing(0))]),
+        false,
+        PLAIN.memory,
+    );
+    let mut clock = ticking(MS);
+    saver.advance(0, wm, &mut comp, &mut clock);
+    saver.advance(SceneClock::FRAME_NS, wm, &mut comp, &mut clock);
+    assert!(fading(&saver).is_some());
+    let _ = comp.set_surface(wm, Surface::new(4, 4).expect("a small surface"));
+    saver.advance(2 * SceneClock::FRAME_NS, wm, &mut comp, &mut clock);
+    assert!(matches!(saver.laying, Laying::Straight));
+    assert_eq!(content(&comp, wm), &laid_straight(&[first]));
+}
+
+/// A scene refused once some of it is on screen rests the screen black, laid
+/// straight on or fading in, and a fade's room goes with it.
+#[test]
+fn a_scene_refused_once_shown_rests_the_screen_black() {
+    for calm in [true, false] {
+        let mut comp = compositor();
+        let wm = screen_canvas(&mut comp);
+        let script = Script::shared([
+            (first_pass_lit(), Status::Tracing(0)),
+            (Vec::new(), Status::Tracing(0)),
+            (Vec::new(), Status::Failed),
+        ]);
+        let mut saver = on_screen(&script, calm, PLAIN.memory);
+        let mut clock = ticking(MS);
+        saver.advance(0, wm, &mut comp, &mut clock);
+        saver.landed(SceneClock::FRAME_NS);
+        saver.advance(SceneClock::FRAME_NS, wm, &mut comp, &mut clock);
+        assert!(brightness(&comp, wm) > 0, "some of it is shown");
+        saver.landed(2 * SceneClock::FRAME_NS);
+        saver.advance(2 * SceneClock::FRAME_NS, wm, &mut comp, &mut clock);
+        assert!(matches!(saver.phase, Phase::Resting { .. }));
+        assert!(matches!(saver.laying, Laying::Straight));
+        assert_eq!(brightness(&comp, wm), 0, "black while it rests");
+    }
+}
+
 /// While a scene is prepared on its thread the loop comes back only to bring
 /// the readout up to date; once the thread readies the scene, the loop comes
-/// back at once and paints its first passes a scene frame apart.
+/// back at once, a scene frame apart until the first steps come, and fades
+/// them in from the frame after.
 #[test]
 fn a_scene_readied_on_its_thread_is_shown_from_its_first_steps() {
     let mut comp = compositor();
@@ -611,13 +938,15 @@ fn a_scene_readied_on_its_thread_is_shown_from_its_first_steps() {
     saver.advance(readied, wm, &mut comp, &mut clock);
     assert_eq!(saver.due_ns(), SceneClock::FRAME_NS);
     saver.advance(SceneClock::FRAME_NS, wm, &mut comp, &mut clock);
+    assert!(fading(&saver).is_some(), "the first step is fading in");
+    assert_eq!(saver.due_ns(), 2 * SceneClock::FRAME_NS);
+    saver.advance(2 * SceneClock::FRAME_NS, wm, &mut comp, &mut clock);
     assert!(
         content(&comp, wm)
             .get(0, 0)
-            .is_some_and(|pixel| pixel.r > 0),
-        "the first step is shown"
+            .is_some_and(|pixel| pixel.r > 0 && pixel.r < LIT.r),
+        "the first step is showing, but not yet all of it"
     );
-    assert_eq!(saver.due_ns(), 2 * SceneClock::FRAME_NS);
 }
 
 /// Steps collected before their paint is due — the loop woken early — wait
@@ -641,6 +970,8 @@ fn steps_collected_early_are_painted_with_the_next() {
     assert!(!comp.has_damage(), "not yet due");
     assert_eq!(saver.drawn.len(), 1);
     saver.advance(SceneClock::FRAME_NS, wm, &mut comp, &mut clock);
+    assert!(saver.drawn.is_empty(), "both are painted");
+    faded_in(&mut saver, wm, &mut comp, &mut clock, SceneClock::FRAME_NS);
     let picture = content(&comp, wm);
     for (x, y) in [(0, 0), (46, 26)] {
         assert!(

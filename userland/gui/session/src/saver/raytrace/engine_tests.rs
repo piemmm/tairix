@@ -10,6 +10,7 @@ use alloc::vec::Vec;
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use tairix_abi::time::NANOS_PER_MILLI as MS;
 use tairix_raster::Pixel;
 use tairix_raytrace::{Detail, Quality, Reveal, Setting, Tracer};
 use tairix_reclaim::pressure::{PressureBand, ReportedPressure};
@@ -22,7 +23,6 @@ use crate::saver::raytrace::album::Unkept;
 use crate::saver::raytrace::crew::{Status, TraceDesk, Turn};
 
 const SIZE: (u32, u32) = (48, 27);
-const MS: u64 = 1_000_000;
 
 /// A clock that reads `step` later every time it is read.
 fn ticking(step: u64) -> impl FnMut() -> u64 {

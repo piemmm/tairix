@@ -7,18 +7,22 @@
 //! The tracing runs on threads of its own where the embedder grants them: one
 //! core under the idle setting, every core under performance, and whole
 //! pictures are kept there when asked. The serve loop only paints what they
-//! have finished: a frame apart while the picture forms, then further apart as
-//! only finer detail is left to show. Where no thread is granted, it traces a
-//! slice a frame itself and keeps nothing. The painter keeps every traced
-//! pixel, so a buffer the compositor lets go is painted afresh rather than
-//! traced again.
-//! Under reduced motion the picture is cut to black rather than faded.
+//! have finished: half a second apart while the picture forms, each paint's
+//! change faded in over the wait until the next, then further apart and laid
+//! straight on as only finer detail is left to show. Where no thread is
+//! granted, it traces a slice a frame itself and keeps nothing. The painter
+//! keeps every traced pixel, so a buffer the compositor lets go is painted
+//! afresh rather than traced again.
+//! Under reduced motion changes are laid straight on and the picture is cut
+//! to black rather than faded.
 
 mod album;
 mod crew;
+mod crossfade;
 mod engine;
 mod preview;
 mod readout;
+mod tiles;
 
 pub use album::{keep, Picture, PictureFiles, Unkept, FOLDERS};
 pub use crew::{
@@ -31,14 +35,16 @@ pub use engine::{Detailing, Engine, Memory, Traced};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
+use tairix_abi::time::NANOS_PER_MILLI;
 use tairix_parallel::JobRunner;
 use tairix_raster::DitherRow;
 use tairix_raytrace::Detail;
-use tairix_theme::{Fade, Theme};
+use tairix_theme::{Fade, Theme, Timeline};
 use tairix_wallpaper::{CpuUse, RaytraceOptions, SceneDetail};
 use tairix_wm::{Color, Compositor, Rect, Region, Scale, WindowId};
 
 use super::seed_from;
+use crossfade::Crossfade;
 use preview::Preview;
 use readout::{Doing, Readout};
 use tairix_theme::motion::SceneClock;
@@ -58,6 +64,10 @@ const FADE_GRAIN: usize = 16_384;
 /// 2 px pass follows it.
 const DETAIL_GRID: u32 = 4;
 
+/// How long apart a reveal's first paints come: the wait each one's change
+/// is faded in over.
+const FIRST_WAIT_NS: u64 = 500_000_000;
+
 /// How long apart a reveal's paints come as its fine detail begins: too
 /// little changes between them for a quicker cadence to show.
 const DETAIL_WAIT_NS: u64 = 1_500_000_000;
@@ -66,8 +76,18 @@ const DETAIL_WAIT_NS: u64 = 1_500_000_000;
 /// never looks stalled.
 const MOST_WAIT_NS: u64 = 3_000_000_000;
 
-// Clamping to the cadence's bounds cannot panic, and its anchor lies within.
-const _: () = assert!(SceneClock::FRAME_NS <= DETAIL_WAIT_NS && DETAIL_WAIT_NS <= MOST_WAIT_NS);
+// Clamping to the cadence's bounds cannot panic, its anchor lies within, and
+// its longest wait is a fade's span in milliseconds.
+const _: () = assert!(
+    SceneClock::FRAME_NS <= FIRST_WAIT_NS
+        && FIRST_WAIT_NS <= DETAIL_WAIT_NS
+        && DETAIL_WAIT_NS <= MOST_WAIT_NS
+        && (MOST_WAIT_NS / NANOS_PER_MILLI) >> u16::BITS == 0
+);
+
+/// How many thousandths of a reveal's steps are shown before its paints are
+/// laid straight on: by then a change is dots too small for a fade to show.
+const FADED_THOUSANDTHS: u64 = 50;
 
 /// How long apart the readout is brought up to date while a scene is prepared
 /// on a thread of its own, which wakes the loop the moment the scene is ready.
@@ -83,6 +103,22 @@ enum Phase {
     Fading { fade: Fade, strength: u8 },
     /// Black until `until_ns`, the heap having refused a scene.
     Resting { until_ns: u64 },
+}
+
+/// How a reveal's changes reach the screen.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "one laying is held for a screensaver's life; boxing the crossfade would add an \
+              allocation that cannot fail gracefully beside the two it already makes fallibly"
+)]
+enum Laying {
+    /// Nothing painted yet: the first change is faded in where the heap and
+    /// the memory band hold the room.
+    Unbegun,
+    /// Each change faded in over the wait until the next paint.
+    Fading(Crossfade),
+    /// Each change laid straight on.
+    Straight,
 }
 
 /// Where the reveal's steps are traced.
@@ -151,12 +187,17 @@ pub(super) struct Raytrace {
     /// Where they go, kept likewise.
     damage: Region,
     preview: Preview,
+    laying: Laying,
     readout: Readout,
     calm: bool,
+    /// What the machine's memory can spare the crossfade.
+    memory: Memory,
     due_ns: u64,
     /// How many steps come before the fine detail: every point of the
     /// `DETAIL_GRID` grid.
     detail_from: u64,
+    /// How many steps are shown before changes are laid straight on.
+    faded_until: u64,
     /// How many steps of the scene under way have been painted.
     shown: u64,
     paint_due_ns: u64,
@@ -207,11 +248,14 @@ impl Raytrace {
             drawn: Vec::new(),
             damage: Region::new(),
             preview,
+            laying: unbegun(calm),
             readout: Readout::new(theme, scale, size),
             calm,
+            memory,
             due_ns: now_ns,
             detail_from: u64::from(size.0.div_ceil(DETAIL_GRID))
                 * u64::from(size.1.div_ceil(DETAIL_GRID)),
+            faded_until: u64::from(size.0) * u64::from(size.1) * FADED_THOUSANDTHS / 1000,
             shown: 0,
             paint_due_ns: now_ns,
         })
@@ -273,6 +317,7 @@ impl Raytrace {
     fn next(&mut self, now_ns: u64) -> Phase {
         self.feed.next();
         self.preview.reset();
+        self.laying = unbegun(self.calm);
         self.drawn.clear();
         self.shown = 0;
         self.paint_due_ns = now_ns;
@@ -280,8 +325,8 @@ impl Raytrace {
         Phase::Revealing
     }
 
-    /// Collect what has been traced, and put it on screen if a paint is due:
-    /// the phase that follows.
+    /// Collect what has been traced, and put it on screen if a paint is due,
+    /// or draw the frame of the change fading in: the phase that follows.
     fn reveal(
         &mut self,
         now_ns: u64,
@@ -299,10 +344,11 @@ impl Raytrace {
             // scene: restarting it every frame would retry the allocation
             // with it, and keep the tracing threads busy on steps nothing can
             // show.
-            if !self.paint(wm, compositor, kept) {
-                return self.rest(now_ns, compositor);
+            if !self.paint(now_ns, wm, compositor, (kept, status)) {
+                return self.rest(now_ns, wm, compositor);
             }
-            self.paint_due_ns = now_ns.saturating_add(paint_wait(self.shown, self.detail_from));
+        } else {
+            self.fade_in(now_ns, wm, compositor);
         }
         match status {
             Status::Preparing(done) => {
@@ -314,7 +360,7 @@ impl Raytrace {
             }
             Status::Tracing(done) => {
                 self.readout.show(compositor, wm, Doing::Rendering, done);
-                self.due_ns = self.feed.due(now_ns, self.paint_due_ns);
+                self.due_ns = self.feed.due(now_ns, self.wanted_ns(now_ns));
                 Phase::Revealing
             }
             Status::Whole => {
@@ -323,36 +369,145 @@ impl Raytrace {
                 self.due_ns = until_ns;
                 Phase::Holding { until_ns }
             }
-            Status::Failed => self.rest(now_ns, compositor),
+            Status::Failed => self.rest(now_ns, wm, compositor),
         }
     }
 
-    /// Rest the screen from `now_ns` after the heap refused the reveal, before
-    /// the next scene is tried.
-    fn rest(&mut self, now_ns: u64, compositor: &mut Compositor) -> Phase {
+    /// When the reveal wants the loop back after `now_ns`: at the next paint,
+    /// and a scene frame on while a change is fading in.
+    fn wanted_ns(&self, now_ns: u64) -> u64 {
+        match &self.laying {
+            Laying::Fading(fade) if !fade.settled() => self
+                .paint_due_ns
+                .min(now_ns.saturating_add(SceneClock::FRAME_NS)),
+            _ => self.paint_due_ns,
+        }
+    }
+
+    /// Rest the screen black from `now_ns` after the heap refused the reveal,
+    /// before the next scene is tried.
+    fn rest(&mut self, now_ns: u64, wm: WindowId, compositor: &mut Compositor) -> Phase {
         self.readout.take_down(compositor);
+        self.laying = Laying::Straight;
+        // Nothing shown of the scene leaves the black it began over.
+        if self.shown > 0 {
+            dim(compositor, wm, self.size, 0);
+        }
         let until_ns = now_ns.saturating_add(HOLD_NS);
         self.due_ns = until_ns;
         Phase::Resting { until_ns }
     }
 
-    /// Paint what the steps collected since the last paint change, marking it
-    /// — the whole picture, painted afresh, in a buffer the compositor let go;
-    /// `false` when the heap would not give the picture a buffer.
-    fn paint(&mut self, wm: WindowId, compositor: &mut Compositor, kept: bool) -> bool {
+    /// Put what the steps collected since the last paint change on screen as
+    /// the reveal, `status`, stands: faded in over the wait until the next
+    /// paint while a twentieth of the picture is yet to be shown, laid
+    /// straight on from there, and the whole picture painted afresh in a
+    /// buffer the compositor let go, which was not `kept`. `false` when the
+    /// heap would not give the picture a buffer.
+    fn paint(
+        &mut self,
+        now_ns: u64,
+        wm: WindowId,
+        compositor: &mut Compositor,
+        (kept, status): (bool, Status),
+    ) -> bool {
+        let fading = kept
+            && status != Status::Whole
+            && self.shown < self.faded_until
+            && self.memory.holds_disposable(Crossfade::bytes(self.size));
+        let (laying, painted) = match core::mem::replace(&mut self.laying, Laying::Straight) {
+            // The first paint with something to show decides for the reveal.
+            Laying::Unbegun if kept && self.drawn.is_empty() => (Laying::Unbegun, true),
+            Laying::Unbegun if fading => match Crossfade::new(self.size) {
+                Some(fade) => self.paint_faded(fade, now_ns, wm, compositor),
+                None => (Laying::Straight, self.paint_straight(wm, compositor, kept)),
+            },
+            Laying::Fading(fade) if fading => self.paint_faded(fade, now_ns, wm, compositor),
+            // Its change goes on whole, and its room with it.
+            Laying::Fading(mut fade) if kept && !fade.settled() => {
+                let _ = fade.show(u8::MAX, (wm, self.size), compositor);
+                (Laying::Straight, self.paint_straight(wm, compositor, kept))
+            }
+            Laying::Unbegun | Laying::Fading(_) | Laying::Straight => {
+                (Laying::Straight, self.paint_straight(wm, compositor, kept))
+            }
+        };
+        self.laying = laying;
+        if painted {
+            self.paint_due_ns = now_ns.saturating_add(paint_wait(self.shown, self.detail_from));
+        }
+        painted
+    }
+
+    /// Settle `fade`'s change under way, then begin fading in what the steps
+    /// collected since the last paint change, over the wait until the next
+    /// paint: how the reveal's changes are then laid, and `false` when the
+    /// picture's window has gone.
+    fn paint_faded(
+        &mut self,
+        mut fade: Crossfade,
+        now_ns: u64,
+        wm: WindowId,
+        compositor: &mut Compositor,
+    ) -> (Laying, bool) {
+        if !fade.settled() && !fade.show(u8::MAX, (wm, self.size), compositor) {
+            return (Laying::Fading(fade), false);
+        }
+        if !self.drawn.is_empty() {
+            self.take_drawn(true);
+            let wait_ms = paint_wait(self.shown, self.detail_from) / NANOS_PER_MILLI;
+            let timeline = Timeline::start(now_ns, u16::try_from(wait_ms).unwrap_or(u16::MAX));
+            let runner = compositor.job_runner();
+            let picture = fade.begin((self.preview.changed(), &mut self.damage), timeline, runner);
+            self.preview.paint(picture, runner);
+        }
+        (Laying::Fading(fade), true)
+    }
+
+    /// Lay what the steps collected since the last paint change straight on,
+    /// marking it — the whole picture, painted afresh, in a buffer that was
+    /// not `kept`; `false` when the heap would not give the picture a buffer.
+    fn paint_straight(&mut self, wm: WindowId, compositor: &mut Compositor, kept: bool) -> bool {
         if kept && self.drawn.is_empty() {
             return true;
         }
-        self.damage.clear();
-        self.preview.take(&self.drawn, kept, &mut self.damage);
-        let painted = u64::try_from(self.drawn.len()).unwrap_or(u64::MAX);
-        self.shown = self.shown.saturating_add(painted);
-        self.drawn.clear();
+        self.take_drawn(kept);
         let runner = compositor.job_runner();
         let preview = &mut self.preview;
         compositor.repaint_window(wm, self.size, &self.damage, |surface, _| {
             preview.paint(surface, runner);
         })
+    }
+
+    /// Take the steps collected since the last paint into the painter,
+    /// marking what they change in `damage` — all of it where the buffer was
+    /// not `kept` — and count them shown.
+    fn take_drawn(&mut self, kept: bool) {
+        self.damage.clear();
+        self.preview.take(&self.drawn, kept, &mut self.damage);
+        let taken = u64::try_from(self.drawn.len()).unwrap_or(u64::MAX);
+        self.shown = self.shown.saturating_add(taken);
+        self.drawn.clear();
+    }
+
+    /// Draw the frame due at `now_ns` of the change fading in — the whole of
+    /// it, its room then let go, once the memory band wants the room back.
+    fn fade_in(&mut self, now_ns: u64, wm: WindowId, compositor: &mut Compositor) {
+        let Laying::Fading(fade) = &mut self.laying else {
+            return;
+        };
+        let held = self.memory.holds_disposable(Crossfade::bytes(self.size));
+        let weight = if held {
+            fade.due(now_ns)
+        } else {
+            (!fade.settled()).then_some(u8::MAX)
+        };
+        if let Some(weight) = weight {
+            let _ = fade.show(weight, (wm, self.size), compositor);
+        }
+        if !held {
+            self.laying = Laying::Straight;
+        }
     }
 
     /// Dim the picture, now carrying `strength`, toward black as `fade` has
@@ -384,16 +539,28 @@ impl Raytrace {
     }
 }
 
+/// How a reveal begins laying its changes on: straight on under reduced
+/// motion, which `calm` is.
+fn unbegun(calm: bool) -> Laying {
+    if calm {
+        Laying::Straight
+    } else {
+        Laying::Unbegun
+    }
+}
+
 /// The wait after a paint leaving `shown` steps of a reveal on screen,
-/// `detail_from` coming before its fine detail: in proportion to the steps
-/// shown, so each pass, four times as long as the one before, is shown in about
-/// as many paints — a scene frame at least, `DETAIL_WAIT_NS` as the fine detail
-/// begins, and `MOST_WAIT_NS` at most.
+/// `detail_from` coming before its fine detail: a scene frame while none is,
+/// so the first are shown as soon as they are traced, then in proportion to
+/// the steps shown, so each pass, four times as long as the one before, is
+/// shown in about as many paints — `FIRST_WAIT_NS` at least, `DETAIL_WAIT_NS`
+/// as the fine detail begins, and `MOST_WAIT_NS` at most.
 fn paint_wait(shown: u64, detail_from: u64) -> u64 {
+    if shown == 0 {
+        return SceneClock::FRAME_NS;
+    }
     let wait = u128::from(shown) * u128::from(DETAIL_WAIT_NS) / u128::from(detail_from.max(1));
-    u64::try_from(wait).map_or(MOST_WAIT_NS, |wait| {
-        wait.clamp(SceneClock::FRAME_NS, MOST_WAIT_NS)
-    })
+    u64::try_from(wait).map_or(MOST_WAIT_NS, |wait| wait.clamp(FIRST_WAIT_NS, MOST_WAIT_NS))
 }
 
 /// Scale the whole of window `wm`'s picture by `share` of 255, dithered, the

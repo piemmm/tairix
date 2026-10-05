@@ -10,3 +10,9 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# The tests' durations are counted in the one nanoseconds-per-millisecond
+# definition rather than a copy of it. Test scaffolding only; never in a
+# TAIRiX build.
+tairix-abi = { path = "../abi", version = "=0.0.0" }

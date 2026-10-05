@@ -21,6 +21,7 @@ use tairix_abi::discovery_ipc::{
 use tairix_abi::net::{SocketAddr, SocketDatagram, SocketDelivery, SocketLinkEvent};
 use tairix_abi::net_ipc::{NetAddrFamily, IF_NAME_LEN};
 use tairix_abi::reply::decode_status_reply;
+use tairix_abi::time::NANOS_PER_MILLI as MS;
 use tairix_abi::{
     AppIdentity, CapabilityId, CapabilitySummary, Errno, Origin, ProcId, PublisherId, TrustDomain,
 };
@@ -36,7 +37,6 @@ use tairix_sandbox::session::{
 };
 use tairix_sandbox::supervise::SessionLauncher;
 
-const MS: u64 = 1_000_000;
 const SEC: u64 = 1_000 * MS;
 const V4: u32 = 1;
 const V6: u32 = 2;

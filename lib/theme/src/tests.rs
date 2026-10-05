@@ -4,6 +4,7 @@ use alloc::string::String;
 
 use tairix_abi::desktop::CURSOR_SET_NAME_MAX;
 use tairix_abi::sysinfo::VolumeHealth;
+use tairix_abi::time::NANOS_PER_MILLI as MS;
 use tairix_abi::window_ipc::WINDOW_BACKDROP_BLUR_MAX_PX;
 
 use tairix_colour::legibility::contrast_hundredths;
@@ -452,7 +453,6 @@ fn a_settled_timeline_is_complete_and_asks_for_no_wake() {
 
 #[test]
 fn a_timeline_runs_from_nothing_to_complete_over_its_span() {
-    const MS: u64 = 1_000_000;
     let timeline = Timeline::start(5 * MS, 100);
     assert!(timeline.running());
     assert_eq!(timeline.progress(5 * MS), 0);
@@ -479,7 +479,6 @@ fn a_clock_that_jumped_backwards_settles_rather_than_stalling() {
     // long as the clock stayed behind, freezing an animation on its first
     // frame. It reads complete instead, and the frame that puts that end state
     // on screen is owed at once.
-    const MS: u64 = 1_000_000;
     let timeline = Timeline::start(100 * MS, 100);
     assert_eq!(timeline.progress(40 * MS), u8::MAX);
     assert!(timeline.finished(40 * MS));
@@ -488,7 +487,6 @@ fn a_clock_that_jumped_backwards_settles_rather_than_stalling() {
 
 #[test]
 fn a_wake_is_the_nearer_of_the_frame_cadence_and_what_is_left() {
-    const MS: u64 = 1_000_000;
     let timeline = Timeline::start(0, 1000);
     // Early on, the cadence is what limits it.
     assert_eq!(timeline.next_frame_in(0), Some(Timeline::FRAME_NS));
@@ -510,7 +508,6 @@ fn a_span_that_ran_out_since_the_last_step_still_owes_its_terminal_frame() {
     // presenting the frame, and only then asks when to wake. A span that ended
     // in between must not answer "nothing", or the end state is stranded
     // undrawn until some unrelated event wakes the owner.
-    const MS: u64 = 1_000_000;
     let timeline = Timeline::start(0, 100);
     let stepped = 99 * MS;
     assert!(timeline.progress(stepped) < u8::MAX, "a frame short");
@@ -536,7 +533,6 @@ fn settling_a_running_timeline_stops_it() {
 
 #[test]
 fn a_fade_carries_its_strength_from_one_end_of_the_span_to_the_other() {
-    const MS: u64 = 1_000_000;
     let covering = Fade::start(0, 100, 0, u8::MAX);
     assert_eq!(covering.strength(0), 0);
     assert_eq!(covering.strength(50 * MS), 127);
@@ -557,7 +553,6 @@ fn a_fade_begun_part_way_starts_from_the_strength_it_was_given() {
     // What a session accepted mid-animation does: the screen is part-covered,
     // and the fade that takes over must continue from there rather than jump
     // to an end it never reached.
-    const MS: u64 = 1_000_000;
     let interrupted = Fade::start(0, 100, 60, u8::MAX);
 
     assert_eq!(interrupted.strength(0), 60);
@@ -575,7 +570,6 @@ fn a_reduced_motion_fade_is_at_its_end_from_the_first_read() {
 
 #[test]
 fn settling_a_fade_lands_it_on_its_target_and_ends_the_asking() {
-    const MS: u64 = 1_000_000;
     let mut fade = Fade::start(0, 100, u8::MAX, 0);
     assert!(fade.running());
     // A span that ran out still owes the frame that draws the end state.
@@ -1514,7 +1508,6 @@ fn sample_metrics() -> Metrics {
 
 #[test]
 fn easing_starts_and_ends_gently_but_still_spans_the_whole_range() {
-    const MS: u64 = 1_000_000;
     let timeline = Timeline::start(0, 100);
     assert_eq!(timeline.eased(0), 0);
     assert_eq!(timeline.eased(100 * MS), u8::MAX);

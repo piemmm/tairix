@@ -5,6 +5,7 @@ extern crate std;
 use std::vec::Vec;
 
 use tairix_abi::input::PointerButtonCode;
+use tairix_abi::time::NANOS_PER_MILLI as MS;
 use tairix_abi::touch::{
     Contact, ContactKind, PinchPhase, TouchButtons, TouchExtent, TouchFrame, TouchSurface,
     PINCH_SCALE_ONE,
@@ -12,8 +13,6 @@ use tairix_abi::touch::{
 use tairix_input::PointerButton;
 
 use super::{Gesture, Pinch, Recogniser, SurfacePoint, TouchPress, TouchSettings};
-
-const MS: u64 = 1_000_000;
 
 /// A surface so large a normalised step is exactly 0.1 mm, so every distance
 /// below is exact.

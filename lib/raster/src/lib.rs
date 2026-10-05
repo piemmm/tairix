@@ -67,7 +67,9 @@ pub use artwork::{
 pub use blur::{
     box_blur, box_blur_coverage, soften_coverage, BlurScratch, Frosting, SOFTEN_PASSES,
 };
-pub use color::{blend_solid_span, blend_span, div255, div255_biased, Color, Pixel, ROUND_NEAREST};
+pub use color::{
+    blend_solid_span, blend_span, div255, div255_biased, mix_span, Color, Pixel, ROUND_NEAREST,
+};
 pub use dither::DitherRow;
 pub use paint::{
     Gradient, GradientKind, GradientStop, Paint, Pattern, SpreadMethod, TileFold, MAX_TILE_EXTENT,

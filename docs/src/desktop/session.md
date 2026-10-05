@@ -1768,12 +1768,17 @@ shows, each scene drawn as the user's `screensaver.*` options set it
   `idle`, the default, that thread alone, one core's worth; under
   `performance`, a worker beside it for every other core. The serve loop only
   collects and paints what has been traced, and the paints come further apart
-  as the picture fills in: a scene frame apart while the coarse passes form it,
-  then in proportion to the share shown, so each pass, four times as long as
-  the one before, is shown in about as many paints — 1.5 s apart as the 2 px
+  as the picture fills in: half a second apart while the coarse passes form
+  it, then in proportion to the share shown, so each pass, four times as long
+  as the one before, is shown in about as many paints — 1.5 s apart as the 2 px
   pass begins, and never more than 3 s. Fine detail changes too little between
-  paints for a quicker cadence to show, and the loop is woken a few times a
-  minute rather than thirty times a second. While a scene is prepared the loop
+  paints for a quicker cadence to show. Until a twentieth of the picture is
+  shown, each paint's change is crossfaded in over the wait until the next,
+  the loop coming back a scene frame at a time to blend only the tiles the
+  change touches; from there each is laid straight on, and the crossfade's two
+  screen-sized pictures are let go. They are taken only where the memory band
+  lets a disposable cache hold them, and let go early once it wants the memory
+  back; under reduced motion every change is laid straight on. While a scene is prepared the loop
   comes back four times a second to bring the readout up to date, and the
   thread wakes it through the session's worker wake the moment the scene is
   ready, so its first passes are shown as they come. The thread prepares a

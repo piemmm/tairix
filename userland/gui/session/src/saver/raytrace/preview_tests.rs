@@ -11,8 +11,9 @@ use tairix_raster::Pixel;
 use tairix_raytrace::{Reveal, Step};
 use tairix_wm::{Point, Rect, Region, Surface};
 
-use super::{coarsen, runs, Cells, Preview, DAMAGE_BUDGET, DAMAGE_TILE};
+use super::{Cells, Preview};
 use crate::saver::raytrace::engine::Traced;
+use crate::saver::raytrace::tiles::{COVER_BUDGET, TILE};
 
 const WHITE: Pixel = Pixel {
     r: 255,
@@ -73,7 +74,8 @@ fn black(size: (u32, u32)) -> Surface {
 }
 
 /// Paint `steps` in frames of `frame` steps over `surface`, as the saver
-/// does, checking every pixel a frame changes lies in the damage it marked.
+/// does, checking every pixel a frame changes lies in the damage it marked
+/// and in the tiles it reports changed.
 fn paint_in_frames(
     preview: &mut Preview,
     surface: &mut Surface,
@@ -85,6 +87,8 @@ fn paint_in_frames(
     for chunk in steps.chunks(frame.max(1)) {
         let mut damage = Region::new();
         preview.take(chunk, true, &mut damage);
+        let changed = preview.changed();
+        let tiles: Vec<_> = changed.spans(0..changed.rows()).collect();
         let before = surface.clone();
         preview.paint(surface, runner);
         for y in 0..surface.height() {
@@ -95,6 +99,12 @@ fn paint_in_frames(
                         i32::try_from(y).expect("small"),
                     );
                     assert!(damage.contains(at), "({x}, {y}) changed unmarked");
+                    assert!(
+                        tiles
+                            .iter()
+                            .any(|(columns, lines)| columns.contains(&x) && lines.contains(&y)),
+                        "({x}, {y}) changed outside its tiles"
+                    );
                 }
             }
         }
@@ -188,11 +198,11 @@ fn a_frame_marks_a_bounded_cover_of_whole_tiles() {
             let mut damage = Region::new();
             preview.take(chunk, true, &mut damage);
             preview.paint(&mut surface, &SERIAL);
-            assert!(damage.rects().len() <= DAMAGE_BUDGET);
+            assert!(damage.rects().len() <= COVER_BUDGET);
             for rect in damage.rects() {
                 let tiled = |edge: i32, end: u32| {
                     let edge = u32::try_from(edge).expect("on the picture");
-                    edge % DAMAGE_TILE == 0 || edge == end
+                    edge % TILE == 0 || edge == end
                 };
                 assert!(
                     tiled(rect.left(), size.0) && tiled(rect.right(), size.0),
@@ -439,25 +449,4 @@ fn cells_come_back_as_their_runs() {
     cells.clear();
     assert_eq!(cells.count(), 0);
     assert!(cells.runs(1, 299).next().is_none());
-}
-
-/// Merging tiles two by two keeps every marked one within a marked merger,
-/// and marks nothing a merger did not reach.
-#[test]
-fn merged_tiles_cover_what_they_merged() {
-    let (across, down) = (7usize, 5usize);
-    let marked = [(0usize, 0usize), (6, 0), (3, 2), (4, 2), (6, 4)];
-    let mut tiles = alloc::vec![false; across * down];
-    for (x, y) in marked {
-        tiles[y * across + x] = true;
-    }
-    coarsen(&mut tiles, across, down);
-    let (half_across, half_down) = (across.div_ceil(2), down.div_ceil(2));
-    let merged: Vec<(usize, usize)> = (0..half_down)
-        .flat_map(|y| (0..half_across).map(move |x| (x, y)))
-        .filter(|(x, y)| tiles[y * half_across + x])
-        .collect();
-    assert_eq!(merged, [(0, 0), (3, 0), (1, 1), (2, 1), (3, 2)]);
-    let lines: Vec<_> = runs(&tiles, half_across, half_down).collect();
-    assert_eq!(lines, [(0, 0..1), (0, 3..4), (1, 1..3), (2, 3..4)]);
 }

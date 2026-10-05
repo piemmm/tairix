@@ -4,9 +4,8 @@ use tairix_wm::{Compositor, ENLARGED_SIDE_PX};
 use super::AidPolicy;
 use crate::shell::DesktopShell;
 use crate::tests::{compositor, moved, shell};
+use tairix_abi::time::NANOS_PER_MILLI as MS;
 use tairix_abi::WAITSET_TIMEOUT_NONE;
-
-const MS: u64 = 1_000_000;
 
 fn every_aid() -> AidPolicy {
     AidPolicy {

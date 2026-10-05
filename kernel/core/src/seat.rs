@@ -1180,13 +1180,13 @@ mod tests {
     const TEST_NOW_NS: u64 = 1_000_000_000;
 
     use tairix_abi::input::PointerButtonCode;
+    use tairix_abi::time::NANOS_PER_MILLI as MS;
 
     #[test]
     fn a_chattering_repress_never_reaches_the_pointer_channel() {
         // The on-metal fault: a worn switch emits a second press 16 ms after
         // the release. The seat drops it and the release that closes the same
         // pulse, so the desktop sees one click and no unpaired edge.
-        const MS: u64 = 1_000_000;
         let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
         seat.acquire(SEAT_PRIMARY, SeatOwner(7)).expect("acquired");
         CLICK_DEBOUNCE.set_ms(25);
@@ -1223,7 +1223,6 @@ mod tests {
     fn a_zero_window_delivers_a_rapid_fire_pair() {
         // A device whose rapid-fire mode emits click pairs at ~10 ms is
         // reporting real intent; zero must deliver every edge.
-        const MS: u64 = 1_000_000;
         let seat = SeatRegistry::new(&NULL_CONSOLE_INPUT);
         seat.acquire(SEAT_PRIMARY, SeatOwner(9)).expect("acquired");
         CLICK_DEBOUNCE.set_ms(0);

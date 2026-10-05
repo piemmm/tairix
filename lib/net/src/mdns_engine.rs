@@ -25,7 +25,7 @@
 
 use alloc::vec::Vec;
 
-use tairix_abi::time::{Duration64, NANOS_PER_SEC};
+use tairix_abi::time::{Duration64, NANOS_PER_MILLI, NANOS_PER_SEC};
 use tairix_hash::HashSeed;
 use tairix_inline::{ArrayVec, BitSet256};
 
@@ -45,7 +45,7 @@ use super::{
 const _: () = assert!(MAX_QUESTIONS <= 256);
 
 /// One millisecond in the engine's nanosecond time base.
-const MS: u128 = 1_000_000;
+const MS: u128 = NANOS_PER_MILLI as u128;
 
 /// Probes before a unique name is considered claimed (RFC 6762 §8.1).
 const PROBE_COUNT: u8 = 3;

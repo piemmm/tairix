@@ -135,8 +135,7 @@ impl RestartPacer {
 #[cfg(test)]
 mod tests {
     use super::{Restart, RestartPacer, RetryLadder};
-
-    const MS: u64 = 1_000_000;
+    use tairix_abi::time::NANOS_PER_MILLI as MS;
 
     #[test]
     fn restarts_double_from_the_base_and_clamp_to_the_cap() {

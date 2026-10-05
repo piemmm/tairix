@@ -9,6 +9,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use tairix_abi::time::NANOS_PER_MILLI as MS;
 use tairix_geometry::{Rect, Scale};
 use tairix_input::{Key, NamedKey};
 use tairix_raster::Surface;
@@ -22,9 +23,6 @@ use crate::testkit::{
     changed_pixels, contrast_in, darkest_in, feed_at, feed_in, key, named, painted, render,
     render_in, render_over_light, still, theme, Scripted, SCREEN,
 };
-
-/// Nanoseconds in one millisecond.
-const MS: u64 = 1_000_000;
 
 /// A monotonic instant a person could plausibly log in at.
 ///

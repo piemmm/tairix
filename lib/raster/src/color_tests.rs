@@ -1,4 +1,4 @@
-//! Unit tests for the span composite.
+//! Unit tests for the span composite and the span mix.
 //!
 //! The per-pixel operators are exercised throughout the crate's own tests and
 //! by every caller; what needs proving here is that laying a *run* of them is
@@ -7,7 +7,7 @@
 
 use alloc::vec::Vec;
 
-use super::{blend_solid_span, blend_span, Pixel};
+use super::{blend_solid_span, blend_span, mix, mix_span, Pixel};
 use crate::dither::DitherRow;
 
 /// A deterministic stream of premultiplied pixels, so a failure is
@@ -170,6 +170,64 @@ fn a_solid_run_is_the_same_run_with_that_colour_repeated() {
             blend_solid_span(&mut solid, src, 208, dither, first_x);
             blend_span(&mut paired, &repeated, 208, dither, first_x);
             assert_eq!(solid, paired, "length {len} from column {first_x}");
+        }
+    }
+}
+
+#[test]
+fn a_mixed_run_is_exactly_the_pixels_mixed_one_at_a_time() {
+    // Any length, beginning at any phase of the dither, so neither a tile
+    // boundary nor the remainder can reset or misread the pattern.
+    let mut rng = Pixels::new(0x0D15_501F_E0F0_0001);
+    for row in [0u32, 3, 7] {
+        let dither = DitherRow::at(row);
+        for weight in [1u8, 64, 128, 200, 254] {
+            for len in 0..=24usize {
+                for first_x in [0u32, 1, 7, 8, 4095] {
+                    let (from, to) = (rng.run(len), rng.run(len));
+                    let mut dst = rng.run(len);
+                    mix_span(&mut dst, &from, &to, weight, dither, first_x);
+                    let expected: Vec<Pixel> = from
+                        .iter()
+                        .zip(&to)
+                        .zip(first_x..)
+                        .map(|((from, to), x)| mix(*from, *to, weight, dither.bias(x)))
+                        .collect();
+                    assert_eq!(
+                        dst, expected,
+                        "row {row}, weight {weight}, length {len} from column {first_x}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_mixed_runs_two_ends_are_its_two_pictures() {
+    let mut rng = Pixels::new(0x0E4D_5A2E_0000_0002);
+    let (from, to) = (rng.run(29), rng.run(29));
+    let mut dst = rng.run(29);
+    mix_span(&mut dst, &from, &to, 0, DitherRow::at(4), 3);
+    assert_eq!(dst, from);
+    mix_span(&mut dst, &from, &to, u8::MAX, DitherRow::at(4), 3);
+    assert_eq!(dst, to);
+}
+
+#[test]
+fn the_shortest_of_the_three_runs_ends_the_mix() {
+    let mut rng = Pixels::new(0x5401_7E57_0000_0003);
+    for (from_len, to_len) in [(3usize, 8usize), (8, 3)] {
+        let (from, to) = (rng.run(from_len), rng.run(to_len));
+        let before = rng.run(8);
+        for weight in [0u8, 100, u8::MAX] {
+            let mut dst = before.clone();
+            mix_span(&mut dst, &from, &to, weight, DitherRow::at(1), 0);
+            assert_eq!(
+                dst.get(3..),
+                before.get(3..),
+                "weight {weight}: nothing past the shortest run is written"
+            );
         }
     }
 }

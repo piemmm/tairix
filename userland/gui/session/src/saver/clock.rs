@@ -11,7 +11,7 @@
 use alloc::format;
 use alloc::string::String;
 
-use tairix_abi::time::WallClockReading;
+use tairix_abi::time::{WallClockReading, NANOS_PER_MILLI};
 use tairix_browse::format_date;
 use tairix_font::BitmapFont;
 use tairix_rng::{NonCryptoRng, RandU64};
@@ -93,7 +93,6 @@ impl ClockFace {
         (wall, now_ns): (Option<WallClockReading>, u64),
         options: ClockOptions,
     ) -> Self {
-        const NS_PER_MS: u64 = 1_000_000;
         let display = BitmapFont::for_role(theme.fonts(), TextRole::Display, scale);
         let time_px = (screen.1 / TIME_SHARE).max(scale.scale_length(TIME_MIN_LOGICAL));
         let face =
@@ -112,7 +111,7 @@ impl ClockFace {
             strength: u8::MAX,
             moving: None,
             fade_ns: u64::from(theme.motion().duration(MotionInteraction::StageTransition))
-                * NS_PER_MS,
+                * NANOS_PER_MILLI,
             rng: NonCryptoRng::seed_from_u64(seed_from(now_ns)),
             screen,
             damage: Region::new(),

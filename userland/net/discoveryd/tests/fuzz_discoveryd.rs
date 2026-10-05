@@ -37,6 +37,7 @@ use tairix_abi::discovery_ipc::{
 use tairix_abi::net::{SocketAddr, SocketDatagram, SocketDelivery, SocketLinkEvent};
 use tairix_abi::net_ipc::{address_parts, IF_NAME_LEN};
 use tairix_abi::reply::decode_status_reply;
+use tairix_abi::time::NANOS_PER_MILLI as MS;
 use tairix_abi::{CapabilityId, CapabilitySummary, Errno, Origin, ProcId, TrustDomain};
 use tairix_discoveryd::decoder::Decoder;
 use tairix_discoveryd::front::{Front, Host, Sockets, MIN_TICK_INTERVAL_NS, OUTBOUND_QUEUE};
@@ -58,7 +59,6 @@ use tairix_sandbox::supervise::SessionLauncher;
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
 const SMOKE_ITERATIONS: u64 = 200;
 
-const MS: u64 = 1_000_000;
 const SEC: u64 = 1_000 * MS;
 
 /// The kinds of thing a hostile decoder says, one per round in turn.

@@ -9,6 +9,7 @@
 //! recomputed only when the owner steps it, which is what keeps painting a
 //! pure function of already-computed state that reads no clock.
 
+use tairix_abi::time::NANOS_PER_MILLI;
 use tairix_colour::Rgba;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Rect, Scale};
@@ -24,9 +25,6 @@ const SHAKE_CYCLES: u32 = 3;
 
 /// Phase steps in one whole oscillation.
 const PERIOD: u32 = 1 << 12;
-
-/// Nanoseconds in one millisecond.
-const NANOS_PER_MS: u64 = 1_000_000;
 
 /// A quarter period of a sine, in 1/255 units, sampled every eighth of the
 /// quarter and interpolated between samples.
@@ -199,7 +197,7 @@ impl Stage {
         // be read at. Rounded up, so the entry lands on that remainder rather
         // than a step short of it.
         let remainder = u64::from(u8::MAX - self.timeline.progress(now_ns));
-        let span = u64::from(duration_ms).saturating_mul(NANOS_PER_MS);
+        let span = u64::from(duration_ms).saturating_mul(NANOS_PER_MILLI);
         let behind = remainder
             .saturating_mul(span)
             .saturating_add(u64::from(u8::MAX) - 1)

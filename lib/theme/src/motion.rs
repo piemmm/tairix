@@ -12,6 +12,8 @@
 //! Density and contrast are likewise data: they change metrics and emphasis,
 //! never the *meaning* of a state (spec §6, §14, §15).
 
+use tairix_abi::time::NANOS_PER_MILLI;
+
 /// One animated interaction, keyed to a spec §9 timing target.
 ///
 /// A control asks the [`MotionTheme`] for the duration of the interaction it
@@ -161,10 +163,6 @@ impl MotionTheme {
     }
 }
 
-/// Nanoseconds in one millisecond, the unit a duration is authored in and the
-/// unit a monotonic clock is read in.
-const NANOS_PER_MS: u64 = 1_000_000;
-
 /// One animation in flight: when it began, and how long it runs for.
 ///
 /// The consumer's counterpart to [`MotionTheme::duration`], and the single
@@ -219,7 +217,7 @@ impl Timeline {
         }
         Self {
             started_ns: now_ns,
-            duration_ns: u64::from(duration_ms).saturating_mul(NANOS_PER_MS),
+            duration_ns: u64::from(duration_ms).saturating_mul(NANOS_PER_MILLI),
         }
     }
 

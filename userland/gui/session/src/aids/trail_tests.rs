@@ -1,11 +1,10 @@
+use tairix_abi::time::NANOS_PER_MILLI as MS;
 use tairix_geometry::Point;
 use tairix_inline::ArrayVec;
 use tairix_wallpaper::PointerTrail;
 use tairix_wm::{Ghost, MAX_GHOSTS};
 
 use super::{shape, Trail, PATH_SAMPLES};
-
-const MS: u64 = 1_000_000;
 
 /// A trail of `length` fed a pointer moving right at one pixel a millisecond,
 /// one sample every 4 ms, until `until_ns`.

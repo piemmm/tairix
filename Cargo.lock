@@ -7188,6 +7188,9 @@ dependencies = [
 [[package]]
 name = "tairix-util"
 version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+]
 
 [[package]]
 name = "tairix-vcmailbox"

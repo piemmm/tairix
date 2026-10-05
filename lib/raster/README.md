@@ -262,6 +262,15 @@ This crate owns:
   plate is laid beside its client's own run on the same row, so the two must
   round identically at every column or the seam between them would show;
   `color_tests` pins it against the paired blend over a repeated colour.
+- `mix_span` — the crate's one mixer, `mix`, a run at a time: a destination
+  run takes a weight of the way from one source run to another, over the same
+  tiled walk at the same dither. One picture dissolving into another whose
+  earlier frames it has overwritten — the ray-traced screensaver fading a
+  change in — needs both ends each frame, and mixing them in one pass reads
+  two runs and writes one where copying one end and compositing the other
+  over it walks the destination twice and rounds twice: measured, it is about
+  half the cost. Its two ends are copies, so a dissolve's first and last
+  frames are exactly its pictures (`color_tests`).
 - `Surface::blit` — composite one surface over another through `blend_span`,
   clipping a negative origin or an over-large source, so a
   transparent-background sprite (a rasterised cursor or icon) lays onto the

@@ -10,6 +10,7 @@ use alloc::vec;
 use core::fmt::Write as _;
 
 use tairix_abi::net_ipc::NetAddrFamily;
+use tairix_abi::time::NANOS_PER_MILLI;
 use tairix_help::{own_short_help, HelpSource};
 
 use crate::command::{Command, Config, PayloadKind, Target};
@@ -24,9 +25,6 @@ pub const USAGE: &str = "usage: ping [-c count] [-i interval] [-s size] [-W time
 
 /// The command word this bundle is named by, for the own-help lookup.
 const OWN_WORD: &str = "ping";
-
-/// Nanoseconds in one millisecond.
-const NANOS_PER_MS: u64 = 1_000_000;
 
 /// The outcome of a completed ping run: enough to choose the exit code.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -316,7 +314,7 @@ fn statistics(target: &Target, summary: RunSummary, rtt: &RttStats, elapsed_ns: 
         summary.transmitted,
         summary.received,
         loss,
-        elapsed_ns / NANOS_PER_MS,
+        elapsed_ns / NANOS_PER_MILLI,
     );
     if rtt.count > 0 {
         // Integer average: total / count, both in nanoseconds.
@@ -335,9 +333,9 @@ fn statistics(target: &Target, summary: RunSummary, rtt: &RttStats, elapsed_ns: 
 /// Format a nanosecond duration as milliseconds with three decimals,
 /// integer-only (`X.YYY`).
 fn format_ms(ns: u64) -> String {
-    let whole = ns / NANOS_PER_MS;
+    let whole = ns / NANOS_PER_MILLI;
     // Microseconds within the millisecond → three fractional digits.
-    let frac = (ns % NANOS_PER_MS) / 1_000;
+    let frac = (ns % NANOS_PER_MILLI) / 1_000;
     format!("{whole}.{frac:03}")
 }
 

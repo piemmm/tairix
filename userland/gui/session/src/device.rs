@@ -567,6 +567,7 @@ mod tests {
     use alloc::vec::Vec;
     use tairix_abi::driver::input::SCROLL_UNITS_PER_DETENT;
     use tairix_abi::input::{PointerButtonCode, PointerInput};
+    use tairix_abi::time::NANOS_PER_MILLI as MS;
     use tairix_abi::touch::{Contact, TouchButtons, TouchExtent, TouchFrame, TouchSurface};
     use tairix_abi::Errno;
     use tairix_wallpaper::{PointerSpeed, PrimaryButton};
@@ -785,7 +786,6 @@ mod tests {
     }
 
     const DETENT: i32 = SCROLL_UNITS_PER_DETENT;
-    const MS: u64 = 1_000_000;
 
     /// What each of `steps` turns of `units`, one drained every `apart_ns`
     /// nanoseconds, is worth once accelerated.

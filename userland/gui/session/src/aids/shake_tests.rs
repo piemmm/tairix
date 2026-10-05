@@ -1,10 +1,9 @@
+use tairix_abi::time::NANOS_PER_MILLI as MS;
 use tairix_geometry::{Point, Scale};
 use tairix_theme::{MotionInteraction, MotionTheme, Theme};
 use tairix_wm::FULLY_ENLARGED;
 
 use super::{Shake, HOLD_NS, SHAKE_STROKES, STROKE_MAX_NS, STROKE_MIN_PX};
-
-const MS: u64 = 1_000_000;
 
 fn motion() -> MotionTheme {
     Theme::dark().motion()

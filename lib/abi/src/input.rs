@@ -769,7 +769,7 @@ impl ClickDebounce {
 
 #[cfg(test)]
 mod tests {
-    const MS: u64 = 1_000_000;
+    use crate::time::NANOS_PER_MILLI as MS;
 
     /// The default chatter window the tests exercise.
     const WINDOW: u64 = 25 * MS;

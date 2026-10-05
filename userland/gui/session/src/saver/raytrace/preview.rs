@@ -17,7 +17,7 @@
 //!
 //! A step changes nothing beyond three of its pass's spacings from its
 //! point. A frame repaints the cells those reaches cover, each once, and
-//! marks a cover of whole tiles, which a compositor merges cheaply.
+//! marks a cover of the tiles they touch, which a compositor merges cheaply.
 
 use alloc::vec::Vec;
 use core::ops::{Range, RangeInclusive};
@@ -30,6 +30,7 @@ use tairix_util::fallible;
 use tairix_wm::{Rect, Region, Surface};
 
 use super::engine::Traced;
+use super::tiles::Tiles;
 
 /// Red, green and blue levels, as the B-spline weighs them.
 type Rgb = [f32; 3];
@@ -54,14 +55,6 @@ const CHUNK: u32 = 64;
 
 /// Room for a stretch's controls along a row: its cells and three beyond.
 const STRETCH: usize = CHUNK as usize + 3;
-
-/// The side of the finest tile damage is marked in.
-const DAMAGE_TILE: u32 = 16;
-
-/// The most rectangles a frame's damage lists. A compositor merges each
-/// against the rest, so scattered rectangles cost more than the pixels they
-/// spare long before they cover the screen; past this the tiles double.
-const DAMAGE_BUDGET: usize = 128;
 
 /// One pass's grid over the picture: its spacing and its last column and row.
 #[derive(Copy, Clone, Debug)]
@@ -280,8 +273,10 @@ pub(super) struct Preview {
     weights: Vec<[f32; 4]>,
     /// The cells of `grid` the steps taken since the last paint change.
     dirty: Cells,
-    /// Which tiles of the finest size those cells touch.
-    tiles: Vec<bool>,
+    /// The tiles the last steps taken change, and room to work out their
+    /// cover in.
+    changed: Tiles,
+    room: Tiles,
 }
 
 impl Preview {
@@ -293,10 +288,6 @@ impl Preview {
         let pixels = usize::try_from(u64::from(width) * u64::from(height))
             .ok()
             .filter(|count| (1..=MAX_SURFACE_PIXELS).contains(count))?;
-        let tiles = usize::try_from(
-            u64::from(width.div_ceil(DAMAGE_TILE)) * u64::from(height.div_ceil(DAMAGE_TILE)),
-        )
-        .ok()?;
         let coarsest = Reveal::coarsest(size);
         let mut preview = Self {
             size,
@@ -307,7 +298,8 @@ impl Preview {
             spare: Border::new(size)?,
             weights: fallible::filled(coarsest as usize, [0.0; 4])?,
             dirty: Cells::new(size)?,
-            tiles: fallible::filled(tiles, false)?,
+            changed: Tiles::new(size)?,
+            room: Tiles::new(size)?,
         };
         preview.load_weights();
         Some(preview)
@@ -319,20 +311,24 @@ impl Preview {
         self.grid = Grid::over(self.size, self.coarsest);
         self.load_weights();
         self.dirty.clear();
-        self.tiles.fill(false);
+        self.changed.clear();
     }
 
     /// Take `steps` in and add what they change to `damage` — the whole
     /// picture when the window's buffer was not `kept`, which the next
-    /// [`paint`](Self::paint) then lays afresh.
+    /// [`paint`](Self::paint) then lays afresh. The tiles they change are
+    /// [`changed`](Self::changed) until the next take.
     pub(super) fn take(&mut self, steps: &[Traced], kept: bool, damage: &mut Region) {
+        self.changed.clear();
         for traced in steps {
             self.record(traced);
         }
         if !kept {
             let (columns, rows) = self.grid.last;
             self.dirty.add(0..=columns, 0..=rows);
-            damage.add(self.rect(0..=columns, 0..=rows));
+            let whole = self.rect(0..=columns, 0..=rows);
+            self.changed.mark(whole);
+            damage.add(whole);
             return;
         }
         for traced in steps {
@@ -340,9 +336,14 @@ impl Preview {
                 continue;
             };
             self.dirty.add(columns.clone(), rows.clone());
-            self.mark_tiles(self.rect(columns, rows));
+            self.changed.mark(self.rect(columns, rows));
         }
-        self.cover(damage);
+        self.changed.cover(&mut self.room, damage);
+    }
+
+    /// The tiles the steps last taken change.
+    pub(super) const fn changed(&self) -> &Tiles {
+        &self.changed
     }
 
     /// Paint what the steps taken since the last paint change into `surface`,
@@ -484,47 +485,6 @@ impl Preview {
             right.saturating_sub(left),
             bottom.saturating_sub(top),
         )
-    }
-
-    /// Mark the tiles of the finest size `rect` touches.
-    fn mark_tiles(&mut self, rect: Rect) {
-        if rect.is_empty() {
-            return;
-        }
-        let across = self.size.0.div_ceil(DAMAGE_TILE) as usize;
-        let tile = |edge: i32| (u32::try_from(edge).unwrap_or(0) / DAMAGE_TILE) as usize;
-        let (left, right) = (tile(rect.left()), tile(rect.right() - 1));
-        for row in tile(rect.top())..=tile(rect.bottom() - 1) {
-            let start = row * across;
-            if let Some(run) = self.tiles.get_mut(start + left..=start + right) {
-                run.fill(true);
-            }
-        }
-    }
-
-    /// Add the marked tiles to `damage`, doubling their side until their runs
-    /// fit the budget, and clear them.
-    fn cover(&mut self, damage: &mut Region) {
-        let (width, height) = self.size;
-        let mut tile = DAMAGE_TILE;
-        let mut across = width.div_ceil(tile) as usize;
-        let mut down = height.div_ceil(tile) as usize;
-        while runs(&self.tiles, across, down).count() > DAMAGE_BUDGET && (across > 1 || down > 1) {
-            coarsen(&mut self.tiles, across, down);
-            (across, down) = (across.div_ceil(2), down.div_ceil(2));
-            tile = tile.saturating_mul(2);
-        }
-        let edge = |at: usize| u32::try_from(at).unwrap_or(u32::MAX).saturating_mul(tile);
-        for (row, columns) in runs(&self.tiles, across, down) {
-            let (left, top) = (edge(columns.start), edge(row));
-            damage.add(Rect::new(
-                i32::try_from(left).unwrap_or(i32::MAX),
-                i32::try_from(top).unwrap_or(i32::MAX),
-                edge(columns.end).min(width).saturating_sub(left),
-                top.saturating_add(tile).min(height).saturating_sub(top),
-            ));
-        }
-        self.tiles.fill(false);
     }
 }
 
@@ -764,45 +724,6 @@ impl Iterator for CellRuns<'_> {
         let end = self.seek(first, false).unwrap_or(self.end);
         self.at = end;
         Some((first, end - 1))
-    }
-}
-
-/// The runs of marked tiles in an `across` by `down` grid of them, row by
-/// row, each as its row and its columns.
-fn runs(
-    tiles: &[bool],
-    across: usize,
-    down: usize,
-) -> impl Iterator<Item = (usize, Range<usize>)> + '_ {
-    (0..down).flat_map(move |row| {
-        let line = tiles.get(row * across..(row + 1) * across).unwrap_or(&[]);
-        let mut at = 0;
-        core::iter::from_fn(move || {
-            let first = at + line.get(at..)?.iter().position(|marked| *marked)?;
-            let end = line
-                .get(first..)
-                .and_then(|rest| rest.iter().position(|marked| !*marked))
-                .map_or(line.len(), |length| first + length);
-            at = end;
-            Some((row, first..end))
-        })
-    })
-}
-
-/// Merge each two by two of an `across` by `down` grid of tiles into one, in
-/// place: a merged tile's index is never past those it reads.
-fn coarsen(tiles: &mut [bool], across: usize, down: usize) {
-    let half = across.div_ceil(2);
-    for row in 0..down.div_ceil(2) {
-        for column in 0..half {
-            let marked = (2 * row..(2 * row + 2).min(down)).any(|y| {
-                (2 * column..(2 * column + 2).min(across))
-                    .any(|x| tiles.get(y * across + x).copied().unwrap_or(false))
-            });
-            if let Some(tile) = tiles.get_mut(row * half + column) {
-                *tile = marked;
-            }
-        }
     }
 }
 

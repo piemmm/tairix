@@ -6,13 +6,11 @@
 //! rim, so it reads over a light picture as well as a dark one. With motion
 //! reduced, one ring stands around the pointer for the same time instead.
 
+use tairix_abi::time::NANOS_PER_MILLI as MS;
 use tairix_geometry::Scale;
 use tairix_theme::motion::{ease_out, smoothstep};
 use tairix_theme::{Theme, Timeline};
 use tairix_wm::{Color, Halo, HaloRing};
-
-/// Nanoseconds in a millisecond.
-const MS: u64 = 1_000_000;
 
 /// How long each ring takes to close in.
 const RING_NS: u64 = 570 * MS;

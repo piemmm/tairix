@@ -19,6 +19,7 @@ use tairix_parallel::JobRunner;
 use tairix_raster::Pixel;
 use tairix_raytrace::{Detail, Draft, Encoder, Quality, Reveal, Scene, Setting, Step, Tracer};
 use tairix_reclaim::pressure::{PressureGauge, PressureThresholds};
+use tairix_reclaim::{CacheBudget, ReclaimClass};
 use tairix_rng::{NonCryptoRng, RandU64};
 use tairix_theme::Timeline;
 use tairix_util::fallible;
@@ -202,6 +203,18 @@ impl Memory {
                 .unwrap_or(0),
         };
         u64::try_from(most_free).unwrap_or(u64::MAX) >= peak
+    }
+
+    /// Whether the band lets drawing the desktop could do without hold
+    /// `bytes` now, as it lets a disposable cache of the machine's share hold
+    /// them.
+    #[must_use]
+    pub fn holds_disposable(self, bytes: u64) -> bool {
+        let budget = CacheBudget::from_backing(usize::try_from(self.total).unwrap_or(usize::MAX));
+        usize::try_from(bytes).is_ok_and(|bytes| {
+            self.gauge
+                .growth_permitted(ReclaimClass::DisposableUi, budget, bytes)
+        })
     }
 }
 

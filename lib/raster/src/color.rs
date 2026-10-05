@@ -1,7 +1,8 @@
 //! Colours and premultiplied-alpha compositing arithmetic.
 //!
-//! [`blend_span`] is where a whole run of pixels is composited; the operators
-//! below are the same arithmetic for one.
+//! [`blend_span`] is where a whole run of pixels is composited, and
+//! [`mix_span`] where one run dissolves into another; the operators below are
+//! the same arithmetic for one.
 //!
 //! The desktop rasteriser works exclusively in **premultiplied alpha**:
 //! each colour channel of a [`Pixel`] is already scaled by its own alpha.
@@ -496,8 +497,9 @@ fn blend_one(dst: &mut Pixel, src: Pixel, factor: u8, bias: u32, map: &impl Fn(P
 /// `weight`/255 of the way from `from` to `to`, per premultiplied channel.
 ///
 /// The crate's one mixer: the blur mixes a frosted copy back over what it
-/// covers with it, and a laid rounded rectangle mixes its arc pixels toward
-/// their new colour with it. Every channel is weighted identically, so a
+/// covers with it, a laid rounded rectangle mixes its arc pixels toward their
+/// new colour with it, and [`mix_span`] dissolves one run of pixels into
+/// another with it. Every channel is weighted identically, so a
 /// colour channel can never come out above the alpha it is premultiplied by,
 /// and the two extremes return their end exactly.
 ///
@@ -523,6 +525,52 @@ pub(crate) fn mix(from: Pixel, to: Pixel, weight: u8, bias: u32) -> Pixel {
         g: channel(from.g, to.g),
         b: channel(from.b, to.b),
         a: channel(from.a, to.a),
+    }
+}
+
+/// The crate's one mixer a run at a time: `dst` takes `weight`/255 of the way
+/// from `from` to `to`, pixel for pixel, rounding at the surface row's ordered
+/// dither — one picture dissolving into another in a single pass, rather than
+/// one copied and the other composited over it.
+///
+/// The three runs are paired by position and the shortest ends the walk;
+/// `first_x` is the surface column `dst[0]` sits at. It is walked in whole
+/// tiles of the dither's period, as [`blend_span`] is and for the same reason,
+/// and its two ends are copies, so a dissolve's first and last frames are
+/// exactly its two pictures.
+pub fn mix_span(
+    dst: &mut [Pixel],
+    from: &[Pixel],
+    to: &[Pixel],
+    weight: u8,
+    dither: DitherRow,
+    first_x: u32,
+) {
+    let paired = dst.len().min(from.len()).min(to.len());
+    let (Some(dst), Some(from), Some(to)) =
+        (dst.get_mut(..paired), from.get(..paired), to.get(..paired))
+    else {
+        return;
+    };
+    match weight {
+        0 => dst.copy_from_slice(from),
+        u8::MAX => dst.copy_from_slice(to),
+        _ => {
+            let tile = dither.tile_at(first_x);
+            let (dst_tiles, dst_rest) = dst.as_chunks_mut::<{ DitherRow::PERIOD }>();
+            let (from_tiles, from_rest) = from.as_chunks::<{ DitherRow::PERIOD }>();
+            let (to_tiles, to_rest) = to.as_chunks::<{ DitherRow::PERIOD }>();
+            for ((dst, from), to) in dst_tiles.iter_mut().zip(from_tiles).zip(to_tiles) {
+                for (((dst, from), to), &bias) in dst.iter_mut().zip(from).zip(to).zip(&tile) {
+                    *dst = mix(*from, *to, weight, bias);
+                }
+            }
+            for (((dst, from), to), &bias) in
+                dst_rest.iter_mut().zip(from_rest).zip(to_rest).zip(&tile)
+            {
+                *dst = mix(*from, *to, weight, bias);
+            }
+        }
     }
 }
 

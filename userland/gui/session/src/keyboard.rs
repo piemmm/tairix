@@ -362,7 +362,7 @@ mod tests {
     use super::{KeyInputChannel, KeyRepeat, KeyboardInputSource};
     use alloc::collections::VecDeque;
     use tairix_abi::input::{KeyInput, KeyValue, Modifiers as AbiModifiers, NamedKeyCode};
-    use tairix_abi::time::Duration64;
+    use tairix_abi::time::{Duration64, NANOS_PER_MILLI as MS};
     use tairix_abi::Errno;
     use tairix_wm::{InputEvent, Key, Modifiers, NamedKey};
 
@@ -624,8 +624,6 @@ mod tests {
             modifiers: AbiModifiers::default(),
         }
     }
-
-    const MS: u64 = 1_000_000;
 
     fn typed<C: KeyInputChannel>(source: &mut KeyboardInputSource<C>, now_ns: u64) -> Option<char> {
         match source.poll_record(now_ns) {
