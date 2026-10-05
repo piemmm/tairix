@@ -835,6 +835,20 @@ impl SyscallHandlers for CountingHandlers {
         self.bump();
         Ok(0)
     }
+    fn fs_watch(&self, _c: &CallerContext<'_>, _fd: u32, _latency_ns: u64) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
+    fn fs_watch_read(
+        &self,
+        _c: &CallerContext<'_>,
+        _fd: u32,
+        _buf: u64,
+        _len: usize,
+    ) -> SyscallResult {
+        self.bump();
+        Ok(0)
+    }
     fn fs_stat(
         &self,
         _c: &CallerContext<'_>,

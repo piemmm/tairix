@@ -137,13 +137,18 @@ fn a_beds_stones_wear_from_fresh_to_as_far_as_its_rock_rounds() {
 /// A land holding one straight stream 5 m across and 0.8 m deep running
 /// along `+z`, falling a hundredth, over flat ground with no grids.
 fn straight_land() -> Land {
+    straight_land_from(0.0)
+}
+
+/// [`straight_land`] with its water standing at `level` where it starts.
+fn straight_land_from(level: f64) -> Land {
     let mut marks: Vec<Mark> = (0..=120)
         .map(|index| {
             let z = 2.5 * f64::from(index);
             Mark {
                 x: 0.0,
                 z,
-                level: -0.01 * z,
+                level: level - 0.01 * z,
                 width: 5.0,
                 depth: 0.8,
                 ..Mark::default()
@@ -209,12 +214,10 @@ fn a_streams_flow_is_solved_further_the_way_the_eye_looks() {
     }
 }
 
-/// A boulder claims its ground, so nothing laid later lies through it, where
-/// a bedded stone leaves its gravel to lie over; and each stands in the flow
-/// as far along and across it as its length and breadth reach, turned as it
-/// lies.
+/// A boulder stands in the flow as far along and across it as its length and
+/// breadth reach, turned as it lies.
 #[test]
-fn a_boulder_claims_its_ground_and_stands_in_the_flow_as_it_lies() {
+fn a_boulder_stands_in_the_flow_as_it_lies() {
     let land = straight_land();
     let (mut stage, mut bed) = laid_bed(0.0);
     stage
@@ -235,9 +238,9 @@ fn a_boulder_claims_its_ground_and_stands_in_the_flow_as_it_lies() {
                 lying,
             };
             let kept = bed.stones.len();
-            bed.set_out(&mut stage, &land, stone).expect("set out");
-            let claimed = !stage.clear(stone.at, 0.05);
-            assert_eq!(claimed, lying == Lying::Fallen, "{lying:?} at {z}");
+            let lie = bed.lie(&stage.fields, &land, stone).expect("lies");
+            assert!(matches!(lie, Lie::Set { .. }), "by the brook");
+            bed.set_out(&mut stage, lie).expect("set out");
             if lying != Lying::Fallen {
                 continue;
             }
@@ -254,4 +257,163 @@ fn a_boulder_claims_its_ground_and_stands_in_the_flow_as_it_lies() {
         }
     }
     assert!(along > 0 && across > 0, "{along} along and {across} across");
+}
+
+/// A branch lying across the brook is one obstacle to the water, not a row
+/// of them: every stone the flow takes it as touches the next, so the bed
+/// rises and the water parts all along it.
+#[test]
+fn drift_in_the_water_reaches_the_flow_as_one_obstacle() {
+    // Its water stands half a metre over the flat ground where the branch
+    // falls in, so the branch lies in it.
+    let land = straight_land_from(1.7);
+    let (mut stage, mut bed) = laid_bed(0.0);
+    stage
+        .footprints
+        .index(land.centre, land.reach)
+        .expect("indexed");
+    let mut dice = Dice::keyed(5, 0);
+    let drift = Drift::new(
+        &mut stage,
+        &mut dice,
+        (
+            crate::compose::plants::Kind::Oak,
+            crate::tree::Season::Summer,
+        ),
+    )
+    .expect("drift");
+    let piece = drift.piece(&mut dice, false).expect("a branch");
+    let kept = bed.stones.len();
+    let outcome = bed
+        .lay_wood(
+            &mut stage,
+            (&land, &drift),
+            (piece, 1.0),
+            ((-1.5, 120.0), FRAC_PI_2),
+            7,
+        )
+        .expect("laid");
+    assert!(matches!(outcome, Lay::Lain(_)), "the branch found room");
+    let flow = bed.stones.get(kept..).expect("its stones");
+    assert!(flow.len() >= 2, "{} stones in the water", flow.len());
+    for pair in flow.windows(2) {
+        let gap = mathf::hypot(pair[1].at.0 - pair[0].at.0, pair[1].at.1 - pair[0].at.1);
+        assert!(
+            gap <= pair[0].reach.0 + pair[1].reach.0 + 1e-9,
+            "a gap of {gap} between stones {} and {} across",
+            pair[0].reach.0,
+            pair[1].reach.0
+        );
+    }
+}
+
+/// A boulder is never set through what already stands there: ground another
+/// piece has claimed — a trunk, the eye's own — keeps it out, where a bedded
+/// stone, which claims nothing, still lies in its gravel.
+#[test]
+fn a_boulder_is_never_set_through_what_already_stands() {
+    let land = straight_land();
+    let (mut stage, mut bed) = laid_bed(0.0);
+    stage
+        .footprints
+        .index(land.centre, land.reach)
+        .expect("indexed");
+    // A trunk's claim where a boulder would fall, and two boulders whose
+    // ground overlaps though no nearer than thinning keeps stones apart,
+    // each with a pebble beside it that only the boulder would crowd out.
+    let trunk = (0.5, 100.0);
+    stage.claim(trunk, 0.3).expect("claimed");
+    let found = [
+        (trunk, 0.8, Lying::Fallen),
+        ((0.5, 120.0), 0.7, Lying::Fallen),
+        ((0.5, 120.62), 0.65, Lying::Fallen),
+        ((0.75, 100.0), 0.05, Lying::Bedded),
+        ((0.75, 120.62), 0.05, Lying::Bedded),
+    ];
+    bed.found = Runs::default();
+    bed.ranking = Ranking::default();
+    assert!(bed.found.reserve(found.len()) && bed.ranking.reserve(found.len()));
+    for (index, &(at, size, lying)) in (0u32..).zip(&found) {
+        bed.found.push(Found {
+            at,
+            size,
+            key: mix32(0x70 ^ index),
+            lying,
+        });
+        bed.ranking.add(size, index);
+    }
+    while !bed.ranking.ranked() {
+        bed.ranking.rank(&tairix_parallel::SERIAL).expect("ranked");
+    }
+    bed.chains =
+        Some(Chains::new((land.centre, land.reach), KEPT_APART, MOST_SIDE).expect("chains"));
+    bed.laid.clear();
+    bed.pass = Pass::Thinning;
+    while bed.pass == Pass::Thinning {
+        bed.thin(&mut stage).expect("thinned");
+    }
+    let kept: Vec<(f64, f64)> = bed.laid.iter().map(|stone| stone.at).collect();
+    assert!(!kept.contains(&trunk), "nothing falls through the trunk");
+    assert!(kept.contains(&(0.5, 120.0)));
+    assert!(
+        !kept.contains(&(0.5, 120.62)),
+        "nor through the boulder kept first"
+    );
+    assert!(
+        kept.contains(&(0.75, 100.0)) && kept.contains(&(0.75, 120.62)),
+        "and no pebble went for a boulder that was never set: {kept:?}"
+    );
+    assert!(
+        stage.clear((0.5, 120.0), 0.1),
+        "a boulder kept takes no ground until it is set out"
+    );
+    bed.place(&mut stage, (&land, &tairix_parallel::SERIAL), 0)
+        .expect("placed");
+    assert!(
+        !stage.clear((0.5, 120.0), 0.1),
+        "set out, it holds its ground"
+    );
+}
+
+/// The branches the current brings pile against a spanning trunk's upstream
+/// side as close as the ground either keeps lets them, rather than finding no
+/// room beside it.
+#[test]
+fn branches_jam_against_a_spanning_trunk() {
+    let land = straight_land_from(1.7);
+    let (mut stage, mut bed) = laid_bed(0.0);
+    stage
+        .footprints
+        .index(land.centre, land.reach)
+        .expect("indexed");
+    let mut dice = Dice::keyed(5, 0);
+    let drift = Drift::new(
+        &mut stage,
+        &mut dice,
+        (
+            crate::compose::plants::Kind::Oak,
+            crate::tree::Season::Summer,
+        ),
+    )
+    .expect("drift");
+    let piece = drift.piece(&mut dice, true).expect("a trunk");
+    let Lay::Lain(trunk) = bed
+        .lay_wood(
+            &mut stage,
+            (&land, &drift),
+            (piece, 1.0),
+            ((-3.0, 120.0), FRAC_PI_2),
+            7,
+        )
+        .expect("laid")
+    else {
+        panic!("the trunk found room");
+    };
+    let before = stage.objects.len();
+    bed.jam(&mut stage, &land, &drift, (&mut Dice::keyed(11, 0), trunk))
+        .expect("jammed");
+    assert!(
+        stage.objects.len() > before,
+        "no branch jammed against the trunk"
+    );
 }

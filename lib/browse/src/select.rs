@@ -10,9 +10,10 @@
 //! simply never invokes the write verbs the selection feeds.
 //!
 //! The selection is **per-listing**: its members are indices into the entries
-//! the browser is currently showing, so the browser collapses it to the single
-//! focused entry whenever the listing changes (a navigation, a refresh, or a
-//! re-sort). Persisting a *cross-directory* set of items for a move or copy is
+//! the browser is currently showing. Another directory's listing or a re-sort
+//! collapses it to the single focused entry; a reload or a reported change
+//! carries it across by entry ([`Selection::remap`]). Persisting a
+//! *cross-directory* set of items for a move or copy is
 //! the [`clipboard`](crate::clipboard)'s job, which captures absolute paths at
 //! the moment of cut / copy and so survives navigating away.
 //!
@@ -130,5 +131,18 @@ impl Selection {
     pub fn clear(&mut self) {
         self.indices.clear();
         self.anchor = None;
+    }
+
+    /// Carry the selection and anchor across a listing change, through `moved`
+    /// — an entry's index before it to its index after, [`None`] for one the
+    /// change removed, which leaves the selection rather than passing to
+    /// whatever now sits where it was.
+    /// An anchor whose entry went passes to the first member still selected.
+    pub fn remap(&mut self, moved: impl Fn(usize) -> Option<usize>) {
+        self.indices = self.indices.iter().filter_map(|&i| moved(i)).collect();
+        self.anchor = self
+            .anchor
+            .and_then(&moved)
+            .or_else(|| self.indices.first().copied());
     }
 }

@@ -37,7 +37,7 @@ use crate::course::{smoothed, Courses, Mark, Nearest, Reach};
 use crate::heightfield::{apart, Heightfield, Sealing, ABSENT};
 use crate::noise::{fbm2, noise2, ridged2, smoothstep};
 use crate::terrain::Terrain;
-use crate::vector::{power, real, share, single, Vec3};
+use crate::vector::{byte, power, real, share, single, Vec3};
 
 /// How water wears a land.
 #[derive(Copy, Clone, Debug)]
@@ -365,14 +365,20 @@ impl Land {
 
     /// The fresh water's level about `(x, z)` wherever its grids hold one,
     /// over a bank beside the water as over the water itself: the finer
-    /// grid's where it lies, as the flow has shaped it.
+    /// grid's where it lies, as the flow has shaped it. The finer grid holds
+    /// water only to just past its brim, so a bank beyond reads the far
+    /// grid's.
     pub(crate) fn water_level(&self, fields: &[Heightfield], x: f64, z: f64) -> Option<f64> {
-        let grid = match self.near_water.filter(|near| near.inside((x, z)) > 0.0) {
-            Some(near) => near.field,
-            None => self.water?,
+        let level_on = |grid: u32| {
+            fields
+                .get(grid as usize)
+                .map(|field| field.height_at(x, z))
+                .filter(|level| level.is_finite())
         };
-        let level = fields.get(grid as usize)?.height_at(x, z);
-        level.is_finite().then_some(level)
+        self.near_water
+            .filter(|near| near.inside((x, z)) > 0.0)
+            .and_then(|near| level_on(near.field))
+            .or_else(|| self.water.and_then(level_on))
     }
 
     /// What one stands on at `(x, z)`: the ground, or the fresh water's
@@ -508,14 +514,10 @@ pub(crate) fn decode_lane(lane: f64) -> (f64, f64) {
 /// A lane attribute of `road` and `path`, the road winning where both lie.
 fn encode_lane(road: f64, path: f64) -> u8 {
     if road > 0.01 {
-        byte(128.0 + 127.0 * road.clamp(0.0, 1.0))
+        byte((128.0 + 127.0 * road.clamp(0.0, 1.0)) / 255.0)
     } else {
-        byte(127.0 * path.clamp(0.0, 1.0))
+        byte(127.0 / 255.0 * path.clamp(0.0, 1.0))
     }
-}
-
-fn byte(value: f64) -> u8 {
-    u8::try_from(mathf::round_i32(value.clamp(0.0, 255.0))).unwrap_or(u8::MAX)
 }
 
 /// Where a land's build stands.
@@ -656,7 +658,9 @@ pub(crate) struct Build {
     stage: Step,
 }
 
-/// Rows of a grid one core fills in a unit of work.
+/// Rows of a grid one core fills in a unit of work, and of a water grid at
+/// most twice as many: each of its vertices asks the rivers' index and their
+/// channel.
 const UNIT_ROWS: usize = 4;
 /// Samples a flood reaches, a routing or accumulation or incision walks, in
 /// a unit of work.
@@ -1436,7 +1440,6 @@ impl Build {
         let side = field.side();
         let end = (row + UNIT_ROWS * runner.width().max(1)).min(side);
         let placing = field.placing();
-        let ((origin_x, origin_z), step) = placing;
         let roughness = self.plan.roughness;
         field.each_row(row..end, runner, &|(row, heights, attributes)| {
             let first = *row * side;
@@ -1444,17 +1447,14 @@ impl Build {
                 before.get(first..first + side).unwrap_or_default(),
                 flux.get(first..first + side).unwrap_or_default(),
             );
-            // A river's channel and its banks' faces stand as it carved
-            // them: its floods, not the droplets, shape them.
-            let z = origin_z + real(*row) * step;
-            for (column, (slot, &was)) in heights.iter_mut().zip(before).enumerate() {
-                let say = self.channel_say((origin_x + real(column) * step, z), step);
-                *slot += single(say) * (was - *slot);
-            }
+            self.keep_channel((*row, heights), before, placing);
             settle_row((heights, attributes), (before, flux), roughness);
             self.hold_row((*row, heights), placing);
             if let Some(horizon) = horizon {
-                blend_row(far, horizon, (*row, heights), (placing, FAR_BAND));
+                let band = (horizon.placing().1, FAR_BAND);
+                blend_row(horizon, (*row, heights), placing, &|at| {
+                    border_blend(far, at, band)
+                });
             }
         });
         if end < side {
@@ -1543,21 +1543,15 @@ impl Build {
         let side = grid.side();
         let end = (row + UNIT_ROWS * runner.width().max(1)).min(side);
         let placing = grid.placing();
-        let ((origin_x, origin_z), step) = placing;
         grid.each_row(row..end, runner, &|(row, heights, _)| {
-            // A river's channel and its banks' faces stand as it carved
-            // them: its floods, not the droplets, shape them.
-            let z = origin_z + real(*row) * step;
             let before = before
                 .get(*row * side..(*row + 1) * side)
                 .unwrap_or_default();
-            for (column, (slot, &was)) in heights.iter_mut().zip(before).enumerate() {
-                if slot.is_finite() && was.is_finite() {
-                    let say = self.channel_say((origin_x + real(column) * step, z), step);
-                    *slot += single(say) * (was - *slot);
-                }
-            }
-            blend_row(laid, around, (*row, heights), (placing, NEST_BAND));
+            self.keep_channel((*row, heights), before, placing);
+            let band = (around.placing().1, NEST_BAND);
+            blend_row(around, (*row, heights), placing, &|at| {
+                border_blend(laid, at, band)
+            });
             self.hold_row((*row, heights), placing);
         });
         if end < side {
@@ -1596,7 +1590,7 @@ impl Build {
             let (origin, step) = self.far_placing();
             *field = Heightfield::new(self.plan.cells.1, origin, step, false)?;
         }
-        let end = (row + UNIT_ROWS * 2 * runner.width().max(1)).min(field.side());
+        let end = (row + water_rows(field.side()) * runner.width().max(1)).min(field.side());
         self.fill_water(field, row..end, runner);
         if end < field.side() {
             return Some(Step::Water(end));
@@ -1634,7 +1628,7 @@ impl Build {
                 return None;
             }
         }
-        let end = (row + UNIT_ROWS * 2 * runner.width().max(1)).min(field.side());
+        let end = (row + water_rows(field.side()) * runner.width().max(1)).min(field.side());
         self.fill_water(field, row..end, runner);
         seam_rows(near, far, field, row..end, runner);
         Some(if end >= field.side() {
@@ -2333,10 +2327,10 @@ impl Build {
             * (1.0 - snowed)
             * (1.0 - smoothstep(0.85, 1.0, lie.wet));
         [
-            byte(255.0 * lie.wet),
-            byte(127.5 + 127.5 * lie.sediment),
+            byte(lie.wet),
+            byte(0.5 + 0.5 * lie.sediment),
             encode_lane(lie.road, lie.path),
-            byte(255.0 * green.clamp(0.0, 1.0)),
+            byte(green),
         ]
     }
 
@@ -2403,6 +2397,25 @@ impl Build {
         (height, self.attributes(&lie, height))
     }
 
+    /// Row `row` of a grid placed at `placing` put back toward what it stood
+    /// at `before` the droplets ran, as far as a river's channel has its say
+    /// there: its floods, not the droplets, shape a channel and its banks'
+    /// faces. A height absent either side is left as it is.
+    fn keep_channel(
+        &self,
+        (row, heights): (usize, &mut [f32]),
+        before: &[f32],
+        ((origin_x, origin_z), step): ((f64, f64), f64),
+    ) {
+        let z = origin_z + real(row) * step;
+        for (column, (slot, &was)) in heights.iter_mut().zip(before).enumerate() {
+            if slot.is_finite() && was.is_finite() {
+                let say = self.channel_say((origin_x + real(column) * step, z), step);
+                *slot += single(say) * (was - *slot);
+            }
+        }
+    }
+
     /// How much of the say a river's channel has over the ground at
     /// `(x, z)` on a grid `step` apart: what it carved there stands against
     /// the droplets run over the land after.
@@ -2455,6 +2468,12 @@ impl Build {
         };
         lake.max(river)
     }
+}
+
+/// Rows of a water grid `side` vertices a side a core fills or shapes in a
+/// unit.
+pub(crate) fn water_rows(side: usize) -> usize {
+    crate::band::unit_rows(side).min(2 * UNIT_ROWS)
 }
 
 /// How far from its middle a river `width` wide wets a grid `step` apart's
@@ -2654,7 +2673,7 @@ const SEAM: f64 = 1.5;
 /// `(x, z)`, the rest the far water grid's: none at its border, where the
 /// two meet, and all of it a `SEAM` within.
 pub(crate) fn seam(near: Laid, at: (f64, f64)) -> f64 {
-    smoothstep(0.0, SEAM, near.inside(at))
+    border_blend(near, at, (1.0, (0.0, SEAM)))
 }
 
 /// Hold rows `rows` of the fresh water's finer grid `near`, `field`, to the
@@ -2668,17 +2687,10 @@ fn seam_rows(
     runner: &dyn JobRunner,
 ) {
     let side = field.side();
-    let ((origin_x, origin_z), step) = field.placing();
+    let placing = field.placing();
     let (heights, _) = field.rows_mut(rows.clone());
     band::for_each(runner, heights, (rows.start, side), &|row, band| {
-        let z = origin_z + real(row) * step;
-        for (column, slot) in band.iter_mut().enumerate() {
-            let x = origin_x + real(column) * step;
-            let (own, level) = (seam(near, (x, z)), far.height_at(x, z));
-            if own < 1.0 && slot.is_finite() && level.is_finite() {
-                *slot = single(level + (f64::from(*slot) - level) * own);
-            }
-        }
+        blend_row(far, (row, band), placing, &|at| seam(near, at));
     });
 }
 
@@ -2689,24 +2701,25 @@ fn snapped(value: f64, (middle, room): (f64, f64), (from, step): (f64, f64)) -> 
     from + mathf::round((kept - from) / step) * step
 }
 
-/// Hold row `row` of the finer grid `laid` describes, lying as `placing`
-/// says, to the surface of the grid about it, `parent`, across its border's
-/// `band`, once its droplets have run.
+/// Hold row `row` of a finer grid, lying as `placing` says, to the surface
+/// of the grid about it, `parent`, by how much of its own surface `shows` at
+/// each place; a height either grid leaves out is left as it is.
 fn blend_row(
-    laid: Laid,
     parent: &Heightfield,
     (row, heights): (usize, &mut [f32]),
-    (placing, band): (((f64, f64), f64), (f64, f64)),
+    placing: ((f64, f64), f64),
+    shows: &dyn Fn((f64, f64)) -> f64,
 ) {
     let ((origin_x, origin_z), step) = placing;
-    let (_, parent_step) = parent.placing();
     let z = origin_z + real(row) * step;
     for (column, slot) in heights.iter_mut().enumerate() {
         let x = origin_x + real(column) * step;
-        let blend = border_blend(laid, (x, z), (parent_step, band));
-        if blend < 1.0 {
+        let own = shows((x, z));
+        if own < 1.0 {
             let flat = single(parent.height_at(x, z));
-            *slot = flat + (*slot - flat) * single(blend);
+            if slot.is_finite() && flat.is_finite() {
+                *slot = flat + (*slot - flat) * single(own);
+            }
         }
     }
 }
@@ -2916,12 +2929,12 @@ fn settle_row(
         let change = f64::from(now - was) / (0.2 * roughness.max(0.5));
         let runs = (f64::from(water) / 12.0).clamp(0.0, 1.0);
         let sediment = f64::from(attributes[1]) / 255.0 * 2.0 - 1.0;
-        attributes[1] = byte(127.5 + 127.5 * (sediment + change).clamp(-1.0, 1.0));
+        attributes[1] = byte(0.5 + 0.5 * (sediment + change).clamp(-1.0, 1.0));
         let wet = f64::from(attributes[0]) / 255.0;
-        attributes[0] = byte(255.0 * wet.max(0.8 * runs));
+        attributes[0] = byte(wet.max(0.8 * runs));
         // Fresh wash and gullies grow less for a while.
         let green = f64::from(attributes[3]) / 255.0;
-        attributes[3] = byte(255.0 * green * (1.0 - 0.5 * smoothstep(0.3, 1.0, change.abs())));
+        attributes[3] = byte(green * (1.0 - 0.5 * smoothstep(0.3, 1.0, change.abs())));
     }
 }
 

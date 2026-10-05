@@ -29,8 +29,9 @@ use tairix_cursor::CursorTheme;
 use tairix_greeter::{Verdict, Verifier, UNNAMED_ACCOUNT};
 use tairix_hash::BuildFastHash;
 use tairix_icon::{
-    artwork_cache, icon_artwork_path, ArtworkCache, ArtworkDesk, ArtworkResolver,
-    IconArtworkSource, IconKind, IconSet, InlineArtwork, NoArtwork, Resolved, MAX_ARTWORK_BYTES,
+    artwork_cache, icon_artwork_path, icon_vector_path, ArtworkCache, ArtworkDesk, ArtworkJob,
+    ArtworkKey, ArtworkResolver, IconArtworkSource, IconKind, IconSet, InlineArtwork, Landed,
+    NoArtwork, Resolved, MAX_ARTWORK_BYTES,
 };
 use tairix_log::{Event, Sink};
 use tairix_proglib::{
@@ -298,6 +299,26 @@ impl ArtworkResolver for Deferring {
     fn prefetch(&mut self, key: &tairix_icon::ArtworkKey, side: u32) {
         self.0.borrow_mut().want(key, side);
     }
+}
+
+/// Install a deferring desk as `shell`'s artwork resolver, so a paint records
+/// every decode it asks for and the test decides which of them land.
+fn deferred_artwork(shell: &mut DesktopShell) -> Rc<RefCell<ArtworkDesk>> {
+    let desk = Rc::new(RefCell::new(ArtworkDesk::new()));
+    shell.set_artwork_resolver(alloc::boxed::Box::new(Deferring(Rc::clone(&desk))));
+    desk
+}
+
+/// Answer every decode `desk` was asked for that `wanted` admits, each as
+/// refused, and hand back the batch that landed.
+fn land(desk: &RefCell<ArtworkDesk>, wanted: impl Fn(&ArtworkJob) -> bool) -> Landed {
+    let mut desk = desk.borrow_mut();
+    while let Some(job) = desk.next_job() {
+        if wanted(&job) {
+            let _ = desk.deliver(&job, None);
+        }
+    }
+    desk.take_landed()
 }
 
 /// The processes the strip holds, in display order.
@@ -3851,7 +3872,7 @@ use crate::picker::{PickAccess, PickEnd, PickStep, PickerSlot, SessionPicker, PI
 use tairix_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode};
 use tairix_abi::window_ipc::{DocumentName, PickPurpose, SaveEndings};
 use tairix_browse::render::chrome_height;
-use tairix_browse::{DirectorySource, Entry, Listing};
+use tairix_browse::{DirectorySource, Entry, Listing, WatchUpdate};
 
 /// An in-memory directory tree keyed by the joined component path, the
 /// picker's stand-in for the session-authority VFS listing.
@@ -4081,6 +4102,108 @@ fn picker_begin_opens_one_window_and_enforces_the_single_slot() {
         picker.begin(9, &OPEN, &mut shell, &mut comp),
         Err(Errno::AlreadyExists),
         "one picker at a time"
+    );
+}
+
+/// A change the showing pick's folder watch reported is merged into the
+/// listing in place, so a file another program saved there can be chosen.
+#[test]
+fn picker_follows_a_reported_change_into_the_listing() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker = SessionPicker::new(TreeSource::fixture);
+    picker.follow(WatchUpdate::Rescan, &mut shell, &mut comp);
+    picker
+        .begin(7, &OPEN, &mut shell, &mut comp)
+        .expect("accepted");
+    picker.follow(
+        WatchUpdate::Changes(vec![tairix_browse::EntryChange::Upsert(Entry::file(
+            "a.txt",
+        ))]),
+        &mut shell,
+        &mut comp,
+    );
+    let down = pressed(KeyValue::Named(NamedKeyCode::Down));
+    let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+    picker.handle_key(&down, &mut shell, &mut comp);
+    assert_eq!(
+        asked_path(picker.handle_key(&enter, &mut shell, &mut comp)),
+        "/a.txt",
+        "the reported file sits after the folder, ahead of readme.md"
+    );
+}
+
+/// A tree a test may change while a pick is showing it.
+struct SharedTree(Rc<RefCell<TreeSource>>);
+
+impl DirectorySource for SharedTree {
+    fn list(&mut self, components: &[String]) -> Result<Listing, Errno> {
+        self.0.borrow_mut().list(components)
+    }
+}
+
+/// A pick whose folder went from its path, and cannot be read again, moves to
+/// the folder's parent rather than offering files that are no longer there.
+#[test]
+fn picker_leaves_a_folder_gone_from_its_path_for_its_parent() {
+    let (mut shell, mut comp) = headless_desktop();
+    let tree = Rc::new(RefCell::new(TreeSource::fixture()));
+    let source = Rc::clone(&tree);
+    let mut picker = SessionPicker::new(move || SharedTree(Rc::clone(&source)));
+    picker
+        .begin(7, &OPEN, &mut shell, &mut comp)
+        .expect("accepted");
+    let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+    assert!(
+        picker.handle_key(&enter, &mut shell, &mut comp).is_none(),
+        "into Docs"
+    );
+    {
+        let mut tree = tree.borrow_mut();
+        tree.dirs.remove("Docs");
+        tree.dirs
+            .insert(String::new(), vec![Entry::file("readme.md")]);
+    }
+    picker.follow(WatchUpdate::Gone, &mut shell, &mut comp);
+    assert_eq!(
+        asked_path(picker.handle_key(&enter, &mut shell, &mut comp)),
+        "/readme.md",
+        "the pick is at the root, not in the folder that went"
+    );
+}
+
+/// A file removed under the focus leaves nothing selected, and Enter then
+/// hands the requesting application nothing rather than the neighbour the
+/// focus came to rest on.
+#[test]
+fn picker_enter_chooses_nothing_once_the_chosen_file_went() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker = SessionPicker::new(TreeSource::fixture);
+    picker
+        .begin(7, &OPEN, &mut shell, &mut comp)
+        .expect("accepted");
+    let down = pressed(KeyValue::Named(NamedKeyCode::Down));
+    let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+    picker.follow(
+        WatchUpdate::Changes(vec![
+            tairix_browse::EntryChange::Upsert(Entry::file("a.txt")),
+            tairix_browse::EntryChange::Upsert(Entry::file("b.txt")),
+        ]),
+        &mut shell,
+        &mut comp,
+    );
+    // Docs, a.txt, b.txt, readme.md: the user chooses b.txt.
+    picker.handle_key(&down, &mut shell, &mut comp);
+    picker.handle_key(&down, &mut shell, &mut comp);
+    picker.follow(
+        WatchUpdate::Changes(vec![tairix_browse::EntryChange::Remove(String::from(
+            "b.txt",
+        ))]),
+        &mut shell,
+        &mut comp,
+    );
+    assert!(
+        picker.handle_key(&enter, &mut shell, &mut comp).is_none(),
+        "Enter chose readme.md, a file the user never selected"
     );
 }
 
@@ -10804,14 +10927,13 @@ fn the_launcher_has_its_icons_before_it_is_first_drawn() {
     let assets = shipped_app_bundle_master(
         MemoryAssets::default().with("/Apps/one.app/Resources/icon.svg", &[BUNDLE_TINT]),
     );
-    let desk = Rc::new(RefCell::new(ArtworkDesk::new()));
     let mut cat = Catalog::new();
     cat.insert(entry_with_icon("one", "One", Some("icon.svg")))
         .expect("fits");
 
     let mut comp = compositor();
     let mut shell = shell();
-    shell.set_artwork_resolver(alloc::boxed::Box::new(Deferring(Rc::clone(&desk))));
+    let desk = deferred_artwork(&mut shell);
     shell.set_library(&mut comp, cat);
     shell.warm_icon_artwork(&comp);
 
@@ -11178,7 +11300,7 @@ const CLEAR_OF_EVERYTHING: (usize, usize) = (600, 200);
 /// The desktop's own folder over the in-memory tree, already listed.
 fn pinboard_desktop() -> Desktop<TreeSource> {
     let mut desktop = Desktop::new(TreeSource::fixture(), Vec::new());
-    desktop.relist(0);
+    desktop.relist();
     desktop
 }
 
@@ -11571,6 +11693,7 @@ fn moving_focus_between_a_window_and_the_desktop_repaints_one_icon() {
 #[test]
 fn arriving_icon_artwork_repaints_the_cells_and_not_the_ground() {
     let (mut shell, mut comp) = headless_desktop();
+    let desk = deferred_artwork(&mut shell);
     let desktop = pinboard_desktop();
     let window = frosted_window(&mut shell, &mut comp);
     shell.present_desktop(&mut comp, &desktop);
@@ -11579,7 +11702,7 @@ fn arriving_icon_artwork_repaints_the_cells_and_not_the_ground() {
 
     let layout = shell.desktop_layout(&comp, &desktop);
     let mut icons = tairix_controls::damage::sink();
-    desktop.mark_icons(&layout, &mut icons);
+    shell.mark_desktop_artwork(&comp, &desktop, &land(&desk, |_| true), &mut icons);
     assert!(!icons.is_empty(), "the fixture column shows icons");
     let cells = icons.bounds();
 
@@ -11603,15 +11726,60 @@ fn arriving_icon_artwork_repaints_the_cells_and_not_the_ground() {
     assert_eq!(comp.window(window).map(Window::opacity), Some(128));
 }
 
+/// A landed decode repaints the icons that draw through it and no others.
+///
+/// Marking every shown icon for any batch repainted the whole column each time
+/// one landed, and a desktop filling at bring-up receives a batch per picture.
+#[test]
+fn arriving_icon_artwork_repaints_only_the_icons_it_pictures() {
+    let (mut shell, mut comp) = headless_desktop();
+    let desk = deferred_artwork(&mut shell);
+    let desktop = pinboard_desktop();
+    shell.present_desktop(&mut comp, &desktop);
+    let kind_of =
+        |index: usize| tairix_browse::media_for_entry(&desktop.entries()[index], &[]).icon();
+    let folder = kind_of(0);
+    assert_ne!(
+        folder,
+        kind_of(1),
+        "the fixture's two icons draw different pictures"
+    );
+
+    let pictures_the_folder = |job: &ArtworkJob| {
+        matches!(&job.key, ArtworkKey::Asset(path)
+            if *path == icon_artwork_path(folder) || *path == icon_vector_path(folder))
+    };
+    let landed = land(&desk, pictures_the_folder);
+    assert!(!landed.is_empty(), "the folder's picture was asked for");
+
+    let layout = shell.desktop_layout(&comp, &desktop);
+    let mut cells = tairix_controls::damage::sink();
+    shell.mark_desktop_artwork(&comp, &desktop, &landed, &mut cells);
+    let cell = |index| layout.shown_rect(0, index).expect("a shown icon");
+    assert_eq!(
+        cells.bounds().intersection(&cell(0)),
+        cell(0),
+        "the folder repaints"
+    );
+    assert!(
+        cells.bounds().intersection(&cell(1)).is_empty(),
+        "the file's picture did not move"
+    );
+}
+
 /// A desktop folder with nothing in it has no icon to redraw, so a landed
 /// decode costs no frame at all rather than a screenful.
 #[test]
 fn arriving_artwork_over_an_empty_column_repaints_nothing() {
     let (shell, comp) = headless_desktop();
     let desktop: Desktop<TreeSource> = Desktop::new(TreeSource::fixture(), Vec::new());
-    let layout = shell.desktop_layout(&comp, &desktop);
+    let desk = RefCell::new(ArtworkDesk::new());
+    desk.borrow_mut()
+        .want(&ArtworkKey::Asset(icon_artwork_path(IconKind::Folder)), 48);
+    let landed = land(&desk, |_| true);
+    assert!(!landed.is_empty(), "a decode landed");
     let mut icons = tairix_controls::damage::sink();
-    desktop.mark_icons(&layout, &mut icons);
+    shell.mark_desktop_artwork(&comp, &desktop, &landed, &mut icons);
     assert!(icons.is_empty(), "no icons, no cells, no repaint");
 }
 
@@ -11661,10 +11829,10 @@ fn a_partial_desktop_repaint_draws_what_a_whole_one_would() {
     let second = centre_of(&layout, 1);
     let gestures: [&Gesture<'_>; 6] = [
         &|d, dmg| {
-            d.pointer_moved(first, &layout, 0, dmg);
+            d.pointer_moved(first, &layout, dmg);
         },
         &|d, dmg| {
-            d.pointer_moved(second, &layout, 1, dmg);
+            d.pointer_moved(second, &layout, dmg);
         },
         &|d, dmg| {
             d.press(second, &layout, 2, &[], dmg);
@@ -14388,10 +14556,9 @@ fn a_window_identity_pending_at_open_is_pictured_when_the_decode_lands() {
 #[test]
 fn a_window_wears_its_own_icon_on_the_frame_it_opens_in() {
     NORMAL_PRESSURE.report(PressureBand::Normal);
-    let desk = Rc::new(RefCell::new(ArtworkDesk::new()));
     let mut comp = compositor();
     let mut shell = shell();
-    shell.set_artwork_resolver(alloc::boxed::Box::new(Deferring(Rc::clone(&desk))));
+    let desk = deferred_artwork(&mut shell);
     let mut windows = SessionWindows::new();
     let assets = identity_bundle(
         MemoryAssets::default(),

@@ -33,6 +33,7 @@ use tairix_abi::blkio::{
     BLK_DATA_LEN, BLK_REQUEST_LEN,
 };
 use tairix_abi::driver::block::Block;
+use tairix_abi::driver::filesystem::NameMatching;
 use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemWrite, NodeKind, NodeSecurity};
 use tairix_abi::sysinfo::{MountAvailability, MountRecord};
 use tairix_abi::volume::{VolumeAttachRequest, VolumeDetachRequest, VolumeFsType};
@@ -42,6 +43,7 @@ use tairix_drv_fs_arxfs::{EntropySource, ARXFS, SYSTEM_VOLUME_KEY};
 use tairix_drv_fs_fat32::Fat32;
 use tairix_kernel_core::devres::{install_shared_mem_facility, SharedChunk, SharedMemFacility};
 use tairix_kernel_core::fs::{FilesystemService, FinalLink};
+use tairix_kernel_core::fswatch::WatchRegistry;
 use tairix_kernel_core::{sharedreg, Vfs};
 use tairix_kernel_ipc::{CallEndpoint, CallEndpointLimits, EndpointId, RecvCall};
 use tairix_kernel_sec::captable::TaskCapabilities;
@@ -431,12 +433,22 @@ fn assert_identity_mapped_access() {
     assert!(n >= 1);
 }
 
-#[test]
-fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
-    // --- One-time global wiring (this is the only test that touches the
-    // boot statics). ---
+/// The boot statics the lifecycle test installs, the only test that touches
+/// them: what its scenarios read back of that wiring.
+struct Booted {
+    pressure: &'static MemoryPressure,
+    watches: &'static WatchRegistry,
+    window: *mut u8,
+    facility: &'static TestFacility,
+}
+
+/// Install the boot statics as production wires them.
+fn boot() -> Booted {
     let pressure: &'static MemoryPressure = Box::leak(Box::new(MemoryPressure::over(&AMPLE)));
-    VOLUME_SERVICE.install(&SINK, pressure);
+    // The directory-watch registry production wires, so every volume the
+    // scenarios attach claims its change table as a hot-plugged one does.
+    let watches: &'static WatchRegistry = Box::leak(Box::new(WatchRegistry::new()));
+    VOLUME_SERVICE.install(&SINK, pressure, Some(watches));
     // The production boot wiring also registers the service as the
     // endpoint-vanish observer (the surprise-removal trigger).
     tairix_kernel_core::callreg::install_vanish_observer(&VOLUME_SERVICE);
@@ -448,12 +460,33 @@ fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
         .install(identity_with_storage_member())
         .expect("install identity once");
     let window: &'static mut [u8] = Box::leak(vec![0u8; BLK_DATA_LEN].into_boxed_slice());
-    let window_ptr = window.as_mut_ptr();
-    let facility: &'static TestFacility = Box::leak(Box::new(TestFacility { window: window_ptr }));
+    let window = window.as_mut_ptr();
+    let facility: &'static TestFacility = Box::leak(Box::new(TestFacility { window }));
     install_shared_mem_facility(facility);
     LATE_FILESYSTEM
         .install_vfs(Vfs::with_default_layout(UserId(0), GroupId(0)))
         .expect("install the default-layout mount table once");
+    Booted {
+        pressure,
+        watches,
+        window,
+        facility,
+    }
+}
+
+/// Whether some volume could claim the change table of the volume `identity`:
+/// refused while that volume is attached, granted once it has gone.
+fn table_free(booted: &Booted, identity: [u8; 16]) -> bool {
+    booted
+        .watches
+        .claim(identity, NameMatching::Exact, booted.pressure)
+        .is_some()
+}
+
+#[test]
+fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
+    let booted = boot();
+    let (window_ptr, facility) = (booted.window, booted.facility);
 
     // --- The volume: a formatted FAT32 image carrying one file. ---
     let (image, expected_identity) = fat32_image(0x0D15_C001, b"runtime volume payload");
@@ -489,6 +522,11 @@ fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
         VOLUME_FOREST.resolve(&expected_identity),
         Some(vec![String::from("Storage"), String::from("usb1")]),
         "the volume's durable root is published under the catalog"
+    );
+    assert!(
+        booted.watches.volume(expected_identity).is_some()
+            && !table_free(&booted, expected_identity),
+        "the attached volume feeds its change table, and no other volume may"
     );
     // A second attach of the same volume under another name is refused
     // (duplicate identity) and unwinds cleanly.
@@ -541,6 +579,10 @@ fn attach_read_detach_lifecycle_over_a_served_fat32_volume() {
     );
     // A repeated detach fails closed.
     assert_eq!(VOLUME_SERVICE.detach(&detach), Err(Errno::NotFound));
+    assert!(
+        table_free(&booted, expected_identity),
+        "detaching let its change table go"
+    );
 
     stop.store(true, Ordering::Relaxed);
     server.join().expect("server thread");

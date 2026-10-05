@@ -23,7 +23,7 @@
 use alloc::vec::Vec;
 use core::f64::consts::FRAC_PI_2;
 
-use tairix_parallel::{bands, for_each, JobRunner};
+use tairix_parallel::{bands, for_each_drawn, piece_len, JobRunner};
 use tairix_raster::color::{Color, Pixel};
 use tairix_wintersun_art::palette;
 use tairix_wintersun_figure::reference::{SUN_ELEVATION, SUN_TOWARD};
@@ -268,19 +268,15 @@ impl LightBuffer {
         let width = self.width as usize;
         let rows = self.height as usize;
         let grain = (MIN_SHADE_TEXELS / width.max(1)).max(1);
-        let pieces = bands(runner, rows, grain).max(1);
-        let per = rows.div_ceil(pieces).max(1);
-
-        let mut work: Vec<(u32, &mut [Lit])> = Vec::new();
-        work.try_reserve(rows.div_ceil(per))
-            .map_err(|_| ClientError::OutOfMemory)?;
-        for (index, chunk) in self.texels.chunks_mut(per * width).enumerate() {
-            let first = u32::try_from(index * per).unwrap_or(u32::MAX);
-            work.push((first, chunk));
-        }
+        let per = piece_len(rows, bands(runner, rows, grain));
         let width32 = self.width;
-        for_each(runner, &mut work, &|(first, texels)| {
-            shade_band(texels, *first, width32, grid, pass);
+        let work = self
+            .texels
+            .chunks_mut(per * width)
+            .enumerate()
+            .map(|(index, chunk)| (u32::try_from(index * per).unwrap_or(u32::MAX), chunk));
+        for_each_drawn(runner, work, &|(first, texels)| {
+            shade_band(texels, first, width32, grid, pass);
         });
         Ok(())
     }

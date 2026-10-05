@@ -159,6 +159,8 @@ extern "C" {
 #define TAIRIX_SYS_SHM_MAP_FROM 133u
 #define TAIRIX_SYS_TOUCH_INJECT 134u
 #define TAIRIX_SYS_TOUCH_READ 135u
+#define TAIRIX_SYS_FS_WATCH 136u
+#define TAIRIX_SYS_FS_WATCH_READ 137u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns TAIRIX_E_WOULD_BLOCK when a
@@ -296,6 +298,25 @@ typedef struct tairix_spawn_attach {
 #define TAIRIX_FS_ATTR_KEY_MAX 255u
 #define TAIRIX_FS_ATTR_VALUE_MAX 3072u
 
+/* fs_watch() / fs_watch_read(). A watch is armed with a latency of at most
+* TAIRIX_DIR_WATCH_LATENCY_MAX_NS and drained into a buffer of at least
+* TAIRIX_DIR_CHANGE_BATCH_MIN_BUFFER bytes. A batch is a header of
+* TAIRIX_DIR_CHANGE_BATCH_HEADER_LEN bytes - status, flags, two zero bytes, a
+* little-endian uint32_t record count - then that many records: a PRESENT tag
+* and one fs_readdir() record (TAIRIX_DIR_ENTRY_HEADER_LEN bytes and the name),
+* or an ABSENT tag, a little-endian uint16_t name length and the name. RESCAN
+* asks for an fs_readdir() of the whole directory; GONE ends the watch. */
+#define TAIRIX_DIR_WATCH_LATENCY_MAX_NS 60000000000ull
+#define TAIRIX_DIR_CHANGE_BATCH_HEADER_LEN 8u
+#define TAIRIX_DIR_CHANGE_BATCH_MIN_BUFFER 324u
+#define TAIRIX_DIR_CHANGE_BATCH_FLAG_MORE 0x1u
+#define TAIRIX_DIR_WATCH_STATUS_CHANGES 0u
+#define TAIRIX_DIR_WATCH_STATUS_RESCAN 1u
+#define TAIRIX_DIR_WATCH_STATUS_GONE 2u
+#define TAIRIX_DIR_CHANGE_PRESENT 0u
+#define TAIRIX_DIR_CHANGE_ABSENT 1u
+#define TAIRIX_DIR_ENTRY_HEADER_LEN 60u
+
 /* fd_grant() write_ceiling that passes on the grantor's own reach: unbounded
 * for a file it opened itself, what it was handed for one it was delegated.
 * A writable descriptor refuses a zero ceiling, so its reach is always asked
@@ -403,6 +424,7 @@ typedef struct tairix_lock_conflict {
 #define TAIRIX_WAIT_SOURCE_PORT_ROOM 10u
 #define TAIRIX_WAIT_SOURCE_STREAM_ROOM 11u
 #define TAIRIX_WAIT_SOURCE_PEER_EXIT 12u
+#define TAIRIX_WAIT_SOURCE_DIR_WATCH 13u
 
 /* System notice topics (the `topic` argument of notice_read() and
 * notice_publish(), uint32_t) and each topic's exact payload length. A topic
@@ -591,6 +613,8 @@ uint64_t tairix_sys_fd_redeem_from(uint64_t a0, void * a1, uintptr_t a2);
 uint64_t tairix_sys_shm_map_from(uint64_t a0, void * a1, uintptr_t a2, void * a3);
 uint64_t tairix_sys_touch_inject(uint64_t a0, void * a1, uintptr_t a2);
 uint64_t tairix_sys_touch_read(uint64_t a0, void * a1, uintptr_t a2);
+uint64_t tairix_sys_fs_watch(uint32_t a0, uint64_t a1);
+uint64_t tairix_sys_fs_watch_read(uint32_t a0, void * a1, uintptr_t a2);
 
 #ifdef __cplusplus
 } /* extern "C" */

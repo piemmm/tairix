@@ -48,7 +48,9 @@ use tairix_abi::font_ipc::{
     FamilyKey, FontRequest, GlyphBatchWriter, GlyphRun, FONT_MAX_FAMILIES_REPLY,
     FONT_MAX_GLYPH_REPLY, FONT_MAX_GLYPH_RUN,
 };
-use tairix_abi::fs::{DirEntries, DirEntry, FileKind, FileStat, OpenFlags, FS_NAME_MAX};
+use tairix_abi::fs::{
+    DirChange, DirChangeBatch, DirEntries, DirEntry, FileKind, FileStat, OpenFlags, FS_NAME_MAX,
+};
 use tairix_abi::input::{KeyInput, PointerInput};
 use tairix_abi::net::{
     decode_bind_reply, decode_send_reply, decode_socket_reply, SocketDatagram, SocketDelivery,
@@ -1181,6 +1183,7 @@ fn exercise_fs(bytes: &[u8]) {
             "the walker must never claim more bytes than the stream holds"
         );
     }
+    exercise_dir_changes(bytes);
     // `FileKind`/`OpenFlags` decode from a scalar rather than a slice; derive
     // the scalar from the fuzz bytes so the boundary between accepted and
     // rejected values is still walked.
@@ -1195,6 +1198,26 @@ fn exercise_fs(bytes: &[u8]) {
             assert_eq!(OpenFlags::from_bits(flags.bits()), Ok(flags));
         }
     }
+}
+
+/// Drive the directory-watch batch decoder on `bytes`: an accepted batch
+/// re-encodes byte for byte, record by record, and a refused one is refused
+/// whole.
+fn exercise_dir_changes(bytes: &[u8]) {
+    let Ok(batch) = DirChangeBatch::decode(bytes) else {
+        return;
+    };
+    let mut out = vec![0u8; bytes.len()];
+    let changes: Vec<DirChange<'_>> = batch.changes().collect();
+    let count = u32::try_from(changes.len()).expect("a batch's count fits its header");
+    let mut at = DirChangeBatch::encode_header(&mut out, batch.status, batch.more, count)
+        .expect("an accepted header re-encodes");
+    for change in &changes {
+        at += change
+            .encode_into(&mut out[at..])
+            .expect("an accepted record re-encodes");
+    }
+    assert_eq!(&out[..at], bytes, "a batch round-trips byte for byte");
 }
 
 /// Drive the URB transport decoders on `bytes`.
@@ -2463,5 +2486,39 @@ fn structured_switchboard_commands_with_corrupted_fields_never_panic() {
                 base[byte] ^= 1 << bit;
             }
         }
+    }
+}
+
+/// Every bit of a canonical change batch, flipped: each result is refused
+/// whole or round-trips byte for byte. Random bytes rarely reach a batch
+/// whose header, count and every record all agree.
+#[test]
+fn dir_change_batches_with_flipped_bits_round_trip_or_are_refused() {
+    let entry = DirEntry {
+        kind: FileKind::Regular,
+        size: 42,
+        allocated: 4096,
+        modified: tairix_abi::Time64::from_secs(1_700_000_000),
+        id: tairix_abi::FileId {
+            volume: [7; 16],
+            node: 9,
+        },
+        nlink: 1,
+        name: b"report.txt",
+    };
+    let changes = [DirChange::Present(entry), DirChange::Absent(b"old.log")];
+    let mut canonical = vec![0u8; 512];
+    let mut at =
+        DirChangeBatch::encode_header(&mut canonical, tairix_abi::DirWatchStatus::Changes, true, 2)
+            .expect("header");
+    for change in &changes {
+        at += change.encode_into(&mut canonical[at..]).expect("record");
+    }
+    canonical.truncate(at);
+    assert!(DirChangeBatch::decode(&canonical).is_ok());
+    for bit in 0..canonical.len() * 8 {
+        let mut flipped = canonical.clone();
+        flipped[bit / 8] ^= 1 << (bit % 8);
+        exercise_dir_changes(&flipped);
     }
 }

@@ -1,7 +1,7 @@
 //! Host tests of the tracer's rays, and the scalars it counts, narrows and
 //! shapes with.
 
-use super::{byte, power, real, tanh, whole, Frame, Pose, Ray, Vec3};
+use super::{byte, power, real, tanh, whole, wrapped, Frame, Pose, Ray, Vec3};
 
 fn close(a: Vec3, b: Vec3) -> bool {
     (a - b).length() < 1e-9
@@ -67,4 +67,18 @@ fn the_hyperbolic_tangent_is_odd_and_bounded() {
     }
     assert!((tanh(0.5) - 0.462_117_157_260_009_8).abs() < 1e-15);
     assert!((tanh(-1e3) + 1.0).abs() < f64::EPSILON);
+}
+
+#[test]
+fn an_angle_is_wrapped_within_half_a_turn_of_nought() {
+    use core::f64::consts::PI;
+    for (angle, wrapped_to) in [
+        (0.3, 0.3),
+        (1.5 * PI, -0.5 * PI),
+        (-1.5 * PI, 0.5 * PI),
+        (PI, -PI),
+        (5.0 * PI + 0.25, -PI + 0.25),
+    ] {
+        assert!((wrapped(angle) - wrapped_to).abs() < 1e-12, "{angle}");
+    }
 }

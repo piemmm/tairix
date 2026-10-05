@@ -46,6 +46,7 @@
 
 pub mod blkclient;
 pub mod blkmeter;
+mod changelog;
 mod delegate;
 mod fscache;
 #[cfg(any(test, feature = "fs-conformance"))]
@@ -56,6 +57,8 @@ pub mod path;
 pub mod perm;
 pub mod retained;
 pub mod service;
+#[cfg(test)]
+pub(crate) mod test_volume;
 mod vfs;
 pub mod volsvc;
 pub mod volumes;
@@ -69,7 +72,7 @@ pub use delegate::{
     Uniform,
 };
 pub use fscache::CachedFs;
-pub use mount::{MountBacking, MountPoint, MountTable};
+pub use mount::{ChildMounts, MountBacking, MountPoint, MountTable};
 pub use mounted::{
     FilesystemAlreadyInstalled, IdentityAlreadyInstalled, LateFilesystem, LateIdentity,
     MountedFilesystemService,
@@ -79,7 +82,9 @@ pub use path::{
 };
 pub use perm::{Access, AclEntry, AclWho, Credentials, Metadata, Mode};
 pub use retained::{JournaledBlock, ReplaySnapshot, RetainedWrites};
-pub use service::{FilesystemService, NullFilesystemService, ReaddirEntry, NULL_FILESYSTEM};
+pub use service::{
+    FilesystemService, LookedUp, NullFilesystemService, ReaddirEntry, NULL_FILESYSTEM,
+};
 pub use vfs::Vfs;
 pub use volsvc::{NullVolumeService, VolumeService, NULL_VOLUME_SERVICE};
 pub use volumes::{VolumeForest, VolumePublishError, NULL_VOLUME_FOREST};
@@ -287,6 +292,8 @@ pub enum VfsError {
     /// create fails closed rather than wrapping a count whose zero would
     /// free storage another name still reaches.
     TooManyLinks,
+    /// The kernel heap could not hold what the operation needed to build.
+    OutOfMemory,
 }
 
 impl VfsError {
@@ -328,6 +335,7 @@ impl VfsError {
             Self::NotSupported => Errno::NotSupported,
             Self::LinkLoop => Errno::LinkLoop,
             Self::TooManyLinks => Errno::TooManyLinks,
+            Self::OutOfMemory => Errno::OutOfMemory,
         }
     }
 }
@@ -353,6 +361,7 @@ impl fmt::Display for VfsError {
             Self::BufferTooSmall => "buffer too small",
             Self::NoSpace => "no space for attribute",
             Self::NotSupported => "attributes not supported by the mounted format",
+            Self::OutOfMemory => "out of memory",
         };
         f.write_str(message)
     }

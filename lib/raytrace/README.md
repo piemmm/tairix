@@ -172,12 +172,16 @@ nothing standing past what water can; a perched river's bank falling to its land
 alternating from unit to unit; a finer water grid meeting the far one at its
 seam; a stream always having somewhere to be looked at from, and a scene
 away from it composing without a brook; its flow solved further the way the
-eye looks, its boulders claiming their ground and standing in the flow as
-they lie, its floating plants on its shaped water and its growing never
-reporting less done; a bed's median at Shields' stone and its wears from
-fresh to the farthest-carried; a river's sand carrying no
-grit of its own and a grain's octaves sharing its depth; and a sward's shade
-on the ground blended between its cells.
+eye looks, its boulders claiming their ground, never set through what already
+stands and standing in the flow as they lie, its drift reaching the flow as
+one obstacle, its crests held once to what water can stand, its floating
+plants on its shaped water and its growing never reporting less done; a bed's
+median at Shields' stone and its wears from fresh to the farthest-carried; a
+course's way holding past its ends; a river's sand carrying no grit of its
+own, a grain's octaves sharing its depth and a grain made for its coarse
+relief keeping it; a water grid's steady fall told apart from its spread; and a
+sward's shade on the ground blended between its cells, a large lawn's read
+from its canopy grid.
 
 The design and the measurements behind its budgets are in
 `docs/src/lib/raytrace.md`.

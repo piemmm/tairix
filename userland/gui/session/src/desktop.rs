@@ -41,19 +41,15 @@
 //! by construction (see [`tairix_taskbar::LibraryPopup`]) and are what a
 //! shortcut is made from.
 //!
-//! # Why the re-list is gesture-driven
+//! # Following the folder
 //!
-//! There is no filesystem-change notification in this system: nothing tells a
-//! process that a directory it is showing has gained a file. The desktop
-//! therefore re-lists at the moments a change could plausibly have happened
-//! and the user is about to look: at bring-up, after an action the session
-//! itself performed that could have altered the folder, and when the pointer
-//! arrives on the desktop having been somewhere else. It runs **no timer and
-//! no polling loop** — a periodically-waking desktop would keep a core busy
-//! and burn power to discover nothing, which is exactly the busy-poll this
-//! system forbids. The pointer-arrival re-list is rate-limited by
-//! [`RELIST_MIN_INTERVAL_NS`] so sweeping the mouse on and off the desktop
-//! cannot turn a gesture into a re-listing loop.
+//! The column follows its folder through a directory watch
+//! (`docs/src/filesystem/watch.md`): whatever program changes it, the
+//! embedder drains the report off the loop and hands the changed entries to
+//! [`Desktop::apply_changes`], which merges them in place and repaints only
+//! the cells they moved. The folder is read whole only at bring-up, when the
+//! watch asks for a rescan, after an action of the session's own, and on the
+//! user's Refresh.
 //!
 //! The model holds no authority: it *names* what should happen
 //! ([`DesktopAction`]) and the embedder — which holds the spawn and
@@ -66,14 +62,14 @@ use alloc::vec::Vec;
 use tairix_abi::Errno;
 use tairix_browse::render::{grid_metrics, grid_tile};
 use tairix_browse::{
-    applications_for, entry_icon_request, media_for_entry, sort_entries, suggest_new_dir_name,
-    AppAssociation, DirectorySource, Entry, EntryKind, GridFlow, GridView, LinkTarget, Listing,
-    SortDirection, SortKey, SortMode,
+    applications_for, entry_icon_request, media_for_entry, merge_changes, sort_entries,
+    suggest_new_dir_name, AppAssociation, DirectorySource, Entry, EntryChange, EntryKind, GridFlow,
+    GridView, LinkTarget, Listing, SortDirection, SortKey, SortMode,
 };
 use tairix_controls::state::{ControlState, FocusState, PointerState, SelectionState};
 use tairix_controls::IconTile;
 use tairix_geometry::{GridFill, Point, Rect, Region, Scale};
-use tairix_icon::IconArtwork;
+use tairix_icon::{IconArtwork, IconKind, IconRequest, Landed};
 use tairix_proglib::{Catalog, EntryId};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
@@ -94,15 +90,6 @@ pub const DESKTOP_MARGIN: u32 = 8;
 /// Where the desktop's icon grid rests: its anchored edge, always. The desktop
 /// does not scroll; its icons stay where the user arranged them.
 const DESKTOP_SCROLL: u64 = 0;
-
-/// The shortest interval, in nanoseconds, between two pointer-arrival
-/// re-listings of the desktop folder (one second).
-///
-/// A deliberate, fixed rate limit on a *gesture*, not a scalable capacity:
-/// sweeping the pointer on and off the desktop must not be able to turn a
-/// mouse movement into a stream of directory reads. Reaching it never fails
-/// anything — the desktop simply keeps showing the listing it already has.
-pub const RELIST_MIN_INTERVAL_NS: u64 = 1_000_000_000;
 
 /// What activating a desktop icon means, resolved by the model and carried
 /// out by the embedder (which holds the spawn capability).
@@ -188,18 +175,15 @@ pub enum DesktopAction {
 /// The work a change to the *backdrop* implies: the wallpaper, and the icons
 /// standing on it.
 ///
-/// Each field names one piece of work the edit asks for, so a change of sort
-/// order does not cost a wallpaper decode and a change of wallpaper does not
-/// cost a directory read. An edit that only changes the backdrop colour asks
-/// for none of them — the repaint alone shows it.
+/// Each field names one piece of work the edit asks for, so a change of
+/// arrangement does not cost a wallpaper decode. A new sort order or backdrop
+/// colour is neither: the desktop re-sorts the icons it shows as it adopts the
+/// settings, and either shows through the [`PinboardChange::layer`] repaint.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct BackdropWork {
     /// The icon arrangement moved: the grid must be laid out again before the
     /// next paint or hit-test.
     pub relayout: bool,
-    /// The sort order changed: the folder must be listed again to pick the new
-    /// order up.
-    pub relist: bool,
     /// The wallpaper image or its fit changed: the embedder must prepare the
     /// screen-sized wallpaper surface again and hand it to the shell.
     pub wallpaper: bool,
@@ -240,10 +224,16 @@ impl AppearanceWork {
     }
 }
 
-/// The work a settings edit implies, beyond the repaint that having changed
-/// anything at all already implies.
+/// The work a settings edit implies.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct PinboardChange {
+    /// The desktop layer is drawn differently — its backdrop colour, the
+    /// icons' arrangement or order, or the theme or scale they are drawn at —
+    /// so it must be repainted whole. Most of the settings document moves no
+    /// pixel of it: the seat's input, the pointer aids and the idle policy are
+    /// all adopted elsewhere, and a new wallpaper repaints the layer when it
+    /// lands.
+    pub layer: bool,
     /// What the backdrop and its icons owe.
     pub backdrop: BackdropWork,
     /// What the desktop's appearance owes.
@@ -253,8 +243,20 @@ pub struct PinboardChange {
     pub notifications: bool,
 }
 
-/// The outcome of one desktop gesture: whether the gesture re-listed the
-/// folder, and what (if anything) the session must now do.
+/// One icon the column shows, as the paint and the artwork landing see it.
+struct ShownIcon<'a> {
+    index: usize,
+    entry: &'a Entry,
+    /// The cell the tile draws strictly inside.
+    bounds: Rect,
+    kind: IconKind,
+    request: IconRequest<'a>,
+    /// The pixel side the picture resolves at.
+    side: u32,
+}
+
+/// The outcome of one desktop command: whether it re-listed the folder, and
+/// what (if anything) the session must now do.
 ///
 /// What the gesture *changed on screen* is not here. Every gesture takes a
 /// [`Region`] sink and adds the icon cells it altered to it, so the embedder
@@ -264,14 +266,9 @@ pub struct PinboardChange {
 /// move one highlight.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DesktopOutcome {
-    /// The gesture re-listed the folder and its contents had changed.
-    ///
-    /// The moment the user's own files demonstrably moved under the desktop
-    /// is the honest moment to re-read what is installed too, so the
-    /// embedder refreshes anything it derives from the installed set (which
-    /// application opens which file) here rather than only when the program
-    /// library is opened. A re-list that found the folder unchanged reports
-    /// `false`, so a pointer sweeping on and off the desktop costs nothing.
+    /// The command re-listed the folder on the spot and its contents had
+    /// changed, so the whole column moved. A re-list read elsewhere lands
+    /// through [`Desktop::resume`] instead.
     pub relisted: bool,
     /// The action the gesture asks for, if any.
     pub action: Option<DesktopAction>,
@@ -316,14 +313,9 @@ pub struct Desktop<S: DirectorySource> {
     hovered: Option<usize>,
     focused: bool,
     clicks: DoubleClickTracker,
-    /// Monotonic nanoseconds of the last listing, or `None` before the first.
-    listed_at_ns: Option<u64>,
     /// Whether a source that reads elsewhere still owes the listing the last
     /// [`relist`](Self::relist) asked for.
     listing_owed: bool,
-    /// Whether the pointer was last seen over the desktop rather than over a
-    /// window or the taskbar — the edge that triggers the arrival re-list.
-    pointer_over: bool,
 }
 
 impl<S: DirectorySource> Desktop<S> {
@@ -346,9 +338,7 @@ impl<S: DirectorySource> Desktop<S> {
             hovered: None,
             focused: false,
             clicks: DoubleClickTracker::new(),
-            listed_at_ns: None,
             listing_owed: false,
-            pointer_over: false,
         }
     }
 
@@ -420,35 +410,46 @@ impl<S: DirectorySource> Desktop<S> {
     /// Adopt `settings`, reporting the work the edit implies.
     ///
     /// `None` means `settings` were already in force: nothing changed and there
-    /// is nothing to do. Anything else means the desktop layer must be
-    /// repainted — that is what a change *is* — and the returned
-    /// [`PinboardChange`] names the further work on top of it, so the caller
-    /// re-lays out, re-lists, or re-prepares the wallpaper only when the edit
+    /// is nothing to do. Otherwise the returned [`PinboardChange`] names the
+    /// work the edit asks for, the layer's own repaint included, so the caller
+    /// repaints, re-lays out or re-prepares the wallpaper only when the edit
     /// actually asks for it. The desktop applies nothing beyond its own state.
     pub fn apply_settings(&mut self, settings: DesktopSettings) -> Option<PinboardChange> {
         if settings == self.settings {
             return None;
         }
+        let relayout = settings.icons != self.settings.icons;
+        let resorted = settings.sort != self.settings.sort;
+        let appearance = AppearanceWork {
+            theme: settings.appearance != self.settings.appearance
+                || settings.contrast != self.settings.contrast
+                || settings.density != self.settings.density
+                || settings.motion != self.settings.motion,
+            scale: settings.scale != self.settings.scale,
+            cursor: settings.cursor_set != self.settings.cursor_set
+                || settings.cursor_size != self.settings.cursor_size
+                || settings.cursor_shadow != self.settings.cursor_shadow,
+        };
         let change = PinboardChange {
+            layer: relayout
+                || resorted
+                || appearance.theme
+                || appearance.scale
+                || settings.backdrop != self.settings.backdrop,
             backdrop: BackdropWork {
-                relayout: settings.icons != self.settings.icons,
-                relist: settings.sort != self.settings.sort,
+                relayout,
                 wallpaper: settings.wallpaper != self.settings.wallpaper
                     || settings.fit != self.settings.fit,
             },
-            appearance: AppearanceWork {
-                theme: settings.appearance != self.settings.appearance
-                    || settings.contrast != self.settings.contrast
-                    || settings.density != self.settings.density
-                    || settings.motion != self.settings.motion,
-                scale: settings.scale != self.settings.scale,
-                cursor: settings.cursor_set != self.settings.cursor_set
-                    || settings.cursor_size != self.settings.cursor_size
-                    || settings.cursor_shadow != self.settings.cursor_shadow,
-            },
+            appearance,
             notifications: settings.notifications != self.settings.notifications,
         };
         self.settings = settings;
+        if resorted {
+            let chosen = self.selected_name();
+            sort_entries(&mut self.entries, sort_mode(self.settings.sort));
+            self.follow_name(chosen);
+        }
         Some(change)
     }
 
@@ -486,22 +487,35 @@ impl<S: DirectorySource> Desktop<S> {
         Self::mark_cell(layout, self.selected, damage);
     }
 
-    /// Add every shown icon's cell to `damage`.
+    /// Add to `damage` the cell of every shown icon whose picture the
+    /// `landed` decodes moved, with `layout`, `scale` and `theme` the ones the
+    /// column is painted at.
     ///
-    /// What arriving icon artwork invalidates, and the whole of it: a decode
-    /// that landed can only change the picture inside a tile, never the
-    /// backdrop colour or the wallpaper the tiles sit on. Repainting the
-    /// layer whole for one instead recomposited the screen, re-blurred every
-    /// frosted surface over it, and did so once per delivered batch — a
-    /// screenful of work to show a 48-pixel picture. A column showing nothing
-    /// damages nothing, which is the common case on a fresh account.
-    pub fn mark_icons(&self, layout: &GridView, damage: &mut Region) {
-        for index in layout.visible_range(DESKTOP_SCROLL) {
-            if index >= self.entries.len() {
-                break;
-            }
-            Self::mark_cell(layout, Some(index), damage);
+    /// A decode can only change the picture inside the tiles that draw through
+    /// it, never the backdrop or another icon, so a batch that pictures none of
+    /// the column damages nothing.
+    pub fn mark_artwork(
+        &self,
+        layout: &GridView,
+        scale: Scale,
+        theme: &Theme,
+        landed: &Landed,
+        damage: &mut Region,
+    ) {
+        if landed.is_empty() {
+            return;
         }
+        self.visit_icons(
+            layout,
+            scale,
+            theme,
+            |_| true,
+            |icon| {
+                if landed.resolves(icon.request, icon.side) {
+                    damage.add(icon.bounds);
+                }
+            },
+        );
     }
 
     /// Add the part of the cell the icon at `index` occupies that shows to
@@ -519,18 +533,14 @@ impl<S: DirectorySource> Desktop<S> {
 
     /// Note that the pointer is somewhere other than the desktop (over a
     /// window, the taskbar, or one of its popovers), clearing the hover.
-    ///
-    /// The next arrival on the desktop is then a real *entry*, which is what
-    /// the rate-limited re-list keys on.
-    pub fn pointer_left(&mut self, layout: &GridView, damage: &mut Region) -> DesktopOutcome {
-        self.pointer_over = false;
+    pub fn pointer_left(&mut self, layout: &GridView, damage: &mut Region) {
         Self::mark_cell(layout, self.hovered.take(), damage);
-        DesktopOutcome::ignored()
     }
 
-    /// Ask for a fresh listing of the folder now, whatever the rate limit says:
-    /// the caller knows something changed (bring-up, or an action the session
-    /// itself performed on the folder). Returns whether the shown set changed.
+    /// Ask for a fresh listing of the folder now: the caller knows the folder
+    /// must be read whole (bring-up, a rescan its watch asked for, or an
+    /// action the session itself performed on it). Returns whether the shown
+    /// set changed.
     ///
     /// A listing the source refuses leaves the desktop empty and selects
     /// nothing rather than showing a stale or guessed folder.
@@ -540,8 +550,7 @@ impl<S: DirectorySource> Desktop<S> {
     /// caller hands the answer over with [`resume`](Self::resume) on the wake
     /// that says the read finished. Blanking the column while a read is in
     /// flight would make every re-list flicker.
-    pub fn relist(&mut self, now_ns: u64) -> bool {
-        self.listed_at_ns = Some(now_ns);
+    pub fn relist(&mut self) -> bool {
         let listed = self.source.refresh(&self.folder);
         self.adopt_listing(listed)
     }
@@ -570,34 +579,139 @@ impl<S: DirectorySource> Desktop<S> {
             Err(_) => Vec::new(),
         };
         sort_entries(&mut entries, sort_mode(self.settings.sort));
-        if entries == self.entries {
+        if entries.len() == self.entries.len()
+            && entries
+                .iter()
+                .zip(&self.entries)
+                .all(|(a, b)| a.same_listing(b))
+        {
             return false;
         }
-        // The selection follows the *name* it was on, so a re-list that adds
-        // or removes a file never silently moves the selection to a different
-        // icon under the user's pointer.
-        let chosen = self
-            .selected
-            .and_then(|index| self.entries.get(index))
-            .map(|entry| entry.name().to_string());
+        let chosen = self.selected_name();
         self.entries = entries;
+        self.follow_name(chosen);
+        true
+    }
+
+    fn selected_name(&self) -> Option<String> {
+        self.selected
+            .and_then(|index| self.entries.get(index))
+            .map(|entry| entry.name().to_string())
+    }
+
+    /// Put the selection back on the icon named `chosen` after the column was
+    /// reordered or replaced, so it never lands on a different icon under the
+    /// user's pointer. The hover and a half-made double-click go with the
+    /// order, since the cell under them may now show another icon.
+    fn follow_name(&mut self, chosen: Option<String>) {
         self.selected = chosen.and_then(|name| {
             self.entries
                 .iter()
                 .position(|entry| entry.name() == name.as_str())
         });
         self.hovered = None;
-        true
+        self.clicks.reset();
     }
 
-    /// The pointer arrived on the desktop having been elsewhere: re-list, but
-    /// no more often than [`RELIST_MIN_INTERVAL_NS`]. Returns whether the
-    /// shown set changed.
-    fn relist_on_arrival(&mut self, now_ns: u64) -> bool {
-        let due = self
-            .listed_at_ns
-            .is_none_or(|last| now_ns.saturating_sub(last) >= RELIST_MIN_INTERVAL_NS);
-        due && self.relist(now_ns)
+    /// Merge the entries the folder's watch reported into the column in
+    /// place, adding to `damage` each cell whose icon or highlight changed.
+    /// The selection stays on the icon it named and goes with one whose file
+    /// went, and a merge the memory could not be had for re-lists the folder
+    /// instead. Answers whether any icon moved.
+    ///
+    /// `layout` lays a desktop out as [`layout`](Self::layout) does, so the
+    /// cells are measured on both sides of the merge.
+    pub fn apply_changes(
+        &mut self,
+        changes: Vec<EntryChange>,
+        layout: impl Fn(&Self) -> GridView,
+        damage: &mut Region,
+    ) -> bool {
+        self.marking(layout, damage, |desktop| {
+            let merged = merge_changes(
+                &mut desktop.entries,
+                changes,
+                sort_mode(desktop.settings.sort),
+            );
+            // Without the memory to merge them, the folder is read again.
+            let Some((placement, moved)) = merged else {
+                return desktop.relist();
+            };
+            if !moved {
+                return false;
+            }
+            desktop.selected = desktop.selected.and_then(|index| placement.place(index));
+            // A hover is the pointer's cell, so it stays only while that cell
+            // still shows the icon it did.
+            desktop.hovered = desktop
+                .hovered
+                .filter(|&index| placement.place(index) == Some(index));
+            desktop.clicks.follow(|at| placement.place_subject(at));
+            true
+        })
+    }
+
+    /// [`relist`](Self::relist), adding to `damage` each cell whose icon or
+    /// highlight the new listing changed rather than answering for the whole
+    /// layer.
+    pub fn relist_into(&mut self, layout: impl Fn(&Self) -> GridView, damage: &mut Region) -> bool {
+        self.marking(layout, damage, Self::relist)
+    }
+
+    /// [`resume`](Self::resume), adding to `damage` each cell whose icon or
+    /// highlight the landed listing changed.
+    ///
+    /// A wake that owes the desktop no listing costs it nothing, rather than a
+    /// snapshot of every shown icon to compare against.
+    pub fn resume_into(&mut self, layout: impl Fn(&Self) -> GridView, damage: &mut Region) -> bool {
+        self.listing_owed && self.marking(layout, damage, Self::resume)
+    }
+
+    /// Whether the folder's listing follows it, so a change the session made
+    /// there arrives as a reported change and needs no re-list.
+    #[must_use]
+    pub fn follows(&self) -> bool {
+        self.source.follows(&self.folder)
+    }
+
+    /// Answer what `change` does to the desktop, adding to `damage` each cell
+    /// shown before or after it whose icon or highlight it changed: only the
+    /// cells the column shows are compared, so the cost is bounded by the
+    /// screen rather than by the folder.
+    fn marking(
+        &mut self,
+        layout: impl Fn(&Self) -> GridView,
+        damage: &mut Region,
+        change: impl FnOnce(&mut Self) -> bool,
+    ) -> bool {
+        let before = layout(self);
+        let shown = before.visible_range(DESKTOP_SCROLL);
+        let was: Vec<(Entry, ControlState)> = shown
+            .clone()
+            .map_while(|index| {
+                let entry = self.entries.get(index)?;
+                Some((entry.clone(), self.icon_state(index)))
+            })
+            .collect();
+        if !change(self) {
+            return false;
+        }
+        let after = layout(self);
+        let end = shown.end.max(after.visible_range(DESKTOP_SCROLL).end);
+        for index in shown.start..end {
+            let old = was.get(index - shown.start);
+            let new = self
+                .entries
+                .get(index)
+                .map(|entry| (entry, self.icon_state(index)));
+            if old.map(|(entry, state)| (entry, *state)) != new {
+                let cell = shown_whole(&after, index).or_else(|| shown_whole(&before, index));
+                if let Some(rect) = cell {
+                    damage.add(rect);
+                }
+            }
+        }
+        true
     }
 
     /// The grid the desktop's icons are laid out in: the shared tile geometry
@@ -653,7 +767,32 @@ impl<S: DirectorySource> Desktop<S> {
         artwork: &mut dyn IconArtwork,
         area: Rect,
     ) {
-        // Spelled once for the whole pass; a bundle icon appends its own leaf
+        self.visit_icons(
+            layout,
+            scale,
+            theme,
+            |bounds| !bounds.intersection(&area).is_empty(),
+            |icon| {
+                let tile = grid_tile(icon.entry, self.icon_state(icon.index), icon.kind);
+                let art = artwork.artwork(icon.request, icon.side);
+                tile.render(surface, icon.bounds, scale, theme, art);
+            },
+        );
+    }
+
+    /// Visit every shown icon whose cell `wanted` admits.
+    ///
+    /// The paint and the artwork landing both walk the column here, so the
+    /// icons a landing repaints are exactly the ones the paint draws from it.
+    fn visit_icons(
+        &self,
+        layout: &GridView,
+        scale: Scale,
+        theme: &Theme,
+        wanted: impl Fn(Rect) -> bool,
+        mut visit: impl FnMut(ShownIcon<'_>),
+    ) {
+        // Spelled once for the whole walk; a bundle icon appends its own leaf
         // into this one buffer rather than allocating a path per tile.
         let dir = tairix_browse::vfs::spell_absolute_path(&self.folder);
         let mut bundle = String::new();
@@ -661,18 +800,18 @@ impl<S: DirectorySource> Desktop<S> {
             let Some(entry) = self.entries.get(index) else {
                 break;
             };
-            let Some(bounds) = shown_whole(layout, index) else {
+            let Some(bounds) = shown_whole(layout, index).filter(|&bounds| wanted(bounds)) else {
                 continue;
             };
-            if bounds.intersection(&area).is_empty() {
-                continue;
-            }
             let kind = media_for_entry(entry, &self.folder).icon();
-            let tile = grid_tile(entry, self.icon_state(index), kind);
-            let side = IconTile::icon_side(bounds, scale, theme);
-            let request = entry_icon_request(&dir, entry, kind, &mut bundle);
-            let art = artwork.artwork(request, side);
-            tile.render(surface, bounds, scale, theme, art);
+            visit(ShownIcon {
+                index,
+                entry,
+                bounds,
+                kind,
+                side: IconTile::icon_side(bounds, scale, theme),
+                request: entry_icon_request(&dir, entry, kind, &mut bundle),
+            });
         }
     }
 
@@ -693,32 +832,14 @@ impl<S: DirectorySource> Desktop<S> {
         state
     }
 
-    /// Pointer motion to screen position `at`.
-    ///
-    /// Arriving on the desktop from somewhere else re-lists the folder (rate
-    /// limited), so a file created while the user was in another window is
-    /// there when they look. Motion otherwise only drives the hover highlight.
-    /// A re-list that changed the shown set reports `relisted`, which is the
-    /// caller's signal to repaint the whole column: the icons themselves
-    /// moved, so no cell of the old layout describes the new one.
-    pub fn pointer_moved(
-        &mut self,
-        at: Point,
-        layout: &GridView,
-        now_ns: u64,
-        damage: &mut Region,
-    ) -> DesktopOutcome {
-        let arrived = !core::mem::replace(&mut self.pointer_over, true);
-        let relisted = arrived && self.relist_on_arrival(now_ns);
+    /// Pointer motion to screen position `at`, which drives the hover
+    /// highlight.
+    pub fn pointer_moved(&mut self, at: Point, layout: &GridView, damage: &mut Region) {
         let hovered = index_at(layout, at);
         if self.hovered != hovered {
             Self::mark_cell(layout, self.hovered, damage);
             Self::mark_cell(layout, hovered, damage);
             self.hovered = hovered;
-        }
-        DesktopOutcome {
-            relisted,
-            action: None,
         }
     }
 
@@ -785,8 +906,7 @@ impl<S: DirectorySource> Desktop<S> {
         on_icon.is_some()
     }
 
-    /// Resolve one pinboard menu `command` against the desktop's own state, at
-    /// monotonic time `now_ns`.
+    /// Resolve one pinboard menu `command` against the desktop's own state.
     ///
     /// This is the single translation from a named command to a
     /// [`DesktopAction`]: `Open` resolves through the very same activation the
@@ -795,12 +915,7 @@ impl<S: DirectorySource> Desktop<S> {
     /// is named through the shared new-directory naming over the listing on
     /// screen, and `Refresh` re-lists here and now. A command that asks for
     /// what is already in force changes nothing.
-    pub fn command(
-        &mut self,
-        command: PinboardCommand,
-        apps: &[AppAssociation],
-        now_ns: u64,
-    ) -> DesktopOutcome {
+    pub fn command(&mut self, command: PinboardCommand, apps: &[AppAssociation]) -> DesktopOutcome {
         match command {
             PinboardCommand::Open => self.activate_selection(apps),
             PinboardCommand::NewFolder => DesktopOutcome::acting(DesktopAction::CreateFolder {
@@ -815,7 +930,7 @@ impl<S: DirectorySource> Desktop<S> {
                 ..self.settings.clone()
             }),
             PinboardCommand::Refresh => DesktopOutcome {
-                relisted: self.relist(now_ns),
+                relisted: self.relist(),
                 action: None,
             },
             PinboardCommand::OpenDesktopFolder => {

@@ -13,7 +13,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_abi::driver::filesystem::{
-    FilesystemAttrs, FilesystemRead, FilesystemSecurity, FilesystemWrite, MountFlags,
+    FilesystemAttrs, FilesystemRead, FilesystemSecurity, FilesystemWrite, MountFlags, NodeId,
     NodeKind as DriverNodeKind,
 };
 use tairix_abi::fs::{RealpathMode, FS_PATH_MAX};
@@ -199,15 +199,16 @@ impl Vfs {
     /// * [`VfsError::NotADirectory`] if `path` names a file.
     /// * [`VfsError::PermissionDenied`], [`VfsError::InvalidPath`], or
     ///   [`VfsError::Io`].
-    pub fn list_via(
+    pub fn list_via<T>(
         &self,
         cred: &Credentials<'_>,
         path: &Path,
         fs: &mut dyn FilesystemRead,
         final_link: FinalLink,
-    ) -> Result<Vec<DelegatedEntry>, VfsError> {
+        each: impl FnMut(DelegatedEntry) -> T,
+    ) -> Result<Vec<T>, VfsError> {
         let (mount, remainder) = self.delegate_context(cred, path, false)?;
-        DelegatedFs::new(fs, mount).list(cred, &remainder, final_link)
+        DelegatedFs::new(fs, mount).list(cred, &remainder, final_link, each)
     }
 
     /// Report the structural metadata of a node under a driver-backed
@@ -579,15 +580,34 @@ impl Vfs {
     /// # Errors
     ///
     /// As [`Vfs::list_via`].
-    pub fn list_via_secured<F: FilesystemRead + FilesystemSecurity + ?Sized>(
+    pub fn list_via_secured<F: FilesystemRead + FilesystemSecurity + ?Sized, T>(
         &self,
         cred: &Credentials<'_>,
         path: &Path,
         fs: &mut F,
         final_link: FinalLink,
-    ) -> Result<Vec<DelegatedEntry>, VfsError> {
+        each: impl FnMut(DelegatedEntry) -> T,
+    ) -> Result<Vec<T>, VfsError> {
         let (mount, remainder) = self.delegate_context(cred, path, false)?;
-        DelegatedFs::new_secured(fs, mount).list(cred, &remainder, final_link)
+        DelegatedFs::new_secured(fs, mount).list(cred, &remainder, final_link, each)
+    }
+
+    /// Per-inode lookup of `names` in the directory at `path`, under the
+    /// listing's authority ([`DelegatedFs::lookup_entries`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::list_via_secured`].
+    pub fn lookup_entries_via_secured<F: FilesystemRead + FilesystemSecurity + ?Sized>(
+        &self,
+        cred: &Credentials<'_>,
+        path: &Path,
+        fs: &mut F,
+        final_link: FinalLink,
+        names: &[&[u8]],
+    ) -> Result<(NodeId, Vec<Option<DelegatedEntry>>), VfsError> {
+        let (mount, remainder) = self.delegate_context(cred, path, false)?;
+        DelegatedFs::new_secured(fs, mount).lookup_entries(cred, &remainder, final_link, names)
     }
 
     /// Per-inode counterpart of [`Vfs::stat_via`].

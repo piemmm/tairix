@@ -59,6 +59,7 @@ which the drift guard enforces.
 | FM16 | The browser window is frosted glass like the Settings and Switchboard windows, with what it lays over its content opaque | done |
 | FM17 | The browser window is never taller than its listing: it opens at the height the listing fills, restates that ceiling as it moves, and the window manager holds it there | done |
 | FM18 | The browser window can be made one row of its listing tall, a drag follows the range as it is restated, and the listing's bar stands beside the "Listing…" cue | done |
+| FM19 | A window follows every change any program makes to the folder it shows, through the directory watch, repainting only the rows that moved | done |
 
 `plans/OPEN-DEFECTS.md` D98 is the one open block: the QEMU harness cannot
 order a typed key after a pointer click, so two guest click-throughs cannot be
@@ -135,6 +136,19 @@ the "Listing…" cue as beside any listing that fits, its thumb resting the
 track's length, and the cue lays out no entry, so nothing undrawn can be
 pressed, scrolled to or probed. A Properties window keeps its own floor
 (`properties_sizing`).
+
+**FM19 — a listing that follows the folder.** Each listing is read through a
+descriptor armed with a directory watch before the read
+(`docs/src/filesystem/watch.md`), so no change falls between the two; the
+reader worker drains each report, and the window merges it in place
+(`Browser::apply_changes`), keeping the focus and selection on their entries
+and repainting only the rows `render::listing_damage` reports. A reload keeps
+them too, and a folder's occupancy cue is kept while it is probed again, so
+nothing blinks. A report waits while a menu, an inline rename or a drag holds
+the listing; a rescan reads the folder again; a folder gone from its path is
+left for its parent. New Folder opens its rename once the listing shows the
+folder. A watch the kernel refuses leaves the listing correct but not live,
+and says so.
 
 **FM-dialogs — the two popup surfaces.** Three defects, one of them shared
 with every other surface on the desktop.

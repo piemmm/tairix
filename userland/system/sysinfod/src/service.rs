@@ -1796,6 +1796,11 @@ mod tests {
                     ResourceLimit::new(32, 128).unwrap(),
                     5,
                 ),
+                ResourceLimitRecord::new(
+                    LimitKind::DirWatches,
+                    ResourceLimit::new(16, 32).unwrap(),
+                    2,
+                ),
             ])
         }
     }

@@ -58,16 +58,17 @@ use tairix_abi::{
 use tairix_caps::CapabilitySet;
 use tairix_kernel_sec::{GroupId, IdentityTable, UserId};
 use tairix_sync::{OnceCell, RwLock, SpinLock};
+use tairix_util::fallible::collected;
 
-use crate::fswatch;
+use crate::fswatch::ClaimRef;
 use crate::sleeplock::SleepLock;
 
 use super::blkmeter::VolumeIoSource;
 
-use super::delegate::FinalLink;
+use super::delegate::{DelegatedEntry, FinalLink};
 use super::path::Path;
 use super::perm::Credentials;
-use super::service::{FilesystemService, ReaddirEntry};
+use super::service::{FilesystemService, LookedUp, ReaddirEntry};
 use super::writeback::WritebackDue;
 use super::{Vfs, VfsError};
 
@@ -128,6 +129,9 @@ struct DriverEntry<F: 'static> {
     /// driver that publishes at every operation, and for one that holds
     /// nothing open.
     writeback: WritebackDue,
+    /// The claim on the volume's watch table, released when the volume is
+    /// unregistered.
+    watch: Option<ClaimRef>,
 }
 
 /// One registered volume's snapshot facts, as [`LateFilesystem::entry`]
@@ -274,6 +278,7 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
         source: &str,
         fstype: &str,
         volume_id: [u8; 16],
+        watch: Option<ClaimRef>,
     ) -> Result<Arc<SleepLock<F>>, FilesystemAlreadyInstalled> {
         let raw = handle.as_u64();
         let shared = {
@@ -291,6 +296,7 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
                 availability: MountAvailability::Available,
                 io: None,
                 writeback: WritebackDue::empty(),
+                watch,
             });
             shared
         };
@@ -576,9 +582,17 @@ impl<F: FilesystemWrite + Send + 'static> LateFilesystem<F> {
     /// registered. Fails closed: an unknown handle removes nothing.
     pub fn unregister(&self, handle: DriverHandle) -> Option<Arc<SleepLock<F>>> {
         let handle = handle.as_u64();
-        let mut drivers = self.drivers.lock();
-        let pos = drivers.iter().position(|e| e.handle == handle)?;
-        Some(drivers.remove(pos).driver)
+        let entry = {
+            let mut drivers = self.drivers.lock();
+            let pos = drivers.iter().position(|e| e.handle == handle)?;
+            drivers.remove(pos)
+        };
+        // The volume's watchers learn it left now, not when its last operation
+        // in flight lets the driver go.
+        if let Some(watch) = &entry.watch {
+            watch.release();
+        }
+        Some(entry.driver)
     }
 
     /// Whether the shared VFS has been installed.
@@ -989,6 +1003,37 @@ const fn node_identity(volume: [u8; 16], node: u64) -> FileId {
     FileId { volume, node }
 }
 
+/// The `readdir` record of a listed entry on `volume`.
+fn readdir_entry(volume: [u8; 16], mut entry: DelegatedEntry) -> ReaddirEntry {
+    ReaddirEntry {
+        kind: file_kind(entry.info.kind),
+        size: entry.info.size,
+        allocated: entry.info.allocated,
+        // The readdir stream carries the cheap common-case modification
+        // stamp; a consumer wanting other times stats the entry.
+        modified: entry.info.times.modified,
+        id: node_identity(volume, entry.node),
+        nlink: entry.info.nlink,
+        name: core::mem::take(&mut entry.name),
+    }
+}
+
+/// The record of a covered mount point the parent volume holds no node for:
+/// a directory by construction, with the placeholders a stampless backing
+/// reports, since no identity, stamp or name count of its own is reachable
+/// through the parent.
+fn mount_point_entry(name: String) -> ReaddirEntry {
+    ReaddirEntry {
+        kind: FileKind::Directory,
+        size: 0,
+        allocated: 0,
+        modified: Time64::UNIX_EPOCH,
+        id: FileId::NONE,
+        nlink: NodeInfo::SINGLE_NAME,
+        name,
+    }
+}
+
 /// Map a driver structural node kind to the userland [`FileKind`] the
 /// `fs_*` contract exposes.
 fn file_kind(kind: DriverNodeKind) -> FileKind {
@@ -996,61 +1041,6 @@ fn file_kind(kind: DriverNodeKind) -> FileKind {
         DriverNodeKind::Directory => FileKind::Directory,
         DriverNodeKind::RegularFile => FileKind::Regular,
         DriverNodeKind::Symlink => FileKind::Symlink,
-    }
-}
-
-/// The parent directory of an absolute `path`, or `None` for the root
-/// itself.
-///
-/// Used to key the file-change notification of a namespace mutation
-/// (create/remove/rename) on the *directory* whose entries changed, so a
-/// `tail -F` watching a directory descriptor wakes on a rotation there.
-fn parent_path(path: &str) -> Option<&str> {
-    let trimmed = path.trim_end_matches('/');
-    match trimmed.rfind('/') {
-        Some(0) => Some("/"),
-        Some(idx) => Some(&trimmed[..idx]),
-        None => None,
-    }
-}
-
-impl<F> MountedFilesystemService<F>
-where
-    F: FilesystemRead
-        + FilesystemWrite
-        + FilesystemSecurity
-        + FilesystemStats
-        + FilesystemAttrsProvider
-        + Send
-        + 'static,
-{
-    /// Fire the file-change notification for the node at `path` (a content
-    /// change: a write, a truncate). Best-effort and gated by
-    /// [`fswatch::watchers_present`], so a system with no watcher pays only
-    /// one relaxed atomic load; a stat failure (a raced removal) simply
-    /// skips the notify rather than failing the mutation that already
-    /// succeeded.
-    fn note_path(&self, uid: u32, caps: &dyn CapabilityQuery, path: &str) {
-        if !fswatch::watchers_present() {
-            return;
-        }
-        if let Ok(stat) = self.stat(uid, caps, path, FinalLink::Follow) {
-            if !stat.id.is_none() {
-                fswatch::note_change(stat.id);
-            }
-        }
-    }
-
-    /// Fire the file-change notification for the *parent directory* of
-    /// `path` (a namespace change under it: a create, remove, or rename),
-    /// so a directory watcher wakes on the change to its entries.
-    fn note_parent(&self, uid: u32, caps: &dyn CapabilityQuery, path: &str) {
-        if !fswatch::watchers_present() {
-            return;
-        }
-        if let Some(parent) = parent_path(path) {
-            self.note_path(uid, caps, parent);
-        }
     }
 }
 
@@ -1071,16 +1061,13 @@ where
         path: &str,
         flags: OpenFlags,
     ) -> Result<(), Errno> {
-        // The closure reports what the open changed so the notify fires only
-        // on a real mutation: `(created, truncated)` — a plain open of an
-        // existing file changes nothing and wakes no watcher.
         // `NO_FOLLOW` makes the open name the final component itself, so the
         // resolution that decides the handle's kind keeps a link rather than
         // reporting what it points at. The same posture rides on the handle
         // and is re-derived by every later operation it serves, so an open
         // and a later stat can never disagree.
         let final_link = FinalLink::for_open(flags);
-        let (created, truncated) = self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
+        self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
             match vfs.stat_via_secured(cred, path, fs, final_link) {
                 Ok(info) => {
                     // An exclusive create demands the path not already exist.
@@ -1110,11 +1097,10 @@ where
                     // Truncate-on-open zeroes the file; it requires write
                     // access (enforced at `OpenFlags::from_bits`) and is
                     // authorised by the secured truncate.
-                    let truncated = flags.contains(OpenFlags::TRUNCATE);
-                    if truncated {
+                    if flags.contains(OpenFlags::TRUNCATE) {
                         vfs.truncate_via_secured(cred, path, fs, 0)?;
                     }
-                    Ok((false, truncated))
+                    Ok(())
                 }
                 // A missing path is created only when asked, and `open` only
                 // ever creates a regular file (directories are made by
@@ -1124,22 +1110,11 @@ where
                     if flags.contains(OpenFlags::DIRECTORY) {
                         return Err(VfsError::NotADirectory);
                     }
-                    vfs.create_via_secured(cred, path, fs)?;
-                    Ok((true, false))
+                    vfs.create_via_secured(cred, path, fs)
                 }
                 Err(err) => Err(err),
             }
-        })?;
-        // A create adds a name under the parent directory (a rotation a
-        // `tail -F` watches for); a truncate-on-open resets the file's own
-        // content (a change a `tail -f` re-reads through).
-        if created {
-            self.note_parent(uid, caps, path);
-        }
-        if truncated {
-            self.note_path(uid, caps, path);
-        }
-        Ok(())
+        })
     }
 
     fn read(
@@ -1164,7 +1139,7 @@ where
         append: bool,
         data: &[u8],
     ) -> Result<usize, Errno> {
-        let written = self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
+        self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
             // An append write ignores the supplied offset and writes at the
             // current end of file (the journal-append posture), resolved under
             // the same lock so the size cannot change before the write.
@@ -1175,12 +1150,7 @@ where
                 offset
             };
             vfs.write_via_secured(cred, path, fs, offset, data)
-        })?;
-        // The file's content changed — wake any descriptor following it.
-        if written > 0 {
-            self.note_path(uid, caps, path);
-        }
-        Ok(written)
+        })
     }
 
     fn readdir(
@@ -1198,35 +1168,18 @@ where
             // exceptions), re-resolving it here would judge it against the
             // wrong volume and fail the whole listing closed, and each
             // re-resolution would repeat the child's full walk.
-            let entries = vfs.list_via_secured(cred, path, fs, final_link)?;
             // One mount resolution for the whole listing: every child of a
             // directory lives on the directory's own volume, so the identity's
             // volume half is the same for all of them.
             let volume = self.volume_at(vfs, path);
-            let mut out: Vec<ReaddirEntry> = entries
-                .into_iter()
-                .map(|entry| ReaddirEntry {
-                    kind: file_kind(entry.info.kind),
-                    size: entry.info.size,
-                    allocated: entry.info.allocated,
-                    // The readdir stream carries the cheap common-case
-                    // modification stamp; a consumer wanting other times
-                    // stats the entry.
-                    modified: entry.info.times.modified,
-                    id: node_identity(volume, entry.node),
-                    nlink: entry.info.nlink,
-                    name: entry.name,
-                })
-                .collect();
+            let mut out = vfs.list_via_secured(cred, path, fs, final_link, |entry| {
+                readdir_entry(volume, entry)
+            })?;
             // A covered mount point is part of its parent's listing even
             // when the parent volume holds no node of that name — the
             // runtime `/Storage/<name>` mounts, i.e. the `Storage:` catalog
             // enumeration (drives.md §15). A same-named node the parent
             // volume *does* hold already listed above and is not repeated.
-            // The merged entry is structural: a mount point is a directory
-            // by construction, and no per-node stamp is reachable through
-            // the parent volume, so it carries the same `UNIX_EPOCH` stamp
-            // any stampless backing reports.
             let mounts = vfs.mounts();
             for mount in mounts.direct_children(path) {
                 let Some(name) = mount.path().components().last() else {
@@ -1235,22 +1188,60 @@ where
                 if out.iter().any(|entry| entry.name == *name) {
                     continue;
                 }
-                out.push(ReaddirEntry {
-                    kind: FileKind::Directory,
-                    size: 0,
-                    allocated: 0,
-                    modified: Time64::UNIX_EPOCH,
-                    // The parent volume holds no node of this name, so it has
-                    // no identity or name count of its own to report — the
-                    // same reason its sizes and stamp are the stampless
-                    // backing's placeholders.
-                    id: FileId::NONE,
-                    nlink: NodeInfo::SINGLE_NAME,
-                    name: name.clone(),
-                });
+                out.try_reserve(1).map_err(|_| VfsError::OutOfMemory)?;
+                out.push(mount_point_entry(name.clone()));
             }
             Ok(out)
         })
+    }
+
+    fn lookup_entries(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        path: &str,
+        final_link: FinalLink,
+        names: &[&[u8]],
+    ) -> Result<LookedUp, Errno> {
+        self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
+            let (dir, found) = vfs.lookup_entries_via_secured(cred, path, fs, final_link, names)?;
+            let volume = self.volume_at(vfs, path);
+            let mounts = vfs.mounts();
+            let children = mounts.children_of(path);
+            let mut covered: Vec<&String> = Vec::new();
+            for name in mounts
+                .direct_children(path)
+                .filter_map(|mount| mount.path().components().last())
+            {
+                covered.try_reserve(1).map_err(|_| VfsError::OutOfMemory)?;
+                covered.push(name);
+            }
+            let entries = collected(
+                found.len(),
+                found
+                    .into_iter()
+                    .zip(names)
+                    .map(|(entry, &name)| match entry {
+                        Some(entry) => Some(readdir_entry(volume, entry)),
+                        // The same merge `readdir` makes: a mount point the
+                        // directory holds no node for still lists.
+                        None => covered
+                            .iter()
+                            .find(|mounted| mounted.as_bytes() == name)
+                            .map(|mounted| mount_point_entry(String::clone(mounted))),
+                    }),
+            )
+            .ok_or(VfsError::OutOfMemory)?;
+            Ok(LookedUp {
+                dir: node_identity(volume, dir.raw()),
+                entries,
+                children,
+            })
+        })
+    }
+
+    fn mount_epoch(&self) -> u64 {
+        self.mount.vfs().map_or(0, |vfs| vfs.mounts().epoch())
     }
 
     fn stat(
@@ -1286,11 +1277,7 @@ where
     ) -> Result<(), Errno> {
         self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
             vfs.truncate_via_secured(cred, path, fs, size)
-        })?;
-        // The file's content (length) changed — wake any descriptor
-        // following it (a shrink is how `tail -f` learns of a truncation).
-        self.note_path(uid, caps, path);
-        Ok(())
+        })
     }
 
     fn sync(&self, _uid: u32, _caps: &dyn CapabilityQuery) -> Result<(), Errno> {
@@ -1311,10 +1298,7 @@ where
     fn mkdir(&self, uid: u32, caps: &dyn CapabilityQuery, path: &str) -> Result<(), Errno> {
         self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
             vfs.mkdir_via_secured(cred, path, fs)
-        })?;
-        // A new name appeared under the parent directory.
-        self.note_parent(uid, caps, path);
-        Ok(())
+        })
     }
 
     fn unlink(
@@ -1326,11 +1310,7 @@ where
     ) -> Result<(), Errno> {
         self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
             vfs.remove_via_secured(cred, path, fs, flags.is_directory_only())
-        })?;
-        // A name disappeared from the parent directory (a rotation a
-        // `tail -F` watches for).
-        self.note_parent(uid, caps, path);
-        Ok(())
+        })
     }
 
     fn symlink(
@@ -1342,10 +1322,7 @@ where
     ) -> Result<(), Errno> {
         self.with_secured(uid, caps, path, |vfs, fs, cred, path| {
             vfs.symlink_via_secured(cred, path, fs, target)
-        })?;
-        // A new name appeared under the parent directory.
-        self.note_parent(uid, caps, path);
-        Ok(())
+        })
     }
 
     fn readlink(&self, uid: u32, caps: &dyn CapabilityQuery, path: &str) -> Result<String, Errno> {
@@ -1375,12 +1352,7 @@ where
     ) -> Result<(), Errno> {
         self.with_secured_pair(uid, caps, src, dst, |vfs, fs, cred, src, dst| {
             vfs.rename_via_secured(cred, src, dst, fs)
-        })?;
-        // A rename removes a name from the source directory and adds one to
-        // the destination directory; both entry sets changed.
-        self.note_parent(uid, caps, src);
-        self.note_parent(uid, caps, dst);
-        Ok(())
+        })
     }
 
     fn link(
@@ -1399,11 +1371,7 @@ where
             |vfs, fs, cred, existing, link| {
                 vfs.link_via_secured(cred, existing, link, fs, existing_link)
             },
-        )?;
-        // Only the new name's directory gained an entry; the existing name
-        // is untouched, so its parent's entry set did not change.
-        self.note_parent(uid, caps, link);
-        Ok(())
+        )
     }
 
     fn set_mode(

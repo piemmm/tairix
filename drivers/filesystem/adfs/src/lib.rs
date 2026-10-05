@@ -61,8 +61,8 @@
 
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
-    DirEntry, FilesystemAttrs, FilesystemRead, FilesystemStats, FilesystemWrite, NodeId, NodeInfo,
-    NodeKind, NodeTimes, VolumeStats,
+    DirEntry, FilesystemAttrs, FilesystemRead, FilesystemStats, FilesystemWrite, NameMatching,
+    NodeId, NodeInfo, NodeKind, NodeTimes, VolumeStats,
 };
 use tairix_abi::time::Time64;
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
@@ -935,6 +935,10 @@ enum DirHandle {
 impl<B: Block> FilesystemRead for Adfs<B> {
     fn root(&self) -> NodeId {
         self.root_node()
+    }
+
+    fn name_matching(&self) -> NameMatching {
+        NameMatching::AsciiCaseInsensitive
     }
 
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {

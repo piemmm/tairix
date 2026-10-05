@@ -42,13 +42,19 @@ unvisited rather than reaching outside the slice.
 `for_each` visits the elements of a slice, so a pass whose pieces are borrows it
 splits off one at a time — row bands of a surface, a buffer cut into parts of
 differing lengths — would have to gather them into a heap list before every
-dispatch. `for_each_drawn` takes the iterator that splits them instead: each
-participant draws its next piece from it under a `lib/sync` spin lock held only
-for the draw, so a dispatch allocates nothing, and `fold_drawn` joins what each
-visit answers in whatever order the visits finish, so its join must not care.
-Fewer than two pieces, or a runner one thread wide, are visited in order on the
-calling thread with no lock taken. The compositor's band split and the frost's
-three passes dispatch this way, which is what lets a frost run from a reserved
+dispatch. `for_each_drawn` takes the iterator that splits them instead: the
+dispatching thread draws them a round at a time and the runner's index `i`
+visits the round's piece `i`. A round is four pieces for each participant, so a
+straggler is absorbed however wide the runner: it lives on the dispatching
+thread's stack for a runner up to 32 participants wide, so such a dispatch
+allocates nothing, and in one buffer reserved for the dispatch past that, a
+stack round at a time if the reservation is refused. No participant waits on a
+lock or runs the iterator, a skipped index leaves its piece unvisited rather
+than another, and `Reversed` visits each round's pieces last first. `fold_drawn` joins the answers on the calling
+thread in the order the pieces were drawn, so its result is the serial fold's —
+a floating-point sum included. A runner one thread wide visits the pieces in
+order on the calling thread. The compositor's band split and the frost's three
+passes dispatch this way, which is what lets a frost run from a reserved
 scratch without allocating.
 
 ## Sizing
@@ -135,8 +141,7 @@ and park again.
 An idle worker is parked in `futex_wait` on the dispatch epoch; a dispatcher with
 pieces still in flight is parked in `futex_wait` on the claim word. An idle pool
 costs the address space its workers' kernel-owned stacks reserve and no CPU at
-all. The one spin is `for_each_drawn`'s, on a lock held only for one draw from
-the pieces' iterator.
+all, and no dispatch takes a lock a preempted participant could hold.
 
 ### It cannot deadlock
 
@@ -167,7 +172,8 @@ than assume it.
 Host tests cover the split policy at and around its boundaries, `for_each`
 visiting each element exactly once, that the order pieces run in cannot change the
 result, the unvisited-element case a skipping runner produces, drawn pieces
-visited once by every runner and folded with every answer joined once, the
+visited once by every runner — last first by `Reversed`, a batch at a time past
+one batch — and folded in the order they were drawn, the
 no-worker degradation, and nested dispatch. The host has no syscall trap, so a pool there has
 no workers by construction; the concurrent protocol is exercised by the `parallel`
 role of the `threads_qemu_{aarch64,riscv64,x86_64}` verticals, which runs a divided

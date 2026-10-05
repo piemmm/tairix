@@ -520,6 +520,27 @@ fn a_grain_settles_to_its_mean_in_relief_as_its_footprint_widens() {
     );
 }
 
+/// A grain made for its coarsest relief stands that steep at its coarsest
+/// octave, whatever its finer octaves add: resolved by nothing, it lends the
+/// roughness that octave's slope and each finer one's in turn.
+#[test]
+fn a_grain_made_for_its_coarse_relief_keeps_it() {
+    let coarse = 0.12;
+    let grain = Relief::grain(coarse, 14.0, 5);
+    let far = grain.tilt(Vec3::UP, &bump_at(Vec3::new(0.37, 0.0, -1.21), 10.0));
+    let whole: f64 = (0..GRAIN_OCTAVES)
+        .map(|octave| {
+            let steep = coarse * mathf::exp(f64::from(octave) * mathf::ln(GRAIN_GAIN));
+            steep * steep / 3.0
+        })
+        .sum();
+    assert!(
+        (far.unresolved - whole).abs() < 1e-12,
+        "{} against {whole}",
+        far.unresolved
+    );
+}
+
 /// A grain's octaves share its depth between them: too fine for a pixel to
 /// resolve, all of it lends the roughness no more slope variance than one
 /// octave as steep as its depth would hold, and resolved, it tilts a normal

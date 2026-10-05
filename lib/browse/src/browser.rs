@@ -31,6 +31,7 @@ use crate::rename::{validate_new_name, RenameError};
 use crate::select::Selection;
 use crate::sort::{sort_entries, SortMode};
 use crate::source::{DirectorySource, Listing, Probe};
+use crate::watch::{merge_changes, EntryChange, Placement};
 
 /// The most directories the back and forward navigation stacks each retain.
 ///
@@ -73,6 +74,13 @@ pub struct Browser<S: DirectorySource> {
     /// that never arrives leaves the view exactly where it was and a refused one
     /// is reported in place. [`resume`](Self::resume) is what commits it.
     pending: Option<Pending>,
+    /// A name the focus moves to once a listing shows it: the folder or new
+    /// name a write in this directory just made, when the listing read after
+    /// it has not landed yet.
+    focus_intent: Option<String>,
+    /// The ancestor a [`climb`](Self::climb) is waiting on, so a refusal that
+    /// lands later climbs on from it rather than from the gone directory.
+    climbing: Option<Vec<String>>,
 }
 
 /// A navigation whose listing has not arrived yet: where it is going, and which
@@ -164,6 +172,8 @@ impl<S: DirectorySource> Browser<S> {
             back: VecDeque::new(),
             forward: VecDeque::new(),
             pending,
+            focus_intent: None,
+            climbing: None,
         })
     }
 
@@ -312,8 +322,10 @@ impl<S: DirectorySource> Browser<S> {
                 Err(_) => Occupancy::Indeterminate,
             };
             if let Some(entry) = self.entries.get_mut(index) {
+                // A folder probed again only because it was reported reads the
+                // same far more often than not: nothing it shows moved.
+                changed |= entry.occupancy() != occupancy;
                 entry.set_occupancy(occupancy);
-                changed = true;
             }
         }
         changed
@@ -335,11 +347,25 @@ impl<S: DirectorySource> Browser<S> {
         self.selected_index().map(|i| &self.entries[i])
     }
 
-    /// The selected entry's name, or `None` when the directory is empty — the
-    /// name the in-place rename editor starts from.
+    /// The selected entry's name, or `None` when the directory is empty.
     #[must_use]
     pub fn selected_name(&self) -> Option<&str> {
         self.selected_entry().map(Entry::name)
+    }
+
+    /// The focused entry's index while it is also selected: the entry a verb
+    /// acts on. A focus resting on a neighbour of a file that went, or on an
+    /// entry a `Ctrl`-click let go, names nothing the user chose.
+    #[must_use]
+    pub fn chosen_index(&self) -> Option<usize> {
+        self.selected_index()
+            .filter(|&index| self.selection.contains(index))
+    }
+
+    /// The entry at [`chosen_index`](Self::chosen_index).
+    #[must_use]
+    pub fn chosen_entry(&self) -> Option<&Entry> {
+        self.chosen_index().map(|index| &self.entries[index])
     }
 
     /// Spell the validated absolute path of the selected entry — the node a
@@ -370,9 +396,16 @@ impl<S: DirectorySource> Browser<S> {
         if index >= self.entries.len() {
             return Err(BrowseError::NoSuchEntry);
         }
-        self.selected = index;
+        self.focus_on(index);
         self.selection.single(index);
         Ok(())
+    }
+
+    /// Put the focus on `index` for the user, which ends any wait to move it
+    /// onto a name a listing has not shown yet.
+    fn focus_on(&mut self, index: usize) {
+        self.selected = index;
+        self.focus_intent = None;
     }
 
     /// Move the focus to the next entry, stopping at the last, and select it
@@ -380,7 +413,7 @@ impl<S: DirectorySource> Browser<S> {
     /// no-op on an empty directory.
     pub fn select_next(&mut self) {
         if let Some(last) = self.entries.len().checked_sub(1) {
-            self.selected = self.selected.saturating_add(1).min(last);
+            self.focus_on(self.selected.saturating_add(1).min(last));
             self.selection.single(self.selected);
         }
     }
@@ -391,14 +424,14 @@ impl<S: DirectorySource> Browser<S> {
         if self.entries.is_empty() {
             return;
         }
-        self.selected = self.selected.saturating_sub(1);
+        self.focus_on(self.selected.saturating_sub(1));
         self.selection.single(self.selected);
     }
 
     /// The set of entries currently selected in this listing — the members the
-    /// management verbs (cut / copy / delete) act on. A superset of the single
-    /// focused entry only while a multi-selection is in force; a fresh listing
-    /// collapses it back to the focus.
+    /// management verbs (cut / copy / delete) act on. Another directory's
+    /// listing collapses it to the focus; a reload or a reported change keeps
+    /// it on the entries it named, and an entry that went leaves it.
     #[must_use]
     pub fn selection(&self) -> &Selection {
         &self.selection
@@ -421,7 +454,7 @@ impl<S: DirectorySource> Browser<S> {
         if index >= self.entries.len() {
             return Err(BrowseError::NoSuchEntry);
         }
-        self.selected = index;
+        self.focus_on(index);
         self.selection.toggle(index);
         Ok(())
     }
@@ -437,7 +470,7 @@ impl<S: DirectorySource> Browser<S> {
         if index >= self.entries.len() {
             return Err(BrowseError::NoSuchEntry);
         }
-        self.selected = index;
+        self.focus_on(index);
         self.selection.range_to(index);
         Ok(())
     }
@@ -445,11 +478,13 @@ impl<S: DirectorySource> Browser<S> {
     /// Select every entry in the current listing (Select All). The focus is
     /// left where it was; an empty directory stays with an empty selection.
     pub fn select_all(&mut self) {
+        self.focus_intent = None;
         self.selection.select_all(self.entries.len());
     }
 
     /// Drop the whole selection (leaving the focus cursor where it is).
     pub fn clear_selection(&mut self) {
+        self.focus_intent = None;
         self.selection.clear();
     }
 
@@ -506,8 +541,17 @@ impl<S: DirectorySource> Browser<S> {
         DeletePlan::new(targets)
     }
 
-    /// Re-read the current directory from the source, preserving the selection
-    /// where it still points at an entry and clamping it otherwise.
+    /// Whether the shown directory's listing follows it, so a change the
+    /// embedder made there arrives as a reported change and needs no
+    /// [`refresh`](Self::refresh).
+    #[must_use]
+    pub fn follows(&self) -> bool {
+        self.source.follows(&self.components)
+    }
+
+    /// Re-read the current directory from the source, keeping the focus and
+    /// selection on the entries they named; a focus whose entry went rests
+    /// where it was.
     ///
     /// # Errors
     ///
@@ -556,9 +600,7 @@ impl<S: DirectorySource> Browser<S> {
 
         self.refresh()
             .map_err(|err| RenameError::Source(err.source_errno().unwrap_or(Errno::NotFound)))?;
-        if let Some(index) = self.entries.iter().position(|e| e.name() == new_name) {
-            self.selected = index;
-        }
+        self.follow(new_name);
         Ok(())
     }
 
@@ -619,10 +661,95 @@ impl<S: DirectorySource> Browser<S> {
 
         self.refresh()
             .map_err(|err| MkdirError::Source(err.source_errno().unwrap_or(Errno::NotFound)))?;
+        self.follow(name);
+        Ok(())
+    }
+
+    /// Move the focus onto the entry `name`, now if the listing shows it, else
+    /// when a listing first does.
+    fn follow(&mut self, name: &str) {
+        self.focus_intent = Some(String::from(name));
+        self.apply_focus_intent();
+    }
+
+    fn apply_focus_intent(&mut self) {
+        let Some(name) = self.focus_intent.as_deref() else {
+            return;
+        };
         if let Some(index) = self.entries.iter().position(|e| e.name() == name) {
             self.selected = index;
+            self.selection.single(index);
+            self.focus_intent = None;
         }
-        Ok(())
+    }
+
+    /// The name the focus is waiting to move onto, until a listing shows it.
+    #[must_use]
+    pub fn focus_pending(&self) -> Option<&str> {
+        self.focus_intent.as_deref()
+    }
+
+    /// Merge the `changes` a directory watch reported into the listing in
+    /// place, keeping the focus, the selection and its anchor on the entries
+    /// they named. An entry a change removed leaves the selection rather than
+    /// passing it on; a removed focus rests where it was, on the entry now
+    /// there. A changed folder keeps showing its occupancy until a fresh probe
+    /// replaces it, so its icon does not blink.
+    ///
+    /// The listing is moved at most once, however many changes there are.
+    /// Answers where each entry that was shown now sits once anything shown
+    /// moved, so a caller tracking an entry by position follows it too, and
+    /// [`None`] otherwise.
+    ///
+    /// # Errors
+    ///
+    /// [`BrowseError::OutOfMemory`] when the memory to merge the changes could
+    /// not be had: the listing is as it was, and only reading the folder again
+    /// brings it up to date.
+    pub fn apply_changes(
+        &mut self,
+        changes: Vec<EntryChange>,
+    ) -> Result<Option<Placement>, BrowseError> {
+        if changes.is_empty() {
+            return Ok(None);
+        }
+        let (placement, moved) = merge_changes(&mut self.entries, changes, self.sort_mode)
+            .ok_or(BrowseError::OutOfMemory)?;
+        self.carry_selection(&placement);
+        Ok(moved.then_some(placement))
+    }
+
+    /// Replace the listing with `entries`, a fresh read of the same directory,
+    /// keeping what [`apply_changes`](Self::apply_changes) keeps: the focus and
+    /// selection on their entries, and each folder's occupancy shown while it
+    /// is probed again — a format that stamps no directory when its contents
+    /// change (FAT) leaves an unchanged record proving nothing.
+    fn relist(&mut self, mut entries: Vec<Entry>) {
+        sort_entries(&mut entries, self.sort_mode);
+        let old = mem::take(&mut self.entries);
+        // Without the memory to match the two listings nothing is carried
+        // across: the selection goes, and each folder is probed afresh.
+        let placed = carried(&old, &mut entries).unwrap_or_default();
+        drop(old);
+        self.entries = entries;
+        self.carry_selection(&Placement::table(placed));
+        // A whole listing read after the write that set the intent and not
+        // showing its name will not show it later: the name went again.
+        self.focus_intent = None;
+    }
+
+    /// Carry the focus and selection across a listing change, by where
+    /// `placement` says each entry went. A removed entry leaves the selection
+    /// and passes it to nothing, so a verb never acts on a neighbour the user
+    /// did not choose.
+    fn carry_selection(&mut self, placement: &Placement) {
+        let focus = placement.place(self.selected);
+        self.selection.remap(|before| placement.place(before));
+        match focus {
+            Some(index) => self.selected = index,
+            None => self.clamp_selection(),
+        }
+        self.apply_focus_intent();
     }
 
     /// Descend into the selected entry, which must be a directory.
@@ -689,13 +816,14 @@ impl<S: DirectorySource> Browser<S> {
     ///
     /// # Errors
     ///
-    /// * [`BrowseError::NoSuchEntry`] if there is no selection (an empty
-    ///   directory).
+    /// * [`BrowseError::NoSuchEntry`] if nothing is
+    ///   [chosen](Self::chosen_index) — an empty directory, or a focus the
+    ///   user did not select.
     /// * [`BrowseError::Source`] if a descended directory cannot be listed, or
     ///   a bundle/file target cannot be named as a valid absolute path; the
     ///   browser stays on the current directory in either case.
     pub fn activate_selected(&mut self, intent: BundleIntent) -> Result<Activation, BrowseError> {
-        let index = self.selected_index().ok_or(BrowseError::NoSuchEntry)?;
+        let index = self.chosen_index().ok_or(BrowseError::NoSuchEntry)?;
         self.activate_index(index, intent)
     }
 
@@ -893,6 +1021,7 @@ impl<S: DirectorySource> Browser<S> {
     /// either history — and a pending navigation replaces any earlier one, so a
     /// user clicking twice goes where they last clicked rather than queueing.
     fn begin(&mut self, target: Vec<String>, step: Step) -> Result<(), BrowseError> {
+        self.climbing = None;
         // A reload is asked because the directory may have changed, so an
         // answer already on its way cannot satisfy it; a move to somewhere
         // else has nothing on its way to mistake for fresh.
@@ -916,8 +1045,12 @@ impl<S: DirectorySource> Browser<S> {
     /// Apply the history move `step` owes, adopt `target` as the location, and
     /// adopt `entries`.
     fn commit(&mut self, target: Vec<String>, step: Step, entries: Vec<Entry>) {
+        self.climbing = None;
         match step {
-            Step::Reload => {}
+            Step::Reload => {
+                self.relist(entries);
+                return;
+            }
             Step::Fresh => {
                 let previous = mem::replace(&mut self.components, target);
                 Self::push_bounded(&mut self.back, previous);
@@ -934,6 +1067,7 @@ impl<S: DirectorySource> Browser<S> {
                 Self::push_bounded(&mut self.back, previous);
             }
         }
+        self.focus_intent = None;
         self.adopt_entries(entries);
     }
 
@@ -983,8 +1117,41 @@ impl<S: DirectorySource> Browser<S> {
                 self.pending = Some(pending);
                 Ok(false)
             }
-            Err(errno) => Err(BrowseError::Source(errno)),
+            Err(errno) => {
+                if self.climbing.as_ref() != Some(&pending.target) {
+                    self.climbing = None;
+                }
+                Err(BrowseError::Source(errno))
+            }
         }
+    }
+
+    /// Leave a directory gone from its path for the nearest ancestor that
+    /// still lists: the parent first, then, as each is refused — at once or
+    /// when its listing's answer lands and [`resume`](Self::resume) reports
+    /// it — the one above. Answers `Ok(false)` once no ancestor is left.
+    ///
+    /// # Errors
+    ///
+    /// Whatever refuses a navigation other than its listing.
+    pub fn climb(&mut self) -> Result<bool, BrowseError> {
+        let mut from = self
+            .climbing
+            .take()
+            .unwrap_or_else(|| self.components.clone());
+        while from.pop().is_some() {
+            match self.begin(from.clone(), Step::Fresh) {
+                Ok(()) => {
+                    if self.pending.is_some() {
+                        self.climbing = Some(from);
+                    }
+                    return Ok(true);
+                }
+                Err(BrowseError::Source(_)) => {}
+                Err(other) => return Err(other),
+            }
+        }
+        Ok(false)
     }
 
     /// Push `location` onto `stack`, dropping the oldest entries to keep the
@@ -1031,4 +1198,30 @@ impl<S: DirectorySource> Browser<S> {
             None => 0,
         };
     }
+}
+
+/// Where each of `old`'s entries sits in `fresh`, a re-read of the same
+/// directory, carrying each folder's occupancy over to its successor; or
+/// [`None`] without the memory to match them.
+fn carried(old: &[Entry], fresh: &mut [Entry]) -> Option<Vec<Option<usize>>> {
+    let mut by_name: Vec<(&str, usize)> = Vec::new();
+    by_name.try_reserve_exact(old.len()).ok()?;
+    by_name.extend(old.iter().enumerate().map(|(at, entry)| (entry.name(), at)));
+    by_name.sort_unstable_by(|a, b| a.0.cmp(b.0));
+    let mut placed = Vec::new();
+    placed.try_reserve_exact(old.len()).ok()?;
+    placed.resize(old.len(), None);
+    for (at, entry) in fresh.iter_mut().enumerate() {
+        let Ok(found) = by_name.binary_search_by(|probe| probe.0.cmp(entry.name())) else {
+            continue;
+        };
+        let Some(&(_, before)) = by_name.get(found) else {
+            continue;
+        };
+        if let (Some(slot), Some(was)) = (placed.get_mut(before), old.get(before)) {
+            *slot = Some(at);
+            entry.inherit_occupancy(was);
+        }
+    }
+    Some(placed)
 }

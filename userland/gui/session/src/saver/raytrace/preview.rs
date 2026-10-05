@@ -364,20 +364,12 @@ impl Preview {
             weights: self.weights.get(..side as usize).unwrap_or(&[]),
             dirty: &self.dirty,
         };
-        let span = rows.end - rows.start;
-        let per_band = span
-            .div_ceil(u32::try_from(pieces.max(1)).unwrap_or(u32::MAX))
-            .max(1);
-        let paint = |band: &mut RowBand<'_>| painter.band(band);
-        let mut bands: Vec<RowBand<'_>> = Vec::new();
-        if pieces > 1 && fallible::reserve(&mut bands, pieces) {
-            bands.extend(surface.row_bands_mut(rows, per_band));
-            tairix_parallel::for_each(runner, &mut bands, &paint);
-        } else {
-            for mut band in surface.row_bands_mut(rows, span) {
-                paint(&mut band);
-            }
-        }
+        let per_band = tairix_raster::band_rows((rows.end - rows.start) as usize, pieces);
+        tairix_parallel::for_each_drawn(
+            runner,
+            surface.row_bands_mut(rows, per_band),
+            &|mut band| painter.band(&mut band),
+        );
         self.dirty.clear();
     }
 

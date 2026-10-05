@@ -353,7 +353,7 @@ impl Ground {
             let (under, hidden) = floor.shades.at(p.x, p.z);
             let littered = smoothstep(0.15, 0.7, under.max(hidden) + 0.2 * patch);
             if littered > 0.0 {
-                colour = colour.lerp(self.litter(floor, p, width, (wet, mottle)), littered);
+                colour = colour.lerp(self.litter(floor, p, width, (wet, mottle, grit)), littered);
             }
         }
         if let Some(rock) = rock {
@@ -378,8 +378,15 @@ impl Ground {
 
     /// A wood's floor: its fallen leaves lying in drifts, each its own shade
     /// between fresh and brown, humus showing in the hollows and where they
-    /// lie thin, and carpets of moss, thickest where the ground is damp.
-    fn litter(&self, floor: &Floor, p: Vec3, width: f64, (wet, mottle): (f64, f64)) -> Vec3 {
+    /// lie thin, and carpets of moss, thickest where the ground is damp; on
+    /// the ground's own `grit`.
+    fn litter(
+        &self,
+        floor: &Floor,
+        p: Vec3,
+        width: f64,
+        (wet, mottle, grit): (f64, f64, f64),
+    ) -> Vec3 {
         let seed = self.seed;
         let drift = smoothstep(
             -0.35,
@@ -406,7 +413,7 @@ impl Ground {
             floor.humus,
             (0.55 * (1.0 - drift) * thin).max(0.45 * hollows),
         ) * (0.9 + 0.14 * mottle)
-            * self.grit(p, width);
+            * grit;
         let carpet = fade(noise2(p.x * 0.15, p.z * 0.15, seed ^ 0x74), width * 0.15)
             + 0.35 * fade(noise2(p.x * 0.6, p.z * 0.6, seed ^ 0x76), width * 0.6);
         let mossy = smoothstep(

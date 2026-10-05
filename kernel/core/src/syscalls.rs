@@ -95,16 +95,16 @@ use tairix_abi::time::NANOS_PER_MILLI;
 use tairix_abi::touch::TouchFrame;
 use tairix_abi::{
     decode_log_record, BootFacts, BootId, CallRecvFlags, CapabilityId, CapabilityQuery,
-    DescriptorTable, DirEntry, Errno, FdWire, FileId, FileStat, InputMode, IntrospectDomain,
-    IrqHandle, LimitKind, LockConflict, LockFlags, LockMode, LockRange, MapFlags, OpenFlags,
-    PeerWatchOp, PortName, PortWidth, PowerAction, ProcId, ProcessStart, RandomFlags,
-    ResourceLimit, SchedPriority, Signal, SignalIntakeOp, SpawnAttach, SpawnSession, StreamMode,
-    SyscallNumber, TerminalSize, Time64, UnlinkFlags, WaitFlags, WaitSetOp, WaitSourceKind,
-    WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, FS_ATTR_KEY_MAX,
-    FS_ATTR_VALUE_MAX, FS_IO_MAX, FS_NAME_MAX, FS_PATH_MAX, FS_SYMLINK_MAX, LOG_FIELDS_MAX,
-    LOG_RECORD_MAX, PORT_NAME_MAX_LEN, PROCESS_START_MAX_TOTAL_LEN, PROC_ID_HEX_LEN, PROC_ID_LEN,
-    RANDOM_REQUEST_MAX_BYTES, RESOURCE_REF_MAX, SPAWN_ATTACH_LEN, SPAWN_UID_INHERIT,
-    TERMINAL_SIZE_WIRE_LEN, WAITSET_CHILD_ANY, WAIT_PID_ANY,
+    DescriptorTable, DirChange, DirChangeBatch, DirWatchStatus, Errno, FdWire, FileId, FileStat,
+    InputMode, IntrospectDomain, IrqHandle, LimitKind, LockConflict, LockFlags, LockMode,
+    LockRange, MapFlags, OpenFlags, PeerWatchOp, PortName, PortWidth, PowerAction, ProcId,
+    ProcessStart, RandomFlags, ResourceLimit, SchedPriority, Signal, SignalIntakeOp, SpawnAttach,
+    SpawnSession, StreamMode, SyscallNumber, TerminalSize, Time64, UnlinkFlags, WaitFlags,
+    WaitSetOp, WaitSourceKind, WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT,
+    DIR_WATCH_LATENCY_MAX_NS, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_IO_MAX, FS_PATH_MAX,
+    FS_SYMLINK_MAX, LOG_FIELDS_MAX, LOG_RECORD_MAX, PORT_NAME_MAX_LEN, PROCESS_START_MAX_TOTAL_LEN,
+    PROC_ID_HEX_LEN, PROC_ID_LEN, RANDOM_REQUEST_MAX_BYTES, RESOURCE_REF_MAX, SPAWN_ATTACH_LEN,
+    SPAWN_UID_INHERIT, TERMINAL_SIZE_WIRE_LEN, WAITSET_CHILD_ANY, WAIT_PID_ANY,
 };
 use tairix_arch_api::backtrace::{walk, StackBounds, UserRegisterFrame};
 use tairix_caps::CapabilitySet;
@@ -129,7 +129,9 @@ use tairix_kernel_syscall::{CallerContext, Dispatcher, RawArgs, SyscallHandlers,
 use tairix_log::{Event, EventId, Field, Level, Sink};
 use tairix_seat::{ConsoleIndex, SeatOwner};
 use tairix_sync::RwLock;
+use tairix_util::fallible::{collected, filled};
 use tairix_util::fmt::{format_hex_u64, format_usize};
+use tairix_util::secret::WipedBuf;
 use zeroize::Zeroize;
 
 use alloc::boxed::Box;
@@ -427,6 +429,9 @@ where
     /// [`Self::with_peer_watch`]: `peer_watch` then fails closed with
     /// `NotImplemented`, so no watch exists for a teardown to miss.
     peer_watch: Option<&'a PeerWatch>,
+    /// The directory-watch registry `fs_watch` arms on and a `File` or
+    /// `DirWatch` member reports through; without it both fail closed.
+    fswatch: Option<&'static crate::fswatch::WatchRegistry>,
     /// The kernel-held crash-record store the user-fault kill path records
     /// into and the `sysinfo_introspect` `Crashes` domain serves
     /// (`plans/FIX-WILD.md` Stage 2). Defaults to the shared empty
@@ -767,6 +772,55 @@ impl<'a> PathAuthority<'a> {
     }
 }
 
+/// The `fs_watch_read` batch reporting `names`, each paired with the record
+/// it now lists as (absent where it lists as nothing), sized exactly and
+/// wiped on drop, since the names are decrypted user data.
+fn dir_watch_batch(
+    status: DirWatchStatus,
+    more: bool,
+    names: &[&[u8]],
+    records: &[Option<crate::fs::ReaddirEntry>],
+) -> Result<WipedBuf, Errno> {
+    let changes = collected(
+        records.len(),
+        names.iter().zip(records).map(|(name, entry)| match entry {
+            Some(entry) => DirChange::Present(entry.wire()),
+            None => DirChange::Absent(name),
+        }),
+    )
+    .ok_or(Errno::OutOfMemory)?;
+    let total = changes
+        .iter()
+        .fold(DirChangeBatch::HEADER_LEN, |total, change| {
+            total.saturating_add(DirChange::len_for(
+                matches!(change, DirChange::Present(_)),
+                change.name().len(),
+            ))
+        });
+    let mut out = WipedBuf::new(filled(total, 0u8).ok_or(Errno::OutOfMemory)?);
+    let count = u32::try_from(changes.len()).map_err(|_| Errno::OutOfRange)?;
+    let mut at = DirChangeBatch::encode_header(&mut out, status, more, count)?;
+    for change in &changes {
+        let slot = out.get_mut(at..).ok_or(Errno::OutOfRange)?;
+        at += change.encode_into(slot)?;
+    }
+    Ok(out)
+}
+
+/// A `DirWatch` member's state against the table it holds, given the mount
+/// table's current epoch.
+fn dir_member_state(
+    m: &crate::waitset::Member,
+    mounts: u64,
+    now: u64,
+) -> crate::fswatch::MemberState {
+    m.table
+        .as_ref()
+        .map_or(crate::fswatch::MemberState::Idle, |table| {
+            table.0.dir_state(m.file.node, &m.pacing, mounts, now)
+        })
+}
+
 /// The `abi-v1` name of syscall `number`, or `"unknown"` for a number this
 /// kernel has no spec for.
 #[cfg(feature = "watchdog-diagnostics")]
@@ -933,6 +987,7 @@ where
             // shared `NULL_SEAT_REGISTRY`.
             seat_registry: &NULL_SEAT_REGISTRY,
             peer_watch: None,
+            fswatch: None,
             // Crash-record store unwired until the boot path installs the
             // real one (`plans/FIX-WILD.md` Stage 2): a user-fault kill
             // records into the shared inert `NULL_CRASH_STORE` and the
@@ -1446,6 +1501,14 @@ where
     #[must_use]
     pub const fn with_seat_registry(mut self, seat_registry: &'static SeatRegistry) -> Self {
         self.seat_registry = seat_registry;
+        self
+    }
+
+    /// Serve directory watches and `File` members through `fswatch`, the
+    /// registry the boot path's volumes claim their tables from.
+    #[must_use]
+    pub const fn with_fswatch(mut self, fswatch: &'static crate::fswatch::WatchRegistry) -> Self {
+        self.fswatch = Some(fswatch);
         self
     }
 
@@ -3629,19 +3692,21 @@ where
         )
     }
 
-    /// Whether one wait-set member is ready, as a **non-consuming peek**
-    /// re-checked against the kernel-trusted caller on every scan — a member
-    /// whose resource was torn down (or never owned) simply is not ready,
-    /// and the woken owner's own drain (recv / reap / read / take), never
-    /// the wait, consumes the event.
-    fn waitset_member_ready(
+    /// How one wait-set member stands, as a **non-consuming peek** re-checked
+    /// against the kernel-trusted caller on every scan — a member whose
+    /// resource was torn down (or never owned) simply is not ready, and the
+    /// woken owner's own drain (recv / reap / read / take), never the wait,
+    /// consumes the event. `mounts` is the mount table's epoch, which only a
+    /// `DirWatch` member resolves against.
+    fn waitset_member_state(
         &self,
         caller: &CallerContext<'_>,
         m: &crate::waitset::Member,
         now: u64,
-    ) -> bool {
+        mounts: u64,
+    ) -> crate::fswatch::MemberState {
         let sched_task = caller.task_id.0;
-        match m.kind {
+        let ready = match m.kind {
             WaitSourceKind::Endpoint => crate::callreg::lookup(EndpointId(m.id))
                 .is_some_and(|ep| ep.owner() == caller.process().0 && ep.has_pending()),
             // A reply to a request *this caller posted* has arrived (or its
@@ -3718,7 +3783,14 @@ where
             // that grows (or a watched directory whose entries change) makes
             // exactly its watchers ready. The wait loop advances the observed
             // generation when it reports the member (the edge consume).
-            WaitSourceKind::File => crate::fswatch::current_generation(m.file) != m.observed,
+            WaitSourceKind::File => m
+                .table
+                .as_ref()
+                .is_some_and(|table| table.0.file_ready(m.file.node, m.observed)),
+            // A recorded change the member has not reported, once the watch's
+            // latency since its previous report has run; one held for that
+            // latency is due when it has.
+            WaitSourceKind::DirWatch => return dir_member_state(m, mounts, now),
             // The topic's generation differs from the one this member last
             // saw. A peek at the published value, never a fresh reading: an
             // unprivileged waiter must not be able to drive a free-memory
@@ -3749,6 +3821,11 @@ where
                         || port.has_room()
                 })
             }
+        };
+        if ready {
+            crate::fswatch::MemberState::Ready
+        } else {
+            crate::fswatch::MemberState::Idle
         }
     }
 
@@ -8217,12 +8294,14 @@ where
         if req_len > tairix_abi::users_admin::USERS_ADMIN_MAX_REQUEST {
             return Err(Errno::LengthOutOfRange);
         }
-        let mut req_buf = vec![0u8; req_len];
+        // The request may carry a password record, so it is wiped on every path
+        // out, a copy that faults partway included.
+        let mut req_buf = WipedBuf::new(vec![0u8; req_len]);
         self.copy_in_user(caller, req, &mut req_buf)?;
 
         // Decode fail-closed, run the engine under the caller's
         // kernel-attested identity, and capture the response before the
-        // request bytes are scrubbed (they may carry a password record).
+        // request bytes are scrubbed.
         let mut out_buf = vec![0u8; out_cap.min(crate::useradmin::USERS_ADMIN_MAX_RESPONSE)];
         let uid = caller.caps.owner().0;
         let result = match tairix_abi::users_admin::UsersAdminRequest::decode(&req_buf) {
@@ -8232,7 +8311,7 @@ where
             }
             Err(err) => Err(err),
         };
-        req_buf.zeroize();
+        drop(req_buf);
 
         let written = result?;
         // A mutating operation answers zero bytes; a list operation's
@@ -10175,6 +10254,12 @@ where
                 // For a File member, the node identity resolved from the
                 // caller's descriptor below; `NONE` for every other kind.
                 let mut member_file = FileId::NONE;
+                // A DirWatch member starts from its watcher's cursor and the
+                // mount epoch it last drained under, so a change between the
+                // arm and this add still reports.
+                let mut member_observed = 0;
+                let mut member_pacing = crate::fswatch::Pacing::default();
+                let mut member_table: Option<crate::waitset::WatchTable> = None;
                 // Resolve and owner-check the *resource* the member names
                 // against the kernel-trusted caller before recording it: a
                 // wait-set may observe only resources the caller already holds
@@ -10381,6 +10466,36 @@ where
                         }
                         member_file = stat.id;
                     }
+                    WaitSourceKind::DirWatch => {
+                        // Only a descriptor of the caller's own table that it
+                        // armed; the watch already carries the authority, so
+                        // adding the member touches no filesystem and may be
+                        // done on a loop that owes a frame.
+                        let armed = u32::try_from(id).ok().and_then(|fd| {
+                            let handle =
+                                self.aspaces.read().open_file_entry(caller.process(), fd)?;
+                            let watch = handle.armed_watch()?;
+                            // A spent watch would only ever sit idle.
+                            let at = watch.position()?;
+                            Some((
+                                watch.dir(),
+                                crate::fswatch::Pacing {
+                                    watcher: watch.watcher(),
+                                    observed: at.at,
+                                    epochs: at.epochs,
+                                    latency_ns: watch.latency_ns(),
+                                    reported_at: None,
+                                },
+                                alloc::sync::Arc::clone(watch.table()),
+                            ))
+                        });
+                        let Some((dir, pacing, table)) = armed else {
+                            return Err(Errno::NotFound);
+                        };
+                        member_file = dir;
+                        member_pacing = pacing;
+                        member_table = Some(crate::waitset::WatchTable(table));
+                    }
                     // A topic is one machine-wide value, so any process may
                     // learn that the desktop switched appearance, that the
                     // mount table moved, or that memory is short, exactly as
@@ -10396,10 +10511,19 @@ where
                         }
                     }
                 }
-                // Record the member first; only on a successful, non-
-                // duplicate add do we register the file-change watch, so a
-                // rejected add never leaks a watch registration.
-                crate::waitset::add(
+                // A File member registers with its node first: the node's
+                // current generation is its baseline, so a change after this
+                // point makes it ready and no earlier one is reported. A node
+                // on a volume nothing reports changes for is refused rather
+                // than left to park for ever, and a rejected add releases the
+                // registration so none leaks.
+                if kind == WaitSourceKind::File {
+                    let fswatch = self.fswatch.ok_or(Errno::NotFound)?;
+                    let (table, baseline) = fswatch.file_member_add(member_file)?;
+                    member_observed = baseline;
+                    member_table = Some(crate::waitset::WatchTable(table));
+                }
+                let added = crate::waitset::add(
                     caller.process().0,
                     set,
                     crate::waitset::Member {
@@ -10407,24 +10531,17 @@ where
                         id,
                         token,
                         file: member_file,
-                        observed: 0,
+                        observed: member_observed,
+                        pacing: member_pacing,
+                        table: member_table.clone(),
                     },
-                )?;
-                if kind == WaitSourceKind::File {
-                    // Registering the watch creates (or refcounts) the node's
-                    // change entry and returns its current generation as the
-                    // member's baseline, so a change after this point makes
-                    // the member ready and no earlier change is spuriously
-                    // reported.
-                    let baseline = crate::fswatch::watch_add(member_file);
-                    let _ = crate::waitset::advance_observed(
-                        caller.process().0,
-                        set,
-                        WaitSourceKind::File,
-                        id,
-                        baseline,
-                    );
+                );
+                if added.is_err() && kind == WaitSourceKind::File {
+                    if let Some(table) = &member_table {
+                        table.0.file_member_remove(member_file.node);
+                    }
                 }
+                added?;
                 if kind == WaitSourceKind::SystemNotice {
                     // Baseline on the generation in force at the add, so a
                     // member added while a topic already holds an unusual
@@ -10605,15 +10722,34 @@ where
             }
             crate::waitq::CALL_WAITQ.register(sched_task, call_deadline);
         }
-        // A File member has no per-kind wait-queue: the fswatch registry
-        // unparks this task directly when the node it watches changes. Register
-        // this task against each watched node *before* the first scan so a
-        // change in the register/park window is not lost (the deadline is
-        // still enforced through the `IRQ_WAITQ` registration above).
-        for m in &members {
-            if m.kind == WaitSourceKind::File {
-                crate::fswatch::park_add(m.file, sched_task);
+        let paced = members.iter().any(|m| m.kind == WaitSourceKind::DirWatch);
+        // File and DirWatch members wait on `FSWATCH_WAITQ` under the key of
+        // the node each watches, and a DirWatch member under the epoch key
+        // too, registered *before* the first scan so a change in the
+        // register/park window is not lost. The scan marks a node parked only
+        // while its member has nothing pending, so a storm of changes wakes
+        // this task once, not once per change. A key that cannot be recorded
+        // fails the wait rather than leaving it to park deaf to that key.
+        let epoch_key = self
+            .fswatch
+            .filter(|_| paced)
+            .map(crate::fswatch::WatchRegistry::epoch_key);
+        let node_keys = members
+            .iter()
+            .filter(|m| matches!(m.kind, WaitSourceKind::File | WaitSourceKind::DirWatch))
+            .filter_map(|m| m.table.as_ref().and_then(|t| t.0.key(m.file.node)));
+        let mut watch_keys: Vec<crate::waitq::WakeKey> = Vec::new();
+        let mut deaf = false;
+        for key in epoch_key.into_iter().chain(node_keys) {
+            if watch_keys.contains(&key) {
+                continue;
             }
+            if watch_keys.try_reserve(1).is_err() {
+                deaf = true;
+                break;
+            }
+            watch_keys.push(key);
+            crate::waitq::FSWATCH_WAITQ.register_keyed(key, sched_task, crate::waitq::NO_DEADLINE);
         }
 
         // A surface's frame obligation runs from one event wait to the
@@ -10632,6 +10768,9 @@ where
         // `(kind, id, token)` of the ready member; `id`/`kind` drive the
         // post-write IRQ-edge consume.
         let outcome: Result<(WaitSourceKind, u64, u64), Errno> = loop {
+            if deaf {
+                break Err(Errno::OutOfMemory);
+            }
             let now = self.arch.monotonic_ns(cpu);
             // A quarantined IRQ member is terminal: the runaway-interrupt
             // safety net disabled its line, so it will never fire again.
@@ -10666,15 +10805,27 @@ where
                 break Err(Errno::NotFound);
             }
             let mut ready: Option<(WaitSourceKind, u64, u64)> = None;
+            // A DirWatch change held back by its latency is due no later
+            // than this; the park below wakes for it as for the timeout.
+            let mut held_until = crate::waitq::NO_DEADLINE;
+            let mounts = if paced {
+                self.filesystem.mount_epoch()
+            } else {
+                0
+            };
             // First ready in the rotated snapshot wins. Each member's
             // readiness is the non-consuming, caller-re-checked peek of
-            // `waitset_member_ready`, so a faulting `token_out` below never
+            // `waitset_member_state`, so a faulting `token_out` below never
             // drops a delivered event and a torn-down resource simply is
             // not ready.
             for m in &members {
-                if self.waitset_member_ready(caller, m, now) {
-                    ready = Some((m.kind, m.id, m.token));
-                    break;
+                match self.waitset_member_state(caller, m, now, mounts) {
+                    crate::fswatch::MemberState::Ready => {
+                        ready = Some((m.kind, m.id, m.token));
+                        break;
+                    }
+                    crate::fswatch::MemberState::Due(at) => held_until = held_until.min(at),
+                    crate::fswatch::MemberState::Idle => {}
                 }
             }
 
@@ -10683,6 +10834,9 @@ where
             }
             if now >= deadline_ns {
                 break Err(Errno::TimedOut);
+            }
+            if paced {
+                crate::waitq::IRQ_WAITQ.register(sched_task, deadline_ns.min(held_until));
             }
 
             // Re-arm every IRQ member's line before parking: a user-space
@@ -10755,10 +10909,8 @@ where
                 }
             }
         }
-        for m in &members {
-            if m.kind == WaitSourceKind::File {
-                crate::fswatch::park_remove(m.file, sched_task);
-            }
+        for &key in &watch_keys {
+            crate::waitq::FSWATCH_WAITQ.deregister_keyed(key, sched_task);
         }
         // Re-point the one-shot at the nearest deadline any remaining waiter
         // on *any* timed wait-queue needs (or clear it) so a finished wait
@@ -10812,13 +10964,39 @@ where
                 .iter()
                 .find(|m| m.kind == WaitSourceKind::File && m.id == id)
             {
-                let generation = crate::fswatch::current_generation(m.file);
+                let generation = m
+                    .table
+                    .as_ref()
+                    .map_or(0, |table| table.0.generation(m.file.node));
                 let _ = crate::waitset::advance_observed(
                     caller.process().0,
                     set,
                     WaitSourceKind::File,
                     id,
                     generation,
+                );
+            }
+        }
+        // Consume a DirWatch winner's edge and start its latency: the next
+        // report waits for a change after this one, and no sooner than the
+        // latency from now. The drain reads whatever has been recorded by
+        // then, so advancing past a change that raced in loses nothing.
+        if kind == WaitSourceKind::DirWatch {
+            if let Some(m) = members
+                .iter()
+                .find(|m| m.kind == WaitSourceKind::DirWatch && m.id == id)
+            {
+                let mounts = self.filesystem.mount_epoch();
+                let (seq, epochs) = m.table.as_ref().map_or_else(Default::default, |table| {
+                    (table.0.journal_seq(m.file.node), table.0.epochs(mounts))
+                });
+                let _ = crate::waitset::advance_paced(
+                    caller.process().0,
+                    set,
+                    id,
+                    seq,
+                    epochs,
+                    self.arch.monotonic_ns(cpu),
                 );
             }
         }
@@ -11260,31 +11438,25 @@ where
             path,
             crate::fs::FinalLink::for_open(handle.flags),
         )?;
-        // Pack the listing into the `DirEntry` wire stream. A name the driver
-        // reports that is empty or longer than `FS_NAME_MAX` is a structural
-        // fault and fails the whole call closed (never a truncated record).
-        let mut out = Vec::new();
-        let mut rec = [0u8; DirEntry::HEADER_LEN + FS_NAME_MAX];
-        for e in &entries {
-            let entry = DirEntry {
-                kind: e.kind,
-                size: e.size,
-                allocated: e.allocated,
-                modified: e.modified,
-                id: e.id,
-                nlink: e.nlink,
-                name: e.name.as_bytes(),
-            };
-            let written = entry.encode_into(&mut rec)?;
-            out.extend_from_slice(&rec[..written]);
-        }
         // The whole listing or nothing: never truncate to fit an undersized
         // buffer (the caller grows `buf` and retries).
-        if out.len() > len {
+        let total = entries.iter().fold(0, |total: usize, e| {
+            total.saturating_add(e.wire().encoded_len())
+        });
+        if total > len {
             return Err(Errno::BufferTooSmall);
         }
-        if out.is_empty() {
+        if total == 0 {
             return Ok(0);
+        }
+        // A name the driver reports that is empty or longer than
+        // `FS_NAME_MAX` fails the whole call closed, never a truncated record.
+        // The names are decrypted user data, so the staging is wiped on drop.
+        let mut out = WipedBuf::new(filled(total, 0u8).ok_or(Errno::OutOfMemory)?);
+        let mut at = 0;
+        for e in &entries {
+            let slot = out.get_mut(at..).ok_or(Errno::OutOfRange)?;
+            at += e.wire().encode_into(slot)?;
         }
         match self.with_caller_aspace(caller, |space, physmap| {
             copy_out(space, physmap, VirtAddr::new(buf), &out)
@@ -11293,6 +11465,172 @@ where
             Some(Err(err)) => Err(copy_fault_errno(err)),
             None => Err(Errno::BadAddress),
         }
+    }
+
+    fn fs_watch(&self, caller: &CallerContext<'_>, fd: u32, latency_ns: u64) -> SyscallResult {
+        if latency_ns > DIR_WATCH_LATENCY_MAX_NS {
+            return Err(Errno::OutOfRange);
+        }
+        let fswatch = self.fswatch.ok_or(Errno::NotImplemented)?;
+        let handle = self
+            .aspaces
+            .read()
+            .open_file_entry(caller.process(), fd)
+            .ok_or(Errno::NotFound)?;
+        // Only a directory the caller opened itself: a resource or stream has
+        // no listing, and `fd_grant` never delegates a directory.
+        let path = handle.own_path().ok_or(Errno::OutOfRange)?;
+        if handle.armed_watch().is_some() {
+            return Err(Errno::AlreadyExists);
+        }
+        // Read before the path resolves, so a move while it does readies the
+        // watch at once rather than hiding in its baseline.
+        let epochs = fswatch.epochs(self.filesystem.mount_epoch());
+        // The listing's own authorisation, and the directory's identity: a
+        // watch observes no more than `fs_readdir` on the descriptor shows.
+        let found = self.filesystem.lookup_entries(
+            caller.caps.owner().0,
+            caller.caps.effective(),
+            path,
+            crate::fs::FinalLink::for_open(handle.flags),
+            &[],
+        )?;
+        if found.dir.is_none() {
+            return Err(Errno::NotImplemented);
+        }
+        let limit = self
+            .aspaces
+            .read()
+            .limits(caller.process())
+            .get(LimitKind::DirWatches)
+            .soft;
+        let watch = crate::fswatch::ArmedWatch::arm(
+            fswatch,
+            found.dir,
+            latency_ns,
+            caller.process(),
+            limit,
+            crate::fswatch::Resolved {
+                epochs,
+                children: found.children,
+            },
+        )?;
+        // A racing arm of the same description wins; this one is released.
+        handle.arm_watch(watch).map_err(|_| Errno::AlreadyExists)?;
+        Ok(0)
+    }
+
+    fn fs_watch_read(
+        &self,
+        caller: &CallerContext<'_>,
+        fd: u32,
+        buf: u64,
+        len: usize,
+    ) -> SyscallResult {
+        if len < DirChangeBatch::MIN_BUFFER {
+            return Err(Errno::BufferTooSmall);
+        }
+        let len = len.min(FS_IO_MAX);
+        let handle = self
+            .aspaces
+            .read()
+            .open_file_entry(caller.process(), fd)
+            .ok_or(Errno::NotFound)?;
+        let path = handle.own_path().ok_or(Errno::OutOfRange)?;
+        let watch = handle.armed_watch().ok_or(Errno::NotFound)?;
+        let table = watch.table();
+        // Read before the path resolves, so a move after it is the next
+        // drain's to see.
+        let epochs = table.epochs(self.filesystem.mount_epoch());
+        let last = watch.position().map_or(epochs, |at| at.epochs);
+        let last_children = watch.children();
+        // A directory's authority moved since the last drain: what the journal
+        // recorded meanwhile may be names this watcher could not have listed.
+        let drain = watch.take(
+            len - DirChangeBatch::HEADER_LEN,
+            epochs.access != last.access,
+        )?;
+        let names: Vec<&[u8]> = match &drain {
+            Some(crate::fswatch::Drain::Names { names, .. }) => {
+                collected(names.len(), names.iter()).ok_or(Errno::OutOfMemory)?
+            }
+            _ => Vec::new(),
+        };
+        // Every drain re-resolves the descriptor's path under its authority,
+        // exactly as `fs_readdir` would: what it reports is what a listing
+        // would show now, and a path that no longer reaches the watched
+        // directory — or no longer may list it — ends the watch.
+        let looked = self.filesystem.lookup_entries(
+            caller.caps.owner().0,
+            caller.caps.effective(),
+            path,
+            crate::fs::FinalLink::for_open(handle.flags),
+            &names,
+        );
+        let found = match looked {
+            Ok(found) if found.dir == watch.dir() && !table.retired() => Ok(found),
+            Ok(_) | Err(Errno::NotFound | Errno::NotADirectory | Errno::PermissionDenied) => {
+                Err(DirWatchStatus::Gone)
+            }
+            // A fault reading an entry is the directory's: it is read whole,
+            // which reports the fault, rather than every drain failing on it.
+            Err(_) => Err(DirWatchStatus::Rescan),
+        };
+        // A re-read happens after this drain, so it settles the epochs read
+        // before it whatever the directory's mounts did.
+        let reread = crate::fswatch::Resolved {
+            epochs,
+            children: last_children,
+        };
+        let (status, more, records, upto, resolved) = match (found, &drain) {
+            (Err(DirWatchStatus::Gone), _) | (_, None) => {
+                watch.spend();
+                (DirWatchStatus::Gone, false, Vec::new(), None, reread)
+            }
+            (Err(status), Some(drain)) => (status, false, Vec::new(), Some(drain.upto()), reread),
+            (Ok(found), Some(drain)) => {
+                let resolved = crate::fswatch::Resolved {
+                    epochs,
+                    children: found.children,
+                };
+                match drain {
+                    // A mount appeared or left beneath the directory: its
+                    // listing moved where no name records it.
+                    crate::fswatch::Drain::Names { upto, more, .. }
+                        if found.children == last_children =>
+                    {
+                        (
+                            DirWatchStatus::Changes,
+                            *more,
+                            found.entries,
+                            Some(*upto),
+                            resolved,
+                        )
+                    }
+                    _ => (
+                        DirWatchStatus::Rescan,
+                        false,
+                        Vec::new(),
+                        Some(drain.upto()),
+                        resolved,
+                    ),
+                }
+            }
+        };
+        let out = dir_watch_batch(status, more, &names, &records)?;
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(buf), &out)
+        }) {
+            Some(Ok(())) => {}
+            Some(Err(err)) => return Err(copy_fault_errno(err)),
+            None => return Err(Errno::BadAddress),
+        }
+        // Only what reached the caller is consumed: a refused copy leaves the
+        // changes recorded for the next drain.
+        if let Some(upto) = upto {
+            watch.commit(upto, resolved);
+        }
+        Ok(out.len() as u64)
     }
 
     fn fs_stat(
@@ -13679,6 +14017,13 @@ where
         self
     }
 
+    /// The hook-level mirror of [`KernelSyscallHandlers::with_fswatch`].
+    #[must_use]
+    pub fn with_fswatch(mut self, fswatch: &'static crate::fswatch::WatchRegistry) -> Self {
+        self.handlers = self.handlers.with_fswatch(fswatch);
+        self
+    }
+
     /// Install the users-database holder the `users_db_read` syscall
     /// serves, consuming and returning `self` (`plans/PI.md` P11).
     ///
@@ -14530,6 +14875,7 @@ mod tests {
     use tairix_abi::input::{KeyValue, Modifiers};
     use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_abi::sysinfo::CrashAccess;
+    use tairix_abi::DirEntry;
     use tairix_abi::{CapabilityId, DescriptorTable, Errno, STDIN, STDOUT, THREAD_STACK_DEFAULT};
     use tairix_caps::CapabilitySet;
     use tairix_kernel_ipc::{CallEndpoint, CallEndpointLimits, Port, RecvCall};
@@ -39050,15 +39396,16 @@ mod tests {
             token: 7,
             file: FileId::NONE,
             observed: 0,
+            pacing: crate::fswatch::Pacing::default(),
+            table: None,
         };
-        assert!(!h.waitset_member_ready(&ctx, &member, 0));
+        let ready =
+            || h.waitset_member_state(&ctx, &member, 0, 0) == crate::fswatch::MemberState::Ready;
+        assert!(!ready());
 
         let _ = h.reclaim_process_resources(ProcessId(peer_process));
         assert!(peers.ready(watcher));
-        assert!(
-            h.waitset_member_ready(&ctx, &member, 0),
-            "the exit wakes the feed"
-        );
+        assert!(ready(), "the exit wakes the feed");
         assert_eq!(
             h.peer_watch(&ctx, PeerWatchOp::Take, 0x1020, PROC_ID_LEN),
             Ok(0)
@@ -39071,10 +39418,7 @@ mod tests {
             Err(Errno::WouldBlock),
             "one exit per watch"
         );
-        assert!(
-            !h.waitset_member_ready(&ctx, &member, 0),
-            "taken, the feed is quiet"
-        );
+        assert!(!ready(), "taken, the feed is quiet");
         // A peer already gone cannot be watched: the watcher learns it is
         // dead rather than waiting on an exit that happened.
         assert_eq!(
@@ -46101,8 +46445,7 @@ mod tests {
         let rng = unseeded_rng();
         // A reserved owner of this test's own, for the same reason the
         // sibling wait-set tests use one: the registry is process-global and
-        // released by owner. The watch registry is keyed by node identity, so
-        // the watched node is this test's own too.
+        // released by owner.
         let owner = crate::test_boot::claim_task();
         aspaces
             .write()
@@ -46116,9 +46459,19 @@ mod tests {
             caps: &caps,
         };
         let file_id = tairix_abi::FileId {
-            volume: [9u8; 16],
+            volume: [0x9F; 16],
             node: owner,
         };
+        let fswatch: &'static crate::fswatch::WatchRegistry =
+            Box::leak(Box::new(crate::fswatch::WatchRegistry::new()));
+        let claim = fswatch
+            .claim(
+                file_id.volume,
+                tairix_abi::driver::filesystem::NameMatching::Exact,
+                crate::test_pressure::unpressured(),
+            )
+            .expect("claims");
+        let watch_table = Arc::clone(claim.table());
         let mut mock = RecordingFs::new();
         mock.stat = FileStat {
             kind: FileKind::Regular,
@@ -46135,7 +46488,8 @@ mod tests {
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
-        .with_filesystem(fs);
+        .with_filesystem(fs)
+        .with_fswatch(fswatch);
 
         let fd = u32::try_from(
             h.fs_open(&ctx, 0x1000, "/f".len(), OpenFlags::READ)
@@ -46157,7 +46511,7 @@ mod tests {
         // No change yet: a zero-timeout wait expires.
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x1000), Err(Errno::TimedOut));
         // The node changes: the member becomes ready and reports its token.
-        crate::fswatch::note_change(file_id);
+        watch_table.node_changed(tairix_abi::driver::filesystem::NodeId::from_raw(owner));
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x1000), Ok(0));
         let token = h
             .with_caller_aspace(&ctx, |space, physmap| {
@@ -46173,8 +46527,641 @@ mod tests {
         // Removing the member drops the watch; teardown leaves no registry
         // entry (the `fswatch` refcount returned to zero).
         assert_eq!(h.waitset_ctl(&ctx, set, WS_OP_DEL, kind, member, 0), Ok(0));
-        assert_eq!(crate::fswatch::current_generation(file_id), 0);
+        assert_eq!(watch_table.generation(owner), 0);
+        assert!(!watch_table.active(), "no node is left watched");
         assert_eq!(crate::waitset::release_owned_by(owner), 1);
+        assert_eq!(h.fs_close(&ctx, fd), Ok(0));
+        drop(claim);
+    }
+
+    /// A file on a volume nothing reports changes for cannot be watched: the
+    /// member would park for ever.
+    #[test]
+    fn waitset_file_member_on_an_untracked_volume_is_refused() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, b"/f");
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let owner = crate::test_boot::claim_task();
+        aspaces
+            .write()
+            .register(ProcessId(owner), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(owner, &[CapabilityId::FS_ACCESS], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(owner),
+            caps: &caps,
+        };
+        let mut mock = RecordingFs::new();
+        mock.stat.id = tairix_abi::FileId {
+            volume: [0x9D; 16],
+            node: owner,
+        };
+        let fs: &'static RecordingFs = Box::leak(Box::new(mock));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_filesystem(fs);
+        let fd = u32::try_from(
+            h.fs_open(&ctx, 0x1000, "/f".len(), OpenFlags::READ)
+                .expect("open"),
+        )
+        .unwrap();
+        let set = h.waitset_create(&ctx).expect("create");
+        assert_eq!(
+            h.waitset_ctl(
+                &ctx,
+                set,
+                WS_OP_ADD,
+                WaitSourceKind::File.as_u32(),
+                u64::from(fd),
+                1
+            ),
+            Err(Errno::NotFound)
+        );
+        assert_eq!(crate::waitset::release_owned_by(owner), 1);
+        assert_eq!(h.fs_close(&ctx, fd), Ok(0));
+    }
+
+    /// A caller holding `CAP_FS_ACCESS` and one user page at `0x1000`, over the
+    /// watched in-memory volume `watched_service` mounts at `/Storage/vol`.
+    struct WatchFixture {
+        owner: u64,
+        table: RwLock<CapTable>,
+        ipc: RwLock<PortRegistry>,
+        aspaces: RwLock<AddressSpaceRegistry>,
+        rng: RwLock<Box<dyn RandomReserve + Send + Sync>>,
+        irq: IrqTable,
+        ctl: UnsupportedController,
+        caps: TaskCapabilities,
+        svc: &'static crate::fs::MountedFilesystemService<
+            crate::fs::CachedFs<crate::fs::memfs::RwMockFs>,
+        >,
+        mounted:
+            &'static crate::fs::LateFilesystem<crate::fs::CachedFs<crate::fs::memfs::RwMockFs>>,
+        fswatch: &'static crate::fswatch::WatchRegistry,
+    }
+
+    impl WatchFixture {
+        /// A fixture over its own watched volume `volume`.
+        fn new(volume: [u8; 16], sink: &'static (dyn Sink + Sync)) -> Self {
+            let owner = crate::test_boot::claim_task();
+            let crate::fs::test_volume::Watched {
+                service: svc,
+                registry: fswatch,
+                mounted,
+                ..
+            } = crate::fs::test_volume::watched_service(volume);
+            let aspaces = RwLock::new(AddressSpaceRegistry::new());
+            let (space, physmap) = send_aspace(
+                MapFlags::READ | MapFlags::WRITE | MapFlags::USER,
+                b"/Storage/vol",
+            );
+            aspaces
+                .write()
+                .register(ProcessId(owner), space, physmap)
+                .expect("registration succeeds");
+            Self {
+                owner,
+                table: RwLock::new(CapTable::new()),
+                ipc: RwLock::new(PortRegistry::new()),
+                aspaces,
+                rng: unseeded_rng(),
+                irq: IrqTable::new(31),
+                ctl: UnsupportedController,
+                caps: make_caps_record(owner, &[CapabilityId::FS_ACCESS], sink),
+                svc,
+                mounted,
+                fswatch,
+            }
+        }
+
+        fn context(&self) -> CallerContext<'_> {
+            CallerContext {
+                task_id: SecTaskId(self.owner),
+                caps: &self.caps,
+            }
+        }
+
+        fn handlers<'a>(
+            &'a self,
+            sched: &'a Scheduler<TestArch>,
+            arch: &'a Arc<TestArch>,
+            sink: &'a (dyn Sink + Sync),
+        ) -> KernelSyscallHandlers<'a, TestArch> {
+            KernelSyscallHandlers::new(
+                sched,
+                &self.table,
+                arch,
+                sink,
+                &self.irq,
+                &self.ctl,
+                &self.ipc,
+                &self.aspaces,
+                &self.rng,
+            )
+            .with_filesystem(self.svc)
+            .with_fswatch(self.fswatch)
+        }
+
+        /// Another program creating `path` on the volume.
+        fn create(&self, path: &str) {
+            let caps = crate::fs::test_volume::caps();
+            self.svc
+                .open(
+                    crate::fs::test_volume::TEST_UID,
+                    &caps,
+                    path,
+                    OpenFlags::CREATE.union(OpenFlags::WRITE),
+                )
+                .expect("another program writes the directory");
+        }
+    }
+
+    /// Open the directory at `path` for `ctx`.
+    fn open_watch_dir(
+        h: &KernelSyscallHandlers<'_, TestArch>,
+        ctx: &CallerContext<'_>,
+        path: &str,
+    ) -> u32 {
+        h.with_caller_aspace(ctx, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(0x1000), path.as_bytes())
+        })
+        .expect("caller space")
+        .expect("writable");
+        u32::try_from(
+            h.fs_open(ctx, 0x1000, path.len(), OpenFlags::DIRECTORY)
+                .expect("open dir"),
+        )
+        .unwrap()
+    }
+
+    /// Arm `fd` at `latency_ns` and add it to a fresh wait-set as `token`.
+    fn watched_set(
+        h: &KernelSyscallHandlers<'_, TestArch>,
+        ctx: &CallerContext<'_>,
+        fd: u32,
+        latency_ns: u64,
+        token: u64,
+    ) -> u64 {
+        assert_eq!(h.fs_watch(ctx, fd, latency_ns), Ok(0));
+        let set = h.waitset_create(ctx).expect("create");
+        let kind = WaitSourceKind::DirWatch.as_u32();
+        assert_eq!(
+            h.waitset_ctl(ctx, set, WS_OP_ADD, kind, u64::from(fd), token),
+            Ok(0)
+        );
+        set
+    }
+
+    /// One drain of `fd`, as the bytes the caller received.
+    fn read_watch_batch(
+        h: &KernelSyscallHandlers<'_, TestArch>,
+        ctx: &CallerContext<'_>,
+        fd: u32,
+    ) -> Vec<u8> {
+        let n = h.fs_watch_read(ctx, fd, 0x1100, 0x800).expect("drains");
+        h.with_caller_aspace(ctx, |space, physmap| {
+            let mut buf = alloc::vec![0u8; usize::try_from(n).unwrap()];
+            copy_in(space, physmap, VirtAddr::new(0x1100), &mut buf).expect("readable");
+            buf
+        })
+        .expect("caller space")
+    }
+
+    /// A watch is armed once per description within its latency bound, is
+    /// drained only into a buffer that holds a header and a record, and is
+    /// released with its descriptor.
+    #[test]
+    fn fs_watch_arms_once_within_its_bounds() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = WatchFixture::new([0xB1; 16], sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        let fd = open_watch_dir(&h, &ctx, "/Storage/vol");
+        assert_eq!(
+            h.fs_watch(&ctx, fd, DIR_WATCH_LATENCY_MAX_NS + 1),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(
+            h.fs_watch_read(&ctx, fd, 0x1100, DirChangeBatch::MIN_BUFFER),
+            Err(Errno::NotFound),
+            "nothing is armed yet"
+        );
+        assert_eq!(h.fs_watch(&ctx, fd, 0), Ok(0));
+        assert_eq!(h.fs_watch(&ctx, fd, 0), Err(Errno::AlreadyExists));
+        assert_eq!(
+            h.fs_watch_read(&ctx, fd, 0x1100, DirChangeBatch::MIN_BUFFER - 1),
+            Err(Errno::BufferTooSmall)
+        );
+        assert_eq!(fx.fswatch.usage(ProcessId(fx.owner)), 1);
+        assert_eq!(h.fs_close(&ctx, fd), Ok(0));
+        assert_eq!(
+            fx.fswatch.usage(ProcessId(fx.owner)),
+            0,
+            "closing the descriptor released the watch"
+        );
+    }
+
+    /// A change another program makes is reported once and drained as the
+    /// record `fs_readdir` would give for it.
+    #[test]
+    fn a_dir_watch_reports_a_change_once_as_readdir_would_list_it() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = WatchFixture::new([0xB2; 16], sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        let fd = open_watch_dir(&h, &ctx, "/Storage/vol");
+        let set = watched_set(&h, &ctx, fd, 0, 0xD1);
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x1080), Err(Errno::TimedOut));
+
+        fx.create("/Storage/vol/new.txt");
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x1080), Ok(0));
+        let bytes = read_watch_batch(&h, &ctx, fd);
+        let batch = DirChangeBatch::decode(&bytes).expect("a valid batch");
+        assert_eq!(batch.status, DirWatchStatus::Changes);
+        let changes: Vec<_> = batch.changes().collect();
+        assert!(matches!(
+            changes.as_slice(),
+            [DirChange::Present(entry)] if entry.name == b"new.txt" && entry.kind == FileKind::Regular
+        ));
+        assert_eq!(
+            h.waitset_wait(&ctx, set, 0, 0x1080),
+            Err(Errno::TimedOut),
+            "the report consumed the edge"
+        );
+        assert_eq!(crate::waitset::release_owned_by(fx.owner), 1);
+        assert_eq!(h.fs_close(&ctx, fd), Ok(0));
+    }
+
+    /// A paced watch reports its first change at once and holds the next for
+    /// its latency.
+    #[test]
+    fn a_paced_dir_watch_holds_the_next_report_for_its_latency() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = WatchFixture::new([0xB3; 16], sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        let fd = open_watch_dir(&h, &ctx, "/Storage/vol");
+        let set = watched_set(&h, &ctx, fd, 1_000_000_000, 0xD2);
+        fx.create("/Storage/vol/first");
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x1080), Ok(0));
+        fx.create("/Storage/vol/second");
+        assert_eq!(
+            h.waitset_wait(&ctx, set, 0, 0x1080),
+            Err(Errno::TimedOut),
+            "the latency holds the next report"
+        );
+        assert_eq!(crate::waitset::release_owned_by(fx.owner), 1);
+        assert_eq!(h.fs_close(&ctx, fd), Ok(0));
+    }
+
+    /// A directory moved away from the watched path ends the watch: its
+    /// watcher learns once, and a spent watch never reports again.
+    #[test]
+    fn a_moved_directory_ends_its_watch() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = WatchFixture::new([0xB4; 16], sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        let caps = crate::fs::test_volume::caps();
+        fx.svc
+            .mkdir(crate::fs::test_volume::TEST_UID, &caps, "/Storage/vol/sub")
+            .expect("mkdir");
+        let sub = open_watch_dir(&h, &ctx, "/Storage/vol/sub");
+        let set = watched_set(&h, &ctx, sub, 0, 0xD3);
+        fx.svc
+            .rename(
+                crate::fs::test_volume::TEST_UID,
+                &caps,
+                "/Storage/vol/sub",
+                "/Storage/vol/moved",
+            )
+            .expect("rename");
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x1080), Ok(0));
+        let gone = read_watch_batch(&h, &ctx, sub);
+        assert_eq!(
+            DirChangeBatch::decode(&gone).map(|b| b.status),
+            Ok(DirWatchStatus::Gone)
+        );
+        assert_eq!(
+            h.waitset_wait(&ctx, set, 0, 0x1080),
+            Err(Errno::TimedOut),
+            "a spent watch never reports again"
+        );
+        let again = h.waitset_create(&ctx).expect("create");
+        assert_eq!(
+            h.waitset_ctl(
+                &ctx,
+                again,
+                WS_OP_ADD,
+                WaitSourceKind::DirWatch.as_u32(),
+                u64::from(sub),
+                0xD4
+            ),
+            Err(Errno::NotFound),
+            "a spent watch takes no new member"
+        );
+        assert_eq!(crate::waitset::release_owned_by(fx.owner), 2);
+        assert_eq!(h.fs_close(&ctx, sub), Ok(0));
+        assert_eq!(fx.fswatch.usage(ProcessId(fx.owner)), 0);
+    }
+
+    /// Renaming a directory above the watched one moves nothing inside it,
+    /// yet its path no longer reaches it: the watcher is woken and told.
+    #[test]
+    fn renaming_an_ancestor_tells_its_watchers_their_directory_is_gone() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = WatchFixture::new([0xB5; 16], sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        let caps = crate::fs::test_volume::caps();
+        let uid = crate::fs::test_volume::TEST_UID;
+        fx.svc.mkdir(uid, &caps, "/Storage/vol/a").expect("mkdir");
+        fx.svc.mkdir(uid, &caps, "/Storage/vol/a/b").expect("mkdir");
+        let b = open_watch_dir(&h, &ctx, "/Storage/vol/a/b");
+        let set = watched_set(&h, &ctx, b, 0, 0xD5);
+        fx.svc
+            .rename(uid, &caps, "/Storage/vol/a", "/Storage/vol/x")
+            .expect("rename");
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x1080), Ok(0));
+        assert_eq!(
+            DirChangeBatch::decode(&read_watch_batch(&h, &ctx, b)).map(|b| b.status),
+            Ok(DirWatchStatus::Gone)
+        );
+        assert_eq!(crate::waitset::release_owned_by(fx.owner), 1);
+        assert_eq!(h.fs_close(&ctx, b), Ok(0));
+    }
+
+    /// A directory whose authority changed is read whole rather than by name:
+    /// a name recorded while its watcher could not list it is never handed
+    /// out, and a watcher that may no longer list it at all is told it is
+    /// gone.
+    #[test]
+    fn a_directorys_authority_moving_drops_its_names_and_its_denied_watchers() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = WatchFixture::new([0xB6; 16], sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        let caps = crate::fs::test_volume::caps();
+        let uid = crate::fs::test_volume::TEST_UID;
+        fx.svc
+            .mkdir(uid, &caps, "/Storage/vol/shared")
+            .expect("mkdir");
+        let fd = open_watch_dir(&h, &ctx, "/Storage/vol/shared");
+        let set = watched_set(&h, &ctx, fd, 0, 0xD6);
+        fx.create("/Storage/vol/shared/secret-plan.txt");
+        fx.svc
+            .set_mode(uid, &caps, "/Storage/vol/shared", 0o755)
+            .expect("chmod");
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x1080), Ok(0));
+        let batch = read_watch_batch(&h, &ctx, fd);
+        let batch = DirChangeBatch::decode(&batch).expect("a valid batch");
+        assert_eq!(batch.status, DirWatchStatus::Rescan);
+        assert_eq!(batch.changes().count(), 0, "no recorded name is handed out");
+        fx.svc
+            .set_mode(uid, &caps, "/Storage/vol/shared", 0o000)
+            .expect("chmod");
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x1080), Ok(0));
+        assert_eq!(
+            DirChangeBatch::decode(&read_watch_batch(&h, &ctx, fd)).map(|b| b.status),
+            Ok(DirWatchStatus::Gone)
+        );
+        assert_eq!(crate::waitset::release_owned_by(fx.owner), 1);
+        assert_eq!(h.fs_close(&ctx, fd), Ok(0));
+    }
+
+    /// A folder made in one watched directory is that directory's change, by
+    /// name, and no other watcher's: nothing anywhere rescans for it.
+    #[test]
+    fn a_new_folder_is_one_directorys_named_change() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = WatchFixture::new([0xB7; 16], sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        let caps = crate::fs::test_volume::caps();
+        let uid = crate::fs::test_volume::TEST_UID;
+        fx.svc
+            .mkdir(uid, &caps, "/Storage/vol/other")
+            .expect("mkdir");
+        let root = open_watch_dir(&h, &ctx, "/Storage/vol");
+        let other = open_watch_dir(&h, &ctx, "/Storage/vol/other");
+        let root_set = watched_set(&h, &ctx, root, 0, 0xD7);
+        let other_set = watched_set(&h, &ctx, other, 0, 0xD8);
+        fx.svc
+            .mkdir(uid, &caps, "/Storage/vol/made")
+            .expect("mkdir");
+        assert_eq!(
+            h.waitset_wait(&ctx, other_set, 0, 0x1080),
+            Err(Errno::TimedOut)
+        );
+        assert_eq!(h.waitset_wait(&ctx, root_set, 0, 0x1080), Ok(0));
+        let batch = read_watch_batch(&h, &ctx, root);
+        let batch = DirChangeBatch::decode(&batch).expect("a valid batch");
+        assert_eq!(batch.status, DirWatchStatus::Changes);
+        assert!(matches!(
+            batch.changes().collect::<Vec<_>>().as_slice(),
+            [DirChange::Present(entry)] if entry.name == b"made"
+        ));
+        assert_eq!(crate::waitset::release_owned_by(fx.owner), 2);
+        assert_eq!(h.fs_close(&ctx, root), Ok(0));
+        assert_eq!(h.fs_close(&ctx, other), Ok(0));
+    }
+
+    /// A reported move is not followed by a report of every later change: the
+    /// member waits for its watcher's drain, which delivers what it held.
+    #[test]
+    fn a_reported_move_waits_for_the_drain() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = WatchFixture::new([0xB8; 16], sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        let caps = crate::fs::test_volume::caps();
+        let uid = crate::fs::test_volume::TEST_UID;
+        fx.svc.mkdir(uid, &caps, "/Storage/vol/a").expect("mkdir");
+        fx.svc
+            .mkdir(uid, &caps, "/Storage/vol/watched")
+            .expect("mkdir");
+        let fd = open_watch_dir(&h, &ctx, "/Storage/vol/watched");
+        let set = watched_set(&h, &ctx, fd, 0, 0xD9);
+        fx.svc
+            .rename(uid, &caps, "/Storage/vol/a", "/Storage/vol/b")
+            .expect("rename");
+        assert_eq!(h.waitset_wait(&ctx, set, 0, 0x1080), Ok(0));
+        fx.create("/Storage/vol/watched/later.txt");
+        assert_eq!(
+            h.waitset_wait(&ctx, set, 0, 0x1080),
+            Err(Errno::TimedOut),
+            "held until the drain"
+        );
+        let batch = read_watch_batch(&h, &ctx, fd);
+        let batch = DirChangeBatch::decode(&batch).expect("a valid batch");
+        assert_eq!(batch.status, DirWatchStatus::Changes);
+        assert!(matches!(
+            batch.changes().collect::<Vec<_>>().as_slice(),
+            [DirChange::Present(entry)] if entry.name == b"later.txt"
+        ));
+        assert_eq!(crate::waitset::release_owned_by(fx.owner), 1);
+        assert_eq!(h.fs_close(&ctx, fd), Ok(0));
+    }
+
+    /// A volume mounted beneath a watched directory moves its listing where
+    /// no name records it, so the next drain asks for the directory to be
+    /// read whole; that re-read settles the mount, and the drain after it
+    /// reports changes again.
+    #[test]
+    fn a_mount_beneath_a_watched_directory_asks_for_a_rescan() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = WatchFixture::new([0xBA; 16], sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        let fd = open_watch_dir(&h, &ctx, "/Storage/vol");
+        assert_eq!(h.fs_watch(&ctx, fd, 0), Ok(0));
+        let status = |batch: Vec<u8>| {
+            DirChangeBatch::decode(&batch)
+                .expect("a valid batch")
+                .status
+        };
+        assert_eq!(
+            status(read_watch_batch(&h, &ctx, fd)),
+            DirWatchStatus::Changes
+        );
+        let backing = crate::fs::MountBacking::new(
+            tairix_abi::driver::DriverHandle::from_raw(10).expect("handle"),
+            None,
+        );
+        fx.mounted
+            .vfs()
+            .expect("installed")
+            .mounts_write()
+            .mount(
+                crate::fs::Path::parse("/Storage/vol/usb").expect("a path"),
+                tairix_abi::driver::filesystem::MountFlags::NOSUID,
+                Some(backing),
+            )
+            .expect("mounted beneath");
+        assert_eq!(
+            status(read_watch_batch(&h, &ctx, fd)),
+            DirWatchStatus::Rescan
+        );
+        fx.create("/Storage/vol/after.txt");
+        let batch = read_watch_batch(&h, &ctx, fd);
+        let batch = DirChangeBatch::decode(&batch).expect("a valid batch");
+        assert_eq!(
+            batch.status,
+            DirWatchStatus::Changes,
+            "the re-read settled it"
+        );
+        assert!(matches!(
+            batch.changes().collect::<Vec<_>>().as_slice(),
+            [DirChange::Present(entry)] if entry.name == b"after.txt"
+        ));
+        assert_eq!(h.fs_close(&ctx, fd), Ok(0));
+    }
+
+    /// Only what reaches the caller is consumed: a drain whose copy faults
+    /// leaves every change for the next.
+    #[test]
+    fn a_drain_whose_copy_faults_consumes_nothing() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = WatchFixture::new([0xB9; 16], sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        let fd = open_watch_dir(&h, &ctx, "/Storage/vol");
+        assert_eq!(h.fs_watch(&ctx, fd, 0), Ok(0));
+        fx.create("/Storage/vol/kept.txt");
+        assert!(h.fs_watch_read(&ctx, fd, 0x7FFF_0000, 0x800).is_err());
+        let batch = read_watch_batch(&h, &ctx, fd);
+        let batch = DirChangeBatch::decode(&batch).expect("a valid batch");
+        assert!(matches!(
+            batch.changes().collect::<Vec<_>>().as_slice(),
+            [DirChange::Present(entry)] if entry.name == b"kept.txt"
+        ));
+        assert_eq!(h.fs_close(&ctx, fd), Ok(0));
+    }
+
+    /// A drain into the smallest buffer takes what fits and says more is
+    /// waiting; the next carries on from there and every change arrives once.
+    #[test]
+    fn a_drain_into_the_smallest_buffer_pages_through_every_change() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let fx = WatchFixture::new([0xBA; 16], sink);
+        let h = fx.handlers(&sched, &arch, sink);
+        let ctx = fx.context();
+        let fd = open_watch_dir(&h, &ctx, "/Storage/vol");
+        assert_eq!(h.fs_watch(&ctx, fd, 0), Ok(0));
+        let name = |i: u32| alloc::format!("file-{i}-{}", "x".repeat(90));
+        for i in 0..6 {
+            fx.create(&alloc::format!("/Storage/vol/{}", name(i)));
+        }
+        let (mut seen, mut drains) = (Vec::new(), 0);
+        loop {
+            drains += 1;
+            let n = h
+                .fs_watch_read(&ctx, fd, 0x1100, DirChangeBatch::MIN_BUFFER)
+                .expect("drains");
+            let bytes = h
+                .with_caller_aspace(&ctx, |space, physmap| {
+                    let mut buf = alloc::vec![0u8; usize::try_from(n).unwrap()];
+                    copy_in(space, physmap, VirtAddr::new(0x1100), &mut buf).expect("readable");
+                    buf
+                })
+                .expect("caller space");
+            let batch = DirChangeBatch::decode(&bytes).expect("a valid batch");
+            assert_eq!(batch.status, DirWatchStatus::Changes);
+            for change in batch.changes() {
+                if let DirChange::Present(entry) = change {
+                    seen.push(alloc::string::String::from_utf8(entry.name.to_vec()).unwrap());
+                }
+            }
+            if !batch.more {
+                break;
+            }
+        }
+        let wanted: Vec<_> = (0..6).map(name).collect();
+        assert_eq!(seen, wanted);
+        assert!(drains > 1, "the smallest buffer holds only some of them");
         assert_eq!(h.fs_close(&ctx, fd), Ok(0));
     }
 

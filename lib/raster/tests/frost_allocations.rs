@@ -7,63 +7,18 @@
 //! memory can refuse. A counting global allocator holds every shape the
 //! compositor frosts to none, on the calling thread and spread across a runner.
 
-use core::alloc::{GlobalAlloc, Layout};
-use core::cell::Cell;
 use core::ops::Range;
-use std::alloc::System;
 
+use tairix_fuzzseed::meter::{metered, Metered};
 use tairix_parallel::{JobRunner, Reversed, SERIAL};
 use tairix_raster::{BlurScratch, Frosting, Pixel, Surface};
 
-std::thread_local! {
-    // Destructor-free, so reading them never allocates and cannot recurse into
-    // the allocator; counted per thread, so the test harness's own threads
-    // never charge the measurement.
-    static ARMED: Cell<bool> = const { Cell::new(false) };
-    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
-}
-
-fn note() {
-    let _ = ARMED.try_with(|armed| {
-        if armed.get() {
-            let _ = ALLOCATIONS.try_with(|count| count.set(count.get() + 1));
-        }
-    });
-}
-
-struct Counting;
-
-// SAFETY: every method forwards to the system allocator unchanged; the only
-// added behaviour is a count kept in destructor-free thread-locals, which
-// allocates nothing and cannot affect memory safety.
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        note();
-        unsafe { System.alloc(layout) }
-    }
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { System.dealloc(ptr, layout) }
-    }
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        note();
-        unsafe { System.alloc_zeroed(layout) }
-    }
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        note();
-        unsafe { System.realloc(ptr, layout, new_size) }
-    }
-}
-
 #[global_allocator]
-static ALLOCATOR: Counting = Counting;
+static ALLOCATOR: Metered = Metered;
 
 /// How many allocations `run` makes on this thread.
 fn allocations(run: impl FnOnce()) -> usize {
-    ALLOCATIONS.with(|count| count.set(0));
-    ARMED.with(|armed| armed.set(true));
-    run();
-    ARMED.with(|armed| armed.set(false));
-    ALLOCATIONS.with(Cell::get)
+    metered(run).1.allocations
 }
 
 const SCREEN: (u32, u32) = (240, 200);

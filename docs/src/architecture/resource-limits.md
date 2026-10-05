@@ -45,9 +45,12 @@ frozen from the first release.
   govern. Today: `AddressSpaceBytes` (the `mem_map` capacity), `OpenStreams`
   (the descriptor-table capacity), `Processes` (the `spawn` fan-out),
   `StackBytes` (the per-task stack), `Threads` (the threads one process may
-  hold — see the [threads page](./threads.md)), and `PinnedMemoryBytes` (the bytes a
+  hold — see the [threads page](./threads.md)), `PinnedMemoryBytes` (the bytes a
   process may hold pinned — exempt from the compressed `ramzip` tier —
-  through `mem_pin`, `plans/STRESSTEST.md` ST2). Discriminants never move; a
+  through `mem_pin`, `plans/STRESSTEST.md` ST2), `FileLocks` (the byte-range
+  lock records it may hold — see [Advisory file locking](../filesystem/locking.md)),
+  and `DirWatches` (the directory watches it may hold — see
+  [Directory watches](../filesystem/watch.md)). Discriminants never move; a
   new resource takes the next free discriminant and bumps
   `LimitKind::COUNT`.
 - **`ResourceLimit { soft, hard }`** is the soft/hard pair, each a `u64`.
@@ -160,6 +163,12 @@ resource**, before the resource is committed, and fails closed (`AGENTS.md`
   `sysinfo limits` query reports for `pinned-memory-bytes` is the whole
   footprint while pinned and zero otherwise — the budget is only consumed
   by a live pin.
+- **`DirWatches` on `fs_watch`.** Each armed watch is charged to the arming
+  process and released when its open file description closes; a watch past
+  the soft bound is refused with `LimitExceeded` and arms nothing. The default is
+  `max(64, RAM / 2 MiB)` — a watch's kernel cost is a journal bounded at
+  32 KiB, so the figure scales the reach of a process with the machine — and
+  the live usage `sysinfo limits` reports for `dir-watches` is the count held.
 
 The remaining `LimitKind`s (`OpenStreams`, `Processes`) carry their
 soft/hard bounds and inherit correctly, but their *consuming-path*
@@ -206,7 +215,8 @@ ulimit [-a] [-H | -S] [<resource> [<value>]]
 
 `<resource>` is one of the canonical `LimitKind` names
 (`LimitKind::name`): `address-space-bytes`, `open-streams`, `processes`,
-`stack-bytes`. An unknown resource, an unknown flag, a malformed value, or a
+`stack-bytes`, `pinned-memory-bytes`, `threads`, `file-locks`,
+`dir-watches`. An unknown resource, an unknown flag, a malformed value, or a
 soft bound set above its hard ceiling is rejected without touching the
 kernel (fail closed, `AGENTS.md` §2.1/§2.9); the store is never written on a
 rejected request.

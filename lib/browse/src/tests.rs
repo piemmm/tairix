@@ -9886,13 +9886,17 @@ mod occupancy {
         assert_eq!(probes_of(&tally, "/aa-empty"), 1);
         assert_eq!(probes_of(&tally, "/bb-full"), 1);
 
-        // A fresh listing is a fresh set of entries, so the answers go with
-        // the old ones.
+        // A reload probes every folder again, but shows each previous answer
+        // meanwhile rather than blinking back to the plain folder.
+        let answered: Vec<Occupancy> = browser.entries().iter().map(Entry::occupancy).collect();
         browser.refresh().expect("refresh");
+        let shown: Vec<Occupancy> = browser.entries().iter().map(Entry::occupancy).collect();
+        assert_eq!(shown, answered);
         assert!(browser
             .entries()
             .iter()
-            .all(|entry| entry.occupancy() == Occupancy::Unprobed));
+            .filter(|entry| entry.is_directory())
+            .all(Entry::needs_occupancy_probe));
         resolve_visible(&mut browser);
         assert_eq!(probes_of(&tally, "/aa-empty"), 2);
         assert_eq!(probes_of(&tally, "/bb-full"), 2);

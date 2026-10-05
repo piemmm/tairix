@@ -1116,11 +1116,12 @@ platform floor).
   the wake source: a stable node identity `tairix_abi::FileId`
   `{volume, node}` carried on `FileStat`, a `WaitSourceKind::File`
   wait-set member keyed on it (fd-resolved, edge-triggered on a
-  per-`FileId` change generation), the `kernel/core::fswatch` registry
-  (targeted wakes, a `watchers_present` fast path so an unwatched write
-  pays only one atomic load), and the change hooks at the
-  `MountedFilesystemService` mutation choke points (write/truncate → the
-  file's id, create/unlink/rename/mkdir → the parent directory's id).
+  per-`FileId` change generation), the `kernel/core::fswatch` per-volume
+  tables (targeted wakes, an `active` fast path so an unwatched write pays
+  one atomic load), and the change hooks in the cached volume layer every
+  mounted volume's mutations pass through (write/truncate/metadata → the
+  node's id, create/unlink/rename/mkdir → the parent directory's id;
+  `docs/src/filesystem/watch.md`).
   `--pid` liveness reuses the System Information process list
   (`tairix_procinfo`); a process the caller cannot observe reads as gone
   (fail closed, documented). **Done: `sleep`** — a full self-contained store bundle

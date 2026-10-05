@@ -90,6 +90,14 @@ pub enum LimitKind {
     /// kernel heap for every other principal; live usage is its current
     /// record count.
     FileLocks = 6,
+    /// Maximum number of directory watches the process may hold armed
+    /// (`docs/src/filesystem/watch.md`).
+    ///
+    /// Each watch pins a change journal in the kernel heap for as long as it
+    /// is armed, so the bound is what stops one process's subscriptions
+    /// exhausting the heap for every other principal; live usage is its
+    /// current armed count.
+    DirWatches = 7,
 }
 
 impl LimitKind {
@@ -97,7 +105,7 @@ impl LimitKind {
     ///
     /// Equals one past the largest discriminant; a per-task limit array is
     /// sized by this constant so adding a variant grows the storage in step.
-    pub const COUNT: usize = 7;
+    pub const COUNT: usize = 8;
 
     /// Every [`LimitKind`] in discriminant order.
     ///
@@ -112,6 +120,7 @@ impl LimitKind {
         Self::PinnedMemoryBytes,
         Self::Threads,
         Self::FileLocks,
+        Self::DirWatches,
     ];
 
     /// Every [`LimitKind`] in discriminant order, paired with its canonical
@@ -129,6 +138,7 @@ impl LimitKind {
         (Self::PinnedMemoryBytes, "pinned-memory-bytes"),
         (Self::Threads, "threads"),
         (Self::FileLocks, "file-locks"),
+        (Self::DirWatches, "dir-watches"),
     ];
 
     /// Raw on-wire discriminant.
@@ -153,6 +163,7 @@ impl LimitKind {
             4 => Ok(Self::PinnedMemoryBytes),
             5 => Ok(Self::Threads),
             6 => Ok(Self::FileLocks),
+            7 => Ok(Self::DirWatches),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -302,7 +313,8 @@ mod tests {
         assert_eq!(LimitKind::PinnedMemoryBytes.as_u32(), 4);
         assert_eq!(LimitKind::Threads.as_u32(), 5);
         assert_eq!(LimitKind::FileLocks.as_u32(), 6);
-        assert_eq!(LimitKind::COUNT, 7);
+        assert_eq!(LimitKind::DirWatches.as_u32(), 7);
+        assert_eq!(LimitKind::COUNT, 8);
     }
 
     #[test]
@@ -322,6 +334,7 @@ mod tests {
     fn names_are_frozen_and_round_trip() {
         assert_eq!(LimitKind::Processes.name(), "processes");
         assert_eq!(LimitKind::Threads.name(), "threads");
+        assert_eq!(LimitKind::DirWatches.name(), "dir-watches");
         for kind in LimitKind::ALL {
             assert_eq!(LimitKind::from_name(kind.name()), Some(kind));
         }

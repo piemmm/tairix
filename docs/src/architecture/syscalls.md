@@ -179,6 +179,8 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 | 133 | `shm_map_from` | `Handle` (grant), `*const ProcId grantor`, `usize len`, `user_ptr` (len out) | `u64` (base) | `CAP_SHM` | yes |
 | 134 | `touch_inject` | `u64 seat`, `user_ptr` (frame), `len`   | `u64` (bytes) | `CAP_INPUT_INJECT` | no |
 | 135 | `touch_read`   | `u64 seat`, `user_ptr` (buf), `len`     | `u64` (bytes) | `CAP_INPUT_READ` | no    |
+| 136 | `fs_watch`     | `u32 fd`, `u64 latency_ns`              | `errno`       | `CAP_FS_ACCESS`  | no    |
+| 137 | `fs_watch_read` | `u32 fd`, `user_ptr` (buf), `len`      | `u64` (bytes) | `CAP_FS_ACCESS`  | no    |
 
 (Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
 `waitset_create`/`waitset_ctl`/`waitset_wait` — and 76–77 — `file_map`/
@@ -1372,6 +1374,24 @@ holds the filesystem's locks). This is what lets an application re-theme the
 moment the session switches appearance, a file manager re-read its places
 when a volume is attached, and a process holding rasterised glyphs give them
 back as memory tightens — each woken by the edge, none polling.
+
+It accepts a `File` member: `id` is a descriptor of the caller's own table
+naming a node on a mounted volume, ready when the node has changed since the
+member last reported — a write, truncate or metadata change to a file, or an
+entry created, removed or renamed under a directory. It is the wake `tail -f`
+follows a log and its rotation by. A descriptor on a volume that records no
+changes refuses with `NotFound`.
+
+It accepts a `DirWatch` member: `id` is a descriptor of the caller's own table
+carrying a watch armed by `fs_watch` (no. 136), ready when the watched
+directory has changes to drain or its path may now resolve differently — the
+mount table, or a directory or link on its volume, moved, or a directory's
+mode, owner or ACL changed. It is edge-triggered and paced in the kernel —
+an isolated change reports at once, a storm at most once per the latency the
+watch was armed with, the trailing report taken as the wait's one-shot
+deadline. A watch already spent (its directory gone) refuses with `NotFound`.
+Draining is `fs_watch_read` (no. 137). See
+[Directory watches](../filesystem/watch.md).
 
 `self_origin` (no. 68) is the self-directed twin of `call_peer_origin` (no.
 58): where that lets a server read the kernel-attested identity of the *peer*

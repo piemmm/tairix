@@ -148,6 +148,7 @@ pub mod sort;
 pub mod source;
 pub mod trash;
 pub mod vfs;
+pub mod watch;
 
 pub use activate::{Activation, BundleIntent};
 pub use browser::Browser;
@@ -211,6 +212,12 @@ pub use trash::{
 #[cfg(feature = "rt")]
 pub use vfs::RtLinkReader;
 pub use vfs::{LinkInfo, LinkReader, NoLinks, NoProbe, VfsDirectorySource};
+pub use watch::{
+    merge_changes, EntryChange, Placement, Took, WatchUpdate, Watches, WATCH_BUFFER_LEN,
+    WATCH_LATENCY_NS,
+};
+#[cfg(feature = "rt")]
+pub use watch::{WatchedDirectory, WatchedListing};
 
 /// Window content width of a browser view, in logical pixels at the
 /// reference density, resolved through the desktop's own scale — the one

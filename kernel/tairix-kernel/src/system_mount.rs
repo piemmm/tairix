@@ -73,6 +73,7 @@ use tairix_abi::driver::filesystem::{
 use tairix_abi::DriverHandle;
 use tairix_drv_fs_arxfs::{ARXFS, SYSTEM_VOLUME_KEY};
 use tairix_kernel_core::fs::blkmeter::VolumeIoSource;
+use tairix_kernel_core::fswatch::{ClaimRef, WatchRegistry};
 use tairix_kernel_core::{
     CachedFs, LateFilesystem, MountBacking, MountedFilesystemService, Path, SleepLock, Vfs,
     VfsError, VolumeForest,
@@ -110,13 +111,18 @@ pub static VOLUME_FOREST: VolumeForest = VolumeForest::new();
 /// the read path and every mutation (including the account-administration
 /// engine's, which shares the registered lock) flow through the same
 /// cache and its invalidation, and every volume's cache obeys the same
-/// pressure bands.
+/// pressure bands. The same passage reports every mutation to the
+/// volume's watch table, claimed from `watches` under the volume's stable id
+/// `identity`; the returned reference is what the registration releases the
+/// claim through.
 pub(crate) fn cached<F>(
     driver: F,
     volume: u64,
+    identity: [u8; 16],
     pressure: &'static MemoryPressure,
     audit: &'static (dyn Sink + Sync),
-) -> Box<dyn KernelFs>
+    watches: Option<&'static WatchRegistry>,
+) -> (Box<dyn KernelFs>, Option<ClaimRef>)
 where
     F: FilesystemRead
         + FilesystemWrite
@@ -126,6 +132,8 @@ where
         + Send
         + 'static,
 {
+    let claim =
+        watches.and_then(|watches| watches.claim(identity, driver.name_matching(), pressure));
     let cache = CachedFs::new(
         driver,
         // Budget from discovered physical RAM (the growable kernel heap's
@@ -145,7 +153,14 @@ where
     for ledger in cache.ledgers().into_iter().flatten() {
         tairix_kernel_core::memstats::MEM_STATS.register_ledger(ledger);
     }
-    Box::new(cache)
+    let reference = claim
+        .as_ref()
+        .map(tairix_kernel_core::fswatch::Claim::reference);
+    let cache = match claim {
+        Some(claim) => cache.with_watch(claim),
+        None => cache,
+    };
+    (Box::new(cache), reference)
 }
 
 /// The production `fs_*` service the dispatch hook holds from boot
@@ -359,13 +374,14 @@ pub fn install_system_mount<B: Block + 'static>(
     store: &'static DriverStoreService<B>,
     audit: &'static (dyn Sink + Sync),
     pressure: &'static MemoryPressure,
+    watches: Option<&'static WatchRegistry>,
 ) {
     // Wire the runtime volume attach/detach service with the same audit
     // sink and pressure gauge the boot mounts use; until the mount table
     // below is published its operations still fail closed. The service
     // also observes endpoint teardown, so a surprise-removed disk's
     // volume transitions the moment its serving driver dies.
-    crate::volume_service::VOLUME_SERVICE.install(audit, pressure);
+    crate::volume_service::VOLUME_SERVICE.install(audit, pressure, watches);
     tairix_kernel_core::callreg::install_vanish_observer(&crate::volume_service::VOLUME_SERVICE);
     // Locate the `/System` extent on a first window, then drop it so the
     // second, owned window is the one promoted into the `'static` mount.
@@ -418,9 +434,23 @@ pub fn install_system_mount<B: Block + 'static>(
         unavailable(audit, "already_installed");
         return;
     }
-    let driver = cached(fs, SYSTEM_MOUNT_HANDLE, pressure, audit);
+    let (driver, watch) = cached(
+        fs,
+        SYSTEM_MOUNT_HANDLE,
+        volume_uuid,
+        pressure,
+        audit,
+        watches,
+    );
     if LATE_FILESYSTEM
-        .register(system_handle, driver, "ARXFSSystem", "arxfs", volume_uuid)
+        .register(
+            system_handle,
+            driver,
+            "ARXFSSystem",
+            "arxfs",
+            volume_uuid,
+            watch,
+        )
         .is_err()
     {
         // Registered once per boot; a refusal is a logic error. The
@@ -489,18 +519,23 @@ pub fn register_writable_state(
     io: VolumeIoSource,
     audit: &'static (dyn Sink + Sync),
     pressure: &'static MemoryPressure,
+    watches: Option<&'static WatchRegistry>,
 ) -> Option<Arc<SleepLock<Box<dyn KernelFs>>>> {
     let Ok(handle) = DriverHandle::from_raw(ROOT_VOLUME_HANDLE) else {
         unavailable(audit, "writable_handle_invalid");
         return None;
     };
-    let Ok(shared) = LATE_FILESYSTEM.register(
-        handle,
-        cached(driver, ROOT_VOLUME_HANDLE, pressure, audit),
-        "ARXFSRoot",
-        "arxfs",
+    let (driver, watch) = cached(
+        driver,
+        ROOT_VOLUME_HANDLE,
         volume_uuid,
-    ) else {
+        pressure,
+        audit,
+        watches,
+    );
+    let Ok(shared) =
+        LATE_FILESYSTEM.register(handle, driver, "ARXFSRoot", "arxfs", volume_uuid, watch)
+    else {
         unavailable(audit, "writable_already_installed");
         return None;
     };

@@ -39,6 +39,8 @@ use tairix_abi::fs::{
 use tairix_abi::CapabilityId;
 use tairix_fsmeta::{AttrKey, NamespaceAccess, KEY_MAX};
 use tairix_kernel_sec::{GroupId, UserId};
+use tairix_util::secret::Wiped;
+use zeroize::Zeroize;
 
 use super::path::{parse_link_target, TargetStep, MAX_COMPONENT_LEN, MAX_PATH_COMPONENTS};
 use super::perm::{Access, Credentials, Metadata};
@@ -138,6 +140,14 @@ pub struct DelegatedEntry {
     pub info: NodeInfo,
     /// The child's name (a single component, never `.`/`..`).
     pub name: String,
+}
+
+/// A name is decrypted user data: wiped before its allocation is released, as
+/// the volume cache wipes its own copies.
+impl Drop for DelegatedEntry {
+    fn drop(&mut self) {
+        self.name.zeroize();
+    }
 }
 
 /// One node a path walk stands on, with everything the walk learned about
@@ -356,7 +366,7 @@ impl<R: FilesystemRead + FilesystemSecurity + ?Sized> MetaPolicy<R> for PerInode
         let mut sec = fs.security(node).map_err(map_driver_error)?;
         sec.uid = cred.uid.0;
         sec.gid = cred.gid.0;
-        fs.set_security(node, sec).map_err(map_driver_error)
+        fs.stamp_security(node, sec).map_err(map_driver_error)
     }
 }
 
@@ -1189,24 +1199,28 @@ impl<R: FilesystemRead + ?Sized, P: MetaPolicy<R>> DelegatedFs<'_, R, P> {
     /// * [`VfsError::NotFound`] or [`VfsError::Io`] (the latter also for a
     ///   directory entry whose on-disk name is not valid UTF-8, or for a
     ///   driver cursor that fails to advance).
-    pub fn list(
+    /// * [`VfsError::OutOfMemory`] if the listing cannot be held.
+    ///
+    /// Each entry is handed to `each` as it is read, and what it answers is
+    /// what the listing holds, so a caller that keeps another form of the
+    /// entries never holds two whole copies of the directory.
+    pub fn list<T>(
         &mut self,
         cred: &Credentials<'_>,
         components: &[String],
         final_link: FinalLink,
-    ) -> Result<Vec<DelegatedEntry>, VfsError> {
-        let (node, info, meta) = self.resolve_final(cred, components, final_link)?;
-        if info.kind != NodeKind::Directory {
-            return Err(VfsError::NotADirectory);
-        }
-        meta.authorize(cred, Access::Read)?;
+        mut each: impl FnMut(DelegatedEntry) -> T,
+    ) -> Result<Vec<T>, VfsError> {
+        let node = self.listable(cred, components, final_link)?;
 
         let mut entries = Vec::new();
-        let mut name_buf = [0u8; MAX_COMPONENT_LEN];
+        // Each name read lands here first; it is user data, wiped however the
+        // listing ends.
+        let mut name_buf = Wiped::<MAX_COMPONENT_LEN>::new();
         let mut cursor: u64 = 0;
         while let Some(entry) = self
             .fs
-            .read_dir(node, cursor, &mut name_buf)
+            .read_dir(node, cursor, &mut name_buf[..])
             .map_err(map_driver_error)?
         {
             // A cursor that does not move cannot make progress; fail the
@@ -1216,14 +1230,76 @@ impl<R: FilesystemRead + ?Sized, P: MetaPolicy<R>> DelegatedFs<'_, R, P> {
             }
             let name =
                 core::str::from_utf8(&name_buf[..entry.name_len]).map_err(|_| VfsError::Io)?;
-            entries.push(DelegatedEntry {
+            let mut owned = String::new();
+            owned
+                .try_reserve_exact(name.len())
+                .map_err(|_| VfsError::OutOfMemory)?;
+            owned.push_str(name);
+            entries.try_reserve(1).map_err(|_| VfsError::OutOfMemory)?;
+            entries.push(each(DelegatedEntry {
                 node: entry.node.raw(),
                 info: entry.info,
-                name: name.to_string(),
-            });
+                name: owned,
+            }));
             cursor = entry.next_cursor;
         }
         Ok(entries)
+    }
+
+    /// For each of `names`, the entry [`list`](Self::list) would report for
+    /// it, or [`None`] where the directory holds no such name — under the
+    /// same authorisation, with one lookup per name rather than a read of
+    /// every entry. Returns the directory's own node with them.
+    ///
+    /// # Errors
+    ///
+    /// As [`list`](Self::list).
+    pub fn lookup_entries(
+        &mut self,
+        cred: &Credentials<'_>,
+        components: &[String],
+        final_link: FinalLink,
+        names: &[&[u8]],
+    ) -> Result<(NodeId, Vec<Option<DelegatedEntry>>), VfsError> {
+        let dir = self.listable(cred, components, final_link)?;
+        let mut entries = Vec::new();
+        entries
+            .try_reserve_exact(names.len())
+            .map_err(|_| VfsError::OutOfMemory)?;
+        for &name in names {
+            let entry = match self.fs.lookup(dir, name) {
+                Ok(node) => {
+                    let info = self.fs.node_info(node).map_err(map_driver_error)?;
+                    let name = core::str::from_utf8(name).map_err(|_| VfsError::Io)?;
+                    Some(DelegatedEntry {
+                        node: node.raw(),
+                        info,
+                        name: name.to_string(),
+                    })
+                }
+                Err(DriverError::NotFound) => None,
+                Err(err) => return Err(map_driver_error(err)),
+            };
+            entries.push(entry);
+        }
+        Ok((dir, entries))
+    }
+
+    /// The directory at `components`, once the caller is authorised to list
+    /// it: the one check [`list`](Self::list) and
+    /// [`lookup_entries`](Self::lookup_entries) share.
+    fn listable(
+        &mut self,
+        cred: &Credentials<'_>,
+        components: &[String],
+        final_link: FinalLink,
+    ) -> Result<NodeId, VfsError> {
+        let (node, info, meta) = self.resolve_final(cred, components, final_link)?;
+        if info.kind != NodeKind::Directory {
+            return Err(VfsError::NotADirectory);
+        }
+        meta.authorize(cred, Access::Read)?;
+        Ok(node)
     }
 }
 
@@ -1526,10 +1602,10 @@ impl<F: FilesystemRead + FilesystemWrite + ?Sized, P: MetaPolicy<F>> DelegatedFs
         let (node, info, meta) = place.found.ok_or(VfsError::NotFound)?;
         Self::authorize_name_mutation(cred, Some(&meta))?;
         if info.kind == NodeKind::Directory {
-            let mut name_buf = [0u8; MAX_COMPONENT_LEN];
+            let mut name_buf = Wiped::<MAX_COMPONENT_LEN>::new();
             if self
                 .fs
-                .read_dir(node, 0, &mut name_buf)
+                .read_dir(node, 0, &mut name_buf[..])
                 .map_err(map_driver_error)?
                 .is_some()
             {

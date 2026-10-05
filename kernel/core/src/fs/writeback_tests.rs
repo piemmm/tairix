@@ -57,6 +57,10 @@ impl FilesystemRead for FlushSpy {
         self.inner.root()
     }
 
+    fn name_matching(&self) -> tairix_abi::driver::filesystem::NameMatching {
+        self.inner.name_matching()
+    }
+
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
         self.inner.node_info(node)
     }
@@ -188,7 +192,7 @@ fn dirty_volumes(
         .map(|n| {
             let volume = handle(n);
             mounts
-                .register(volume, FlushSpy::new(), "vol", "spy", [0u8; 16])
+                .register(volume, FlushSpy::new(), "vol", "spy", [0u8; 16], None)
                 .expect("register");
             mounts.note_writeback_due(volume, Some(first + (n - 1) * spacing));
             volume
@@ -205,7 +209,7 @@ fn a_registered_driver_is_handed_the_timer_under_its_own_handle() {
     let mounts = registry();
     let volume = handle(7);
     mounts
-        .register(volume, FlushSpy::new(), "vol", "spy", [0u8; 16])
+        .register(volume, FlushSpy::new(), "vol", "spy", [0u8; 16], None)
         .expect("register");
     assert_eq!(
         mounts
@@ -223,7 +227,7 @@ fn a_driver_registered_before_a_host_exists_is_handed_none() {
     let mounts: &'static LateFilesystem<FlushSpy> = Box::leak(Box::new(LateFilesystem::new()));
     let volume = handle(7);
     mounts
-        .register(volume, FlushSpy::new(), "vol", "spy", [0u8; 16])
+        .register(volume, FlushSpy::new(), "vol", "spy", [0u8; 16], None)
         .expect("register");
     assert_eq!(
         mounts
@@ -308,7 +312,7 @@ fn the_due_set_is_returned_in_deadline_order() {
     for (raw, deadline) in [(1u64, 3_000u64), (2, 1_000), (3, 2_000)] {
         let volume = handle(raw);
         mounts
-            .register(volume, FlushSpy::new(), "vol", "spy", [0u8; 16])
+            .register(volume, FlushSpy::new(), "vol", "spy", [0u8; 16], None)
             .expect("register");
         mounts.note_writeback_due(volume, Some(deadline));
     }
@@ -329,7 +333,7 @@ fn a_refused_publish_is_logged_and_leaves_the_due_set() {
     let mounts = registry();
     let volume = handle(4);
     mounts
-        .register(volume, FlushSpy::refusing(), "vol", "spy", [0u8; 16])
+        .register(volume, FlushSpy::refusing(), "vol", "spy", [0u8; 16], None)
         .expect("register");
     mounts.note_writeback_due(volume, Some(500));
     let audit = sink();
@@ -391,7 +395,7 @@ fn an_absurd_deadline_cannot_spell_nothing_open() {
     let mounts = registry();
     let volume = handle(1);
     mounts
-        .register(volume, FlushSpy::new(), "vol", "spy", [0u8; 16])
+        .register(volume, FlushSpy::new(), "vol", "spy", [0u8; 16], None)
         .expect("register");
     mounts.note_writeback_due(volume, Some(u64::MAX));
     assert_eq!(

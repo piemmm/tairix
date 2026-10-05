@@ -194,7 +194,7 @@ pub(crate) fn rows(
                 }
             })
         },
-        |one, other| one || other,
+        &|one, other| one || other,
     );
     (!failed).then_some(())
 }
@@ -220,13 +220,17 @@ pub(crate) fn transposed(
     }
     let per = per.max(1);
     band::for_each(runner, to, (0, per * rows), &|band, values| {
-        for (offset, line) in values.chunks_mut(rows).enumerate() {
-            let column = first + band * per + offset;
-            for (row, value) in line.iter_mut().enumerate() {
-                *value = from
-                    .get(row * columns + column)
-                    .copied()
-                    .unwrap_or_default();
+        // A source row at a time, the band's columns side by side in it
+        // rather than a whole row apart down each.
+        let start = first + band * per;
+        let lines = values.len() / rows;
+        for row in 0..rows {
+            let at = row * columns + start;
+            let across = from.get(at..at + lines).unwrap_or_default();
+            for (line, &value) in across.iter().enumerate() {
+                if let Some(slot) = values.get_mut(line * rows + row) {
+                    *slot = value;
+                }
             }
         }
     });

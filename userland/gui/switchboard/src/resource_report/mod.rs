@@ -406,6 +406,7 @@ pub(super) const fn limit_name(kind: LimitKind) -> &'static str {
         LimitKind::PinnedMemoryBytes => "Pinned memory",
         LimitKind::Threads => "Threads",
         LimitKind::FileLocks => "File locks",
+        LimitKind::DirWatches => "Folder watches",
     }
 }
 
@@ -422,7 +423,8 @@ pub(super) fn bound(kind: LimitKind, value: u64) -> String {
         LimitKind::OpenStreams
         | LimitKind::Processes
         | LimitKind::Threads
-        | LimitKind::FileLocks => value.to_string(),
+        | LimitKind::FileLocks
+        | LimitKind::DirWatches => value.to_string(),
     }
 }
 

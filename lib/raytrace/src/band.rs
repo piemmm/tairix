@@ -1,30 +1,37 @@
 //! A grid's rows, or a volume's layers, filled a band at a time across a
 //! runner.
 
-use alloc::vec::Vec;
-
 use tairix_parallel::JobRunner;
-use tairix_util::fallible;
+
+/// About how many vertices of a grid one core fills in a unit of work: well
+/// under a millisecond on a desktop core.
+const UNIT_VERTICES: usize = 8192;
+
+/// Rows of a grid `side` vertices a side one core fills in a unit of work.
+pub(crate) fn unit_rows(side: usize) -> usize {
+    (UNIT_VERTICES / side.max(1)).max(1)
+}
+
+/// `values` cut into `per`-long bands numbered from `first`; a `per` of `0`
+/// reads as `1`.
+fn numbered<T>(
+    values: &mut [T],
+    (first, per): (usize, usize),
+) -> impl Iterator<Item = (usize, &mut [T])> {
+    (first..).zip(values.chunks_mut(per.max(1)))
+}
 
 /// Visit each `per`-long band of `values` with its number, counted from
-/// `first`, spread across `runner`: on the calling thread alone when the heap
-/// will not hold the list of bands, so no band is ever left unfilled.
+/// `first`, spread across `runner`.
 pub(crate) fn for_each<T: Send>(
     runner: &dyn JobRunner,
     values: &mut [T],
-    (first, per): (usize, usize),
+    bands: (usize, usize),
     visit: &(dyn Fn(usize, &mut [T]) + Sync),
 ) {
-    let per = per.max(1);
-    let mut bands: Vec<(usize, &mut [T])> = Vec::new();
-    if fallible::reserve(&mut bands, values.len().div_ceil(per)) {
-        bands.extend((first..).zip(values.chunks_mut(per)));
-        tairix_parallel::for_each(runner, &mut bands, &|(number, band)| visit(*number, band));
-    } else {
-        for (number, band) in (first..).zip(values.chunks_mut(per)) {
-            visit(number, band);
-        }
-    }
+    tairix_parallel::for_each_drawn(runner, numbered(values, bands), &|(number, band)| {
+        visit(number, band);
+    });
 }
 
 /// Visit each band of `values` as [`for_each`] does, and join what each
@@ -33,31 +40,18 @@ pub(crate) fn for_each<T: Send>(
 pub(crate) fn fold<T: Send, R: Copy + Send>(
     runner: &dyn JobRunner,
     values: &mut [T],
-    (first, per): (usize, usize),
+    bands: (usize, usize),
     start: R,
     visit: &(dyn Fn(usize, &mut [T]) -> R + Sync),
-    join: impl Fn(R, R) -> R,
+    join: &(dyn Fn(R, R) -> R + Sync),
 ) -> R {
-    let per = per.max(1);
-    let mut bands: Vec<(usize, &mut [T], R)> = Vec::new();
-    if !fallible::reserve(&mut bands, values.len().div_ceil(per)) {
-        return (first..)
-            .zip(values.chunks_mut(per))
-            .fold(start, |joined, (number, band)| {
-                join(joined, visit(number, band))
-            });
-    }
-    bands.extend(
-        (first..)
-            .zip(values.chunks_mut(per))
-            .map(|(number, band)| (number, band, start)),
-    );
-    tairix_parallel::for_each(runner, &mut bands, &|(number, band, answer)| {
-        *answer = visit(*number, band);
-    });
-    bands
-        .iter()
-        .fold(start, |joined, &(_, _, answer)| join(joined, answer))
+    tairix_parallel::fold_drawn(
+        runner,
+        numbered(values, bands),
+        start,
+        &|(number, band)| visit(number, band),
+        join,
+    )
 }
 
 #[cfg(test)]

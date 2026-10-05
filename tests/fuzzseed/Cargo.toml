@@ -1,6 +1,6 @@
 [package]
 name = "tairix-fuzzseed"
-description = "Shared host test-support seam for the fuzz harnesses, the proptest models, and the filesystem soak: one place that picks a per-run PRNG seed (fresh entropy by default, env-pinned for replay), logs it at the start of each test, and bounds the smoke iteration count / soak budget. Test scaffolding only — never linked into TAIRiX itself."
+description = "Shared host test-support seam for the fuzz harnesses, the proptest models, and the filesystem soak: one place that picks a per-run PRNG seed (fresh entropy by default, env-pinned for replay), logs it at the start of each test, bounds the smoke iteration count / soak budget, and meters the allocator per thread. Test scaffolding only — never linked into TAIRiX itself."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

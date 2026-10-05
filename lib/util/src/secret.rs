@@ -16,8 +16,11 @@
 //!
 //! [`Wiped`] applies the same erasure to a fixed-size buffer at the end of
 //! its scope, including on an early return or an unwind, so a caller cannot
-//! grow a new exit path that forgets to erase.
+//! grow a new exit path that forgets to erase; [`WipedBuf`] does it for a
+//! heap buffer sized at run time.
 
+use alloc::vec::Vec;
+use core::mem::MaybeUninit;
 use core::ops::{Deref, DerefMut};
 use core::ptr;
 use core::sync::atomic::{compiler_fence, Ordering};
@@ -143,9 +146,78 @@ impl<const N: usize> Drop for Wiped<N> {
     }
 }
 
+/// A heap buffer erased with [`wipe`] at the end of its scope, including on
+/// an early return or an unwind: [`Wiped`] for a buffer sized at run time.
+///
+/// It is reached only as a slice, so it never grows: a buffer that grew
+/// would leave what it held in the block it outgrew, past any wipe's reach.
+/// The whole block is erased, spare capacity too, since a vector handed in
+/// truncated still holds what it was truncated from.
+#[derive(Debug)]
+pub struct WipedBuf(Vec<u8>);
+
+impl WipedBuf {
+    /// `bytes`, to be erased when dropped.
+    #[must_use]
+    pub const fn new(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    /// Erase the buffer now, rather than waiting for the end of the scope.
+    pub fn wipe(&mut self) {
+        wipe(&mut self.0);
+        wipe_with(self.0.spare_capacity_mut(), MaybeUninit::new(0));
+    }
+}
+
+impl Deref for WipedBuf {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl DerefMut for WipedBuf {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        &mut self.0
+    }
+}
+
+impl Drop for WipedBuf {
+    fn drop(&mut self) {
+        self.wipe();
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{wipe, wipe_with, Wiped};
+    use super::{wipe, wipe_with, Wiped, WipedBuf};
+
+    #[test]
+    fn a_wiped_buffer_reads_as_its_bytes_until_it_is_erased() {
+        let mut buf = WipedBuf::new(alloc::vec![0x5Au8; 37]);
+        buf[3..9].copy_from_slice(b"secret");
+        assert_eq!(&buf[3..9], b"secret");
+        assert_eq!(buf.len(), 37);
+        buf.wipe();
+        assert!(buf.iter().all(|&byte| byte == 0));
+    }
+
+    /// What a vector was truncated from is still in its block, so it is
+    /// erased with the bytes the buffer shows.
+    #[test]
+    fn a_wiped_buffer_erases_what_its_vector_was_truncated_from() {
+        let mut held = alloc::vec![0xA5u8; 32];
+        held.truncate(4);
+        let mut buf = WipedBuf::new(held);
+        buf.wipe();
+        let spare = buf.0.spare_capacity_mut();
+        assert!(spare.len() >= 28);
+        // SAFETY: the wipe just wrote every spare byte, so each is
+        // initialised, and the borrow is the buffer's own.
+        assert!(spare.iter().all(|byte| unsafe { byte.assume_init() } == 0));
+    }
 
     #[test]
     fn wipe_with_blanks_every_element_of_any_plain_type() {

@@ -150,6 +150,9 @@ struct WritableStateSink<B: Block + 'static> {
     /// The system memory-pressure gauge the writable root volume's cache
     /// samples, threaded from [`UnlockEnv`].
     pressure: &'static MemoryPressure,
+    /// The directory-watch registry the writable root volume claims its
+    /// table from.
+    watches: Option<&'static tairix_kernel_core::fswatch::WatchRegistry>,
 }
 
 impl<B: Block + 'static> WritableRootSink for WritableStateSink<B> {
@@ -234,6 +237,7 @@ impl<B: Block + 'static> WritableRootSink for WritableStateSink<B> {
             self.store.io_source(),
             self.audit,
             self.pressure,
+            self.watches,
         )
     }
 }
@@ -361,6 +365,7 @@ pub fn finish_unlock<B: Block + 'static>(
             store,
             audit,
             pressure,
+            watches: ctx.watches(),
         };
         // The unlock owns console 0 for the passphrase prompt (its
         // `GatedConsoleRead` keeps `login` parked). The moment it resolves — a
@@ -455,7 +460,7 @@ pub fn finish_unlock<B: Block + 'static>(
     // serve loop below keeps its own independent window, so the two never
     // conflict. Fail-soft and audited: a disk with no readable `/System`
     // volume simply leaves the `fs_*` syscalls failing closed.
-    install_system_mount(store, audit, pressure);
+    install_system_mount(store, audit, pressure, ctx.watches());
 
     // Become the persistent capability-gated driver-store serve loop the
     // user-space `devmgr` autoloads signed `/System` drivers through — bound

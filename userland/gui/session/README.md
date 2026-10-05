@@ -215,8 +215,7 @@ clears the selection on empty desktop) and arms the shared
 `DoubleClickTracker` under the double-click interval the user chose, so a
 second press within it activates the icon
 — the desktop can never disagree with the file manager about what a gesture
-means. Motion drives hover feedback and, on arrival from elsewhere, the
-gesture-driven re-list below. While the desktop holds the keyboard, the
+means. Motion drives hover feedback. While the desktop holds the keyboard, the
 arrows move the selection (down/up one icon, left/right one whole column),
 `Enter` activates it, and `Escape` clears it.
 
@@ -229,16 +228,14 @@ associated with is refused, stating the reason on the error stream rather
 than failing silently. Every launch rides the session's existing
 asynchronous launch path, so the compositor never blocks on one.
 
-**Re-listing is gesture-driven, never timed.** There is no
-filesystem-change notification in this system, so the desktop re-lists at
-bring-up, after a session action that could have touched the folder, and on
-pointer arrival from elsewhere — rate-limited by `RELIST_MIN_INTERVAL_NS` so
-sweeping the pointer on and off the desktop cannot turn a gesture into a
-re-listing loop. There is deliberately **no timer and no polling loop**: a
-periodically-waking desktop would keep a core busy to discover nothing. A
-re-list that actually changed the folder also refreshes the library catalog
-and the file associations (`DesktopOutcome::relisted`), so an application
-installed after bring-up is picked up without a restart.
+**The column follows its folder.** The pinboard's listing arms a directory
+watch (`docs/src/filesystem/watch.md`), so a file any program saves to,
+removes from or renames in the `Desktop` folder appears on its own: the
+listing worker drains each report and `Desktop::apply_changes` merges it in
+place, repainting only the cells it moved. The folder is read whole only at
+bring-up, on a rescan, after the session's own action, and on Refresh, which
+also re-reads the library catalog and the file associations. The file picker
+follows the folder it shows the same way.
 
 ## Fading the desktop in and out
 

@@ -1234,6 +1234,91 @@ pub fn scroll_wheel<S: DirectorySource>(
         .wheel(model, delta, scale, (bounds, shown), damage)
 }
 
+/// What the item view drew, slot by slot, captured before a listing change so
+/// that the change repaints only the slots it altered.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ShownListing {
+    slots: Vec<(Rect, Entry, bool, bool)>,
+    scroll: (u64, u64),
+}
+
+/// The item view as `browser` draws it now: each shown entry's rectangle,
+/// with whether it is selected and focused, and where the scroll range stands.
+#[must_use]
+pub fn shown_listing<S: DirectorySource>(
+    browser: &Browser<S>,
+    scale: Scale,
+    theme: &Theme,
+    viewport: Rect,
+    toolbar: ToolbarBand,
+) -> ShownListing {
+    let view = view_layout_for(browser, scale, theme, viewport, toolbar);
+    let offset = browser.scroll_offset();
+    let focus = browser.selected_index();
+    let slots = view
+        .visible_range(offset)
+        .filter_map(|index| {
+            let rect = view.item_rect(offset, index)?;
+            let entry = browser.entries().get(index)?.clone();
+            Some((
+                rect,
+                entry,
+                browser.is_selected(index),
+                focus == Some(index),
+            ))
+        })
+        .collect();
+    let model = view.scroll_model(offset);
+    ShownListing {
+        slots,
+        scroll: (model.offset(), model.range().max_offset()),
+    }
+}
+
+/// Report into `damage` what a listing change since `before` repainted: every
+/// slot whose drawn entry, selection or focus differs, every slot the view no
+/// longer fills, and the scrollbar when its range moved. Answers whether
+/// anything did, so a change entirely out of view repaints nothing.
+pub fn listing_damage<S: DirectorySource>(
+    before: &ShownListing,
+    browser: &Browser<S>,
+    scale: Scale,
+    theme: &Theme,
+    viewport: Rect,
+    toolbar: ToolbarBand,
+    damage: &mut Region,
+) -> bool {
+    let after = shown_listing(browser, scale, theme, viewport, toolbar);
+    let mut moved = false;
+    // An empty view draws its own cue across the whole item area.
+    if before.slots.is_empty() != after.slots.is_empty() {
+        let view = view_layout_for(browser, scale, theme, viewport, toolbar);
+        damage.add(view.view(browser.scroll_offset()).viewport());
+        moved = true;
+    }
+    // Both are in index order over the same layout, so slot `i` before and
+    // after sit at one rectangle unless the scroll moved, when every slot
+    // differs anyway: one pass compares them.
+    let longest = before.slots.len().max(after.slots.len());
+    for i in 0..longest {
+        let (was, now) = (before.slots.get(i), after.slots.get(i));
+        if was == now {
+            continue;
+        }
+        for slot in [was, now].into_iter().flatten() {
+            damage.add(slot.0);
+        }
+        moved = true;
+    }
+    if after.scroll != before.scroll {
+        if let Some(bar) = scrollbar_bounds(scale, theme, viewport, toolbar) {
+            damage.add(bar);
+        }
+        moved = true;
+    }
+    moved
+}
+
 /// Adjust the scroll offset so the current selection is visible, moving the
 /// least (a no-op when it already is). A caller runs this after a
 /// selection-changing key or a directory change, before it repaints.

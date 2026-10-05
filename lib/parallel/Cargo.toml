@@ -27,9 +27,10 @@ pool = ["dep:tairix-rt", "dep:tairix-abi"]
 test-util = []
 
 [dependencies]
-# The lock participants draw `for_each_drawn` pieces through, held only for the
-# draw.
-tairix-sync = { path = "../sync", version = "=0.0.0" }
+# The round a drawn dispatch gathers its pieces into on the dispatching
+# thread's stack, so a dispatch on a runner up to 32 wide allocates nothing and
+# none takes a lock.
+tairix-inline = { path = "../inline", version = "=0.0.0" }
 # The thread and futex primitives the pool is built on: a worker is a
 # `lib/rt` thread, and a parked worker waits on a futex word rather than
 # spinning.

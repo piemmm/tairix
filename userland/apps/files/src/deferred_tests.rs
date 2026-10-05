@@ -338,3 +338,51 @@ fn a_stopping_property_desk_hands_out_no_work() {
     assert!(desk.take(1).is_none());
     assert!(!desk.take_landed());
 }
+
+#[test]
+fn a_client_round_trips_through_its_number() {
+    let client = FilesClients::default().mint();
+    assert_eq!(super::FilesClient::from_number(client.number()), client);
+}
+
+#[test]
+fn a_folder_that_changed_mid_probe_is_asked_afresh() {
+    let dir = vec![String::from("Users")];
+    let folder = vec![String::from("Users"), String::from("src")];
+    let changed: alloc::collections::BTreeSet<&str> = ["src"].into_iter().collect();
+    let mut probes = Probes::new();
+    probes.ask(&folder);
+    let batch = probes.next_batch().expect("a batch");
+    probes.invalidate(&dir, &changed);
+    assert!(
+        probes.ask(&folder).1,
+        "asked again while the stale probe is still under way"
+    );
+    assert!(
+        !probes.deliver(vec![(batch[0].clone(), false)]),
+        "the stale answer is dropped"
+    );
+    assert_eq!(
+        probes.next_batch(),
+        Some(vec![folder.clone()]),
+        "and the fresh probe is the next batch"
+    );
+    probes.deliver(vec![(folder.clone(), true)]);
+    let unrelated: alloc::collections::BTreeSet<&str> = ["docs"].into_iter().collect();
+    probes.invalidate(&dir, &unrelated);
+    probes.invalidate(&folder, &changed);
+    assert_eq!(
+        probes.ask(&folder).0,
+        Probe::Ready(true),
+        "another folder's change keeps it"
+    );
+    probes.ask(&folder);
+    probes.next_batch();
+    probes.deliver(vec![(folder.clone(), true)]);
+    probes.invalidate(&dir, &changed);
+    assert_eq!(
+        probes.ask(&folder).0,
+        Probe::Pending,
+        "a held answer goes too"
+    );
+}

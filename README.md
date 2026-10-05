@@ -63,6 +63,7 @@ for filesystems, the feature section below.
 | User-mode execution (ring 3 / EL0 / U-mode) | ✓ | ✓ | ✓ | — |
 | Threads within a process (`thread_create`, futex) | ✓ | ✓ | ✓ | — |
 | Advisory byte-range file locking (`fs_lock`, description-owned) | ✓ | ✓ | ✓ | ✓ |
+| Directory change watches (`fs_watch`, kernel-paced, live listings) | ✓ | ✓ | ✓ | ✓ |
 | Multi-core software compositing (banded composite + blur) | ✓ | ✓ | ✓ | — |
 | Desktop layer surfaces (`CAP_DESKTOP_LAYER`, shaped hit test) | ✓ | ✓ | ✓ | — |
 | C-callable ABI (`abi-v1`, non-Rust) | ✓ | ✓ | ✓ | — |

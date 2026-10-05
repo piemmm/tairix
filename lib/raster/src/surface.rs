@@ -2169,6 +2169,13 @@ fn span_offsets(
     })
 }
 
+/// The band size that splits `rows` rows into `bands` bands through
+/// [`Surface::row_bands_mut`].
+#[must_use]
+pub fn band_rows(rows: usize, bands: usize) -> u32 {
+    u32::try_from(tairix_parallel::piece_len(rows, bands)).unwrap_or(u32::MAX)
+}
+
 /// One band of [`Surface::row_bands_mut`]: a contiguous block of whole surface
 /// rows, borrowed exclusively.
 ///

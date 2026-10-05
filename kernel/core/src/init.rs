@@ -49,7 +49,9 @@ use crate::dispatch_slot::AlreadyInstalledError;
 use crate::peerwatch::PeerWatch;
 use crate::procwait::{KernelProcessWait, ProcessWait};
 use crate::random::{BootReserve, RandomReserve};
-use crate::rlimit::{default_file_lock_records, default_pinned_limit_bytes, LimitSet};
+use crate::rlimit::{
+    default_dir_watches, default_file_lock_records, default_pinned_limit_bytes, LimitSet,
+};
 use crate::spawn::InitSpawnCtx;
 use crate::syscalls::{KernelDispatchHook, KernelSpawnCtx, SpawnCredential};
 
@@ -409,7 +411,8 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
             Some(translation) => spawner.with_dma_translation(translation),
             None => spawner,
         }
-        .with_mastering(state.mastering);
+        .with_mastering(state.mastering)
+        .with_watches(&state.fswatch);
         let ctx: &'static (dyn InitSpawnCtx + Sync) = Box::leak(Box::new(spawner));
         init.spawn_init(ctx);
     }
@@ -1106,6 +1109,9 @@ pub struct KernelInitSpawner<'a, A: KernelArch> {
     /// The bus mastering a driver's function follows, and a kernel service
     /// hands its own device over through.
     mastering: Option<crate::iommu::Mastering>,
+    /// The directory-watch registry the volumes the boot path mounts claim
+    /// their tables from.
+    watches: Option<&'static crate::fswatch::WatchRegistry>,
 }
 
 impl<'a, A: KernelArch> KernelInitSpawner<'a, A> {
@@ -1149,7 +1155,16 @@ impl<'a, A: KernelArch> KernelInitSpawner<'a, A> {
             tlb_shootdown,
             dma_translation: None,
             mastering: None,
+            watches: None,
         }
+    }
+
+    /// Hand the volumes the boot path mounts `watches` to claim their
+    /// directory-watch tables from.
+    #[must_use]
+    pub fn with_watches(mut self, watches: &'static crate::fswatch::WatchRegistry) -> Self {
+        self.watches = Some(watches);
+        self
     }
 
     /// Admit drivers, and serve kernel services, against the DMA translation
@@ -1591,6 +1606,10 @@ mod dispatch_loop_tests {
 impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
     fn frames(&self) -> &FrameAllocator {
         self.frames
+    }
+
+    fn watches(&self) -> Option<&'static crate::fswatch::WatchRegistry> {
+        self.watches
     }
 
     fn audit(&self) -> &(dyn Sink + Sync) {
@@ -2271,6 +2290,7 @@ fn run_phases<A: KernelArch>(
         scheduler,
         caps: RwLock::new(CapTable::new()),
         peer_watch: PeerWatch::new(),
+        fswatch: crate::fswatch::WatchRegistry::new(),
         ipc: RwLock::new(PortRegistry::new()),
         aspaces: RwLock::new(AddressSpaceRegistry::new()),
         // The kernel random output reserve boots **unseeded** over the
@@ -2303,6 +2323,7 @@ fn run_phases<A: KernelArch>(
             .set_default_limits(LimitSet::with_derived_defaults(
                 default_pinned_limit_bytes(installed_memory_bytes),
                 default_file_lock_records(installed_memory_bytes),
+                default_dir_watches(installed_memory_bytes),
             ));
     }
 
@@ -2597,6 +2618,7 @@ fn run_phases<A: KernelArch>(
         // until installed.
         .with_file_map(file_map)
         .with_peer_watch(&state.peer_watch)
+        .with_fswatch(&state.fswatch)
         // Serve the users database the boot path loaded off the mounted
         // root volume (`plans/PI.md` P11); the default `NULL_USERS_DB`
         // keeps `users_db_read` fail-closed when no root volume was
@@ -3058,6 +3080,8 @@ pub(crate) struct KernelState<A: KernelArch> {
     /// The peer-exit watches on `caps`' records, fired as each record leaves
     /// the table.
     pub(crate) peer_watch: PeerWatch,
+    /// Every volume's directory-watch table and the watches processes hold.
+    pub(crate) fswatch: crate::fswatch::WatchRegistry,
     /// Named-port registry. The `KernelDispatchHook` reads this on
     /// every `ipc_send` / `ipc_recv` to resolve the endpoint carried
     /// in the syscall against the live, kernel-owned [`PortRegistry`];

@@ -81,6 +81,10 @@ impl FilesystemRead for MockFs {
         NodeId::from_raw(ROOT)
     }
 
+    fn name_matching(&self) -> tairix_abi::driver::filesystem::NameMatching {
+        tairix_abi::driver::filesystem::NameMatching::Exact
+    }
+
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
         match node.raw() {
             ROOT | DOCS => Ok(NodeInfo {
@@ -182,6 +186,10 @@ struct BadFs;
 impl FilesystemRead for BadFs {
     fn root(&self) -> NodeId {
         NodeId::from_raw(ROOT)
+    }
+
+    fn name_matching(&self) -> tairix_abi::driver::filesystem::NameMatching {
+        tairix_abi::driver::filesystem::NameMatching::Exact
     }
 
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
@@ -364,11 +372,17 @@ fn delegated_list_of_mount_point_lists_driver_root() {
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
     let mut fs = MockFs;
     let names = vfs
-        .list_via(&admin, &p("/Storage/usb0"), &mut fs, FinalLink::Follow)
+        .list_via(
+            &admin,
+            &p("/Storage/usb0"),
+            &mut fs,
+            FinalLink::Follow,
+            |entry| entry,
+        )
         .expect("list mount root");
     let kinds: Vec<(NodeKind, String)> = names
         .into_iter()
-        .map(|entry| (entry.info.kind, entry.name))
+        .map(|mut entry| (entry.info.kind, core::mem::take(&mut entry.name)))
         .collect();
     assert_eq!(
         kinds,
@@ -386,16 +400,22 @@ fn delegated_list_of_subdir() {
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
     let mut fs = MockFs;
     let names = vfs
-        .list_via(&admin, &p("/Storage/usb0/docs"), &mut fs, FinalLink::Follow)
+        .list_via(
+            &admin,
+            &p("/Storage/usb0/docs"),
+            &mut fs,
+            FinalLink::Follow,
+            |entry| entry,
+        )
         .expect("list subdir");
     let entries: Vec<(NodeKind, u64, Time64, String)> = names
         .into_iter()
-        .map(|entry| {
+        .map(|mut entry| {
             (
                 entry.info.kind,
                 entry.info.size,
                 entry.info.times.modified,
-                entry.name,
+                core::mem::take(&mut entry.name),
             )
         })
         .collect();
@@ -463,7 +483,8 @@ fn delegated_list_of_file_is_not_a_directory() {
             &admin,
             &p("/Storage/usb0/kernel.img"),
             &mut fs,
-            FinalLink::Follow
+            FinalLink::Follow,
+            |entry| entry
         ),
         Err(VfsError::NotADirectory)
     );
@@ -537,7 +558,13 @@ fn non_utf8_directory_name_surfaces_as_io() {
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
     let mut fs = BadFs;
     assert_eq!(
-        vfs.list_via(&admin, &p("/Storage/usb0"), &mut fs, FinalLink::Follow),
+        vfs.list_via(
+            &admin,
+            &p("/Storage/usb0"),
+            &mut fs,
+            FinalLink::Follow,
+            |entry| entry
+        ),
         Err(VfsError::Io)
     );
 }
@@ -603,11 +630,17 @@ fn delegated_mkdir_then_create_inside() {
         .expect("write inside");
 
     let names = vfs
-        .list_via(&admin, &p("/Storage/usb0/sub"), &mut fs, FinalLink::Follow)
+        .list_via(
+            &admin,
+            &p("/Storage/usb0/sub"),
+            &mut fs,
+            FinalLink::Follow,
+            |entry| entry,
+        )
         .expect("list");
     let kinds: Vec<(NodeKind, String)> = names
         .into_iter()
-        .map(|entry| (entry.info.kind, entry.name))
+        .map(|mut entry| (entry.info.kind, core::mem::take(&mut entry.name)))
         .collect();
     assert_eq!(kinds, [(NodeKind::RegularFile, String::from("inner.bin"))]);
 }
@@ -1042,6 +1075,10 @@ impl FilesystemRead for SecMockFs {
         NodeId::from_raw(ROOT)
     }
 
+    fn name_matching(&self) -> tairix_abi::driver::filesystem::NameMatching {
+        tairix_abi::driver::filesystem::NameMatching::Exact
+    }
+
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
         match node.raw() {
             ROOT => Ok(NodeInfo {
@@ -1202,11 +1239,17 @@ fn secured_list_of_mount_root_lists_driver_root() {
     let mut fs = SecMockFs;
     // The driver root is 0o755, world-readable, so listing it is allowed.
     let names = vfs
-        .list_via_secured(&admin, &p("/Storage/usb0"), &mut fs, FinalLink::Follow)
+        .list_via_secured(
+            &admin,
+            &p("/Storage/usb0"),
+            &mut fs,
+            FinalLink::Follow,
+            |entry| entry,
+        )
         .expect("secured list");
     let kinds: Vec<(NodeKind, String)> = names
         .into_iter()
-        .map(|entry| (entry.info.kind, entry.name))
+        .map(|mut entry| (entry.info.kind, core::mem::take(&mut entry.name)))
         .collect();
     assert_eq!(kinds, [(NodeKind::RegularFile, String::from("secret.txt"))]);
 }
@@ -1402,6 +1445,10 @@ impl FilesystemRead for StuckCursorFs {
         NodeId::from_raw(ROOT)
     }
 
+    fn name_matching(&self) -> tairix_abi::driver::filesystem::NameMatching {
+        tairix_abi::driver::filesystem::NameMatching::Exact
+    }
+
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
         if node.raw() == ROOT {
             Ok(NodeInfo {
@@ -1461,7 +1508,13 @@ fn a_listing_whose_cursor_never_advances_fails_closed() {
     let admin = cred(ADMIN_UID, ADMIN_GID, &caps);
     let mut fs = StuckCursorFs;
     assert_eq!(
-        vfs.list_via(&admin, &p("/Storage/usb0"), &mut fs, FinalLink::Follow),
+        vfs.list_via(
+            &admin,
+            &p("/Storage/usb0"),
+            &mut fs,
+            FinalLink::Follow,
+            |entry| entry
+        ),
         Err(VfsError::Io)
     );
 }
@@ -1731,6 +1784,10 @@ impl FilesystemRead for NoLinksFs {
         NodeId::from_raw(ROOT)
     }
 
+    fn name_matching(&self) -> tairix_abi::driver::filesystem::NameMatching {
+        tairix_abi::driver::filesystem::NameMatching::Exact
+    }
+
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
         match node.raw() {
             ROOT => Ok(NodeInfo {
@@ -1891,11 +1948,11 @@ fn keeping_the_final_link_refuses_to_list_it_as_a_directory() {
     // A `NO_FOLLOW` descriptor names the link, and a link is not a
     // directory — so its target's entries are never listed in its place.
     assert_eq!(
-        vfs.list_via(&admin, &path, &mut fs, FinalLink::Keep),
+        vfs.list_via(&admin, &path, &mut fs, FinalLink::Keep, |entry| entry),
         Err(VfsError::NotADirectory)
     );
     let entries = vfs
-        .list_via(&admin, &path, &mut fs, FinalLink::Follow)
+        .list_via(&admin, &path, &mut fs, FinalLink::Follow, |entry| entry)
         .expect("following lists the target");
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].name, "leaf");
@@ -2441,6 +2498,10 @@ const REFUSING_ROOT: u64 = 1;
 impl FilesystemRead for RefusingFs {
     fn root(&self) -> NodeId {
         NodeId::from_raw(REFUSING_ROOT)
+    }
+
+    fn name_matching(&self) -> tairix_abi::driver::filesystem::NameMatching {
+        tairix_abi::driver::filesystem::NameMatching::Exact
     }
 
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {

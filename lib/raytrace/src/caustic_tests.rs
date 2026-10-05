@@ -88,6 +88,7 @@ fn laid(
         ior: 1.333,
         top: 1.0,
         flat,
+        tilt: 0.0,
         slope: 0.0,
         clear: 0.0,
         unresolved: [0.0; FINEST as usize],
@@ -791,4 +792,36 @@ fn every_pyramid_bounds_the_beams_beneath_it() {
             blocks = above;
         }
     }
+}
+
+/// A water grid's steady fall shifts every beam alike, by its size, and only
+/// how its slope varies about that fall spreads them.
+#[test]
+fn a_grids_steady_fall_is_told_apart_from_its_spread() {
+    let grid = |height: &dyn Fn(f64, f64) -> f64| {
+        let mut field = Heightfield::new(64, (0.0, 0.0), 0.25, false).expect("a grid");
+        let (((origin_x, origin_z), step), side) = (field.placing(), field.side());
+        for (start, band) in field.bands(0..side, 3) {
+            for (offset, row) in band.chunks_mut(side).enumerate() {
+                let z = origin_z + step * real(start + offset);
+                for (column, cell) in row.iter_mut().enumerate() {
+                    *cell = single(height(origin_x + step * real(column), z));
+                }
+            }
+        }
+        field.seal();
+        field
+    };
+    let falling = grid(&|x, z| 0.02 * x + 0.01 * z);
+    let (tilt, variance) = slope_spread(&falling);
+    assert!(
+        (tilt - mathf::sqrt(0.02 * 0.02 + 0.01 * 0.01)).abs() < 1e-6,
+        "{tilt}"
+    );
+    assert!(variance < 1e-9, "{variance}");
+    // Ripples on the same fall still count: a sine of slope amplitude 0.2,
+    // read across a quarter-metre step, varies by about a hundredth.
+    let rippled = grid(&|x, z| 0.02 * x + 0.05 * mathf::sin(4.0 * z));
+    let (_, variance) = slope_spread(&rippled);
+    assert!(variance > 0.008, "{variance}");
 }

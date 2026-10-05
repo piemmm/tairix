@@ -1,11 +1,9 @@
 //! The work a scene takes once it is set out, done a bounded unit at a time:
 //! each unit small enough that a caller answering a frame can stop after it.
 
-use alloc::vec::Vec;
 use core::ops::Range;
 
 use tairix_parallel::JobRunner;
-use tairix_util::fallible;
 
 use crate::grass::Lawn;
 use crate::heightfield::{apart, Heightfield, Sealing};
@@ -47,10 +45,6 @@ pub(crate) struct Fill {
 /// How much of a height grid's fill its sealing is, as a share: a seal's
 /// pass over a cell is a few comparisons where a fill's is noise or waves.
 const SEALING_SHARE: f64 = 0.05;
-
-/// About how many vertices one core fills in a unit of work: well under a
-/// millisecond of noise on a desktop core.
-const UNIT_VERTICES: usize = 8192;
 
 /// How few vertices a band of a grid should hold to be worth another core.
 const FILL_GRAIN: usize = 2048;
@@ -115,7 +109,7 @@ fn advance(
     value: &(dyn Fn(f64, f64) -> f64 + Sync),
 ) {
     let side = grid.side();
-    let unit = (UNIT_VERTICES / side.max(1)).max(1) * runner.width().max(1);
+    let unit = crate::band::unit_rows(side) * runner.width().max(1);
     let rows = *row..(*row + unit).min(side);
     *row = rows.end;
     fill_grid(grid, rows, runner, value);
@@ -130,7 +124,7 @@ fn canopy(
     value: &(dyn Fn(f64, f64) -> (f64, [u8; 4]) + Sync),
 ) {
     let side = tops.side().max(1);
-    let unit = (UNIT_VERTICES / side).max(1) * runner.width().max(1);
+    let unit = crate::band::unit_rows(side) * runner.width().max(1);
     let rows = *row..(*row + unit).min(side);
     *row = rows.end;
     let ((origin_x, origin_z), step) = tops.placing();
@@ -147,8 +141,7 @@ fn canopy(
 }
 
 /// Fill `rows` of `grid` with `value` at each vertex, the rows spread over
-/// `runner` in bands; on the calling thread alone when the heap will not
-/// hold the list of bands.
+/// `runner` in bands.
 fn fill_grid(
     grid: &mut Heightfield,
     rows: Range<usize>,
@@ -158,24 +151,15 @@ fn fill_grid(
     let side = grid.side().max(1);
     let ((origin_x, origin_z), step) = grid.placing();
     let pieces = tairix_parallel::bands(runner, rows.len(), FILL_GRAIN.div_ceil(side));
-    let per = rows.len().div_ceil(pieces.max(1)).max(1);
-    let fill_band = |(start, cells): &mut (usize, &mut [f32])| {
+    let per = tairix_parallel::piece_len(rows.len(), pieces);
+    tairix_parallel::for_each_drawn(runner, grid.bands(rows, per), &|(start, cells)| {
         for (offset, row) in cells.chunks_mut(side).enumerate() {
-            let z = origin_z + step * real(*start + offset);
+            let z = origin_z + step * real(start + offset);
             for (column, cell) in row.iter_mut().enumerate() {
                 *cell = single(value(origin_x + step * real(column), z));
             }
         }
-    };
-    let mut bands = Vec::new();
-    if pieces > 1 && fallible::reserve(&mut bands, pieces) {
-        bands.extend(grid.bands(rows, per));
-        tairix_parallel::for_each(runner, &mut bands, &fill_band);
-    } else {
-        for mut band in grid.bands(rows, per) {
-            fill_band(&mut band);
-        }
-    }
+    });
 }
 
 #[cfg(test)]

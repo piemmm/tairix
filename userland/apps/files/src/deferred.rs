@@ -33,6 +33,7 @@
 //! displace another's; a re-read of the same window supersedes its own
 //! outstanding one, since only the latest answer describes the node now.
 
+use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -61,6 +62,21 @@ impl FilesClients {
     }
 }
 
+impl FilesClient {
+    /// The number this consumer was minted as, which its watch's wait-set
+    /// token is derived from.
+    #[must_use]
+    pub const fn number(self) -> u64 {
+        self.0
+    }
+
+    /// The consumer minted as `number`, recovered from a wait-set token.
+    #[must_use]
+    pub const fn from_number(number: u64) -> Self {
+        Self(number)
+    }
+}
+
 /// What the folder cues have asked for and what has come back.
 ///
 /// Deliberately free of locks, threads, and syscalls: the embedder supplies the
@@ -76,6 +92,9 @@ pub struct Probes {
     /// Answers waiting to be drawn, each served once — the renderer latches it
     /// onto the entry, so a later ask is a genuinely fresh question.
     answers: Vec<(Vec<String>, bool)>,
+    /// Folders that changed while being probed: their answers describe them
+    /// as they were and are dropped on delivery.
+    superseded: Vec<Vec<String>>,
     /// Whether a batch has been delivered since the embedder last asked. The
     /// loop consumes it and resolves the cues, which is what turns a worker's
     /// answer into pixels: without it the answers sit here until some
@@ -93,6 +112,7 @@ impl Probes {
             wanted: Vec::new(),
             probing: Vec::new(),
             answers: Vec::new(),
+            superseded: Vec::new(),
             landed: false,
             stopping: false,
         }
@@ -122,11 +142,18 @@ impl Probes {
         if self.stopping {
             return (Probe::Pending, false);
         }
-        let known = self
-            .wanted
+        // A folder that changed while being probed is asked again: the probe
+        // under way describes it as it was.
+        let superseded = self
+            .superseded
             .iter()
-            .chain(self.probing.iter())
             .any(|path| path.as_slice() == components);
+        let known = self.wanted.iter().any(|path| path.as_slice() == components)
+            || (!superseded
+                && self
+                    .probing
+                    .iter()
+                    .any(|path| path.as_slice() == components));
         if !known {
             self.wanted.push(components.to_vec());
         }
@@ -137,6 +164,23 @@ impl Probes {
     #[must_use]
     pub fn has_work(&self) -> bool {
         !self.stopping && !self.wanted.is_empty()
+    }
+
+    /// The folders called `names` in the directory at `dir` changed: an answer
+    /// held or being probed for one describes it as it was, so it is dropped
+    /// and the folder is asked afresh. One pass over what is held, however
+    /// many folders changed.
+    pub fn invalidate(&mut self, dir: &[String], names: &BTreeSet<&str>) {
+        let changed = |path: &[String]| {
+            path.split_last()
+                .is_some_and(|(name, parent)| parent == dir && names.contains(name.as_str()))
+        };
+        self.answers.retain(|(path, _)| !changed(path));
+        for path in &self.probing {
+            if changed(path) && !self.superseded.contains(path) {
+                self.superseded.push(path.clone());
+            }
+        }
     }
 
     /// Take every outstanding probe as one batch, or `None` when there is
@@ -164,8 +208,10 @@ impl Probes {
     /// scrolled past, which on a directory of a hundred thousand entries is a
     /// capacity nothing bounds. A folder that scrolls back into view is simply
     /// asked again.
-    pub fn deliver(&mut self, answers: Vec<(Vec<String>, bool)>) -> bool {
+    pub fn deliver(&mut self, mut answers: Vec<(Vec<String>, bool)>) -> bool {
         self.probing.clear();
+        let superseded = core::mem::take(&mut self.superseded);
+        answers.retain(|(path, _)| !superseded.contains(path));
         if self.stopping || answers.is_empty() {
             self.answers.clear();
             return false;

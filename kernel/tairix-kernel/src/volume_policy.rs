@@ -27,8 +27,8 @@
 
 use tairix_abi::driver::filesystem::{
     DirEntry, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider, FilesystemRead,
-    FilesystemSecurity, FilesystemStats, FilesystemWrite, NodeId, NodeInfo, NodeKind, NodeSecurity,
-    VolumeStats, WritebackHost,
+    FilesystemSecurity, FilesystemStats, FilesystemWrite, NameMatching, NodeId, NodeInfo, NodeKind,
+    NodeSecurity, VolumeStats, WritebackHost,
 };
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::DriverError;
@@ -117,6 +117,10 @@ impl<F: FilesystemRead> FilesystemRead for GroupMappedFs<F> {
 
     fn root(&self) -> NodeId {
         self.inner.root()
+    }
+
+    fn name_matching(&self) -> NameMatching {
+        self.inner.name_matching()
     }
 
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {

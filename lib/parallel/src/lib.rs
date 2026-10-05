@@ -48,7 +48,7 @@ pub mod pool;
 #[cfg(feature = "pool")]
 pub use pool::Pool;
 
-use tairix_sync::SpinLock;
+use tairix_inline::ArrayVec;
 
 /// How many pieces of work a runner can make progress on at once, and how to
 /// run them.
@@ -139,6 +139,18 @@ pub fn bands(runner: &dyn JobRunner, units: usize, grain: usize) -> usize {
     // that can be short and a tiny job is never fragmented.
     let affordable = units / grain.max(1);
     affordable.clamp(1, width.saturating_mul(OVERSUBSCRIPTION))
+}
+
+/// How many of `units` units each of `pieces` pieces takes, the last taking
+/// what is left: at least one, so a split never makes a piece of nothing.
+#[must_use]
+pub const fn piece_len(units: usize, pieces: usize) -> usize {
+    let len = units.div_ceil(if pieces == 0 { 1 } else { pieces });
+    if len == 0 {
+        1
+    } else {
+        len
+    }
 }
 
 /// A runner that reports a width it does not have and runs its pieces
@@ -328,56 +340,161 @@ pub fn for_each<T: Send>(runner: &dyn JobRunner, items: &mut [T], visit: &(dyn F
     });
 }
 
+/// How many pieces a drawn dispatch gathers on the dispatching thread's own
+/// stack: a round of [`OVERSUBSCRIPTION`] pieces for each participant of a
+/// runner up to 32 wide, with no allocation.
+const DRAWN_BATCH: usize = 32 * OVERSUBSCRIPTION;
+
 /// Visit every piece `pieces` yields exactly once, spread across `runner`,
 /// returning when every one has been visited.
 ///
 /// For pieces a pass splits off one borrow at a time — row bands, a buffer cut
 /// into parts of differing lengths — which [`for_each`] would need gathered
-/// into a list first: each participant draws its next piece from the iterator
-/// itself, under a lock held only for the draw, so a dispatch allocates
-/// nothing. The pieces must be independent, as [`for_each`]'s elements are,
-/// and the order they are visited in is unspecified.
+/// into a list first. The dispatching thread draws them a round at a time and
+/// the runner's index `i` visits the round's piece `i`, so no participant
+/// waits on a lock and the iterator runs only where it was made. A round is
+/// four pieces for each participant, so a straggler is absorbed however wide
+/// the runner: on the dispatching thread's stack for a runner up to 32 wide,
+/// and past that from one buffer reserved for the dispatch, or a stack round
+/// at a time should that be refused. The pieces must be independent, as
+/// [`for_each`]'s elements are.
 ///
-/// Fewer than two pieces, or a runner one thread wide, are visited in order on
-/// the calling thread with no lock taken.
+/// A runner one thread wide visits the pieces in order on the calling thread.
 pub fn for_each_drawn<I>(runner: &dyn JobRunner, pieces: I, visit: &(dyn Fn(I::Item) + Sync))
 where
-    I: ExactSizeIterator + Send,
+    I: Iterator,
+    I::Item: Send,
 {
     fold_drawn(runner, pieces, (), &|piece| visit(piece), &|(), ()| ());
 }
 
 /// [`for_each_drawn`], joining what each visit answers onto `start`.
 ///
-/// The answers are joined in the order the visits finish, so `join` must give
-/// the same result in any order — a sum, a maximum. It runs under the lock the
-/// pieces are drawn through, so it should cost no more than they do.
+/// The answers are joined on the calling thread in the order the pieces were
+/// drawn, so the result is the serial fold's whichever runner visited them and
+/// in whatever order — a floating-point sum included.
 pub fn fold_drawn<I, R>(
     runner: &dyn JobRunner,
-    pieces: I,
+    mut pieces: I,
     start: R,
     visit: &(dyn Fn(I::Item) -> R + Sync),
     join: &(dyn Fn(R, R) -> R + Sync),
 ) -> R
 where
-    I: ExactSizeIterator + Send,
+    I: Iterator,
+    I::Item: Send,
     R: Copy + Send,
 {
-    let count = pieces.len();
-    if count <= 1 || runner.width() <= 1 {
+    if runner.width() <= 1 {
         return pieces.fold(start, |joined, piece| join(joined, visit(piece)));
     }
-    let shared = SpinLock::new((pieces, start));
-    runner.run(count, &|_| {
-        let drawn = shared.lock().0.next();
-        let Some(piece) = drawn else {
-            return;
-        };
-        let answer = visit(piece);
-        let mut held = shared.lock();
-        held.1 = join(held.1, answer);
-    });
-    shared.into_inner().1
+    #[cfg(feature = "pool")]
+    if let Some(mut round) = HeapRound::for_runner(runner) {
+        return fold_rounds(runner, &mut round, &mut pieces, start, visit, join);
+    }
+    let mut round = ArrayVec::<Slot<I::Item, R>, DRAWN_BATCH>::new();
+    fold_rounds(runner, &mut round, &mut pieces, start, visit, join)
+}
+
+/// A piece waiting to be visited, and what its visit answered.
+type Slot<T, R> = (Option<T>, Option<R>);
+
+/// Where a drawn dispatch holds a round of pieces while the runner visits it.
+trait Round<T> {
+    /// Fill a new round from `pieces`, answering whether it took a whole one,
+    /// so more may follow.
+    fn refill(&mut self, pieces: &mut dyn Iterator<Item = T>) -> bool;
+
+    fn slots(&mut self) -> &mut [T];
+}
+
+impl<T, const N: usize> Round<T> for ArrayVec<T, N> {
+    fn refill(&mut self, pieces: &mut dyn Iterator<Item = T>) -> bool {
+        self.clear();
+        for piece in pieces.take(N) {
+            // `take` stops at the capacity, so there is always room.
+            let _ = self.try_push(piece);
+        }
+        self.is_full()
+    }
+
+    fn slots(&mut self) -> &mut [T] {
+        self
+    }
+}
+
+/// A round for a runner wider than a stack round holds, reserved once for
+/// the dispatch.
+#[cfg(feature = "pool")]
+struct HeapRound<T> {
+    slots: alloc::vec::Vec<T>,
+    len: usize,
+}
+
+#[cfg(feature = "pool")]
+impl<T> HeapRound<T> {
+    /// The round `runner` wants, when that is more than a stack round and the
+    /// heap holds it.
+    fn for_runner(runner: &dyn JobRunner) -> Option<Self> {
+        let len = runner.width().saturating_mul(OVERSUBSCRIPTION);
+        if len <= DRAWN_BATCH {
+            return None;
+        }
+        let mut slots = alloc::vec::Vec::new();
+        slots.try_reserve_exact(len).ok()?;
+        Some(Self { slots, len })
+    }
+}
+
+#[cfg(feature = "pool")]
+impl<T> Round<T> for HeapRound<T> {
+    fn refill(&mut self, pieces: &mut dyn Iterator<Item = T>) -> bool {
+        self.slots.clear();
+        // Reserved for `len`, so filling it never moves it.
+        self.slots.extend(pieces.take(self.len));
+        self.slots.len() == self.len
+    }
+
+    fn slots(&mut self) -> &mut [T] {
+        &mut self.slots
+    }
+}
+
+/// Hand `pieces` out a round at a time, joining the answers in the order the
+/// pieces were drawn.
+fn fold_rounds<I, R>(
+    runner: &dyn JobRunner,
+    round: &mut impl Round<Slot<I::Item, R>>,
+    pieces: &mut I,
+    start: R,
+    visit: &(dyn Fn(I::Item) -> R + Sync),
+    join: &(dyn Fn(R, R) -> R + Sync),
+) -> R
+where
+    I: Iterator,
+    I::Item: Send,
+    R: Copy + Send,
+{
+    let mut joined = start;
+    loop {
+        let full = round.refill(&mut pieces.by_ref().map(|piece| (Some(piece), None)));
+        let slots = round.slots();
+        for_each(runner, slots, &|(piece, answer)| {
+            if let Some(piece) = piece.take() {
+                *answer = Some(visit(piece));
+            }
+        });
+        // A runner that skipped an index left its piece unvisited and its
+        // answer unjoined.
+        for (_, answer) in &*slots {
+            if let Some(answer) = answer {
+                joined = join(joined, *answer);
+            }
+        }
+        if !full {
+            return joined;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -551,6 +668,106 @@ mod tests {
         assert_eq!(values, [1, 1, 0, 1]);
     }
 
+    /// The order-independence proof every drawn pass leans on is only a proof
+    /// if `Reversed` really reverses drawn work: piece `0` must be visited last.
+    #[test]
+    fn a_reversed_runner_visits_drawn_pieces_last_first() {
+        let visits = core::sync::atomic::AtomicU32::new(0);
+        let mut order = [u32::MAX; 5];
+        for_each_drawn(&Reversed::new(4), order.chunks_mut(1), &|piece| {
+            piece[0] = visits.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        });
+        assert_eq!(order, [4, 3, 2, 1, 0]);
+    }
+
+    /// More pieces than one batch holds are handed out a batch at a time, and
+    /// every one is still visited exactly once.
+    #[test]
+    fn drawn_pieces_past_one_batch_are_each_visited_once() {
+        let runner = Reversed::new(4);
+        let mut counts = [0u32; 3 * DRAWN_BATCH + 5];
+        for_each_drawn(&runner, counts.chunks_mut(1), &|piece| piece[0] += 1);
+        assert!(counts.iter().all(|&count| count == 1));
+        assert_eq!(runner.dispatches(), 4);
+        assert_eq!(runner.widest(), DRAWN_BATCH);
+        let mut threaded = [0u32; 3 * DRAWN_BATCH + 5];
+        for_each_drawn(&Threaded::new(4), threaded.chunks_mut(1), &|piece| {
+            piece[0] += 1;
+        });
+        assert_eq!(counts, threaded);
+    }
+
+    /// A runner wider than a stack round holds is still handed four pieces for
+    /// each participant a round, so no round leaves its stragglers unabsorbed,
+    /// and every piece is visited once with the answers joined in order.
+    #[test]
+    fn a_wide_runner_is_handed_a_whole_round_for_every_participant() {
+        let width = 2 * DRAWN_BATCH / OVERSUBSCRIPTION;
+        let round = width * OVERSUBSCRIPTION;
+        let runner = Reversed::new(width);
+        let mut counts = alloc::vec![0u32; 2 * round + 7];
+        for_each_drawn(&runner, counts.chunks_mut(1), &|piece| piece[0] += 1);
+        assert!(counts.iter().all(|&count| count == 1));
+        assert_eq!(runner.dispatches(), 3);
+        assert_eq!(runner.widest(), round);
+        let sum = |runner: &dyn JobRunner| {
+            let mut values: alloc::vec::Vec<u64> = (0..round as u64 + 3).collect();
+            fold_drawn(
+                runner,
+                values.chunks_mut(1),
+                1u64,
+                &|piece| piece[0],
+                &|joined, next| joined.wrapping_mul(31).wrapping_add(next),
+            )
+        };
+        assert_eq!(sum(&Reversed::new(width)), sum(&SERIAL));
+    }
+
+    /// The length an iterator reports is never what decides which pieces are
+    /// visited: one that under-reports still has every piece visited.
+    #[test]
+    fn an_iterator_that_misreports_its_length_still_has_every_piece_visited() {
+        /// Claims two pieces, whatever it holds.
+        struct Understated<I>(I);
+        impl<I: Iterator> Iterator for Understated<I> {
+            type Item = I::Item;
+            fn next(&mut self) -> Option<I::Item> {
+                self.0.next()
+            }
+            fn size_hint(&self) -> (usize, Option<usize>) {
+                (2, Some(2))
+            }
+        }
+        let runners: [&dyn JobRunner; 3] = [&SERIAL, &Reversed::new(4), &Threaded::new(4)];
+        for runner in runners {
+            let mut counts = [0u32; 9];
+            for_each_drawn(runner, Understated(counts.chunks_mut(1)), &|piece| {
+                piece[0] += 1;
+            });
+            assert_eq!(counts, [1; 9]);
+        }
+    }
+
+    /// The answers are joined in the order the pieces were drawn, so a join
+    /// that cares about order — a floating-point sum does — gives the serial
+    /// result on every runner.
+    #[test]
+    fn a_fold_joins_in_the_order_the_pieces_were_drawn() {
+        let fold = |runner: &dyn JobRunner| {
+            let mut values: [u64; 150] = core::array::from_fn(|at| at as u64);
+            fold_drawn(
+                runner,
+                values.chunks_mut(1),
+                7u64,
+                &|piece| piece[0],
+                &|joined, next| joined.wrapping_mul(31).wrapping_add(next),
+            )
+        };
+        let serial = fold(&SERIAL);
+        assert_eq!(fold(&Reversed::new(4)), serial);
+        assert_eq!(fold(&Threaded::new(4)), serial);
+    }
+
     /// A runner that skips an index leaves a piece undrawn — a defect in the
     /// runner, and not memory-unsafe: nothing of it is ever handed out.
     #[test]
@@ -593,6 +810,15 @@ mod tests {
     #[test]
     fn a_zero_grain_reads_as_one_unit_per_piece() {
         assert_eq!(bands(&Reversed::new(2), 3, 0), 3);
+    }
+
+    #[test]
+    fn a_piece_takes_its_share_rounded_up_and_never_nothing() {
+        assert_eq!(piece_len(10, 3), 4);
+        assert_eq!(piece_len(9, 3), 3);
+        assert_eq!(piece_len(0, 3), 1);
+        assert_eq!(piece_len(5, 0), 5);
+        assert_eq!(piece_len(usize::MAX, 1), usize::MAX);
     }
 
     /// A runner claiming an absurd width must not overflow the bound.

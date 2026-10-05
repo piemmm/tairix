@@ -104,6 +104,12 @@ pub trait InitSpawnCtx {
     /// frames the image's pages are mapped to.
     fn frames(&self) -> &FrameAllocator;
 
+    /// The directory-watch registry the volumes the boot path mounts claim
+    /// their tables from; [`None`] leaves every volume unwatched.
+    fn watches(&self) -> Option<&'static crate::fswatch::WatchRegistry> {
+        None
+    }
+
     /// The boot audit sink the build path records `ProcessSpawn*` events
     /// through.
     fn audit(&self) -> &(dyn Sink + Sync);

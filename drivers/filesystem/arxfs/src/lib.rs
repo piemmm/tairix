@@ -55,8 +55,8 @@ use alloc::vec::Vec;
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
     DirEntry, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider, FilesystemRead,
-    FilesystemSecurity, FilesystemStats, FilesystemWrite, NodeId, NodeInfo, NodeKind, NodeTimes,
-    VolumeStats, WritebackHost,
+    FilesystemSecurity, FilesystemStats, FilesystemWrite, NameMatching, NodeId, NodeInfo, NodeKind,
+    NodeTimes, VolumeStats, WritebackHost,
 };
 pub use tairix_abi::driver::filesystem::{
     NodeSecurity as Security, SecurityAcl as AclEntry, SecuritySubject as AclSubject,
@@ -4898,6 +4898,10 @@ fn random_uuid(entropy: &mut dyn EntropySource) -> Result<u128, DriverError> {
 impl<B: Block> FilesystemRead for ARXFS<B> {
     fn root(&self) -> NodeId {
         NodeId::from_raw(u64::from(ROOT_INO))
+    }
+
+    fn name_matching(&self) -> NameMatching {
+        NameMatching::Exact
     }
 
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {

@@ -34,10 +34,16 @@ fn mkdir_creates_nested_directories() {
         .expect("mkdir a/b");
 
     let names: Vec<(NodeKind, String)> = vfs
-        .list_via_secured(&owner, &vol_path("a"), &mut fs, FinalLink::Follow)
+        .list_via_secured(
+            &owner,
+            &vol_path("a"),
+            &mut fs,
+            FinalLink::Follow,
+            |entry| entry,
+        )
         .expect("list a")
         .into_iter()
-        .map(|entry| (entry.info.kind, entry.name))
+        .map(|mut entry| (entry.info.kind, core::mem::take(&mut entry.name)))
         .collect();
     assert_eq!(names, [(NodeKind::Directory, String::from("b"))]);
 }

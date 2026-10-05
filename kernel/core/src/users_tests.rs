@@ -66,6 +66,10 @@ impl FilesystemRead for MockRoot {
         NodeId::from_raw(ROOT)
     }
 
+    fn name_matching(&self) -> tairix_abi::driver::filesystem::NameMatching {
+        tairix_abi::driver::filesystem::NameMatching::Exact
+    }
+
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
         match node.raw() {
             ROOT | SYSTEM | SECURITY => Ok(NodeInfo {

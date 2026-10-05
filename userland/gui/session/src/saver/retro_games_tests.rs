@@ -528,3 +528,22 @@ fn a_draw_stays_within_its_bounds() {
         );
     }
 }
+
+/// A runner wide enough is handed as many bands as a large paint is worth,
+/// past the sixty-four a fixed scratch once held it to, and paints what one
+/// thread does.
+#[test]
+fn a_wide_runner_splits_a_large_paint_as_finely_as_it_is_worth() {
+    let size = (3840, 2160);
+    let new = || {
+        RetroGames::new(size, Scale::ONE, (false, RetroGamesOptions::default()), 7)
+            .expect("a scene")
+    };
+    let mut one = Surface::new(size.0, size.1).expect("a surface");
+    new().paint(&mut one, &SERIAL);
+    let wide = Reversed::new(32);
+    let mut split = Surface::new(size.0, size.1).expect("a surface");
+    new().paint(&mut split, &wide);
+    assert!(wide.widest() > 64, "{}", wide.widest());
+    assert_eq!(difference(&split, &one), None);
+}

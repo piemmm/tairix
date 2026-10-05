@@ -103,6 +103,17 @@ pub trait DirectorySource {
         self.list(components)
     }
 
+    /// Whether the listing this source serves for `components` follows the
+    /// directory, reporting each change made there: an embedder that has just
+    /// changed it shows the change as it is reported rather than reading the
+    /// directory again.
+    ///
+    /// The default is that it does not, which is right for a source that only
+    /// reads.
+    fn follows(&self, _components: &[String]) -> bool {
+        false
+    }
+
     /// Whether the directory named by `components` holds at least one child.
     ///
     /// This answers the one question a listing cannot: no VFS surface reports

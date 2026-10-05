@@ -12,6 +12,7 @@
 use alloc::vec::Vec;
 use core::f64::consts::{FRAC_PI_2, PI, TAU};
 
+use tairix_parallel::JobRunner;
 use tairix_util::{fallible, mathf};
 
 use super::architecture::Aqueduct;
@@ -199,11 +200,11 @@ pub(super) fn ground(
     // larger shape, and a coarser grain its geometry does not share would
     // light as if it did.
     stage.material(
-        Material::new(Pigment::Ground(ground), Finish::Ground).with_relief(Relief::Grain {
-            depth: 0.14,
-            scale: 14.0,
-            seed: dice.seed(),
-        }),
+        Material::new(Pigment::Ground(ground), Finish::Ground).with_relief(Relief::grain(
+            0.06,
+            14.0,
+            dice.seed(),
+        )),
     )
 }
 
@@ -414,6 +415,7 @@ impl Scheme {
         &self,
         dice: &mut Dice,
         survey: &Survey<'_>,
+        runner: &dyn JobRunner,
     ) -> Option<(Option<Vantage>, Siting)> {
         let vantage = match *self {
             Self::Set(ref set) => {
@@ -482,12 +484,12 @@ impl Scheme {
                 let rise = dice.range(1.6, 3.0);
                 overlook(survey, dice, rise)
             }),
-            Self::Stream { .. } => stream_vantage(survey, dice).unwrap_or_else(|| {
+            Self::Stream { .. } => stream_vantage(survey, dice, runner).unwrap_or_else(|| {
                 let rise = dice.range(1.6, 3.0);
                 overlook(survey, dice, rise)
             }),
             Self::Aqueduct(ref aqueduct) => aqueduct.site(survey, dice),
-            Self::Sculpture(grounds) => return grounds.scheme().site(dice, survey),
+            Self::Sculpture(grounds) => return grounds.scheme().site(dice, survey, runner),
         };
         let mut siting = Siting::ahead(&vantage);
         let paths = match self {
@@ -1471,7 +1473,7 @@ fn meadow_scene(stage: &mut Stage, dice: &mut Dice, land: &Land, vantage: Vantag
     ])?;
     let grove = Grove::new(stage, dice, (kinds, season), Stand::Open)?;
     let eye = vantage.eye;
-    stage.claim((eye.x, eye.z), 4.0)?;
+    stage.keep_open((eye.x, eye.z), 4.0)?;
     let grassland = Grassland {
         fallen: grove
             .of(kinds[0])
@@ -1704,7 +1706,7 @@ fn forest_scene(
             .and_then(|grown| Fallen::from(&grown, season, 1.8)),
         ..plants::grassland(dice, Character::Meadow, season)
     };
-    stage.claim((vantage.eye.x, vantage.eye.z), 2.0)?;
+    stage.keep_open((vantage.eye.x, vantage.eye.z), 2.0)?;
     let deadfall = deadfall(stage, dice, (young, season), forest.deadfall)?;
     stage.sow(Wood {
         grove,
@@ -1893,7 +1895,7 @@ fn alpine_scene(
         )
     };
     let grove = Grove::new(stage, dice, (kinds, season), Stand::Close)?;
-    stage.claim((vantage.eye.x, vantage.eye.z), 5.0)?;
+    stage.keep_open((vantage.eye.x, vantage.eye.z), 5.0)?;
     let count = dice.count(30, 70);
     strew(
         stage,
@@ -2107,7 +2109,7 @@ fn coast_scene(
     (vantage, centre, out): (Vantage, (f64, f64), f64),
 ) -> Option<Look> {
     let eye = vantage.eye;
-    stage.claim((eye.x, eye.z), 3.0)?;
+    stage.keep_open((eye.x, eye.z), 3.0)?;
     let weather = weather::outdoors(stage, dice, &COAST, vantage.heading)?;
     ocean(stage, dice, out)?;
     let count = dice.count(20, 50);
@@ -2435,7 +2437,7 @@ fn desert_scene(
     land: &Land,
     (vantage, dunes): (Vantage, bool),
 ) -> Option<Look> {
-    stage.claim((vantage.eye.x, vantage.eye.z), 4.0)?;
+    stage.keep_open((vantage.eye.x, vantage.eye.z), 4.0)?;
     if dunes {
         erg(stage, dice, land, &vantage)?;
     } else {
@@ -2659,14 +2661,10 @@ pub(super) fn winter(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
                 foam: None,
             },
         )
-        .with_relief(Relief::Grain {
-            depth: 0.012,
-            scale: 0.8,
-            seed: dice.seed(),
-        }),
+        .with_relief(Relief::grain(0.005, 0.8, dice.seed())),
     )?;
     let build = lay(stage, plan, material, Some(ice))?;
-    stage.claim((0.0, 0.0), 1.6 * pond)?;
+    stage.keep_open((0.0, 0.0), 1.6 * pond)?;
     Some(Composed::Landed(Landing {
         build,
         scheme: Scheme::Winter { pond },
@@ -2687,7 +2685,7 @@ fn winter_scene(
         Stand::Close,
     )?;
     let eye = vantage.eye;
-    stage.claim((eye.x, eye.z), 3.0)?;
+    stage.keep_open((eye.x, eye.z), 3.0)?;
     // Trees crowd the banks, never the ice.
     let woodland = Woodland {
         cover: 0.7,
@@ -2736,13 +2734,11 @@ fn winter_scene(
 
 /// A snowman at `base`, looking toward `facing`.
 fn snowman(stage: &mut Stage, dice: &mut Dice, base: Vec3, facing: f64) -> Option<()> {
-    let snow = stage.material(
-        Material::new(Pigment::Solid(rgb(0xF4_F6_FA)), Finish::Matte).with_relief(Relief::Grain {
-            depth: 0.25,
-            scale: 8.0,
-            seed: dice.seed(),
-        }),
-    )?;
+    let snow =
+        stage.material(
+            Material::new(Pigment::Solid(rgb(0xF4_F6_FA)), Finish::Matte)
+                .with_relief(Relief::grain(0.105, 8.0, dice.seed())),
+        )?;
     stage.claim((base.x, base.z), 0.6)?;
     let mut level = base.y - 0.1;
     let mut head = Vec3::ZERO;
@@ -2813,11 +2809,7 @@ pub(super) fn lagoon(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
             },
             Finish::Coated { roughness: 0.7 },
         )
-        .with_relief(Relief::Grain {
-            depth: 0.18,
-            scale: 9.0,
-            seed: dice.seed(),
-        }),
+        .with_relief(Relief::grain(0.075, 9.0, dice.seed())),
     )?;
     pillars(stage, dice, depth, stone)?;
     if dice.chance(0.6) {
@@ -3105,7 +3097,7 @@ fn terrace_vantage(survey: &Survey<'_>, dice: &mut Dice, terrace: f64, rise: f64
 }
 
 fn canyon_scene(stage: &mut Stage, dice: &mut Dice, land: &Land, vantage: Vantage) -> Option<Look> {
-    stage.claim((vantage.eye.x, vantage.eye.z), 4.0)?;
+    stage.keep_open((vantage.eye.x, vantage.eye.z), 4.0)?;
     let count = dice.count(40, 90);
     strew(
         stage,
@@ -3235,7 +3227,7 @@ fn valley_scene(stage: &mut Stage, dice: &mut Dice, land: &Land, vantage: Vantag
     };
     let grove = Grove::new(stage, dice, (kinds, season), Stand::Open)?;
     let eye = vantage.eye;
-    stage.claim((eye.x, eye.z), 4.0)?;
+    stage.keep_open((eye.x, eye.z), 4.0)?;
     let grassland = Grassland {
         fallen: grove
             .first()
@@ -3429,75 +3421,88 @@ fn brook_water(stage: &mut Stage, dice: &mut Dice) -> Option<usize> {
 /// on the margin its low water leaves bare — on the bar across from the
 /// deep water most often — looking up or down along it toward a ledge or a
 /// riffle where one lies ahead; `None` when the land has no such stream.
-fn stream_vantage(survey: &Survey<'_>, dice: &mut Dice) -> Option<Vantage> {
+fn stream_vantage(survey: &Survey<'_>, dice: &mut Dice, runner: &dyn JobRunner) -> Option<Vantage> {
     let rivers = survey.rivers();
     let form = survey.form()?;
     let (centre, reach) = survey.extent();
     let up = dice.chance(0.6);
     let ahead = if up { -1.0 } else { 1.0 };
-    let mut spots = Vec::new();
-    let mut best = 0;
+    // Each mark well along its course, with room to look along it, and how
+    // far along the course it lies.
+    let mut marks = Vec::new();
     for course in 0..rivers.len() {
-        let marks = rivers.course(course);
+        let course_marks = rivers.course(course);
         let mut along = 0.0;
-        for (index, pair) in marks.windows(2).enumerate() {
+        for (index, pair) in course_marks.windows(2).enumerate() {
             let (mark, next) = (pair[0], pair[1]);
             let here = along;
             along += mathf::hypot(next.x - mark.x, next.z - mark.z);
-            // A mark well along its course, with room to look along it;
-            // best near the land's middle where it runs as broad as a
-            // stream, between dry banks rather than through a lake, and
-            // toward a ledge or a riffle ahead.
-            if index < 4 || index + 5 > marks.len() {
-                continue;
+            if index >= 4 && index + 5 <= course_marks.len() {
+                marks.try_reserve(1).ok()?;
+                marks.push((course, index, here));
             }
+        }
+    }
+    // Best near the land's middle where it runs as broad as a stream,
+    // between dry banks rather than through a lake, and running; each
+    // mark's standing weighed across the runner.
+    let mut placed = fallible::collected(marks.len(), core::iter::repeat(0u32))?;
+    crate::band::for_each(runner, &mut placed, (0, MARKS), &|band, placed| {
+        let weighed = marks.get(band * MARKS..).unwrap_or_default();
+        for (&(course, index, _), slot) in weighed.iter().zip(placed) {
+            let course_marks = rivers.course(course);
+            let (Some(&mark), Some(&next)) = (course_marks.get(index), course_marks.get(index + 1))
+            else {
+                continue;
+            };
             let inner = mathf::hypot(mark.x - centre.0, mark.z - centre.1) < 0.55 * reach;
             let sized = (2.5..9.0).contains(&mark.width);
             let running = (RUNNING.0..RUNNING.1).contains(&mark.fall);
-            let placed = (u32::from(inner) * 2 + u32::from(sized)) * 4
+            *slot = (u32::from(inner) * 2 + u32::from(sized)) * 4
                 + 2 * u32::from(banked(survey, (mark, next)))
                 + u32::from(running);
-            // What lies ahead only breaks a tie, so it is read only where it
-            // could.
-            if 3 * placed + 2 < best {
-                continue;
-            }
-            let interest = (0..12)
-                .filter_map(|step| {
-                    let at = here + ahead * (8.0 + 2.0 * f64::from(step));
-                    Station::on(rivers, course, at).map(|station| Section::new(&station, &form))
-                })
-                .map(|section| {
-                    if section.ledge > 0.5 {
-                        2
-                    } else {
-                        u32::from(section.pool < 0.15)
-                    }
-                })
-                .max()
-                .unwrap_or(0);
-            let rank = 3 * placed + interest;
-            if rank < best {
-                continue;
-            }
-            if rank > best {
-                best = rank;
-                spots.clear();
-            }
-            spots.try_reserve(1).ok()?;
-            spots.push((course, here));
         }
+    });
+    // Toward a ledge or a riffle ahead, which breaks a tie among the best
+    // placed alone: each of those ranked one more than what lies ahead of it,
+    // across the runner, and every other none.
+    let most = placed.iter().copied().max()?;
+    let ahead_of = |course: usize, here: f64| {
+        let mut interest = 0;
+        for step in 0..12 {
+            let at = here + ahead * (8.0 + 2.0 * f64::from(step));
+            let Some(station) = Station::on(rivers, course, at) else {
+                continue;
+            };
+            let section = Section::new(&station, &form);
+            // Nothing ahead ranks above a ledge.
+            if section.ledge > 0.5 {
+                return 2;
+            }
+            interest = interest.max(u32::from(section.pool < 0.15));
+        }
+        interest
+    };
+    crate::band::for_each(runner, &mut placed, (0, MARKS), &|band, placed| {
+        let ranked = marks.get(band * MARKS..).unwrap_or_default();
+        for (&(course, _, here), slot) in ranked.iter().zip(placed) {
+            *slot = if *slot == most {
+                1 + ahead_of(course, here)
+            } else {
+                0
+            };
+        }
+    });
+    let best = placed.iter().copied().max()?;
+    let mut spots = Vec::new();
+    for (&(course, _, here), _) in marks.iter().zip(&placed).filter(|(_, &rank)| rank == best) {
+        spots.try_reserve(1).ok()?;
+        spots.push((course, here));
     }
     let (course, along) = dice.pick(&spots)?;
     let section = Section::new(&Station::on(rivers, course, along)?, &form);
-    let (before, mark, after) = (
-        rivers.at(course, along - 1.0)?,
-        rivers.at(course, along)?,
-        rivers.at(course, along + 1.0)?,
-    );
-    let (dx, dz) = (after.x - before.x, after.z - before.z);
-    let length = mathf::hypot(dx, dz).max(1e-6);
-    let (downstream, left) = ((dx / length, dz / length), (-dz / length, dx / length));
+    let mark = rivers.at(course, along)?;
+    let (downstream, left) = rivers.way(course, along)?;
     // The bar rises across from where the deep water swings.
     let bar = if section.thalweg >= 0.0 { -1.0 } else { 1.0 };
     let side = if dice.chance(0.75) { bar } else { -bar };
@@ -3520,6 +3525,9 @@ fn stream_vantage(survey: &Survey<'_>, dice: &mut Dice) -> Option<Vantage> {
 /// The falls between which a stream's eye looks over running water: not a
 /// level reach where it pools still, nor a steep one where it steps down.
 const RUNNING: (f64, f64) = (0.003, 0.03);
+
+/// The marks of a land's streams a core weighs at a time for a stream's eye.
+const MARKS: usize = 512;
 
 /// Whether the stream running from `mark` to `next` on `survey`'s land runs
 /// between dry banks, no lake or marsh standing beside it.
@@ -3577,7 +3585,7 @@ fn stream_scene(
         )?;
     }
     let grove = Grove::new(stage, dice, (kinds, season), Stand::Open)?;
-    stage.claim((eye.x, eye.z), 3.0)?;
+    stage.keep_open((eye.x, eye.z), 3.0)?;
     let grassland = Grassland {
         fallen: grove
             .first()

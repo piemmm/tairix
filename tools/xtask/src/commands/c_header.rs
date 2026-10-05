@@ -52,31 +52,32 @@ use tairix_abi::field::{
 };
 use tairix_abi::sysinfo::SYSINFO_QUERIES;
 use tairix_abi::{
-    AbiType, AppInfoHeader, BufferClass, BundleEntry, CallRecvFlags, CapabilityId, DriverBindKey,
-    DriverError, DriverHandle, DriverKind, DriverManifest, DriverRegisterReply, Duration64, Errno,
-    GroupDirectoryRecord, GroupDirectoryRequest, HwDeviceClass, HwMatchKey, HwMatchKind, HwNode,
-    HwProperty, HwResource, HwResourceKind, IpcMessageHeader, KernelMemoryStats, KeyInput,
-    LibraryCategory, LibraryScope, LimitKind, LinkFlags, LoadAverage, LoadHeader, ManifestHeader,
-    MapFlags, MountAvailability, MountListRequest, MountRecord, NamedKeyCode, NeededLibrary,
-    NoticeTopic, OpenFlags, PeerWatchOp, PointerButtonCode, PointerInput, PortName, PowerAction,
-    ProcessListRequest, ProcessRecord, ProcessStartHeader, ProcessState, RandomFlags, RealpathMode,
-    ResourceLimit, ResourceLimitRecord, RxePermission, SchedPriority, Segment, SelfAccountRecord,
-    Severity, Signal, SignalIntakeOp, StdInfoKind, StringSlot, SysinfoQueryId,
-    SysinfoRequestHeader, SystemIdentity, Time64, UnlinkFlags, Uptime, UserDirectoryRecord,
-    UserDirectoryRequest, WaitFlags, WaitSetOp, WaitSourceKind, ABI_VERSION_V1, APPINFO_MAGIC,
-    APPINFO_MAX_BROWSE, APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BROWSE_ENTRY_LEN,
-    BUNDLE_AUTHOR_MAX, BUNDLE_ID_MAX, BUNDLE_NAME_MAX, BUNDLE_PURPOSE_MAX, BUNDLE_TITLE_MAX,
-    BUNDLE_VERSION_MAX, BUTTON_NONE, CAPABILITY_ID_MAX, COARSE_CLOCK_GRANULARITY_NS,
-    CONSOLE_INHERIT, DRIVER_MANIFEST_MAGIC, DRIVER_MANIFEST_MAX_BIND_KEYS,
-    DRIVER_MANIFEST_MAX_CAPABILITIES, DRIVER_REGISTER_REPLY_MAGIC, DRIVER_REGISTER_STATUS_OK,
-    DRIVER_SIGNATURE_LEN, DRIVER_SIGNER_PUBKEY_LEN, ENCODED_QUERY_TABLE_LEN, FS_ATTR_KEY_MAX,
-    FS_ATTR_VALUE_MAX, FS_MODE_MASK, GRANT_EXTENT_INHERIT, HOSTNAME_MAX, HWTREE_VERSION_V1,
-    HW_COMPATIBLE_MAX, HW_NODE_HEADER_LEN, HW_NODE_MAX_MATCH_KEYS, HW_NODE_MAX_RESOURCES,
-    HW_NODE_ROOT, IPC_MESSAGE_HEADER_MAGIC, KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC,
-    KIND_KEY_PRESSED, KIND_KEY_RELEASED, KIND_MOVED_BY, KIND_PRESSED, KIND_RELEASED, KIND_SCROLLED,
-    LIBRARY_ICON_MAX, LIBREF_MAX, LOAD_FLAG_PIE, LOAD_MAGIC, LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS,
-    LOG_FIELDS_MAX, LOG_FIELDS_PAYLOAD_MAX, LOG_FIELD_KEY_MAX, LOG_FIELD_VALUE_MAX, LOG_LEVEL_MAX,
-    LOG_MESSAGE_MAX, LOG_RECORD_HEADER_LEN, LOG_RECORD_MAX, MACHINE_ID_LEN, MANIFEST_MAGIC,
+    AbiType, AppInfoHeader, BufferClass, BundleEntry, CallRecvFlags, CapabilityId, DirChange,
+    DirChangeBatch, DirEntry, DirWatchStatus, DriverBindKey, DriverError, DriverHandle, DriverKind,
+    DriverManifest, DriverRegisterReply, Duration64, Errno, GroupDirectoryRecord,
+    GroupDirectoryRequest, HwDeviceClass, HwMatchKey, HwMatchKind, HwNode, HwProperty, HwResource,
+    HwResourceKind, IpcMessageHeader, KernelMemoryStats, KeyInput, LibraryCategory, LibraryScope,
+    LimitKind, LinkFlags, LoadAverage, LoadHeader, ManifestHeader, MapFlags, MountAvailability,
+    MountListRequest, MountRecord, NamedKeyCode, NeededLibrary, NoticeTopic, OpenFlags,
+    PeerWatchOp, PointerButtonCode, PointerInput, PortName, PowerAction, ProcessListRequest,
+    ProcessRecord, ProcessStartHeader, ProcessState, RandomFlags, RealpathMode, ResourceLimit,
+    ResourceLimitRecord, RxePermission, SchedPriority, Segment, SelfAccountRecord, Severity,
+    Signal, SignalIntakeOp, StdInfoKind, StringSlot, SysinfoQueryId, SysinfoRequestHeader,
+    SystemIdentity, Time64, UnlinkFlags, Uptime, UserDirectoryRecord, UserDirectoryRequest,
+    WaitFlags, WaitSetOp, WaitSourceKind, ABI_VERSION_V1, APPINFO_MAGIC, APPINFO_MAX_BROWSE,
+    APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BROWSE_ENTRY_LEN, BUNDLE_AUTHOR_MAX, BUNDLE_ID_MAX,
+    BUNDLE_NAME_MAX, BUNDLE_PURPOSE_MAX, BUNDLE_TITLE_MAX, BUNDLE_VERSION_MAX, BUTTON_NONE,
+    CAPABILITY_ID_MAX, COARSE_CLOCK_GRANULARITY_NS, CONSOLE_INHERIT, DIR_WATCH_LATENCY_MAX_NS,
+    DRIVER_MANIFEST_MAGIC, DRIVER_MANIFEST_MAX_BIND_KEYS, DRIVER_MANIFEST_MAX_CAPABILITIES,
+    DRIVER_REGISTER_REPLY_MAGIC, DRIVER_REGISTER_STATUS_OK, DRIVER_SIGNATURE_LEN,
+    DRIVER_SIGNER_PUBKEY_LEN, ENCODED_QUERY_TABLE_LEN, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX,
+    FS_MODE_MASK, GRANT_EXTENT_INHERIT, HOSTNAME_MAX, HWTREE_VERSION_V1, HW_COMPATIBLE_MAX,
+    HW_NODE_HEADER_LEN, HW_NODE_MAX_MATCH_KEYS, HW_NODE_MAX_RESOURCES, HW_NODE_ROOT,
+    IPC_MESSAGE_HEADER_MAGIC, KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC, KIND_KEY_PRESSED,
+    KIND_KEY_RELEASED, KIND_MOVED_BY, KIND_PRESSED, KIND_RELEASED, KIND_SCROLLED, LIBRARY_ICON_MAX,
+    LIBREF_MAX, LOAD_FLAG_PIE, LOAD_MAGIC, LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS, LOG_FIELDS_MAX,
+    LOG_FIELDS_PAYLOAD_MAX, LOG_FIELD_KEY_MAX, LOG_FIELD_VALUE_MAX, LOG_LEVEL_MAX, LOG_MESSAGE_MAX,
+    LOG_RECORD_HEADER_LEN, LOG_RECORD_MAX, MACHINE_ID_LEN, MANIFEST_MAGIC,
     MANIFEST_MAX_CAPABILITIES, MEMORY_CLASS_COUNT, MIME_ENTRY_LEN, MIME_TYPE_MAX, MOD_ALT,
     MOD_CTRL, MOD_MASK, MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX,
     MOUNT_VOLUME_ID_LEN, NANOS_PER_SEC, NOTICE_PAYLOAD_MAX, PAGE_SIZE, PLAUSIBLE_FUTURE_SECS,
@@ -2622,6 +2623,7 @@ fn generate_syscall() -> String {
     emit_wait_contract(&mut out);
     emit_spawn_attach_contract(&mut out);
     emit_fs_contract(&mut out);
+    emit_dir_watch_contract(&mut out);
     emit_grant_contract(&mut out);
     emit_filelock_contract(&mut out);
     emit_signal_contract(&mut out);
@@ -2988,6 +2990,7 @@ const fn wait_source_macro_suffix(kind: WaitSourceKind) -> &'static str {
         WaitSourceKind::PortRoom => "PORT_ROOM",
         WaitSourceKind::StreamRoom => "STREAM_ROOM",
         WaitSourceKind::PeerExit => "PEER_EXIT",
+        WaitSourceKind::DirWatch => "DIR_WATCH",
     }
 }
 
@@ -3138,6 +3141,69 @@ fn emit_fs_contract(out: &mut String) {
     );
     let _ = writeln!(out, "#define TAIRIX_FS_ATTR_KEY_MAX {FS_ATTR_KEY_MAX}u");
     let _ = writeln!(out, "#define TAIRIX_FS_ATTR_VALUE_MAX {FS_ATTR_VALUE_MAX}u");
+    out.push('\n');
+}
+
+/// Emit the directory-watch contract items into `tairix_syscall.h`: the
+/// latency and buffer bounds and the batch layout `fs_watch_read()` writes,
+/// every value read from `lib/abi`.
+fn emit_dir_watch_contract(out: &mut String) {
+    use std::fmt::Write as _;
+    out.push_str(
+        "/* fs_watch() / fs_watch_read(). A watch is armed with a latency of at most\n\
+         * TAIRIX_DIR_WATCH_LATENCY_MAX_NS and drained into a buffer of at least\n\
+         * TAIRIX_DIR_CHANGE_BATCH_MIN_BUFFER bytes. A batch is a header of\n\
+         * TAIRIX_DIR_CHANGE_BATCH_HEADER_LEN bytes - status, flags, two zero bytes, a\n\
+         * little-endian uint32_t record count - then that many records: a PRESENT tag\n\
+         * and one fs_readdir() record (TAIRIX_DIR_ENTRY_HEADER_LEN bytes and the name),\n\
+         * or an ABSENT tag, a little-endian uint16_t name length and the name. RESCAN\n\
+         * asks for an fs_readdir() of the whole directory; GONE ends the watch. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_DIR_WATCH_LATENCY_MAX_NS {DIR_WATCH_LATENCY_MAX_NS}ull"
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_DIR_CHANGE_BATCH_HEADER_LEN {}u",
+        DirChangeBatch::HEADER_LEN
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_DIR_CHANGE_BATCH_MIN_BUFFER {}u",
+        DirChangeBatch::MIN_BUFFER
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_DIR_CHANGE_BATCH_FLAG_MORE {:#x}u",
+        DirChangeBatch::MORE
+    );
+    for (name, status) in [
+        ("CHANGES", DirWatchStatus::Changes),
+        ("RESCAN", DirWatchStatus::Rescan),
+        ("GONE", DirWatchStatus::Gone),
+    ] {
+        let _ = writeln!(
+            out,
+            "#define TAIRIX_DIR_WATCH_STATUS_{name} {}u",
+            status as u8
+        );
+    }
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_DIR_CHANGE_PRESENT {}u",
+        DirChange::PRESENT
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_DIR_CHANGE_ABSENT {}u",
+        DirChange::ABSENT
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_DIR_ENTRY_HEADER_LEN {}u",
+        DirEntry::HEADER_LEN
+    );
     out.push('\n');
 }
 
@@ -3625,6 +3691,31 @@ mod tests {
                 "#define TAIRIX_FS_ATTR_VALUE_MAX {FS_ATTR_VALUE_MAX}u"
             )),
             "fs_attr value bound: {h}"
+        );
+    }
+
+    /// The directory-watch batch layout is read from `lib/abi`, so a C
+    /// consumer parses exactly what the kernel writes.
+    #[test]
+    fn syscall_header_carries_the_dir_watch_layout() {
+        let h = generate_syscall();
+        for line in [
+            format!("#define TAIRIX_DIR_WATCH_LATENCY_MAX_NS {DIR_WATCH_LATENCY_MAX_NS}ull"),
+            format!(
+                "#define TAIRIX_DIR_CHANGE_BATCH_MIN_BUFFER {}u",
+                DirChangeBatch::MIN_BUFFER
+            ),
+            format!(
+                "#define TAIRIX_DIR_ENTRY_HEADER_LEN {}u",
+                DirEntry::HEADER_LEN
+            ),
+            String::from("#define TAIRIX_DIR_WATCH_STATUS_GONE 2u"),
+            String::from("#define TAIRIX_DIR_CHANGE_ABSENT 1u"),
+        ] {
+            assert!(h.contains(&line), "{line} missing: {h}");
+        }
+        assert!(
+            h.contains("uint64_t tairix_sys_fs_watch_read(uint32_t a0, void * a1, uintptr_t a2);")
         );
     }
 

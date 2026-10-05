@@ -1848,7 +1848,8 @@ fn unit_for_limit(kind: LimitKind) -> Unit {
         LimitKind::OpenStreams
         | LimitKind::Processes
         | LimitKind::Threads
-        | LimitKind::FileLocks => Unit::Count,
+        | LimitKind::FileLocks
+        | LimitKind::DirWatches => Unit::Count,
     }
 }
 
@@ -2169,6 +2170,11 @@ mod tests {
                         LimitKind::FileLocks,
                         ResourceLimit::new(64, 256).expect("well-formed"),
                         7,
+                    ),
+                    ResourceLimitRecord::new(
+                        LimitKind::DirWatches,
+                        ResourceLimit::new(16, 32).expect("well-formed"),
+                        2,
                     ),
                 ],
                 pressure: fixture_pressure(),

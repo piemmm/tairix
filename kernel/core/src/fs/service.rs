@@ -30,8 +30,10 @@ use tairix_abi::sysinfo::{
 };
 use tairix_abi::time::Time64;
 use tairix_abi::{
-    CapabilityQuery, Errno, FileId, FileKind, FileStat, OpenFlags, RealpathMode, UnlinkFlags,
+    CapabilityQuery, DirEntry, Errno, FileId, FileKind, FileStat, OpenFlags, RealpathMode,
+    UnlinkFlags,
 };
+use zeroize::Zeroize;
 
 /// One directory entry as [`FilesystemService::readdir`] reports it: the
 /// child's kind, its apparent and allocated sizes, its identity and name
@@ -66,6 +68,42 @@ pub struct ReaddirEntry {
     pub nlink: u32,
     /// The entry's name (a single component, never `.`/`..`).
     pub name: String,
+}
+
+impl ReaddirEntry {
+    /// This entry as the `fs_readdir` stream carries it.
+    #[must_use]
+    pub fn wire(&self) -> DirEntry<'_> {
+        DirEntry {
+            kind: self.kind,
+            size: self.size,
+            allocated: self.allocated,
+            modified: self.modified,
+            id: self.id,
+            nlink: self.nlink,
+            name: self.name.as_bytes(),
+        }
+    }
+}
+
+/// A name is decrypted user data: wiped before its allocation is released, as
+/// the volume cache wipes its own copies.
+impl Drop for ReaddirEntry {
+    fn drop(&mut self) {
+        self.name.zeroize();
+    }
+}
+
+/// What [`FilesystemService::lookup_entries`] found.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LookedUp {
+    /// The directory the path reached, so a caller can tell whether it is
+    /// still the one it expected.
+    pub dir: FileId,
+    /// Each asked-for name's record, in order; [`None`] where it is absent.
+    pub entries: Vec<Option<ReaddirEntry>>,
+    /// The mounts directly beneath the directory, as its listing shows them.
+    pub children: super::ChildMounts,
 }
 
 /// The set of secured filesystem operations a userland `fs_*` syscall needs.
@@ -154,6 +192,34 @@ pub trait FilesystemService: Send + Sync {
         path: &str,
         final_link: FinalLink,
     ) -> Result<Vec<ReaddirEntry>, Errno>;
+
+    /// For each of `names`, what [`readdir`](Self::readdir) of the directory
+    /// at `path` would report for it now, or [`None`] where no such entry
+    /// exists — under the same authority, without reading the whole listing.
+    /// With no names it is the listing's authorisation alone.
+    ///
+    /// Defaulted to fail closed for a service with no change notification.
+    ///
+    /// # Errors
+    ///
+    /// As [`readdir`](Self::readdir).
+    fn lookup_entries(
+        &self,
+        uid: u32,
+        caps: &dyn CapabilityQuery,
+        path: &str,
+        final_link: FinalLink,
+        names: &[&[u8]],
+    ) -> Result<LookedUp, Errno> {
+        let _ = (uid, caps, path, final_link, names);
+        Err(Errno::NotImplemented)
+    }
+
+    /// How many times the mount table has changed: a directory watch rescans
+    /// when it moved, since what its path reaches may have.
+    fn mount_epoch(&self) -> u64 {
+        0
+    }
 
     /// Report the structural metadata of the node at `path`.
     ///

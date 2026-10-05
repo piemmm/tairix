@@ -104,6 +104,28 @@ pub const fn default_file_lock_records(installed_memory_bytes: u64) -> u64 {
     }
 }
 
+/// The smallest `LimitKind::DirWatches` bound the derived policy hands out:
+/// room for a file manager's windows and a desktop on the smallest board.
+const MIN_DIR_WATCHES: u64 = 64;
+
+/// The default `LimitKind::DirWatches` policy: how many directory watches one
+/// process may hold armed on a machine with `installed_memory_bytes` of RAM.
+///
+/// A watch can pin its directory's change journal at
+/// [`crate::fswatch::JOURNAL_BYTES`] while its watcher leaves it undrained,
+/// so one watch per 2 MiB of RAM keeps a process's worst case at a
+/// sixty-fourth of memory — and journals hold nothing at all under memory
+/// pressure. A small board scales down to a documented floor.
+#[must_use]
+pub const fn default_dir_watches(installed_memory_bytes: u64) -> u64 {
+    let derived = installed_memory_bytes / (2 << 20);
+    if derived < MIN_DIR_WATCHES {
+        MIN_DIR_WATCHES
+    } else {
+        derived
+    }
+}
+
 /// One task's effective resource limits: a [`ResourceLimit`] for every
 /// [`LimitKind`].
 ///
@@ -148,11 +170,16 @@ impl LimitSet {
     /// path derives from discovered hardware written in (soft and hard).
     ///
     /// Built once at boot ([`default_pinned_limit_bytes`],
-    /// [`default_file_lock_records`]) and installed as the registry default,
+    /// [`default_file_lock_records`], [`default_dir_watches`]) and installed
+    /// as the registry default,
     /// so every task — including inheritance's never-widen intersection —
     /// runs under the derived bounds without a second code path.
     #[must_use]
-    pub const fn with_derived_defaults(pinned_bytes: u64, file_lock_records: u64) -> Self {
+    pub const fn with_derived_defaults(
+        pinned_bytes: u64,
+        file_lock_records: u64,
+        dir_watches: u64,
+    ) -> Self {
         let mut out = Self::DEFAULT;
         out.limits[LimitKind::PinnedMemoryBytes.as_u32() as usize] = ResourceLimit {
             soft: pinned_bytes,
@@ -161,6 +188,10 @@ impl LimitSet {
         out.limits[LimitKind::FileLocks.as_u32() as usize] = ResourceLimit {
             soft: file_lock_records,
             hard: file_lock_records,
+        };
+        out.limits[LimitKind::DirWatches.as_u32() as usize] = ResourceLimit {
+            soft: dir_watches,
+            hard: dir_watches,
         };
         out
     }
@@ -243,8 +274,8 @@ pub fn authorize_set(
 #[cfg(test)]
 mod tests {
     use super::{
-        authorize_set, default_file_lock_records, default_pinned_limit_bytes, LimitSet,
-        DEFAULT_STACK_LIMIT_BYTES, MIN_FILE_LOCK_RECORDS,
+        authorize_set, default_dir_watches, default_file_lock_records, default_pinned_limit_bytes,
+        LimitSet, DEFAULT_STACK_LIMIT_BYTES, MIN_DIR_WATCHES, MIN_FILE_LOCK_RECORDS,
     };
     use tairix_abi::{Errno, LimitKind, ResourceLimit, RLIMIT_INFINITY};
 
@@ -263,8 +294,13 @@ mod tests {
         assert_eq!(default_file_lock_records(1 << 30), 16 << 10);
         assert_eq!(default_file_lock_records(16 << 20), MIN_FILE_LOCK_RECORDS);
         assert_eq!(default_file_lock_records(0), MIN_FILE_LOCK_RECORDS);
+        // One watch per 2 MiB: 512 on a 1 GiB board, the floor on a tiny one.
+        assert_eq!(default_dir_watches(1 << 30), 512);
+        assert_eq!(default_dir_watches(16 << 30), 8 << 10);
+        assert_eq!(default_dir_watches(64 << 20), MIN_DIR_WATCHES);
+        assert_eq!(default_dir_watches(0), MIN_DIR_WATCHES);
 
-        let set = LimitSet::with_derived_defaults(128 << 20, 16 << 10);
+        let set = LimitSet::with_derived_defaults(128 << 20, 16 << 10, 512);
         let pinned = set.get(LimitKind::PinnedMemoryBytes);
         assert_eq!(pinned.soft, 128 << 20);
         assert_eq!(pinned.hard, 128 << 20);
@@ -273,6 +309,8 @@ mod tests {
         assert_eq!(locks.soft, 16 << 10);
         assert_eq!(locks.hard, 16 << 10);
         assert!(locks.is_well_formed());
+        let watches = set.get(LimitKind::DirWatches);
+        assert_eq!((watches.soft, watches.hard), (512, 512));
         // Every other kind keeps the compile-time floor.
         assert_eq!(
             set.get(LimitKind::StackBytes),
@@ -355,7 +393,7 @@ mod tests {
         // A parent with no pinned bound of its own is capped by the
         // per-boot derived default; a parent already tighter keeps its
         // tighter bound — inheritance never widens either way.
-        let boot_default = LimitSet::with_derived_defaults(128 << 20, 16 << 10);
+        let boot_default = LimitSet::with_derived_defaults(128 << 20, 16 << 10, 512);
         let child = LimitSet::inherit(&LimitSet::DEFAULT, &boot_default);
         assert_eq!(
             child.get(LimitKind::PinnedMemoryBytes),

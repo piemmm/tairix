@@ -7,13 +7,13 @@ use alloc::rc::Rc;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 
 use tairix_abi::desktop::{Appearance, Contrast, Density, Motion};
 use tairix_abi::window_ipc::AppMenuItemId;
 use tairix_abi::{Errno, Time64};
 use tairix_browse::{
-    AppAssociation, DirectorySource, Entry, EntryKind, GridView, LinkTarget, Listing,
+    AppAssociation, DirectorySource, Entry, EntryChange, EntryKind, GridView, LinkTarget, Listing,
 };
 use tairix_colour::Rgb;
 use tairix_controls::{ActivityState, MenuMark};
@@ -29,7 +29,7 @@ use tairix_wm::{Key, NamedKey};
 
 use crate::desktop::{
     BackdropWork, Desktop, DesktopAction, DesktopActivation, DesktopOutcome, LaunchDocument,
-    PinboardChange, DESKTOP_MARGIN, RELIST_MIN_INTERVAL_NS,
+    PinboardChange, DESKTOP_MARGIN,
 };
 use crate::pinboard::{self, PinboardCommand};
 use tairix_controls::{ChainChild, ChainModel};
@@ -148,7 +148,7 @@ fn home() -> Vec<String> {
 /// A desktop over `folder`, already listed once.
 fn desktop_over(folder: &Rc<RefCell<Folder>>) -> Desktop<FakeDir> {
     let mut desktop = Desktop::new(FakeDir(Rc::clone(folder)), home());
-    desktop.relist(0);
+    desktop.relist();
     desktop
 }
 
@@ -170,7 +170,7 @@ fn arranged_by(icons: IconFlow, sort: IconSort) -> DesktopSettings {
 fn desktop_with(entries: Vec<Entry>, settings: DesktopSettings) -> Desktop<FakeDir> {
     let mut desktop = Desktop::new(FakeDir(holding(entries)), home());
     let _ = desktop.apply_settings(settings);
-    desktop.relist(0);
+    desktop.relist();
     desktop
 }
 
@@ -183,7 +183,7 @@ fn work_area() -> Rect {
     Rect::new(0, 0, 800, 600)
 }
 
-fn layout_of(desktop: &Desktop<FakeDir>) -> GridView {
+fn layout_of<S: DirectorySource>(desktop: &Desktop<S>) -> GridView {
     desktop.layout(work_area(), Scale::ONE, &theme())
 }
 
@@ -258,7 +258,7 @@ fn the_listing_is_the_shared_sort_order_of_the_folder() {
 fn a_folder_that_will_not_list_shows_nothing_and_never_panics() {
     let mut desktop = Desktop::new(FakeDir(Rc::new(RefCell::new(Folder::default()))), home());
     assert!(
-        !desktop.relist(0),
+        !desktop.relist(),
         "an empty listing is no change from empty"
     );
     assert!(desktop.entries().is_empty());
@@ -280,7 +280,7 @@ fn a_relist_keeps_the_selection_on_the_same_named_icon() {
         file("b.txt"),
         file("c.txt"),
     ])));
-    assert!(desktop.relist(1));
+    assert!(desktop.relist());
     assert_eq!(desktop.selected(), Some(2));
     assert_eq!(desktop.entries()[2].name(), "c.txt");
 }
@@ -292,46 +292,8 @@ fn a_relist_that_removes_the_selected_icon_selects_nothing() {
     let layout = layout_of(&desktop);
     desktop.press(centre_of(&layout, 1), &layout, 0, &[], &mut Region::new());
     folder.borrow_mut().answer = Some(Ok(Listing::Ready(vec![file("a.txt")])));
-    assert!(desktop.relist(1));
+    assert!(desktop.relist());
     assert_eq!(desktop.selected(), None);
-}
-
-// --- The gesture-driven, rate-limited re-list -----------------------------
-
-#[test]
-fn arriving_on_the_desktop_relists_but_no_more_often_than_the_rate_limit() {
-    let folder = holding(vec![file("a.txt")]);
-    let mut desktop = desktop_over(&folder);
-    let layout = layout_of(&desktop);
-    assert_eq!(listings(&folder), 1, "the bring-up listing");
-
-    // Sweeping on and off inside the limit costs no further listing at all.
-    for step in 0..5 {
-        desktop.pointer_left(&layout, &mut Region::new());
-        desktop.pointer_moved(EMPTY_DESKTOP, &layout, step, &mut Region::new());
-    }
-    assert_eq!(listings(&folder), 1, "a sweep is not a re-list");
-
-    // Once the limit has passed, the next arrival looks again — exactly once.
-    desktop.pointer_left(&layout, &mut Region::new());
-    desktop.pointer_moved(
-        EMPTY_DESKTOP,
-        &layout,
-        RELIST_MIN_INTERVAL_NS,
-        &mut Region::new(),
-    );
-    assert_eq!(listings(&folder), 2);
-    desktop.pointer_moved(
-        centre_of(&layout, 0),
-        &layout,
-        RELIST_MIN_INTERVAL_NS + 1,
-        &mut Region::new(),
-    );
-    assert_eq!(
-        listings(&folder),
-        2,
-        "motion that never left is not an arrival"
-    );
 }
 
 /// A wake shared with other work says nothing about the folder, so adopting
@@ -342,7 +304,7 @@ fn arriving_on_the_desktop_relists_but_no_more_often_than_the_rate_limit() {
 fn resuming_adopts_the_owed_listing_and_never_starts_a_read() {
     let worker = Rc::new(RefCell::new(Worker::default()));
     let mut desktop = Desktop::new(DeferredDir(Rc::clone(&worker)), home());
-    assert!(!desktop.relist(0), "a deferred read changes nothing yet");
+    assert!(!desktop.relist(), "a deferred read changes nothing yet");
     assert!(!desktop.resume(), "nothing has landed yet");
 
     land(&worker, vec![file("a.txt")]);
@@ -361,8 +323,8 @@ fn resuming_adopts_the_owed_listing_and_never_starts_a_read() {
 fn a_relist_while_a_listing_is_owed_asks_afresh() {
     let worker = Rc::new(RefCell::new(Worker::default()));
     let mut desktop = Desktop::new(DeferredDir(Rc::clone(&worker)), home());
-    desktop.relist(0);
-    desktop.relist(1);
+    desktop.relist();
+    desktop.relist();
     assert_eq!(worker.borrow().reads, 2);
 
     land(&worker, vec![file("new.txt")]);
@@ -371,15 +333,192 @@ fn a_relist_while_a_listing_is_owed_asks_afresh() {
 }
 
 #[test]
-fn a_forced_relist_ignores_the_rate_limit() {
-    // The rate limit exists to stop a pointer sweep becoming a stream of
-    // directory reads; it never delays a re-list the session asked for
-    // because it knows something changed.
+fn every_relist_the_session_asks_for_reads_the_folder() {
     let folder = holding(vec![file("a.txt")]);
     let mut desktop = desktop_over(&folder);
-    desktop.relist(1);
-    desktop.relist(2);
+    desktop.relist();
+    desktop.relist();
     assert_eq!(listings(&folder), 3);
+}
+
+#[test]
+fn a_reported_change_merges_in_place_and_repaints_only_the_cells_it_moved() {
+    let mut desktop = desktop_of(vec![file("a.txt"), file("c.txt"), file("e.txt")]);
+    let layout = layout_of(&desktop);
+    desktop.press(centre_of(&layout, 1), &layout, 0, &[], &mut Region::new());
+    let damage = damage_of(|damage| {
+        assert!(desktop.apply_changes(vec![EntryChange::Upsert(file("d.txt"))], layout_of, damage,));
+    });
+    let names: Vec<&str> = desktop.entries().iter().map(Entry::name).collect();
+    assert_eq!(names, ["a.txt", "c.txt", "d.txt", "e.txt"]);
+    assert_eq!(desktop.selected(), Some(1), "the selection stays on c.txt");
+    let after = layout_of(&desktop);
+    assert_eq!(
+        damage.rects(),
+        [cell(&after, 2), cell(&after, 3)],
+        "the icons ahead of the new one did not move"
+    );
+}
+
+#[test]
+fn a_reported_change_moving_the_icons_ends_a_double_click_in_progress() {
+    let mut desktop = desktop_of(vec![file("b.txt"), file("c.txt")]);
+    let layout = layout_of(&desktop);
+    let at = centre_of(&layout, 0);
+    desktop.press(at, &layout, 0, &[], &mut Region::new());
+    desktop.apply_changes(
+        vec![EntryChange::Upsert(file("a.txt"))],
+        layout_of,
+        &mut Region::new(),
+    );
+    let acted = desktop.press(at, &layout, 1, &[], &mut Region::new());
+    assert_eq!(
+        acted.action, None,
+        "a.txt is under the pointer now, unpressed"
+    );
+}
+
+#[test]
+fn a_relist_moving_the_icons_ends_a_double_click_in_progress() {
+    let folder = holding(vec![file("b.txt"), file("c.txt")]);
+    let mut desktop = desktop_over(&folder);
+    let layout = layout_of(&desktop);
+    let at = centre_of(&layout, 0);
+    desktop.press(at, &layout, 0, &[], &mut Region::new());
+    folder.borrow_mut().answer = Some(Ok(Listing::Ready(vec![file("c.txt")])));
+    assert!(desktop.relist());
+    let acted = desktop.press(at, &layout, 1, &[], &mut Region::new());
+    assert_eq!(
+        acted.action, None,
+        "c.txt is under the pointer now, unpressed"
+    );
+}
+
+/// A fresh listing — a rescan, a folder gone and read again, a name the
+/// desktop made — repaints the cells whose icon it changed and no more.
+#[test]
+fn a_relist_repaints_only_the_cells_its_listing_changed() {
+    let folder = holding(vec![file("a.txt"), file("c.txt"), file("e.txt")]);
+    let mut desktop = desktop_over(&folder);
+    desktop.relist();
+    folder.borrow_mut().answer = Some(Ok(Listing::Ready(vec![
+        file("a.txt"),
+        file("c.txt"),
+        file("d.txt"),
+        file("e.txt"),
+    ])));
+    let damage = damage_of(|damage| assert!(desktop.relist_into(layout_of, damage)));
+    let after = layout_of(&desktop);
+    assert_eq!(
+        damage.rects(),
+        [cell(&after, 2), cell(&after, 3)],
+        "the icons ahead of the new one did not move"
+    );
+    let unchanged = damage_of(|damage| assert!(!desktop.relist_into(layout_of, damage)));
+    assert!(
+        unchanged.is_empty(),
+        "a listing that reads as shown costs nothing"
+    );
+}
+
+/// A listing landing on a wake repaints the cells it filled, and a wake with
+/// nothing owed repaints nothing.
+#[test]
+fn a_landed_listing_repaints_the_cells_it_filled() {
+    let worker = Rc::new(RefCell::new(Worker::default()));
+    let mut desktop = Desktop::new(DeferredDir(Rc::clone(&worker)), home());
+    desktop.relist();
+    let idle = damage_of(|damage| assert!(!desktop.resume_into(layout_of, damage)));
+    assert!(idle.is_empty());
+    land(&worker, vec![file("a.txt"), file("b.txt")]);
+    let damage = damage_of(|damage| assert!(desktop.resume_into(layout_of, damage)));
+    let after = layout_of(&desktop);
+    assert_eq!(damage.rects(), [cell(&after, 0), cell(&after, 1)]);
+}
+
+/// A wake owing the desktop no listing compares nothing: every worker wake —
+/// a landed decode, a published setting — passes through here.
+#[test]
+fn a_wake_owing_no_listing_costs_the_desktop_nothing() {
+    let folder = holding(vec![file("a.txt")]);
+    let mut desktop = desktop_over(&folder);
+    let laid_out = Cell::new(0);
+    let counted = |desk: &Desktop<FakeDir>| {
+        laid_out.set(laid_out.get() + 1);
+        layout_of(desk)
+    };
+    assert!(!desktop.resume_into(counted, &mut Region::new()));
+    assert_eq!(
+        laid_out.get(),
+        0,
+        "no listing was owed, so none was compared"
+    );
+    assert_eq!(listings(&folder), 1, "nor read");
+}
+
+/// A source whose listing follows the session's desktop folder, as a watched
+/// one does.
+struct Followed;
+
+impl DirectorySource for Followed {
+    fn list(&mut self, _components: &[String]) -> Result<Listing, Errno> {
+        Ok(Listing::Ready(Vec::new()))
+    }
+
+    fn follows(&self, components: &[String]) -> bool {
+        components == home().as_slice()
+    }
+}
+
+/// The desktop asks its source about its own folder, and a source that only
+/// reads follows nothing.
+#[test]
+fn the_desktop_follows_its_folder_only_where_its_source_does() {
+    assert!(Desktop::new(Followed, home()).follows());
+    assert!(!Desktop::new(Followed, vec!["Apps".to_string()]).follows());
+    assert!(!desktop_of(vec![file("a.txt")]).follows());
+}
+
+#[test]
+fn reading_back_a_folder_a_change_named_is_no_change() {
+    let mut desktop = desktop_of(vec![folder("Work"), file("a.txt")]);
+    assert!(!desktop.apply_changes(
+        vec![EntryChange::Upsert(folder("Work"))],
+        layout_of,
+        &mut Region::new(),
+    ));
+    assert!(
+        !desktop.relist(),
+        "the listing reads as it shows, whatever was found out about the folder"
+    );
+}
+
+#[test]
+fn a_reported_removal_takes_its_selection_and_an_unchanged_entry_costs_nothing() {
+    let mut desktop = desktop_of(vec![file("a.txt"), file("b.txt")]);
+    let layout = layout_of(&desktop);
+    desktop.press(centre_of(&layout, 1), &layout, 0, &[], &mut Region::new());
+    let damage = damage_of(|damage| {
+        assert!(desktop.apply_changes(
+            vec![EntryChange::Remove(String::from("b.txt"))],
+            layout_of,
+            damage,
+        ));
+    });
+    assert_eq!(desktop.selected(), None);
+    assert_eq!(
+        damage.rects(),
+        [cell(&layout, 1)],
+        "the vacated cell is erased"
+    );
+    let unchanged = damage_of(|damage| {
+        assert!(!desktop.apply_changes(
+            vec![EntryChange::Upsert(file("a.txt"))],
+            layout_of,
+            damage,
+        ));
+    });
+    assert!(unchanged.is_empty());
 }
 
 // --- Hover, selection, focus ---------------------------------------------
@@ -390,23 +529,23 @@ fn hover_follows_the_pointer_and_damages_only_the_cells_it_moves_between() {
     let layout = layout_of(&desktop);
     let mut damage = Region::new();
 
-    desktop.pointer_moved(centre_of(&layout, 0), &layout, 0, &mut damage);
+    desktop.pointer_moved(centre_of(&layout, 0), &layout, &mut damage);
     assert_eq!(damage.rects(), [cell(&layout, 0)]);
     assert_eq!(desktop.hovered(), Some(0));
 
     damage.clear();
-    desktop.pointer_moved(centre_of(&layout, 0), &layout, 1, &mut damage);
+    desktop.pointer_moved(centre_of(&layout, 0), &layout, &mut damage);
     assert!(damage.is_empty(), "the same icon is not a change");
 
     // Moving between icons costs both cells and nothing between them: the one
     // that lost the highlight and the one that took it.
     damage.clear();
-    desktop.pointer_moved(centre_of(&layout, 1), &layout, 2, &mut damage);
+    desktop.pointer_moved(centre_of(&layout, 1), &layout, &mut damage);
     assert_eq!(damage.rects(), [cell(&layout, 0), cell(&layout, 1)]);
     assert_eq!(desktop.hovered(), Some(1));
 
     damage.clear();
-    desktop.pointer_moved(EMPTY_DESKTOP, &layout, 3, &mut damage);
+    desktop.pointer_moved(EMPTY_DESKTOP, &layout, &mut damage);
     assert_eq!(damage.rects(), [cell(&layout, 1)]);
     assert_eq!(desktop.hovered(), None);
 }
@@ -455,7 +594,7 @@ fn a_column_the_field_cannot_hold_whole_is_left_out() {
         );
 
         let damage = damage_of(|damage| {
-            desktop.pointer_moved(sliver.center(), &layout, 0, damage);
+            desktop.pointer_moved(sliver.center(), &layout, damage);
         });
         assert_eq!(
             desktop.hovered(),
@@ -470,7 +609,7 @@ fn a_column_the_field_cannot_hold_whole_is_left_out() {
 fn leaving_the_desktop_clears_the_hover() {
     let mut desktop = desktop_of(vec![file("a.txt")]);
     let layout = layout_of(&desktop);
-    desktop.pointer_moved(centre_of(&layout, 0), &layout, 0, &mut Region::new());
+    desktop.pointer_moved(centre_of(&layout, 0), &layout, &mut Region::new());
     assert_eq!(
         damage_of(|damage| {
             desktop.pointer_left(&layout, damage);
@@ -1006,7 +1145,7 @@ fn every_icon_the_column_shows_is_painted_even_with_no_artwork_at_all() {
     let mut surface = Surface::new(800, 600).expect("a screen-sized layer");
     desktop.set_focused(true, &layout, &mut Region::new());
     desktop.press(centre_of(&layout, 0), &layout, 0, &[], &mut Region::new());
-    desktop.pointer_moved(centre_of(&layout, 1), &layout, 1, &mut Region::new());
+    desktop.pointer_moved(centre_of(&layout, 1), &layout, &mut Region::new());
 
     desktop.render(
         &mut surface,
@@ -1169,7 +1308,7 @@ fn changing_the_arrangement_relays_the_icons_out_without_relisting() {
         .apply_settings(arranged_by(IconFlow::Trailing, IconSort::default()))
         .expect("the arrangement changed");
     assert!(change.backdrop.relayout);
-    assert!(!change.backdrop.relist && !change.backdrop.wallpaper);
+    assert!(!change.backdrop.wallpaper);
     assert_eq!(listings(&folder), 1, "an arrangement is not a listing");
 
     let after = cell(&layout_of(&desktop), 0);
@@ -1222,8 +1361,12 @@ fn adopting_settings_reports_only_the_work_the_edit_implies() {
     let sorted = desktop
         .apply_settings(arranged_by(IconFlow::default(), IconSort::Size))
         .expect("the order changed");
-    assert!(sorted.backdrop.relist);
-    assert!(!sorted.backdrop.relayout && !sorted.backdrop.wallpaper);
+    assert_eq!(
+        sorted.backdrop,
+        BackdropWork::default(),
+        "a new order is the desktop's own work"
+    );
+    assert!(sorted.layer, "a new order moves the icons");
 
     let base = desktop.settings().clone();
     let recoloured = desktop.apply_settings(DesktopSettings {
@@ -1232,8 +1375,11 @@ fn adopting_settings_reports_only_the_work_the_edit_implies() {
     });
     assert_eq!(
         recoloured,
-        Some(PinboardChange::default()),
-        "a new backdrop colour is shown by the repaint alone"
+        Some(PinboardChange {
+            layer: true,
+            ..PinboardChange::default()
+        }),
+        "a new backdrop colour costs the layer's repaint alone"
     );
 
     let base = desktop.settings().clone();
@@ -1244,7 +1390,60 @@ fn adopting_settings_reports_only_the_work_the_edit_implies() {
         })
         .expect("the wallpaper changed");
     assert!(papered.backdrop.wallpaper);
-    assert!(!papered.backdrop.relist && !papered.backdrop.relayout);
+    assert!(!papered.backdrop.relayout);
+    assert!(
+        !papered.layer,
+        "the new ground repaints the layer when it lands"
+    );
+}
+
+/// Most of the settings document moves no pixel of the desktop layer, and
+/// repainting the bottom layer recomposites the screen and re-blurs every
+/// frosted surface over it.
+#[test]
+fn a_setting_the_layer_does_not_show_repaints_none_of_it() {
+    let edits: [fn(&mut DesktopSettings); 2] = [
+        |s| s.cursor_locate = !s.cursor_locate,
+        |s| s.cursor_shake = !s.cursor_shake,
+    ];
+    for edit in edits {
+        let mut desktop = desktop_of(vec![file("a.txt")]);
+        let mut wanted = desktop.settings().clone();
+        edit(&mut wanted);
+        assert_eq!(
+            desktop.apply_settings(wanted),
+            Some(PinboardChange::default()),
+            "a pointer aid is adopted elsewhere"
+        );
+    }
+}
+
+#[test]
+fn a_new_sort_order_reorders_the_icons_shown_without_reading_the_folder() {
+    let folder = holding(vec![
+        Entry::new("b.txt", EntryKind::File, 300, Time64::from_secs(30)),
+        Entry::new("a.txt", EntryKind::File, 900, Time64::from_secs(20)),
+        Entry::new("c.txt", EntryKind::File, 100, Time64::from_secs(10)),
+    ]);
+    let mut desktop = desktop_over(&folder);
+    let layout = layout_of(&desktop);
+    desktop.press(centre_of(&layout, 0), &layout, 0, &[], &mut Region::new());
+    desktop.pointer_moved(centre_of(&layout, 1), &layout, &mut Region::new());
+
+    desktop
+        .apply_settings(arranged_by(IconFlow::default(), IconSort::Size))
+        .expect("the order changed");
+    let names: Vec<&str> = desktop.entries().iter().map(Entry::name).collect();
+    assert_eq!(names, ["c.txt", "b.txt", "a.txt"]);
+    assert_eq!(listings(&folder), 1, "the icons shown are the folder's");
+    assert_eq!(desktop.selected(), Some(2), "the selection stays on a.txt");
+    assert_eq!(
+        desktop.hovered(),
+        None,
+        "the cell under the pointer changed"
+    );
+    let acted = desktop.press(centre_of(&layout, 0), &layout, 1, &[], &mut Region::new());
+    assert_eq!(acted.action, None, "c.txt was never pressed before");
 }
 
 // --- The context-menu gesture and its commands ----------------------------
@@ -1300,7 +1499,7 @@ fn the_menus_open_command_resolves_exactly_as_a_double_click_does() {
     let clicked = desktop.press(at, &layout, 1, &[], &mut Region::new());
 
     assert_eq!(
-        desktop.command(PinboardCommand::Open, &[], 2).action,
+        desktop.command(PinboardCommand::Open, &[]).action,
         clicked.action,
         "one definition of what opening an icon means"
     );
@@ -1316,7 +1515,7 @@ fn the_menus_open_command_resolves_exactly_as_a_double_click_does() {
 fn open_with_nothing_selected_asks_for_nothing() {
     let mut desktop = desktop_of(vec![folder("Work")]);
     assert_eq!(
-        desktop.command(PinboardCommand::Open, &[], 0),
+        desktop.command(PinboardCommand::Open, &[]),
         DesktopOutcome::ignored()
     );
 }
@@ -1325,7 +1524,7 @@ fn open_with_nothing_selected_asks_for_nothing() {
 fn a_new_folder_is_named_through_the_shared_naming_over_the_listing() {
     let mut desktop = desktop_of(vec![folder("New Folder")]);
     assert_eq!(
-        desktop.command(PinboardCommand::NewFolder, &[], 0).action,
+        desktop.command(PinboardCommand::NewFolder, &[]).action,
         Some(DesktopAction::CreateFolder {
             path: "/Users/ada/Desktop/New Folder 2".to_string(),
         })
@@ -1337,7 +1536,7 @@ fn a_sort_or_arrangement_row_asks_the_embedder_to_adopt_the_edit() {
     let mut desktop = desktop_of(vec![file("a.txt")]);
     assert_eq!(
         desktop
-            .command(PinboardCommand::SortBy(IconSort::Size), &[], 0)
+            .command(PinboardCommand::SortBy(IconSort::Size), &[])
             .action,
         Some(DesktopAction::AdoptSettings(arranged_by(
             IconFlow::default(),
@@ -1351,7 +1550,7 @@ fn a_sort_or_arrangement_row_asks_the_embedder_to_adopt_the_edit() {
     );
     assert_eq!(
         desktop
-            .command(PinboardCommand::ArrangeFrom(IconFlow::Trailing), &[], 0)
+            .command(PinboardCommand::ArrangeFrom(IconFlow::Trailing), &[])
             .action,
         Some(DesktopAction::AdoptSettings(arranged_by(
             IconFlow::Trailing,
@@ -1359,7 +1558,7 @@ fn a_sort_or_arrangement_row_asks_the_embedder_to_adopt_the_edit() {
         )))
     );
     assert_eq!(
-        desktop.command(PinboardCommand::SortBy(IconSort::Name), &[], 0),
+        desktop.command(PinboardCommand::SortBy(IconSort::Name), &[]),
         DesktopOutcome::ignored(),
         "the order already in force is no edit at all"
     );
@@ -1374,7 +1573,7 @@ fn refresh_relists_now_and_the_remaining_rows_name_their_own_action() {
     // A re-list reports no cell: the icons themselves moved, so the caller
     // repaints the whole layer instead of any cell of the layout it replaced.
     assert_eq!(
-        desktop.command(PinboardCommand::Refresh, &[], 1),
+        desktop.command(PinboardCommand::Refresh, &[]),
         DesktopOutcome {
             relisted: true,
             action: None,
@@ -1383,14 +1582,14 @@ fn refresh_relists_now_and_the_remaining_rows_name_their_own_action() {
     assert_eq!(listings(&folder), 2);
     assert_eq!(desktop.entries().len(), 2);
     assert_eq!(
-        desktop.command(PinboardCommand::Refresh, &[], 2),
+        desktop.command(PinboardCommand::Refresh, &[]),
         DesktopOutcome::ignored(),
         "a refresh that finds nothing changed costs nothing"
     );
 
     assert_eq!(
         desktop
-            .command(PinboardCommand::OpenDesktopFolder, &[], 3)
+            .command(PinboardCommand::OpenDesktopFolder, &[])
             .action,
         Some(DesktopAction::Activate(DesktopActivation::OpenFolder {
             path: "/Users/ada/Desktop".to_string(),
@@ -1398,7 +1597,7 @@ fn refresh_relists_now_and_the_remaining_rows_name_their_own_action() {
     );
     assert_eq!(
         desktop
-            .command(PinboardCommand::ChangeBackground, &[], 4)
+            .command(PinboardCommand::ChangeBackground, &[])
             .action,
         Some(DesktopAction::ChangeBackground)
     );
@@ -1573,6 +1772,7 @@ fn an_appearance_edit_asks_for_a_re_theme_and_nothing_of_the_backdrop() {
     assert!(!themed.appearance.scale);
     assert!(!themed.appearance.cursor);
     assert!(themed.appearance.any());
+    assert!(themed.layer, "the tiles are drawn in the theme");
     // A contrast change must not re-list the folder or decode a wallpaper.
     assert_eq!(themed.backdrop, BackdropWork::default());
 
@@ -1585,6 +1785,7 @@ fn an_appearance_edit_asks_for_a_re_theme_and_nothing_of_the_backdrop() {
         .expect("the scale changed");
     assert!(rescaled.appearance.scale);
     assert!(!rescaled.appearance.theme);
+    assert!(rescaled.layer, "every tile resolves at the new density");
     assert_eq!(rescaled.backdrop, BackdropWork::default());
 }
 
@@ -1607,6 +1808,7 @@ fn a_cursor_edit_asks_only_for_the_pointer() {
         assert!(change.appearance.cursor);
         assert!(!change.appearance.theme);
         assert!(!change.appearance.scale);
+        assert!(!change.layer, "the pointer is drawn over the layer");
         assert_eq!(change.backdrop, BackdropWork::default());
     }
 }
@@ -1640,5 +1842,6 @@ fn every_appearance_axis_asks_for_the_re_theme() {
         axis(&mut wanted);
         let change = desktop.apply_settings(wanted).expect("an axis moved");
         assert!(change.appearance.theme);
+        assert!(change.layer);
     }
 }

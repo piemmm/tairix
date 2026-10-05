@@ -49,14 +49,15 @@ pub enum Scope {
     AllTargets,
     /// The crate's `--lib` tests only, for the reason carried here.
     LibOnly(&'static str),
-    /// The crate's `--lib` tests bar the modules `skip` names, for the
-    /// reason carried here.
+    /// The crate's `--lib` tests bar the modules or tests `skip` names, for
+    /// the reason carried here.
     ///
-    /// Budget only: a skipped module carries no `unsafe` and passes when it
-    /// is run, so what the interpreter would spend on it buys nothing the
-    /// rest of the crate does not already prove. Skipping one that *reports*
-    /// undefined behaviour would be dodging a finding, which the charter
-    /// forbids.
+    /// Budget or isolation only: what is skipped carries no `unsafe` and
+    /// passes when it is run, so either what the interpreter would spend on
+    /// it buys nothing the rest of the crate does not already prove, or it
+    /// makes an operation the isolated stage refuses (a realtime clock read,
+    /// a file opened). Skipping one that *reports* undefined behaviour would
+    /// be dodging a finding, which the charter forbids.
     LibExcept {
         /// libtest `--skip` patterns.
         skip: &'static [&'static str],
@@ -168,6 +169,24 @@ pub const TARGETS: &[Target] = &[
                       and every guard's aliasing claim",
         features: &[],
         scope: Scope::AllTargets,
+        spread: Spread::OneProcess,
+    },
+    Target {
+        package: "tairix-fuzzseed",
+        description: "the metered system allocator a host test installs as its global \
+                      allocator: every request handed to `System` with the caller's arguments \
+                      unchanged or refused with a null pointer, a refused growth keeping the \
+                      block it would have moved, and the per-thread counters it charges read \
+                      without allocating",
+        features: &[],
+        scope: Scope::LibExcept {
+            skip: &[
+                "tests::entropy_seed_differs_across_calls",
+                "tests::resolve_seed_uses_the_env_when_set",
+            ],
+            reason: "each draws an entropy seed from the realtime clock, which the isolated \
+                     stage refuses to read; the seeding carries no `unsafe`",
+        },
         spread: Spread::OneProcess,
     },
     Target {

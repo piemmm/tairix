@@ -297,6 +297,17 @@ pub(crate) struct Bump {
 }
 
 impl Relief {
+    /// A grain whose coarsest octave, `scale` waves to the metre, stands
+    /// `coarse` steep, its finer octaves adding to it as they each do.
+    #[must_use]
+    pub(crate) fn grain(coarse: f64, scale: f64, seed: u32) -> Self {
+        Self::Grain {
+            depth: coarse * GRAIN_SUM,
+            scale,
+            seed,
+        }
+    }
+
     /// The waves `wind` raises under `seed`; `None` when the heap will not
     /// hold them.
     pub(crate) fn waves(wind: Wind, seed: u32) -> Option<Self> {
@@ -356,8 +367,8 @@ impl Relief {
 }
 
 /// How many octaves a grain's relief runs to, each this many times finer than
-/// the last and this share as steep: the coarsest `scale` across, the finest
-/// about a millimetre on ground or stone.
+/// the last and this share as steep: the coarsest `scale` waves to the metre,
+/// the finest about a millimetre on ground or stone.
 const GRAIN_OCTAVES: u32 = 5;
 const GRAIN_LACUNARITY: f64 = 2.7;
 const GRAIN_GAIN: f64 = 0.62;

@@ -113,6 +113,20 @@ impl ClickRun {
     pub fn reset(&mut self) {
         *self = Self::new();
     }
+
+    /// The subjects moved under the run: carry it to where `moved` says its
+    /// subject now is, or forget it once that answers nothing, so a press
+    /// pairs with the item it was made on and never with one that took its
+    /// place.
+    pub fn follow(&mut self, moved: impl FnOnce(u64) -> Option<u64>) {
+        let Some(last) = self.last.as_mut() else {
+            return;
+        };
+        match moved(last.subject) {
+            Some(subject) => last.subject = subject,
+            None => self.reset(),
+        }
+    }
 }
 
 /// The pure double-click detector: it remembers the previous qualifying press
@@ -164,6 +178,11 @@ impl DoubleClickTracker {
     pub fn reset(&mut self) {
         self.run.reset();
     }
+
+    /// The subjects moved under a remembered press: as [`ClickRun::follow`].
+    pub fn follow(&mut self, moved: impl FnOnce(u64) -> Option<u64>) {
+        self.run.follow(moved);
+    }
 }
 
 #[cfg(test)]
@@ -183,6 +202,19 @@ mod tests {
     /// The primary button, which every pre-existing case below presses.
     const LEFT: PointerButton = PointerButton::Primary;
     const RIGHT: PointerButton = PointerButton::Secondary;
+
+    /// A press followed to where its subject moved still pairs there, and
+    /// one whose subject went pairs with nothing that took its place.
+    #[test]
+    fn a_followed_press_pairs_where_its_subject_went() {
+        let mut tracker = DoubleClickTracker::new();
+        assert_eq!(tracker.register(0, 3, LEFT, INTERVAL), ClickKind::Single);
+        tracker.follow(|at| Some(at + 1));
+        assert_eq!(tracker.register(10, 4, LEFT, INTERVAL), ClickKind::Double);
+        assert_eq!(tracker.register(20, 4, LEFT, INTERVAL), ClickKind::Single);
+        tracker.follow(|_| None);
+        assert_eq!(tracker.register(30, 4, LEFT, INTERVAL), ClickKind::Single);
+    }
 
     #[test]
     fn a_lone_press_is_a_single_click() {

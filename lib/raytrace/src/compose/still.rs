@@ -574,11 +574,7 @@ fn druse(stage: &mut Stage, dice: &mut Dice) -> Option<()> {
             },
             Finish::Coated { roughness: 0.8 },
         )
-        .with_relief(Relief::Grain {
-            depth: 0.35,
-            scale: 7.0,
-            seed: dice.seed(),
-        }),
+        .with_relief(Relief::grain(0.146, 7.0, dice.seed())),
     )?;
     let (stone, middle) = stage.boulder(Vec3::ZERO, radius, rock, dice)?;
     let tint = rgb(dice.pick(&GLASS_TINTS)?);

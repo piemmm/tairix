@@ -176,7 +176,8 @@ fn walk_dir<F>(
     // store that simply does not exist all leave this subtree empty. A non-root listing failure is a skipped entry;
     // a missing store root is the legitimate "no drivers" case and is not
     // counted, because the empty result already says so.
-    let entries = match vfs.list_via_secured(cred, &dir_path, fs, FinalLink::Follow) {
+    let entries = match vfs.list_via_secured(cred, &dir_path, fs, FinalLink::Follow, |entry| entry)
+    {
         Ok(entries) => entries,
         Err(_) if depth == 0 => return,
         Err(_) => {
@@ -185,8 +186,8 @@ fn walk_dir<F>(
         }
     };
 
-    for entry in entries {
-        let name = entry.name;
+    for mut entry in entries {
+        let name = core::mem::take(&mut entry.name);
         if drivers.len() >= MAX_STORE_DRIVERS {
             // The store presents more entries than the validation bound
             // permits; the surplus is refused fail-closed rather than growing the scan without limit.

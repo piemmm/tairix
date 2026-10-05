@@ -262,6 +262,9 @@ pub struct Entry {
     size: u64,
     modified: Time64,
     occupancy: Occupancy,
+    /// The occupancy shown is from before a change to this folder: it stays
+    /// drawn, so the icon does not blink, until a fresh probe replaces it.
+    stale: bool,
 }
 
 impl Entry {
@@ -275,6 +278,7 @@ impl Entry {
             size,
             modified,
             occupancy: Occupancy::Unprobed,
+            stale: false,
         }
     }
 
@@ -379,14 +383,35 @@ impl Entry {
     /// Record the answer a probe gave for this entry.
     pub const fn set_occupancy(&mut self, occupancy: Occupancy) {
         self.occupancy = occupancy;
+        self.stale = false;
     }
 
-    /// `true` if this entry is a plain directory whose occupancy is still
-    /// unknown — the one shape [`Browser::resolve_occupancy`] probes.
+    /// Whether this and `other` would be listed identically: everything but
+    /// what a probe found out about them.
+    #[must_use]
+    pub fn same_listing(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.kind == other.kind
+            && self.target == other.target
+            && self.size == other.size
+            && self.modified == other.modified
+    }
+
+    /// Carry `previous`'s occupancy over to this, its replacement after a
+    /// change, to be shown until a fresh probe replaces it.
+    pub(crate) fn inherit_occupancy(&mut self, previous: &Self) {
+        if self.is_directory() && previous.is_directory() {
+            self.occupancy = previous.occupancy;
+            self.stale = true;
+        }
+    }
+
+    /// `true` if this entry is a plain directory whose occupancy is unknown or
+    /// out of date — the one shape [`Browser::resolve_occupancy`] probes.
     ///
     /// [`Browser::resolve_occupancy`]: crate::Browser::resolve_occupancy
     #[must_use]
     pub const fn needs_occupancy_probe(&self) -> bool {
-        self.is_directory() && matches!(self.occupancy, Occupancy::Unprobed)
+        self.is_directory() && (self.stale || matches!(self.occupancy, Occupancy::Unprobed))
     }
 }

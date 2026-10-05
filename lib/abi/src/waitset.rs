@@ -277,6 +277,21 @@ pub enum WaitSourceKind {
     /// socket, a session, a counted connection — has gone, without being its
     /// parent and without polling for it: one member covers every watch.
     PeerExit = 12,
+    /// A directory descriptor of the caller's **own** open table armed with
+    /// [`crate::SyscallNumber::FS_WATCH`] (its `id` is that descriptor
+    /// number). An unarmed descriptor, an unopened number, and another task's
+    /// descriptor refuse with the same oracle-free `NotFound` the other kinds
+    /// use; adding the member touches no filesystem.
+    ///
+    /// Ready when the watch has recorded a change since the member last
+    /// reported, or its directory has gone. **Edge-triggered and paced**: a
+    /// report consumes the edge, and a change arriving within the watch's
+    /// latency of the previous report is held until that latency has run, so
+    /// an isolated change wakes the waiter at once while a storm wakes it at
+    /// most once per latency. The woken owner drains with
+    /// [`crate::SyscallNumber::FS_WATCH_READ`], and may do so from another
+    /// thread (`docs/src/filesystem/watch.md`).
+    DirWatch = 13,
 }
 
 impl WaitSourceKind {
@@ -307,6 +322,7 @@ impl WaitSourceKind {
             10 => Ok(Self::PortRoom),
             11 => Ok(Self::StreamRoom),
             12 => Ok(Self::PeerExit),
+            13 => Ok(Self::DirWatch),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -341,10 +357,11 @@ mod tests {
             WaitSourceKind::PortRoom,
             WaitSourceKind::StreamRoom,
             WaitSourceKind::PeerExit,
+            WaitSourceKind::DirWatch,
         ] {
             assert_eq!(WaitSourceKind::from_u32(kind.as_u32()), Ok(kind));
         }
-        assert_eq!(WaitSourceKind::from_u32(13), Err(Errno::OutOfRange));
+        assert_eq!(WaitSourceKind::from_u32(14), Err(Errno::OutOfRange));
         assert_eq!(WaitSourceKind::from_u32(u32::MAX), Err(Errno::OutOfRange));
     }
 
@@ -364,6 +381,8 @@ mod tests {
         assert_eq!(WaitSourceKind::SystemNotice.as_u32(), 9);
         assert_eq!(WaitSourceKind::PortRoom.as_u32(), 10);
         assert_eq!(WaitSourceKind::StreamRoom.as_u32(), 11);
+        assert_eq!(WaitSourceKind::PeerExit.as_u32(), 12);
+        assert_eq!(WaitSourceKind::DirWatch.as_u32(), 13);
         assert_eq!(WAITSET_CHILD_ANY, u64::MAX);
         assert_eq!(WAITSET_TIMEOUT_NONE, u64::MAX);
     }

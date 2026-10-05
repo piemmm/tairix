@@ -511,22 +511,13 @@ impl Engine {
             }
         };
         let pieces = tairix_parallel::bands(runner, slots.len(), GRAIN);
-        let per = slots.len().div_ceil(pieces.max(1)).max(1);
+        let per = tairix_parallel::piece_len(slots.len(), pieces);
         let stride = u32::try_from(per).unwrap_or(u32::MAX);
         let first = self.shown;
-        let split = fallible::collected(
-            pieces,
-            slots
-                .chunks_mut(per)
-                .zip((0u32..).map(|piece| first.saturating_add(piece.saturating_mul(stride))))
-                .map(|(out, start)| (start, out)),
-        );
-        match split {
-            Some(mut split) if split.len() > 1 => {
-                tairix_parallel::for_each(runner, &mut split, &|(start, out)| work(*start, out));
-            }
-            _ => work(first, slots),
-        }
+        let split = slots
+            .chunks_mut(per)
+            .zip((0u32..).map(|piece| first.saturating_add(piece.saturating_mul(stride))));
+        tairix_parallel::for_each_drawn(runner, split, &|(out, start)| work(start, out));
     }
 
     /// Lay what `traced` traced into the copy of the picture, if one is kept.

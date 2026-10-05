@@ -113,7 +113,7 @@ fn group_rank(entry: &Entry) -> u8 {
 }
 
 /// The total order two entries take under `mode`.
-fn entry_cmp(a: &Entry, b: &Entry, mode: SortMode) -> Ordering {
+pub(crate) fn entry_cmp(a: &Entry, b: &Entry, mode: SortMode) -> Ordering {
     group_rank(a).cmp(&group_rank(b)).then_with(|| {
         let primary = match mode.key {
             SortKey::Name => name_cmp(a.name(), b.name()),

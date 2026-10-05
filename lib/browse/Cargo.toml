@@ -58,6 +58,9 @@ tairix-icon = { path = "../icon", version = "=0.0.0" }
 # use, so the file manager routes a scrollbar press/drag through one input
 # vocabulary rather than a private one.
 tairix-input = { path = "../input", version = "=0.0.0" }
+# The one fast hash: a watch batch's merge filters the listing's names through
+# it before searching the batch for them.
+tairix-hash = { path = "../hash", version = "=0.0.0" }
 
 # The renderer's host tests draw text, so they inject the shared solid test
 # transport via the `test-util` feature (never a running `fontd`).

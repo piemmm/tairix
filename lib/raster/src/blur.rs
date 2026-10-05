@@ -26,7 +26,7 @@ use tairix_util::fallible;
 
 use crate::color::{mix, Pixel};
 use crate::dither::DitherRow;
-use crate::surface::{RowBand, Surface};
+use crate::surface::{band_rows, RowBand, Surface};
 
 /// Blur `region` in place: a dense, row-major, premultiplied
 /// `width`×`height` block of pixels, blurred by a separable box blur of
@@ -617,7 +617,8 @@ impl Frost {
         let mut start = 0;
         // Strips keep to the runs of rows the pieces cover: rows between
         // distant bands hold nothing to average or mix.
-        while let Some(run) = covered_run(pieces, start) {
+        let spans = pieces.iter().map(|piece| piece.rows.clone());
+        while let Some(run) = covered_run(&spans, start) {
             start = run.start;
             let mut end = start.saturating_add(per).min(run.end);
             // Disjoint bands never need more than the strip's rows times the
@@ -650,9 +651,7 @@ impl Frost {
             rows.len(),
             MIN_PARALLEL_FROST_PX.div_ceil(self.width().max(1)),
         );
-        let per = u32::try_from(rows.len().div_ceil(count.max(1)))
-            .unwrap_or(u32::MAX)
-            .max(1);
+        let per = band_rows(rows.len(), count);
         let bands = dest.row_bands_mut(self.row(rows.start)..self.row(rows.end), per);
         tairix_parallel::for_each_drawn(runner, bands, &|mut band| {
             self.mix_rows(&mut band, pieces, strip, rows, coverage);
@@ -751,7 +750,8 @@ impl PlaneRead<'_> {
     /// Rows are independent, so they are split across `runner` in bands of the
     /// plane, each with a line of its own: a row's averages are all taken from
     /// the backdrop before any is written back, because bands side by side
-    /// read one another's columns.
+    /// read one another's columns. Each run of rows the bands read is split on
+    /// its own, so rows between distant bands take no participant's share.
     fn blur_lines(
         &self,
         plane: &mut Surface,
@@ -761,25 +761,23 @@ impl PlaneRead<'_> {
         dest: &Surface,
     ) {
         let width = self.frost.width().max(1);
-        let Some(span) = bands
-            .iter()
-            .map(|band| self.frost.pass_rows(band))
-            .reduce(hull)
-        else {
-            return;
-        };
-        let count =
-            tairix_parallel::bands(runner, span.len(), MIN_PARALLEL_FROST_PX.div_ceil(width))
-                .clamp(1, (lines.len() / width).max(1));
-        let per = u32::try_from(span.len().div_ceil(count))
-            .unwrap_or(u32::MAX)
-            .max(1);
-        let work = plane
-            .row_bands_mut(self.row(span.start)..self.row(span.end), per)
-            .zip(lines.chunks_exact_mut(width));
-        tairix_parallel::for_each_drawn(runner, work, &|(mut band, line)| {
-            self.blur_band_lines(&mut band, line, bands, dest);
-        });
+        let reads = bands.iter().map(|band| self.frost.pass_rows(band));
+        let mut start = 0;
+        while let Some(run) = covered_run(&reads, start) {
+            let count =
+                tairix_parallel::bands(runner, run.len(), MIN_PARALLEL_FROST_PX.div_ceil(width))
+                    .clamp(1, (lines.len() / width).max(1));
+            let work = plane
+                .row_bands_mut(
+                    self.row(run.start)..self.row(run.end),
+                    band_rows(run.len(), count),
+                )
+                .zip(lines.chunks_exact_mut(width));
+            tairix_parallel::for_each_drawn(runner, work, &|(mut band, line)| {
+                self.blur_band_lines(&mut band, line, bands, dest);
+            });
+            start = run.end;
+        }
     }
 
     /// The horizontal pass over the plane rows `rows` owns, a row at a time:
@@ -899,7 +897,9 @@ impl PlaneRead<'_> {
             &tairix_parallel::SERIAL
         };
         let (mut sums, mut strip) = (sums, strip);
-        let jobs = pieces.iter().map(move |piece| {
+        // Every piece's sums are split off in turn, since they lie in piece
+        // order; only the pieces covering the strip are handed out.
+        let jobs = pieces.iter().filter_map(move |piece| {
             let all_sums = core::mem::take(&mut sums);
             let (held, rest) = all_sums.split_at_mut(piece.cols.len().min(all_sums.len()));
             sums = rest;
@@ -922,10 +922,8 @@ impl PlaneRead<'_> {
                 block,
             })
         });
-        tairix_parallel::for_each_drawn(runner, jobs, &|job| {
-            if let Some(mut job) = job {
-                self.average(plane, &mut job);
-            }
+        tairix_parallel::for_each_drawn(runner, jobs, &|mut job| {
+            self.average(plane, &mut job);
         });
     }
 
@@ -1033,19 +1031,22 @@ impl PlaneRead<'_> {
     }
 }
 
-/// The first run of rows at or after `from` that `pieces` cover without a
+/// The first run of rows at or after `from` that `spans` cover without a
 /// gap, or `None` when they cover none.
-fn covered_run(pieces: &[Piece], from: usize) -> Option<Range<usize>> {
-    let start = pieces
-        .iter()
-        .filter(|piece| piece.rows.end > from)
-        .map(|piece| piece.rows.start.max(from))
+fn covered_run(
+    spans: &(impl Iterator<Item = Range<usize>> + Clone),
+    from: usize,
+) -> Option<Range<usize>> {
+    let start = spans
+        .clone()
+        .filter(|rows| rows.end > from)
+        .map(|rows| rows.start.max(from))
         .min()?;
     let mut end = start;
-    while let Some(further) = pieces
-        .iter()
-        .filter(|piece| piece.rows.start <= end && piece.rows.end > end)
-        .map(|piece| piece.rows.end)
+    while let Some(further) = spans
+        .clone()
+        .filter(|rows| rows.start <= end && rows.end > end)
+        .map(|rows| rows.end)
         .max()
     {
         end = further;
@@ -1091,7 +1092,7 @@ fn divide(bands: &[Band], pieces: &mut Vec<Piece>, runner: &dyn JobRunner) -> Op
             .max(1);
         let count =
             tairix_parallel::bands(runner, band.area(), MIN_PARALLEL_FROST_PX).clamp(1, spare);
-        let per = band.cols.len().div_ceil(count).max(1);
+        let per = tairix_parallel::piece_len(band.cols.len(), count);
         let mut start = band.cols.start;
         while start < band.cols.end {
             let end = start.saturating_add(per).min(band.cols.end);

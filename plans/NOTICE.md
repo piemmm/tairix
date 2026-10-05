@@ -91,9 +91,11 @@ copy:
   collision would leave an application in the wrong appearance for ever, and
   that is not a trade worth making for a spurious read.
 - `Mounts` — a counter bumped by every mount-table mutation. Every mutator in
-  `kernel/core/src/fs/mount.rs` ends with `notice::mounts_changed()`, so no
-  call site that attaches, re-backs, or removes a mount can forget to; a
-  *refused* mutation changed nothing and bumps nothing.
+  `kernel/core/src/fs/mount.rs` ends in `MountTable::changed`, which moves the
+  table's own epoch, `notice::mounts_changed()` and the directory watches'
+  wake together, so no call site that attaches, re-backs, or removes a mount
+  can forget one of them; a *refused* mutation changed nothing and moves
+  nothing.
 - `MemoryPressure` — the published band's depth itself, which is what the old
   bespoke wait source used. A band that deepens and relaxes again before the
   waiter runs therefore correctly reports nothing to do.

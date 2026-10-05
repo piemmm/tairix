@@ -75,7 +75,7 @@ use tairix_kernel_mem::{
     Frame, MapFlags, Page, PhysMap, Retire, UserAddressSpace, VirtAddr, PAGE_SIZE,
 };
 use tairix_kernel_sec::{ProcessId, TaskId};
-use tairix_sync::RwLock;
+use tairix_sync::{OnceCell, RwLock};
 
 use crate::filelock::OwnerId;
 use crate::pipe::PipeEnd;
@@ -705,6 +705,9 @@ pub struct Description {
     /// owner, and never reused, so a reclaimed description cannot inherit a
     /// dead one's locks.
     lock_owner: OwnerId,
+    /// The change watch armed on this directory description
+    /// (`docs/src/filesystem/watch.md`), released with it.
+    watch: OnceCell<crate::fswatch::ArmedWatch>,
 }
 
 /// Releasing the last descriptor on a description releases the locks it
@@ -767,6 +770,7 @@ impl OpenFile {
             description: Arc::new(Description {
                 cursor: AtomicU64::new(0),
                 lock_owner: crate::filelock::mint_owner(),
+                watch: OnceCell::new(),
             }),
         }
     }
@@ -932,6 +936,28 @@ impl OpenFile {
             | OpenBacking::PtyMaster(_)
             | OpenBacking::PtySlave(_) => None,
         }
+    }
+
+    /// The change watch armed on this descriptor's open file description.
+    #[must_use]
+    pub fn armed_watch(&self) -> Option<&crate::fswatch::ArmedWatch> {
+        self.description.watch.get().ok().flatten()
+    }
+
+    /// Arm `watch` on this descriptor's open file description, handing it
+    /// back when one is already armed.
+    ///
+    /// # Errors
+    ///
+    /// The refused watch, when the description already holds one.
+    pub fn arm_watch(
+        &self,
+        watch: crate::fswatch::ArmedWatch,
+    ) -> Result<(), crate::fswatch::ArmedWatch> {
+        self.description
+            .watch
+            .set(watch)
+            .map_err(|refused| refused.0)
     }
 
     /// The resource this descriptor resolves to, or `None` when it is backed
@@ -3827,7 +3853,7 @@ mod tests {
     #[test]
     fn set_default_limits_feeds_the_fallback_and_set_limit_base() {
         let mut reg = AddressSpaceRegistry::new();
-        let boot_default = LimitSet::with_derived_defaults(128 << 20, 16 << 10);
+        let boot_default = LimitSet::with_derived_defaults(128 << 20, 16 << 10, 512);
         reg.set_default_limits(boot_default);
         // An unestablished task resolves to the per-boot default …
         assert_eq!(reg.limits(ProcessId(9)), boot_default);

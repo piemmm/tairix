@@ -2715,6 +2715,30 @@ impl SyscallNumber {
     /// keyboard, so they reach only the seat's owner.
     pub const TOUCH_READ: Self = Self(135);
 
+    /// Arm a change watch on an open directory descriptor
+    /// (`docs/src/filesystem/watch.md`).
+    ///
+    /// Arguments: `fd: u32` — a directory the caller opened itself, under
+    /// the same authority `fs_readdir` needs — and `latency_ns: u64`, the
+    /// least interval between two reports of its
+    /// [`crate::WaitSourceKind::DirWatch`] member (`0` reports every change
+    /// at once; at most [`crate::fs::DIR_WATCH_LATENCY_MAX_NS`]). Returns `0`.
+    /// [`crate::Errno::AlreadyExists`] for a descriptor already armed,
+    /// [`crate::Errno::LimitExceeded`] past the caller's
+    /// [`crate::LimitKind::DirWatches`] bound. Gated by
+    /// [`crate::CapabilityId::FS_ACCESS`].
+    pub const FS_WATCH: Self = Self(136);
+
+    /// Drain the changes an armed directory watch has recorded
+    /// (`docs/src/filesystem/watch.md`).
+    ///
+    /// Arguments: `fd: u32`, `buf: *mut u8` and `len: usize` (at least
+    /// [`crate::fs::DirChangeBatch::MIN_BUFFER`]). Returns the bytes written:
+    /// one [`crate::fs::DirChangeBatch`] whose records are what `fs_readdir`
+    /// reports for each changed name now. Gated by
+    /// [`crate::CapabilityId::FS_ACCESS`].
+    pub const FS_WATCH_READ: Self = Self(137);
+
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;
 
@@ -2997,6 +3021,8 @@ mod tests {
         assert_eq!(SyscallNumber::CALL_POST.as_u16(), 99);
         assert_eq!(SyscallNumber::CALL_REAP.as_u16(), 100);
         assert_eq!(SyscallNumber::CALL_CANCEL.as_u16(), 101);
+        assert_eq!(SyscallNumber::FS_WATCH.as_u16(), 136);
+        assert_eq!(SyscallNumber::FS_WATCH_READ.as_u16(), 137);
     }
 
     #[test]

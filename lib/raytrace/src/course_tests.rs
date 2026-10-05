@@ -94,3 +94,48 @@ fn smoothing_keeps_the_ends_and_rounds_the_corners() {
         .iter()
         .all(|at| mathf::hypot(at.x - 10.0, at.z) > 1.0));
 }
+
+/// A course whose length is not finite has no place to hold within it, and
+/// its way is answered rather than refused with a panic.
+#[test]
+fn a_course_of_no_finite_length_answers_its_way() {
+    let mut courses =
+        Courses::new(&[straight()], ((-200.0, -200.0), 400.0), reach(20.0)).expect("courses");
+    if let Some(length) = courses.along.last_mut() {
+        *length = f64::NAN;
+    }
+    assert!(courses.way(0, 3.0).is_some());
+}
+
+/// The way a course runs holds right to its ends and past them, where its
+/// marks are held: a piece lodged beyond the end of a stream still lies
+/// across the stream rather than along nothing.
+#[test]
+fn a_courses_way_holds_to_its_ends_and_past_them() {
+    let courses =
+        Courses::new(&[straight()], ((-200.0, -200.0), 400.0), reach(20.0)).expect("courses");
+    let length = *courses.along.last().expect("a length");
+    for along in [
+        -10.0,
+        0.0,
+        0.5,
+        0.5 * length,
+        length - 0.3,
+        length,
+        length + 30.0,
+    ] {
+        let (down, left) = courses.way(0, along).expect("a way");
+        assert!(
+            (mathf::hypot(down.0, down.1) - 1.0).abs() < 1e-9,
+            "{along}: {down:?}"
+        );
+        assert!((down.0 * left.0 + down.1 * left.1).abs() < 1e-9, "{along}");
+        let (dx, dz) = {
+            let marks = courses.course(0);
+            let (first, last) = (marks[0], marks[marks.len() - 1]);
+            (last.x - first.x, last.z - first.z)
+        };
+        let along_course = (down.0 * dx + down.1 * dz) / mathf::hypot(dx, dz);
+        assert!(along_course > 0.99, "{along}: {down:?} against the course");
+    }
+}

@@ -108,7 +108,8 @@ mod program {
     };
     use tairix_appdata::RtHost;
     use tairix_browse::{
-        AppAssociation, DirectorySource, Entry, GridView, Listing, ListingDesk, RtLinkReader,
+        AppAssociation, DirectorySource, Entry, GridView, Listing, ListingDesk, RtLinkReader, Took,
+        WatchUpdate, WatchedDirectory, Watches, WATCH_BUFFER_LEN,
     };
     use tairix_caps::CapabilitySet;
     use tairix_controls::damage;
@@ -333,6 +334,13 @@ mod program {
     /// a wallpaper preparation the session asked for has finished, so whichever
     /// consumer was waiting can adopt it and repaint.
     const WORKER_TOKEN: u64 = 10;
+
+    /// The wait-set token of the pinboard's folder watch: a program changed
+    /// the user's `Desktop` folder, so the worker drains what it did.
+    const PINBOARD_WATCH_TOKEN: u64 = 11;
+
+    /// The wait-set token of the showing pick's folder watch.
+    const PICKER_WATCH_TOKEN: u64 = 12;
 
     /// Queued-wake capacity of the mailbox. The authority sends one wake per
     /// switch and the loop drains it on the very next turn, so a handful of
@@ -1910,7 +1918,16 @@ mod program {
                  the serve loop",
             );
         }
-        let listings = alloc::sync::Arc::new(Listings::new(alloc::sync::Arc::clone(&worker_wake)));
+        // Made before any listing is asked for, so every watch a listing arms
+        // joins the set the moment it is taken.
+        let set = tairix_rt::waitset_create();
+        if set < 0 {
+            return app::fail(APP_NAME, EXIT_WAIT_FAILED, "wait-set refused");
+        }
+        #[allow(clippy::cast_sign_loss)] // `set >= 0` checked above; it is a kernel handle.
+        let set = set as u64;
+        let listings =
+            alloc::sync::Arc::new(Listings::new(alloc::sync::Arc::clone(&worker_wake), set));
         let wallpapers =
             alloc::sync::Arc::new(Wallpapers::new(alloc::sync::Arc::clone(&worker_wake)));
         let artworks = alloc::sync::Arc::new(Artworks::new(alloc::sync::Arc::clone(&worker_wake)));
@@ -1959,7 +1976,7 @@ mod program {
         // With no worker there is nobody to answer a recorded request, so the
         // desk is stopped and that work happens on this task instead.
         if workers.listing.is_none() {
-            listings.stop();
+            listings.alone();
         }
         if workers.wallpaper.is_empty() {
             wallpapers.stop();
@@ -2081,7 +2098,7 @@ mod program {
         // the user's own sort order and icon arrangement rather than
         // re-sorting a frame later.
         let mut pinboard = load_pinboard(&mut desktop, &mut shell, &mut compositor, sandbox);
-        desktop.relist(tairix_rt::clock_get());
+        desktop.relist();
         // The wallpaper the desktop layer is painted over: read under the
         // session's own identity and fitted to this screen in the sandbox
         // worker, once. A wallpaper that cannot be read or rendered leaves
@@ -2261,12 +2278,6 @@ mod program {
         // when the machine's pressure band moves. Every member is
         // owner-checked at add; the session never polls and never sleeps
         // through its own revocation.
-        let set = tairix_rt::waitset_create();
-        if set < 0 {
-            return app::fail(APP_NAME, EXIT_WAIT_FAILED, "wait-set refused");
-        }
-        #[allow(clippy::cast_sign_loss)] // `set >= 0` checked above; it is a kernel handle.
-        let set = set as u64;
         if tairix_rt::waitset_ctl(
             set,
             WaitSetOp::Add,
@@ -2831,6 +2842,13 @@ mod program {
             if token == SEAT_TOKEN && !repeat_due {
                 idle.input(tairix_rt::clock_get());
             }
+            // With no listing worker a watch's change is drained here, and
+            // adopted as a worker's answer is.
+            let drained_here = match token {
+                PINBOARD_WATCH_TOKEN => listings.want_drain(ListingClient::Pinboard),
+                PICKER_WATCH_TOKEN => listings.want_drain(ListingClient::Picker),
+                _ => false,
+            };
             if token == WINDOW_TOKEN {
                 // Serve the pending window request. Every outcome — including
                 // a malformed request — is a well-formed typed reply, so no
@@ -3106,13 +3124,17 @@ mod program {
                         }
                     }
                 }
-            } else if token == WORKER_TOKEN {
+            } else if token == WORKER_TOKEN || drained_here {
                 // A worker finished something. Drain the nudge bytes (the member
                 // is a level-triggered peek, so anything left re-reports on the
                 // next wait and nothing is lost), then offer every consumer the
                 // chance to adopt what arrived. Each is a no-op unless it was the
-                // one waiting, so one wake serves whichever it was.
-                worker_wake.drain();
+                // one waiting, so one wake serves whichever it was. An update
+                // drained here left no byte in the pipe, and reading an empty
+                // one would park the loop for good.
+                if token == WORKER_TOKEN {
+                    worker_wake.drain();
+                }
                 saver.trace_landed(tairix_rt::clock_get());
                 let settings_landed = collect_publish(
                     &publisher,
@@ -3129,7 +3151,10 @@ mod program {
                 if let Some(loaded) = catalogs.collect() {
                     adopt_programs(loaded, &mut shell, &mut compositor, &mut programs);
                 }
-                let relisted = desktop.resume();
+                // A listing landing and what the folder's watch reported change
+                // the icon cells they touch and nothing behind them.
+                let mut cells = damage::sink();
+                desktop.resume_into(|desk| shell.desktop_layout(&compositor, desk), &mut cells);
                 let papered = prepare_wallpaper(
                     &mut pinboard,
                     &wallpapers,
@@ -3171,26 +3196,41 @@ mod program {
                     );
                     shell.present_icon_artwork(&mut compositor, &arted);
                 }
-                // A re-list moved every icon, a new wallpaper replaced the
-                // ground, and a settings change re-laid the column: each of
-                // those is the whole layer. Arriving artwork is not — it
-                // changes the picture inside the tiles and nothing behind
-                // them — so it repaints the cells and leaves the ground
-                // alone.
-                if relisted || papered || settings_landed {
+                let layout = |desk: &_| shell.desktop_layout(&compositor, desk);
+                match listings.take_update(ListingClient::Pinboard) {
+                    WatchUpdate::Quiet => {}
+                    WatchUpdate::Changes(changes) => {
+                        desktop.apply_changes(changes, layout, &mut cells);
+                    }
+                    WatchUpdate::Rescan => {
+                        desktop.relist_into(layout, &mut cells);
+                    }
+                    WatchUpdate::Gone => {
+                        listings.unwatch(ListingClient::Pinboard);
+                        desktop.relist_into(layout, &mut cells);
+                    }
+                }
+                // A new wallpaper replaced the ground, and a settings change
+                // restyled or re-laid the layer: each of those is the whole
+                // of it. A listing, a reported change or arriving artwork is
+                // not — it changes the tiles and nothing behind them — so it
+                // repaints the cells and leaves the ground alone.
+                if papered || settings_landed {
                     shell.present_desktop(&mut compositor, &desktop);
-                } else if !arted.is_empty() {
-                    let layout = shell.desktop_layout(&compositor, &desktop);
-                    let mut icons = damage::sink();
-                    desktop.mark_icons(&layout, &mut icons);
-                    if !icons.is_empty() {
-                        shell.present_desktop_area(&mut compositor, &desktop, &icons);
+                } else {
+                    shell.mark_desktop_artwork(&compositor, &desktop, &arted, &mut cells);
+                    if !cells.is_empty() {
+                        shell.present_desktop_area(&mut compositor, &desktop, &cells);
                     }
                 }
                 picker.resume(&mut shell, &mut compositor);
+                let update = listings.take_update(ListingClient::Picker);
+                if matches!(update, WatchUpdate::Gone) {
+                    listings.unwatch(ListingClient::Picker);
+                }
+                picker.follow(update, &mut shell, &mut compositor);
                 // Every file call carried out since the last wake, in the order
                 // it was asked.
-                let mut desk_relisted = false;
                 while let Some(answer) = files.collect() {
                     match answer {
                         FileAnswer::Pick { serial, opened } => settle_pick(
@@ -3206,7 +3246,7 @@ mod program {
                             &mut menu,
                         ),
                         FileAnswer::Desktop(done) => {
-                            desk_relisted |= settle_desktop_call(
+                            settle_desktop_call(
                                 done,
                                 &mut desktop,
                                 &mut shell,
@@ -3219,13 +3259,9 @@ mod program {
                                     windows: &windows,
                                     identity: &identity,
                                 },
-                                tairix_rt::clock_get(),
                             );
                         }
                     }
-                }
-                if desk_relisted {
-                    shell.present_desktop(&mut compositor, &desktop);
                 }
                 while let Some(done) = wallpapers.take_preview() {
                     settle_wallpaper_preview(
@@ -3253,8 +3289,9 @@ mod program {
                 // throughout: a dropped entry is simply rendered again on
                 // demand, so this costs rendering work and never a wrong
                 // pixel. Nothing is repainted here, and a band that demands
-                // nothing releases nothing, so a wake the desktop has
-                // already acted on is almost free.
+                // nothing releases nothing but frosts the window stack no
+                // longer earns, so a wake the desktop has already acted on is
+                // almost free.
                 //
                 // Window *content* is the one thing the desktop cannot
                 // re-render itself, so a *visible* window whose pixels the
@@ -3371,14 +3408,6 @@ mod program {
                         machine_watch.forget(pid);
                     },
                 );
-                // A program the desktop started has finished, and it may
-                // have written to the folder the icons come from. This
-                // system has no filesystem-change notification, so an exit
-                // the session itself observes is one of the few honest
-                // moments to look again — and it is an event, never a poll.
-                if desktop.relist(tairix_rt::clock_get()) {
-                    shell.present_desktop(&mut compositor, &desktop);
-                }
             } else if token == WAKE_TOKEN {
                 // The session authority speaking to this desktop: it is the
                 // foreground session again, or the authority is going away
@@ -4476,57 +4505,119 @@ mod program {
 
     /// The desktop's directory listings, read on a worker thread so a slow or
     /// contended disk cannot stall the compositor, the seat drain, or an
-    /// application blocked in a window call.
+    /// application blocked in a window call, and the watches that keep each
+    /// listing current.
     ///
-    /// The policy — who asked for what, which answer is stale, whose turn it is
-    /// — is the host-tested [`ListingDesk`]; this adds only the three things a
-    /// real program brings: the runtime's futex mutex for exclusion, a
+    /// The policy — who asked for what, which answer is stale, whose turn it is,
+    /// which watch a listing installs — is the host-tested [`ListingDesk`] and
+    /// [`Watches`]; this adds the runtime's futex mutex for exclusion, a
     /// condition variable the worker parks on with nothing to do (never a
     /// spin), and the write end of the pipe whose read end is a wait-set
     /// member, so the session learns an answer landed through the very loop it
-    /// already parks in — no new ABI and no second wake mechanism.
+    /// already parks in.
     struct Listings {
-        desk: tairix_rt::sync::Mutex<ListingDesk<ListingClient>>,
+        work: tairix_rt::sync::Mutex<ListingWork>,
         /// Signalled when a request is recorded, and on teardown.
-        work: tairix_rt::sync::Condvar,
+        signal: tairix_rt::sync::Condvar,
         wake: alloc::sync::Arc<tairix_rt::sync::WorkerWake>,
+        /// The wait-set the session parks in, which each listing's watch joins
+        /// once its listing is taken.
+        set: u64,
+    }
+
+    /// What [`Listings`] holds under its one lock: the worker reads both desks,
+    /// so one lock is one ordering rather than two that could interleave.
+    /// With no worker, `alone`, the session reads and drains on its own task
+    /// through `scratch`.
+    struct ListingWork {
+        desk: ListingDesk<ListingClient>,
+        watches: Watches<ListingClient, alloc::sync::Arc<WatchedDirectory>>,
+        alone: bool,
+        scratch: Vec<u8>,
+    }
+
+    /// State that a desktop folder no longer follows its changes, and why.
+    fn unfollowed(err: Errno) {
+        app::report(
+            APP_NAME,
+            format_args!("a desktop folder will not refresh by itself ({err})"),
+        );
+    }
+
+    /// The wait-set token a consumer's watch reports under.
+    const fn watch_token(client: ListingClient) -> u64 {
+        match client {
+            ListingClient::Pinboard => PINBOARD_WATCH_TOKEN,
+            ListingClient::Picker => PICKER_WATCH_TOKEN,
+        }
     }
 
     impl Listings {
-        /// A desk with no worker yet.
-        fn new(wake: alloc::sync::Arc<tairix_rt::sync::WorkerWake>) -> Self {
+        /// A desk with no worker yet, whose watches join `set`.
+        fn new(wake: alloc::sync::Arc<tairix_rt::sync::WorkerWake>, set: u64) -> Self {
             Self {
-                desk: tairix_rt::sync::Mutex::new(ListingDesk::new()),
-                work: tairix_rt::sync::Condvar::new(),
+                work: tairix_rt::sync::Mutex::new(ListingWork {
+                    desk: ListingDesk::new(),
+                    watches: Watches::new(),
+                    alone: false,
+                    scratch: Vec::new(),
+                }),
+                signal: tairix_rt::sync::Condvar::new(),
                 wake,
+                set,
             }
         }
 
-        /// One worker's whole life: park until there is a directory to read,
-        /// read it, deliver it, wake the session.
+        /// One worker's whole life: park until there is a directory to read or
+        /// a watch to drain, do it, deliver it, wake the session.
         ///
         /// Leaves when the desk stops. A read that nobody wants any more is
         /// delivered all the same and reports itself unwanted, so no wake is
         /// owed for it — a user clicking through directories does not make the
         /// session repaint once per abandoned read.
         fn serve(&self) {
+            // Refused, each drain reads its changes a few at a time instead.
+            let mut scratch =
+                tairix_util::fallible::filled(WATCH_BUFFER_LEN, 0).unwrap_or_default();
             loop {
                 let job = {
-                    let mut desk = self.desk.lock();
+                    let mut work = self.work.lock();
                     loop {
-                        if desk.stopping() {
+                        if work.desk.stopping() {
                             return;
                         }
-                        if let Some(job) = desk.next_job() {
-                            break job;
+                        if let Some(job) = work.desk.next_job() {
+                            break Ok(job);
                         }
-                        desk = self.work.wait(desk);
+                        if let Some(drain) = work.watches.next_drain() {
+                            break Err(drain);
+                        }
+                        work = self.signal.wait(work);
                     }
                 };
                 // The read itself, with no lock held: this is the call that can
                 // take as long as the disk takes.
-                let result = read_directory(job.target());
-                if self.desk.lock().deliver(job, result) {
+                let owed = match job {
+                    Ok(job) => {
+                        let (client, target) = (job.client(), job.target().to_vec());
+                        // A reload of the folder already watched reads through
+                        // that watch, so its pacing carries on.
+                        let reuse = self.work.lock().watches.relisting(client, &target);
+                        let (listed, armed) = WatchedDirectory::read(&target, reuse, unfollowed);
+                        let (owed, unwanted) = {
+                            let mut work = self.work.lock();
+                            let owed = work.desk.deliver(job, listed);
+                            (owed, work.watches.offer_armed(owed, client, &target, armed))
+                        };
+                        drop(unwanted);
+                        owed
+                    }
+                    Err((client, location, dir)) => {
+                        let update = dir.drain(&mut scratch);
+                        self.work.lock().watches.deliver(client, &location, update)
+                    }
+                };
+                if owed {
                     self.wake.nudge();
                 }
             }
@@ -4539,12 +4630,34 @@ mod program {
         /// instead, which is exactly what the session did before it had one. A
         /// recorded request nobody will ever serve would leave the desktop
         /// listing forever, so the degradation is a real read, not a wait.
+        ///
+        /// A listing taken commits its consumer to the watch armed with it,
+        /// which joins the session's wait-set here.
         fn request(
             &self,
             client: ListingClient,
             components: &[alloc::string::String],
         ) -> Result<Listing, Errno> {
-            self.ask(components, |desk| desk.take(client, components))
+            let mut took = Took::default();
+            let listing = self.ask(client, components, |work| {
+                let listing = work.desk.take(client, components);
+                if matches!(listing, Ok(Listing::Ready(_))) {
+                    took = work.watches.took(client, components);
+                }
+                listing
+            });
+            self.commit(client, took);
+            listing
+        }
+
+        /// Join the watch `client` now reports on to the session's wait-set,
+        /// letting go of what it moved away from; a folder that cannot be
+        /// followed says so and is unwatched.
+        fn commit(&self, client: ListingClient, took: Took<alloc::sync::Arc<WatchedDirectory>>) {
+            if let Err(err) = took.commit(self.set, watch_token(client)) {
+                self.unwatch(client);
+                unfollowed(err);
+            }
         }
 
         /// Record a fresh listing of `components` for `client` — one no read
@@ -4555,40 +4668,127 @@ mod program {
             client: ListingClient,
             components: &[alloc::string::String],
         ) -> Result<Listing, Errno> {
-            self.ask(components, |desk| {
-                desk.refresh(client, components);
+            self.ask(client, components, |work| {
+                work.desk.refresh(client, components);
                 Ok(Listing::Pending)
             })
         }
 
-        /// Put a listing request to the desk through `record`, waking a worker
-        /// when it leaves the consumer waiting.
+        /// Put `client`'s listing request to the desk through `record`, waking
+        /// a worker when it leaves the consumer waiting; with no worker to,
+        /// read it on this task.
         fn ask(
             &self,
+            client: ListingClient,
             components: &[alloc::string::String],
-            record: impl FnOnce(&mut ListingDesk<ListingClient>) -> Result<Listing, Errno>,
+            record: impl FnOnce(&mut ListingWork) -> Result<Listing, Errno>,
         ) -> Result<Listing, Errno> {
             let deferred = {
-                let mut desk = self.desk.lock();
-                if desk.stopping() {
+                let mut work = self.work.lock();
+                if work.desk.stopping() {
                     None
                 } else {
-                    Some(record(&mut desk))
+                    Some(record(&mut work))
                 }
             };
             let Some(listing) = deferred else {
-                return read_directory(components).map(Listing::Ready);
+                return self.read_here(client, components);
             };
             if matches!(listing, Ok(Listing::Pending)) {
-                self.work.notify_one();
+                self.signal.notify_one();
             }
             listing
         }
 
+        /// Read `components` for `client` on this task: armed and joined as a
+        /// worker's read would be when the session has no worker, so its folder
+        /// still follows its changes, and read bare once it is tearing down.
+        fn read_here(
+            &self,
+            client: ListingClient,
+            components: &[alloc::string::String],
+        ) -> Result<Listing, Errno> {
+            let read = {
+                let mut work = self.work.lock();
+                let ListingWork { watches, alone, .. } = &mut *work;
+                alone.then(|| {
+                    watches.read_here(client, components, |reuse| {
+                        WatchedDirectory::read(components, reuse, unfollowed)
+                    })
+                })
+            };
+            let Some((listed, took)) = read else {
+                return read_directory(components).map(Listing::Ready);
+            };
+            self.commit(client, took);
+            listed.map(Listing::Ready)
+        }
+
+        /// `client`'s watch reported a change: drain it off the loop, or here
+        /// with no worker to. Whether it was drained here and left something
+        /// for the loop to adopt now.
+        fn want_drain(&self, client: ListingClient) -> bool {
+            let mut work = self.work.lock();
+            if !work.watches.want_drain(client) {
+                return false;
+            }
+            if work.alone {
+                let ListingWork {
+                    watches, scratch, ..
+                } = &mut *work;
+                return watches.drain_here(|dir| dir.drain(scratch));
+            }
+            drop(work);
+            self.signal.notify_one();
+            false
+        }
+
+        /// What `client`'s drains produced, handed over once.
+        fn take_update(&self, client: ListingClient) -> WatchUpdate {
+            self.work.lock().watches.take_update(client)
+        }
+
+        /// Whether `client`'s listing of `components` follows that folder.
+        fn follows(&self, client: ListingClient, components: &[alloc::string::String]) -> bool {
+            self.work.lock().watches.follows(client, components)
+        }
+
+        /// `client` reports on nothing any more: its folder went.
+        fn unwatch(&self, client: ListingClient) {
+            let gone = self.work.lock().watches.unwatch(client);
+            drop(gone);
+        }
+
+        /// `client` is gone, with whatever it had asked for and the watch it
+        /// held.
+        fn forget(&self, client: ListingClient) {
+            let released = {
+                let mut work = self.work.lock();
+                work.desk.forget(client);
+                work.watches.forget(client)
+            };
+            drop(released);
+        }
+
         /// Ask the workers to leave and wake every one of them.
         fn stop(&self) {
-            self.desk.lock().stop();
-            self.work.notify_all();
+            {
+                let mut work = self.work.lock();
+                work.desk.stop();
+                work.watches.stop();
+                work.alone = false;
+            }
+            self.signal.notify_all();
+        }
+
+        /// No worker will answer: every listing is read, and every watch
+        /// drained, on the session's own task. Refused its scratch, each drain
+        /// reads its changes a few at a time instead.
+        fn alone(&self) {
+            let mut work = self.work.lock();
+            work.desk.stop();
+            work.alone = true;
+            work.scratch = tairix_util::fallible::filled(WATCH_BUFFER_LEN, 0).unwrap_or_default();
         }
     }
 
@@ -5058,15 +5258,18 @@ mod program {
     }
 
     /// One consumer's view of [`Listings`]: a [`DirectorySource`] that records a
-    /// request and answers with whatever has come back.
-    ///
-    /// Cheap to clone, because the picker builds a fresh browser per pick and
-    /// both consumers must reach the one worker rather than each starting their
-    /// own.
-    #[derive(Clone)]
+    /// request and answers with whatever has come back. Both consumers reach
+    /// the one worker; dropping one — a pick closing — lets go of what it
+    /// asked for and the watch it held.
     struct AsyncDirectorySource {
         listings: alloc::sync::Arc<Listings>,
         client: ListingClient,
+    }
+
+    impl Drop for AsyncDirectorySource {
+        fn drop(&mut self) {
+            self.listings.forget(self.client);
+        }
     }
 
     impl DirectorySource for AsyncDirectorySource {
@@ -5076,6 +5279,10 @@ mod program {
 
         fn refresh(&mut self, components: &[alloc::string::String]) -> Result<Listing, Errno> {
             self.listings.refresh(self.client, components)
+        }
+
+        fn follows(&self, components: &[alloc::string::String]) -> bool {
+            self.listings.follows(self.client, components)
         }
     }
 
@@ -5445,7 +5652,6 @@ mod program {
             route_desktop(
                 &outcome,
                 self.publisher,
-                self.catalogs,
                 self.files,
                 self.pinboard,
                 self.wallpapers,
@@ -5839,9 +6045,8 @@ mod program {
         let Some(command) = command else {
             return;
         };
-        let acted = desk
-            .desktop
-            .command(command, &desk.programs.associations, now_ns);
+        let refresh = command == PinboardCommand::Refresh;
+        let acted = desk.desktop.command(command, &desk.programs.associations);
         let whole = acted.relisted
             | apply_desktop_action(
                 acted.action,
@@ -5862,7 +6067,10 @@ mod program {
                 },
                 now_ns,
             );
-        if acted.relisted {
+        // Asking to look again is the honest moment to re-read what is
+        // installed too, so a program installed since bring-up can open a
+        // document from here without the library popup being opened first.
+        if refresh {
             request_programs(desk.catalogs, shell, compositor, desk.programs);
         }
         if whole {
@@ -7018,8 +7226,7 @@ mod program {
     /// window as one of the desktop outcomes, and those drive the column's
     /// hover, selection, keyboard, and activation. Every other outcome means
     /// the gesture went somewhere else; when the pointer is over a window or
-    /// the bar that is a departure, which clears the hover and arms the next
-    /// arrival's re-listing.
+    /// the bar that is a departure, which clears the hover.
     ///
     /// A refusal — a file no installed application opens — is written to
     /// `stderr` and changes nothing else.
@@ -7027,7 +7234,6 @@ mod program {
     fn route_desktop<S: DirectorySource>(
         outcome: &tairix_desktop_session::ShellOutcome,
         publisher: &Publisher,
-        catalogs: &Catalogs,
         files: &Files,
         pinboard: &mut PinboardPanel,
         wallpapers: &Wallpapers,
@@ -7054,7 +7260,8 @@ mod program {
         let acted = match outcome {
             tairix_desktop_session::ShellOutcome::WindowManager(response) => match response {
                 InputResponse::DesktopPointerMoved => {
-                    desktop.pointer_moved(pointer, &layout, now_ns, &mut damage)
+                    desktop.pointer_moved(pointer, &layout, &mut damage);
+                    DesktopOutcome::ignored()
                 }
                 InputResponse::DesktopPressed => desktop.press(
                     pointer,
@@ -7087,23 +7294,12 @@ mod program {
         // taskbar outcome is never also a desktop gesture — and `or` says so
         // without discarding either.
         let action = shortcut_asked(outcome, shell, desktop).or(acted.action);
-        // A re-list moved the icons themselves, so no cell of the layout the
-        // gesture reported against describes the new column: that, and the
-        // settings and folder edits `apply_desktop_action` performs, are the
-        // changes that genuinely repaint the whole layer.
-        let whole = acted.relisted
-            | apply_desktop_action(
-                action, publisher, files, pinboard, wallpapers, desktop, shell, compositor, launch,
-                now_ns,
-            );
-        if acted.relisted {
-            // The user's own files demonstrably changed under the desktop, so
-            // this is the honest moment to ask what is installed as well: a
-            // program installed since bring-up can open a document from here
-            // without waiting for the library popup to be opened. A re-list
-            // that found nothing changed costs none of this.
-            request_programs(catalogs, shell, compositor, programs);
-        }
+        // The settings and folder edits `apply_desktop_action` performs are
+        // the changes that genuinely repaint the whole layer.
+        let whole = apply_desktop_action(
+            action, publisher, files, pinboard, wallpapers, desktop, shell, compositor, launch,
+            now_ns,
+        );
         if whole {
             shell.present_desktop(compositor, desktop);
         } else if !damage.is_empty() {
@@ -7345,37 +7541,25 @@ mod program {
                 run_path,
                 label,
                 document: Some(document),
-            })) => ask_for_desktop_call(
-                DesktopCall::Document {
+            })) => {
+                let call = DesktopCall::Document {
                     run_path,
                     label,
                     document,
-                },
-                files,
-                desktop,
-                shell,
-                compositor,
-                launch,
-                now_ns,
-            ),
-            Some(DesktopAction::CreateFolder { path }) => ask_for_desktop_call(
-                DesktopCall::Folder { path },
-                files,
-                desktop,
-                shell,
-                compositor,
-                launch,
-                now_ns,
-            ),
-            Some(DesktopAction::CreateShortcut { link, target }) => ask_for_desktop_call(
-                DesktopCall::Shortcut { link, target },
-                files,
-                desktop,
-                shell,
-                compositor,
-                launch,
-                now_ns,
-            ),
+                };
+                ask_for_desktop_call(call, files, desktop, shell, compositor, launch);
+                false
+            }
+            Some(DesktopAction::CreateFolder { path }) => {
+                let call = DesktopCall::Folder { path };
+                ask_for_desktop_call(call, files, desktop, shell, compositor, launch);
+                false
+            }
+            Some(DesktopAction::CreateShortcut { link, target }) => {
+                let call = DesktopCall::Shortcut { link, target };
+                ask_for_desktop_call(call, files, desktop, shell, compositor, launch);
+                false
+            }
             Some(DesktopAction::AdoptSettings(settings)) => request_pinboard_settings(
                 settings, publisher, None, pinboard, wallpapers, desktop, shell, compositor, now_ns,
             ),
@@ -7403,8 +7587,9 @@ mod program {
     }
 
     /// Settle a name the session asked the filesystem to create at `path`,
-    /// whose call answered `ret`, and show the result — answering whether the
-    /// icon column changed.
+    /// whose call answered `made`, and show the result: through the folder's
+    /// watch when it follows the folder, otherwise by re-listing it and
+    /// repainting only the icon cells the fresh listing changed.
     ///
     /// Both names the desktop creates — a folder and a shortcut — end here,
     /// so a refusal reads the same whichever asked for it and the fresh name
@@ -7416,21 +7601,29 @@ mod program {
         path: &str,
         made: Result<(), Errno>,
         desktop: &mut Desktop<S>,
-        now_ns: u64,
-    ) -> bool {
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+    ) {
         if let Err(err) = made {
             app::report(
                 APP_NAME,
                 format_args!("{path} could not be created ({err})"),
             );
-            return false;
+            return;
         }
-        desktop.relist(now_ns)
+        // A followed folder reports what was made in it.
+        if desktop.follows() {
+            return;
+        }
+        let mut cells = damage::sink();
+        if desktop.relist_into(|desk| shell.desktop_layout(compositor, desk), &mut cells) {
+            shell.present_desktop_area(compositor, desktop, &cells);
+        }
     }
 
     /// Ask the file worker for `call`, settling it here when it was answered
     /// at once — carried out on this thread for want of a worker, or refused
-    /// because too many are waiting. Answers whether the icon column changed.
+    /// because too many are waiting.
     #[allow(clippy::too_many_arguments)] // The desktop's whole mutable state, threaded explicitly.
     fn ask_for_desktop_call<S: DirectorySource>(
         call: DesktopCall,
@@ -7439,19 +7632,14 @@ mod program {
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
         launch: &mut LaunchCtx<'_>,
-        now_ns: u64,
-    ) -> bool {
-        match files.submit(FileJob::Desktop(call)) {
-            Some(FileAnswer::Desktop(done)) => {
-                settle_desktop_call(done, desktop, shell, compositor, launch, now_ns)
-            }
-            // An answer is for the call it was asked with.
-            Some(FileAnswer::Pick { .. }) | None => false,
+    ) {
+        // An answer is for the call it was asked with.
+        if let Some(FileAnswer::Desktop(done)) = files.submit(FileJob::Desktop(call)) {
+            settle_desktop_call(done, desktop, shell, compositor, launch);
         }
     }
 
-    /// Settle a desktop call the file worker carried out, answering whether
-    /// the icon column changed.
+    /// Settle a desktop call the file worker carried out.
     ///
     /// A document launches its application with the descriptor opened for it;
     /// a folder or shortcut made is shown. A refusal is stated on `stderr`
@@ -7463,8 +7651,7 @@ mod program {
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
         launch: &mut LaunchCtx<'_>,
-        now_ns: u64,
-    ) -> bool {
+    ) {
         match done {
             DesktopAnswer::Document {
                 run_path,
@@ -7482,10 +7669,9 @@ mod program {
                         app::report(APP_NAME, format_args!("cannot open '{name}' ({err})"));
                     }
                 }
-                false
             }
             DesktopAnswer::Made { path, made } => {
-                settle_desktop_create(&path, made, desktop, now_ns)
+                settle_desktop_create(&path, made, desktop, shell, compositor);
             }
         }
     }
@@ -7522,7 +7708,7 @@ mod program {
     }
 
     /// Adopt whatever the settings worker has published, if anything, and do
-    /// exactly the work the resulting change names: re-lay-out, re-list, and
+    /// exactly the work the resulting change names: re-lay-out the icons and
     /// re-prepare the wallpaper.
     ///
     /// Answers whether the desktop layer needs a whole repaint.
@@ -7582,20 +7768,13 @@ mod program {
         let Some(change) = desktop.apply_settings(published.settings) else {
             return false;
         };
-        if change.backdrop.relist {
-            desktop.relist(now_ns);
-        }
-        if change.backdrop.wallpaper {
-            prepare_wallpaper(pinboard, wallpapers, shell, desktop, compositor, now_ns);
-        }
+        let papered = change.backdrop.wallpaper
+            && prepare_wallpaper(pinboard, wallpapers, shell, desktop, compositor, now_ns);
         adopt_appearance(change.appearance, &wanted, shell, compositor);
         if change.notifications {
             shell.withdraw_unadmitted(compositor, &wanted.notifications);
         }
-        // A re-layout, a re-list, and a new wallpaper all show as the same
-        // repaint of the desktop layer, so one present covers whichever of
-        // them the change asked for.
-        true
+        change.layer || papered
     }
 
     /// Put the *appearance* half of a settings change into effect: the theme
@@ -7670,7 +7849,7 @@ mod program {
         damage: &mut Region,
     ) -> DesktopOutcome {
         if compositor.window_at(pointer).is_some() {
-            return desktop.pointer_left(layout, damage);
+            desktop.pointer_left(layout, damage);
         }
         DesktopOutcome::ignored()
     }

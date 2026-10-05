@@ -30,7 +30,6 @@ use alloc::vec::Vec;
 use core::f64::consts::{PI, TAU};
 use core::ops::{Add, Mul, Range, Sub};
 
-use tairix_inline::ArrayVec;
 use tairix_parallel::JobRunner;
 use tairix_raster::{DitherRow, Pixel, RowBand, ScanScratch, SUBPIXEL};
 use tairix_rng::{NonCryptoRng, RandU64};
@@ -79,9 +78,7 @@ const SHUTTER: f64 = 0.5;
 const SWAY: f64 = 0.3;
 const SWAY_PERIOD: f64 = 53.0;
 
-/// The most bands a paint splits its rows into, and the fewest pixels one is
-/// worth handing to another core.
-const MAX_BANDS: usize = 64;
+/// The fewest pixels a band is worth handing to another core.
 const MIN_BAND_PIXELS: usize = 32_768;
 
 /// The parts and polygons a frame's craft have room for before they grow.
@@ -127,13 +124,10 @@ impl RetroGames {
     ) -> Option<Self> {
         let view = View::new(size, scale)?;
         let scatter = seed_from(now_ns);
-        let (mut scratch, mut showing) = (Vec::new(), Vec::new());
-        if !(fallible::reserve(&mut scratch, MAX_BANDS)
-            && fallible::reserve(&mut showing, STAGE_PARTS))
-        {
+        let (scratch, mut showing) = (Vec::new(), Vec::new());
+        if !fallible::reserve(&mut showing, STAGE_PARTS) {
             return None;
         }
-        scratch.resize_with(MAX_BANDS, ScanScratch::new);
         let mountains = Mountains::new(&view, scatter)?;
         let sky = Sky::new(view, &mountains)?;
         let speed = FLIGHT_SPEED * f64::from(options.speed.percent()) / 100.0;
@@ -163,6 +157,7 @@ impl RetroGames {
     /// Draw the whole scene onto `surface` as it stands when the flight
     /// begins, spreading the work across `runner`.
     pub(super) fn paint(&mut self, surface: &mut Surface, runner: &dyn JobRunner) {
+        grow_scratch(&mut self.scratch, runner);
         let moment = Moment::default();
         self.stage_craft(moment);
         self.paint_backdrop(surface, runner, moment);
@@ -194,6 +189,7 @@ impl RetroGames {
         }
         let size = (self.view.width, self.view.height);
         let runner = compositor.job_runner();
+        grow_scratch(&mut self.scratch, runner);
         let kept = compositor.keeps_content(wm, size) && lay_back;
         let Self {
             sky,
@@ -558,15 +554,31 @@ fn paint_rows(
     row: &(dyn Fn(u32, &mut [Pixel]) + Sync),
 ) {
     let width = surface.width();
-    paint_bands(surface, rows, runner, |band| band, &|band: &mut RowBand<
-        '_,
-    >| {
-        for y in band.rows() {
-            if let Some((_, span)) = band.row_span_mut(y, 0, width) {
-                row(y, span);
+    paint_bands(
+        surface,
+        rows,
+        runner,
+        usize::MAX,
+        |band| band,
+        &|band: &mut RowBand<'_>| {
+            for y in band.rows() {
+                if let Some((_, span)) = band.row_span_mut(y, 0, width) {
+                    row(y, span);
+                }
             }
+        },
+    );
+}
+
+/// Give `scratch` a scan converter for each band `runner` splits a paint
+/// into, once: a refusal keeps what it holds, and the paint splits no finer.
+fn grow_scratch(scratch: &mut Vec<ScanScratch>, runner: &dyn JobRunner) {
+    let wanted = tairix_parallel::bands(runner, usize::MAX, 1);
+    if let Some(more) = wanted.checked_sub(scratch.len()) {
+        if fallible::reserve(scratch, more) {
+            scratch.resize_with(wanted, ScanScratch::new);
         }
-    });
+    }
 }
 
 /// Paint rows `rows` of `surface` with `paint` a band of whole rows at a time
@@ -578,11 +590,13 @@ fn draw_bands(
     scratch: &mut [ScanScratch],
     paint: &(dyn Fn(&mut RowBand<'_>, &mut ScanScratch) + Sync),
 ) {
+    let most = scratch.len().max(1);
     let mut spare = scratch.iter_mut();
     paint_bands(
         surface,
         rows,
         runner,
+        most,
         |band| (band, spare.next()),
         &|(band, scratch): &mut (RowBand<'_>, Option<&mut ScanScratch>)| match scratch {
             Some(scratch) => paint(band, scratch),
@@ -591,31 +605,27 @@ fn draw_bands(
     );
 }
 
-/// Paint rows `rows` of `surface` a band of whole rows at a time, spread
-/// across `runner`: `ready` makes each band what `paint` is handed.
+/// Paint rows `rows` of `surface` in at most `most` bands of whole rows,
+/// spread across `runner`: `ready` makes each band what `paint` is handed.
 fn paint_bands<'s, T: Send>(
     surface: &'s mut Surface,
     rows: Range<u32>,
     runner: &dyn JobRunner,
-    mut ready: impl FnMut(RowBand<'s>) -> T,
+    most: usize,
+    ready: impl FnMut(RowBand<'s>) -> T,
     paint: &(dyn Fn(&mut T) + Sync),
 ) {
     let count = usize::try_from(rows.end.saturating_sub(rows.start)).unwrap_or(0);
     let wide = usize::try_from(surface.width()).unwrap_or(1).max(1);
-    let pieces =
-        tairix_parallel::bands(runner, count, MIN_BAND_PIXELS.div_ceil(wide)).clamp(1, MAX_BANDS);
-    let per_band = u32::try_from(count.div_ceil(pieces))
-        .unwrap_or(u32::MAX)
+    let pieces = tairix_parallel::bands(runner, count, MIN_BAND_PIXELS.div_ceil(wide))
+        .min(most)
         .max(1);
-    let mut bands: ArrayVec<T, MAX_BANDS> = ArrayVec::new();
-    for band in surface.row_bands_mut(rows, per_band) {
-        // The split never makes more bands than it was asked for; one that
-        // somehow did is still painted, on this thread.
-        if let Err(refused) = bands.try_push(ready(band)) {
-            paint(&mut refused.into_value());
-        }
-    }
-    tairix_parallel::for_each(runner, &mut bands, paint);
+    let per_band = tairix_raster::band_rows(count, pieces);
+    tairix_parallel::for_each_drawn(
+        runner,
+        surface.row_bands_mut(rows, per_band).map(ready),
+        &|mut piece| paint(&mut piece),
+    );
 }
 
 #[cfg(test)]

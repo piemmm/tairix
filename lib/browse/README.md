@@ -105,6 +105,21 @@ can never diverge in navigation semantics, listing policy, or look.
   and gets its own slot the first time it asks, until the program `forget`s it:
   two consumers sharing one slot would each discard the other's answer and
   neither would ever settle.
+- **Live listings** (`watch`, `docs/src/filesystem/watch.md`): every directory
+  view follows its folder through a kernel directory watch with the one
+  implementation here. `WatchedDirectory::list` arms the watch on the
+  descriptor before listing through it, so no change falls between the two,
+  `join`s its consumer's wait-set once and withdraws that member before its
+  descriptor can close, and `drain`s a report into `EntryChange`s decoded
+  exactly as a listing's records are. The `Watches<C, H>` desk — lock-,
+  thread- and syscall-free like `ListingDesk` — hands a consumer taking a
+  listing the watch armed with it (`took`, whose `Took` names what to join and
+  what to let go), reads a reload through the watch already held
+  (`relisting`), and drops a drain for somewhere the consumer has left. `merge_changes` (behind `Browser::apply_changes`) folds a
+  report into a sorted listing in one pass plus a sort of the changes, and a
+  reload keeps the focus, the selection and each folder's occupancy cue on
+  their entries, so a refresh never blinks. `render::shown_listing` and
+  `listing_damage` scope the repaint to the rows a change moved.
 - **Navigation history** (`Browser`): a bounded back /
   forward stack (`go_back` / `go_forward`, with `can_go_back` /
   `can_go_forward` supplying the enable state of the Back / Forward toolbar

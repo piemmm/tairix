@@ -372,26 +372,45 @@ fn every_hull_lies_within_its_extent() {
     }
 }
 
-/// What a scene is made of and how it is seen, as text to compare.
+/// What a scene is made of and how it is seen, as text to compare: each of
+/// its fields as a digest of every height and attribute it holds.
 fn describe(scene: &Scene) -> alloc::string::String {
+    let fields: Vec<(usize, u32)> = scene
+        .fields
+        .iter()
+        .map(|field| {
+            let side = field.side();
+            let heights = field
+                .heights()
+                .iter()
+                .fold(0, |held, height| mix32(held ^ height.to_bits()));
+            let held = (0..side * side).fold(heights, |held, at| {
+                mix32(held ^ u32::from_le_bytes(field.attributes_of(at % side, at / side)))
+            });
+            (side, held)
+        })
+        .collect();
     alloc::format!(
-        "{:?}{:?}{:?}{:?}",
+        "{:?}{:?}{:?}{:?}{:?}{fields:?}",
         scene.objects,
         scene.lights,
         scene.camera,
-        scene.exposure
+        scene.exposure,
+        scene.lawns,
     )
 }
 
 #[test]
 fn a_seed_composes_the_same_scene_every_time_and_another_seed_another() {
     let runner = Threaded::new(8);
-    // A winter's frozen pond sets out its reeds and reedmace about the eye.
+    // A winter's frozen pond sets out its reeds and reedmace about the eye,
+    // and a stream's bed and flow are worked a runner's width at a time.
     for setting in [
         Setting::Classic,
         Setting::Ruins,
         Setting::Meadow,
         Setting::Winter,
+        Setting::Stream,
     ] {
         let first = corpus()
             .iter()

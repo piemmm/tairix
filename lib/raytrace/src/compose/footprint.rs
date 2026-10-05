@@ -3,6 +3,10 @@
 //! A still life holds a handful, and is asked of them all; a land's woods
 //! hold thousands, so once a land lays its extent the circles are indexed
 //! over a grid of it and a question looks only at its neighbours.
+//!
+//! A circle is taken either by a piece standing there or as ground the
+//! composition keeps open of pieces — the eye's own, a pond — where what
+//! grows wild may still stand.
 
 use alloc::vec::Vec;
 
@@ -10,18 +14,34 @@ use super::chains::Chains;
 use crate::vector::real;
 
 /// The clearance two pieces' circles keep between them.
-const GAP: f64 = 0.08;
+pub(super) const GAP: f64 = 0.08;
 
 /// The most cells a side of the grid holds, and the least a cell spans:
 /// room for a stage-sized square at a tree's spacing.
 const MOST_SIDE: usize = 512;
 const LEAST_CELL: f64 = 4.0;
 
-/// Circles `(x, z, radius)` on the ground, each taken by a piece.
+/// Circles on the ground, each taken by a piece or kept open.
 #[derive(Debug, Default)]
 pub(super) struct Footprints {
-    circles: Vec<(f64, f64, f64)>,
+    circles: Vec<Circle>,
     index: Option<Index>,
+}
+
+/// What takes a circle of the ground.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(super) enum Taken {
+    /// A piece stands there: a trunk, a stone, a wall.
+    Piece,
+    /// The composition keeps it open of pieces.
+    Open,
+}
+
+#[derive(Copy, Clone, Debug)]
+struct Circle {
+    at: (f64, f64),
+    radius: f64,
+    taken: Taken,
 }
 
 /// The circles chained into the cells of a grid over the ground, each into
@@ -38,12 +58,22 @@ impl Footprints {
     /// Whether a piece `radius` across at `at` keeps clear of every circle;
     /// a negative radius takes no room of its own.
     pub(super) fn clear(&self, at: (f64, f64), radius: f64) -> bool {
+        self.clear_of(at, radius, |_| true)
+    }
+
+    /// Whether what grows `radius` across at `at` keeps clear of every
+    /// piece, open ground being no bar to it.
+    pub(super) fn clear_of_pieces(&self, at: (f64, f64), radius: f64) -> bool {
+        self.clear_of(at, radius, |taken| taken == Taken::Piece)
+    }
+
+    fn clear_of(&self, at: (f64, f64), radius: f64, bars: impl Fn(Taken) -> bool) -> bool {
         let radius = radius.max(0.0);
         let apart = |id: u32| {
-            self.circles.get(id as usize).is_none_or(|&(x, z, taken)| {
-                let (dx, dz) = (at.0 - x, at.1 - z);
-                let least = radius + taken + GAP;
-                dx * dx + dz * dz > least * least
+            self.circles.get(id as usize).is_none_or(|circle| {
+                let (dx, dz) = (at.0 - circle.at.0, at.1 - circle.at.1);
+                let least = radius + circle.radius + GAP;
+                !bars(circle.taken) || dx * dx + dz * dz > least * least
             })
         };
         let Some(index) = &self.index else {
@@ -55,11 +85,11 @@ impl Footprints {
 
     /// Take a circle `radius` across at `at`, no room for a negative one;
     /// `None` when the heap will not hold it.
-    pub(super) fn claim(&mut self, at: (f64, f64), radius: f64) -> Option<()> {
+    pub(super) fn claim(&mut self, at: (f64, f64), radius: f64, taken: Taken) -> Option<()> {
         let radius = radius.max(0.0);
         let id = u32::try_from(self.circles.len()).ok()?;
         self.circles.try_reserve(1).ok()?;
-        self.circles.push((at.0, at.1, radius));
+        self.circles.push(Circle { at, radius, taken });
         match &mut self.index {
             Some(index) => index.link(id, at, radius),
             None => Some(()),
@@ -74,8 +104,8 @@ impl Footprints {
             chains: Chains::new((centre, reach), cell, MOST_SIDE)?,
             beyond: Vec::new(),
         };
-        for (id, &(x, z, radius)) in self.circles.iter().enumerate() {
-            index.link(u32::try_from(id).ok()?, (x, z), radius)?;
+        for (id, circle) in self.circles.iter().enumerate() {
+            index.link(u32::try_from(id).ok()?, circle.at, circle.radius)?;
         }
         self.index = Some(index);
         Some(())

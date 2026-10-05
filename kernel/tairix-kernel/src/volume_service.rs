@@ -82,8 +82,8 @@ use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
     DirEntry, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider, FilesystemRead,
-    FilesystemSecurity, FilesystemStats, FilesystemWrite, MountFlags, NodeId, NodeInfo, NodeKind,
-    NodeSecurity, VolumeStats,
+    FilesystemSecurity, FilesystemStats, FilesystemWrite, MountFlags, NameMatching, NodeId,
+    NodeInfo, NodeKind, NodeSecurity, VolumeStats,
 };
 use tairix_abi::sysinfo::MountAvailability;
 use tairix_abi::volume::{VolumeAttachRequest, VolumeDetachRequest, VolumeFsType};
@@ -96,6 +96,7 @@ use tairix_kernel_core::devres::installed_shared_mem_facility;
 use tairix_kernel_core::fs::blkclient::BlkClient;
 use tairix_kernel_core::fs::blkmeter::VolumeIoSource;
 use tairix_kernel_core::fs::{JournaledBlock, RetainedWrites};
+use tairix_kernel_core::fswatch::{ClaimRef, WatchRegistry};
 use tairix_kernel_core::sharedreg::kernel_hold;
 use tairix_kernel_core::{
     Metadata, Mode, MountBacking, Path, SleepLock, Vfs, VolumePublishError, VolumeService,
@@ -240,6 +241,10 @@ impl FilesystemRead for UnavailableFs {
         // and faults honestly (`NodeId::NONE` would read as "volume not
         // online yet" instead of "device gone").
         NodeId::from_raw(1)
+    }
+
+    fn name_matching(&self) -> NameMatching {
+        NameMatching::Exact
     }
 
     fn node_info(&mut self, _node: NodeId) -> Result<NodeInfo, DriverError> {
@@ -388,6 +393,7 @@ impl FilesystemAttrsProvider for UnavailableFs {
 struct Wiring {
     audit: &'static (dyn Sink + Sync),
     pressure: &'static MemoryPressure,
+    watches: Option<&'static WatchRegistry>,
 }
 
 /// The production runtime volume attach/detach service. One static
@@ -429,11 +435,20 @@ impl RuntimeVolumeService {
         }
     }
 
-    /// Wire the service with the boot path's audit sink and pressure
-    /// gauge. First-wins and idempotent, like the other late-installed
-    /// seams.
-    pub fn install(&self, audit: &'static (dyn Sink + Sync), pressure: &'static MemoryPressure) {
-        let _ = self.wiring.set(Wiring { audit, pressure });
+    /// Wire the service with the boot path's audit sink, pressure gauge and
+    /// directory-watch registry. First-wins and idempotent, like the other
+    /// late-installed seams.
+    pub fn install(
+        &self,
+        audit: &'static (dyn Sink + Sync),
+        pressure: &'static MemoryPressure,
+        watches: Option<&'static WatchRegistry>,
+    ) {
+        let _ = self.wiring.set(Wiring {
+            audit,
+            pressure,
+            watches,
+        });
     }
 
     /// The installed wiring, or fail-closed before boot installs it.
@@ -579,6 +594,7 @@ impl Default for RuntimeVolumeService {
 /// identity and registration facts.
 struct OpenedVolume {
     driver: alloc::boxed::Box<dyn KernelFs>,
+    watch: Option<ClaimRef>,
     identity: [u8; 16],
     fstype: &'static str,
 }
@@ -629,8 +645,17 @@ fn open_filesystem(
                 )
                 .map_err(DriverError::as_errno)?
             };
+            let (driver, watch) = cached(
+                fs,
+                volume_handle,
+                identity,
+                wiring.pressure,
+                wiring.audit,
+                wiring.watches,
+            );
             Ok(OpenedVolume {
-                driver: cached(fs, volume_handle, wiring.pressure, wiring.audit),
+                driver,
+                watch,
                 identity,
                 fstype: "arxfs",
             })
@@ -638,8 +663,17 @@ fn open_filesystem(
         VolumeFsType::Ext4 => {
             let fs = Ext4::open(window).map_err(DriverError::as_errno)?;
             let identity = fs.volume_uuid();
+            let (driver, watch) = cached(
+                fs,
+                volume_handle,
+                identity,
+                wiring.pressure,
+                wiring.audit,
+                wiring.watches,
+            );
             Ok(OpenedVolume {
-                driver: cached(fs, volume_handle, wiring.pressure, wiring.audit),
+                driver,
+                watch,
                 identity,
                 fstype: "ext4",
             })
@@ -650,17 +684,27 @@ fn open_filesystem(
             // FAT32 stores no owner model; mount it under the storage-group
             // identity map when the group is provisioned, else keep the
             // driver's own restrictive system-owned posture (fail closed).
-            let driver = match map_gid {
+            let (driver, watch) = match map_gid {
                 Some(gid) => cached(
                     GroupMappedFs::new(fs, gid),
                     volume_handle,
+                    identity,
                     wiring.pressure,
                     wiring.audit,
+                    wiring.watches,
                 ),
-                None => cached(fs, volume_handle, wiring.pressure, wiring.audit),
+                None => cached(
+                    fs,
+                    volume_handle,
+                    identity,
+                    wiring.pressure,
+                    wiring.audit,
+                    wiring.watches,
+                ),
             };
             Ok(OpenedVolume {
                 driver,
+                watch,
                 identity,
                 fstype: "fat32",
             })
@@ -705,14 +749,20 @@ fn mount_storage_volume(
 /// under the operation lock.
 fn register_with_health(
     handle: DriverHandle,
-    driver: alloc::boxed::Box<dyn KernelFs>,
+    opened: OpenedVolume,
     source: &str,
-    fstype: &'static str,
     volume_id: [u8; 16],
     health: VolumeIoSource,
 ) -> Result<(), ()> {
     LATE_FILESYSTEM
-        .register(handle, driver, source, fstype, volume_id)
+        .register(
+            handle,
+            opened.driver,
+            source,
+            opened.fstype,
+            volume_id,
+            opened.watch,
+        )
         .map_err(|_| ())?;
     let _ = LATE_FILESYSTEM.set_io_source(handle, health);
     Ok(())
@@ -1050,21 +1100,13 @@ impl VolumeService for RuntimeVolumeService {
         // Register the live driver, then publish the identity last; each
         // failure unwinds everything already done, so a refused attach
         // leaves no trace.
-        if register_with_health(
-            handle,
-            opened.driver,
-            name,
-            opened.fstype,
-            opened.identity,
-            health,
-        )
-        .is_err()
-        {
+        let identity = opened.identity;
+        let fstype = opened.fstype;
+        if register_with_health(handle, opened, name, identity, health).is_err() {
             let _ = vfs.mounts_write().unmount(&path);
             return Err(refused("handle_in_use", Errno::AlreadyExists));
         }
-        if let Err(err) = publish_volume_identity(opened.identity, &["Storage", name], name, audit)
-        {
+        if let Err(err) = publish_volume_identity(identity, &["Storage", name], name, audit) {
             let _ = LATE_FILESYSTEM.unregister(handle);
             let _ = vfs.mounts_write().unmount(&path);
             let errno = match err {
@@ -1075,14 +1117,14 @@ impl VolumeService for RuntimeVolumeService {
         }
 
         self.state.lock().push(AttachedVolume {
-            id: opened.identity,
+            id: identity,
             name: String::from(name),
             path,
             handle,
             endpoint: request.endpoint,
             window: request.window,
             journal,
-            fstype: opened.fstype,
+            fstype,
             first_lba: request.first_lba,
             blocks: request.blocks,
             availability: Availability::Available,
@@ -1527,16 +1569,8 @@ impl RuntimeVolumeService {
         // under the operation lock (the handle was just freed, the path
         // just unmounted).
         let _ = LATE_FILESYSTEM.unregister(target.handle);
-        if register_with_health(
-            target.handle,
-            opened.driver,
-            &target.name,
-            opened.fstype,
-            target.id,
-            health,
-        )
-        .is_err()
-        {
+        let fstype = opened.fstype;
+        if register_with_health(target.handle, opened, &target.name, target.id, health).is_err() {
             return Err(refused("handle_in_use", Errno::AlreadyExists));
         }
         // A conflicted volume stays read-only `RecoveryConflict`, over which
@@ -1570,7 +1604,7 @@ impl RuntimeVolumeService {
             if let Some(entry) = state.iter_mut().find(|v| v.id == target.id) {
                 entry.endpoint = request.endpoint;
                 entry.window = request.window;
-                entry.fstype = opened.fstype;
+                entry.fstype = fstype;
                 entry.availability = if conflict {
                     Availability::RecoveryConflict
                 } else {
@@ -1678,6 +1712,7 @@ impl RuntimeVolumeService {
                     &name,
                     fstype,
                     id,
+                    None,
                 );
                 let _ = LATE_FILESYSTEM.set_availability(
                     handle,

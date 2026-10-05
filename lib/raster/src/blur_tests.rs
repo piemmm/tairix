@@ -1327,6 +1327,70 @@ fn the_rows_between_distant_bands_cost_no_dispatch() {
     );
 }
 
+/// Each run of rows the bands read is split on its own, so two distant bands
+/// are handed out exactly as each would be frosted alone: no participant is
+/// given only the rows between them.
+#[test]
+fn distant_bands_are_split_as_each_would_be_alone() {
+    let (width, height) = (1000u32, 760u32);
+    let rect = (20u32, 28, 960, 704);
+    let (x, y, w, h) = rect;
+    let top = (x..x + w, y..y + 16);
+    let bottom = (x..x + w, y + h - 16..y + h);
+    let split = |bands: &[(Range<u32>, Range<u32>)]| {
+        let runner = tairix_parallel::Reversed::new(4);
+        let mut scratch = BlurScratch::new();
+        assert!(scratch.reserve(width, height, 2, &runner));
+        let (mut plane, mut surface) = (patterned(width, height), patterned(width, height));
+        assert!(frost_from_plane(
+            &mut surface,
+            &mut plane,
+            &frosting(rect, NOTHING_HELD, bands, 43),
+            &mut scratch,
+            &runner,
+            230,
+        ));
+        (runner.dispatches(), runner.widest())
+    };
+    let (top_alone, bottom_alone) = (
+        split(core::slice::from_ref(&top)),
+        split(core::slice::from_ref(&bottom)),
+    );
+    let together = split(&[top, bottom]);
+    assert_eq!(together.0, top_alone.0 + bottom_alone.0);
+    assert_eq!(together.1, top_alone.1.max(bottom_alone.1));
+}
+
+/// A strip hands out only the pieces covering it: one whose rows the strip
+/// misses would only wake a participant to find nothing to average.
+#[test]
+fn a_strip_hands_out_only_the_pieces_covering_it() {
+    let frost = super::Frost::new(0, 0, (0..460, 0..220), &NOTHING_HELD, 2);
+    let read = super::PlaneRead {
+        frost: &frost,
+        origin: (0, 0),
+    };
+    let plane = patterned(460, 220);
+    let piece = |cols: Range<usize>, rows: Range<usize>| super::Piece { cols, rows };
+    let pieces = [
+        piece(0..100, 0..100),
+        piece(100..200, 0..100),
+        piece(200..300, 0..100),
+        piece(300..400, 0..100),
+        piece(450..460, 200..210),
+    ];
+    let mut sums = vec![super::PixelSum::default(); 410];
+    let mut strip = vec![Pixel::TRANSPARENT; 400 * 10];
+    let runner = tairix_parallel::Reversed::new(4);
+    read.average_strip(&plane, &pieces, &mut sums, &mut strip, &(0..10), &runner);
+    assert_eq!(runner.dispatches(), 1);
+    assert_eq!(
+        runner.widest(),
+        4,
+        "the piece below the strip was handed out"
+    );
+}
+
 /// A frost mixed back a few rows at a time, over many strips, writes exactly
 /// what one strip holding every row writes.
 #[test]

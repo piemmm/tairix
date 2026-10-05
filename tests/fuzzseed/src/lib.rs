@@ -327,6 +327,8 @@ impl Prng {
     }
 }
 
+pub mod meter;
+
 /// The shared `proptest` stateful-model runner used by the models.
 ///
 /// Enabled by the `proptest` feature. Centralises the seed resolution, the

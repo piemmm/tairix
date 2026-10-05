@@ -40,7 +40,10 @@ fn a_landscapes_eye_stands_above_its_land_and_clear_of_its_water() {
     for (index, plan) in plans.into_iter().enumerate() {
         let (stage, landing, mut dice) = surveyed(plan, 5);
         let survey = landing.build.survey(&stage.fields).expect("a survey");
-        let (vantage, siting) = landing.scheme.site(&mut dice, &survey).expect("sited");
+        let (vantage, siting) = landing
+            .scheme
+            .site(&mut dice, &survey, &tairix_parallel::SERIAL)
+            .expect("sited");
         let Vantage { eye, heading } = vantage.expect("a landscape sites its eye");
         let ground = survey.height(eye.x, eye.z);
         let water = survey.water(eye.x, eye.z).unwrap_or(f64::NEG_INFINITY);
@@ -132,13 +135,26 @@ fn a_backdrops_clearing_stays_level_once_its_land_is_built() {
     }
 }
 
-/// A stream's land always has somewhere by its stream for the eye to stand.
+/// A stream's land always has somewhere by its stream for the eye to stand,
+/// the same however its marks are weighed out.
 #[test]
 fn a_stream_always_has_somewhere_to_be_looked_at_from() {
     for seed in 0..4 {
         let (stage, landing, mut dice) = surveyed(stream, seed);
         let survey = landing.build.survey(&stage.fields).expect("a survey");
-        let vantage = stream_vantage(&survey, &mut dice).expect("a spot by the stream");
+        let vantage =
+            stream_vantage(&survey, &mut dice, &Threaded::new(3)).expect("a spot by the stream");
+        let bits = |runner: &dyn tairix_parallel::JobRunner| {
+            stream_vantage(&survey, &mut Dice::keyed(seed, 1), runner).map(|vantage| {
+                let Vantage { eye, heading } = vantage;
+                [eye.x, eye.y, eye.z, heading].map(f64::to_bits)
+            })
+        };
+        assert_eq!(
+            bits(&tairix_parallel::SERIAL),
+            bits(&Threaded::new(5)),
+            "{seed}"
+        );
         let near = survey.rivers().nearest(vantage.eye.x, vantage.eye.z);
         assert!(near.is_some(), "{seed}: the eye stands by its stream");
     }

@@ -32,8 +32,8 @@
 //! foam, with the foam a stone through the surface sheds, is carried down
 //! the stream as it spreads and bursts.
 //!
-//! Every unit of the work is a few rows of the grid a core, so a caller
-//! answering a frame stops after any of them.
+//! Every unit of the work is a bounded number of the grid's points a core,
+//! so a caller answering a frame stops after any of them.
 
 use alloc::vec::Vec;
 use core::f64::consts::{PI, TAU};
@@ -118,8 +118,10 @@ const DRAPE_SEED: u32 = 0x3d4f;
 /// How near the bed the surface may fall, as a share of the depth.
 const FLOOR: f64 = 0.85;
 
-/// Rows of the grid a core works in a unit.
-const ROWS: usize = 16;
+/// About how many of a grid's points a core works through in a unit, and
+/// how many stones it takes the measure of in one.
+const POINTS: usize = 16_384;
+const TAKEN: usize = 2048;
 
 /// A stretch of stream, as its course runs: where it begins along the
 /// course and how long it is, how far either side of the course it reaches,
@@ -243,9 +245,7 @@ impl Flow {
             at(column + 1, row + 1),
         ];
         let blend = |pick: fn((f64, f64)) -> f64| {
-            let top = pick(corners[0]) + (pick(corners[1]) - pick(corners[0])) * across_cell;
-            let bottom = pick(corners[2]) + (pick(corners[3]) - pick(corners[2])) * across_cell;
-            top + (bottom - top) * down
+            crate::heightfield::bilinear(corners.map(pick), (across_cell, down))
         };
         (blend(|corner| corner.0), blend(|corner| corner.1))
     }
@@ -256,14 +256,12 @@ impl Flow {
 /// its water runs, and how far it is tapered to nothing.
 type Adjust = dyn Fn(&Stretch, f64, (f64, f64), (f64, f64), f64) -> f64 + Sync;
 
-/// A stone as the grid takes it: where it stands in the order the stones
-/// were laid, the first and last rows it reaches, the cells its rise in the
-/// bed covers, and, where it stands through the surface, the cells its
-/// source covers and the source itself.
+/// A stone as the grid takes it: the first and last rows it reaches, the
+/// cells its rise in the bed covers, and, where it stands through the
+/// surface, the cells its source covers and the source itself.
 #[derive(Copy, Clone, Debug, PartialEq)]
 struct Laid {
     stone: Stone,
-    order: u32,
     rows: (usize, usize),
     bed: Option<Cells>,
     source: Option<(Cells, Source)>,
@@ -361,20 +359,41 @@ impl Ladder {
         mathf::exp(self.ln_least + t * self.ln_span)
     }
 
-    /// Where `value` lies on the ladder: the rung at or below it and how far
-    /// toward the next, held to its ends.
-    fn place(&self, value: f64) -> (usize, f64) {
-        let top = real(self.rungs - 1);
+    /// How far up the ladder `value` lies, in rungs, held to its ends.
+    fn position(&self, value: f64) -> f64 {
         if self.ln_span <= 0.0 || value <= self.least {
-            return (0, 0.0);
+            return 0.0;
         }
-        let at = (top * (mathf::ln(value) - self.ln_least) / self.ln_span).clamp(0.0, top);
-        let below = mathf::floor(at).min(top - 1.0).max(0.0);
+        let top = real(self.rungs - 1);
+        (top * (mathf::ln(value) - self.ln_least) / self.ln_span).clamp(0.0, top)
+    }
+
+    /// Where `value` lies up the ladder, as a share of its height in
+    /// 65 535ths: finer than a blend between two rungs can tell, in half the
+    /// room of a float.
+    fn mark(&self, value: f64) -> u16 {
+        let top = real(self.rungs - 1);
+        let share = if top > 0.0 {
+            self.position(value) / top
+        } else {
+            0.0
+        };
+        u16::try_from(mathf::round_i32(f64::from(u16::MAX) * share)).unwrap_or(u16::MAX)
+    }
+
+    /// The position `mark` keeps.
+    fn marked(&self, mark: u16) -> f64 {
+        real(self.rungs - 1) * f64::from(mark) / f64::from(u16::MAX)
+    }
+
+    /// The rung at or below position `at` and how far toward the next.
+    fn split(&self, at: f64) -> (usize, f64) {
+        let below = mathf::floor(at).min(real(self.rungs - 1) - 1.0).max(0.0);
         (whole(below), at - below)
     }
 
-    /// The weight rung `rung`'s answer takes where the value lies at
-    /// `place`.
+    /// The weight rung `rung`'s answer takes where the value lies `t` of the
+    /// way from rung `below` to the next.
     fn weight((below, t): (usize, f64), rung: usize) -> f64 {
         if rung == below {
             1.0 - t
@@ -392,6 +411,11 @@ enum Phase {
     /// Measuring how deep and fast the water runs at each point, from `row`.
     Measuring {
         row: usize,
+    },
+    /// Taking the measure of the stones as the grid takes them, from
+    /// `stone`.
+    Taking {
+        stone: usize,
     },
     /// Laying the stones into the bed and the sources, from `row`.
     Laying {
@@ -423,7 +447,13 @@ enum Phase {
         pair: usize,
         row: usize,
     },
-    /// Holding the answer to what water can stand, from `row`.
+    /// Tapering the answer to nothing at the stretch's ends and its edges,
+    /// from `row`.
+    Tapering {
+        row: usize,
+    },
+    /// Holding the tapered answer to what water can stand, for the foam to
+    /// read where it breaks, from `row`.
     Holding {
         row: usize,
     },
@@ -452,7 +482,8 @@ pub(crate) struct Solving {
     /// The bed's rises and the stones' sources as the real and imaginary
     /// parts of one grid, rows across the stream; the same turned, rows
     /// along it, which becomes their transform; and a turned grid of two
-    /// layers' answers at once.
+    /// layers' answers at once. Each per-point grid is reserved whole only
+    /// once its phase begins, and grown a unit at a time.
     grid: Vec<Complex>,
     turned: Vec<Complex>,
     answer: Vec<Complex>,
@@ -460,14 +491,26 @@ pub(crate) struct Solving {
     /// the deepest and the fastest measured so far.
     places: Vec<[f32; 2]>,
     measured: (f64, f64),
-    /// The stones as the grid takes them, once the water is measured.
+    /// The stones as the grid takes them, once the water is measured, in the
+    /// order they were laid; a unit of them as they are taken; and each
+    /// one's first row, place in that order and last row, sorted: the order
+    /// every row takes them in, which a row past a stone skips it in without
+    /// reading the stone.
     laid: Vec<Laid>,
+    taking: Vec<(Option<Laid>, Option<Shed>)>,
+    reaching: Vec<(u32, u32, u32)>,
     /// The depths and the speeds answered, the answer blended between them,
     /// and the foam on it.
     depths: Ladder,
     speeds: Ladder,
+    /// Where each point's depth and speed lie up the ladders, marked by the
+    /// first pair's return and read by the rest.
+    rungs: Vec<[u16; 2]>,
     rise: Vec<f32>,
     foam: Vec<u8>,
+    /// The tapered answer as roughening will hold it, which the foam reads
+    /// for where the surface stands too steep; kept only while it is found.
+    held: Vec<f64>,
     /// How white the water breaks where it lands below a ledge, down each
     /// column of the grid.
     pouring: Vec<f64>,
@@ -512,7 +555,7 @@ impl Solving {
         );
         // As fine as the grid allows, its points spanning the whole stretch.
         let cell = (stretch.length / real(columns)).max(2.0 * stretch.half / real(rows));
-        let points = columns.checked_mul(rows)?;
+        columns.checked_mul(rows)?;
         Some(Self {
             stretch,
             stones,
@@ -520,16 +563,20 @@ impl Solving {
             cell,
             along: Fourier::new(columns)?,
             across: Fourier::new(rows)?,
-            grid: fallible::filled(points, Complex::ZERO)?,
-            turned: fallible::filled(points, Complex::ZERO)?,
-            answer: fallible::filled(points, Complex::ZERO)?,
-            places: fallible::filled(points, [0.0f32; 2])?,
+            grid: Vec::new(),
+            turned: Vec::new(),
+            answer: Vec::new(),
+            places: Vec::new(),
             measured: (0.0, 0.0),
             laid: Vec::new(),
+            taking: Vec::new(),
+            reaching: Vec::new(),
             depths: Ladder::new(1.0, 1.0, DEPTHS),
             speeds: Ladder::new(1.0, 1.0, SPEEDS),
-            rise: fallible::filled(points, 0.0f32)?,
+            rungs: Vec::new(),
+            rise: Vec::new(),
             foam: Vec::new(),
+            held: Vec::new(),
             pouring: Vec::new(),
             shed: Vec::new(),
             phase: Phase::Measuring { row: 0 },
@@ -540,22 +587,24 @@ impl Solving {
     pub(crate) fn done(&self) -> f64 {
         let (columns, rows) = self.size;
         let pairs = LAYERS / 2;
-        // Measuring, laying, the forward transform's three passes, each
-        // pair's three, and the holding, foaming and roughening, weighed
-        // alike.
-        let passes = real(5 + 3 * pairs + 3);
+        // Measuring, taking the stones' measure, laying, the forward
+        // transform's three passes, each pair's three, and the tapering,
+        // holding, foaming and roughening, weighed alike.
+        let passes = real(6 + 3 * pairs + 4);
         let (pass, within) = match self.phase {
             Phase::Measuring { row } => (0, share(row, rows)),
-            Phase::Laying { row } => (1, share(row, rows)),
-            Phase::Along { row } => (2, share(row, rows)),
-            Phase::Turning { row } => (3, share(row, columns)),
-            Phase::Across { row } => (4, share(row, columns)),
-            Phase::Answering { pair, row } => (5 + 3 * pair, share(row, columns)),
-            Phase::TurningBack { pair, row } => (6 + 3 * pair, share(row, rows)),
-            Phase::Returning { pair, row } => (7 + 3 * pair, share(row, rows)),
-            Phase::Holding { row } => (5 + 3 * pairs, share(row, rows)),
-            Phase::Foaming { row } => (6 + 3 * pairs, share(row, rows)),
-            Phase::Roughening { row } => (7 + 3 * pairs, share(row, rows)),
+            Phase::Taking { stone } => (1, share(stone, self.stones.len())),
+            Phase::Laying { row } => (2, share(row, rows)),
+            Phase::Along { row } => (3, share(row, rows)),
+            Phase::Turning { row } => (4, share(row, columns)),
+            Phase::Across { row } => (5, share(row, columns)),
+            Phase::Answering { pair, row } => (6 + 3 * pair, share(row, columns)),
+            Phase::TurningBack { pair, row } => (7 + 3 * pair, share(row, rows)),
+            Phase::Returning { pair, row } => (8 + 3 * pair, share(row, rows)),
+            Phase::Tapering { row } => (6 + 3 * pairs, share(row, rows)),
+            Phase::Holding { row } => (7 + 3 * pairs, share(row, rows)),
+            Phase::Foaming { row } => (8 + 3 * pairs, share(row, rows)),
+            Phase::Roughening { row } => (9 + 3 * pairs, share(row, rows)),
             Phase::Done => return 1.0,
         };
         (real(pass) + within) / passes
@@ -566,6 +615,7 @@ impl Solving {
     pub(crate) fn step(&mut self, runner: &dyn JobRunner) -> Option<bool> {
         self.phase = match self.phase {
             Phase::Measuring { .. }
+            | Phase::Taking { .. }
             | Phase::Laying { .. }
             | Phase::Along { .. }
             | Phase::Turning { .. }
@@ -576,37 +626,42 @@ impl Solving {
         Some(self.phase == Phase::Done)
     }
 
-    /// The next unit of measuring the water, laying the stones and
-    /// transforming them, and the phase it leads to.
+    /// The next unit of measuring the water, taking the stones' measure,
+    /// laying them and transforming them, and the phase it leads to.
     fn forward(&mut self, runner: &dyn JobRunner) -> Option<Phase> {
         let (columns, rows) = self.size;
-        let unit = ROWS * runner.width().max(1);
+        let points = columns * rows;
+        let (lines, turned) = (per(columns), per(rows));
+        let width = runner.width().max(1);
         Some(match self.phase {
             Phase::Measuring { row } => {
-                let end = (row + unit).min(rows);
+                let end = (row + lines * width).min(rows);
+                reach(&mut self.places, (end * columns, points), [0.0; 2])?;
                 self.measure_rows(row..end, runner)?;
                 if end < rows {
                     Phase::Measuring { row: end }
                 } else {
                     self.ladders();
-                    self.lay_out()?;
-                    Phase::Laying { row: 0 }
+                    Phase::Taking { stone: 0 }
                 }
             }
+            Phase::Taking { stone } => self.take(stone, runner)?,
             Phase::Laying { row } => {
-                let end = (row + unit).min(rows);
+                let end = (row + lines * width).min(rows);
+                reach(&mut self.grid, (end * columns, points), Complex::ZERO)?;
                 self.lay_rows(row..end, runner)?;
                 if end < rows {
                     Phase::Laying { row: end }
                 } else {
                     self.laid = Vec::new();
+                    self.reaching = Vec::new();
                     Phase::Along { row: 0 }
                 }
             }
             Phase::Along { row } => {
-                let end = (row + unit).min(rows);
+                let end = (row + lines * width).min(rows);
                 let span = self.grid.get_mut(row * columns..end * columns)?;
-                fourier::rows(&self.along, span, (ROWS, false), runner)?;
+                fourier::rows(&self.along, span, (lines, false), runner)?;
                 if end < rows {
                     Phase::Along { row: end }
                 } else {
@@ -614,9 +669,10 @@ impl Solving {
                 }
             }
             Phase::Turning { row } => {
-                let end = (row + unit).min(columns);
+                let end = (row + turned * width).min(columns);
+                reach(&mut self.turned, (end * rows, points), Complex::ZERO)?;
                 let to = self.turned.get_mut(row * rows..end * rows)?;
-                transposed(&self.grid, (rows, columns), to, (row, ROWS), runner)?;
+                transposed(&self.grid, (rows, columns), to, (row, turned), runner)?;
                 if end < columns {
                     Phase::Turning { row: end }
                 } else {
@@ -624,9 +680,9 @@ impl Solving {
                 }
             }
             Phase::Across { row } => {
-                let end = (row + unit).min(columns);
+                let end = (row + turned * width).min(columns);
                 let span = self.turned.get_mut(row * rows..end * rows)?;
-                fourier::rows(&self.across, span, (ROWS, false), runner)?;
+                fourier::rows(&self.across, span, (turned, false), runner)?;
                 if end < columns {
                     Phase::Across { row: end }
                 } else {
@@ -638,13 +694,16 @@ impl Solving {
     }
 
     /// The next unit of answering each pair of layers, turning the answer
-    /// back and holding it to what water stands, and the phase it leads to.
+    /// back and tapering it, and the phase it leads to.
     fn backward(&mut self, runner: &dyn JobRunner) -> Option<Phase> {
         let (columns, rows) = self.size;
-        let unit = ROWS * runner.width().max(1);
+        let points = columns * rows;
+        let (lines, turned) = (per(columns), per(rows));
+        let width = runner.width().max(1);
         Some(match self.phase {
             Phase::Answering { pair, row } => {
-                let end = (row + unit).min(columns);
+                let end = (row + turned * width).min(columns);
+                reach(&mut self.answer, (end * rows, points), Complex::ZERO)?;
                 self.answer_rows(pair, row..end, runner)?;
                 if end < columns {
                     Phase::Answering { pair, row: end }
@@ -653,9 +712,9 @@ impl Solving {
                 }
             }
             Phase::TurningBack { pair, row } => {
-                let end = (row + unit).min(rows);
+                let end = (row + lines * width).min(rows);
                 let to = self.grid.get_mut(row * columns..end * columns)?;
-                transposed(&self.answer, (columns, rows), to, (row, ROWS), runner)?;
+                transposed(&self.answer, (columns, rows), to, (row, lines), runner)?;
                 if end < rows {
                     Phase::TurningBack { pair, row: end }
                 } else {
@@ -663,7 +722,9 @@ impl Solving {
                 }
             }
             Phase::Returning { pair, row } => {
-                let end = (row + unit).min(rows);
+                let end = (row + lines * width).min(rows);
+                reach(&mut self.rise, (end * columns, points), 0.0)?;
+                reach(&mut self.rungs, (end * columns, points), [0; 2])?;
                 self.return_rows(pair, row..end, runner)?;
                 if end < rows {
                     Phase::Returning { pair, row: end }
@@ -674,31 +735,43 @@ impl Solving {
                     }
                 } else {
                     self.release();
+                    Phase::Tapering { row: 0 }
+                }
+            }
+            Phase::Tapering { row } => {
+                let end = (row + lines * width).min(rows);
+                self.taper_rows(row..end, runner)?;
+                if end < rows {
+                    Phase::Tapering { row: end }
+                } else {
+                    self.foam = self.shed_foam()?;
+                    self.shed = Vec::new();
+                    self.pouring = self.poured()?;
                     Phase::Holding { row: 0 }
                 }
             }
             Phase::Holding { row } => {
-                let end = (row + unit).min(rows);
+                let end = (row + lines * width).min(rows);
+                reach(&mut self.held, (end * columns, points), 0.0)?;
                 self.hold_rows(row..end, runner)?;
                 if end < rows {
                     Phase::Holding { row: end }
                 } else {
-                    self.foam = self.shed_foam()?;
-                    self.pouring = self.poured()?;
                     Phase::Foaming { row: 0 }
                 }
             }
             Phase::Foaming { row } => {
-                let end = (row + unit).min(rows);
+                let end = (row + lines * width).min(rows);
                 self.foam_rows(row..end, runner)?;
                 if end < rows {
                     Phase::Foaming { row: end }
                 } else {
+                    self.held = Vec::new();
                     Phase::Roughening { row: 0 }
                 }
             }
             Phase::Roughening { row } => {
-                let end = (row + unit).min(rows);
+                let end = (row + lines * width).min(rows);
                 self.roughen_rows(row..end, runner)?;
                 if end < rows {
                     Phase::Roughening { row: end }
@@ -736,15 +809,16 @@ impl Solving {
             .places
             .get_mut(rows.start * columns..rows.end * columns)?;
         let most = |one: (f64, f64), other: (f64, f64)| (one.0.max(other.0), one.1.max(other.1));
+        let lines = per(columns);
         let measured = band::fold(
             runner,
             span,
-            (0, ROWS * columns),
+            (0, lines * columns),
             (0.0, 0.0),
             &|band, values| {
                 let mut measured = (0.0f64, 0.0f64);
                 for (offset, line) in values.chunks_mut(columns).enumerate() {
-                    let across = real(first + band * ROWS + offset) * cell - stretch.half;
+                    let across = real(first + band * lines + offset) * cell - stretch.half;
                     for (column, place) in line.iter_mut().enumerate() {
                         let (depth, speed) =
                             stretch.place(stretch.from + real(column) * cell, across);
@@ -755,7 +829,7 @@ impl Solving {
                 }
                 measured
             },
-            most,
+            &most,
         );
         self.measured = most(self.measured, measured);
         Some(())
@@ -771,31 +845,56 @@ impl Solving {
         self.speeds = Ladder::new(SLOWEST * fastest, fastest, SPEEDS);
     }
 
-    /// Every stone as the grid takes it, ordered by the first row it
-    /// reaches, and the wake each through the surface sheds; `None` when the
-    /// heap will not hold them.
-    fn lay_out(&mut self) -> Option<()> {
-        let stones = core::mem::take(&mut self.stones);
-        let mut laid = Vec::new();
-        laid.try_reserve_exact(stones.len()).ok()?;
-        for (order, stone) in (0u32..).zip(stones) {
-            let (taken, shed) = self.taken(stone, order);
-            if let Some(shed) = shed {
-                self.shed.try_reserve(1).ok()?;
-                self.shed.push(shed);
-            }
-            laid.extend(taken);
+    /// Take the measure of the next unit of the stones from `stone` across
+    /// `runner`, as the grid takes them in the order they were laid and the
+    /// wake each through the surface sheds, and the phase it leads to: once
+    /// every one is taken, their order sorted by the first row each reaches.
+    /// `None` when the heap will not hold them.
+    fn take(&mut self, stone: usize, runner: &dyn JobRunner) -> Option<Phase> {
+        let count = self.stones.len();
+        let end = (stone + TAKEN * runner.width().max(1)).min(count);
+        if stone == 0 {
+            fallible::reserve(&mut self.laid, count).then_some(())?;
         }
-        laid.sort_unstable_by_key(|laid| (laid.rows.0, laid.order));
-        self.laid = laid;
-        Some(())
+        let mut taking = core::mem::take(&mut self.taking);
+        taking.clear();
+        fallible::grow_to(&mut taking, end - stone, (None, None)).then_some(())?;
+        let (stones, this) = (self.stones.get(stone..end)?, &*self);
+        band::for_each(runner, &mut taking, (0, TAKEN), &|band, taking| {
+            let stones = stones.get(band * TAKEN..).unwrap_or_default();
+            for (stone, slot) in stones.iter().zip(taking) {
+                *slot = this.taken(*stone);
+            }
+        });
+        // Only a stone through the surface sheds, so the wakes grow as they
+        // are found rather than reserving one for every stone.
+        let shedding = taking.iter().filter(|taken| taken.1.is_some()).count();
+        self.shed.try_reserve(shedding).ok()?;
+        self.shed.extend(taking.iter().filter_map(|taken| taken.1));
+        self.laid.extend(taking.iter().filter_map(|taken| taken.0));
+        if end < count {
+            self.taking = taking;
+            return Some(Phase::Taking { stone: end });
+        }
+        self.stones = Vec::new();
+        let mut reaching = Vec::new();
+        reaching.try_reserve_exact(self.laid.len()).ok()?;
+        let row = |row: usize| u32::try_from(row).unwrap_or(u32::MAX);
+        reaching.extend(
+            (0u32..)
+                .zip(&self.laid)
+                .map(|(order, laid)| (row(laid.rows.0), order, row(laid.rows.1))),
+        );
+        reaching.sort_unstable();
+        self.reaching = reaching;
+        Some(Phase::Laying { row: 0 })
     }
 
-    /// How the grid takes `stone`, the `order`th laid: the rise it makes in
-    /// the bed, as much of it as the linear answer holds, and, where it
-    /// stands through the surface, the source of the water it parts about
-    /// it and the wake it sheds; nothing where it covers no point.
-    fn taken(&self, stone: Stone, order: u32) -> (Option<Laid>, Option<Shed>) {
+    /// How the grid takes `stone`: the rise it makes in the bed, as much of
+    /// it as the linear answer holds, and, where it stands through the
+    /// surface, the source of the water it parts about it and the wake it
+    /// sheds; nothing where it covers no point.
+    fn taken(&self, stone: Stone) -> (Option<Laid>, Option<Shed>) {
         let (columns, rows) = self.size;
         let (depth, speed) = self.stretch.place(stone.at.0, stone.at.1);
         let reach = (stone.reach.0.max(1e-3), stone.reach.1.max(1e-3));
@@ -848,7 +947,6 @@ impl Solving {
             .reduce(|one, other| (one.0.min(other.0), one.1.max(other.1)));
         let laid = reached.map(|rows| Laid {
             stone,
-            order,
             rows,
             bed,
             source,
@@ -861,20 +959,24 @@ impl Solving {
     /// comes out the same however its rows are divided.
     fn lay_rows(&mut self, rows: core::ops::Range<usize>, runner: &dyn JobRunner) -> Option<()> {
         let (columns, _) = self.size;
-        let (laid, places) = (&self.laid, &self.places);
+        let (laid, reaching, places) = (&self.laid, &self.reaching, &self.places);
         let placing = ((self.stretch.from, -self.stretch.half), self.cell);
         let first = rows.start;
         let span = self
             .grid
             .get_mut(rows.start * columns..rows.end * columns)?;
-        band::for_each(runner, span, (0, ROWS * columns), &|band, values| {
-            let top = first + band * ROWS;
+        let lines = per(columns);
+        band::for_each(runner, span, (0, lines * columns), &|band, values| {
+            let top = first + band * lines;
             let bottom = top + values.len() / columns;
-            let reaching = laid.partition_point(|laid| laid.rows.0 < bottom);
-            for stone in laid.get(..reaching).unwrap_or(&[]) {
-                if stone.rows.1 < top {
+            let begun = reaching.partition_point(|&(row, ..)| (row as usize) < bottom);
+            for &(_, order, last) in reaching.get(..begun).unwrap_or(&[]) {
+                if (last as usize) < top {
                     continue;
                 }
+                let Some(stone) = laid.get(order as usize) else {
+                    continue;
+                };
                 for (row, line) in (top..).zip(values.chunks_mut(columns)) {
                     let measured = places
                         .get(row * columns..(row + 1) * columns)
@@ -914,14 +1016,15 @@ impl Solving {
         let span = self
             .answer
             .get_mut(rows.start * across..rows.end * across)?;
+        let lines = per(across);
         let failed = band::fold(
             runner,
             span,
-            (0, ROWS * across),
+            (0, lines * across),
             false,
             &|band, values| {
                 values.chunks_mut(across).enumerate().any(|(offset, line)| {
-                    let row = first + band * ROWS + offset;
+                    let row = first + band * lines + offset;
                     let mirrored = (columns - row) % columns;
                     let k_along = TAU * frequency(row, columns) / length;
                     for (column, value) in line.iter_mut().enumerate() {
@@ -960,7 +1063,7 @@ impl Solving {
                     back.inverse(line).is_none()
                 })
             },
-            |one, other| one || other,
+            &|one, other| one || other,
         );
         (!failed).then_some(())
     }
@@ -976,30 +1079,42 @@ impl Solving {
     ) -> Option<()> {
         let (columns, _) = self.size;
         let points = rows.start * columns..rows.end * columns;
+        let lines = per(columns);
         fourier::rows(
             &self.along,
             self.grid.get_mut(points.clone())?,
-            (ROWS, true),
+            (lines, true),
             runner,
         )?;
         let (depths, speeds) = (self.depths, self.speeds);
         let slowest = speeds.value(0);
         let (grid, places) = (&self.grid, &self.places);
         let first = points.start;
-        let failed = band::fold(
+        let each = lines * columns;
+        let bands = (0..)
+            .zip(self.rise.get_mut(points.clone())?.chunks_mut(each))
+            .zip(self.rungs.get_mut(points)?.chunks_mut(each));
+        let failed = tairix_parallel::fold_drawn(
             runner,
-            self.rise.get_mut(points)?,
-            (0, ROWS * columns),
+            bands,
             false,
-            &|band, out| {
-                let from = first + band * ROWS * columns;
+            &|((band, out), rungs)| {
+                let from = first + band * each;
                 let span = from..from + out.len();
                 let (Some(line), Some(places)) = (grid.get(span.clone()), places.get(span)) else {
                     return true;
                 };
-                for ((rise, value), &[depth, speed]) in out.iter_mut().zip(line).zip(places) {
-                    let (depth, speed) = (f64::from(depth), f64::from(speed));
-                    let (by_depth, by_speed) = (depths.place(depth), speeds.place(speed));
+                for (((rise, value), &[depth, speed]), rung) in
+                    out.iter_mut().zip(line).zip(places).zip(rungs.iter_mut())
+                {
+                    let speed = f64::from(speed);
+                    if pair == 0 {
+                        *rung = [depths.mark(f64::from(depth)), speeds.mark(speed)];
+                    }
+                    let (by_depth, by_speed) = (
+                        depths.split(depths.marked(rung[0])),
+                        speeds.split(speeds.marked(rung[1])),
+                    );
                     let slower = if speed < slowest {
                         let ratio = speed / slowest;
                         ratio * ratio
@@ -1015,7 +1130,7 @@ impl Solving {
                 }
                 false
             },
-            |one, other| one || other,
+            &|one, other| one || other,
         );
         (!failed).then_some(())
     }
@@ -1025,21 +1140,20 @@ impl Solving {
         self.grid = Vec::new();
         self.turned = Vec::new();
         self.answer = Vec::new();
+        self.rungs = Vec::new();
     }
 
-    /// Rows `rows` of the answer held to what water can stand, and tapered
-    /// to nothing at the stretch's ends and where the water thins to its
-    /// edge; across `runner`.
-    fn hold_rows(&mut self, rows: core::ops::Range<usize>, runner: &dyn JobRunner) -> Option<()> {
-        self.each_rise(rows, runner, &|_, rise, _, (depth, speed), taper| {
-            taper * held(rise, head(speed), FLOOR * depth)
-        })
+    /// Rows `rows` of the answer tapered to nothing at the stretch's ends and
+    /// where the water thins to its edge; across `runner`. It is held to what
+    /// water can stand only once roughened, so no crest is held twice.
+    fn taper_rows(&mut self, rows: core::ops::Range<usize>, runner: &dyn JobRunner) -> Option<()> {
+        self.each_rise(rows, runner, &|_, rise, _, _, taper| taper * rise)
     }
 
-    /// Rows `rows` of the held answer roughened where fast water churns and
+    /// Rows `rows` of the tapered answer roughened where fast water churns and
     /// shallow water drapes over its gravel — texture the water's own
-    /// breaking never sees — tapered as the answer is and held again; across
-    /// `runner`.
+    /// breaking never sees — tapered as the answer is, and held to what water
+    /// can stand; across `runner`.
     fn roughen_rows(
         &mut self,
         rows: core::ops::Range<usize>,
@@ -1075,9 +1189,10 @@ impl Solving {
         let span = self
             .rise
             .get_mut(rows.start * columns..rows.end * columns)?;
-        band::for_each(runner, span, (0, ROWS * columns), &|band, values| {
+        let lines = per(columns);
+        band::for_each(runner, span, (0, lines * columns), &|band, values| {
             for (offset, line) in values.chunks_mut(columns).enumerate() {
-                let row = first + band * ROWS + offset;
+                let row = first + band * lines + offset;
                 let across = real(row) * cell - half;
                 let measured = places
                     .get(row * columns..(row + 1) * columns)
@@ -1152,66 +1267,145 @@ impl Solving {
         Some(pouring)
     }
 
-    /// Rows `rows` of the foam: where the surface stands steeper than a wave
-    /// can and breaks, where the water lands below a ledge, and where a stone
-    /// through the surface sheds it, each carried down the stream as it
-    /// bursts; across `runner`.
-    fn foam_rows(&mut self, rows: core::ops::Range<usize>, runner: &dyn JobRunner) -> Option<()> {
-        let (columns, all) = self.size;
-        let (cell, half, from) = (self.cell, self.stretch.half, self.stretch.from);
-        let (rise, places, pouring) = (&self.rise, &self.places, &self.pouring);
+    /// Rows `rows` of the tapered answer as roughening will hold it, across
+    /// `runner`.
+    fn hold_rows(&mut self, rows: core::ops::Range<usize>, runner: &dyn JobRunner) -> Option<()> {
+        let (columns, _) = self.size;
+        let (rise, places) = (&self.rise, &self.places);
         let first = rows.start;
         let span = self
-            .foam
+            .held
             .get_mut(rows.start * columns..rows.end * columns)?;
-        band::for_each(runner, span, (0, ROWS * columns), &|band, values| {
-            for (offset, line) in values.chunks_mut(columns).enumerate() {
-                let row = first + band * ROWS + offset;
-                let across = real(row) * cell - half;
-                let height = |column: usize, row: usize| {
-                    rise.get(row.min(all - 1) * columns + column.min(columns - 1))
-                        .map_or(0.0, |&value| f64::from(value))
-                };
-                let mut carried = 0.0f64;
-                for (column, slot) in line.iter_mut().enumerate() {
-                    let [depth, speed] = places
-                        .get(row * columns + column)
-                        .copied()
-                        .unwrap_or_default();
-                    let speed = f64::from(speed);
-                    let fade = if speed > 0.0 {
-                        mathf::exp(-cell / (speed * FOAM_LIFE))
-                    } else {
-                        0.0
-                    };
-                    let (left, right) = (column.saturating_sub(1), column + 1);
-                    let along_slope = (height(right, row) - height(left, row))
-                        / (cell * real(right.min(columns - 1) - left).max(1.0));
-                    let across_slope = (height(column, row + 1)
-                        - height(column, row.saturating_sub(1)))
-                        / (2.0 * cell);
-                    let breaking = smoothstep(
-                        BREAKING.0,
-                        BREAKING.1,
-                        mathf::hypot(along_slope, across_slope),
-                    );
-                    let along = from + real(column) * cell;
-                    let shedding = f64::from(*slot) / 255.0;
-                    let poured = if depth > 0.0 {
-                        let pour = pouring.get(column).copied().unwrap_or(0.0);
-                        let streak =
-                            0.5 + 0.5 * noise2(along / STREAKS.0, across / STREAKS.1, STREAK_SEED);
-                        pour * (streak + (1.0 - streak) * pour * pour)
-                    } else {
-                        0.0
-                    };
-                    carried = (carried * fade).max(breaking).max(shedding).max(poured);
-                    *slot = byte(carried);
-                }
+        let lines = per(columns);
+        band::for_each(runner, span, (0, lines * columns), &|band, values| {
+            let at = (first + band * lines) * columns;
+            let rises = rise.get(at..at + values.len()).unwrap_or_default();
+            let measured = places.get(at..at + values.len()).unwrap_or_default();
+            for ((slot, &value), &[depth, speed]) in values.iter_mut().zip(rises).zip(measured) {
+                *slot = held(
+                    f64::from(value),
+                    head(f64::from(speed)),
+                    FLOOR * f64::from(depth),
+                );
             }
         });
         Some(())
     }
+
+    /// Rows `rows` of the foam: where the held surface stands steeper than a
+    /// wave can and breaks, where the water lands below a ledge, and where a
+    /// stone through the surface sheds it, each carried down the stream as it
+    /// bursts; across `runner`.
+    fn foam_rows(&mut self, rows: core::ops::Range<usize>, runner: &dyn JobRunner) -> Option<()> {
+        let (columns, all) = self.size;
+        let held = &self.held;
+        let foaming = Foaming {
+            places: &self.places,
+            pouring: &self.pouring,
+            columns,
+            cell: self.cell,
+            half: self.stretch.half,
+            from: self.stretch.from,
+        };
+        let first = rows.start;
+        let span = self
+            .foam
+            .get_mut(rows.start * columns..rows.end * columns)?;
+        // The grid's edge rows stand for the rows beyond them.
+        let held_row = |row: usize| {
+            let at = row.min(all - 1) * columns;
+            held.get(at..at + columns).unwrap_or_default()
+        };
+        let lines = per(columns);
+        band::for_each(runner, span, (0, lines * columns), &|band, values| {
+            let top = first + band * lines;
+            for (offset, line) in values.chunks_mut(columns).enumerate() {
+                let row = top + offset;
+                let around = [row.saturating_sub(1), row, row + 1].map(held_row);
+                foaming.line(row, line, around);
+            }
+        });
+        Some(())
+    }
+}
+
+/// What foaming a row of a stretch's grid reads besides its held surface:
+/// how deep and fast the water runs at each point, how white it pours down
+/// each column below a ledge, and where the grid lies.
+struct Foaming<'a> {
+    places: &'a [[f32; 2]],
+    pouring: &'a [f64],
+    columns: usize,
+    cell: f64,
+    half: f64,
+    from: f64,
+}
+
+impl Foaming<'_> {
+    /// Foam row `row` of the grid, `line`, holding what a stone sheds there,
+    /// from the held surface above, along and below it: where it breaks,
+    /// where the water lands below a ledge, and what a stone sheds, each
+    /// carried down the stream as it bursts.
+    fn line(&self, row: usize, line: &mut [u8], [above, here, below]: [&[f64]; 3]) {
+        let Self {
+            places,
+            pouring,
+            columns,
+            cell,
+            half,
+            from,
+        } = *self;
+        let height =
+            |line: &[f64], column: usize| line.get(column.min(columns - 1)).copied().unwrap_or(0.0);
+        let across = real(row) * cell - half;
+        let mut carried = 0.0f64;
+        for (column, slot) in line.iter_mut().enumerate() {
+            let [depth, speed] = places
+                .get(row * columns + column)
+                .copied()
+                .unwrap_or_default();
+            let speed = f64::from(speed);
+            let fade = if speed > 0.0 {
+                mathf::exp(-cell / (speed * FOAM_LIFE))
+            } else {
+                0.0
+            };
+            let (left, right) = (column.saturating_sub(1), column + 1);
+            let along_slope = (height(here, right) - height(here, left))
+                / (cell * real(right.min(columns - 1) - left).max(1.0));
+            let across_slope = (height(below, column) - height(above, column)) / (2.0 * cell);
+            let breaking = smoothstep(
+                BREAKING.0,
+                BREAKING.1,
+                mathf::hypot(along_slope, across_slope),
+            );
+            let along = from + real(column) * cell;
+            let shedding = f64::from(*slot) / 255.0;
+            let poured = if depth > 0.0 {
+                let pour = pouring.get(column).copied().unwrap_or(0.0);
+                let streak = 0.5 + 0.5 * noise2(along / STREAKS.0, across / STREAKS.1, STREAK_SEED);
+                pour * (streak + (1.0 - streak) * pour * pour)
+            } else {
+                0.0
+            };
+            carried = (carried * fade).max(breaking).max(shedding).max(poured);
+            *slot = byte(carried);
+        }
+    }
+}
+
+/// How many rows `length` points long a core takes in a band of a unit.
+fn per(length: usize) -> usize {
+    (POINTS / length.max(1)).max(1)
+}
+
+/// `buffer` holding its first `to` points, `value` where none is written
+/// yet, room for all `points` reserved once: a grid grown a unit at a time,
+/// never set whole beforehand; `None` when the heap will not hold it.
+fn reach<T: Clone>(buffer: &mut Vec<T>, (to, points): (usize, usize), value: T) -> Option<()> {
+    let room = buffer.capacity() >= points
+        || fallible::reserve(buffer, points.saturating_sub(buffer.len()));
+    (room && fallible::grow_to(buffer, to, value)).then_some(())
 }
 
 /// How far water `depth` deep running at `speed` churns its surface up or

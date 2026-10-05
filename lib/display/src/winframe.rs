@@ -168,9 +168,7 @@ impl Shape {
             rows,
             MIN_PARALLEL_BAND_PX.div_ceil(self.columns.max(1)),
         );
-        u32::try_from(rows.div_ceil(count.max(1)))
-            .unwrap_or(u32::MAX)
-            .max(1)
+        tairix_raster::band_rows(rows, count)
     }
 
     /// Byte range of surface row `y`'s span, within a frame slice whose first

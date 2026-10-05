@@ -763,3 +763,101 @@ fn grass_thinning_out_grows_short_as_well_as_sparse() {
         "{barely} against {thriving}"
     );
 }
+
+/// A canopy grid over `lawn` of blocks `block` cells across, a vertex at
+/// each block's middle keeping what `keep` gives for its place.
+fn canopy_grid(
+    lawn: &Lawn,
+    block: u32,
+    keep: &(dyn Fn((f64, f64)) -> (f64, [u8; 4]) + Sync),
+) -> Heightfield {
+    let spacing = lawn.cell * f64::from(block);
+    let blocks = (lawn.to.0 - lawn.from.0) / spacing;
+    let cells = usize::try_from(mathf::round_i32(mathf::ceil(blocks))).expect("blocks") + 1;
+    let origin = (lawn.from.0 - 0.5 * spacing, lawn.from.1 - 0.5 * spacing);
+    let mut grid = Heightfield::new(cells, origin, spacing, false).expect("a grid");
+    assert!(grid.carry_attributes());
+    let side = grid.side();
+    let ((origin_x, origin_z), step) = grid.placing();
+    grid.each_row(0..side, &tairix_parallel::SERIAL, &|(
+        row,
+        heights,
+        kept,
+    )| {
+        let z = origin_z + step * crate::vector::real(*row);
+        for (column, height) in heights.iter_mut().enumerate() {
+            let x = origin_x + step * crate::vector::real(column);
+            let (top, packed) = keep((x, z));
+            *height = crate::vector::single(top);
+            if let Some(slot) = kept.get_mut(column) {
+                *slot = packed;
+            }
+        }
+    });
+    grid.seal();
+    grid
+}
+
+/// Over a block's middle the canopy is what that block's own vertex keeps,
+/// never a neighbouring block's: read through the lawn's grid, it is what a
+/// grid holding that one block's stand at every vertex gives.
+#[test]
+fn a_blocks_canopy_is_read_from_its_own_vertex() {
+    let block = 2u32;
+    let ground = || level(Some([0, 128, 0, 255]));
+    let green = ground();
+    let mut lawn = lawn(0.0);
+    let grid = canopy_grid(&lawn, block, &|at| lawn.canopy_at(&green, at, block));
+    lawn.tops = Some(Tops { field: 1, block });
+    let fields = [ground(), grid];
+    let spacing = lawn.cell * f64::from(block);
+    let (mut probed, mut distinct) = (0u32, 0u32);
+    for row in 1..5 {
+        for column in 1..5 {
+            let middle = (
+                lawn.from.0 + (f64::from(column) + 0.5) * spacing,
+                lawn.from.1 + (f64::from(row) + 0.5) * spacing,
+            );
+            let own = lawn.canopy_at(&green, middle, block);
+            let beside = lawn.canopy_at(&green, (middle.0 + spacing, middle.1 + spacing), block);
+            distinct += u32::from(own.1 != beside.1);
+            let at = Vec3::new(middle.0, 0.01, middle.1);
+            let Some(expected) = lawn.canopy(at, &[ground(), canopy_grid(&lawn, block, &|_| own)])
+            else {
+                continue;
+            };
+            let read = lawn.canopy(at, &fields).expect("the grid keeps it");
+            let near = |a: f64, b: f64| (a - b).abs() <= 1e-9 * b.abs().max(1e-12);
+            assert!(
+                near(read.density, expected.density) && near(read.up, expected.up),
+                "{middle:?}: {read:?} against {expected:?}"
+            );
+            probed += 1;
+        }
+    }
+    assert!(
+        probed >= 12 && distinct >= 8,
+        "{probed} probed, {distinct} distinct"
+    );
+}
+
+/// A lawn too large for its canopy grid to keep every cell has its canopy
+/// read from the grid's blocks, never grown again from the ground a point at
+/// a time: bared once the grid is built, the ground changes nothing.
+#[test]
+fn a_large_lawns_canopy_is_read_from_its_grid() {
+    let block = 2u32;
+    let green = level(Some([0, 128, 0, 255]));
+    let mut lawn = lawn(0.0);
+    let grid = canopy_grid(&lawn, block, &|at| lawn.canopy_at(&green, at, block));
+    lawn.tops = Some(Tops { field: 1, block });
+    let at = Vec3::new(0.11, 0.01, 0.37);
+    let fields = [green, grid];
+    let grown = lawn.canopy(at, &fields).expect("grass over the point");
+    let [_, grid] = fields;
+    let kept = lawn
+        .canopy(at, &[level(Some([0, 128, 0, 0])), grid])
+        .expect("the grid still keeps it");
+    assert_eq!(grown.density.to_bits(), kept.density.to_bits());
+    assert_eq!(grown.up.to_bits(), kept.up.to_bits());
+}

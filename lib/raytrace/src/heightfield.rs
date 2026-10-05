@@ -262,8 +262,7 @@ impl Heightfield {
         (self.heights.get_mut(span).unwrap_or_default(), attributes)
     }
 
-    /// Visit rows `rows` with `visit`, a row a piece across `runner`; on the
-    /// calling thread alone when the heap will not hold the list of rows.
+    /// Visit rows `rows` with `visit`, a row a piece across `runner`.
     pub(crate) fn each_row(
         &mut self,
         rows: Range<usize>,
@@ -273,18 +272,11 @@ impl Heightfield {
         let side = self.side;
         let first = rows.start;
         let (heights, attributes) = self.rows_mut(rows);
-        let count = heights.len().div_ceil(side.max(1));
-        let mut kept = attributes.chunks_mut(side);
-        let lines = (first..).zip(heights.chunks_mut(side));
-        let mut list: Vec<Row<'_>> = Vec::new();
-        if fallible::reserve(&mut list, count) {
-            list.extend(lines.map(|(row, line)| (row, line, kept.next().unwrap_or_default())));
-            tairix_parallel::for_each(runner, &mut list, visit);
-        } else {
-            for (row, line) in lines {
-                visit(&mut (row, line, kept.next().unwrap_or_default()));
-            }
-        }
+        let mut kept = attributes.chunks_mut(side.max(1));
+        let lines = (first..)
+            .zip(heights.chunks_mut(side.max(1)))
+            .map(move |(row, line)| (row, line, kept.next().unwrap_or_default()));
+        tairix_parallel::for_each_drawn(runner, lines, &|mut row| visit(&mut row));
     }
 
     /// The attributes vertex `(column, row)` carries, as set; nought for a
@@ -412,7 +404,7 @@ impl Heightfield {
             (rows.start / per, per * cells),
             before,
             &band,
-            Extremes::join,
+            &Extremes::join,
         )
     }
 

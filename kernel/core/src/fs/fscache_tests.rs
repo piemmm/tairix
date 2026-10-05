@@ -41,6 +41,10 @@ impl<F: FilesystemRead> FilesystemRead for Counting<F> {
         self.inner.root()
     }
 
+    fn name_matching(&self) -> tairix_abi::driver::filesystem::NameMatching {
+        self.inner.name_matching()
+    }
+
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
         self.calls += 1;
         self.inner.node_info(node)

@@ -223,7 +223,10 @@ one in eight in summer, and rosettes of pondweed. Each cell of a lattice of
 detail's reach, holds a patch of the plant its place suits best or none, as
 likely as the place suits it in that plant's own patches and gaps; the better
 it suits it, the taller and thicker its patch, so a bed thins and shortens
-toward its edges. `Simple` sets them out to 250 m, at most 8000 patches;
+toward its edges. A patch whose square reaches a piece already standing — a
+boulder, drift, a trunk, a pier — is left out, though ground a scene keeps
+open of pieces, a pond or the eye's own, is no bar to it (`Taken::Open`).
+`Simple` sets them out to 250 m, at most 8000 patches;
 `Maximum` to 700 m, at most 40 000 — where more would stand, those nearest
 the eye, so the water's edge ends at a distance rather than part way across
 the view. A plant's clumps and beds are planned as prototypes only once a
@@ -553,11 +556,12 @@ faces, 256 materials, 12 lights, 12 height grids, 96 prototypes, 16 lawns and
 A scene may take up to 160 s to prepare on a desktop-class machine across 8
 threads and hold up to 2 GB at its peak at `Maximum`, far less at `Simple`
 (`plans/RAYTRACE.md`). Measured at 1920×1080 on a 24-thread desktop preparing
-across 8 threads, a landscape prepares at `Maximum` in 1.3–41 s — a meadow
-in 26–36 s, a forest in 33–34 s, snow over a frozen pond in 32–41 s, a desert
-in 7–9 s, a lagoon in 1.3–2.6 s, most of each its radiosity records and up to
-half of a lagoon's its caustics — holding at most about 640 MB at its peak and
-once prepared; at `Simple` it prepares in 0.5–4.3 s, holding at most 374 MB.
+across 8 threads, a landscape prepares at `Maximum` in 1.3–63 s — a stream
+in 39–63 s, a meadow in 26–36 s, a forest in 33–34 s, snow over a frozen pond
+in 32–41 s, a desert in 7–9 s, a lagoon in 1.3–2.6 s, most of each its
+radiosity records and up to half of a lagoon's its caustics — holding at most
+about 710 MB at its peak and once prepared, a stream's; at `Simple` it
+prepares in 0.5–6.4 s, holding at most 374 MB.
 Laying a scene's caustics takes up to 0.25 s at `Simple` and
 0.95 s at `Maximum`, and holds up to about 75 MB and 330 MB. Traced on one of its cores,
 built for the x86-64 baseline (SSE2), a sample costs from about 2.4 µs (the
@@ -569,7 +573,9 @@ cent more, and beneath or over water the caustics about 2.5 µs.
 Every unit of preparation is a fixed amount of work a core — a band of a
 grid's rows or of a shade's, a turn of a land's droplet tiles, a band of the
 objects' boxes or a slice of a hierarchy, a ring's places drawn or a run of
-their ranking, a few rows of the water's edge's lattice, a few rows of a
+their ranking, a few rows of the water's edge's lattice, a bed's stones read,
+thinned or set out a few thousand at a time, a stream's flow solved a few
+thousand of its points a core, a few rows of a
 radiosity record's hemisphere, a handful of
 the meter's samples, a hundred or so of the caustics' survey points, a couple
 of thousand of their beams or a few thousand of their pyramids' nodes — and a

@@ -412,7 +412,9 @@ fn a_link_is_listed_as_a_link_by_its_parent() {
     make_link(&vfs, &mut fs, "link", "target");
 
     let listing = vfs
-        .list_via_secured(&owner, &path(MOUNT), &mut fs, FinalLink::Follow)
+        .list_via_secured(&owner, &path(MOUNT), &mut fs, FinalLink::Follow, |entry| {
+            entry
+        })
         .expect("list the volume root");
     let link = listing
         .iter()

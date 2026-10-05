@@ -184,6 +184,8 @@ const NUM_FS_CLOSE: u64 = SyscallNumber::FS_CLOSE.as_u16() as u64;
 const NUM_FS_READ: u64 = SyscallNumber::FS_READ.as_u16() as u64;
 const NUM_FS_WRITE: u64 = SyscallNumber::FS_WRITE.as_u16() as u64;
 const NUM_FS_READDIR: u64 = SyscallNumber::FS_READDIR.as_u16() as u64;
+const NUM_FS_WATCH: u64 = SyscallNumber::FS_WATCH.as_u16() as u64;
+const NUM_FS_WATCH_READ: u64 = SyscallNumber::FS_WATCH_READ.as_u16() as u64;
 const NUM_FS_STAT: u64 = SyscallNumber::FS_STAT.as_u16() as u64;
 const NUM_FS_TRUNCATE: u64 = SyscallNumber::FS_TRUNCATE.as_u16() as u64;
 const NUM_FS_SYNC: u64 = SyscallNumber::FS_SYNC.as_u16() as u64;
@@ -2748,6 +2750,32 @@ pub extern "C" fn sys_fs_readdir(fd: u32, buf: *mut c_void, len: usize) -> u64 {
     }
 }
 
+/// `fs_watch`: arm a change watch on open directory `fd`, its wait-set member
+/// reporting at most once per `latency_ns` (`SyscallNumber::FS_WATCH`).
+/// Returns `0`, or a `TAIRIX_E_*` code reinterpreted into the result.
+#[must_use]
+#[export_name = "tairix_sys_fs_watch"]
+pub extern "C" fn sys_fs_watch(fd: u32, latency_ns: u64) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the call carries no pointer.
+    unsafe { raw_syscall(NUM_FS_WATCH, [u64::from(fd), latency_ns, 0, 0, 0, 0]) }
+}
+
+/// `fs_watch_read`: drain the changes the watch on `fd` recorded into `buf` as
+/// one [`tairix_abi::DirChangeBatch`] (`SyscallNumber::FS_WATCH_READ`).
+/// Returns the number of bytes written, or a `TAIRIX_E_*` code reinterpreted
+/// into the result.
+#[must_use]
+#[export_name = "tairix_sys_fs_watch_read"]
+pub extern "C" fn sys_fs_watch_read(fd: u32, buf: *mut c_void, len: usize) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates `(buf, len)`.
+    unsafe {
+        raw_syscall(
+            NUM_FS_WATCH_READ,
+            [u64::from(fd), ptr_arg(buf), len as u64, 0, 0, 0],
+        )
+    }
+}
+
 /// `fs_stat`: report the structural metadata of open handle `fd` as one
 /// [`tairix_abi::FileStat`] record at `out` (`SyscallNumber::FS_STAT`).
 /// Returns the number of bytes written, or a `TAIRIX_E_*` code reinterpreted
@@ -3550,6 +3578,8 @@ mod tests {
         (NUM_FS_READ, "fs_read", 4),
         (NUM_FS_WRITE, "fs_write", 4),
         (NUM_FS_READDIR, "fs_readdir", 3),
+        (NUM_FS_WATCH, "fs_watch", 2),
+        (NUM_FS_WATCH_READ, "fs_watch_read", 3),
         (NUM_FS_STAT, "fs_stat", 3),
         (NUM_FS_TRUNCATE, "fs_truncate", 2),
         (NUM_FS_SYNC, "fs_sync", 1),
@@ -4790,6 +4820,26 @@ mod tests {
         assert_eq!(args[1], ptr as usize as u64);
         assert_eq!(args[2], 64);
         assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn fs_watch_marshals_fd_and_latency() {
+        let (number, args) = capture(0, || {
+            assert_eq!(sys_fs_watch(0x104, 7), 0);
+        });
+        assert_eq!(number, NUM_FS_WATCH);
+        assert_eq!(args, [0x104, 7, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn fs_watch_read_marshals_fd_pointer_and_len() {
+        let mut buffer = [0u8; 400];
+        let ptr = buffer.as_mut_ptr().cast::<c_void>();
+        let (number, args) = capture(8, || {
+            assert_eq!(sys_fs_watch_read(0x104, ptr, 400), 8);
+        });
+        assert_eq!(number, NUM_FS_WATCH_READ);
+        assert_eq!(args, [0x104, ptr as usize as u64, 400, 0, 0, 0]);
     }
 
     #[test]

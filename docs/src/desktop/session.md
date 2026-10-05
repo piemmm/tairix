@@ -74,13 +74,15 @@ verbatim.
   nothing, so a collision is `AlreadyExists` at create time, reported as the
   refusal it is. Picking a free name instead would silently make a second,
   differently-named shortcut for a user who already has one, off a listing
-  the rate-limited re-list may have left stale.
+  that may already be stale.
 - The create runs target-first on the session's file worker, like the
   new-folder create and a document opened from the desktop, so a slow or
   failing disk never stalls the compositing loop; its answer settles through
   the same `settle_desktop_create` tail the new-folder create uses, so both
-  state a refusal identically and both show the fresh name by re-listing. A desktop never dies over a shortcut it
-  could not make (`AGENTS.md` §2.24).
+  state a refusal identically and both show the fresh name the same way:
+  through the folder's watch when its listing follows it, by re-listing
+  otherwise. A desktop never dies over a shortcut it could not make
+  (`AGENTS.md` §2.24).
 
 ## The icon bar
 
@@ -399,8 +401,7 @@ clears the selection on an empty desktop) and arms the shared
 `DoubleClickTracker` under the double-click interval the user chose, so a
 second press within it activates the icon
 — the desktop can never disagree with the file manager about what a gesture
-means. Motion drives hover feedback and, on arrival from elsewhere, the
-gesture-driven re-list below. A secondary press opens the [pinboard's context
+means. Motion drives hover feedback. A secondary press opens the [pinboard's context
 menu](#the-pinboards-context-menu). While the desktop holds the keyboard, the
 arrows move the selection (down/up one icon, left/right one whole column),
 `Enter` activates it, and `Escape` clears it. *Which* horizontal arrow moves
@@ -419,17 +420,17 @@ than failing silently. Every launch rides the session's existing
 [asynchronous launch path](#launch-bookkeeping), so the compositor never
 blocks on one.
 
-**Re-listing is gesture-driven, never timed.** There is no
-filesystem-change notification in this system, so the desktop re-lists at
-bring-up, after a session action that could have touched the folder, and on
-pointer arrival from elsewhere — rate-limited by `RELIST_MIN_INTERVAL_NS` so
-sweeping the pointer on and off the desktop cannot turn a gesture into a
-re-listing loop. There is deliberately **no timer and no polling loop**: a
-periodically-waking desktop would keep a core busy to discover nothing
-(`AGENTS.md` §2.23). A re-list that actually changed the folder also
-refreshes the library catalog and the file associations
-(`DesktopOutcome::relisted`), so an application installed after bring-up is
-picked up without a restart.
+**The column follows its folder.** The pinboard's listing arms a
+[directory watch](../filesystem/watch.md), so a file any program saves to,
+removes from or renames in the `Desktop` folder appears there on its own. The
+listing worker drains each report and `Desktop::apply_changes` merges it in
+place, keeping the selection on its icon, ending a half-made double-click, and
+repainting only the cells the merge moved. The folder is read whole only at
+bring-up, on a rescan or a gone the watch reports, after an action of the
+session's own, and on the menu's Refresh, which also re-reads the library
+catalog and the file associations so an application installed since bring-up
+opens documents without a restart. The file picker follows the folder it shows
+the same way, and moves to its parent when that folder goes.
 
 ### The pinboard settings live on the desktop model
 
@@ -443,16 +444,22 @@ so it is fully specified before the embedder has read anything.
 
 An edit arrives through `Desktop::apply_settings`, which reports what the edit
 asks for instead of making the caller guess: `None` means the settings were
-already in force and there is nothing to do at all, and otherwise the layer must
-be repainted — that is what a change *is* — while the returned `PinboardChange`
-names the further work on top of it. It has two halves, because they are two
-different embedders' jobs. `BackdropWork` is the desktop layer's own
-(`relayout` when the arrangement moved, `relist` when the sort order changed,
-`wallpaper` when the image or its fit changed), and `AppearanceWork` reaches
-past it: `theme` when the appearance, contrast, density or motion moved, and
-`scale` when the interface scale did. Changing the sort order therefore never
-decodes a wallpaper, changing the wallpaper never re-reads the folder, never
-re-themes, and a new backdrop colour costs one repaint.
+already in force and there is nothing to do at all, and otherwise the returned
+`PinboardChange` names the work. `layer` says the desktop layer is drawn
+differently — its backdrop colour, the icons' arrangement or order, or the
+theme or scale they are drawn at — and must be repainted whole; most of the
+document moves no pixel of it (the seat's input, the pointer aids and the idle
+policy are adopted elsewhere), and a new wallpaper repaints the layer when it
+lands. The rest has two halves, because they are two different embedders'
+jobs. `BackdropWork` is the desktop layer's own
+(`relayout` when the arrangement moved, `wallpaper` when the image or its fit
+changed), and `AppearanceWork` reaches past it: `theme` when the appearance,
+contrast, density or motion moved, and `scale` when the interface scale did. A
+new sort order is neither: the desktop re-sorts the icons it shows as it adopts
+the settings, keeping the selection on its icon. Changing the sort order
+therefore reads nothing and decodes no wallpaper, changing the wallpaper never
+re-reads the folder or re-themes, and a new backdrop colour costs one
+repaint.
 
 `adopt_appearance` is the one place the appearance half is put into effect —
 the theme registry, the output's density, and the republish every open
@@ -550,10 +557,16 @@ clip and hands the same rectangle to `Desktop::render`, which skips every cell
 it does not reach, and `Compositor::repaint_desktop` marks exactly the
 rectangles it painted. `present_desktop` is the whole-screen case of the same
 call, for the changes that genuinely alter the whole layer: bring-up, a new
-wallpaper, a theme switch, adopted settings, and a re-list that moved the icons
-(which is why a re-list reports `relisted` rather than cells — no rectangle of
-the old layout describes the new column). A freshly allocated layer is likewise
-painted whole, since it holds no pixels a partial paint could preserve.
+wallpaper, a theme switch, and adopted settings that restyle or re-lay it
+(`PinboardChange::layer`). Arriving icon artwork is not one either: it repaints
+only the icons whose pictures the batch moved (`DesktopShell::mark_desktop_artwork`,
+walking the column through the same visitor the paint does). A re-list is not
+one: the
+column's pitch is fixed, so each index keeps its cell whatever the listing, and
+adopting one reports the cells whose icon or highlight it changed
+(`Desktop::relist_into`, `Desktop::resume_into`) exactly as a merged report does.
+A freshly allocated layer is likewise painted whole, since it holds no pixels a
+partial paint could preserve.
 
 ### The backdrop menu
 
@@ -2254,9 +2267,9 @@ folder about 150 times a second, waking the compositor on every completion
 (`plans/FIX-DESKTOP.md` DESK-17).
 
 **Collecting an answer never asks for one.** The wake is shared by every worker,
-so it says nothing about the folder: the icon column asks for a listing only at
-the honest moments above (`Desktop::relist`), and on a wake it only collects the
-one it is owed (`Desktop::resume`). Asking on the wake instead costs a directory
+so it says nothing about the folder: the icon column asks for a listing only when
+it must be read whole (`Desktop::relist`), and on a wake it only collects the
+one it is owed (`Desktop::resume`) and the changes its folder's watch reported. Asking on the wake instead costs a directory
 read and a second wake for every unrelated completion — every icon, every
 wallpaper thumbnail.
 
@@ -2279,7 +2292,14 @@ asking again for a folder whose read is merely under way (`take`) joins it.
   the user in a directory the session could not read. While a read of somewhere
   *else* is in flight the listing area says so (`Listing…`), because the items on
   screen belong to a directory the user has already asked to leave; a re-read of
-  what is already shown keeps its items, so a periodic re-list cannot flicker.
+  what is already shown keeps its items, so a re-list cannot flicker.
+- **One lock, two desks.** The listing desk and the `Watches` desk the listings'
+  watches are held in share the worker's one lock. A consumer taking a listing
+  is what commits the watch armed with it, joining its `DirWatch` member to the
+  session's wait-set as it does (`Took::commit`); a consumer dropped — a closed
+  pick — lets its watch go, and the watch withdraws its member before its
+  descriptor closes. With no listing worker the session reads and drains on its
+  own task instead, so the desktop still follows its folders.
 - **Each wallpaper preparer owns its own sandbox.** The icon rasteriser keeps
   the loop's own sandbox handle, untouched and deliberately not `Send`; the
   session runs one preparer thread per online CPU, and each creates its own
@@ -2784,7 +2804,8 @@ selection by one icon and by one whole column, wrapping at the ends, `Enter`
 activating, and `Escape` clearing; every activation branch (a directory
 opening the file manager at its path, a bundle launching, a plain file
 resolving its association and launching with the file as its argument, and
-an unassociated file refused with a stated reason); the rate-limited
-pointer-arrival re-list (due, not yet due, and a re-list the source refuses
-leaving the listing exactly as it was); and the selection following a
-renamed-or-reordered entry by name across a re-list rather than by index.
+an unassociated file refused with a stated reason); a re-list the source
+refuses leaving the column empty; a reported change merged in place with only
+the cells it moved repainted and the selection kept or dropped by name; and
+the selection following a renamed-or-reordered entry by name across a re-list
+rather than by index.

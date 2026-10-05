@@ -1133,6 +1133,7 @@ dependencies = [
  "tairix-font",
  "tairix-fsmeta",
  "tairix-geometry",
+ "tairix-hash",
  "tairix-icon",
  "tairix-input",
  "tairix-log",
@@ -3038,8 +3039,8 @@ name = "tairix-parallel"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-inline",
  "tairix-rt",
- "tairix-sync",
 ]
 
 [[package]]
@@ -7440,6 +7441,7 @@ dependencies = [
  "tairix-cursor",
  "tairix-display",
  "tairix-font",
+ "tairix-fuzzseed",
  "tairix-geometry",
  "tairix-hash",
  "tairix-icon",

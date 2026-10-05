@@ -167,6 +167,24 @@ impl Courses {
         )
     }
 
+    /// The way course `index` runs at `along` its length — down it, and
+    /// across it to its left — from its marks a metre either side, the place
+    /// held that far within its ends so the way holds right to and past
+    /// them; `None` for a course with no marks.
+    pub(crate) fn way(&self, index: usize, along: f64) -> Option<((f64, f64), (f64, f64))> {
+        let (start, end) = (
+            *self.starts.get(index)? as usize,
+            *self.starts.get(index + 1)? as usize,
+        );
+        let length = *self.along.get(start..end)?.last()?;
+        let inside = 1.0f64.min(0.5 * length);
+        let middle = mathf::clamp(along, inside, length - inside);
+        let (before, after) = (self.at(index, middle - 1.0)?, self.at(index, middle + 1.0)?);
+        let (dx, dz) = (after.x - before.x, after.z - before.z);
+        let span = mathf::hypot(dx, dz).max(1e-6);
+        Some(((dx / span, dz / span), (-dz / span, dx / span)))
+    }
+
     /// The first mark of every segment: each mark but its course's last.
     fn segments(&self) -> impl Iterator<Item = usize> + '_ {
         self.starts.windows(2).flat_map(|pair| {
@@ -338,7 +356,6 @@ pub(crate) fn smoothed(marks: &[Mark], rounds: u32) -> Option<Vec<Mark>> {
     Some(current)
 }
 
-/// The mark `t` of the way from `a` to `b`.
 /// How far along `course` each of its marks lies from its first.
 pub(crate) fn travelled(course: &[Mark]) -> impl Iterator<Item = f64> + '_ {
     let mut total = 0.0;
@@ -370,6 +387,7 @@ pub(crate) fn blended(marks: &[Mark], along: &[f64], at: f64) -> Option<Mark> {
     Some(between(a, b, t))
 }
 
+/// The mark `t` of the way from `a` to `b`.
 pub(crate) fn between(a: Mark, b: Mark, t: f64) -> Mark {
     let blend = |from: f64, to: f64| from + (to - from) * t;
     Mark {

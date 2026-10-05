@@ -33,13 +33,14 @@
 //! handle is the natural rendezvous and avoids threading another map through
 //! `KernelState`'s cross-crate wiring.
 
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use tairix_abi::{Errno, FileId, WaitSourceKind};
 use tairix_sync::SpinLock;
 
 /// One registered source of a wait-set.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Member {
     /// The kind of resource this member observes.
     pub kind: WaitSourceKind,
@@ -49,15 +50,40 @@ pub struct Member {
     /// The caller's opaque token, reported back by a successful wait when this
     /// member is the one found ready.
     pub token: u64,
-    /// For a [`WaitSourceKind::File`] member: the stable identity of the node
-    /// the descriptor named at add time, keyed on by the change-notification
-    /// registry. [`FileId::NONE`] for every other kind.
+    /// For a [`WaitSourceKind::File`] or [`WaitSourceKind::DirWatch`]
+    /// member: the stable identity of the node it watches, keyed on by the
+    /// change-notification registry. [`FileId::NONE`] for every other kind.
     pub file: FileId,
-    /// For a [`WaitSourceKind::File`] member: the change generation last
-    /// observed. The member is ready when the node's current generation
-    /// differs from this; reporting it ready advances this to the current
-    /// generation (the edge consume). Unused (`0`) for every other kind.
+    /// The edge an edge-triggered member last reported: a `File` member's node
+    /// generation, a `SystemNotice` member's topic generation. Unused (`0`) for
+    /// every other kind.
     pub observed: u64,
+    /// What a `DirWatch` member last reported and how it paces the next;
+    /// default for every other kind.
+    pub pacing: crate::fswatch::Pacing,
+    /// For a `File` or `DirWatch` member: the watch table of the volume its node
+    /// is on, held for the member's life so a volume that leaves still
+    /// reports its departure to the member rather than vanishing from it.
+    pub table: Option<WatchTable>,
+}
+
+/// A volume's watch table held by a member; two are equal only when they are
+/// the same table.
+#[derive(Clone)]
+pub struct WatchTable(pub Arc<crate::fswatch::VolumeWatch>);
+
+impl PartialEq for WatchTable {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for WatchTable {}
+
+impl core::fmt::Debug for WatchTable {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("WatchTable").field(&self.0.volume()).finish()
+    }
 }
 
 /// A caller-owned wait-set: the owning process, its growable membership, and
@@ -164,32 +190,33 @@ pub fn add(owner: u64, handle: u64, member: Member) -> Result<(), Errno> {
 pub fn remove(owner: u64, handle: u64, kind: WaitSourceKind, id: u64) -> Result<(), Errno> {
     // Collect the removed File member's identity under the set lock, then
     // drop its file-change watch after releasing the lock (so the fswatch
-    // registry lock is never taken nested under this one).
-    let removed_file = with_owned(owner, handle, |set| {
-        let before = set.members.len();
-        let mut file = None;
-        set.members.retain(|m| {
-            let matches = m.kind == kind && m.id == id;
-            if matches && m.kind == WaitSourceKind::File {
-                file = Some(m.file);
-            }
-            !matches
-        });
-        if set.members.len() == before {
-            return Err(Errno::NotFound);
-        }
-        Ok(file)
+    // table lock is never taken nested under this one).
+    let removed = with_owned(owner, handle, |set| {
+        let at = set
+            .members
+            .iter()
+            .position(|m| m.kind == kind && m.id == id)
+            .ok_or(Errno::NotFound)?;
+        Ok(set.members.remove(at))
     })??;
-    if let Some(file) = removed_file {
-        crate::fswatch::watch_remove(file);
-    }
+    release_file_member(&removed);
     Ok(())
 }
 
-/// Record the change generation a [`WaitSourceKind::File`] member last
-/// observed (the edge consume performed when the member is reported ready).
-/// A no-op if the member is absent — the owner may have removed it between
-/// the readiness scan and this update.
+/// Release the node registration a File member holds, after the set lock is
+/// dropped so the watch table's lock never nests under it.
+fn release_file_member(member: &Member) {
+    if member.kind == WaitSourceKind::File {
+        if let Some(table) = &member.table {
+            table.0.file_member_remove(member.file.node);
+        }
+    }
+}
+
+/// Record the edge an edge-triggered member last reported (the consume
+/// performed when the member is reported ready). A no-op if the member is
+/// absent — the owner may have removed it between the readiness scan and this
+/// update.
 ///
 /// # Errors
 ///
@@ -202,14 +229,39 @@ pub fn advance_observed(
     observed: u64,
 ) -> Result<(), Errno> {
     with_owned(owner, handle, |set| {
-        if let Some(member) = set
-            .members
-            .iter_mut()
-            .find(|m| m.kind == kind && m.id == id)
-        {
+        if let Some(member) = find(set, kind, id) {
             member.observed = observed;
         }
     })
+}
+
+/// Record what a `DirWatch` member just reported: the journal position and
+/// mount-table epoch it covered, and when, which starts its latency.
+///
+/// # Errors
+///
+/// [`Errno::NotFound`] if `handle` is not a wait-set owned by `owner`.
+pub fn advance_paced(
+    owner: u64,
+    handle: u64,
+    id: u64,
+    observed: u64,
+    epochs: crate::fswatch::Epochs,
+    now: u64,
+) -> Result<(), Errno> {
+    with_owned(owner, handle, |set| {
+        if let Some(member) = find(set, WaitSourceKind::DirWatch, id) {
+            member.pacing.observed = observed;
+            member.pacing.epochs = epochs;
+            member.pacing.reported_at = Some(now);
+        }
+    })
+}
+
+fn find(set: &mut WaitSet, kind: WaitSourceKind, id: u64) -> Option<&mut Member> {
+    set.members
+        .iter_mut()
+        .find(|m| m.kind == kind && m.id == id)
 }
 
 /// Snapshot the members of the owner's wait-set `handle`, in the order the
@@ -271,31 +323,28 @@ pub fn note_reported(owner: u64, handle: u64, kind: WaitSourceKind, id: u64) -> 
 /// and IRQ lines the task owns, which are reclaimed by their own teardown), so
 /// dropping the sets is the whole reclamation. Idempotent.
 pub fn release_owned_by(owner: u64) -> usize {
-    // Collect the File members' identities while dropping the owner's sets,
-    // then release each one's file-change watch after the lock is dropped so
-    // the watch_add/watch_remove pairing survives task teardown.
-    let (removed, files) = {
-        let mut g = WAIT_SETS.lock();
-        let before = g.sets.len();
-        let mut files: Vec<FileId> = Vec::new();
-        g.sets.retain(|_, set| {
-            if set.owner == owner {
-                for member in &set.members {
-                    if member.kind == WaitSourceKind::File {
-                        files.push(member.file);
-                    }
-                }
-                false
-            } else {
-                true
-            }
-        });
-        (before - g.sets.len(), files)
-    };
-    for file in files {
-        crate::fswatch::watch_remove(file);
+    // One set at a time, so a teardown allocates nothing; each set's file
+    // watches are released after the lock is dropped, so the
+    // watch_add/watch_remove pairing survives task teardown.
+    let mut removed = 0;
+    loop {
+        let set = {
+            let mut g = WAIT_SETS.lock();
+            let handle = g
+                .sets
+                .iter()
+                .find(|(_, set)| set.owner == owner)
+                .map(|(&handle, _)| handle);
+            handle.and_then(|handle| g.sets.remove(&handle))
+        };
+        let Some(set) = set else {
+            return removed;
+        };
+        removed += 1;
+        for member in &set.members {
+            release_file_member(member);
+        }
     }
-    removed
 }
 
 /// `true` if `handle` is a live wait-set owned by `owner`. Diagnostic / test
@@ -320,6 +369,8 @@ mod tests {
             token,
             file: FileId::NONE,
             observed: 0,
+            pacing: crate::fswatch::Pacing::default(),
+            table: None,
         }
     }
 
@@ -371,6 +422,8 @@ mod tests {
                     token: 55,
                     file: FileId::NONE,
                     observed: 0,
+                    pacing: crate::fswatch::Pacing::default(),
+                    table: None,
                 }
             ),
             Ok(()),
@@ -461,6 +514,8 @@ mod tests {
                     token: 55,
                     file: FileId::NONE,
                     observed: 0,
+                    pacing: crate::fswatch::Pacing::default(),
+                    table: None,
                 }
             ),
             Ok(())

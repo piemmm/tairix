@@ -1126,15 +1126,30 @@ impl DesktopShell {
     /// Repaint the bar's items whose picture the `landed` decodes moved,
     /// because the paint that wanted them fell back to a built-in glyph.
     ///
-    /// The desktop's own icon column is the embedder's to repaint (it owns the
-    /// model the column is laid out from); this is the taskbar half of the same
-    /// answer, so a decode that lands is drawn wherever it belongs without the
-    /// embedder having to know which of the bar's surfaces show icons, or
-    /// which of their items one picture is worth.
+    /// The desktop's own icons are the other half of the same answer, marked by
+    /// [`mark_desktop_artwork`](Self::mark_desktop_artwork) and presented with
+    /// whatever else changed the column, so a decode that lands is drawn
+    /// wherever it belongs without the embedder having to know which of the
+    /// bar's surfaces show icons, or which of their items one picture is worth.
     pub fn present_icon_artwork(&mut self, compositor: &mut Compositor, landed: &Landed) {
         let scale = compositor.scale();
         self.session.taskbar_mut().adopt_icon_artwork(landed, scale);
         self.present(compositor);
+    }
+
+    /// Add to `damage` the cells of `desktop`'s icons whose picture the
+    /// `landed` decodes moved, at the geometry and theme
+    /// [`present_desktop_area`](Self::present_desktop_area) paints them in.
+    pub fn mark_desktop_artwork<S: DirectorySource>(
+        &self,
+        compositor: &Compositor,
+        desktop: &Desktop<S>,
+        landed: &Landed,
+        damage: &mut Region,
+    ) {
+        let layout = self.desktop_layout(compositor, desktop);
+        let theme = self.session.active_theme();
+        desktop.mark_artwork(&layout, compositor.scale(), theme, landed, damage);
     }
 
     /// Install the screen-sized, already-fitted `wallpaper` the desktop layer

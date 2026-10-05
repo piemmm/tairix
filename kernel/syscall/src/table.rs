@@ -2473,6 +2473,28 @@ pub trait SyscallHandlers {
         Err(Errno::NotImplemented)
     }
 
+    /// Arm a change watch on open directory `fd`, paced to at most one
+    /// report per `latency_ns` (`docs/src/filesystem/watch.md`).
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn fs_watch(&self, _caller: &CallerContext<'_>, _fd: u32, _latency_ns: u64) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// Drain the changes the watch on `fd` recorded into the user buffer
+    /// `buf` as one [`tairix_abi::DirChangeBatch`], returning its length.
+    ///
+    /// The default implementation fails closed with [`Errno::NotImplemented`].
+    fn fs_watch_read(
+        &self,
+        _caller: &CallerContext<'_>,
+        _fd: u32,
+        _buf: u64,
+        _len: usize,
+    ) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
     /// Write the [`tairix_abi::FileStat`] of open handle `fd` to the user
     /// buffer `out`, returning the number of bytes written
     /// (`PREREQUISITES.md` P-A).
@@ -3900,6 +3922,15 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 let len = decode_len(args.0[2])?;
                 self.handlers
                     .fs_readdir(caller, decode_u32(args.0[0]), args.0[1], len)
+            }
+            SyscallNumber::FS_WATCH => {
+                self.handlers
+                    .fs_watch(caller, decode_u32(args.0[0]), args.0[1])
+            }
+            SyscallNumber::FS_WATCH_READ => {
+                let len = decode_len(args.0[2])?;
+                self.handlers
+                    .fs_watch_read(caller, decode_u32(args.0[0]), args.0[1], len)
             }
             SyscallNumber::FS_STAT => {
                 let out_len = decode_len(args.0[2])?;
@@ -5492,6 +5523,22 @@ mod tests {
             _len: usize,
         ) -> SyscallResult {
             self.record("fs_readdir");
+            Ok(0)
+        }
+
+        fn fs_watch(&self, _c: &CallerContext<'_>, _fd: u32, _latency_ns: u64) -> SyscallResult {
+            self.record("fs_watch");
+            Ok(0)
+        }
+
+        fn fs_watch_read(
+            &self,
+            _c: &CallerContext<'_>,
+            _fd: u32,
+            _buf: u64,
+            _len: usize,
+        ) -> SyscallResult {
+            self.record("fs_watch_read");
             Ok(0)
         }
 

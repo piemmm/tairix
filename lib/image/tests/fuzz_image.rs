@@ -44,10 +44,7 @@
 //! here. Chunks are framed through `tairix_crc32`, the checksum's one
 //! definition, tested against the standard on its own.
 
-use core::alloc::{GlobalAlloc, Layout};
-use std::alloc::System;
-use std::cell::Cell;
-
+use tairix_fuzzseed::meter::{metered, refusing_above, Metered};
 use tairix_fuzzseed::Prng;
 use tairix_image::{
     decode, decode_as, decode_fitted, decode_peak_bytes, encode_bmp, encode_gif, encode_jpeg,
@@ -58,102 +55,14 @@ use tairix_image::{
     SpriteMode, SpriteName, SpritePalette, TiffCompression, TiffOptions, MOST_ORA_LAYERS,
 };
 
-std::thread_local! {
-    /// Requests larger than this are refused on this thread only, so the
-    /// harness's own threads allocate normally.
-    static REFUSE_ABOVE: Cell<usize> = const { Cell::new(usize::MAX) };
-    /// Bytes this thread holds, and the most it has held since last reset.
-    static LIVE: Cell<usize> = const { Cell::new(0) };
-    static PEAK: Cell<usize> = const { Cell::new(0) };
-}
-
-fn refused(size: usize) -> bool {
-    REFUSE_ABOVE
-        .try_with(|limit| size > limit.get())
-        .unwrap_or(false)
-}
-
-fn held(grown: usize, released: usize) {
-    let _ = LIVE.try_with(|live| {
-        let now = live.get().saturating_sub(released).saturating_add(grown);
-        live.set(now);
-        let _ = PEAK.try_with(|peak| peak.set(peak.get().max(now)));
-    });
-}
-
-/// The system allocator, metered and able to refuse, per thread.
-struct MeteredAlloc;
-
-// SAFETY: every request is either passed to the system allocator with the
-// caller's layout unchanged, or refused with a null pointer, which the
-// `GlobalAlloc` contract permits for any request; the metering touches only
-// this thread's counters.
-unsafe impl GlobalAlloc for MeteredAlloc {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if refused(layout.size()) {
-            return core::ptr::null_mut();
-        }
-        // SAFETY: the caller's obligations for `layout` are passed on as given.
-        let block = unsafe { System.alloc(layout) };
-        if !block.is_null() {
-            held(layout.size(), 0);
-        }
-        block
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        if refused(layout.size()) {
-            return core::ptr::null_mut();
-        }
-        // SAFETY: as `alloc`.
-        let block = unsafe { System.alloc_zeroed(layout) };
-        if !block.is_null() {
-            held(layout.size(), 0);
-        }
-        block
-    }
-
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        if refused(new_size) {
-            return core::ptr::null_mut();
-        }
-        // SAFETY: `ptr` and `layout` come from this allocator, which only ever
-        // hands out the system allocator's blocks.
-        let block = unsafe { System.realloc(ptr, layout, new_size) };
-        if !block.is_null() {
-            // A moved block holds both until the copy is done.
-            held(new_size, 0);
-            held(0, layout.size());
-        }
-        block
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        held(0, layout.size());
-        // SAFETY: as `realloc`.
-        unsafe { System.dealloc(ptr, layout) }
-    }
-}
-
 #[global_allocator]
-static ALLOC: MeteredAlloc = MeteredAlloc;
-
-/// Run `f` with every allocation larger than `bytes` refused on this thread.
-fn refusing_above<R>(bytes: usize, f: impl FnOnce() -> R) -> R {
-    REFUSE_ABOVE.with(|limit| limit.set(bytes));
-    let out = f();
-    REFUSE_ABOVE.with(|limit| limit.set(usize::MAX));
-    out
-}
+static ALLOC: Metered = Metered;
 
 /// Run `f`, answering the most bytes this thread held during it beyond what
 /// it held before.
 fn peak_of<R>(f: impl FnOnce() -> R) -> (R, u64) {
-    let before = LIVE.with(Cell::get);
-    PEAK.with(|peak| peak.set(before));
-    let out = f();
-    let peak = PEAK.with(Cell::get);
-    (out, (peak - before) as u64)
+    let (out, metering) = metered(f);
+    (out, metering.peak as u64)
 }
 
 /// Decode with `decode`, asserting that it held no more than

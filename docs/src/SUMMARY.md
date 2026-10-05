@@ -145,6 +145,7 @@
 - [On-disk layout enforcement](./filesystem/layout.md)
 - [Permissions](./filesystem/permissions.md)
 - [Advisory file locking](./filesystem/locking.md)
+- [Directory watches](./filesystem/watch.md)
 - [FAT32 driver](./filesystem/fat32.md)
 - [arxfs driver](./filesystem/arxfs.md)
 - [arxfs specification](./filesystem/arxfs-spec.md)

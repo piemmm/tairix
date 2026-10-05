@@ -392,11 +392,47 @@ fn no_place_stands_past_what_water_can() {
     assert!((held(0.001, 0.04, 0.1) - 0.001).abs() < 1e-6);
 }
 
-/// A stretch's answer is the same bit for bit however its rows are shared
-/// out, and nothing outside the stretch.
+/// The answer is held to what water can stand once: where a crowd of stones
+/// drives the riffle's answer far past its velocity head, the tallest crest
+/// stands at nearly that head, where holding the answer and then its
+/// roughened surface again capped every crest at some five sixths of it.
+#[test]
+fn a_crest_is_held_once_to_what_water_can_stand() {
+    let stones: Vec<Stone> = (0..400)
+        .map(|index| {
+            let key = crate::sample::mix32(index ^ 0x77);
+            Stone {
+                at: (
+                    1.5 + 9.0 * crate::sample::unit(key),
+                    3.2 * crate::sample::unit(crate::sample::mix32(key ^ 1)) - 1.6,
+                ),
+                reach: (0.15, 0.12),
+                top: 0.05 + 0.3 * crate::sample::unit(crate::sample::mix32(key ^ 2)),
+            }
+        })
+        .collect();
+    let flow = solve(riffle(), stones, &tairix_parallel::SERIAL);
+    let section = plane(4.0, 0.3, 0.5, 0.013);
+    let mut tallest = 0.0f64;
+    for step in 0..2000u32 {
+        let along = 0.006 * f64::from(step);
+        for across in [-1.5, -0.7, 0.0, 0.4, 1.2] {
+            let (rise, _) = flow.at(along, across);
+            tallest = tallest.max(rise / head(section.water_at(across).1));
+        }
+    }
+    assert!(
+        tallest > 0.9,
+        "the tallest crest stood {tallest} of its head"
+    );
+}
+
+/// A stretch's answer is the same bit for bit however its rows and its
+/// stones are shared out — a crowd taken over several units alone and in
+/// one across a runner — and nothing outside the stretch.
 #[test]
 fn a_flow_is_the_same_on_any_runner() {
-    let stones = vec![
+    let mut stones = vec![
         Stone {
             at: (4.0, 0.3),
             reach: (0.2, 0.15),
@@ -408,6 +444,18 @@ fn a_flow_is_the_same_on_any_runner() {
             top: 0.06,
         },
     ];
+    let crowd = u32::try_from(3 * TAKEN).expect("a crowd of stones");
+    stones.extend((0..crowd).map(|index| {
+        let key = crate::sample::mix32(index ^ 0x5c);
+        Stone {
+            at: (
+                1.0 + 10.0 * crate::sample::unit(key),
+                3.4 * crate::sample::unit(crate::sample::mix32(key ^ 1)) - 1.7,
+            ),
+            reach: (0.03, 0.02),
+            top: 0.02 + 0.2 * crate::sample::unit(crate::sample::mix32(key ^ 2)),
+        }
+    }));
     let alone = solve(riffle(), stones.clone(), &tairix_parallel::SERIAL);
     let shared = solve(riffle(), stones, &Threaded::new(5));
     assert_eq!(alone.rise, shared.rise);
@@ -476,22 +524,76 @@ fn a_stones_answer_keeps_pace_with_the_beds() {
     }
 }
 
+/// A mark keeps a value's place up its ladder finer than a blend between two
+/// rungs could tell, from its least to its most.
+#[test]
+fn a_ladders_mark_keeps_a_values_place() {
+    let ladder = Ladder::new(0.02, 0.9, DEPTHS);
+    let finest = real(DEPTHS - 1) / f64::from(u16::MAX);
+    for step in 0..=400u32 {
+        let value = 0.01 + 0.0025 * f64::from(step);
+        let kept = ladder.marked(ladder.mark(value));
+        assert!(
+            (kept - ladder.position(value)).abs() <= 0.5 * finest + 1e-12,
+            "{value}: {kept}"
+        );
+    }
+    assert_eq!(ladder.mark(0.01), 0);
+    assert_eq!(ladder.mark(5.0), u16::MAX);
+    assert!((ladder.marked(u16::MAX) - real(DEPTHS - 1)).abs() < 1e-12);
+    let one = Ladder::new(0.3, 0.3, 1);
+    assert_eq!(one.mark(0.3), 0);
+    assert!(one.marked(u16::MAX).abs() < 1e-12);
+}
+
+/// The foam reads the surface as it will be held, never the raw answer: a
+/// ripple steep enough to break on its own breaks nowhere where it rides a
+/// crest held flat at the water's velocity head.
+#[test]
+fn the_foam_breaks_where_the_held_surface_does() {
+    let foamed = |crest: f64| {
+        let mut solving =
+            Solving::new(riffle(), Vec::new(), (0.02, (1024, 256))).expect("a solving");
+        let (columns, rows) = solving.size;
+        let points = columns * rows;
+        let (depth, speed) = (0.15f32, 1.5f32);
+        let head = head(f64::from(speed));
+        let cell = solving.cell;
+        solving.places = vec![[depth, speed]; points];
+        solving.rise = (0..points)
+            .map(|at| {
+                let along = real(at % columns) * cell;
+                single(head * (crest + 0.35 * mathf::sin(TAU * along / 0.2)))
+            })
+            .collect();
+        solving.pouring = vec![0.0; columns];
+        solving.foam = vec![0; points];
+        solving.held = vec![0.0; points];
+        let runner = Threaded::new(3);
+        solving.hold_rows(0..rows, &runner).expect("held");
+        solving.foam_rows(0..rows, &runner).expect("foamed");
+        solving.foam.iter().copied().max().unwrap_or(0)
+    };
+    assert!(foamed(0.0) > 128, "the ripple breaks alone");
+    assert_eq!(foamed(10.0), 0, "held flat at the head, it does not");
+}
+
 /// A ladder's rungs run evenly in their logarithm, and a value takes the two
 /// rungs about it, weighted toward the nearer, held at either end.
 #[test]
 fn a_ladder_weighs_the_rungs_about_a_value() {
     let ladder = Ladder::new(0.1, 1.0, 3);
+    let place = |value: f64| ladder.split(ladder.position(value));
     assert!((ladder.value(0) - 0.1).abs() < 1e-12);
     assert!((ladder.value(1) - mathf::sqrt(0.1)).abs() < 1e-12);
     assert!((ladder.value(2) - 1.0).abs() < 1e-12);
     for value in [0.05, 0.1, 0.2, 0.5, 1.0, 3.0] {
-        let place = ladder.place(value);
-        let total: f64 = (0..3).map(|rung| Ladder::weight(place, rung)).sum();
+        let total: f64 = (0..3).map(|rung| Ladder::weight(place(value), rung)).sum();
         assert!((total - 1.0).abs() < 1e-12, "{value}: {total}");
     }
-    assert_eq!(ladder.place(0.05), (0, 0.0));
-    let (below, t) = ladder.place(3.0);
+    assert_eq!(place(0.05), (0, 0.0));
+    let (below, t) = place(3.0);
     assert!(below == 1 && (t - 1.0).abs() < 1e-12);
-    let (below, t) = ladder.place(mathf::sqrt(0.1) * 1.01);
+    let (below, t) = place(mathf::sqrt(0.1) * 1.01);
     assert!(below == 1 && t > 0.0 && t < 0.05, "{below} {t}");
 }

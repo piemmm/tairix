@@ -21,7 +21,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::fs::{DirEntries, FileKind, FS_PATH_MAX};
+use tairix_abi::fs::{DirEntries, DirEntry, FileKind, FS_PATH_MAX};
 use tairix_abi::window_ipc::WINDOW_TITLE_MAX;
 use tairix_abi::Errno;
 use tairix_font::ELLIPSIS;
@@ -337,31 +337,44 @@ pub fn entries_from_dir_stream(
 ) -> Result<Vec<Entry>, Errno> {
     let mut entries = Vec::new();
     for item in DirEntries::new(stream) {
-        let entry = item?;
-        let name = core::str::from_utf8(entry.name).map_err(|_| Errno::OutOfRange)?;
-        // Only a link costs a second call: the stream already carries every
-        // other kind outright, and carries neither a link's target nor what
-        // that target is.
-        let described = match entry.kind {
-            FileKind::Symlink => links.describe(&tairix_path::join(directory, name)),
-            FileKind::Directory | FileKind::Regular => None,
-        };
-        let resolution = described.as_ref().and_then(|link| {
-            link.kind.map(|kind| LinkResolution {
-                kind,
-                target_name: tairix_path::leaf_name(&link.target),
-            })
-        });
-        let kind = EntryKind::for_listing(entry.kind, name, resolution);
-        let mut built = Entry::new(name, kind, entry.size, entry.modified);
-        // A link whose target could not be reached still shows the spelling it
-        // stores: that spelling is exactly what tells a user why it is broken.
-        if let Some(link) = described {
-            built = built.with_target(link.target);
-        }
-        entries.push(built);
+        entries.push(entry_from_record(directory, &item?, links)?);
     }
     Ok(entries)
+}
+
+/// The [`Entry`] one listing record of `directory` stands for — the one
+/// decode a listing and a watch's changed records share.
+///
+/// # Errors
+///
+/// [`Errno::OutOfRange`] for a name that is not UTF-8.
+pub(crate) fn entry_from_record(
+    directory: &str,
+    entry: &DirEntry<'_>,
+    links: &mut dyn LinkReader,
+) -> Result<Entry, Errno> {
+    let name = core::str::from_utf8(entry.name).map_err(|_| Errno::OutOfRange)?;
+    // Only a link costs a second call: the stream already carries every
+    // other kind outright, and carries neither a link's target nor what
+    // that target is.
+    let described = match entry.kind {
+        FileKind::Symlink => links.describe(&tairix_path::join(directory, name)),
+        FileKind::Directory | FileKind::Regular => None,
+    };
+    let resolution = described.as_ref().and_then(|link| {
+        link.kind.map(|kind| LinkResolution {
+            kind,
+            target_name: tairix_path::leaf_name(&link.target),
+        })
+    });
+    let kind = EntryKind::for_listing(entry.kind, name, resolution);
+    let mut built = Entry::new(name, kind, entry.size, entry.modified);
+    // A link whose target could not be reached still shows the spelling it
+    // stores: that spelling is exactly what tells a user why it is broken.
+    if let Some(link) = described {
+        built = built.with_target(link.target);
+    }
+    Ok(built)
 }
 
 /// The production [`DirectorySource`]: validated path spelling composed

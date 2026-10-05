@@ -275,6 +275,18 @@ folder, a delete or a paste — asks `DirectorySource::refresh` rather than `lis
 because the directory may just have changed, so it is answered only by a read
 that begins after it, never by one already under way. A source that reads on
 the calling thread is fresh by construction and answers exactly as `list` does.
+A reload keeps the focus, the selection and each folder's occupancy cue on the
+entries they named.
+
+Between reads, every listing follows its folder through a
+[directory watch](../filesystem/watch.md), armed on the descriptor the listing
+is read through. A change any program makes arrives as the changed entries
+alone, merged in place by `Browser::apply_changes` and repainted only where a
+row moved (`render::listing_damage`); a rescan the watch asks for is a reload,
+and a folder gone from its path is read again or, failing that, left for the
+nearest ancestor that can still be read (`Browser::climb`). Where the app is
+granted no reader, it lists and drains on its event loop instead, so a window
+still follows its folder.
 
 While a navigation is pending the browser has moved **nothing** — not the
 location, not the entries, not either history. `Browser::resume` asks the source

@@ -57,11 +57,7 @@ fn masonry(stage: &mut Stage, dice: &mut Dice) -> Option<usize> {
             },
             Finish::Coated { roughness: 0.75 },
         )
-        .with_relief(Relief::Grain {
-            depth: 0.12,
-            scale: 6.0,
-            seed: dice.seed(),
-        }),
+        .with_relief(Relief::grain(0.05, 6.0, dice.seed())),
     )
 }
 
@@ -868,11 +864,7 @@ pub(super) fn rotunda(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
                 Pigment::Solid(rgb(0x5E_9E_8A)),
                 Finish::Coated { roughness: 0.55 },
             )
-            .with_relief(Relief::Grain {
-                depth: 0.15,
-                scale: 3.0,
-                seed: dice.seed(),
-            }),
+            .with_relief(Relief::grain(0.063, 3.0, dice.seed())),
         )?,
         1 => stage.metal(GOLD, 0.25)?,
         2 => stage.metal(COPPER, 0.3)?,

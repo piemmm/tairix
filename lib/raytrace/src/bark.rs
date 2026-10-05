@@ -8,7 +8,7 @@
 //! no seam, and each tree is moved to its own part of that space by the key
 //! it was placed under, so no two trees of a kind wear the same bark.
 
-use core::f64::consts::{PI, TAU};
+use core::f64::consts::TAU;
 
 use tairix_util::mathf;
 
@@ -595,7 +595,7 @@ fn scar(at: &OnLimb, seed: u32, chance: f64) -> Option<(f64, f64, u32)> {
             }
             let middle = (whole + unit(mix32(key))) * SCAR_ROW;
             let turned = at.angle - TAU * unit(mix32(key ^ 0x9));
-            let turned = turned - TAU * mathf::floor((turned + PI) / TAU);
+            let turned = crate::vector::wrapped(turned);
             let (across, up) = (turned * at.girth, at.along - middle);
             let farther =
                 nearest.is_some_and(|(x, y, _)| x * x + y * y <= across * across + up * up);

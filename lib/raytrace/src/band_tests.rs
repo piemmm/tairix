@@ -47,7 +47,7 @@ fn a_fold_joins_every_bands_answer_in_band_order() {
                 }
                 (number as u64) * 100 + band.len() as u64
             },
-            |joined, answer| joined.wrapping_mul(1_000_003).wrapping_add(answer),
+            &|joined, answer| joined.wrapping_mul(1_000_003).wrapping_add(answer),
         );
         let expected = [305, 405, 505, 605, 703]
             .into_iter()

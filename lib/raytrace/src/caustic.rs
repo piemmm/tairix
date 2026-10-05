@@ -95,15 +95,20 @@ const SEAL_BAND: usize = 1024;
 /// How many points a side a water grid's own slopes are looked over at.
 const SLOPE_SURVEY: u32 = 64;
 
-/// The variance of `grid`'s own slope where it holds a surface, looked over
-/// at the cells' slopes across a lattice of points spread over it.
-fn slope_variance(grid: &Heightfield) -> f64 {
+/// How `grid`'s own surface slopes where it holds one, looked over at the
+/// cells' slopes across a lattice of points spread over it: the size of its
+/// steady fall, which shifts every beam alike, and the variance about that
+/// fall, which spreads them.
+fn slope_spread(grid: &Heightfield) -> (f64, f64) {
     let ((origin_x, origin_z), step) = grid.placing();
-    let span = real(grid.side().saturating_sub(1)) * step;
-    let (mut sum, mut count) = (0.0, 0u32);
+    // Inset a cell, so no point reads its neighbours from past the grid's
+    // edge, where the grid holds its last height and a slope would halve.
+    let span = (real(grid.side().saturating_sub(1)) - 2.0).max(0.0) * step;
+    let (mut sum, mut squares, mut count) = ((0.0, 0.0), 0.0, 0u32);
     for row in 0..SLOPE_SURVEY {
         for column in 0..SLOPE_SURVEY {
-            let place = |index: u32| (f64::from(index) + 0.5) / f64::from(SLOPE_SURVEY) * span;
+            let place =
+                |index: u32| step + (f64::from(index) + 0.5) / f64::from(SLOPE_SURVEY) * span;
             let (x, z) = (origin_x + place(column), origin_z + place(row));
             let at = |dx: f64, dz: f64| grid.height_at(x + dx, z + dz);
             let (east, west, north, south) =
@@ -112,15 +117,18 @@ fn slope_variance(grid: &Heightfield) -> f64 {
                 continue;
             }
             let (dx, dz) = ((east - west) / (2.0 * step), (north - south) / (2.0 * step));
-            sum += dx * dx + dz * dz;
+            sum = (sum.0 + dx, sum.1 + dz);
+            squares += dx * dx + dz * dz;
             count += 1;
         }
     }
     if count == 0 {
-        0.0
-    } else {
-        sum / f64::from(count)
+        return (0.0, 0.0);
     }
+    let count = f64::from(count);
+    let mean = (sum.0 / count, sum.1 / count);
+    let tilt = mean.0 * mean.0 + mean.1 * mean.1;
+    (mathf::sqrt(tilt), (squares / count - tilt).max(0.0))
 }
 
 /// The side of a cell at level `level`.
@@ -371,6 +379,9 @@ struct Sheet {
     /// How high above the surface a probe starts down to find it.
     top: f64,
     flat: Flat,
+    /// The steady fall of the surface's own shape, which shifts every beam
+    /// over it alike.
+    tilt: f64,
     /// The waves' slope's spread, where a gust raises them all.
     slope: f64,
     /// How much of its clearest primary the water absorbs per metre.
@@ -982,11 +993,12 @@ impl Focusing {
                 };
                 // A grid shaped by more than its waves, as a stream's is by its
                 // flow, strays its beams the further for its own slopes.
-                let shaped = match scene.objects.get(object).map(|found| &found.shape) {
-                    Some(&Shape::Land { field }) => {
-                        scene.fields.get(field as usize).map_or(0.0, slope_variance)
-                    }
-                    _ => 0.0,
+                let (tilt, shaped) = match scene.objects.get(object).map(|found| &found.shape) {
+                    Some(&Shape::Land { field }) => scene
+                        .fields
+                        .get(field as usize)
+                        .map_or((0.0, 0.0), slope_spread),
+                    _ => (0.0, 0.0),
                 };
                 let (mut unresolved, mut curvature) =
                     ([0.0; FINEST as usize], [0.0; FINEST as usize]);
@@ -1001,6 +1013,7 @@ impl Focusing {
                     ior,
                     top,
                     flat,
+                    tilt,
                     slope: mathf::sqrt(waves.slope_variance() + shaped),
                     clear: water.absorb.x.min(water.absorb.y).min(water.absorb.z),
                     unresolved,
@@ -1476,7 +1489,7 @@ impl Caustics {
         if sheet.too_faint(level, bent) {
             return None;
         }
-        let stray = lit.gone * sheet.flat.bend[w] * STRAY * sheet.slope;
+        let stray = lit.gone * sheet.flat.bend[w] * (sheet.tilt + STRAY * sheet.slope);
         let (along, across) = sheet.flat.disc[w];
         let reach = stray + DISC_TO_BOX * lit.gone * along.max(across);
         let lattice = |at: f64| place(mathf::floor(at / TILE));

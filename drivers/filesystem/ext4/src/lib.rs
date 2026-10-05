@@ -70,8 +70,8 @@
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
     DirEntry, FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats,
-    FilesystemWrite, NodeId, NodeInfo, NodeKind, NodeSecurity, NodeTimes, SecurityAcl,
-    SecuritySubject, VolumeStats,
+    FilesystemWrite, NameMatching, NodeId, NodeInfo, NodeKind, NodeSecurity, NodeTimes,
+    SecurityAcl, SecuritySubject, VolumeStats,
 };
 use tairix_abi::fs::FS_SYMLINK_MAX;
 use tairix_abi::time::Time64;
@@ -2660,6 +2660,10 @@ impl<B: Block> Ext4<B> {
 impl<B: Block> FilesystemRead for Ext4<B> {
     fn root(&self) -> NodeId {
         NodeId::from_raw(u64::from(ROOT_INODE))
+    }
+
+    fn name_matching(&self) -> NameMatching {
+        NameMatching::Exact
     }
 
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {

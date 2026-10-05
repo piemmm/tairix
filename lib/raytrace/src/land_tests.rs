@@ -537,6 +537,45 @@ fn a_finer_water_grid_meets_the_far_one_at_its_seam() {
     assert!(inner > 0, "water stands within the finer grid");
 }
 
+/// A bank inside the finer grid's square but past its brim, where it holds no
+/// water, reads the far grid's level, as the same bank outside the square
+/// does, so what stands at the water's edge does not stop at the square.
+#[test]
+fn a_bank_past_the_finer_grids_brim_reads_the_far_level() {
+    let mut plan = plan(true, 7);
+    plan.near_water = Some(NearWater {
+        reach: 300.0,
+        cells: 512,
+    });
+    let (land, fields, _, _) = built(plan);
+    let near = land.near_water.expect("a finer water grid");
+    let water = land.water.expect("a water grid");
+    let (finer, far) = (&fields[near.field as usize], &fields[water as usize]);
+    let ((origin_x, origin_z), cell) = far.placing();
+    let mut banks = 0;
+    for row in 0..far.side() {
+        for column in 0..far.side() {
+            let (x, z) = (
+                origin_x + cell * (f64::from(u32::try_from(column).expect("a column")) + 0.5),
+                origin_z + cell * (f64::from(u32::try_from(row).expect("a row")) + 0.5),
+            );
+            if near.inside((x, z)) <= 0.0 {
+                continue;
+            }
+            let (own, other) = (finer.height_at(x, z), far.height_at(x, z));
+            if own.is_finite() || !other.is_finite() {
+                continue;
+            }
+            assert_eq!(land.water_level(&fields, x, z), Some(other));
+            banks += 1;
+        }
+    }
+    assert!(
+        banks > 0,
+        "the far grid holds water up banks past the finer brim"
+    );
+}
+
 /// The water grid's units reach only the rows they fill, never zeroing the
 /// whole grid on the first.
 #[test]

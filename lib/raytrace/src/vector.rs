@@ -53,6 +53,12 @@ pub(crate) fn power(x: f64, p: f64) -> f64 {
     }
 }
 
+/// `angle`, in radians, brought within half a turn of nought.
+pub(crate) fn wrapped(angle: f64) -> f64 {
+    use core::f64::consts::{PI, TAU};
+    angle - TAU * mathf::floor((angle + PI) / TAU)
+}
+
 /// The hyperbolic tangent of `x`.
 pub(crate) fn tanh(x: f64) -> f64 {
     let e = mathf::exp(-2.0 * x.abs());

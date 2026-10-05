@@ -957,11 +957,13 @@ impl Compositor {
         self.frost.accounting()
     }
 
-    /// Give back whatever the current memory-pressure band says retained
-    /// frosts may keep, returning the bytes released.
+    /// Settle which frosts the window stack still earns, then give back
+    /// whatever the current memory-pressure band says retained frosts may
+    /// keep, returning the bytes released.
     ///
     /// A released frost is blurred again on demand, so this costs blur work
-    /// and never a wrong pixel. A band that demands nothing releases nothing.
+    /// and never a wrong pixel. A band that demands nothing releases only the
+    /// frosts the stack no longer earns, which the next frame would withdraw.
     pub fn trim_frost(&mut self) -> usize {
         self.ration_frost()
     }
@@ -4226,9 +4228,7 @@ impl Compositor {
         // a full-width one needs few.
         let count =
             tairix_parallel::bands(runner, rows, MIN_PARALLEL_BAND_PX.div_ceil(cols.max(1)));
-        let per_band = u32::try_from(rows.div_ceil(count.max(1)))
-            .unwrap_or(u32::MAX)
-            .max(1);
+        let per_band = tairix_raster::band_rows(rows, count);
         // Resolved once for the whole rectangle rather than per row, and the
         // band split below divides exactly this region: a segment that cannot
         // reach its scan-out bytes composes nothing, so the back buffer can
@@ -4412,10 +4412,11 @@ struct SpanBand<'a> {
 
 /// The scan-out bytes a segment's bands pair with: the frame's, a band's
 /// worth at a time, or none for each of a segment's bands written to the frost
-/// plane.
+/// plane — as many as there are bands, since the bands are what it is zipped
+/// with.
 enum FrameChunks<'a> {
     Frame(core::slice::ChunksMut<'a, u8>),
-    Absent(usize),
+    Absent,
 }
 
 impl<'a> Iterator for FrameChunks<'a> {
@@ -4424,23 +4425,10 @@ impl<'a> Iterator for FrameChunks<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             Self::Frame(chunks) => chunks.next().map(Some),
-            Self::Absent(left) => {
-                *left = left.checked_sub(1)?;
-                Some(None)
-            }
+            Self::Absent => Some(None),
         }
     }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        let left = match self {
-            Self::Frame(chunks) => chunks.len(),
-            Self::Absent(left) => *left,
-        };
-        (left, Some(left))
-    }
 }
-
-impl ExactSizeIterator for FrameChunks<'_> {}
 
 /// The surface a composite writes.
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -4503,11 +4491,7 @@ fn frame_chunks(
             let region = frame_region(frame, rows.start, rows.end, stride)?;
             Some(FrameChunks::Frame(region.chunks_mut(band_bytes)))
         }
-        Target::Plane => {
-            let rows = usize::try_from(rows.end.saturating_sub(rows.start)).ok()?;
-            let per_band = usize::try_from(per_band.max(1)).ok()?;
-            Some(FrameChunks::Absent(rows.div_ceil(per_band)))
-        }
+        Target::Plane => Some(FrameChunks::Absent),
     }
 }
 

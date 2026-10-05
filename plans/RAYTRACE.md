@@ -222,8 +222,12 @@ scene holds, so a caller answering a frame stops within a few milliseconds:
   rows 16 384 a unit, each band covered from the crowns that can reach it,
   then spread along its rows and, turned, along its columns, a band a core —
   bit for bit the shade cast whole. A lawn samples its shade the same way.
-- A land's fills and settle passes run four rows a core, its droplets in
-  turns of tiles across the runner (`lib/terrain`), its seal in bands; the
+- A land's fills and settle passes run four rows a core, its water grids
+  about 8192 vertices a core, its droplets in turns of tiles across the
+  runner (`lib/terrain`), its seal in bands; a stream's eye is sited with its
+  marks weighed across the runner, its bed's stones are read, thinned and set
+  out a few thousand a unit, and its flow solved about 16 384 points a core;
+  a wood's trees are thinned 512 a unit; the
   sky's tables a row a core, a cloud bank's light a quarter layer a core;
   a radiosity record's hemisphere is gathered 64 rays a core a unit, and the
   records laid so far are indexed a slice at a time before the next grid
@@ -349,7 +353,9 @@ one with nothing laid does not.
   the detail's reach (`Simple` 250 m, at most 8000 patches; `Maximum` 700 m,
   40 000, the nearest the eye kept where more would stand), each cell a patch
   of the plant its place suits best or none, as likely as it suits it and as
-  tall and thick, so beds thin toward their edges. A plant's clumps and beds
+  tall and thick, so beds thin toward their edges, and none whose square
+  reaches a piece — a boulder, drift, a trunk — though ground kept open of
+  pieces, a pond or the eye's own, bars no patch. A plant's clumps and beds
   are planned as prototypes only once a patch of one is set out, so a plant
   no water in the scene suits costs it none of the scene's 96, and past the
   96 a patch never planned is left out. A cell's patch is drawn from its place and the light there alone, so
@@ -528,10 +534,12 @@ stands by no stream looks over its dale with no brook laid.
   bubbles and streaks. The caustics count the grid's own slopes in how far its
   beams stray.
 
-Measured on Stream at 960×540, *Simple*, 16 threads, seeds 0–2: preparation
-3.1–4.1 s.
+Measured on Stream at 1920×1080 preparing across 8 threads, seeds 0–2: at
+*Simple* in 5.0–6.4 s, holding at most 304 MB; at *Maximum* in 39–63 s, at
+most 712 MB at its peak and 710 MB once prepared.
 The flow is solved on 2048 × 256 points at *Simple* and 4096 × 512 at
-*Maximum*, holding about 29 MB and 116 MB while it is solved.
+*Maximum*, holding at most 34 MB and 134 MB while it is solved, each grid
+reserved only once the solve reaches it.
 
 Tests: a valley along its compass heading; a hard cap wearing its hardness
 times as slowly; a course counted in units by its width and its fall, its
@@ -557,10 +565,14 @@ points still shedding; a stone's answer keeping pace with the bed's; a finer
 water grid meeting the far one at its seam; a stream always having
 somewhere to be looked at from, and a scene away from it composing without a
 brook; a river's sand carrying no grit of its own; a grain's octaves sharing
-its depth; a water planning only the patches it sets out; a stream's flow
-solved further the way the eye looks; a boulder claiming its ground and
-standing in the flow as it lies; a stream's floating plants on its shaped
-water; and a stream's growing never reporting less done.
+its depth, and a grain made for its coarse relief keeping it; a water
+planning only the patches it sets out; a stream's flow solved further the way
+the eye looks; a boulder claiming its ground, never set through what already
+stands, and standing in the flow as it lies; drift reaching the flow as one
+obstacle; a crest held once to what water can stand; a course's way holding
+past its ends; a water grid's steady fall told apart from its spread; a stream's
+floating plants on its shaped water; and a stream's growing never reporting
+less done.
 
 ## RT13 — `lib/countryside`
 
@@ -766,9 +778,9 @@ session weighs against the memory band (`plans/NEW-DESKTOP-SETTINGS.md`
 DS24); each profile has its own measured progress shares.
 
 Measured at 1920×1080 on a 24-thread desktop preparing across 8 threads, a
-landscape prepares at *Simple* in 0.5–4.3 s, holding at most 374 MB at its
-peak and once prepared, and at *Maximum* in 1.3–41 s, at most 636 MB and
-634 MB — most of *Maximum*'s time its radiosity records. RT37's woods to the
+landscape prepares at *Simple* in 0.5–6.4 s, holding at most 374 MB at its
+peak and once prepared, and at *Maximum* in 1.3–63 s, at most 712 MB and
+710 MB, a stream's — most of *Maximum*'s time its radiosity records. RT37's woods to the
 horizon, RT38's stones, and what later items buy are *Maximum*'s to spend the
 rest of its budget on.
 

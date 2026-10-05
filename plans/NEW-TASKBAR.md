@@ -1732,25 +1732,21 @@ now stands:
   nothing is associated with is refused with the reason on `stderr`, the
   icon left selected. Every launch rides the session's existing asynchronous
   path (`plans/FIX-DESKTOP.md`), so the compositor never blocks on one.
-- **Re-listing is gesture-driven and rate-limited, never timed.** The system
-  has no filesystem-change notification, so the desktop re-lists at
-  bring-up, when the session asks (a forced re-list ignores the limit), and
-  on pointer arrival — no more often than `RELIST_MIN_INTERVAL_NS`, so
-  sweeping the pointer on and off cannot turn a gesture into a stream of
-  directory reads. There is deliberately **no timer and no polling loop**: a
-  periodically-waking desktop would keep a core busy to discover nothing. A
-  re-list keeps the selection on the same named icon, and one that changed
-  the folder also refreshes the library catalog and the file associations
-  (`DesktopOutcome::relisted`), so an application installed after bring-up
-  is picked up without a restart.
+- **The column follows its folder through a directory watch**
+  (`docs/src/filesystem/watch.md`): a report is drained off the loop and
+  merged in place by `Desktop::apply_changes`, keeping the selection on its
+  icon and repainting only the cells it moved. The folder is read whole at
+  bring-up, on a rescan or a gone, after the session's own action, and on
+  Refresh, which also re-reads the library catalog and the file associations.
+  A new sort order re-sorts the icons shown and reads nothing.
 
 Tested in the wm suite (the layer draws over the background and under every
 window, a layer smaller than the screen leaves the background showing,
 setting and clearing it damages exactly what it covered, the accelerated
 scene carries it beneath the windows, and the two desktop input responses)
 and in `userland/gui/session/src/desktop_tests.rs` (shared sort order, an
-unlistable folder, selection kept or dropped across a re-list, the rate
-limit and the forced re-list, hover and its clearing, press-to-select and
+unlistable folder, selection kept or dropped across a re-list, a reported
+change merged with only its cells repainted, hover and its clearing, press-to-select and
 clear-on-empty, the keyboard model with its clamps and its silence when
 unfocused, every activation branch including the unassociated-file refusal
 and the too-slow second click, and painting — every shown icon draws even

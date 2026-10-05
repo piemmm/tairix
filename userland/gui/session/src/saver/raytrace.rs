@@ -35,7 +35,6 @@ use tairix_parallel::JobRunner;
 use tairix_raster::DitherRow;
 use tairix_raytrace::Detail;
 use tairix_theme::{Fade, Theme};
-use tairix_util::fallible;
 use tairix_wallpaper::{CpuUse, RaytraceOptions, SceneDetail};
 use tairix_wm::{Color, Compositor, Rect, Region, Scale, WindowId};
 
@@ -414,9 +413,7 @@ fn dim(compositor: &mut Compositor, wm: WindowId, size: (u32, u32), share: u8) {
         let rows = usize::try_from(height).unwrap_or(0);
         let row_pixels = usize::try_from(width.max(1)).unwrap_or(1);
         let pieces = tairix_parallel::bands(runner, rows, FADE_GRAIN.div_ceil(row_pixels));
-        let per_band = u32::try_from(rows.div_ceil(pieces.max(1)))
-            .unwrap_or(height)
-            .max(1);
+        let per_band = tairix_raster::band_rows(rows, pieces);
         let darken = |band: &mut tairix_raster::RowBand<'_>| {
             for y in band.rows() {
                 let dither = DitherRow::at(y);
@@ -429,15 +426,11 @@ fn dim(compositor: &mut Compositor, wm: WindowId, size: (u32, u32), share: u8) {
                 }
             }
         };
-        let mut bands: Vec<_> = Vec::new();
-        if pieces > 1 && fallible::reserve(&mut bands, pieces) {
-            bands.extend(surface.row_bands_mut(0..height, per_band));
-            tairix_parallel::for_each(runner, &mut bands, &darken);
-        } else {
-            for mut band in surface.row_bands_mut(0..height, height.max(1)) {
-                darken(&mut band);
-            }
-        }
+        tairix_parallel::for_each_drawn(
+            runner,
+            surface.row_bands_mut(0..height, per_band),
+            &|mut band| darken(&mut band),
+        );
     });
 }
 

@@ -692,9 +692,10 @@ settled, spending 48 672 px a frame for as long as the session was up, and
 turning a 1 798-px hover sample into 48 982. `Taskbar::report_library_shown` is
 the witness's own non-latching route, mirroring `library_routing_mut`. Landing
 with it: arriving icon artwork repainted the desktop layer **whole**, a screen
-per delivered batch, where a decode can only change the picture inside a tile —
-`Desktop::mark_icons` scopes it to the cells, and an empty column costs no frame
-at all.
+per delivered batch, where a decode can only change the picture inside the
+tiles that draw through it — `Desktop::mark_artwork` scopes it to those cells,
+walking the column through the same visitor the paint does, and a batch that
+pictures nothing shown costs no frame at all.
 
 **Arriving artwork is adopted per item, not per surface.** The desk answers
 which decodes came back (`tairix_icon::Landed`) rather than a bare bool, so
@@ -1015,8 +1016,9 @@ still painted whole, holding no pixels a partial paint could preserve.
 `DesktopShell::present_desktop_area` paints each rectangle under a narrowed
 surface clip, and `present_desktop` is now the whole-screen case of the same call
 — kept for the changes that genuinely alter the whole layer: bring-up, a new
-wallpaper, a theme switch, adopted settings, and a re-list that moved the icons
-(which is why a re-list reports `relisted` rather than cells).
+wallpaper, a theme switch and adopted settings. A re-list reports cells like any
+other change (`Desktop::relist_into`): the column's pitch is fixed, so an index
+keeps its cell whatever the listing.
 
 **A latent rendering defect closed with it:** the painter used to skip the
 backdrop fill when the wallpaper surface was screen-sized, but `lib/sandbox`

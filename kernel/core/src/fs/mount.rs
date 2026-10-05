@@ -13,11 +13,13 @@
 //! the queried path. The root mount (`/`) covers everything, so resolution
 //! always succeeds.
 //!
-//! Every mutator here ends with [`crate::notice::mounts_changed`], so a
-//! newly attached or removed volume reaches the `Mounts` system notice and a
-//! subscriber converges on it instead of polling (`plans/NOTICE.md`). A new
-//! mutator owes that call: the alternative is a file manager whose places
-//! rail silently stops matching the machine.
+//! Every mutator here records its change through `MountTable::changed` under
+//! the table's own lock, so a newly attached or removed volume reaches the
+//! `Mounts` system notice and every directory watcher, and each converges on it
+//! instead of polling (`plans/NOTICE.md`,
+//! `docs/src/filesystem/watch.md`). A new mutator owes that call: the
+//! alternative is a file manager whose places rail and listings silently stop
+//! matching the machine.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -95,6 +97,17 @@ pub struct MountPoint {
     /// `None` for the boot layout's mounts, whose mount-point node in the
     /// tree is the template.
     template: Option<Metadata>,
+    /// The table's epoch when this mount last changed.
+    changed_at: u64,
+}
+
+/// What a directory's listing shows of the backed mounts directly beneath
+/// it. Every change to that set moves the count or introduces a later
+/// `latest`, so two equal values mean an unchanged set.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct ChildMounts {
+    count: usize,
+    latest: u64,
 }
 
 impl MountPoint {
@@ -164,6 +177,9 @@ impl MountPoint {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MountTable {
     mounts: Vec<MountPoint>,
+    /// Advances with every mutation, so a directory watch can tell that what
+    /// its path reaches, or a listing's mount points, may have moved.
+    epoch: u64,
 }
 
 impl MountTable {
@@ -177,8 +193,27 @@ impl MountTable {
                 backing: None,
                 backing_subtree: Vec::new(),
                 template: None,
+                changed_at: 0,
             }],
+            epoch: 0,
         }
+    }
+
+    /// How many times the table has changed.
+    #[must_use]
+    pub const fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// Record a change and tell everything that depends on the table's
+    /// composition: the `Mounts` notice's subscribers, and every directory
+    /// watcher, whose path may now reach another directory or list a mount
+    /// point that came or went.
+    fn changed(&mut self) -> u64 {
+        self.epoch = self.epoch.wrapping_add(1);
+        crate::notice::mounts_changed();
+        crate::fswatch::mounts_changed();
+        self.epoch
     }
 
     /// Add a mount at `path` with `flags`, backed by `backing`.
@@ -219,14 +254,15 @@ impl MountTable {
         if self.mounts.iter().any(|m| m.path == path) {
             return Err(VfsError::AlreadyExists);
         }
+        let changed_at = self.changed();
         self.mounts.push(MountPoint {
             path,
             flags,
             backing,
             backing_subtree,
             template: None,
+            changed_at,
         });
-        crate::notice::mounts_changed();
         Ok(())
     }
 
@@ -252,14 +288,15 @@ impl MountTable {
         if self.mounts.iter().any(|m| m.path == path) {
             return Err(VfsError::AlreadyExists);
         }
+        let changed_at = self.changed();
         self.mounts.push(MountPoint {
             path,
             flags,
             backing: Some(backing),
             backing_subtree: Vec::new(),
             template: Some(template),
+            changed_at,
         });
-        crate::notice::mounts_changed();
         Ok(())
     }
 
@@ -274,12 +311,13 @@ impl MountTable {
     /// a backing driver: a second root volume is a wiring defect, never
     /// a silent re-mount (fail closed).
     pub fn back_root(&mut self, backing: MountBacking) -> Result<(), VfsError> {
-        let root = &mut self.mounts[0];
-        if root.backing.is_some() {
+        if self.mounts[0].backing.is_some() {
             return Err(VfsError::AlreadyExists);
         }
+        let changed_at = self.changed();
+        let root = &mut self.mounts[0];
         root.backing = Some(backing);
-        crate::notice::mounts_changed();
+        root.changed_at = changed_at;
         Ok(())
     }
 
@@ -309,17 +347,19 @@ impl MountTable {
         backing: MountBacking,
         backing_subtree: Vec<String>,
     ) -> Result<(), VfsError> {
-        let mount = self
+        let at = self
             .mounts
-            .iter_mut()
-            .find(|m| &m.path == path)
+            .iter()
+            .position(|m| &m.path == path)
             .ok_or(VfsError::NotFound)?;
-        if mount.backing.is_some() {
+        if self.mounts[at].backing.is_some() {
             return Err(VfsError::AlreadyExists);
         }
+        let changed_at = self.changed();
+        let mount = &mut self.mounts[at];
         mount.backing = Some(backing);
         mount.backing_subtree = backing_subtree;
-        crate::notice::mounts_changed();
+        mount.changed_at = changed_at;
         Ok(())
     }
 
@@ -339,7 +379,7 @@ impl MountTable {
         if self.mounts.len() == before {
             return Err(VfsError::NotFound);
         }
-        crate::notice::mounts_changed();
+        self.changed();
         Ok(())
     }
 
@@ -378,6 +418,17 @@ impl MountTable {
         })
     }
 
+    /// What the listing of `path` shows of the mounts directly beneath it, for
+    /// a directory watch to tell whether that set moved.
+    #[must_use]
+    pub fn children_of(&self, path: &Path) -> ChildMounts {
+        self.direct_children(path)
+            .fold(ChildMounts::default(), |seen, mount| ChildMounts {
+                count: seen.count + 1,
+                latest: seen.latest.max(mount.changed_at),
+            })
+    }
+
     /// Every mount in the table, in insertion order (the permanent root
     /// mount first).
     ///
@@ -412,6 +463,61 @@ mod tests {
     /// A backing whose device medium the attach path could not name.
     fn unclassified(raw: u64) -> MountBacking {
         MountBacking::new(DriverHandle::from_raw(raw).expect("non-zero handle"), None)
+    }
+
+    #[test]
+    fn a_directorys_child_mounts_move_only_when_its_own_mounts_do() {
+        let mut table = MountTable::new(MountFlags::default());
+        let storage = p("/Storage");
+        let users = p("/Users");
+        let empty = table.children_of(&storage);
+        table
+            .mount(
+                p("/Storage/usb"),
+                MountFlags::default(),
+                Some(unclassified(1)),
+            )
+            .expect("mount");
+        let one = table.children_of(&storage);
+        assert_ne!(one, empty);
+        assert_eq!(
+            table.children_of(&users),
+            empty,
+            "another directory is untouched"
+        );
+        table
+            .mount(
+                p("/Storage/usb/deeper"),
+                MountFlags::default(),
+                Some(unclassified(2)),
+            )
+            .expect("mount");
+        assert_eq!(
+            table.children_of(&storage),
+            one,
+            "a deeper mount lists elsewhere"
+        );
+        table.unmount(&p("/Storage/usb")).expect("unmount");
+        table
+            .mount(
+                p("/Storage/usb"),
+                MountFlags::default(),
+                Some(unclassified(3)),
+            )
+            .expect("remount");
+        assert_ne!(
+            table.children_of(&storage),
+            one,
+            "the same name mounted again is a change"
+        );
+        table
+            .mount(p("/Storage/card"), MountFlags::default(), None)
+            .expect("unbacked mount");
+        let unbacked = table.children_of(&storage);
+        table
+            .set_backing(&p("/Storage/card"), unclassified(4), Vec::new())
+            .expect("backs");
+        assert_ne!(table.children_of(&storage), unbacked, "backing it lists it");
     }
 
     #[test]

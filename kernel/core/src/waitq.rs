@@ -975,6 +975,27 @@ pub fn notice_wake() {
     NOTICE_WAITQ.request_wake();
 }
 
+/// The wait-queue holding `waitset_wait` callers with a `File` or `DirWatch`
+/// member, each under the key of the node it watches (`crate::fswatch`), so a
+/// change wakes only the waiters of that node.
+pub static FSWATCH_WAITQ: WaitQueue = WaitQueue::new();
+
+/// Wake the waiters of the node whose key is `key`. Called from mutation
+/// paths in task context, after the watch table's lock is released.
+pub fn fswatch_wake(key: WakeKey) {
+    if let Some(arch) = wait_arch() {
+        let _ = FSWATCH_WAITQ.wake_key(arch, key);
+    }
+}
+
+/// Wake every filesystem watcher, for an event that concerns all of a
+/// volume's watches at once (it left, or was rewritten beneath its driver).
+pub fn fswatch_wake_all() {
+    if let Some(arch) = wait_arch() {
+        FSWATCH_WAITQ.wake_all(arch);
+    }
+}
+
 /// The wait-queue holding the write-back flusher kthread — the one task that
 /// publishes a volume whose open filesystem transaction has aged out
 /// (`crate::fs::writeback`).
@@ -1305,6 +1326,11 @@ static ALL_QUEUES: &[GlobalQueue] = &[
     },
     GlobalQueue {
         queue: &NOTICE_WAITQ,
+        timed: false,
+        deferred: true,
+    },
+    GlobalQueue {
+        queue: &FSWATCH_WAITQ,
         timed: false,
         deferred: true,
     },

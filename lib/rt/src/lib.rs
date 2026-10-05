@@ -383,6 +383,12 @@ const NUM_FS_WRITE: u64 = SyscallNumber::FS_WRITE.as_u16() as u64;
 /// `fs_readdir` syscall number (as above).
 const NUM_FS_READDIR: u64 = SyscallNumber::FS_READDIR.as_u16() as u64;
 
+/// `fs_watch` syscall number (as above).
+const NUM_FS_WATCH: u64 = SyscallNumber::FS_WATCH.as_u16() as u64;
+
+/// `fs_watch_read` syscall number (as above).
+const NUM_FS_WATCH_READ: u64 = SyscallNumber::FS_WATCH_READ.as_u16() as u64;
+
 /// `fs_stat` syscall number (as above).
 const NUM_FS_STAT: u64 = SyscallNumber::FS_STAT.as_u16() as u64;
 
@@ -4909,6 +4915,55 @@ pub fn fs_readdir(fd: u32, buf: &mut [u8]) -> Result<usize, i64> {
     count_result(ret, buf.len())
 }
 
+/// Arm a change watch on the open directory descriptor `fd`
+/// (`SyscallNumber::FS_WATCH`), its wait-set member reporting at most once per
+/// `latency_ns` (`docs/src/filesystem/watch.md`). Prefer [`Dir::watch`].
+///
+/// # Errors
+///
+/// The raw negative kernel result (`-errno`): the descriptor is not a
+/// directory the caller may list, is already armed (`AlreadyExists`), the
+/// caller's `dir-watches` limit is reached (`LimitExceeded`), or `latency_ns`
+/// exceeds [`tairix_abi::DIR_WATCH_LATENCY_MAX_NS`] (`OutOfRange`).
+pub fn fs_watch(fd: u32, latency_ns: u64) -> Result<(), i64> {
+    // SAFETY: `raw_syscall` is always safe to invoke; the call carries no
+    // pointer, and the kernel validates the descriptor and latency.
+    let ret = unsafe { raw_syscall(NUM_FS_WATCH, [u64::from(fd), latency_ns, 0, 0, 0, 0]) };
+    #[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 errno encoding.
+    let signed = ret as i64;
+    if signed < 0 {
+        return Err(signed);
+    }
+    Ok(())
+}
+
+/// Drain the changes the watch on `fd` has recorded into `buf`
+/// (`SyscallNumber::FS_WATCH_READ`), returning the length of the
+/// [`tairix_abi::DirChangeBatch`] written. `buf` must hold at least
+/// [`tairix_abi::DirChangeBatch::MIN_BUFFER`] bytes. Prefer
+/// [`Dir::read_changes`].
+///
+/// # Errors
+///
+/// The raw negative kernel result (`-errno`): no watch is armed on `fd`
+/// (`NotFound`), `buf` is too small (`BufferTooSmall`), the names could not be
+/// copied out (`OutOfMemory`) or `buf` is not the caller's to write. A
+/// directory that can no longer be listed, or whose read faulted, is not an
+/// error: the batch says so, as `Gone` or `Rescan`.
+pub fn fs_watch_read(fd: u32, buf: &mut [u8]) -> Result<usize, i64> {
+    let ptr = buf.as_mut_ptr() as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke; the kernel validates the
+    // `(buf, len)` pair against the caller's address space before writing it.
+    // `buf` is a live exclusive `&mut [u8]` for the duration of the call.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_FS_WATCH_READ,
+            [u64::from(fd), ptr, buf.len() as u64, 0, 0, 0],
+        )
+    };
+    count_result(ret, buf.len())
+}
+
 /// Read the structural metadata of the open descriptor `fd`
 /// (`SyscallNumber::FS_STAT`).
 ///
@@ -6032,6 +6087,39 @@ impl Dir {
     pub fn read(&self, buf: &mut [u8]) -> Result<usize, i64> {
         fs_readdir(self.file.fd(), buf)
     }
+
+    /// Read the whole listing, sized to its exact byte length — the growing
+    /// read [`read_dir_all`] makes, over this already-open directory.
+    ///
+    /// # Errors
+    ///
+    /// The raw negative kernel result (`-errno`) of the failing `fs_readdir`.
+    pub fn read_all(&self) -> Result<alloc::vec::Vec<u8>, i64> {
+        read_all_growing(DIR_STREAM_INITIAL, tairix_abi::fs::FS_IO_MAX, |buf| {
+            self.read(buf)
+        })
+    }
+
+    /// Arm a change watch on this directory ([`fs_watch`]): add it to a
+    /// wait-set as a [`tairix_abi::WaitSourceKind::DirWatch`] member and drain
+    /// it with [`Self::read_changes`]. Arm before reading the listing, so no
+    /// change falls between the two.
+    ///
+    /// # Errors
+    ///
+    /// As [`fs_watch`].
+    pub fn watch(&self, latency_ns: u64) -> Result<(), i64> {
+        fs_watch(self.file.fd(), latency_ns)
+    }
+
+    /// Drain one batch of this directory's recorded changes ([`fs_watch_read`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`fs_watch_read`].
+    pub fn read_changes(&self, buf: &mut [u8]) -> Result<usize, i64> {
+        fs_watch_read(self.file.fd(), buf)
+    }
 }
 
 /// Open the existing file at the absolute `path` for reading.
@@ -6130,10 +6218,7 @@ pub fn read_all_growing(
 /// The raw negative kernel result (`-errno`) of the failing `fs_open` or
 /// `fs_readdir` syscall.
 pub fn read_dir_all(path: &[u8]) -> Result<alloc::vec::Vec<u8>, i64> {
-    let dir = open_dir(path)?;
-    read_all_growing(DIR_STREAM_INITIAL, tairix_abi::fs::FS_IO_MAX, |buf| {
-        dir.read(buf)
-    })
+    open_dir(path)?.read_all()
 }
 
 /// The least a whole-file read grows by while the file runs past the size its
@@ -8377,6 +8462,31 @@ mod tests {
         assert_eq!(args[1], ptr);
         assert_eq!(args[2], 64);
         assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn fs_watch_marshals_fd_and_latency() {
+        let (number, args) = capture(0, || {
+            assert_eq!(fs_watch(9, 250_000_000), Ok(()));
+        });
+        assert_eq!(number, NUM_FS_WATCH);
+        assert_eq!(args, [9, 250_000_000, 0, 0, 0, 0]);
+        let want = -i64::from(tairix_abi::Errno::AlreadyExists.as_i32());
+        let neg = u64::from_ne_bytes(want.to_ne_bytes());
+        let (_, _) = capture(neg, || {
+            assert_eq!(fs_watch(9, 0), Err(want));
+        });
+    }
+
+    #[test]
+    fn fs_watch_read_marshals_fd_pointer_and_len() {
+        let mut buf = [0u8; 512];
+        let ptr = buf.as_mut_ptr() as usize as u64;
+        let (number, args) = capture(8, || {
+            assert_eq!(fs_watch_read(7, &mut buf), Ok(8));
+        });
+        assert_eq!(number, NUM_FS_WATCH_READ);
+        assert_eq!(args, [7, ptr, 512, 0, 0, 0]);
     }
 
     #[test]

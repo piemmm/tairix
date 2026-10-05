@@ -505,7 +505,7 @@ fn smooth_rows(
             }
             true
         },
-        |held, also| held && also,
+        &|held, also| held && also,
     )
 }
 
@@ -598,7 +598,7 @@ impl Sampling {
                 }
                 touched
             },
-            |was, also| was || also,
+            &|was, also| was || also,
         );
         self.touched |= touched;
         self.next = end;

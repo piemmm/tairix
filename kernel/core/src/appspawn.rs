@@ -366,11 +366,11 @@ impl<'a> FsBundleStore<'a> {
         } else {
             format!("{root}/{rel_dir}")
         };
-        for entry in self
+        for mut entry in self
             .fs
             .readdir(self.uid, self.caps, &abs_dir, FinalLink::Follow)?
         {
-            let name = entry.name;
+            let name = core::mem::take(&mut entry.name);
             let rel = if rel_dir.is_empty() {
                 name.clone()
             } else {
@@ -411,7 +411,7 @@ impl BundleStore for FsBundleStore<'_> {
             .fs
             .readdir(self.uid, self.caps, bundle, FinalLink::Follow)?
             .into_iter()
-            .map(|entry| entry.name)
+            .map(|mut entry| core::mem::take(&mut entry.name))
             .collect())
     }
 

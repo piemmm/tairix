@@ -197,8 +197,8 @@ impl Viewport {
     /// cut by.
     #[must_use]
     pub fn band_rows(&self, runner: &dyn JobRunner) -> u32 {
-        let count = u32::try_from(self.band_count(runner)).unwrap_or(u32::MAX);
-        self.render_height.div_ceil(count.max(1)).max(1)
+        let rows = usize::try_from(self.render_height).unwrap_or(usize::MAX);
+        tairix_raster::band_rows(rows, self.band_count(runner))
     }
 }
 

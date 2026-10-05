@@ -30,7 +30,9 @@
 //! stats, and `set_security` drops the node's security record. When a
 //! mutation's target cannot be identified (an unexpected driver error
 //! while resolving it), the **whole cache is purged** — fail closed,
-//! never a stale entry.
+//! never a stale entry. The same completeness is why the volume's
+//! directory watches are fed from here ([`CachedFs::with_watch`],
+//! `docs/src/filesystem/watch.md`).
 //!
 //! # Classification, bounds, eviction, and accounting
 //!
@@ -89,8 +91,8 @@ use core::mem::size_of;
 
 use tairix_abi::driver::filesystem::{
     DirEntry, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider, FilesystemRead,
-    FilesystemSecurity, FilesystemStats, FilesystemWrite, NodeId, NodeInfo, NodeKind, NodeSecurity,
-    VolumeStats, WritebackHost,
+    FilesystemSecurity, FilesystemStats, FilesystemWrite, NameMatching, NodeId, NodeInfo, NodeKind,
+    NodeSecurity, VolumeStats, WritebackHost,
 };
 use tairix_abi::driver::DriverHandle;
 use tairix_abi::DriverError;
@@ -103,8 +105,10 @@ use tairix_reclaim::{
 };
 use zeroize::Zeroize;
 
+use super::changelog::ChangeLog;
 use super::path::MAX_COMPONENT_LEN;
 use crate::cache_control::{CacheClass, CacheControl, CACHE_CONTROL};
+use crate::fswatch::Claim;
 
 /// A cached file-data chunk covers exactly one page-aligned window.
 const CHUNK: usize = PAGE_SIZE;
@@ -205,6 +209,10 @@ pub struct CachedFs<F> {
     lru_data: BTreeMap<u64, KeyRef>,
     /// LRU index of the metadata pools, keyed by tick (oldest first).
     lru_meta: BTreeMap<u64, KeyRef>,
+    /// Where every mutation is reported for the volume's watchers. Every
+    /// mutation passes through here, so nothing on a mounted volume changes
+    /// unreported — the same reason the invalidation above is complete.
+    changes: Option<ChangeLog>,
 }
 
 /// The single source of this cache's label stem. The cache-wide audit
@@ -301,7 +309,16 @@ impl<F> CachedFs<F> {
             data: BTreeMap::new(),
             lru_data: BTreeMap::new(),
             lru_meta: BTreeMap::new(),
+            changes: None,
         }
+    }
+
+    /// Report every mutation to the volume's watch table, claimed for this
+    /// wrapper.
+    #[must_use]
+    pub fn with_watch(mut self, claim: Claim) -> Self {
+        self.changes = Some(ChangeLog::new(claim));
+        self
     }
 
     /// Bind a specific [`CacheControl`] instead of the process-global
@@ -650,6 +667,18 @@ impl<F> CachedFs<F> {
 }
 
 impl<F: FilesystemRead> CachedFs<F> {
+    /// What kind of node `node` is, asked only while something on the volume
+    /// is watched: whether moving it can change what a watched path reaches,
+    /// or who may list beneath it.
+    fn watched_kind(&mut self, node: Option<u64>) -> Option<NodeKind> {
+        if !self.changes.as_ref().is_some_and(ChangeLog::active) {
+            return None;
+        }
+        self.node_info(NodeId::from_raw(node?))
+            .ok()
+            .map(|info| info.kind)
+    }
+
     /// Resolve the node `dir/name` currently names, for invalidation,
     /// preferring the cache over a driver read.
     ///
@@ -882,6 +911,10 @@ impl<F: FilesystemRead> FilesystemRead for CachedFs<F> {
         self.inner.root()
     }
 
+    fn name_matching(&self) -> NameMatching {
+        self.inner.name_matching()
+    }
+
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
         self.enforce_pressure();
         let raw = node.raw();
@@ -918,10 +951,17 @@ impl<F: FilesystemRead> FilesystemRead for CachedFs<F> {
                 entry.tick = tick;
             }
             self.accounting.record_hit(ReclaimClass::FsMetadata);
-            return Ok(NodeId::from_raw(node));
+            let node = NodeId::from_raw(node);
+            if let Some(changes) = self.changes.as_mut() {
+                changes.resolved(node, dir, name);
+            }
+            return Ok(node);
         }
         self.accounting.record_miss(ReclaimClass::FsMetadata);
         let node = self.inner.lookup(dir, name)?;
+        if let Some(changes) = self.changes.as_mut() {
+            changes.resolved(node, dir, name);
+        }
         // A name over the VFS component bound is unbounded input from
         // the cache's point of view and is served uncached.
         if name.len() > MAX_COMPONENT_LEN {
@@ -1107,6 +1147,9 @@ impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for CachedFs<F> {
         self.invalidate_lookups(dir_raw);
         self.invalidate_dirents(dir_raw);
         self.invalidate_stat(dir_raw);
+        if let (Some(changes), Ok(node)) = (self.changes.as_mut(), result.as_ref()) {
+            changes.added(dir, name, Some(*node));
+        }
         result
     }
 
@@ -1122,6 +1165,9 @@ impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for CachedFs<F> {
         self.invalidate_dirents(dir_raw);
         self.invalidate_stat(dir_raw);
         self.invalidate_stat(node.raw());
+        if let (Some(changes), Ok(())) = (self.changes.as_mut(), result.as_ref()) {
+            changes.linked(dir, name, node);
+        }
         result
     }
 
@@ -1137,6 +1183,9 @@ impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for CachedFs<F> {
         self.invalidate_lookups(dir_raw);
         self.invalidate_dirents(dir_raw);
         self.invalidate_stat(dir_raw);
+        if let (Some(changes), Ok(node)) = (self.changes.as_mut(), result.as_ref()) {
+            changes.added(dir, name, Some(*node));
+        }
         result
     }
 
@@ -1162,6 +1211,9 @@ impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for CachedFs<F> {
             }
             Err(()) => self.purge(),
         }
+        if let (Some(changes), Ok(_)) = (self.changes.as_mut(), result.as_ref()) {
+            changes.written(dir, name, target.ok().flatten().map(NodeId::from_raw));
+        }
         result
     }
 
@@ -1181,12 +1233,17 @@ impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for CachedFs<F> {
             }
             Err(()) => self.purge(),
         }
+        if let (Some(changes), Ok(())) = (self.changes.as_mut(), result.as_ref()) {
+            changes.written(dir, name, target.ok().flatten().map(NodeId::from_raw));
+        }
         result
     }
 
     fn remove(&mut self, dir: NodeId, name: &[u8]) -> Result<(), DriverError> {
         self.enforce_pressure();
         let target = self.resolve_for_invalidation(dir, name);
+        // A removed directory is empty, so only a link carried a path anywhere.
+        let rerouted = self.watched_kind(target.ok().flatten()) == Some(NodeKind::Symlink);
         let result = self.inner.remove(dir, name);
         let dir_raw = dir.raw();
         match target {
@@ -1202,6 +1259,12 @@ impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for CachedFs<F> {
             }
             Err(()) => self.purge(),
         }
+        if let (Some(changes), Ok(())) = (self.changes.as_mut(), result.as_ref()) {
+            changes.removed(dir, name, target.ok().flatten().map(NodeId::from_raw));
+            if rerouted {
+                changes.paths_moved();
+            }
+        }
         result
     }
 
@@ -1214,7 +1277,30 @@ impl<F: FilesystemRead + FilesystemWrite> FilesystemWrite for CachedFs<F> {
     ) -> Result<(), DriverError> {
         self.enforce_pressure();
         let overwritten = self.resolve_for_invalidation(dst_dir, dst_name);
+        // The moved node is resolved only while something is watched: its
+        // watchers must learn their path no longer reaches it.
+        let moved = if self.changes.as_ref().is_some_and(ChangeLog::active) {
+            self.resolve_for_invalidation(src_dir, src_name)
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+        let carries_paths = |kind| matches!(kind, Some(NodeKind::Directory | NodeKind::Symlink));
+        let rerouted = carries_paths(self.watched_kind(moved))
+            || carries_paths(self.watched_kind(overwritten.ok().flatten()));
         let result = self.inner.rename(src_dir, src_name, dst_dir, dst_name);
+        if let (Some(changes), Ok(())) = (self.changes.as_mut(), result.as_ref()) {
+            changes.renamed(
+                (src_dir, src_name),
+                (dst_dir, dst_name),
+                moved.map(NodeId::from_raw),
+                overwritten.ok().flatten().map(NodeId::from_raw),
+            );
+            if rerouted {
+                changes.paths_moved();
+            }
+        }
         let src_raw = src_dir.raw();
         let dst_raw = dst_dir.raw();
         match overwritten {
@@ -1274,9 +1360,25 @@ impl<F: FilesystemRead + FilesystemSecurity> FilesystemSecurity for CachedFs<F> 
 
     fn set_security(&mut self, node: NodeId, security: NodeSecurity) -> Result<(), DriverError> {
         self.enforce_pressure();
+        let directory = self.watched_kind(Some(node.raw())) == Some(NodeKind::Directory);
         let result = self.inner.set_security(node, security);
         // Invalidate on success and failure alike; the next `security`
         // re-reads the stored record.
+        self.invalidate_sec(node.raw());
+        if let (Some(changes), Ok(())) = (self.changes.as_mut(), result.as_ref()) {
+            changes.metadata(node);
+            if directory {
+                changes.access_moved();
+            }
+        }
+        result
+    }
+
+    /// The create that made `node` already reported it, and nothing could
+    /// have resolved a path through it, so a watcher has nothing to learn.
+    fn stamp_security(&mut self, node: NodeId, security: NodeSecurity) -> Result<(), DriverError> {
+        self.enforce_pressure();
+        let result = self.inner.stamp_security(node, security);
         self.invalidate_sec(node.raw());
         result
     }
@@ -1322,6 +1424,9 @@ where
         // re-reads the stored record (attribute blocks count against the
         // inode's allocation).
         self.invalidate_stat(node.raw());
+        if let (Some(changes), Ok(())) = (self.changes.as_mut(), result.as_ref()) {
+            changes.metadata(node);
+        }
         result
     }
 
@@ -1343,6 +1448,9 @@ where
             None => return Err(DriverError::Unsupported),
         };
         self.invalidate_stat(node.raw());
+        if let (Some(changes), Ok(())) = (self.changes.as_mut(), result.as_ref()) {
+            changes.metadata(node);
+        }
         result
     }
 }

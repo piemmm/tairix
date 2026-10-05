@@ -183,6 +183,19 @@ pub enum NodeKind {
     Symlink = 2,
 }
 
+/// How a format matches a looked-up name against the entries it stores.
+///
+/// A consumer that keys anything on a name — a change journal, a lookup
+/// cache — is only exact on a format whose lookup is exact: on a folding
+/// format a lookup can resolve a spelling other than the one stored.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum NameMatching {
+    /// A name matches only the entry stored with exactly the same bytes.
+    Exact,
+    /// ASCII letters match regardless of case (FAT, `FileCore`).
+    AsciiCaseInsensitive,
+}
+
 /// Structural metadata about a node, returned by
 /// [`FilesystemRead::node_info`].
 ///
@@ -298,6 +311,11 @@ pub struct DirEntry {
 pub trait FilesystemRead {
     /// The identifier of the filesystem's root directory.
     fn root(&self) -> NodeId;
+
+    /// How [`lookup`](Self::lookup) matches a name. Required rather than
+    /// defaulted: only the format knows, and a guess of
+    /// [`NameMatching::Exact`] would be wrong silently.
+    fn name_matching(&self) -> NameMatching;
 
     /// Report the structural metadata of `node`.
     ///
@@ -866,6 +884,20 @@ pub trait FilesystemSecurity {
     /// * [`DriverError::NotFound`] if `node` does not name a live node.
     /// * [`DriverError::DeviceFault`] on an unrecoverable block write.
     fn set_security(&mut self, node: NodeId, security: NodeSecurity) -> Result<(), DriverError>;
+
+    /// Give `node`, which the operation in progress just created, its first
+    /// security record, before anything could have resolved a path through
+    /// it.
+    ///
+    /// No one's authority over anything already there changes, which a layer
+    /// that reports security changes relies on to leave it out.
+    ///
+    /// # Errors
+    ///
+    /// As [`set_security`](Self::set_security).
+    fn stamp_security(&mut self, node: NodeId, security: NodeSecurity) -> Result<(), DriverError> {
+        self.set_security(node, security)
+    }
 }
 
 /// The four timestamps stored for a filesystem node.
@@ -1200,6 +1232,10 @@ mod tests {
     impl FilesystemRead for MockReadFs {
         fn root(&self) -> NodeId {
             ROOT
+        }
+
+        fn name_matching(&self) -> super::NameMatching {
+            super::NameMatching::Exact
         }
 
         fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {

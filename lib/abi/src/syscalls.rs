@@ -3337,6 +3337,41 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         required_capability: Some(CapabilityId::INPUT_READ),
         audit: false,
     },
+    SyscallSpec {
+        number: SyscallNumber::FS_WATCH,
+        name: "fs_watch",
+        arg_count: 2,
+        args: [
+            AbiType::U32,
+            AbiType::U64,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::U64,
+        // A watch observes no more than `fs_readdir` on the same descriptor
+        // shows, under the same blanket gate and the same per-inode check;
+        // arming one mutates nothing, so it is unaudited like the read.
+        required_capability: Some(CapabilityId::FS_ACCESS),
+        audit: false,
+    },
+    SyscallSpec {
+        number: SyscallNumber::FS_WATCH_READ,
+        name: "fs_watch_read",
+        arg_count: 3,
+        args: [
+            AbiType::U32,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::Unit,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        ret: AbiType::U64,
+        required_capability: Some(CapabilityId::FS_ACCESS),
+        audit: false,
+    },
 ];
 
 /// Length, in bytes, of the canonical encoding stored in
@@ -3705,6 +3740,8 @@ mod tests {
         for n in [
             SyscallNumber::FS_OPEN,
             SyscallNumber::FS_READDIR,
+            SyscallNumber::FS_WATCH,
+            SyscallNumber::FS_WATCH_READ,
             SyscallNumber::FS_MKDIR,
             SyscallNumber::FS_UNLINK,
             SyscallNumber::FS_RENAME,
@@ -3762,6 +3799,8 @@ mod tests {
             SyscallNumber::FS_CLOSE,
             SyscallNumber::FS_READ,
             SyscallNumber::FS_READDIR,
+            SyscallNumber::FS_WATCH,
+            SyscallNumber::FS_WATCH_READ,
             SyscallNumber::FS_STAT,
             SyscallNumber::FS_SYNC,
             SyscallNumber::FS_ATTR_GET,

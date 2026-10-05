@@ -150,9 +150,10 @@ mod program {
         DeleteDisposition, DeletePlan, DeleteWalk, DirectorySource, Entry, EntryKind, Listing,
         ListingDesk, ListingJob, ManagerChrome, ManagerTool, ManagerToolModel, OpenWithCandidate,
         OpenWithChooser, OwnerChange, PasteItem, PasteStrategy, Places, Probe, ProgressModel,
-        ProgressOp, Properties, RenameError, RowList, RtLinkReader, ScrollColumn, ToolbarBand,
-        ToolbarCommand, TrashStrategy, VfsDirectorySource, Volume, VolumeId, MANAGER_MENU_TITLE,
-        MANAGER_TOOLS, MANAGER_VIEW_MODE, MANAGER_WINDOW_GROUND, WIN_HEIGHT, WIN_WIDTH,
+        ProgressOp, Properties, RenameError, RowList, RtLinkReader, ScrollColumn, Took,
+        ToolbarBand, ToolbarCommand, TrashStrategy, VfsDirectorySource, Volume, VolumeId,
+        WatchUpdate, WatchedDirectory, Watches, MANAGER_MENU_TITLE, MANAGER_TOOLS,
+        MANAGER_VIEW_MODE, MANAGER_WINDOW_GROUND, WATCH_BUFFER_LEN, WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_controls::damage;
     use tairix_controls::decision::Dialog;
@@ -213,6 +214,10 @@ mod program {
     /// The wait-set token the mount-table notice arrives under: a volume
     /// attached or removed, which the places rail must re-read.
     const MOUNTS_TOKEN: u64 = READS_TOKEN + 1;
+
+    /// Each browser window's directory watch reports under this plus the
+    /// number its listing consumer was minted as, so a wake names its window.
+    const WATCH_TOKEN_BASE: u64 = MOUNTS_TOKEN + 1;
 
     /// The maximum digit count the owner/group id editor accepts — a `u32` id
     /// is at most ten decimal digits, so a longer entry cannot be a valid id.
@@ -382,6 +387,9 @@ mod program {
         menu: Option<OpenMenuState>,
         /// What the window's height was last fitted to.
         fit: Fit,
+        /// The directory shown has gone from its path: a reload that cannot
+        /// list it climbs to its parent rather than showing what was there.
+        lost: bool,
     }
 
     /// What a browser window's height was last fitted to: the window never
@@ -560,6 +568,181 @@ mod program {
         fn note_pointer(&mut self, event: &WindowEvent) {
             if let WindowEvent::Pointer { x, y, .. } | WindowEvent::Scrolled { x, y, .. } = event {
                 self.pointer = Some(pointer_point(*x, *y));
+            }
+        }
+
+        /// Whether a gesture holds the entries it was opened on — a context
+        /// menu, an inline rename, a drag — so a reported change waits for it
+        /// to end rather than moving the listing under it.
+        fn listing_is_held(&self) -> bool {
+            self.menu.is_some()
+                || self.overlays.rename.is_some()
+                || self.overlays.drag.is_some()
+                || self.overlays.carrying.is_some()
+        }
+
+        /// Open the rename New Folder asked for once the listing shows the
+        /// folder, answering whether it opened. A focus moved elsewhere, a
+        /// navigation away, or a gesture holding the listing lets it go.
+        fn rename_arrived(&mut self, canvas: Canvas<'_>) -> bool {
+            let Some((dir, name)) = self.overlays.rename_on_arrival.as_ref() else {
+                return false;
+            };
+            if self.browser.focus_pending() == Some(name.as_str()) {
+                return false;
+            }
+            let arrived = self.browser.focus_pending().is_none()
+                && self.browser.components() == dir.as_slice()
+                && self.browser.selected_name() == Some(name.as_str())
+                && !self.listing_is_held();
+            self.overlays.rename_on_arrival = None;
+            arrived
+                && begin_rename(
+                    &mut self.browser,
+                    &mut self.overlays.rename,
+                    canvas.scale,
+                    canvas.theme(),
+                    canvas.viewport(&self.places),
+                    canvas.chrome.toolbar,
+                )
+                .0
+        }
+
+        /// Apply what the window's watch reported, answering what it
+        /// repainted. A change rewrites only the rows it altered; a rescan
+        /// re-reads the folder whole; a folder gone from its path is re-read
+        /// and, if it will not list, left for its parent. A navigation to
+        /// somewhere else decides what the window shows next, so a report
+        /// waits for it, as one does while a gesture holds the listing.
+        fn follow_watch(
+            &mut self,
+            reads: &Reads,
+            canvas: Canvas<'_>,
+            damage: &mut Region,
+        ) -> Repaint {
+            let elsewhere = self
+                .browser
+                .listing_target()
+                .is_some_and(|target| target != self.browser.components());
+            if self.listing_is_held() || elsewhere {
+                return Repaint::Nothing;
+            }
+            match reads.take_watch_update(self.listing) {
+                WatchUpdate::Quiet => Repaint::Nothing,
+                WatchUpdate::Changes(changes) => self.merge(changes, reads, canvas, damage),
+                WatchUpdate::Rescan => self.rescan(),
+                WatchUpdate::Gone => {
+                    drop(reads.unwatch(self.listing));
+                    self.lost = true;
+                    if self.browser.refresh().is_ok() {
+                        return self.landed();
+                    }
+                    self.climb()
+                }
+            }
+        }
+
+        /// Read the folder again whole. A reload already under way may have
+        /// begun before the change: asking again restamps it.
+        fn rescan(&mut self) -> Repaint {
+            match self.browser.refresh() {
+                Ok(()) => self.landed(),
+                Err(err) => {
+                    report_error(&alloc::format!("listing refused ({err})"));
+                    Repaint::Nothing
+                }
+            }
+        }
+
+        /// Merge reported `changes` into the listing, repainting only the rows
+        /// they moved. A changed folder's cue is asked afresh, and a toolbar
+        /// whose verbs the change enabled or disabled is repainted with it; a
+        /// merge the memory could not be had for reads the folder again.
+        fn merge(
+            &mut self,
+            changes: Vec<tairix_browse::EntryChange>,
+            reads: &Reads,
+            canvas: Canvas<'_>,
+            damage: &mut Region,
+        ) -> Repaint {
+            let viewport = canvas.viewport(&self.places);
+            let (scale, theme, toolbar) = (canvas.scale, canvas.theme(), canvas.chrome.toolbar);
+            let folders: alloc::collections::BTreeSet<&str> = changes
+                .iter()
+                .filter_map(|change| match change {
+                    tairix_browse::EntryChange::Upsert(entry) if entry.is_directory() => {
+                        Some(entry.name())
+                    }
+                    _ => None,
+                })
+                .collect();
+            let cued = !folders.is_empty();
+            if cued {
+                reads.invalidate_probes(self.browser.components(), &folders);
+            }
+            drop(folders);
+            let tools = manager_tool_model(&self.browser);
+            let before = tairix_browse::render::shown_listing(
+                &self.browser,
+                scale,
+                theme,
+                viewport,
+                toolbar,
+            );
+            let Ok(moved) = self.browser.apply_changes(changes) else {
+                return self.rescan();
+            };
+            let recued = cued && resolve_visible_occupancy(&mut self.browser, &self.places, canvas);
+            if moved.is_none() && !recued {
+                return Repaint::Nothing;
+            }
+            if let Some(placement) = &moved {
+                self.overlays
+                    .double_click
+                    .follow(|at| placement.place_subject(at));
+            }
+            // The editor may scroll its row into view, and the verbs live in
+            // the toolbar: neither is a row comparison.
+            if self.rename_arrived(canvas) || manager_tool_model(&self.browser) != tools {
+                return Repaint::Whole;
+            }
+            Repaint::reported_if(tairix_browse::render::listing_damage(
+                &before,
+                &self.browser,
+                scale,
+                theme,
+                viewport,
+                toolbar,
+                damage,
+            ))
+        }
+
+        /// What a navigation or reload just asked for repaints: nothing while
+        /// its read is under way, since its landing repaints, and the whole
+        /// window when it was read on the spot.
+        fn landed(&mut self) -> Repaint {
+            if self.browser.is_listing() {
+                return Repaint::Nothing;
+            }
+            self.lost = false;
+            Repaint::Whole
+        }
+
+        /// The folder shown is gone from its path: leave it for the nearest
+        /// one above that is still there, staying lost until a listing lands
+        /// so a refusal that answers later climbs on.
+        fn climb(&mut self) -> Repaint {
+            match self.browser.climb() {
+                Ok(true) => self.landed(),
+                Ok(false) => {
+                    self.lost = false;
+                    Repaint::Nothing
+                }
+                Err(err) => {
+                    self.lost = false;
+                    report_error(&alloc::format!("listing refused ({err})"));
+                    Repaint::Nothing
+                }
             }
         }
     }
@@ -797,6 +980,7 @@ mod program {
                     opening: opening.1,
                     restored: true,
                 },
+                lost: false,
             })),
         })
     }
@@ -2017,32 +2201,22 @@ mod program {
     }
 
     /// Everything the file manager reads off its event loop, and the one worker
-    /// that reads it.
+    /// that reads it: each is a read of somebody's disk, which on the loop
+    /// froze the window for as long as that disk took.
     ///
-    /// Four kinds of read used to happen on the loop that owes the window a
-    /// frame: the directory the user navigated to, the icon artwork every
-    /// visible tile draws, the folder cue every visible folder draws, and the
-    /// three program stores the *Open With…* chooser is built from. Each is a
-    /// read of somebody's disk, so each froze the window for as long as that
-    /// disk took.
-    ///
-    /// They share one worker rather than taking one each. The app browses one
-    /// place at a time, so these are never concurrent workloads — and a shared
-    /// worker gives the order they are served in a single, stated answer:
-    ///
-    /// 1. **the listing**, because the user navigated and is waiting for it;
-    /// 2. **the icon artwork**, which the listing's own tiles are drawn from;
-    /// 3. **the folder cues**, which decorate a listing already on screen;
-    /// 4. **the bundle scan**, which the chooser waits on but which no frame
-    ///    depends on.
-    ///
-    /// Nothing can starve: each request set is finite and is refilled only by
-    /// the user asking again.
+    /// One worker serves them in one stated order, [`Reads::next_read`]'s: a
+    /// document opened, a listing navigated to, a shown folder's changes, a
+    /// Properties read, icon artwork, folder cues, the bundle scan, the places
+    /// rail. Nothing starves: each set is finite, refilled only by the user
+    /// asking again or, for a folder's changes, by a watch the kernel paces to
+    /// one report a window per latency.
     struct Reads {
         work: tairix_rt::sync::Mutex<Work>,
         /// Signalled when a read is recorded, and on teardown.
         signal: tairix_rt::sync::Condvar,
         wake: tairix_rt::sync::WorkerWake,
+        /// The wait-set the loop parks in, which each window's watch joins.
+        set: u64,
     }
 
     /// The desks the worker serves, in one lock: they are read by the same
@@ -2052,6 +2226,8 @@ mod program {
         /// The documents asked to be opened, each answered in turn.
         opens: tairix_util::defer::JobQueue<DocumentOpen, DocumentOpened>,
         listings: ListingDesk<FilesClient>,
+        /// Each browser window's watch of the directory it shows.
+        watches: Watches<FilesClient, alloc::sync::Arc<WatchedDirectory>>,
         /// Where each browser window's listing consumer comes from.
         listing_clients: FilesClients,
         /// What the paints have asked to be decoded and what has come back.
@@ -2071,6 +2247,17 @@ mod program {
         /// worker's exit test does not depend on which desk happens to carry
         /// one.
         stopping: bool,
+        /// No reader was granted: the loop reads, and drains the windows'
+        /// watches through `scratch`, itself.
+        alone: bool,
+        scratch: Vec<u8>,
+    }
+
+    /// State that a window's folder no longer follows its changes, and why.
+    fn unfollowed(err: Errno) {
+        report_error(&alloc::format!(
+            "this folder will not refresh by itself ({err})"
+        ));
     }
 
     /// The most documents the app holds for opening at once, counting those
@@ -2101,6 +2288,8 @@ mod program {
         Open(DocumentOpen),
         /// List this directory for the browser.
         List(ListingJob<FilesClient>),
+        /// Drain a window's watch of the directory it shows.
+        Drain(FilesClient, Vec<String>, alloc::sync::Arc<WatchedDirectory>),
         /// Read and decode one tile's icon artwork.
         Artwork(ArtworkJob),
         /// Probe these folders' occupancy as one batch.
@@ -2114,14 +2303,16 @@ mod program {
     }
 
     impl Reads {
-        /// A desk over `wake`, with no worker yet.
-        fn new(wake: tairix_rt::sync::WorkerWake) -> Self {
+        /// A desk over `wake`, with no worker yet, whose windows' watches
+        /// report in `set`.
+        fn new(wake: tairix_rt::sync::WorkerWake, set: u64) -> Self {
             Self {
                 work: tairix_rt::sync::Mutex::new(Work {
                     // A queue refused its room refuses every open, stating why.
                     opens: tairix_util::defer::JobQueue::with_capacity(DOCUMENT_OPENS_MAX)
                         .unwrap_or_default(),
                     listings: ListingDesk::new(),
+                    watches: Watches::new(),
                     listing_clients: FilesClients::default(),
                     artwork: ArtworkDesk::new(),
                     probes: Probes::new(),
@@ -2129,9 +2320,12 @@ mod program {
                     bundles: tairix_util::defer::JobDesk::new(),
                     places: tairix_util::defer::JobDesk::new(),
                     stopping: false,
+                    alone: false,
+                    scratch: Vec::new(),
                 }),
                 signal: tairix_rt::sync::Condvar::new(),
                 wake,
+                set,
             }
         }
 
@@ -2145,6 +2339,9 @@ mod program {
             let mut rasteriser = SandboxRasteriser {
                 sandbox: ParserSandbox::new(RtLauncher::own_binary(), tairix_rt::LogSink),
             };
+            // Refused, each drain reads its changes a few at a time instead.
+            let mut scratch =
+                tairix_util::fallible::filled(WATCH_BUFFER_LEN, 0).unwrap_or_default();
             loop {
                 let job = {
                     let mut work = self.work.lock();
@@ -2169,8 +2366,22 @@ mod program {
                             .deliver(DocumentOpened { job, result })
                     }
                     Read::List(job) => {
-                        let listed = read_directory(job.target());
-                        self.work.lock().listings.deliver(job, listed)
+                        let (client, target) = (job.client(), job.target().to_vec());
+                        // A reload of the folder already watched reads through
+                        // that watch, so its pacing carries on.
+                        let reuse = self.work.lock().watches.relisting(client, &target);
+                        let (listed, armed) = WatchedDirectory::read(&target, reuse, unfollowed);
+                        let (owed, unwanted) = {
+                            let mut work = self.work.lock();
+                            let owed = work.listings.deliver(job, listed);
+                            (owed, work.watches.offer_armed(owed, client, &target, armed))
+                        };
+                        drop(unwanted);
+                        owed
+                    }
+                    Read::Drain(client, location, dir) => {
+                        let update = dir.drain(&mut scratch);
+                        self.work.lock().watches.deliver(client, &location, update)
                     }
                     Read::Artwork(job) => {
                         // The shared decode, so deferring it cannot change
@@ -2211,6 +2422,11 @@ mod program {
             if let Some(job) = work.listings.next_job() {
                 return Some(Read::List(job));
             }
+            // A folder on screen that changed is next: what the user sees is
+            // wrong until it lands.
+            if let Some((client, location, dir)) = work.watches.next_drain() {
+                return Some(Read::Drain(client, location, dir));
+            }
             // A node the user asked to be described comes before the icon
             // decodes and folder cues: those are decoration a frame already
             // draws without, and a Properties window shows nothing until its
@@ -2237,15 +2453,39 @@ mod program {
         /// thread instead, which is exactly what this app did before it had
         /// one: a recorded request nobody will serve would leave the window
         /// listing for ever, so the degradation is a real read, not a wait.
+        ///
+        /// A listing taken commits its window to the watch armed with it,
+        /// whichever path took it, so a navigation answered on the spot is as
+        /// live as one that waited.
         fn list(&self, client: FilesClient, components: &[String]) -> Result<Listing, Errno> {
-            self.ask(components, |listings| listings.take(client, components))
+            let mut took = Took::default();
+            let listing = self.ask(client, components, |work| {
+                let listing = work.listings.take(client, components);
+                if matches!(listing, Ok(Listing::Ready(_))) {
+                    took = work.watches.took(client, components);
+                }
+                listing
+            });
+            self.commit(client, took);
+            listing
+        }
+
+        /// Join the watch `client` now reports on to the loop's wait-set,
+        /// letting go of what it moved away from; a folder that cannot be
+        /// followed says so and is unwatched.
+        fn commit(&self, client: FilesClient, took: Took<alloc::sync::Arc<WatchedDirectory>>) {
+            let token = WATCH_TOKEN_BASE.saturating_add(client.number());
+            if let Err(err) = took.commit(self.set, token) {
+                drop(self.unwatch(client));
+                unfollowed(err);
+            }
         }
 
         /// Record a fresh listing of `components` — one no read already under
         /// way may answer — degrading exactly as [`list`](Self::list) does.
         fn refresh(&self, client: FilesClient, components: &[String]) -> Result<Listing, Errno> {
-            self.ask(components, |listings| {
-                listings.refresh(client, components);
+            self.ask(client, components, |work| {
+                work.listings.refresh(client, components);
                 Ok(Listing::Pending)
             })
         }
@@ -2256,33 +2496,100 @@ mod program {
         }
 
         /// Let a closed window's listing consumer go, with whatever it had
-        /// asked for.
+        /// asked for and the watch it held.
         fn forget_listing(&self, client: FilesClient) {
-            self.work.lock().listings.forget(client);
+            let released = {
+                let mut work = self.work.lock();
+                work.listings.forget(client);
+                work.watches.forget(client)
+            };
+            drop(released);
         }
 
-        /// Put a listing request to the desk through `record`, waking the
-        /// worker when it leaves the browser waiting.
+        /// Whether a window's listing of `components` follows that folder.
+        fn follows(&self, client: FilesClient, components: &[String]) -> bool {
+            self.work.lock().watches.follows(client, components)
+        }
+
+        /// A window's watch reported a change: drain it off the loop, or here
+        /// with no reader to. Whether it was drained here and left something
+        /// for the loop to adopt now.
+        fn want_drain(&self, client: FilesClient) -> bool {
+            let mut work = self.work.lock();
+            if !work.watches.want_drain(client) {
+                return false;
+            }
+            if work.alone {
+                let Work {
+                    watches, scratch, ..
+                } = &mut *work;
+                return watches.drain_here(|dir| dir.drain(scratch));
+            }
+            drop(work);
+            self.signal.notify_one();
+            false
+        }
+
+        /// What a window's drains produced, handed over once.
+        fn take_watch_update(&self, client: FilesClient) -> WatchUpdate {
+            self.work.lock().watches.take_update(client)
+        }
+
+        /// The window stopped watching: the watch it held, to release.
+        fn unwatch(&self, client: FilesClient) -> Option<alloc::sync::Arc<WatchedDirectory>> {
+            self.work.lock().watches.unwatch(client)
+        }
+
+        /// The folders `names` in `dir` changed, so an answer about one is
+        /// stale.
+        fn invalidate_probes(&self, dir: &[String], names: &alloc::collections::BTreeSet<&str>) {
+            self.work.lock().probes.invalidate(dir, names);
+        }
+
+        /// Put `client`'s listing request to the desk through `record`, waking
+        /// the worker when it leaves the browser waiting; with no worker to,
+        /// read it on the loop.
         fn ask(
             &self,
+            client: FilesClient,
             components: &[String],
-            record: impl FnOnce(&mut ListingDesk<FilesClient>) -> Result<Listing, Errno>,
+            record: impl FnOnce(&mut Work) -> Result<Listing, Errno>,
         ) -> Result<Listing, Errno> {
             let deferred = {
                 let mut work = self.work.lock();
                 if work.stopping {
                     None
                 } else {
-                    Some(record(&mut work.listings))
+                    Some(record(&mut work))
                 }
             };
             let Some(listing) = deferred else {
-                return read_directory(components).map(Listing::Ready);
+                return self.read_here(client, components);
             };
             if matches!(listing, Ok(Listing::Pending)) {
                 self.signal.notify_one();
             }
             listing
+        }
+
+        /// Read `components` for `client` on the loop: armed and joined as the
+        /// reader's read would be when the app has no reader, so the window
+        /// still follows its folder, and read bare once it is tearing down.
+        fn read_here(&self, client: FilesClient, components: &[String]) -> Result<Listing, Errno> {
+            let read = {
+                let mut work = self.work.lock();
+                let Work { watches, alone, .. } = &mut *work;
+                alone.then(|| {
+                    watches.read_here(client, components, |reuse| {
+                        WatchedDirectory::read(components, reuse, unfollowed)
+                    })
+                })
+            };
+            let Some((listed, took)) = read else {
+                return read_directory(components).map(Listing::Ready);
+            };
+            self.commit(client, took);
+            listed.map(Listing::Ready)
         }
 
         /// Answer a paint's miss on `key` at `side`, recording the decode if
@@ -2477,18 +2784,38 @@ mod program {
         /// Ask the worker to leave and wake it.
         fn stop(&self) {
             let mut work = self.work.lock();
-            work.stopping = true;
-            drop(work.opens.stop());
-            work.listings.stop();
-            // Overwrites every decode still held, so one user's rendered
-            // pixels do not outlive their window in reusable heap.
-            work.artwork.stop();
-            work.probes.stop();
-            work.properties.stop();
-            work.bundles.stop();
-            work.places.stop();
+            work.halt();
+            work.watches.stop();
+            work.alone = false;
             drop(work);
             self.signal.notify_all();
+        }
+
+        /// No reader will answer: every desk's work is done on the loop, and
+        /// the windows' watches are kept, drained there too. Refused its
+        /// scratch, each drain reads its changes a few at a time instead.
+        fn alone(&self) {
+            let mut work = self.work.lock();
+            work.halt();
+            work.alone = true;
+            work.scratch = tairix_util::fallible::filled(WATCH_BUFFER_LEN, 0).unwrap_or_default();
+        }
+    }
+
+    impl Work {
+        /// Stop recording work on every desk but the watches, so what is asked
+        /// is done where it is asked.
+        fn halt(&mut self) {
+            self.stopping = true;
+            drop(self.opens.stop());
+            self.listings.stop();
+            // Overwrites every decode still held, so one user's rendered
+            // pixels do not outlive their window in reusable heap.
+            self.artwork.stop();
+            self.probes.stop();
+            self.properties.stop();
+            self.bundles.stop();
+            self.places.stop();
         }
     }
 
@@ -2557,6 +2884,10 @@ mod program {
 
         fn refresh(&mut self, components: &[String]) -> Result<Listing, Errno> {
             self.0.refresh(self.1, components)
+        }
+
+        fn follows(&self, components: &[String]) -> bool {
+            self.0.follows(self.1, components)
         }
 
         fn has_children(&mut self, components: &[String]) -> Result<Probe, Errno> {
@@ -2861,6 +3192,16 @@ mod program {
                     self.desktop_moved.set(true);
                     return Ok(Parked::Interrupted);
                 }
+                // A folder a window shows changed. The drain is the reader's,
+                // and its answer arrives as a reader wake for the loop to
+                // adopt, so this park carries on — but with no reader it was
+                // drained here, and is the loop's to adopt now.
+                Wake::App(token) if token >= WATCH_TOKEN_BASE => {
+                    let client = FilesClient::from_number(token - WATCH_TOKEN_BASE);
+                    if self.reads.want_drain(client) {
+                        return Ok(Parked::Interrupted);
+                    }
+                }
                 Wake::Event | Wake::PressureUnchanged | Wake::App(_) => {}
             }
             Ok(Parked::Served)
@@ -3069,6 +3410,9 @@ mod program {
     struct Overlays {
         /// The in-place rename editor, when open (`F2`).
         rename: Option<TextField>,
+        /// The folder New Folder made and the directory it made it in, whose
+        /// rename opens once a listing there shows it.
+        rename_on_arrival: Option<(Vec<String>, String)>,
         /// The delete-confirmation dialog, when open (`Delete`).
         delete: Option<DeleteConfirm>,
         /// The "Open With…" application chooser, when open (chosen from the
@@ -5237,7 +5581,7 @@ mod program {
             model,
             MANAGER_MENU_TITLE,
             ContextQuick {
-                name: browser.selected_name().unwrap_or_default(),
+                name: browser.chosen_entry().map_or("", Entry::name),
                 candidates: &quick,
             },
         ) {
@@ -5302,7 +5646,7 @@ mod program {
     /// application to choose; a selection that cannot be spelled is no target
     /// rather than a fabricated one (fail closed).
     fn open_with_target<S: DirectorySource>(browser: &Browser<S>) -> Option<PendingChooser> {
-        let entry = browser.selected_entry()?;
+        let entry = browser.chosen_entry()?;
         if entry.kind().resolved() != Some(EntryKind::File) {
             return None;
         }
@@ -5908,14 +6252,9 @@ mod program {
         tool: ManagerTool,
     ) -> (bool, bool) {
         match tool {
-            ManagerTool::NewFolder => begin_new_folder(
-                browser,
-                &mut overlays.rename,
-                scale,
-                theme,
-                viewport,
-                toolbar,
-            ),
+            ManagerTool::NewFolder => {
+                begin_new_folder(browser, overlays, scale, theme, viewport, toolbar)
+            }
             ManagerTool::Trash => go_to_trash(browser, scale, theme, viewport, toolbar),
             ManagerTool::EmptyTrash => begin_empty_trash(browser, &mut overlays.delete),
         }
@@ -6053,11 +6392,12 @@ mod program {
     /// capability; the per-inode owner/mode/ACL model gates it. The engine
     /// validates before the syscall and is transactional: a refused create
     /// leaves the listing exactly as it was and states its reason on `stderr`
-    /// (an honest answer, never a crash or a fabricated folder). On success the
-    /// engine has selected the new folder, so the rename editor opens on it.
+    /// (an honest answer, never a crash or a fabricated folder). The rename
+    /// editor opens on the new folder once the listing shows it — at once when
+    /// it already does, else when the read it is waiting on lands.
     fn begin_new_folder<S: DirectorySource>(
         browser: &mut Browser<S>,
-        rename: &mut Option<TextField>,
+        overlays: &mut Overlays,
         scale: Scale,
         theme: &Theme,
         viewport: Rect,
@@ -6072,7 +6412,18 @@ mod program {
                 Err(Errno::from_syscall(ret))
             }
         }) {
-            Ok(()) => begin_rename(browser, rename, scale, theme, viewport, toolbar),
+            Ok(()) if browser.focus_pending().is_some() => {
+                overlays.rename_on_arrival = Some((browser.components().to_vec(), name));
+                (false, false)
+            }
+            Ok(()) => begin_rename(
+                browser,
+                &mut overlays.rename,
+                scale,
+                theme,
+                viewport,
+                toolbar,
+            ),
             Err(err) => {
                 let msg = err.message();
                 app::report(APP_NAME, msg);
@@ -6093,7 +6444,7 @@ mod program {
         viewport: Rect,
         toolbar: ToolbarBand,
     ) -> (bool, bool) {
-        let Some(name) = browser.selected_name().map(ToString::to_string) else {
+        let Some(name) = browser.chosen_entry().map(|entry| entry.name().to_string()) else {
             return (false, false);
         };
         tairix_browse::render::reveal_selection(browser, scale, theme, viewport, toolbar);
@@ -6114,7 +6465,7 @@ mod program {
         browser: &Browser<S>,
         request: &mut Option<PropertiesRequest>,
     ) -> (bool, bool) {
-        let Some(entry) = browser.selected_entry() else {
+        let Some(entry) = browser.chosen_entry() else {
             return (false, false);
         };
         let kind = entry.kind();
@@ -6960,6 +7311,7 @@ mod program {
     fn initial_overlays() -> Overlays {
         Overlays {
             rename: None,
+            rename_on_arrival: None,
             delete: None,
             open_with: None,
             operation: None,
@@ -7183,7 +7535,7 @@ mod program {
         // cannot stall the window. A pipe the kernel refuses, or a thread it
         // will not grant, leaves those reads on this task — where they used to
         // be, and stated once.
-        let reads = alloc::sync::Arc::new(Reads::new(tairix_rt::sync::WorkerWake::create()));
+        let reads = alloc::sync::Arc::new(Reads::new(tairix_rt::sync::WorkerWake::create(), set));
         let reader = if reads.wake.is_armed() {
             spawn_reader(&reads)
         } else {
@@ -7191,7 +7543,7 @@ mod program {
             None
         };
         if reader.is_none() {
-            reads.stop();
+            reads.alone();
         }
         // Declared after the handle, so it runs first: the desks stop, then the
         // handle detaches.
@@ -7335,7 +7687,13 @@ mod program {
                     // closed).
                     if let Some(state) = windows[busy].browser() {
                         state.overlays.operation = None;
-                        let _ = state.browser.refresh();
+                        // A followed folder reports what the operation did to
+                        // it; only an unfollowed one is read again.
+                        if !state.browser.follows() {
+                            if let Err(err) = state.browser.refresh() {
+                                report_error(&alloc::format!("listing refused ({err})"));
+                            }
+                        }
                     }
                     // Reap any launched bundle that exited while the operation
                     // ran (the wait-set was not parked on during it).
@@ -7459,6 +7817,14 @@ mod program {
                         for win in &mut windows {
                             if let Some(state) = win.browser() {
                                 sidebar::refresh_places(&mut state.places, &home, &volumes);
+                                // A listing no volume records changes for — the
+                                // namespace's own roots, the mount points under
+                                // `/Storage` — moves with the mount table.
+                                if !state.browser.follows() && !state.browser.is_listing() {
+                                    if let Err(err) = state.browser.refresh() {
+                                        report_error(&alloc::format!("listing refused ({err})"));
+                                    }
+                                }
                             }
                         }
                         if start.role == Role::Desktop {
@@ -7506,24 +7872,51 @@ mod program {
                     // resuming it is what turns the answer into entries. It
                     // costs a taken `Option` when nothing is pending, so
                     // asking every turn is free.
-                    let mut resumed = false;
-                    for win in &mut windows {
+                    let mut resumed = alloc::vec::Vec::new();
+                    for (index, win) in windows.iter_mut().enumerate() {
+                        let mode = *win.pane.mode();
                         let Some(state) = win.browser() else {
                             continue;
                         };
+                        // A menu, a rename or a drag acts on the entries it was
+                        // opened over: the listing that replaces them waits.
+                        if state.listing_is_held() {
+                            continue;
+                        }
                         match state.browser.resume() {
-                            Ok(committed) => resumed |= committed,
+                            Ok(true) => {
+                                state.lost = false;
+                                state.overlays.double_click.reset();
+                                state.rename_arrived(Canvas {
+                                    theme: themes.active(),
+                                    mode: &mode,
+                                    scale: desktop.scale(),
+                                    chrome: state.chrome,
+                                });
+                                resumed.push(index);
+                            }
+                            Ok(false) => {}
+                            // A folder gone from its path is left for the
+                            // nearest one above rather than shown as it was.
+                            Err(_) if state.lost => {
+                                if matches!(state.climb(), Repaint::Whole) {
+                                    resumed.push(index);
+                                }
+                            }
                             Err(err) => {
                                 report_error(&alloc::format!("listing refused ({err})"));
                             }
                         }
                     }
-                    if resumed {
+                    if !resumed.is_empty() {
                         // A listing is a whole new set of entries, so the
                         // window is repainted whole rather than by a mark: no
                         // reading of the old state describes where anything is
-                        // now.
-                        for win in &mut windows {
+                        // now. Only the windows that committed one.
+                        for index in resumed {
+                            let Some(win) = windows.get_mut(index) else {
+                                continue;
+                            };
                             if present_whole(
                                 win,
                                 &mut client,
@@ -7540,6 +7933,45 @@ mod program {
                                 );
                             }
                         }
+                        continue;
+                    }
+                    // What each window's watch reported, applied to that
+                    // window alone and repainted only where it altered a row.
+                    let mut followed = false;
+                    for win in &mut windows {
+                        let mode = *win.pane.mode();
+                        let mut damage = Region::new();
+                        let repaint = match win.browser() {
+                            Some(state) => {
+                                let canvas = Canvas {
+                                    theme: themes.active(),
+                                    mode: &mode,
+                                    scale: desktop.scale(),
+                                    chrome: state.chrome,
+                                };
+                                state.follow_watch(&reads, canvas, &mut damage)
+                            }
+                            None => Repaint::Nothing,
+                        };
+                        if repaint == Repaint::Nothing {
+                            continue;
+                        }
+                        followed = true;
+                        if present_window(
+                            win,
+                            &mut client,
+                            themes.grounds(MANAGER_WINDOW_GROUND),
+                            &icons,
+                            desktop.scale(),
+                            repaint,
+                            &damage,
+                        )
+                        .is_err()
+                        {
+                            return app::fail(APP_NAME, app::EXIT_CHANNEL_LOST, "present refused");
+                        }
+                    }
+                    if followed {
                         continue;
                     }
                     // A node's description the reader has answered, adopted

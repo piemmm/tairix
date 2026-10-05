@@ -25,104 +25,20 @@ use tairix_abi::{
     CapabilityId, Errno, FileKind, OpenFlags, RealpathMode, UnlinkFlags, FS_OWNER_UNCHANGED,
 };
 use tairix_caps::CapabilitySet;
-use tairix_kernel_sec::{
-    GroupId, GroupRecord, IdentityTable, IdentityTableBuilder, UserId, UserRecord,
-};
-use tairix_log::{Event, Sink};
+use tairix_kernel_sec::{GroupId, GroupRecord, IdentityTableBuilder, UserId, UserRecord};
 
 use super::{LateFilesystem, LateIdentity, MountedFilesystemService};
 use crate::fs::blkmeter::{BlkHealthCountersAtomic, BlkIoStatsAtomic, VolumeIoSource};
 use crate::fs::memfs::RwMockFs;
 use crate::fs::perm::Credentials;
 use crate::fs::service::FilesystemService;
+use crate::fs::test_volume::{
+    caps, dir_driver, driver, identity_table, vfs, NullSink, MOUNT, MOUNT_MEDIUM, TEST_GID,
+    TEST_UID,
+};
 use crate::fs::{FinalLink, Mode, MountBacking, Path, Vfs};
 
 /// The test principal that owns the mounted volume's files.
-const TEST_UID: u32 = 1000;
-const TEST_GID: u32 = 1000;
-/// The mount point the in-memory driver is mounted at.
-const MOUNT: &str = "/Storage/vol";
-/// The storage medium the fixture's block device declares, so the snapshot
-/// can be checked against a value only the attach path could have supplied.
-const MOUNT_MEDIUM: BlkDeviceClass = BlkDeviceClass::SolidState;
-
-/// A sink that discards every event — the identity-table verifier audits its
-/// outcome but these tests assert behaviour, not the audit trail.
-struct NullSink;
-impl Sink for NullSink {
-    fn write_event(&self, _event: &Event<'_>) {}
-}
-
-fn caps() -> CapabilitySet {
-    CapabilitySet::empty()
-}
-
-/// An identity table holding exactly the test principal (uid/gid 1000).
-fn identity_table() -> IdentityTable {
-    let mut builder = IdentityTableBuilder::new();
-    builder.push_group(GroupRecord {
-        gid: GroupId(TEST_GID),
-    });
-    builder.push_user(UserRecord {
-        uid: UserId(TEST_UID),
-        primary_gid: GroupId(TEST_GID),
-        supplementary_gids: Vec::new(),
-        capability_grants: CapabilitySet::empty(),
-    });
-    builder
-        .verify(&NullSink)
-        .expect("well-formed identity table")
-}
-
-/// A default-layout VFS with the in-memory driver mounted at [`MOUNT`],
-/// read-only when `read_only`.
-fn vfs(read_only: bool) -> Vfs {
-    let mut vfs = Vfs::with_default_layout(UserId(TEST_UID), GroupId(TEST_GID));
-    let caps = caps();
-    let cred = Credentials {
-        uid: UserId(TEST_UID),
-        gid: GroupId(TEST_GID),
-        supplementary_gids: &[],
-        caps: &caps,
-    };
-    let mount = Path::parse(MOUNT).expect("valid mount path");
-    vfs.mkdir(&cred, &mount, Mode::from_bits(0o755))
-        .expect("create mount point");
-    let handle = DriverHandle::from_raw(9).expect("non-zero handle");
-    let flags = if read_only {
-        MountFlags::READ_ONLY
-    } else {
-        MountFlags::from_bits(0).expect("empty flags")
-    };
-    // The fixture stands in for a volume attached from a classified block
-    // device, so the medium it reports is the one the device declared.
-    vfs.mounts_write()
-        .mount(
-            mount,
-            flags,
-            Some(MountBacking::new(handle, Some(MOUNT_MEDIUM))),
-        )
-        .expect("mount backed");
-    vfs
-}
-
-/// The in-memory driver, with its root and created files owned by the test
-/// principal so it can traverse, create, and write.
-fn driver() -> RwMockFs {
-    let mut fs = RwMockFs::new().with_create_owner(TEST_UID, TEST_GID, 0o644);
-    fs.set_root_security(NodeSecurity::new(0o755, TEST_UID, TEST_GID));
-    fs
-}
-
-/// A driver owned by the test principal whose created nodes are
-/// world-traversable directories (mode `0o755`), so a rebased mount can walk
-/// the backing-subtree directories it pre-creates.
-fn dir_driver() -> RwMockFs {
-    let mut fs = RwMockFs::new().with_create_owner(TEST_UID, TEST_GID, 0o755);
-    fs.set_root_security(NodeSecurity::new(0o755, TEST_UID, TEST_GID));
-    fs
-}
-
 /// Two rebased sub-mounts that share **one** backing driver (the
 /// `/System/Logs` + `/System/Settings`-on-one-volume shape) route each to
 /// their own backing subtree and stay isolated; a second driver under a
@@ -187,9 +103,9 @@ fn rebased_submounts_route_to_their_backing_subtree_and_handle() {
 
     let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
     cell.install_vfs(vfs).expect("install vfs");
-    cell.register(h_shared, shared, "shared", "memfs", [0u8; 16])
+    cell.register(h_shared, shared, "shared", "memfs", [0u8; 16], None)
         .expect("register shared");
-    cell.register(h_other, other, "other", "memfs", [0u8; 16])
+    cell.register(h_other, other, "other", "memfs", [0u8; 16], None)
         .expect("register other");
     let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
     identity.install(identity_table()).expect("identity");
@@ -306,11 +222,11 @@ fn readdir_merges_direct_child_mounts_into_the_parent_listing() {
 
     let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
     cell.install_vfs(vfs).expect("install vfs");
-    cell.register(h_parent, parent, "root", "memfs", [0u8; 16])
+    cell.register(h_parent, parent, "root", "memfs", [0u8; 16], None)
         .expect("register parent");
-    cell.register(h_usb, usb, "usb1", "memfs", [0u8; 16])
+    cell.register(h_usb, usb, "usb1", "memfs", [0u8; 16], None)
         .expect("register usb");
-    cell.register(h_dup, driver(), "dup", "memfs", [0u8; 16])
+    cell.register(h_dup, driver(), "dup", "memfs", [0u8; 16], None)
         .expect("register dup");
     let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
     identity.install(identity_table()).expect("identity");
@@ -368,7 +284,7 @@ fn service(
         // `vfs`); register it under that same handle so the service routes
         // operations on `/Storage/vol/...` to it.
         let handle = DriverHandle::from_raw(9).expect("non-zero handle");
-        cell.register(handle, driver(), "vol", "memfs", [0u8; 16])
+        cell.register(handle, driver(), "vol", "memfs", [0u8; 16], None)
             .expect("register driver");
     }
     let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
@@ -391,7 +307,7 @@ fn ready_traversable() -> MountedFilesystemService<RwMockFs> {
     let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
     cell.install_vfs(vfs(false)).expect("install vfs");
     let handle = DriverHandle::from_raw(9).expect("non-zero handle");
-    cell.register(handle, dir_driver(), "vol", "memfs", [0u8; 16])
+    cell.register(handle, dir_driver(), "vol", "memfs", [0u8; 16], None)
         .expect("register driver");
     let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
     identity
@@ -908,7 +824,7 @@ fn ready_with_supplementary(gid: u32) -> MountedFilesystemService<RwMockFs> {
     let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
     cell.install_vfs(vfs(false)).expect("install vfs");
     let handle = DriverHandle::from_raw(9).expect("non-zero handle");
-    cell.register(handle, driver(), "vol", "memfs", [0u8; 16])
+    cell.register(handle, driver(), "vol", "memfs", [0u8; 16], None)
         .expect("register driver");
     let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
     let mut builder = IdentityTableBuilder::new();
@@ -1150,9 +1066,9 @@ fn an_ordinary_user_lists_the_system_owned_read_only_mount() {
 
     let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
     cell.install_vfs(vfs).expect("install vfs");
-    cell.register(system_handle, system, "system", "memfs", [0u8; 16])
+    cell.register(system_handle, system, "system", "memfs", [0u8; 16], None)
         .expect("register system");
-    cell.register(root_handle, rootvol, "root", "memfs", [0u8; 16])
+    cell.register(root_handle, rootvol, "root", "memfs", [0u8; 16], None)
         .expect("register root");
     let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
     identity.install(identity_table()).expect("identity");
@@ -1214,7 +1130,7 @@ fn mount_snapshot_overlays_reported_block_health() {
     let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
     cell.install_vfs(vfs(false)).expect("install vfs");
     let handle = DriverHandle::from_raw(9).expect("handle");
-    cell.register(handle, driver(), "vol", "memfs", [0u8; 16])
+    cell.register(handle, driver(), "vol", "memfs", [0u8; 16], None)
         .expect("register");
     let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
     identity.install(identity_table()).expect("identity");
@@ -1354,6 +1270,7 @@ where
         "vol",
         "memfs",
         [0u8; 16],
+        None,
     )
     .expect("register");
     let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
@@ -1448,6 +1365,7 @@ fn attr_access_follows_the_nodes_own_permissions() {
         "vol",
         "memfs",
         [0u8; 16],
+        None,
     )
     .expect("register");
     let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
@@ -1605,6 +1523,10 @@ struct NoAttrsFs(RwMockFs);
 impl FilesystemRead for NoAttrsFs {
     fn root(&self) -> NodeId {
         self.0.root()
+    }
+
+    fn name_matching(&self) -> tairix_abi::driver::filesystem::NameMatching {
+        self.0.name_matching()
     }
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
         self.0.node_info(node)
@@ -2106,7 +2028,7 @@ fn a_link_in_a_submount_cannot_resolve_outside_the_projected_subtree() {
 
     let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
     cell.install_vfs(vfs).expect("install vfs");
-    cell.register(h, volume, "vol", "memfs", [0u8; 16])
+    cell.register(h, volume, "vol", "memfs", [0u8; 16], None)
         .expect("register");
     let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
     identity.install(identity_table()).expect("identity");
@@ -2351,7 +2273,7 @@ fn realpath_answers_a_submount_with_its_own_mount_point() {
         .expect("rebased mount");
     let cell: &'static LateFilesystem<RwMockFs> = Box::leak(Box::new(LateFilesystem::new()));
     cell.install_vfs(vfs).expect("install vfs");
-    cell.register(h, volume, "vol", "memfs", [0u8; 16])
+    cell.register(h, volume, "vol", "memfs", [0u8; 16], None)
         .expect("register");
     let identity: &'static LateIdentity = Box::leak(Box::new(LateIdentity::new()));
     identity.install(identity_table()).expect("identity");
@@ -2371,4 +2293,167 @@ fn realpath_answers_a_submount_with_its_own_mount_point() {
         svc.realpath(TEST_UID, &caps, "/Storage/area/up", RealpathMode::Existing),
         Ok(canonical)
     );
+}
+
+mod watch {
+    use super::*;
+    use crate::fs::test_volume::{watched_service, Watched};
+    use crate::fswatch::Drain;
+
+    fn create(svc: &impl FilesystemService, path: &str) {
+        svc.open(
+            TEST_UID,
+            &caps(),
+            path,
+            OpenFlags::CREATE.union(OpenFlags::WRITE),
+        )
+        .expect("create");
+    }
+
+    /// A directory made through the service is handed to its creator without
+    /// moving any epoch, so the watchers of the volume do not rescan for it,
+    /// while a real change of a directory's mode still does.
+    #[test]
+    fn a_mkdir_through_the_service_moves_no_epoch() {
+        let Watched {
+            service: svc,
+            watch,
+            ..
+        } = watched_service([0x73; 16]);
+        let root = svc
+            .stat(TEST_UID, &caps(), MOUNT, FinalLink::Follow)
+            .expect("stats")
+            .id;
+        watch.watch(root.node, watch.epochs(0)).expect("arms");
+        let before = watch.epochs(0);
+        svc.mkdir(TEST_UID, &caps(), "/Storage/vol/made")
+            .expect("mkdir");
+        assert_eq!(watch.epochs(0), before);
+        svc.set_mode(TEST_UID, &caps(), "/Storage/vol/made", 0o700)
+            .expect("chmod");
+        assert_ne!(watch.epochs(0), before);
+    }
+
+    #[test]
+    fn lookup_entries_reports_what_readdir_does_for_those_names() {
+        let svc = watched_service([0x70; 16]).service;
+        create(svc, "/Storage/vol/a.txt");
+        svc.write(TEST_UID, &caps(), "/Storage/vol/a.txt", 0, false, b"moo")
+            .expect("write");
+        svc.mkdir(TEST_UID, &caps(), "/Storage/vol/d")
+            .expect("mkdir");
+        let listing = svc
+            .readdir(TEST_UID, &caps(), MOUNT, FinalLink::Follow)
+            .expect("lists");
+        let names: [&[u8]; 3] = [b"a.txt", b"d", b"absent"];
+        let found = svc
+            .lookup_entries(TEST_UID, &caps(), MOUNT, FinalLink::Follow, &names)
+            .expect("looks up");
+        let listed = |name: &str| listing.iter().find(|e| e.name == name).cloned();
+        assert_eq!(found.entries[0], listed("a.txt"));
+        assert_eq!(found.entries[1], listed("d"));
+        assert_eq!(found.entries[2], None);
+        let stat = svc
+            .stat(TEST_UID, &caps(), MOUNT, FinalLink::Follow)
+            .expect("stats");
+        assert_eq!(
+            found.dir, stat.id,
+            "the directory's own identity comes back"
+        );
+    }
+
+    #[test]
+    fn lookup_entries_is_refused_where_a_listing_would_be() {
+        let svc = watched_service([0x71; 16]).service;
+        svc.mkdir(TEST_UID, &caps(), "/Storage/vol/private")
+            .expect("mkdir");
+        svc.set_mode(TEST_UID, &caps(), "/Storage/vol/private", 0o300)
+            .expect("chmod");
+        assert_eq!(
+            svc.lookup_entries(
+                TEST_UID,
+                &caps(),
+                "/Storage/vol/private",
+                FinalLink::Follow,
+                &[]
+            )
+            .map(|_| ()),
+            Err(Errno::PermissionDenied)
+        );
+        create(svc, "/Storage/vol/file");
+        assert_eq!(
+            svc.lookup_entries(
+                TEST_UID,
+                &caps(),
+                "/Storage/vol/file",
+                FinalLink::Follow,
+                &[]
+            )
+            .map(|_| ()),
+            Err(Errno::NotADirectory)
+        );
+    }
+
+    #[test]
+    fn every_kind_of_mutation_through_the_service_reaches_the_journal() {
+        let Watched {
+            service: svc,
+            watch,
+            ..
+        } = watched_service([0x72; 16]);
+        let dir = svc
+            .stat(TEST_UID, &caps(), MOUNT, FinalLink::Follow)
+            .expect("stats")
+            .id;
+        let watcher = watch.watch(dir.node, watch.epochs(0)).expect("arms").0;
+        let drained = || match watch
+            .take(dir.node, watcher, usize::MAX, false)
+            .expect("copies out")
+        {
+            Some(Drain::Names { names, upto, .. }) => {
+                watch.commit(dir.node, watcher, upto, watch.epochs(0));
+                names
+                    .iter()
+                    .map(|n| alloc::string::String::from_utf8(n.to_vec()).expect("utf-8"))
+                    .collect::<Vec<_>>()
+            }
+            _ => panic!("expected names"),
+        };
+        create(svc, "/Storage/vol/new.txt");
+        assert_eq!(drained(), ["new.txt"]);
+        svc.write(
+            TEST_UID,
+            &caps(),
+            "/Storage/vol/new.txt",
+            0,
+            true,
+            b"line\n",
+        )
+        .expect("append");
+        assert_eq!(drained(), ["new.txt"]);
+        svc.set_mode(TEST_UID, &caps(), "/Storage/vol/new.txt", 0o600)
+            .expect("chmod");
+        assert_eq!(drained(), ["new.txt"], "a metadata change is reported too");
+        svc.rename(
+            TEST_UID,
+            &caps(),
+            "/Storage/vol/new.txt",
+            "/Storage/vol/old.txt",
+        )
+        .expect("rename");
+        assert_eq!(drained(), ["new.txt", "old.txt"]);
+        svc.mkdir(TEST_UID, &caps(), "/Storage/vol/sub")
+            .expect("mkdir");
+        assert_eq!(drained(), ["sub"]);
+        create(svc, "/Storage/vol/sub/inner");
+        assert_eq!(drained(), ["sub"], "the subfolder's own entry changed");
+        svc.unlink(
+            TEST_UID,
+            &caps(),
+            "/Storage/vol/old.txt",
+            UnlinkFlags::empty(),
+        )
+        .expect("unlink");
+        assert_eq!(drained(), ["old.txt"]);
+    }
 }

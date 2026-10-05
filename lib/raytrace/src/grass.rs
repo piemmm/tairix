@@ -37,7 +37,7 @@ use crate::noise::{cell, cells2, hash2, noise2, smoothstep};
 use crate::sample::{mix32, mix64, unit};
 use crate::shade::Shade;
 use crate::shape::{reciprocal, Aabb, Geometry, Hit};
-use crate::vector::{Members, Ray, Vec3};
+use crate::vector::{byte, whole, Members, Ray, Vec3};
 
 /// The most cells a ray walks across one cover: past any a lawn holds along
 /// a ray, so only a walk gone wrong ever meets it.
@@ -167,8 +167,9 @@ pub(crate) struct Lawn {
 }
 
 /// A lawn's canopy grid: the scene's grid it is, and how many cells a side
-/// each of its vertices stands for — one, and a vertex also keeps how its
-/// cell grows, so a ray need not work it out again.
+/// each of its vertices stands for. A vertex also keeps how the cell at its
+/// block's middle grows — for a block of one, its own cell — so a ray need
+/// not work it out again.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Tops {
     pub(crate) field: u32,
@@ -581,9 +582,6 @@ impl Lawn {
     /// its stature, as a share of the rankest; and the way out from its
     /// tussock, in 256ths of a turn. No shoots at all packs as none.
     fn pack(&self, grass: &Grass, stand: &Stand) -> [u8; 4] {
-        let byte = |share: f64| {
-            u8::try_from(mathf::round_i32(255.0 * share.clamp(0.0, 1.0))).unwrap_or(u8::MAX)
-        };
         let kind = (stand.marks >> KIND_SHIFT) & KIND_MASK;
         let vigour = (stand.marks >> VIGOUR_SHIFT) & VIGOUR_STEPS;
         let splay = u32::try_from(mathf::round_i32(stand.splay * f64::from(SPLAY_STEPS)))
@@ -645,7 +643,8 @@ impl Lawn {
     /// How high the tallest shoot of the block of `block` by `block` cells
     /// about `(x, z)` stands, ground and all, the lawn's edge blocks standing
     /// for the ground a block beyond them — `ABSENT` where nothing grows —
-    /// and, for a block of one cell, how that cell grows, packed.
+    /// and how its middle cell grows, packed: the cell itself for a block of
+    /// one, and what the canopy blends for a larger block.
     ///
     /// A lawn's canopy grid takes a vertex at the middle of each block, so a
     /// point of any block lies in a patch of the grid one of whose corners is
@@ -686,7 +685,8 @@ impl Lawn {
                 let Some(stand) = self.grown(&grass, ground, cell) else {
                     continue;
                 };
-                if block == 1 {
+                // The vertex keeps the cell it stands in: the block's middle.
+                if dx == block / 2 && dz == block / 2 {
                     packed = self.pack(&grass, &stand);
                 }
                 let highest =
@@ -717,14 +717,19 @@ impl Lawn {
         if !(-0.05..self.reach()).contains(&above) {
             return None;
         }
-        let tops = self.tops.and_then(|tops| fields.get(tops.field as usize));
-        // The leaves' density and height blended between the four cells
-        // whose middles stand about the point: how much light gets through a
+        let tops = self
+            .tops
+            .and_then(|tops| Some((fields.get(tops.field as usize)?, tops.block)));
+        // The leaves' density and height blended between the four stands
+        // whose middles lie about the point: how much light gets through a
         // sward is a mean over many leaves, so the ground beneath it darkens
-        // smoothly from cell to cell rather than a cell at a time.
+        // smoothly rather than a cell at a time. The stands are the ones its
+        // canopy grid keeps, a block's middle cell standing for the block,
+        // so a lookup is cheap however large the lawn.
+        let spacing = self.cell * f64::from(tops.map_or(1, |(_, block)| block));
         let (u, v) = (
-            (at.0 - self.from.0) / self.cell - 0.5,
-            (at.1 - self.from.1) / self.cell - 0.5,
+            (at.0 - self.from.0) / spacing - 0.5,
+            (at.1 - self.from.1) / spacing - 0.5,
         );
         let (column, row) = (mathf::floor(u), mathf::floor(v));
         let (right, down) = (u - column, v - row);
@@ -736,18 +741,27 @@ impl Lawn {
             (1.0, 1.0, right * down),
         ] {
             let middle = (
-                self.from.0 + (column + dx + 0.5) * self.cell,
-                self.from.1 + (row + dz + 0.5) * self.cell,
+                self.from.0 + (column + dx + 0.5) * spacing,
+                self.from.1 + (row + dz + 0.5) * spacing,
             );
             if weight <= 0.0 || !self.covers(middle) {
                 continue;
             }
+            // The grid's vertices lie at the stands' middles, one beyond its
+            // first, and a covered middle is never before the lawn's start.
+            let kept = match tops {
+                Some((grid, _)) => {
+                    let vertex = (whole(column + dx) + 1, whole(row + dz) + 1);
+                    self.unpack(&grass, grid.attributes_of(vertex.0, vertex.1), middle)
+                }
+                None => self.grown(&grass, field, self.cell_of(middle)),
+            };
             let Some(Stand {
                 kind,
                 shoots,
                 stature,
                 ..
-            }) = self.stand(&grass, (field, tops), self.cell_of(middle))
+            }) = kept
             else {
                 continue;
             };

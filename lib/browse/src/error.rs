@@ -23,6 +23,9 @@ pub enum BrowseError {
     /// The target entry is a regular file, not a directory, so the browser
     /// cannot descend into it.
     NotADirectory,
+    /// The memory the listing needed could not be had; the listing is as it
+    /// was.
+    OutOfMemory,
 }
 
 impl BrowseError {
@@ -42,6 +45,7 @@ impl fmt::Display for BrowseError {
             Self::Source(errno) => write!(f, "directory read failed: {errno}"),
             Self::NoSuchEntry => f.write_str("no such entry"),
             Self::NotADirectory => f.write_str("not a directory"),
+            Self::OutOfMemory => f.write_str("out of memory"),
         }
     }
 }

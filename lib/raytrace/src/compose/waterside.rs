@@ -15,14 +15,14 @@
 //! shows the same water's edge however its work is divided.
 
 use alloc::vec::Vec;
-use core::f64::consts::FRAC_PI_2;
+use core::f64::consts::{FRAC_1_SQRT_2, FRAC_PI_2};
 
 use tairix_parallel::JobRunner;
-use tairix_util::{fallible, mathf};
+use tairix_util::mathf;
 
+use super::lattice::{snap, Lattice};
 use super::woodland::KEPT;
 use super::{rgb, Dice, Recipe, Stage};
-use crate::band;
 use crate::heightfield::Heightfield;
 use crate::land::Land;
 use crate::leaf::Outline;
@@ -166,17 +166,6 @@ enum Pass {
     Done,
 }
 
-/// A square lattice of cells about the eye: its first cell's corner, its
-/// cells a side and their size, and the square a finer lattice reads
-/// instead.
-#[derive(Copy, Clone, Debug)]
-struct Lattice {
-    corner: (f64, f64),
-    side: usize,
-    cell: f64,
-    hole: Option<((f64, f64), (f64, f64))>,
-}
-
 /// A patch of a plant a cell holds: its kind and which of its patches,
 /// where its middle stands, how it is turned, and its key.
 #[derive(Copy, Clone, Debug)]
@@ -299,9 +288,7 @@ impl Margins {
         (land, shades, runner): (&Land, Option<&Shades>, &dyn JobRunner),
     ) -> Option<()> {
         match self.pass {
-            Pass::Reading { index, row } => {
-                self.read(&stage.fields, (land, shades, runner), (index, row))
-            }
+            Pass::Reading { index, row } => self.read(stage, (land, shades, runner), (index, row)),
             Pass::Keeping => {
                 self.keep();
                 Some(())
@@ -312,10 +299,10 @@ impl Margins {
     }
 
     /// Read the next unit of lattice `index`'s rows from `row` on `land`,
-    /// gathering the patches its cells hold.
+    /// gathering the patches its cells hold clear of `stage`'s pieces.
     fn read(
         &mut self,
-        fields: &[Heightfield],
+        stage: &Stage,
         (land, shades, runner): (&Land, Option<&Shades>, &dyn JobRunner),
         (index, row): (usize, usize),
     ) -> Option<()> {
@@ -325,12 +312,9 @@ impl Margins {
         };
         let per = if index == 0 { NEAR_ROWS } else { FAR_ROWS };
         let end = (row + per * runner.width().max(1)).min(lattice.side);
-        let mut cells = fallible::filled((end - row) * lattice.side, None)?;
-        band::for_each(runner, &mut cells, (row, lattice.side), &|row, cells| {
-            for (column, cell) in cells.iter_mut().enumerate() {
-                *cell = self.grows_in((land, fields, shades), &lattice, (column, row));
-            }
-        });
+        let cells = lattice.read(row..end, runner, &|cell| {
+            self.grows_in((land, stage, shades), &lattice, cell)
+        })?;
         // Grown by doubling, as it is extended a unit at a time.
         self.found
             .try_reserve(cells.iter().flatten().count())
@@ -419,61 +403,58 @@ impl Margins {
     fn lattice(&self, index: usize) -> Option<Lattice> {
         // Squared to the far lattice, so its cells and the near ones lie on
         // the land's own grid of places whatever the eye.
-        let snap = |value: f64| mathf::floor(value / FAR_CELL) * FAR_CELL;
-        let (x, z) = (snap(self.eye.0), snap(self.eye.1));
+        let (x, z) = (snap(self.eye.0, FAR_CELL), snap(self.eye.1, FAR_CELL));
         let near = 0.5 * real(NEAR_CELLS) * NEAR_CELL;
         match index {
-            0 => Some(Lattice {
-                corner: (x - near, z - near),
-                side: NEAR_CELLS,
-                cell: NEAR_CELL,
-                hole: None,
-            }),
-            1 => {
-                // A cell more than the reach spans, as its corner lies up to
-                // a cell short of it.
-                let side =
-                    usize::try_from(mathf::round_i32(mathf::ceil(2.0 * self.reach / FAR_CELL)) + 1)
-                        .ok()?;
-                Some(Lattice {
-                    corner: (snap(self.eye.0 - self.reach), snap(self.eye.1 - self.reach)),
-                    side,
-                    cell: FAR_CELL,
-                    hole: Some(((x - near, z - near), (x + near, z + near))),
-                })
-            }
+            0 => Some(Lattice::new((x - near, z - near), NEAR_CELLS, NEAR_CELL)),
+            1 => Some(
+                Lattice::about(self.eye, self.reach, FAR_CELL)?
+                    .without(((x - near, z - near), (x + near, z + near))),
+            ),
             _ => None,
         }
     }
 
+    /// Whether patch `patch` of the plant in `slot`, at `(x, z)`, stands
+    /// clear of every piece on `stage` — a boulder, a trunk, a pier.
+    fn clears_pieces(
+        &self,
+        stage: &Stage,
+        (slot, patch): (usize, usize),
+        (x, z): (f64, f64),
+    ) -> bool {
+        let side = self
+            .sown
+            .get(slot)
+            .and_then(Option::as_ref)
+            .and_then(|sown| sown.patches.get(patch))
+            .map(|patch| patch.side);
+        // Its plants root anywhere in its square, out to the corners.
+        side.is_some_and(|side| stage.clear_of_pieces((x, z), FRAC_1_SQRT_2 * side))
+    }
+
     /// The patch cell `(column, row)` of `lattice` holds on `land`, in the
     /// light `shades` leave it, if any: the plant the place suits best among
-    /// those of the season, as likely as it suits.
+    /// those of the season, as likely as it suits, clear of `stage`'s pieces.
     fn grows_in(
         &self,
-        (land, fields, shades): (&Land, &[Heightfield], Option<&Shades>),
+        (land, stage, shades): (&Land, &Stage, Option<&Shades>),
         lattice: &Lattice,
         (column, row): (usize, usize),
     ) -> Option<Placed> {
-        let (x, z) = (
-            lattice.corner.0 + (real(column) + 0.5) * lattice.cell,
-            lattice.corner.1 + (real(row) + 0.5) * lattice.cell,
-        );
-        if lattice
-            .hole
-            .is_some_and(|((x0, z0), (x1, z1))| (x0..x1).contains(&x) && (z0..z1).contains(&z))
-        {
-            return None;
-        }
+        let fields = &stage.fields;
+        let (x, z) = lattice.middle((column, row))?;
         let (dx, dz) = (x - self.eye.0, z - self.eye.1);
         let apart = dx * dx + dz * dz;
         if apart > self.reach * self.reach || apart < EYE_CLEAR * EYE_CLEAR {
             return None;
         }
         let far = lattice.cell > NEAR_CELL;
-        let place =
-            |value: f64| mathf::round_i32(mathf::floor(value / lattice.cell)).cast_unsigned();
-        let key = hash2(place(x), place(z), self.seed ^ u32::from(far));
+        let key = hash2(
+            lattice.place(x),
+            lattice.place(z),
+            self.seed ^ u32::from(far),
+        );
         let edge = edge_at((land, fields, shades), (x, z), self.lake)?;
         let mut best: Option<(usize, f64)> = None;
         for (slot, (&margin, sown)) in KINDS.iter().zip(&self.sown).enumerate() {
@@ -503,6 +484,9 @@ impl Margins {
         let pick = usize::try_from(mathf::round_i32(vigour * real(last)))
             .ok()?
             .min(last);
+        if !self.clears_pieces(stage, (slot, first + pick), (x, z)) {
+            return None;
+        }
         let margin = KINDS.get(slot).copied()?;
         let floating = matches!(margin, Margin::Lily | Margin::Pondweed | Margin::Crowfoot);
         // Crowfoot streams down the current; quarter turns keep the rest's

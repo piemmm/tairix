@@ -252,7 +252,7 @@ pub use confirm::{Answer, ConfirmPrompt, CONFIRM_ORIGIN};
 pub use depart::{serve_park_ns, Departure};
 pub use desktop::{
     AppearanceWork, BackdropWork, Desktop, DesktopAction, DesktopActivation, DesktopOutcome,
-    LaunchDocument, PinboardChange, DESKTOP_MARGIN, RELIST_MIN_INTERVAL_NS,
+    LaunchDocument, PinboardChange, DESKTOP_MARGIN,
 };
 pub use device::{DeviceInputSource, PointerInputChannel};
 pub use drag::DragEnd;

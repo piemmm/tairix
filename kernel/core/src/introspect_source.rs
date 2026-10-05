@@ -777,6 +777,7 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
         // The live advisory-lock record count, read from the lock registry
         // that charges it rather than recounted here.
         let lock_usage = crate::filelock::usage(ProcessId(task_id.0));
+        let watch_usage = self.state.fswatch.usage(ProcessId(task_id.0));
         let (limits, aspace_usage, stack_usage, pinned_usage) = {
             let aspaces = self.state.aspaces.read();
             let process = ProcessId(task_id.0);
@@ -803,6 +804,7 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
                 LimitKind::PinnedMemoryBytes => pinned_usage,
                 LimitKind::Threads => thread_usage,
                 LimitKind::FileLocks => lock_usage,
+                LimitKind::DirWatches => watch_usage,
                 _ => 0,
             };
             let record = ResourceLimitRecord::new(kind, limits.get(kind), usage);

@@ -850,7 +850,8 @@ impl<'a> DirEntry<'a> {
     /// * [`Errno::BufferTooSmall`] if `bytes` is shorter than the header or
     ///   than the declared name.
     /// * [`Errno::OutOfRange`] if the `kind` byte is not a defined
-    ///   [`FileKind`].
+    ///   [`FileKind`], or the pad byte is not zero — every record has exactly
+    ///   one encoding.
     /// * [`Errno::LengthOutOfRange`] if the declared name length is zero or
     ///   exceeds [`FS_NAME_MAX`].
     /// * [`Errno::TimestampOutOfRange`] if the modification stamp is not a
@@ -860,6 +861,9 @@ impl<'a> DirEntry<'a> {
             return Err(Errno::BufferTooSmall);
         }
         let kind = FileKind::from_u8(bytes[0])?;
+        if bytes[1] != 0 {
+            return Err(Errno::OutOfRange);
+        }
         let name_len = usize::from(bytes[2]) | (usize::from(bytes[3]) << 8);
         if name_len == 0 || name_len > FS_NAME_MAX {
             return Err(Errno::LengthOutOfRange);
@@ -937,12 +941,266 @@ impl<'a> Iterator for DirEntries<'a> {
 
 impl core::iter::FusedIterator for DirEntries<'_> {}
 
+/// The longest latency [`SyscallNumber::FS_WATCH`](crate::SyscallNumber::FS_WATCH)
+/// accepts: a watcher that wants changes less often than this wants a
+/// periodic re-read, not a watch.
+pub const DIR_WATCH_LATENCY_MAX_NS: u64 = 60 * 1_000_000_000;
+
+/// What one [`DirChangeBatch`] says about its watch.
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DirWatchStatus {
+    /// Records follow, each naming one entry that changed and stating it now.
+    Changes = 0,
+    /// More changed than the watch could record by name, or something a name
+    /// cannot express did: re-read the whole directory with `fs_readdir` on
+    /// the same descriptor. The watch stays armed and reports from here.
+    Rescan = 1,
+    /// The descriptor's path no longer reaches the watched directory — it
+    /// was removed, renamed or moved away, or its volume left. The watch is
+    /// spent and records nothing more.
+    Gone = 2,
+}
+
+impl DirWatchStatus {
+    const fn from_u8(raw: u8) -> Result<Self, Errno> {
+        match raw {
+            0 => Ok(Self::Changes),
+            1 => Ok(Self::Rescan),
+            2 => Ok(Self::Gone),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
+/// One entry a directory watch reports as changed.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DirChange<'a> {
+    /// The name exists: exactly the record `fs_readdir` reports for it now.
+    Present(DirEntry<'a>),
+    /// The name no longer exists.
+    Absent(&'a [u8]),
+}
+
+impl<'a> DirChange<'a> {
+    /// The tag byte of a [`DirChange::Present`] record, followed by one
+    /// [`DirEntry`].
+    pub const PRESENT: u8 = 0;
+    /// The tag byte of a [`DirChange::Absent`] record, followed by a
+    /// little-endian `u16` name length and the name.
+    pub const ABSENT: u8 = 1;
+    const ABSENT_HEADER_LEN: usize = 3;
+
+    /// The longest record: a present entry with the longest name.
+    pub const MAX_LEN: usize = 1 + DirEntry::HEADER_LEN + FS_NAME_MAX;
+
+    /// The encoded length of a record for `name`, present or absent.
+    #[must_use]
+    pub const fn len_for(present: bool, name_len: usize) -> usize {
+        if present {
+            1 + DirEntry::HEADER_LEN + name_len
+        } else {
+            Self::ABSENT_HEADER_LEN + name_len
+        }
+    }
+
+    /// The changed entry's name.
+    #[must_use]
+    pub const fn name(&self) -> &'a [u8] {
+        match self {
+            Self::Present(entry) => entry.name,
+            Self::Absent(name) => name,
+        }
+    }
+
+    /// Encode this record into the front of `out`, returning its length.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] for an empty name or one longer than
+    /// [`FS_NAME_MAX`]; [`Errno::BufferTooSmall`] if `out` is shorter than the
+    /// record.
+    pub fn encode_into(&self, out: &mut [u8]) -> Result<usize, Errno> {
+        match self {
+            Self::Present(entry) => {
+                let (tag, rest) = out.split_first_mut().ok_or(Errno::BufferTooSmall)?;
+                let written = entry.encode_into(rest)?;
+                *tag = Self::PRESENT;
+                Ok(1 + written)
+            }
+            Self::Absent(name) => {
+                let len = u16::try_from(name.len())
+                    .ok()
+                    .filter(|&len| len != 0 && usize::from(len) <= FS_NAME_MAX)
+                    .ok_or(Errno::LengthOutOfRange)?;
+                let total = Self::ABSENT_HEADER_LEN + name.len();
+                let record = out.get_mut(..total).ok_or(Errno::BufferTooSmall)?;
+                record[0] = Self::ABSENT;
+                record[1..3].copy_from_slice(&len.to_le_bytes());
+                record[3..].copy_from_slice(name);
+                Ok(total)
+            }
+        }
+    }
+
+    /// Decode the first record of `bytes`, returning it and its length.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::BufferTooSmall`] for a truncated record, [`Errno::OutOfRange`]
+    /// for an unknown tag, and whatever [`DirEntry::decode`] refuses for a
+    /// present one.
+    pub fn decode(bytes: &'a [u8]) -> Result<(Self, usize), Errno> {
+        let (&tag, rest) = bytes.split_first().ok_or(Errno::BufferTooSmall)?;
+        match tag {
+            Self::PRESENT => {
+                let (entry, used) = DirEntry::decode(rest)?;
+                Ok((Self::Present(entry), 1 + used))
+            }
+            Self::ABSENT => {
+                let header = bytes
+                    .get(..Self::ABSENT_HEADER_LEN)
+                    .ok_or(Errno::BufferTooSmall)?;
+                let len = usize::from(u16::from_le_bytes([header[1], header[2]]));
+                if len == 0 || len > FS_NAME_MAX {
+                    return Err(Errno::LengthOutOfRange);
+                }
+                let total = Self::ABSENT_HEADER_LEN + len;
+                let name = bytes
+                    .get(Self::ABSENT_HEADER_LEN..total)
+                    .ok_or(Errno::BufferTooSmall)?;
+                Ok((Self::Absent(name), total))
+            }
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
+/// One [`SyscallNumber::FS_WATCH_READ`](crate::SyscallNumber::FS_WATCH_READ)
+/// answer: an 8-byte header — status, flags, two reserved zero bytes, a
+/// little-endian record count — then that many [`DirChange`] records.
+///
+/// [`decode`](Self::decode) validates every record before handing out any, so
+/// a consumer never applies part of a malformed batch.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct DirChangeBatch<'a> {
+    /// What the batch says about the watch.
+    pub status: DirWatchStatus,
+    /// More changes are recorded than this batch held: read again.
+    pub more: bool,
+    records: &'a [u8],
+}
+
+impl<'a> DirChangeBatch<'a> {
+    /// Length of the batch header.
+    pub const HEADER_LEN: usize = 8;
+
+    /// The smallest buffer a drain accepts: one header and the longest
+    /// record, so every drain makes progress.
+    pub const MIN_BUFFER: usize = Self::HEADER_LEN + DirChange::MAX_LEN;
+
+    /// The flag bit saying more changes are recorded than the batch held.
+    pub const MORE: u8 = 1;
+
+    /// Write a batch header into the front of `out`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::BufferTooSmall`] if `out` is shorter than
+    /// [`HEADER_LEN`](Self::HEADER_LEN).
+    pub fn encode_header(
+        out: &mut [u8],
+        status: DirWatchStatus,
+        more: bool,
+        count: u32,
+    ) -> Result<usize, Errno> {
+        let header = out
+            .get_mut(..Self::HEADER_LEN)
+            .ok_or(Errno::BufferTooSmall)?;
+        header[0] = status as u8;
+        header[1] = if more { Self::MORE } else { 0 };
+        header[2] = 0;
+        header[3] = 0;
+        header[4..8].copy_from_slice(&count.to_le_bytes());
+        Ok(Self::HEADER_LEN)
+    }
+
+    /// Decode and validate a whole batch.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::BufferTooSmall`] for a truncated header or record,
+    /// [`Errno::OutOfRange`] for an unknown status or flag, set reserved
+    /// bytes, records on a batch whose status carries none, a record count
+    /// that disagrees with the records, or trailing bytes; and whatever
+    /// [`DirChange::decode`] refuses.
+    pub fn decode(bytes: &'a [u8]) -> Result<Self, Errno> {
+        let header = bytes.get(..Self::HEADER_LEN).ok_or(Errno::BufferTooSmall)?;
+        let status = DirWatchStatus::from_u8(header[0])?;
+        if header[1] & !Self::MORE != 0 || header[2] != 0 || header[3] != 0 {
+            return Err(Errno::OutOfRange);
+        }
+        let more = header[1] & Self::MORE != 0;
+        let count = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
+        let records = &bytes[Self::HEADER_LEN..];
+        if status != DirWatchStatus::Changes && (count != 0 || more || !records.is_empty()) {
+            return Err(Errno::OutOfRange);
+        }
+        let mut rest = records;
+        let mut seen: u32 = 0;
+        while !rest.is_empty() {
+            let (_, used) = DirChange::decode(rest)?;
+            rest = &rest[used..];
+            seen = seen.checked_add(1).ok_or(Errno::OutOfRange)?;
+        }
+        if seen != count {
+            return Err(Errno::OutOfRange);
+        }
+        Ok(Self {
+            status,
+            more,
+            records,
+        })
+    }
+
+    /// The batch's records, in the order the kernel wrote them.
+    #[must_use]
+    pub const fn changes(&self) -> DirChanges<'a> {
+        DirChanges { rest: self.records }
+    }
+}
+
+/// The records of a validated [`DirChangeBatch`].
+#[derive(Clone, Debug)]
+pub struct DirChanges<'a> {
+    rest: &'a [u8],
+}
+
+impl<'a> Iterator for DirChanges<'a> {
+    type Item = DirChange<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // The batch validated every record, so a failure here is impossible;
+        // stopping rather than guessing keeps it so if that ever changes.
+        if let Ok((change, used)) = DirChange::decode(self.rest) {
+            self.rest = &self.rest[used..];
+            Some(change)
+        } else {
+            self.rest = &[];
+            None
+        }
+    }
+}
+
+impl core::iter::FusedIterator for DirChanges<'_> {}
+
 #[cfg(test)]
 mod tests {
     extern crate alloc;
     use super::{
-        mode_string, DirEntries, DirEntry, FileId, FileKind, FileStat, NodeTimes, OpenFlags,
-        RealpathMode, UnlinkFlags, FS_NAME_MAX, FS_PATH_MAX, FS_SYMLINK_MAX,
+        mode_string, DirChange, DirChangeBatch, DirEntries, DirEntry, DirWatchStatus, FileId,
+        FileKind, FileStat, NodeTimes, OpenFlags, RealpathMode, UnlinkFlags, FS_NAME_MAX,
+        FS_PATH_MAX, FS_SYMLINK_MAX,
     };
     use crate::time::Time64;
     use crate::Errno;
@@ -1406,6 +1664,22 @@ mod tests {
     }
 
     #[test]
+    fn a_dir_entry_with_a_set_pad_byte_is_refused() {
+        let mut stream = encoded_stream(&[DirEntry {
+            kind: FileKind::Regular,
+            size: 1,
+            allocated: 1,
+            modified: Time64::UNIX_EPOCH,
+            id: FileId::NONE,
+            nlink: 1,
+            name: b"x",
+        }]);
+        assert!(DirEntry::decode(&stream).is_ok());
+        stream[1] = 1;
+        assert_eq!(DirEntry::decode(&stream), Err(Errno::OutOfRange));
+    }
+
+    #[test]
     fn dir_entries_over_an_empty_stream_yields_nothing() {
         assert!(DirEntries::new(&[]).next().is_none());
     }
@@ -1468,5 +1742,127 @@ mod tests {
             Err(Errno::BufferTooSmall)
         );
         assert!(it.next().is_none());
+    }
+
+    fn present(name: &[u8]) -> DirEntry<'_> {
+        DirEntry {
+            kind: FileKind::Regular,
+            size: 5,
+            allocated: 4096,
+            modified: Time64::from_secs(-86_400),
+            id: FileId {
+                volume: [9; 16],
+                node: 77,
+            },
+            nlink: 2,
+            name,
+        }
+    }
+
+    /// A batch as the kernel's drain writes it: the header, then each record.
+    fn batch(status: DirWatchStatus, more: bool, changes: &[DirChange<'_>]) -> alloc::vec::Vec<u8> {
+        let mut buf = vec![0u8; 4096];
+        let count = u32::try_from(changes.len()).expect("small");
+        let mut off = DirChangeBatch::encode_header(&mut buf, status, more, count).expect("fits");
+        for change in changes {
+            let len = change.encode_into(&mut buf[off..]).expect("fits");
+            assert_eq!(
+                len,
+                DirChange::len_for(matches!(change, DirChange::Present(_)), change.name().len())
+            );
+            off += len;
+        }
+        buf.truncate(off);
+        buf
+    }
+
+    #[test]
+    fn a_change_batch_round_trips_in_order() {
+        let changes = [
+            DirChange::Present(present(b"report.txt")),
+            DirChange::Absent(b"old.log"),
+            DirChange::Present(present(&[b'n'; FS_NAME_MAX])),
+        ];
+        let bytes = batch(DirWatchStatus::Changes, true, &changes);
+        let decoded = DirChangeBatch::decode(&bytes).expect("valid batch");
+        assert_eq!(decoded.status, DirWatchStatus::Changes);
+        assert!(decoded.more);
+        assert!(decoded.changes().eq(changes.iter().copied()));
+    }
+
+    #[test]
+    fn the_minimum_buffer_holds_the_longest_record() {
+        let longest = DirChange::Present(present(&[b'x'; FS_NAME_MAX]));
+        let mut buf = vec![0u8; DirChangeBatch::MIN_BUFFER];
+        let off = DirChangeBatch::encode_header(&mut buf, DirWatchStatus::Changes, false, 1)
+            .expect("header fits");
+        assert_eq!(longest.encode_into(&mut buf[off..]), Ok(DirChange::MAX_LEN));
+        assert_eq!(off + DirChange::MAX_LEN, DirChangeBatch::MIN_BUFFER);
+    }
+
+    #[test]
+    fn rescan_and_gone_carry_no_records() {
+        for status in [DirWatchStatus::Rescan, DirWatchStatus::Gone] {
+            let bytes = batch(status, false, &[]);
+            let decoded = DirChangeBatch::decode(&bytes).expect("bare status");
+            assert_eq!(decoded.status, status);
+            assert!(decoded.changes().next().is_none());
+            let padded = batch(status, false, &[DirChange::Absent(b"x")]);
+            assert_eq!(DirChangeBatch::decode(&padded), Err(Errno::OutOfRange));
+            let more = batch(status, true, &[]);
+            assert_eq!(DirChangeBatch::decode(&more), Err(Errno::OutOfRange));
+        }
+    }
+
+    #[test]
+    fn a_malformed_batch_is_refused_whole() {
+        let good = batch(
+            DirWatchStatus::Changes,
+            false,
+            &[DirChange::Absent(b"a"), DirChange::Absent(b"b")],
+        );
+        assert!(DirChangeBatch::decode(&good).is_ok());
+        // A record count that disagrees with the records.
+        let mut miscounted = good.clone();
+        miscounted[4] = 3;
+        assert_eq!(DirChangeBatch::decode(&miscounted), Err(Errno::OutOfRange));
+        // An unknown status, an undefined flag, a set reserved byte.
+        for (at, value) in [(0, 9), (1, 2), (2, 1), (3, 1)] {
+            let mut bad = good.clone();
+            bad[at] = value;
+            assert_eq!(DirChangeBatch::decode(&bad), Err(Errno::OutOfRange));
+        }
+        // A truncated last record, an unknown tag, an empty absent name.
+        assert_eq!(
+            DirChangeBatch::decode(&good[..good.len() - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+        let mut tagged = good.clone();
+        tagged[DirChangeBatch::HEADER_LEN] = 7;
+        assert_eq!(DirChangeBatch::decode(&tagged), Err(Errno::OutOfRange));
+        let mut empty = good;
+        empty[DirChangeBatch::HEADER_LEN + 1] = 0;
+        assert_eq!(DirChangeBatch::decode(&empty), Err(Errno::LengthOutOfRange));
+        assert_eq!(
+            DirChangeBatch::decode(&[0u8; 7]),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn an_absent_record_refuses_an_unencodable_name() {
+        let mut buf = [0u8; 600];
+        assert_eq!(
+            DirChange::Absent(b"").encode_into(&mut buf),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert_eq!(
+            DirChange::Absent(&[b'a'; FS_NAME_MAX + 1]).encode_into(&mut buf),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert_eq!(
+            DirChange::Absent(b"abc").encode_into(&mut buf[..5]),
+            Err(Errno::BufferTooSmall)
+        );
     }
 }

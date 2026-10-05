@@ -249,6 +249,10 @@ impl FilesystemRead for MockRootFs {
         NodeId::from_raw(ROOT_ID)
     }
 
+    fn name_matching(&self) -> tairix_abi::driver::filesystem::NameMatching {
+        tairix_abi::driver::filesystem::NameMatching::Exact
+    }
+
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {
         let n = self.nodes.get(&node.raw()).ok_or(DriverError::NotFound)?;
         Ok(NodeInfo {

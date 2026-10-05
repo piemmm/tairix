@@ -26,6 +26,8 @@ use tairix_rng::NonCryptoRng;
 use tairix_util::{fallible, mathf};
 
 use super::chains::Chains;
+use super::footprint::{Footprints, Taken, GAP};
+use super::lattice::Lattice;
 use super::plants::{Drift, Piece};
 use super::woodland::{Ranking, Runs, KEPT};
 use super::{rgb, Dice, Recipe, Stage, GRANITES};
@@ -34,7 +36,7 @@ use crate::channel::{Banked, Form, Section, Station, BROADEST};
 use crate::deadwood::{LOG_TAPER, SUNK};
 use crate::ground::Rock;
 use crate::heightfield::Heightfield;
-use crate::land::{seam, Land};
+use crate::land::{seam, water_rows, Land};
 use crate::material::{Finish, Material, Relief, CARRIED_FOAM};
 use crate::noise::hash3;
 use crate::noise::smoothstep;
@@ -153,11 +155,7 @@ fn bedded(half: f64, buried: f64) -> f64 {
 
 /// A stone's surface grain, a few centimetres across a metre.
 fn grain(dice: &mut Dice) -> Relief {
-    Relief::Grain {
-        depth: 0.29,
-        scale: 14.0,
-        seed: dice.seed(),
-    }
+    Relief::grain(0.12, 14.0, dice.seed())
 }
 
 /// The stretch of stream a scene's eye looks along: which of the land's
@@ -199,11 +197,13 @@ const LEAST_FALL: f64 = 1e-3;
 /// boulders, which its banks and its own steps hold back.
 const MEDIAN: f64 = 0.25;
 
-/// Rows of a lattice a core reads in a unit, stones thinned in one, and
-/// stones set out in one.
+/// Rows of a lattice a core reads in a unit, stones thinned in one, the most
+/// stones set out in one, and the stones a core works out the lie of at a
+/// time.
 const ROWS: usize = 8;
 const THIN: usize = 4096;
 const PLACED: usize = 8192;
+const LYING: usize = 256;
 
 /// How much of a stone's breadth, seen from above, no other stone overlaps:
 /// stones nest into the gaps between their neighbours and lie partly under
@@ -284,6 +284,12 @@ enum Lodged {
     Spanning,
 }
 
+/// The ground a piece of drift `thick` across keeps clear about its axis, a
+/// little wider than it lies.
+fn wood_room(thick: f64) -> f64 {
+    (1.2 * thick).max(0.15)
+}
+
 /// A piece of drift lain: where its foot lies, which way it runs from
 /// there, and how long and thick it is.
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -336,6 +342,11 @@ pub(super) struct Bed {
     ranking: Ranking,
     chains: Option<Chains>,
     laid: Vec<Laid>,
+    /// The ground the boulders and outcrops kept so far take while the bed is
+    /// thinned, each claimed on the stage only once it is set out.
+    boulders: Footprints,
+    /// How a unit of them lies, worked out before it is set out.
+    lies: Vec<Option<Lie>>,
     /// The stones the water runs over, for its flow to be solved.
     stones: Vec<Stone>,
     pass: Pass,
@@ -367,6 +378,25 @@ struct Found {
     size: f64,
     key: u32,
     lying: Lying,
+}
+
+/// A stone as it lies, worked out apart from the stage.
+#[derive(Copy, Clone, Debug)]
+enum Lie {
+    /// The instance it is added as, in its material, and what the flow
+    /// takes it for where the brook's own stream runs over it.
+    Set {
+        prototype: u32,
+        pose: Pose,
+        scale: f64,
+        key: u32,
+        material: usize,
+        obstacle: Option<Stone>,
+        /// The ground a boulder or an outcrop takes from what is set out after it.
+        ground: Option<((f64, f64), f64)>,
+    },
+    /// Past where any bed is laid, so left out.
+    Out,
 }
 
 /// How a stone came to lie where it does.
@@ -445,46 +475,31 @@ fn normal(x: f64) -> f64 {
     }
 }
 
-/// A square lattice of one size class's cells about the eye: its first
-/// cell's corner, its cells a side, and their breadth.
-#[derive(Copy, Clone, Debug)]
-struct Lattice {
-    corner: (f64, f64),
-    side: usize,
-    cell: f64,
+/// Cell `cell` of `lattice`'s key for size class `class` under `seed`, drawn
+/// from its place on the land's own grid, and where in the cell its stone
+/// would stand.
+fn draw(
+    lattice: &Lattice,
+    cell: (usize, usize),
+    class: usize,
+    seed: u32,
+) -> Option<(u32, (f64, f64))> {
+    let (x0, z0) = lattice.corner_of(cell);
+    let key = hash3(
+        lattice.place(x0 + 0.5 * lattice.cell),
+        lattice.place(z0 + 0.5 * lattice.cell),
+        u32::try_from(class).ok()?,
+        seed,
+    );
+    let at = (
+        x0 + lattice.cell * unit(mix32(key ^ 1)),
+        z0 + lattice.cell * unit(mix32(key ^ 2)),
+    );
+    Some((key, at))
 }
 
-impl Lattice {
-    /// Cell `(column, row)`'s key for size class `class` under `seed`,
-    /// drawn from its place on the land's own grid, and where in the cell its
-    /// stone would stand.
-    fn draw(
-        &self,
-        (column, row): (usize, usize),
-        class: usize,
-        seed: u32,
-    ) -> Option<(u32, (f64, f64))> {
-        let place = |value: f64| mathf::round_i32(mathf::floor(value / self.cell)).cast_unsigned();
-        let (x0, z0) = (
-            self.corner.0 + real(column) * self.cell,
-            self.corner.1 + real(row) * self.cell,
-        );
-        let key = hash3(
-            place(x0 + 0.5 * self.cell),
-            place(z0 + 0.5 * self.cell),
-            u32::try_from(class).ok()?,
-            seed,
-        );
-        let at = (
-            x0 + self.cell * unit(mix32(key ^ 1)),
-            z0 + self.cell * unit(mix32(key ^ 2)),
-        );
-        Some((key, at))
-    }
-}
-
-/// Ask `stage` for the bed of `brook` about `vantage` — the eye's place and
-/// the way it looks — laid once its land stands, and `drift` lodged in it.
+/// Ask `stage` for the bed of `brook` about the eye at `eye`, looking along
+/// `heading`, laid once its land stands, and `drift` lodged in it.
 /// One draw of `dice` keys it. `None` when the stage will not hold its
 /// prototypes or materials.
 pub(super) fn bed(
@@ -544,6 +559,8 @@ pub(super) fn bed(
         ranking: Ranking::default(),
         chains: None,
         laid: Vec::new(),
+        boulders: Footprints::default(),
+        lies: Vec::new(),
         stones: Vec::new(),
         pass: Pass::Reading { class: 0, row: 0 },
     });
@@ -682,12 +699,13 @@ impl Bed {
                         KEPT_APART,
                         MOST_SIDE,
                     )?);
+                    self.boulders.index(self.eye, self.reach + 1.0)?;
                     self.pass = Pass::Thinning;
                 }
                 Some(())
             }
-            Pass::Thinning => self.thin(),
-            Pass::Placing { next } => self.place(stage, land, next),
+            Pass::Thinning => self.thin(stage),
+            Pass::Placing { next } => self.place(stage, (land, runner), next),
             Pass::Lodging => {
                 self.lodge(stage, land)?;
                 self.pass = Pass::Done;
@@ -702,29 +720,14 @@ impl Bed {
     /// `None` past the classes the bed lays.
     fn lattice(&self, class: usize) -> Option<Lattice> {
         if class == BOULDERS {
-            let snap = |value: f64| mathf::floor(value / BOULDER_CELL) * BOULDER_CELL;
-            let side =
-                usize::try_from(mathf::round_i32(mathf::ceil(2.0 * self.reach / BOULDER_CELL)) + 1)
-                    .ok()?;
-            return Some(Lattice {
-                corner: (snap(self.eye.0 - self.reach), snap(self.eye.1 - self.reach)),
-                side,
-                cell: BOULDER_CELL,
-            });
+            return Lattice::about(self.eye, self.reach, BOULDER_CELL);
         }
         let least = Sizes::least(class);
         if class >= CLASSES || least >= MOST || self.sizes.chances.get(class)? <= &0.0 {
             return None;
         }
-        let cell = 2.0 * least;
         let seen = (2.0 * least / (self.pixels * self.pixel)).min(self.reach);
-        let snap = |value: f64| mathf::floor(value / cell) * cell;
-        let side = usize::try_from(mathf::round_i32(mathf::ceil(2.0 * seen / cell)) + 1).ok()?;
-        Some(Lattice {
-            corner: (snap(self.eye.0 - seen), snap(self.eye.1 - seen)),
-            side,
-            cell,
-        })
+        Lattice::about(self.eye, seen, 2.0 * least)
     }
 
     /// Read the next unit of class `class`'s lattice from row `row` on
@@ -747,12 +750,9 @@ impl Bed {
             return Some(());
         };
         let end = (row + ROWS * runner.width().max(1)).min(lattice.side);
-        let mut cells = fallible::filled((end - row) * lattice.side, None)?;
-        band::for_each(runner, &mut cells, (row, lattice.side), &|row, cells| {
-            for (column, cell) in cells.iter_mut().enumerate() {
-                *cell = self.holds((land, fields), (&lattice, class), (column, row));
-            }
-        });
+        let cells = lattice.read(row..end, runner, &|cell| {
+            self.holds((land, fields), (&lattice, class), cell)
+        })?;
         let count = cells.iter().flatten().count();
         if !self.found.reserve(count) || !self.ranking.reserve(count) {
             return None;
@@ -789,7 +789,7 @@ impl Bed {
         if class == BOULDERS {
             return self.boulder((land, fields), lattice, (column, row));
         }
-        let (key, at) = lattice.draw((column, row), class, self.seed)?;
+        let (key, at) = draw(lattice, (column, row), class, self.seed)?;
         if unit(key) >= *self.sizes.chances.get(class)? {
             return None;
         }
@@ -829,8 +829,7 @@ impl Bed {
         if distance > self.reach || size < self.pixels * self.pixel * distance {
             return false;
         }
-        let off = mathf::atan2(dx, dz) - self.heading;
-        let off = off - TAU * mathf::floor((off + core::f64::consts::PI) / TAU);
+        let off = crate::vector::wrapped(mathf::atan2(dx, dz) - self.heading);
         distance <= ABOUT || off.abs() <= VIEW
     }
 
@@ -847,7 +846,7 @@ impl Bed {
         lattice: &Lattice,
         (column, row): (usize, usize),
     ) -> Option<Found> {
-        let (key, at) = lattice.draw((column, row), BOULDERS, self.seed)?;
+        let (key, at) = draw(lattice, (column, row), BOULDERS, self.seed)?;
         let near = land.rivers.nearest(at.0, at.1)?;
         let banked = Banked::new(&Station::of(&near), &self.brook.form);
         let across = near.side * near.distance;
@@ -890,11 +889,15 @@ impl Bed {
     /// Thin the next unit of the stones found, largest first: each laid where
     /// it keeps clear of every stone laid before it, until the bed holds as
     /// many as it may.
-    fn thin(&mut self) -> Option<()> {
+    fn thin(&mut self, stage: &mut Stage) -> Option<()> {
         let most = usize::try_from(self.most).unwrap_or(usize::MAX);
         for _ in 0..THIN {
             if self.laid.len() >= most || self.ranking.exhausted() {
+                // Only what was kept is read from here on.
                 self.chains = None;
+                self.boulders = Footprints::default();
+                self.found = Runs::default();
+                self.ranking = Ranking::default();
                 self.pass = Pass::Placing { next: 0 };
                 return Some(());
             }
@@ -917,6 +920,18 @@ impl Bed {
             });
             if crowded {
                 continue;
+            }
+            // A boulder or an outcrop is never set through what already
+            // stands — a trunk, the eye's own ground, a boulder already
+            // kept — so one that would be is left out before it crowds out
+            // the gravel about it, and one that is kept holds its ground
+            // against the rest of the bed.
+            if found.lying != Lying::Bedded {
+                let room = 0.5 * found.size;
+                if !stage.clear(found.at, room) || !self.boulders.clear(found.at, room) {
+                    continue;
+                }
+                self.boulders.claim(found.at, room, Taken::Piece)?;
             }
             let id = u32::try_from(self.laid.len()).ok()?;
             chains.link(id, cells)?;
@@ -955,17 +970,37 @@ impl Bed {
     }
 
     /// Set out the next unit of the stones laid from `next`, on `land`, as far
-    /// as the stage has room for them.
-    fn place(&mut self, stage: &mut Stage, land: &Land, next: usize) -> Option<()> {
-        let end = (next + PLACED).min(self.laid.len());
-        for index in next..end {
+    /// as the stage has room for them: how each lies worked out across
+    /// `runner`, each added in the order laid.
+    fn place(
+        &mut self,
+        stage: &mut Stage,
+        (land, runner): (&Land, &dyn JobRunner),
+        next: usize,
+    ) -> Option<()> {
+        // A batch of lies for each core, so a unit takes a small machine no
+        // longer than a large one.
+        let unit = runner.width().max(1).saturating_mul(LYING).min(PLACED);
+        let end = (next + unit).min(self.laid.len());
+        let mut lies = core::mem::take(&mut self.lies);
+        lies.clear();
+        fallible::grow_to(&mut lies, end - next, None).then_some(())?;
+        let unit = self.laid.get(next..end)?;
+        let (bed, fields) = (&*self, &stage.fields);
+        band::for_each(runner, &mut lies, (0, LYING), &|band, lies| {
+            let stones = unit.get(band * LYING..).unwrap_or_default();
+            for (stone, lie) in stones.iter().zip(lies) {
+                *lie = bed.lie(fields, land, *stone);
+            }
+        });
+        for lie in lies.drain(..) {
             if stage.room() <= KEPT {
                 self.placed();
                 return Some(());
             }
-            let stone = *self.laid.get(index)?;
-            self.set_out(stage, land, stone)?;
+            self.set_out(stage, lie?)?;
         }
+        self.lies = lies;
         if end < self.laid.len() {
             self.pass = Pass::Placing { next: end };
         } else {
@@ -1005,13 +1040,10 @@ impl Bed {
     /// `-1.0` up it.
     fn ahead(&self, land: &Land) -> Option<f64> {
         let (course, along) = (self.brook.course, self.brook.station.along);
-        let (before, after) = (
-            land.rivers.at(course, along - 1.0)?,
-            land.rivers.at(course, along + 1.0)?,
-        );
+        let (down, _) = land.rivers.way(course, along)?;
         let looking = (mathf::sin(self.heading), mathf::cos(self.heading));
-        let down = looking.0 * (after.x - before.x) + looking.1 * (after.z - before.z);
-        Some(if down >= 0.0 { 1.0 } else { -1.0 })
+        let toward = looking.0 * down.0 + looking.1 * down.1;
+        Some(if toward >= 0.0 { 1.0 } else { -1.0 })
     }
 
     /// Lodge a piece of `drift` as `lodged` has it somewhere along the
@@ -1049,13 +1081,8 @@ impl Bed {
     ) -> Option<Lay> {
         let course = self.brook.course;
         let section = Section::new(&Station::on(&land.rivers, course, along)?, &self.brook.form);
-        let (mark, next) = (
-            land.rivers.at(course, along)?,
-            land.rivers.at(course, along + 1.0)?,
-        );
-        let (dx, dz) = (next.x - mark.x, next.z - mark.z);
-        let length = mathf::hypot(dx, dz).max(1e-6);
-        let (down, left) = ((dx / length, dz / length), (-dz / length, dx / length));
+        let mark = land.rivers.at(course, along)?;
+        let (down, left) = land.rivers.way(course, along)?;
         let downstream = mathf::atan2(down.0, down.1);
         let either = if dice.chance(0.5) { 0.0 } else { PI };
         let side = dice.sign();
@@ -1140,6 +1167,7 @@ impl Bed {
         (dice, trunk): (&mut Dice, Lain),
     ) -> Option<()> {
         let (sin, cos) = (mathf::sin(trunk.heading), mathf::cos(trunk.heading));
+        let across = (cos, -sin);
         for _ in 0..dice.count(JAM.0, JAM.1) {
             let t = dice.range(0.2, 0.8);
             let on = (
@@ -1149,12 +1177,28 @@ impl Bed {
             let Some(near) = land.rivers.nearest(on.0, on.1) else {
                 continue;
             };
-            let back = trunk.radius + dice.range(0.05, 0.3);
-            let middle = (on.0 - near.toward.0 * back, on.1 - near.toward.1 * back);
+            let upstream = if across.0 * near.toward.0 + across.1 * near.toward.1 > 0.0 {
+                -1.0
+            } else {
+                1.0
+            };
+            let lie = dice.range(0.0, 0.1);
             let piece = drift.piece(dice, false)?;
             let scale = dice.range(0.8, 1.15);
-            let heading = trunk.heading + dice.range(-0.35, 0.35);
+            let swing = dice.range(-0.35, 0.35);
+            let heading = trunk.heading + swing;
             let reach = 0.5 * piece.length * scale;
+            // As close against the trunk as the ground either keeps lets it
+            // lie, its nearer end as well as its middle.
+            let apart = wood_room(trunk.radius)
+                + wood_room(piece.radius * scale)
+                + GAP
+                + reach * mathf::sin(swing).abs()
+                + lie;
+            let middle = (
+                on.0 + across.0 * upstream * apart,
+                on.1 + across.1 * upstream * apart,
+            );
             let start = (
                 middle.0 - mathf::sin(heading) * reach,
                 middle.1 - mathf::cos(heading) * reach,
@@ -1186,7 +1230,7 @@ impl Bed {
         let course = self.brook.course;
         let (long, thick) = (piece.length * scale, piece.radius * scale);
         let (sin, cos) = (mathf::sin(heading), mathf::cos(heading));
-        let room = (1.2 * thick).max(0.15);
+        let room = wood_room(thick);
         let discs =
             u32::try_from(mathf::round_i32(mathf::ceil(long / (1.5 * room))).max(2)).ok()?;
         let disc = |index: u32| {
@@ -1208,30 +1252,40 @@ impl Bed {
         );
         drift.lay(stage, (piece.prototype, scale), (pose, key))?;
         for index in 0..discs {
-            let ((x, z), t) = disc(index);
-            stage.claim((x, z), room)?;
+            stage.claim(disc(index).0, room)?;
+        }
+        // In the water it is one obstacle, not a row of them: each stone the
+        // flow takes it as touches the next, so the bed rises and the water
+        // parts all along it.
+        let mut t = 0.0f64;
+        while long > 0.0 && thick > 0.0 && t <= 1.0 {
+            let (x, z) = (start.0 + sin * long * t, start.1 + cos * long * t);
             // Its axis rests as far over the line between its ends as it is
             // thick there, sunk a little into what it lies on.
             let radius = thick * (1.0 - LOG_TAPER * t);
             let axis = foot + (top - foot) * t + (1.0 - SUNK) * radius;
-            let Some(near) = land
+            if let Some(near) = land
                 .rivers
                 .nearest(x, z)
                 .filter(|near| near.course == course)
-            else {
-                continue;
-            };
-            let section = Section::new(&Station::of(&near), &self.brook.form);
-            let across = near.side * near.distance;
-            if near.distance >= section.half || axis - radius >= section.water {
-                continue;
+            {
+                let section = Section::new(&Station::of(&near), &self.brook.form);
+                let across = near.side * near.distance;
+                if near.distance < section.half && axis - radius < section.water {
+                    self.stones.try_reserve(1).ok()?;
+                    self.stones.push(Stone {
+                        at: (near.along, across),
+                        reach: (radius, radius),
+                        top: (axis + radius - section.bed(across)).max(0.01),
+                    });
+                }
             }
-            self.stones.try_reserve(1).ok()?;
-            self.stones.push(Stone {
-                at: (near.along, across),
-                reach: (radius, radius),
-                top: (axis + radius - section.bed(across)).max(0.01),
-            });
+            if t >= 1.0 {
+                break;
+            }
+            // The step this radius and the next one, tapered, sum to.
+            let step = 2.0 * radius / (1.0 + LOG_TAPER * thick / long);
+            t = (t + step / long).min(1.0);
         }
         Some(Lay::Lain(Lain {
             start,
@@ -1243,20 +1297,23 @@ impl Bed {
 
     /// Every stone set out: let what laying them took go, the drift to lodge.
     fn placed(&mut self) {
-        self.found = Runs::default();
-        self.ranking = Ranking::default();
         self.laid = Vec::new();
+        self.lies = Vec::new();
         self.pass = Pass::Lodging;
     }
 
-    /// Set `stone` out on `land`: on its flattest side, its longest across the
-    /// stream and dipping upstream, bedded into the gravel, wet where the
-    /// water covers it; and, in the brook's own stream, kept for the flow.
-    fn set_out(&mut self, stage: &mut Stage, land: &Land, stone: Laid) -> Option<()> {
-        let fields = &stage.fields;
+    /// How `stone` lies on `land` over `fields`: on its flattest side, its
+    /// longest across the stream and dipping upstream, bedded into the
+    /// gravel, wet where the water covers it; and, in the brook's own stream,
+    /// kept for the flow.
+    fn lie(&self, fields: &[Heightfield], land: &Land, stone: Laid) -> Option<Lie> {
         let (x, z) = stone.at;
         let ground = land.height(fields, x, z);
-        let near = land.rivers.nearest(x, z)?;
+        // A stone the rivers' index finds no course near lies past where any
+        // bed is laid, so it is left out rather than refusing the scene.
+        let Some(near) = land.rivers.nearest(x, z) else {
+            return Some(Lie::Out);
+        };
         let (prototype, habit) = *self.kinds.get(stone.wear)?.get(stone.shape)?;
         let scale = 0.5 * stone.size;
         let half = habit.squash * scale;
@@ -1300,38 +1357,66 @@ impl Bed {
         } else {
             self.mossy
         };
-        stage.add(
-            Shape::Instance {
-                prototype,
-                pose,
-                scale,
-                key: mix32(stone.key ^ 9),
-            },
-            material,
-            pose,
-            false,
-        )?;
-        if stone.lying != Lying::Bedded {
-            // Nothing laid later lies through a boulder or an outcrop.
-            stage.claim((x, z), scale)?;
-        }
-        if near.course == self.brook.course {
-            // Against the bed the flow is solved over: the channel's own,
-            // the stone reaching along and across it as far as its length
-            // and breadth do, turned as it lies.
+        // Against the bed the flow is solved over: the channel's own, the
+        // stone reaching along and across it as far as its length and breadth
+        // do, turned as it lies.
+        let obstacle = (near.course == self.brook.course).then(|| {
             let across = near.side * near.distance;
-            let bed = section.bed(across);
             let (sin, cos) = (mathf::sin(turn - downstream), mathf::cos(turn - downstream));
             let (long, short) = (scale, habit.elongation * scale);
-            self.stones.try_reserve(1).ok()?;
-            self.stones.push(Stone {
+            Stone {
                 at: (near.along, across),
                 reach: (
                     mathf::hypot(short * cos, long * sin),
                     mathf::hypot(short * sin, long * cos),
                 ),
-                top: top - bed,
-            });
+                top: top - section.bed(across),
+            }
+        });
+        Some(Lie::Set {
+            prototype,
+            pose,
+            scale,
+            key: mix32(stone.key ^ 9),
+            material,
+            obstacle,
+            ground: (stone.lying != Lying::Bedded).then_some((stone.at, 0.5 * stone.size)),
+        })
+    }
+
+    /// Add `lie` to `stage`, claiming the ground a boulder or an outcrop
+    /// takes, and keep it for the flow where the brook's own stream runs over
+    /// it.
+    fn set_out(&mut self, stage: &mut Stage, lie: Lie) -> Option<()> {
+        let Lie::Set {
+            prototype,
+            pose,
+            scale,
+            key,
+            material,
+            obstacle,
+            ground,
+        } = lie
+        else {
+            return Some(());
+        };
+        if let Some((at, room)) = ground {
+            stage.claim(at, room)?;
+        }
+        stage.add(
+            Shape::Instance {
+                prototype,
+                pose,
+                scale,
+                key,
+            },
+            material,
+            pose,
+            false,
+        )?;
+        if let Some(stone) = obstacle {
+            self.stones.try_reserve(1).ok()?;
+            self.stones.push(stone);
         }
         Some(())
     }
@@ -1352,7 +1437,7 @@ pub(super) fn surface(
     let finer = land.near_water?;
     let field = stage.fields.get_mut(finer.field as usize)?;
     let side = field.side();
-    let end = (row + ROWS * runner.width().max(1)).min(side);
+    let end = (row + water_rows(side) * runner.width().max(1)).min(side);
     let ((origin_x, origin_z), step) = field.placing();
     field.each_row(row..end, runner, &|(at, heights, kept)| {
         let z = origin_z + step * real(*at);

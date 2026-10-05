@@ -142,7 +142,7 @@ impl Fixture {
         let handle = DriverHandle::from_raw(raw).expect("non-zero handle");
         let driver: Box<dyn KernelFs> = Box::new(fs);
         self.mounts
-            .register(handle, driver, "fixture", "arxfs", [0u8; 16])
+            .register(handle, driver, "fixture", "arxfs", [0u8; 16], None)
             .expect("register");
         Volume { handle, medium }
     }

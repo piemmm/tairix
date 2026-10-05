@@ -18,8 +18,8 @@ use alloc::vec::Vec;
 
 use tairix_abi::driver::filesystem::{
     DirEntry, FilesystemAttrs, FilesystemAttrsFs, FilesystemAttrsProvider, FilesystemRead,
-    FilesystemSecurity, FilesystemStats, FilesystemWrite, NodeId, NodeInfo, NodeKind, NodeSecurity,
-    NodeTimes, VolumeStats, WritebackHost,
+    FilesystemSecurity, FilesystemStats, FilesystemWrite, NameMatching, NodeId, NodeInfo, NodeKind,
+    NodeSecurity, NodeTimes, VolumeStats, WritebackHost,
 };
 use tairix_abi::driver::{DriverError, DriverHandle};
 use tairix_fsmeta::{AttrFlags, AttrSet};
@@ -57,6 +57,9 @@ pub struct RwMockFs {
     create_uid: u32,
     create_gid: u32,
     create_mode: u32,
+    /// Folding by default, so the cache's and the watch's folding paths stay
+    /// exercised; [`Self::with_exact_names`] stands in for an exact format.
+    name_matching: NameMatching,
 }
 
 impl Default for RwMockFs {
@@ -79,6 +82,21 @@ impl RwMockFs {
             create_uid: ADMIN_UID,
             create_gid: ADMIN_GID,
             create_mode: 0o755,
+            name_matching: NameMatching::AsciiCaseInsensitive,
+        }
+    }
+
+    /// Match names byte-for-byte, as ARXFS and ext4 do.
+    #[must_use]
+    pub fn with_exact_names(mut self) -> Self {
+        self.name_matching = NameMatching::Exact;
+        self
+    }
+
+    fn names_match(matching: NameMatching, stored: &str, wanted: &str) -> bool {
+        match matching {
+            NameMatching::Exact => stored == wanted,
+            NameMatching::AsciiCaseInsensitive => stored.eq_ignore_ascii_case(wanted),
         }
     }
 
@@ -124,7 +142,7 @@ impl RwMockFs {
         };
         let needle = core::str::from_utf8(name).map_err(|_| DriverError::NotFound)?;
         for (k, &v) in children {
-            if k.eq_ignore_ascii_case(needle) {
+            if Self::names_match(self.name_matching, k, needle) {
                 return Ok(Some(v));
             }
         }
@@ -138,12 +156,13 @@ impl RwMockFs {
     /// node, and finding the entry by node index would drop whichever the
     /// map happened to yield first.
     fn unlink_name(&mut self, dir_idx: usize, name: &str) -> Option<usize> {
+        let matching = self.name_matching;
         let RwNode::Dir(children) = &mut self.nodes[dir_idx] else {
             return None;
         };
         let key = children
             .keys()
-            .find(|k| k.eq_ignore_ascii_case(name))
+            .find(|k| Self::names_match(matching, k, name))
             .cloned()?;
         let child = children.remove(&key)?;
         // A detached name is one fewer name; the node itself lives on for as
@@ -174,6 +193,10 @@ impl RwMockFs {
 impl FilesystemRead for RwMockFs {
     fn root(&self) -> NodeId {
         NodeId::from_raw(1)
+    }
+
+    fn name_matching(&self) -> NameMatching {
+        self.name_matching
     }
 
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {

@@ -54,7 +54,8 @@
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::filesystem::{
     DirEntry, FilesystemAttrsProvider, FilesystemRead, FilesystemSecurity, FilesystemStats,
-    FilesystemWrite, NodeId, NodeInfo, NodeKind, NodeSecurity, NodeTimes, VolumeStats,
+    FilesystemWrite, NameMatching, NodeId, NodeInfo, NodeKind, NodeSecurity, NodeTimes,
+    VolumeStats,
 };
 use tairix_abi::time::{CivilTime, Time64};
 use tairix_abi::{CapabilityId, DriverError, DriverHandle, DriverHost};
@@ -2035,6 +2036,10 @@ impl<B: Block> Fat32<B> {
 impl<B: Block> FilesystemRead for Fat32<B> {
     fn root(&self) -> NodeId {
         pack_node(self.layout.root_cluster, true, 0)
+    }
+
+    fn name_matching(&self) -> NameMatching {
+        NameMatching::AsciiCaseInsensitive
     }
 
     fn node_info(&mut self, node: NodeId) -> Result<NodeInfo, DriverError> {

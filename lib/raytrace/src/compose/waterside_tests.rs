@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 use std::sync::OnceLock;
 
 use super::*;
+use crate::compose::footprint::GAP;
 use crate::compose::{Composition, Setting};
 use crate::detail::{Densities, Detail};
 
@@ -439,40 +440,111 @@ fn a_streams_floating_plants_float_on_its_shaped_water() {
     assert!(floating > 0, "plants float in the streams about the eye");
 }
 
-#[test]
-fn the_patches_kept_are_the_nearest_the_eye_in_order() {
-    let at = |x: f64, z: f64| Placed {
+/// The summer water's edge about `eye` on a bare stage, its pass and its
+/// patches to be set by hand.
+fn summer_margins(eye: (f64, f64)) -> (Stage, Margins) {
+    let mut stage = Stage::new(Detail::Simple.densities()).expect("a stage");
+    let mut dice = Dice::keyed(7, 0);
+    margins(&mut stage, &mut dice, (eye, Season::Summer, None)).expect("margins");
+    let margins = stage.margins.take().expect("margins");
+    (stage, margins)
+}
+
+/// A reed patch, `patch` among its clumps and beds, standing at `(x, z)`.
+fn reeds(patch: usize, x: f64, z: f64) -> Placed {
+    Placed {
         kind: 0,
-        patch: 0,
+        patch: u8::try_from(patch).expect("a patch"),
         base: Vec3::new(x, 0.0, z),
         turn: 0.0,
         key: 0,
-    };
-    let mut margins = Margins {
-        sown: [None; KINDS.len()],
-        lake: None,
-        seed: 1,
-        eye: (10.0, 10.0),
-        reach: 250.0,
-        most: 3,
-        found: alloc::vec![
-            at(50.0, 10.0),
-            at(10.0, 12.0),
-            at(-80.0, 0.0),
-            at(10.0, 8.0),
-            at(13.0, 10.0)
-        ],
-        pass: Pass::Keeping,
-    };
-    margins.keep();
-    let kept: Vec<(f64, f64)> = margins
+    }
+}
+
+/// Where each patch `margins` kept stands.
+fn kept(margins: &Margins) -> Vec<(f64, f64)> {
+    margins
         .found
         .iter()
         .map(|placed| (placed.base.x, placed.base.z))
-        .collect();
+        .collect()
+}
+
+#[test]
+fn the_patches_kept_are_the_nearest_the_eye_in_order() {
+    let (_, mut margins) = summer_margins((10.0, 10.0));
+    margins.most = 3;
+    margins.found = alloc::vec![
+        reeds(0, 50.0, 10.0),
+        reeds(0, 10.0, 12.0),
+        reeds(0, -80.0, 0.0),
+        reeds(0, 10.0, 8.0),
+        reeds(0, 13.0, 10.0)
+    ];
+    margins.pass = Pass::Keeping;
+    margins.keep();
     // Two equally near are kept in one order whichever was found first.
-    assert_eq!(kept, [(10.0, 8.0), (10.0, 12.0), (13.0, 10.0)]);
+    assert_eq!(kept(&margins), [(10.0, 8.0), (10.0, 12.0), (13.0, 10.0)]);
     assert_eq!(margins.pass, Pass::Placing { next: 0 });
+}
+
+/// A patch whose square reaches a piece — a boulder, a trunk — is not kept,
+/// out to its corners and as far as a bed is broad; ground kept open, a
+/// pond or the eye's own, is no bar to it.
+#[test]
+fn a_patch_is_never_set_through_a_piece_though_open_ground_is_no_bar() {
+    let (mut stage, margins) = summer_margins((0.0, 0.0));
+    stage.claim((10.0, 0.0), 1.0).expect("a boulder");
+    stage.keep_open((30.0, 0.0), 5.0).expect("a pond");
+    let corner = 1.0 + GAP + FRAC_1_SQRT_2 * NEAR_CELL;
+    let found = [
+        reeds(0, 10.0 + corner - 0.01, 0.0),
+        reeds(0, 10.0 + corner + 0.01, 0.0),
+        reeds(0, 30.0, 0.0),
+        reeds(0, 10.0, 3.5),
+        reeds(CLUMPS, 10.0, -3.5),
+    ];
+    let clear: Vec<(f64, f64)> = found
+        .iter()
+        .filter(|placed| {
+            let patch = (usize::from(placed.kind), usize::from(placed.patch));
+            margins.clears_pieces(&stage, patch, (placed.base.x, placed.base.z))
+        })
+        .map(|placed| (placed.base.x, placed.base.z))
+        .collect();
+    assert_eq!(
+        clear,
+        [(10.0 + corner + 0.01, 0.0), (30.0, 0.0), (10.0, 3.5)]
+    );
+}
+
+/// Every plant a scene's water's edge sets out stands clear of the pieces
+/// already standing there: the boulders and drift along a stream's banks,
+/// the trees, the eye's own ground aside.
+#[test]
+fn no_scene_sets_its_waters_edge_through_a_piece() {
+    let mut checked = 0;
+    for (setting, seed) in [
+        (Setting::Stream, 0),
+        (Setting::Stream, 1),
+        (Setting::Stream, 2),
+        (Setting::Winter, 1),
+    ] {
+        let mut composition =
+            Composition::new(setting, seed, (320, 180), Detail::Simple).expect("composes");
+        composition.run_until_seen();
+        for (margin, at, far) in patches(&composition) {
+            let side = if far { FAR_CELL } else { NEAR_CELL };
+            assert!(
+                composition
+                    .stage
+                    .clear_of_pieces((at.x, at.z), FRAC_1_SQRT_2 * side),
+                "{setting:?} {seed}: {margin:?} at {at:?}"
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 500, "{checked}");
 }
 
 #[test]

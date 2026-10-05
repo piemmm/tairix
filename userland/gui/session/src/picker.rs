@@ -38,12 +38,14 @@ use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode};
 use tairix_abi::window_ipc::{PickPurpose, SaveEndings, WINDOW_TITLE_MAX};
 use tairix_abi::{Errno, FS_NAME_MAX};
 use tairix_browse::render::{
-    entry_index_at, render_into, reveal_selection, scroll_pointer, scroll_wheel, toolbar_command_at,
+    entry_index_at, listing_damage, render_into, reveal_selection, scroll_pointer, scroll_wheel,
+    shown_listing, toolbar_command_at,
 };
 use tairix_browse::ManagerChrome;
 use tairix_browse::ToolbarBand;
 use tairix_browse::{
-    apply_command, vfs, Browser, DirectorySource, Ending, EntryKind, WIN_HEIGHT, WIN_WIDTH,
+    apply_command, vfs, BrowseError, Browser, DirectorySource, Ending, EntryKind, WatchUpdate,
+    WIN_HEIGHT, WIN_WIDTH,
 };
 use tairix_controls::{damage, Button, ButtonContent, ControlRole, TextAction, TextField};
 use tairix_font::BitmapFont;
@@ -342,6 +344,14 @@ struct ActivePick<S: DirectorySource> {
     waiting: Option<Waiting>,
     /// Whether [`PICKER_SHOWN`] has been announced for this pick.
     shown: bool,
+    /// The folder shown went from its path: if reading it again fails, the
+    /// pick climbs to the nearest folder still there rather than showing it
+    /// as it was.
+    lost: bool,
+    /// The folder's watch asked for a re-read while another listing was in
+    /// flight: owed once that listing is refused, since it answers for the
+    /// folder only by landing.
+    reread_owed: bool,
 }
 
 impl<S: DirectorySource> ActivePick<S> {
@@ -443,10 +453,9 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
                 NavOutcome::Redraw
             }),
             KeyValue::Named(NamedKeyCode::Enter) => self.navigate(shell, compositor, |browser| {
-                match browser.selected_index() {
-                    Some(index) => open_or_choose(browser, index),
-                    None => NavOutcome::None,
-                }
+                browser
+                    .chosen_index()
+                    .map_or(NavOutcome::None, |index| open_or_choose(browser, index))
             }),
             KeyValue::Named(NamedKeyCode::Backspace) => {
                 self.navigate(shell, compositor, |browser| {
@@ -619,12 +628,104 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
     /// finished — never a poll. With no pick showing, or nothing pending, it
     /// does nothing. A listing the source now refuses drops the pending
     /// navigation and repaints, so the "listing" cue clears and the picker is
-    /// left exactly where it was (fail closed).
+    /// left exactly where it was (fail closed) — unless the folder went from
+    /// its path, when the pick moves to its parent.
     pub fn resume(&mut self, shell: &mut DesktopShell, compositor: &mut Compositor) {
-        let _ = self.navigate(shell, compositor, |browser| match browser.resume() {
-            Ok(true) | Err(_) => NavOutcome::Redraw,
-            Ok(false) => NavOutcome::None,
+        self.reread(shell, compositor, Browser::resume);
+    }
+
+    /// Run `read` — a listing collected, or one asked afresh — on the showing
+    /// pick's browser, repainting once it answers (`Ok(false)`: not yet). A
+    /// pick whose folder went moves to its parent when the folder's read fails.
+    fn reread(
+        &mut self,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        read: impl FnOnce(&mut Browser<S>) -> Result<bool, BrowseError>,
+    ) {
+        let Some((lost, owed)) = self
+            .active
+            .as_ref()
+            .map(|active| (active.lost, active.reread_owed))
+        else {
+            return;
+        };
+        let mut in_flight = false;
+        let _ = self.navigate(shell, compositor, |browser| {
+            let mut outcome = read(browser);
+            if outcome.is_err() {
+                if lost {
+                    outcome = browser.climb();
+                } else if owed {
+                    outcome = browser.refresh().map(|()| !browser.is_listing());
+                }
+            }
+            in_flight = browser.is_listing();
+            if matches!(outcome, Ok(false)) {
+                NavOutcome::None
+            } else {
+                NavOutcome::Redraw
+            }
         });
+        if let Some(active) = self.active.as_mut().filter(|_| !in_flight) {
+            active.lost = false;
+            active.reread_owed = false;
+        }
+    }
+
+    /// Follow what the showing pick's folder watch reported: the changed
+    /// entries are merged in place and only the rows they altered repainted;
+    /// a rescan, or a folder gone from its path, reads the folder afresh —
+    /// once a navigation already reading one is refused, if one is — and a
+    /// folder that cannot be read again after going leaves the pick at the
+    /// nearest folder above that is still there.
+    pub fn follow(
+        &mut self,
+        update: WatchUpdate,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+    ) {
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        let gone = matches!(update, WatchUpdate::Gone);
+        match update {
+            WatchUpdate::Quiet => {}
+            WatchUpdate::Changes(changes) => {
+                let scale = compositor.scale();
+                let theme = shell.session().active_theme();
+                let viewport = picker_viewport(scale);
+                let before = shown_listing(&active.browser, scale, theme, viewport, PICKER_TOOLBAR);
+                match active.browser.apply_changes(changes) {
+                    Ok(Some(_)) => {}
+                    Ok(None) => return,
+                    // Without the memory to merge them, the folder is read again.
+                    Err(_) => return self.follow(WatchUpdate::Rescan, shell, compositor),
+                }
+                let mut moved = Region::new();
+                if listing_damage(
+                    &before,
+                    &active.browser,
+                    scale,
+                    theme,
+                    viewport,
+                    PICKER_TOOLBAR,
+                    &mut moved,
+                ) {
+                    repaint(active, &moved, shell, compositor);
+                }
+            }
+            WatchUpdate::Rescan | WatchUpdate::Gone => {
+                active.lost |= gone;
+                active.reread_owed = true;
+                if active.browser.is_listing() {
+                    return;
+                }
+                self.reread(shell, compositor, |browser| {
+                    browser.refresh().map(|()| !browser.is_listing())
+                });
+            }
+        }
     }
 
     /// Dismiss the showing pick without choosing, closing the picker window.
@@ -1077,6 +1178,8 @@ impl<S: DirectorySource, F: FnMut() -> S> PickerSlot for SessionPicker<S, F> {
             save,
             waiting: None,
             shown: false,
+            lost: false,
+            reread_owed: false,
         });
         Ok(())
     }

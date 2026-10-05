@@ -12,6 +12,7 @@ mod architecture;
 mod chains;
 mod footprint;
 mod landscape;
+mod lattice;
 mod plants;
 mod still;
 mod stones;
@@ -50,7 +51,7 @@ use crate::terrain::Sea;
 use crate::tree::{fern, palm, saguaro, Growth, Season, Species, Stock};
 use crate::vector::{real, share, Frame, Pose, Ray, Vec3};
 use crate::waterside::{patch, Margin, Marsh};
-use footprint::Footprints;
+use footprint::{Footprints, Taken};
 use landscape::Lawning;
 use landscape::{Scheme, Vantage};
 use stones::Bed;
@@ -664,7 +665,7 @@ impl Composition {
         }
         if landing.build.waiting() {
             let survey = landing.build.survey(&self.stage.fields)?;
-            let (vantage, siting) = landing.scheme.site(&mut self.dice, &survey)?;
+            let (vantage, siting) = landing.scheme.site(&mut self.dice, &survey, runner)?;
             landing.vantage = vantage.map(|vantage| {
                 (
                     vantage,
@@ -1100,8 +1101,8 @@ impl Stage {
 
     /// The grid of how high `lawn`'s shoots stand, a vertex at the middle of
     /// each block of its cells and one more beyond each end — blocks no more
-    /// than a canopy grid's side across it, and where a block is a cell, how
-    /// the cell grows — taken among the scene's grids to be filled.
+    /// than a canopy grid's side across it — and how each block's middle cell
+    /// grows, taken among the scene's grids to be filled.
     fn tops(&mut self, lawn: &Lawn) -> Option<Tops> {
         let cells = |low: f64, high: f64| mathf::ceil((high - low) / lawn.cell).max(1.0);
         let across = cells(lawn.from.0, lawn.to.0).max(cells(lawn.from.1, lawn.to.1));
@@ -1146,7 +1147,7 @@ impl Stage {
                 centre.1 + distance * mathf::sin(angle),
             );
             if self.footprints.clear((x, z), radius) {
-                self.footprints.claim((x, z), radius)?;
+                self.footprints.claim((x, z), radius, Taken::Piece)?;
                 return Some((x, z));
             }
         }
@@ -1156,6 +1157,12 @@ impl Stage {
     /// Whether a piece `radius` across at `at` stays clear of the rest.
     fn clear(&self, at: (f64, f64), radius: f64) -> bool {
         self.footprints.clear(at, radius)
+    }
+
+    /// Whether what grows wild `radius` across at `at` stands clear of every
+    /// piece, wherever the composition keeps the ground open.
+    fn clear_of_pieces(&self, at: (f64, f64), radius: f64) -> bool {
+        self.footprints.clear_of_pieces(at, radius)
     }
 
     /// Record a tree's crown reaching `reach` from its trunk at `(x, z)`.
@@ -1175,7 +1182,13 @@ impl Stage {
 
     /// Mark `at` taken by a piece `radius` across placed there by hand.
     fn claim(&mut self, at: (f64, f64), radius: f64) -> Option<()> {
-        self.footprints.claim(at, radius)
+        self.footprints.claim(at, radius, Taken::Piece)
+    }
+
+    /// Keep the ground `radius` about `at` open of pieces — the eye's own, a
+    /// pond — though what grows wild may stand there.
+    fn keep_open(&mut self, at: (f64, f64), radius: f64) -> Option<()> {
+        self.footprints.claim(at, radius, Taken::Open)
     }
 
     /// Mark taken the strip `half` either side of the line from `from` to
@@ -1937,11 +1950,7 @@ impl Stage {
                     Pigment::Solid(COPPER.lerp(GOLD, dice.unit())),
                     Finish::Metal { roughness: 0.1 },
                 )
-                .with_relief(Relief::Grain {
-                    depth: 0.12,
-                    scale: 14.0,
-                    seed: dice.seed(),
-                }),
+                .with_relief(Relief::grain(0.05, 14.0, dice.seed())),
             ),
             7 => {
                 let metal = dice.pick(&[STEEL, ALUMINIUM, BRASS, TITANIUM])?;

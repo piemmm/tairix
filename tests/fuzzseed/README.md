@@ -17,7 +17,12 @@ filesystem soak. It is the single place (`AGENTS.md` §2.2) that:
   `Prng` (SplitMix64): every output bit is mixed, so `below`, `at_most`,
   `pick`, `next_u8`…`next_u64`, and `fill` may be used for any choice. A
   bounded draw spends one word whatever its bound, so a stream replays
-  exactly from its seed. A private generator anywhere else is a defect.
+  exactly from its seed. A private generator anywhere else is a defect;
+- owns the **one metered allocator** a host test installs as its global
+  allocator to hold a call to an allocation bound or a graceful refusal
+  (`meter::Metered`, `meter::metered`, `meter::refusing_above`): every figure
+  is the calling thread's, so neither the harness's own threads nor tests
+  running beside a measurement charge it.
 
 It lives under `tests/` — not `lib/`, which is reserved for code that ships
 inside TAIRiX — and is consumed only as a `[dev-dependencies]` entry of the

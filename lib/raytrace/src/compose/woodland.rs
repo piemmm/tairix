@@ -501,19 +501,12 @@ fn sow_ring(
 }
 
 /// Read the ground at every one of `seedlings` across `runner`.
-fn read_all(
-    runner: &dyn JobRunner,
-    seedlings: &mut [Seedling],
-    reading: &Reading<'_>,
-) -> Option<()> {
-    let mut bands: Vec<&mut [Seedling]> =
-        fallible::collected(seedlings.len().div_ceil(BAND), seedlings.chunks_mut(BAND))?;
-    tairix_parallel::for_each(runner, &mut bands, &|band| {
+fn read_all(runner: &dyn JobRunner, seedlings: &mut [Seedling], reading: &Reading<'_>) {
+    tairix_parallel::for_each_drawn(runner, seedlings.chunks_mut(BAND), &|band| {
         for seedling in band.iter_mut() {
             reading.read(seedling);
         }
     });
-    Some(())
 }
 
 /// A tree stood, as its neighbours see it.
@@ -615,7 +608,7 @@ struct Standing {
 /// thins at most, one after another since each tree stood shapes where the
 /// next may.
 const READ_UNIT: usize = 1 << 14;
-const THIN_UNIT: usize = 1 << 10;
+const THIN_UNIT: usize = 1 << 9;
 
 impl Standing {
     /// `grove`'s plants to be stood as `woodland` grows them, seen from
@@ -702,7 +695,7 @@ impl Standing {
                 beneath: shade,
                 seeds: self.seeds,
             };
-            read_all(runner, &mut self.band, &reading)?;
+            read_all(runner, &mut self.band, &reading);
             let growing = self.band.iter().filter(|seedling| seedling.tree.is_some());
             let count = growing.clone().count();
             if !self.grown.reserve(count) || !self.ranking.reserve(count) {
@@ -1089,8 +1082,7 @@ fn sown_for(
 /// and within `open.1` either side of the way it looks.
 fn walls_off(open: (f64, f64), vantage: &Vantage, at: (f64, f64), height: f64) -> bool {
     let (dx, dz) = (at.0 - vantage.eye.x, at.1 - vantage.eye.z);
-    let turn = mathf::atan2(dx, dz) - vantage.heading;
-    let turn = turn - TAU * mathf::floor((turn + PI) / TAU);
+    let turn = crate::vector::wrapped(mathf::atan2(dx, dz) - vantage.heading);
     mathf::hypot(dx, dz) < open.0 * height && turn.abs() < open.1
 }
 
