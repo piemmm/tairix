@@ -9958,22 +9958,17 @@ where
             Some(Err(err)) => return Err(copy_fault_errno(err)),
             None => return Err(Errno::BadAddress),
         }
-        // Grant the calling task a device resource for the allocated virtual
-        // line, so it may both `irq_bind` it and forward it as an
-        // `HwResource::irq` onto a child node it publishes (the `hw_emit_node`
-        // grant-coverage check tests against exactly this). Minted against
-        // `caller.task_id` (kernel-trusted), exactly like the driver-admission
-        // grant path; the handle is unused here — the *line*, not a handle, is
-        // what the driver presents to `irq_bind` and forwards.
-        let line = HwResource::message_vector(u64::from(allocation.line));
+        // Granted as the allocation names it, so the caller may bind the line
+        // and forward that same resource onto a child it publishes.
+        let vector = allocation.resource();
         // A vector allocated for a driver's device ends with that device.
         let Some(node) = node else {
-            self.aspaces.write().mint_grant(caller.process(), line);
+            self.aspaces.write().mint_grant(caller.process(), vector);
             return Ok(tairix_abi::MsiAllocation::WIRE_LEN as u64);
         };
         self.aspaces
             .write()
-            .mint_node_grant(caller.process(), line, node);
+            .mint_node_grant(caller.process(), vector, node);
         // A removal whose walk ran before the mint missed this grant.
         if !self.hw_tree.is_live(node) {
             let revoked = {
@@ -35608,6 +35603,10 @@ mod tests {
         );
     }
 
+    /// The vector [`RemovingMsi`] allocates.
+    const TEST_VECTOR: tairix_abi::MsiAllocation =
+        tairix_abi::MsiAllocation::new(0xFEE0_0000, 0x41, 77);
+
     /// An MSI producer that can take the driver's node out of the tree while
     /// it allocates, as a removal racing the call would.
     struct RemovingMsi {
@@ -35623,7 +35622,7 @@ mod tests {
             if let Some(node) = self.remove {
                 self.tree.gone.write().push(node);
             }
-            Ok(tairix_abi::MsiAllocation::new(0xFEE0_0000, 0x41, 77))
+            Ok(TEST_VECTOR)
         }
     }
 
@@ -35673,16 +35672,22 @@ mod tests {
         .with_msi_alloc_facility(msi);
 
         let result = h.msi_alloc(&ctx, 0x1000, tairix_abi::MsiAllocation::WIRE_LEN);
-        let holds = aspaces.read().holds_irq_line(ProcessId(driver), 77);
+        let holds = aspaces
+            .read()
+            .holds_irq_line(ProcessId(driver), TEST_VECTOR.line);
         if holds {
             assert_eq!(
-                aspaces.read().wired_irq_origin(ProcessId(driver), 77),
+                aspaces
+                    .read()
+                    .wired_irq_origin(ProcessId(driver), TEST_VECTOR.line),
                 None,
                 "a vector raises no pin"
             );
             aspaces.write().revoke_node_grants(&[9]);
             assert!(
-                !aspaces.read().holds_irq_line(ProcessId(driver), 77),
+                !aspaces
+                    .read()
+                    .holds_irq_line(ProcessId(driver), TEST_VECTOR.line),
                 "the vector ends with its device"
             );
         }
@@ -35715,6 +35720,83 @@ mod tests {
             msi_alloc_for_node_9(false, true),
             (Err(Errno::DeviceOffline), false, 1)
         );
+    }
+
+    /// A bus driver forwards its vector onto a child only as the allocation
+    /// names it: described as a wire, the child's driver binding it would
+    /// raise a pin on the child's function.
+    #[test]
+    fn a_child_carries_an_allocated_vector_only_as_it_was_granted() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let driver = crate::test_boot::claim_task();
+        let child = |line: tairix_abi::HwResource| {
+            let mut node = tairix_abi::HwNode::new(0, 0, tairix_abi::HwDeviceClass::Bus);
+            node.push_resource(line).expect("resource fits");
+            node
+        };
+        let granted = child(TEST_VECTOR.resource());
+        let wired = child(tairix_abi::HwResource::irq(u64::from(TEST_VECTOR.line), 1));
+        // The granted child at 0x1000, the wired one at 0x1400, and the
+        // allocation record written out at 0x1800.
+        let mut payload = alloc::vec![0u8; 0x800];
+        payload[..tairix_abi::HwNode::WIRE_LEN].copy_from_slice(&granted.to_le_bytes());
+        payload[0x400..0x400 + tairix_abi::HwNode::WIRE_LEN].copy_from_slice(&wired.to_le_bytes());
+        let (space, physmap) =
+            send_aspace(MapFlags::READ | MapFlags::WRITE | MapFlags::USER, &payload);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        {
+            let mut aspaces = aspaces.write();
+            aspaces
+                .register(ProcessId(driver), space, physmap)
+                .expect("registers");
+            aspaces
+                .admit_driver(ProcessId(driver), 9, crate::iommu::DmaPath::Untranslated)
+                .expect("the node is free");
+        }
+        let tree: &'static StaticHwTree =
+            Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+        let msi: &'static RemovingMsi = Box::leak(Box::new(RemovingMsi {
+            tree,
+            remove: None,
+            allocated: core::sync::atomic::AtomicUsize::new(0),
+        }));
+        let caps = make_caps_record(
+            driver,
+            &[CapabilityId::IRQ_BIND, CapabilityId::HW_EMIT],
+            sink,
+        );
+        let ctx = CallerContext {
+            task_id: SecTaskId(driver),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_hw_tree(tree)
+        .with_msi_alloc_facility(msi);
+
+        assert_eq!(
+            h.msi_alloc(&ctx, 0x1800, tairix_abi::MsiAllocation::WIRE_LEN),
+            Ok(tairix_abi::MsiAllocation::WIRE_LEN as u64)
+        );
+        assert_eq!(
+            h.hw_emit_node(&ctx, 0x1400, tairix_abi::HwNode::WIRE_LEN),
+            Err(Errno::PermissionDenied)
+        );
+        assert!(tree.published.read().is_empty());
+        assert_eq!(
+            h.hw_emit_node(&ctx, 0x1000, tairix_abi::HwNode::WIRE_LEN),
+            Ok(100)
+        );
+        assert_eq!(tree.published.read().as_slice(), &[(9, granted)]);
     }
 
     /// An exit recorder that loads a successor for the dead driver's node and

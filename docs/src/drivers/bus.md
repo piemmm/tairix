@@ -1160,10 +1160,13 @@ also uses, `AGENTS.md` §2.2), resolves the BAR to its CPU-physical address
 with `tairix_pci::bus_to_cpu_phys`, and publishes the controller as an
 xHCI `HwNode` carrying that BAR (an `Mmio` window inside the bridge's
 outbound `BusWindow` grant, so the kernel's grant-coverage check admits
-it) and a DMA constraint. The composition lives — and is host-tested
-against a mock bus — in the driver crate's own `lib` target
-(`wiring::emit_vl805_node` / `wiring::publish_usb_function`), so the driver
-binary is a thin freestanding stub.
+it), a DMA constraint, and the MSI vector it routed the function to,
+exactly as `MsiAllocation::resource` names it: that is the grant
+`msi_alloc` minted, and a line re-described as a wired pin is refused. The
+composition lives — and is host-tested against a mock bus — in the driver
+crate's own `lib` target (`wiring::emit_vl805_node` /
+`wiring::publish_usb_function`), so the driver binary is a thin
+freestanding stub.
 
 The USB host driver does the same one level down, for the HID device it
 enumerates behind the controller (`plans/PI.md` Stage 4.HW item 5b-ii).

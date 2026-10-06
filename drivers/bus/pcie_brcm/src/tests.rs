@@ -21,16 +21,23 @@ use tairix_abi::{
 
 use super::*;
 
-/// The discovered Pi 4 windows: inbound viewport at PCIe 0 covering the
-/// low 3 GiB of SDRAM, outbound MMIO at CPU `0x6_0000_0000` → PCIe
-/// `0xc000_0000`, 1 GiB.
+// The Pi 4 discovered values: controller `reg`, inbound `dma-ranges` (PCIe
+// base 0, the low 3 GiB of SDRAM), outbound `ranges` (CPU `0x6_0000_0000` →
+// PCIe `0xc000_0000`, 1 GiB).
+const REGS_PHYS: u64 = 0xfd50_0000;
+const APERTURE_TOP: u64 = 0xc000_0000;
+const OUTBOUND_CPU: u64 = 0x6_0000_0000;
+const OUTBOUND_PCIE: u64 = 0xc000_0000;
+const OUTBOUND_SIZE: u64 = 0x4000_0000;
+
+/// The windows the discovered Pi 4 values describe.
 const PI_WINDOWS: PcieWindows = PcieWindows {
     inbound_pcie_base: 0,
-    inbound_size: 0xc000_0000,
-    inbound_cpu_top: 0xc000_0000,
-    outbound_cpu_base: 0x6_0000_0000,
-    outbound_pcie_base: 0xc000_0000,
-    outbound_size: 0x4000_0000,
+    inbound_size: APERTURE_TOP,
+    inbound_cpu_top: APERTURE_TOP,
+    outbound_cpu_base: OUTBOUND_CPU,
+    outbound_pcie_base: OUTBOUND_PCIE,
+    outbound_size: OUTBOUND_SIZE,
 };
 
 /// A no-op delay: host tests assert register effects, not real time.
@@ -729,25 +736,22 @@ fn bind_table_matches_the_pi4_pcie_node() {
 
 use tairix_abi::{HwDeviceClass, HwNode, HwResource};
 
-/// The Pi 4 discovered values: controller `reg`, inbound `dma-ranges`
-/// (PCIe base 0, 3 GiB), outbound `ranges` (CPU `0x6_0000_0000` → PCIe
-/// `0xc000_0000`, 1 GiB).
-const REGS_PHYS: u64 = 0xfd50_0000;
-const APERTURE_TOP: u64 = 0xc000_0000;
-const OUTBOUND_CPU: u64 = 0x6_0000_0000;
-const OUTBOUND_PCIE: u64 = 0xc000_0000;
-const OUTBOUND_SIZE: u64 = 0x4000_0000;
-
-fn pcie_node() -> HwNode {
+/// The bridge node a port discovers with `windows`, whose resources are the
+/// grants its driver is minted.
+fn bridge_node(windows: &PcieWindows) -> HwNode {
     let mut node = HwNode::new(9, 1, HwDeviceClass::Bus);
     node.push_resource(HwResource::mmio(REGS_PHYS, 0x9310))
         .unwrap();
-    node.push_resource(HwResource::dma_translated(APERTURE_TOP, APERTURE_TOP, 0))
-        .unwrap();
+    node.push_resource(HwResource::dma_translated(
+        windows.inbound_cpu_top,
+        windows.inbound_size,
+        windows.inbound_pcie_base,
+    ))
+    .unwrap();
     node.push_resource(HwResource::bus_window(
-        OUTBOUND_CPU,
-        OUTBOUND_SIZE,
-        OUTBOUND_PCIE,
+        windows.outbound_cpu_base,
+        windows.outbound_size,
+        windows.outbound_pcie_base,
     ))
     .unwrap();
     node
@@ -755,7 +759,8 @@ fn pcie_node() -> HwNode {
 
 #[test]
 fn bringup_inputs_are_assembled_from_the_node() {
-    let bringup = wiring::pcie_bringup_from_node(&pcie_node()).expect("all resources present");
+    let bringup =
+        wiring::pcie_bringup_from_node(&bridge_node(&PI_WINDOWS)).expect("all resources present");
     assert_eq!(bringup.regs_phys, REGS_PHYS);
     assert_eq!(bringup.windows.inbound_pcie_base, 0);
     assert_eq!(bringup.windows.inbound_size, APERTURE_TOP);
@@ -853,7 +858,7 @@ fn bring_up_from_node_requires_the_mmio_capability() {
         mapper: Some(MockMapper { grant: true }),
     };
     assert_eq!(
-        wiring::bring_up_from_node(&host, &pcie_node(), &NoDelay).err(),
+        wiring::bring_up_from_node(&host, &bridge_node(&PI_WINDOWS), &NoDelay).err(),
         Some(DriverError::PermissionDenied)
     );
 }
@@ -893,7 +898,7 @@ fn bring_up_from_node_reaches_the_root_port_check_over_a_mapped_window() {
         mapper: Some(MockMapper { grant: true }),
     };
     assert_eq!(
-        wiring::bring_up_from_node(&host, &pcie_node(), &NoDelay).err(),
+        wiring::bring_up_from_node(&host, &bridge_node(&PI_WINDOWS), &NoDelay).err(),
         Some(DriverError::DeviceFault)
     );
 }
@@ -1031,21 +1036,28 @@ impl PciBus for StubPciBus {
 
 /// A [`DriverHost`] double that maps BARs through a granting [`MockMapper`]
 /// and captures the node published through [`DriverHost::emit_node`].
+///
+/// It admits a node only when each resource the node requests is covered,
+/// by the rule `hw_emit_node` applies ([`HwResource::covers`]), by a grant
+/// it minted: the bridge node's, or a vector `alloc_msi` allocated.
 struct RecordingHost {
     emit_ok: bool,
     /// The virtual line `alloc_msi` returns, or `None` to model a host with
     /// no MSI facility (the default trait behaviour: `Unsupported`).
     msi_line: Option<u32>,
     mapper: MockMapper,
+    grants: RefCell<Vec<HwResource>>,
     emitted: RefCell<Option<HwNode>>,
 }
 
 impl RecordingHost {
-    fn new(emit_ok: bool) -> Self {
+    /// A host whose driver was loaded for the bridge node `windows` describe.
+    fn new(emit_ok: bool, windows: &PcieWindows) -> Self {
         Self {
             emit_ok,
             msi_line: None,
             mapper: MockMapper { grant: true },
+            grants: RefCell::new(bridge_node(windows).resources().to_vec()),
             emitted: RefCell::new(None),
         }
     }
@@ -1068,7 +1080,12 @@ impl DriverHost for RecordingHost {
     }
 
     fn emit_node(&self, node: HwNode) -> Result<(), DriverError> {
-        if !self.emit_ok {
+        let grants = self.grants.borrow();
+        let covered = node
+            .resources()
+            .iter()
+            .all(|wanted| grants.iter().any(|held| held.covers(wanted)));
+        if !self.emit_ok || !covered {
             return Err(DriverError::PermissionDenied);
         }
         *self.emitted.borrow_mut() = Some(node);
@@ -1076,10 +1093,10 @@ impl DriverHost for RecordingHost {
     }
 
     fn alloc_msi(&self) -> Result<tairix_abi::MsiAllocation, DriverError> {
-        match self.msi_line {
-            Some(line) => Ok(tairix_abi::MsiAllocation::new(0xFFFF_FFFC, 0x6540, line)),
-            None => Err(DriverError::Unsupported),
-        }
+        let line = self.msi_line.ok_or(DriverError::Unsupported)?;
+        let allocation = tairix_abi::MsiAllocation::new(0xFFFF_FFFC, 0x6540, line);
+        self.grants.borrow_mut().push(allocation.resource());
+        Ok(allocation)
     }
 }
 
@@ -1088,7 +1105,7 @@ fn publish_usb_function_emits_the_translated_bar_and_dma_grants() {
     // The BAR is assigned the bottom of the Pi 4 outbound PCIe window, so its
     // CPU-physical address is the outbound CPU base.
     let bus = StubPciBus::new(PI_WINDOWS.outbound_pcie_base);
-    let host = RecordingHost::new(true);
+    let host = RecordingHost::new(true, &PI_WINDOWS);
     let node = wiring::publish_usb_function(&host, &bus, &PI_WINDOWS).expect("publishes");
 
     // The BAR is assigned, decoded and mapped, and the function made a bus
@@ -1130,7 +1147,7 @@ fn publish_usb_function_emits_the_translated_bar_and_dma_grants() {
 fn publish_usb_function_without_a_usb_function_fails_closed_not_found() {
     let mut bus = StubPciBus::new(PI_WINDOWS.outbound_pcie_base);
     bus.has_usb = false;
-    let host = RecordingHost::new(true);
+    let host = RecordingHost::new(true, &PI_WINDOWS);
     assert_eq!(
         wiring::publish_usb_function(&host, &bus, &PI_WINDOWS).err(),
         Some(DriverError::NotFound)
@@ -1144,7 +1161,7 @@ fn publish_usb_function_fails_closed_when_the_bar_is_outside_the_outbound_window
     // the bridge window, so the publish is refused rather than emitting a
     // grant the kernel could not cover.
     let bus = StubPciBus::new(PI_WINDOWS.outbound_pcie_base - 0x1000);
-    let host = RecordingHost::new(true);
+    let host = RecordingHost::new(true, &PI_WINDOWS);
     assert_eq!(
         wiring::publish_usb_function(&host, &bus, &PI_WINDOWS).err(),
         Some(DriverError::OutOfRange)
@@ -1158,7 +1175,7 @@ fn publish_usb_function_propagates_a_refused_emit() {
     // requests an uncovered resource) surfaces the refusal — fail closed —
     // and the function no driver was handed stops mastering again.
     let bus = StubPciBus::new(PI_WINDOWS.outbound_pcie_base);
-    let host = RecordingHost::new(false);
+    let host = RecordingHost::new(false, &PI_WINDOWS);
     assert_eq!(
         wiring::publish_usb_function(&host, &bus, &PI_WINDOWS).err(),
         Some(DriverError::PermissionDenied)
@@ -1170,7 +1187,7 @@ fn publish_usb_function_propagates_a_refused_emit() {
 fn a_refused_emit_is_reported_whether_or_not_the_function_stops() {
     let mut bus = StubPciBus::new(PI_WINDOWS.outbound_pcie_base);
     bus.unmaster_fails = true;
-    let host = RecordingHost::new(false);
+    let host = RecordingHost::new(false, &PI_WINDOWS);
     assert_eq!(
         wiring::publish_usb_function(&host, &bus, &PI_WINDOWS).err(),
         Some(DriverError::PermissionDenied),
@@ -1180,16 +1197,13 @@ fn a_refused_emit_is_reported_whether_or_not_the_function_stops() {
 }
 
 #[test]
-fn publish_usb_function_forwards_the_msi_line_as_an_irq_grant() {
-    // When the host allocates an MSI vector and the function's MSI capability
-    // is programmed, the published node carries the resulting virtual line as
-    // an `Irq` grant request, so the matched xHCI driver parks on its
-    // completion interrupt rather than busy-polling. The line is covered by
-    // the grant `alloc_msi` minted, so the kernel's `hw_emit_node` admits it.
+fn publish_usb_function_forwards_the_msi_vector_as_it_was_granted() {
+    // The publish admits the line only as the allocation names it: described
+    // as a wire, it is not covered and the node is refused.
     const MSI_LINE: u32 = 0x4A;
     let mut bus = StubPciBus::new(PI_WINDOWS.outbound_pcie_base);
     bus.route_msi_ok = true;
-    let mut host = RecordingHost::new(true);
+    let mut host = RecordingHost::new(true, &PI_WINDOWS);
     host.msi_line = Some(MSI_LINE);
     wiring::publish_usb_function(&host, &bus, &PI_WINDOWS).expect("publishes");
 
@@ -1202,20 +1216,20 @@ fn publish_usb_function_forwards_the_msi_line_as_an_irq_grant() {
         .iter()
         .find(|r| r.kind() == Some(HwResourceKind::Irq))
         .expect("an Irq grant");
-    assert_eq!(irq.base(), u64::from(MSI_LINE));
-    assert_eq!(irq.length(), 1);
+    assert_eq!(
+        *irq,
+        tairix_abi::MsiAllocation::new(0, 0, MSI_LINE).resource()
+    );
+    assert!(irq.is_message(), "a vector raises no pin on the function");
 }
 
 #[test]
 fn publish_usb_function_omits_the_irq_grant_when_msi_is_unavailable() {
-    // Best-effort: a function with no programmable MSI capability
-    // (`route_msi` → `NotFound`) still publishes the node — without an `Irq`
-    // grant — rather than blocking enumeration, leaving the matched driver to
-    // fall back to its poll path. The vector `alloc_msi` minted is simply not
-    // forwarded.
+    // A function with no programmable MSI capability still publishes the
+    // node, without a line: the vector `alloc_msi` minted is not forwarded.
     let mut bus = StubPciBus::new(PI_WINDOWS.outbound_pcie_base);
     bus.route_msi_ok = false;
-    let mut host = RecordingHost::new(true);
+    let mut host = RecordingHost::new(true, &PI_WINDOWS);
     host.msi_line = Some(0x4A);
     wiring::publish_usb_function(&host, &bus, &PI_WINDOWS).expect("publishes");
 
@@ -1229,13 +1243,9 @@ fn publish_usb_function_omits_the_irq_grant_when_msi_is_unavailable() {
 
 #[test]
 fn publish_forwards_a_nonzero_translation_the_parent_grant_covers() {
-    // The real Pi 4 inbound viewport is `IB MEM 0x0..0x1ffffffff ->
-    // 0x4_0000_0000`: a non-zero far-side base. The emitted child DMA grant
-    // must carry that exact translation (`HwResource::dma_translated`) so the
-    // kernel's `Dma`→`Dma` coverage rule — which requires the identical
-    // translation — admits it against the bridge driver's own grant. (The
-    // earlier defect emitted an untranslated `dma(...)`, whose `xlate == 0`
-    // failed coverage and was refused `PermissionDenied`.)
+    // The 8 GiB Pi 4's inbound viewport, `IB MEM 0x0..0x1ffffffff ->
+    // 0x4_0000_0000`: coverage of a translated window demands the identical
+    // translation, so the child carries the bridge's aperture verbatim.
     let windows = PcieWindows {
         inbound_pcie_base: 0x4_0000_0000,
         inbound_size: 0x2_0000_0000,
@@ -1245,7 +1255,7 @@ fn publish_forwards_a_nonzero_translation_the_parent_grant_covers() {
         outbound_size: 0x4000_0000,
     };
     let bus = StubPciBus::new(windows.outbound_pcie_base);
-    let host = RecordingHost::new(true);
+    let host = RecordingHost::new(true, &windows);
     wiring::publish_usb_function(&host, &bus, &windows).expect("publishes");
 
     let emitted = host.emitted.borrow();
@@ -1255,16 +1265,14 @@ fn publish_forwards_a_nonzero_translation_the_parent_grant_covers() {
         .iter()
         .find(|r| r.kind() == Some(HwResourceKind::Dma))
         .expect("a Dma constraint grant");
-    // The child grant is the parent aperture, verbatim.
-    let parent = HwResource::dma_translated(
-        windows.inbound_cpu_top,
-        windows.inbound_size,
-        windows.inbound_pcie_base,
+    assert_eq!(
+        *dma,
+        HwResource::dma_translated(
+            windows.inbound_cpu_top,
+            windows.inbound_size,
+            windows.inbound_pcie_base,
+        )
     );
-    assert_eq!(*dma, parent);
-    // …and the bridge driver's own grant covers it (the kernel's
-    // `hw_emit_node` admission check).
-    assert!(parent.covers(dma));
 }
 
 #[test]
@@ -1277,7 +1285,7 @@ fn emit_vl805_node_reaches_the_link_bringup_over_a_mapped_window() {
         mmio_map: true,
         mapper: Some(MockMapper { grant: true }),
     };
-    let bringup = wiring::pcie_bringup_from_node(&pcie_node()).expect("complete node");
+    let bringup = wiring::pcie_bringup_from_node(&bridge_node(&PI_WINDOWS)).expect("complete node");
     assert_eq!(
         wiring::emit_vl805_node(&host, &bringup, &NoDelay).err(),
         Some(DriverError::DeviceFault)

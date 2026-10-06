@@ -285,14 +285,14 @@ pub fn emit_vl805_node(
 
 /// Enumerate the USB host controller on the trained `bus`, assign/decode/map
 /// its register BAR, and publish it as a bindable child [`HwNode`] carrying
-/// exactly the two device-resource grant *requests* the matched downstream
-/// xHCI driver needs and no more. This driver owns the function's
-/// configuration space, so it makes the function a bus master as it hands
-/// it over, and stops it again if the publish is refused.
+/// the device-resource grant *requests* the matched downstream xHCI driver
+/// needs and no more. This driver owns the function's configuration space,
+/// so it makes the function a bus master as it hands it over, and stops it
+/// again if the publish is refused.
 ///
 /// Split out from [`emit_vl805_node`] so the post-link logic — the part QEMU
 /// can model (the link training itself is metal-only) — is
-/// host-tested against a mock [`PciBus`]. The two emitted grants are:
+/// host-tested against a mock [`PciBus`]. The emitted grants are:
 ///
 /// * an [`HwResource::mmio`] of the controller's BAR resolved to its
 ///   **CPU-physical** address ([`bus_to_cpu_phys`] over the discovered
@@ -311,7 +311,12 @@ pub fn emit_vl805_node(
 ///   device-visible bus address through the same viewport. On the Pi 4 this aperture is `IB MEM 0x0..0x1ffffffff ->
 ///   0x4_0000_0000`, so a non-zero far-side base is the common case, not a
 ///   special one; the buffer size the matched driver carves is its own
-///   concern, bounded by the aperture, never re-encoded here.
+///   concern, bounded by the aperture, never re-encoded here; and
+/// * the MSI vector [`DriverHost::alloc_msi`] allocated, once the function's
+///   MSI capability routes to it, exactly as its
+///   [`MsiAllocation::resource`](tairix_abi::MsiAllocation::resource) names
+///   it: that is the grant this driver holds, so it is the form the publish
+///   admits.
 ///
 /// The BAR is mapped only transiently here, to learn its assigned base and
 /// size; the window is dropped immediately (the matched user-space driver
@@ -374,26 +379,16 @@ pub fn publish_usb_function(
     ))
     .map_err(|_| DriverError::NoSpace)?;
 
-    // Wire the controller for message-signalled interrupts so the matched
-    // xHCI driver parks on its completion interrupt rather than busy-polling
-    // (`plans/PI.md` U-MSI). Allocate a vector through the host (the kernel
-    // mints it, brings the platform MSI controller up, and grants this driver
-    // a device resource for the resulting virtual line), program the VL805's
-    // MSI capability with the returned doorbell, and forward the line as the
-    // node's IRQ grant request — covered by the grant `alloc_msi` just minted,
-    // so `hw_emit_node` admits it (no ambient authority). Best-effort: a
-    // platform with no MSI controller (`alloc_msi` → `NotImplemented`) or a
-    // function with no MSI capability (`route_msi` → `NotFound`) simply
-    // publishes the node without an IRQ resource; the matched driver then
-    // waits only for URB submissions and cannot complete interrupt-driven
-    // transfers until hardware supplies an IRQ-capable path.
+    // A platform with no MSI controller, or a function with no MSI capability,
+    // publishes the node without a line, and the xHCI driver refuses to run a
+    // controller it cannot serve by interrupt.
     if let Ok(allocation) = host.alloc_msi() {
         let message = MsiMessage {
             address: allocation.address,
             data: allocation.data,
         };
         if bus.route_msi(bdf, message).is_ok() {
-            node.push_resource(HwResource::irq(u64::from(allocation.line), 1))
+            node.push_resource(allocation.resource())
                 .map_err(|_| DriverError::NoSpace)?;
         }
     }

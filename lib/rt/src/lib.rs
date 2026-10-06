@@ -952,9 +952,9 @@ pub fn resource_grants(buf: &mut [u8]) -> i64 {
 /// A user-space **bus** driver wiring a PCI function for MSI calls this; it
 /// is gated by [`tairix_abi::CapabilityId::IRQ_BIND`] (the same privilege the
 /// driver needs to `irq_bind` the returned line). The kernel grants the
-/// caller a device resource for the line, so it may both `irq_bind` it and
-/// forward it as an [`tairix_abi::hwtree::HwResource::irq`] onto a child node
-/// it publishes — never ambient authority.
+/// caller [`tairix_abi::MsiAllocation::resource`], so it may both `irq_bind`
+/// the line and forward that resource onto a child node it publishes — never
+/// ambient authority.
 ///
 /// # Errors
 ///

@@ -1221,11 +1221,10 @@ pub trait DriverHost {
     /// A PCI bus driver wiring a function for MSI (the BCM2711 PCIe driver
     /// arming the VL805 xHCI) calls this, programs the function's MSI
     /// capability with the returned doorbell (`PciBus`-side), and forwards
-    /// the returned line as an [`HwResource::irq`] on the child node it
-    /// publishes through [`Self::emit_node`], so the downstream driver binds
-    /// it with `irq_bind`/`irq_wait`. The kernel grants the calling task a
-    /// device resource for the line, so the forwarded resource is covered by
-    /// a grant the emitter already holds (no ambient authority).
+    /// [`MsiAllocation::resource`] on the child node it publishes through
+    /// [`Self::emit_node`], so the downstream driver binds the line with
+    /// `irq_bind`/`irq_wait`. That resource is the grant the kernel minted the
+    /// caller, so it is the only form of the line the publish admits.
     ///
     /// The default implementation returns [`DriverError::Unsupported`], the
     /// correct shape for a host with no MSI facility wired (a unit-test seam,

@@ -803,12 +803,12 @@ impl SyscallNumber {
     /// Gated by [`crate::CapabilityId::IRQ_BIND`] — the same privilege a
     /// driver needs to `irq_bind` the resulting line. The kernel's
     /// interrupt controller mints a free MSI vector, lazily brings the
-    /// platform's MSI controller up, and **grants the calling task a device
-    /// resource for the virtual line**, so the caller may both bind it and
-    /// forward it (as an [`crate::hwtree::HwResource::irq`]) onto a child
-    /// node it publishes through [`SyscallNumber::HW_EMIT_NODE`] — never
-    /// ambient authority. A platform with no MSI controller fails closed
-    /// with [`crate::Errno::NotImplemented`]; exhaustion of the vector space
+    /// platform's MSI controller up, and **grants the calling task
+    /// [`crate::MsiAllocation::resource`]**, so the caller may both bind the
+    /// line and forward that resource onto a child node it publishes through
+    /// [`SyscallNumber::HW_EMIT_NODE`] — never ambient authority. A platform
+    /// with no MSI controller fails closed with
+    /// [`crate::Errno::NotImplemented`]; exhaustion of the vector space
     /// fails closed with [`crate::Errno::OutOfRange`]. The returned doorbell
     /// is opaque to the caller — a bus driver writes it verbatim into the
     /// function's MSI capability (the message-address/data registers) so the

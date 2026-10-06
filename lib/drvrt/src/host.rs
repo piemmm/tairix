@@ -862,12 +862,6 @@ impl<S: GrantSyscalls> DriverHost for RtDriverHost<S> {
     }
 
     fn alloc_msi(&self) -> Result<tairix_abi::MsiAllocation, DriverError> {
-        // Allocate an MSI vector through `msi_alloc`: the kernel mints a
-        // vector, grants this task a device resource for the resulting line
-        // (so it may forward it as an `HwResource::irq` on the node it
-        // publishes), and returns the doorbell to program into the function's
-        // MSI capability. The host adds no authority — `CAP_IRQ_BIND` is
-        // enforced kernel-side. A refusal fails closed.
         self.syscalls.msi_alloc().map_err(|ret| {
             Errno::try_from_syscall(ret).map_or(DriverError::DeviceFault, msi_alloc_error)
         })

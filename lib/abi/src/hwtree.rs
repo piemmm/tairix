@@ -1142,13 +1142,6 @@ impl HwResource {
         Self::new_xlate(HwResourceKind::Irq, line, 1, IRQ_MESSAGE, u64::from(entry))
     }
 
-    /// Interrupt `line`, a vector the kernel allocated a driver, raised by
-    /// a message whose MSI-X table entry the driver chooses: it names none.
-    #[must_use]
-    pub fn message_vector(line: u64) -> Self {
-        Self::new_xlate(HwResourceKind::Irq, line, 1, IRQ_MESSAGE, NO_MESSAGE_ENTRY)
-    }
-
     /// Whether this is an [`Irq`](HwResourceKind::Irq) raised by a message
     /// rather than a wire the device holds.
     #[must_use]
@@ -1158,7 +1151,7 @@ impl HwResource {
 
     /// The MSI-X table entry a message-raised [`Irq`](HwResourceKind::Irq)
     /// was routed through; [`None`] for a vector that names none
-    /// ([`Self::message_vector`]), a wired one, or any other kind.
+    /// ([`MsiAllocation::resource`]), a wired one, or any other kind.
     #[must_use]
     pub fn message_entry(&self) -> Option<u16> {
         if self.kind() != Some(HwResourceKind::Irq) || self.flags & IRQ_MESSAGE == 0 {
@@ -2105,10 +2098,10 @@ impl GrantedResource {
 ///
 /// A bus driver that wires a PCI function for message-signalled interrupts
 /// asks the kernel to allocate a vector; the kernel mints a free vector,
-/// grants the caller a device resource for [`line`](Self::line) (so it may
-/// both `irq_bind` it and forward it as an [`HwResource::irq`] onto a child
-/// node), and reports the doorbell `(address, data)` the function's MSI
-/// capability must be programmed with so its message routes to that line.
+/// grants the caller [`resource`](Self::resource) (so it may both `irq_bind`
+/// the line and forward that resource onto a child node), and reports the
+/// doorbell `(address, data)` the function's MSI capability must be
+/// programmed with so its message routes to that line.
 /// The doorbell is **opaque** to the driver — only the kernel's interrupt
 /// controller knows what address/data its MSI controller decodes.
 ///
@@ -2125,8 +2118,7 @@ pub struct MsiAllocation {
     /// register is programmed with (selects the vector at the controller).
     pub data: u32,
     /// The kernel virtual interrupt line the allocated vector is delivered
-    /// on — what the driver `irq_bind`s, and what it forwards as an
-    /// [`HwResource::irq`] onto the child node the interrupt belongs to.
+    /// on: what the driver `irq_bind`s.
     pub line: u32,
 }
 
@@ -2143,6 +2135,21 @@ impl MsiAllocation {
             data,
             line,
         }
+    }
+
+    /// The device resource naming this vector: the grant `msi_alloc` mints,
+    /// and so the one form a child node may carry the line in. It is raised
+    /// by a message, so it holds no pin, and names no MSI-X table entry,
+    /// since the driver routes the function.
+    #[must_use]
+    pub fn resource(&self) -> HwResource {
+        HwResource::new_xlate(
+            HwResourceKind::Irq,
+            u64::from(self.line),
+            1,
+            IRQ_MESSAGE,
+            NO_MESSAGE_ENTRY,
+        )
     }
 
     /// Encode `self` little-endian: the address at offset `0`, the data at
@@ -4092,10 +4099,38 @@ mod tests {
         assert_eq!(HwResource::mmio(4100, 3).message_entry(), None);
         assert!(message.is_message());
         assert!(!HwResource::irq(4100, 1).is_message());
-        let vector = HwResource::message_vector(4100);
+    }
+
+    #[test]
+    fn an_allocated_vector_names_its_one_line_raised_by_a_message() {
+        let vector = MsiAllocation::new(0xFEE0_0000, 0x41, 4100).resource();
+        assert_eq!(vector.kind(), Some(HwResourceKind::Irq));
+        assert_eq!((vector.base(), vector.length()), (4100, 1));
         assert!(vector.is_message(), "a vector is raised by a message");
         assert_eq!(vector.message_entry(), None, "whose entry its driver picks");
+        assert!(!vector.is_edge_triggered());
         assert_eq!(HwResource::from_bytes(&vector.to_le_bytes()), Ok(vector));
+        assert_eq!(
+            MsiAllocation::new(0, 0, 4100).resource(),
+            vector,
+            "the doorbell is the function's to write, not part of the grant"
+        );
+    }
+
+    #[test]
+    fn an_allocated_vector_covers_only_itself_as_the_allocation_names_it() {
+        // Re-described as a wire, the line would have its driver's bind raise
+        // a pin on the child's function.
+        let vector = MsiAllocation::new(0xFEE0_0000, 0x41, 77).resource();
+        assert!(vector.covers(&vector));
+        assert!(!vector.covers(&HwResource::irq(77, 1)));
+        assert!(!vector.covers(&HwResource::irq_at(77, 0)));
+        assert!(!vector.covers(&HwResource::edge_irq_at(77, 0)));
+        assert!(!vector.covers(&MsiAllocation::new(0xFEE0_0000, 0x42, 78).resource()));
+        assert!(
+            !HwResource::irq(77, 1).covers(&vector),
+            "nor a wire a vector"
+        );
     }
 
     #[test]
