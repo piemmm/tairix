@@ -10,8 +10,9 @@ random from a seed, and a tracer that answers what one pixel of one shows.
 
 - `Setting` — the twenty settings a scene is set in: still lifes (a
   checkerboard of spheres and gems, a studio, crystals at dusk, lamps at
-  night, soap bubbles), buildings (colonnades, arcades and aqueducts,
-  rotundas, ruins), sculpture in a landscape, and landscapes (meadows, a
+  night, soap bubbles), buildings (colonnades, arcades in stone or brick and
+  aqueducts, rotundas, ruins, each laid stone by stone, weathered and grown
+  over with moss and lichen), sculpture in a landscape, and landscapes (meadows, a
   forest, mountains over a lake, a coast, desert, snow, a lagoon, canyons, a
   river valley, a stream through its pools, riffles and ledges).
 - `Detail` — how much a scene sets out: `Simple`, every setting plainer

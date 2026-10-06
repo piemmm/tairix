@@ -16,6 +16,7 @@ use tairix_parallel::JobRunner;
 use tairix_util::{fallible, mathf};
 
 use super::architecture::Aqueduct;
+use super::courses::{Dressing, Mason, Opening, Quarry, Ring, Wall, Weathering};
 use super::cracked;
 use super::plants::{self, Character, Fallen, Grassland, Grove, Kind, Stand, Tier};
 use super::plants::{Dead, Drift};
@@ -26,6 +27,7 @@ use super::waterside;
 use super::weather::{self, Climate, Cover, Hour, Outdoors};
 use super::woodland::{Beneath, Deadfall, Wood};
 use super::{direction, lumens, rgb, Composed, Dice, Landing, Look, Stage, View, GOLD};
+use crate::solid::Form;
 
 use crate::channel::{Section, Station};
 use crate::course::Mark;
@@ -33,8 +35,8 @@ use crate::grass::Seen;
 use crate::ground::{Ground, Palette, Road, Rock};
 use crate::heightfield::Heightfield;
 use crate::land::{
-    self, Build, Fields, Horizon, Laid, Land, Lie, NearWater, Nest, Plan, Rivers, Roadway, Surface,
-    Survey, Wear, NESTS,
+    self, Build, Crossing, Fields, Horizon, Laid, Land, Lie, NearWater, Nest, Plan, Rivers,
+    Roadway, Surface, Survey, Wear, NESTS,
 };
 use crate::material::{Finish, Foam, Material, Relief, Wind};
 use crate::noise::smoothstep;
@@ -341,6 +343,8 @@ pub(super) struct Siting {
     pub(super) focus: (f64, f64),
     pub(super) lead: (f64, f64),
     pub(super) path: Option<Vec<Mark>>,
+    /// Level beds to cut into the land about the eye.
+    pub(super) cuttings: Vec<Vec<Mark>>,
 }
 
 impl Siting {
@@ -352,6 +356,7 @@ impl Siting {
             focus: (vantage.eye.x, vantage.eye.z),
             lead: (0.55 * sin, 0.55 * cos),
             path: None,
+            cuttings: Vec::new(),
         }
     }
 }
@@ -433,6 +438,7 @@ impl Scheme {
                     focus,
                     lead: (0.0, 0.0),
                     path: None,
+                    cuttings: Vec::new(),
                 };
                 return Some((None, siting));
             }
@@ -498,6 +504,10 @@ impl Scheme {
             Self::Sculpture(grounds) => return grounds.scheme().site(dice, survey, runner),
         };
         let mut siting = Siting::ahead(&vantage);
+        if let Self::Aqueduct(ref aqueduct) = *self {
+            siting.cuttings = aqueduct.cuttings(&|x, z| survey.height(x, z))?;
+            siting.lead = Aqueduct::lead(&vantage);
+        }
         let paths = match self {
             Self::Meadow | Self::Valley => 0.4,
             Self::Forest { .. } => 0.5,
@@ -551,9 +561,19 @@ impl Scheme {
     }
 }
 
-/// A stone bridge carrying `land`'s road over each river it crosses: a
-/// deck between abutments bedded in either bank, parapets along its edges,
-/// and piers standing in the water where the span is long.
+/// The crossing a land's valley is seen by: its road's bridge over the
+/// river lowest in it, the river the valley was cut by, rather than a brook
+/// up on the land above.
+fn main_crossing(crossings: &[Crossing]) -> Option<&Crossing> {
+    crossings.iter().min_by(|a, b| a.water.total_cmp(&b.water))
+}
+
+/// A stone bridge carrying `land`'s road over each river it crosses: arches
+/// of voussoirs, segmental where the road runs low, springing from piers
+/// cutwatered against the stream; spandrels coursed about a core of rubble
+/// and mortar; parapets coped along its edges; its deck surfaced as the road
+/// is; founded in either bank. The road's bridges were built alike, of one
+/// stone, and are laid as one structure.
 fn bridges(stage: &mut Stage, dice: &mut Dice, land: &Land) -> Option<()> {
     let Some(roadway) = land.road else {
         return Some(());
@@ -561,113 +581,364 @@ fn bridges(stage: &mut Stage, dice: &mut Dice, land: &Land) -> Option<()> {
     if land.crossings.is_empty() {
         return Some(());
     }
-    let stone = stage.stone(dice)?;
+    let quarry = dice.pick(&[
+        Quarry::Limestone,
+        Quarry::Sandstone,
+        Quarry::Granite,
+        Quarry::RedSandstone,
+    ])?;
+    let lowest = main_crossing(&land.crossings).map_or(0.0, |crossing| crossing.water);
+    let weathering = Weathering {
+        damp: dice.range(0.55, 0.9),
+        drought: dice.range(0.1, 0.5),
+        foot: lowest + 0.6,
+    };
+    let age = dice.range(0.4, 0.9);
+    let work = stage.stonework(dice, quarry, (age, weathering))?;
+    let mut mason = Mason::new(work, dice.seed())?;
     for crossing in &land.crossings {
         let (from, to) = (crossing.from, crossing.to);
-        let (dx, dz) = (to.x - from.x, to.z - from.z);
-        let length = mathf::hypot(dx, dz);
-        if length < 1.0 {
+        let length = mathf::hypot(to.x - from.x, to.z - from.z);
+        if length >= 1.0 {
+            bridge(stage, dice, &mut mason, (crossing, roadway, length))?;
+        }
+    }
+    stage.raise(mason, Pose::new(Vec3::ZERO, Frame::WORLD), dice.seed())?;
+    Some(())
+}
+
+/// The rings of a bridge's `openings` through its body standing at `foot`,
+/// `half` its breadth either side, and a cutwater before each pier, `pier`
+/// thick, up and downstream, coursed from the `bed` to a little above the
+/// water's flood at `flood`.
+fn piers(
+    mason: &mut Mason,
+    (foot, openings): (Pose, &[Opening]),
+    (pier, half): (f64, f64),
+    (bed, flood): (f64, f64),
+) -> Option<()> {
+    for opening in openings {
+        let voussoirs = u32::try_from(mathf::round_i32(opening.span / 0.3)).ok()?;
+        mason.arch(&Ring {
+            centre: Vec3::new(opening.at, opening.springing, 0.0),
+            wall: foot,
+            span: opening.span,
+            rise: opening.rise,
+            depth: opening.ring,
+            through: (-half, half),
+            count: voussoirs.max(9),
+            dressing: Dressing::Ashlar,
+            joint: 0.008,
+        })?;
+    }
+    for pair in openings.windows(2) {
+        let [a, b] = pair else {
             continue;
-        }
-        let frame = Frame::turned(mathf::atan2(dx, dz), 0.0);
-        let middle = Vec3::new(
-            f64::midpoint(from.x, to.x),
-            crossing.deck,
-            f64::midpoint(from.z, to.z),
-        );
-        let (half, run) = (0.5 * roadway.width + 0.45, 0.5 * length + 2.0);
-        stage.slab(
-            Pose::new(middle - Vec3::UP * 0.4, frame),
-            Vec3::new(half, 0.4, run),
-            stone,
-        )?;
-        let (ahead_x, ahead_z) = (frame.z.x * run, frame.z.z * run);
-        stage.claim_along(
-            (middle.x - ahead_x, middle.z - ahead_z),
-            (middle.x + ahead_x, middle.z + ahead_z),
-            half,
-        )?;
-        for side in [-1.0, 1.0] {
-            let at = middle + frame.x * (side * (half - 0.22)) + Vec3::UP * 0.5;
-            stage.slab(Pose::new(at, frame), Vec3::new(0.22, 0.5, run), stone)?;
-        }
-        // Each end founded below the lower of its bank and the water.
-        for end in [from, to] {
-            let ground = land
-                .grids
-                .height(&stage.fields, end.x, end.z)
-                .min(crossing.water);
-            let top = crossing.deck - 0.8;
-            let depth = (top - ground + 1.5).max(1.0);
-            let at = Vec3::new(end.x, top - 0.5 * depth, end.z);
-            stage.slab(
-                Pose::new(at, frame),
-                Vec3::new(half + 0.3, 0.5 * depth, 1.4),
-                stone,
-            )?;
-        }
-        // Piers stand in the water only, a few metres apart across the river.
-        let bays = u32::try_from(mathf::round_i32(mathf::floor(
-            crossing.width / dice.range(9.0, 12.0),
-        )))
-        .unwrap_or(0)
-        .min(6)
-            + 1;
-        let bed = crossing.water - 2.5;
-        let (open, water) = (
-            0.5 * (length - crossing.width) / length,
-            crossing.width / length,
-        );
-        for bay in 1..bays {
-            let t = open.max(0.0) + water * f64::from(bay) / f64::from(bays);
-            let (x, z) = (from.x + dx * t, from.z + dz * t);
-            let height = crossing.deck - 0.8 - bed;
-            let at = Vec3::new(x, bed + 0.5 * height, z);
-            stage.slab(
-                Pose::new(at, frame),
-                Vec3::new(0.75 * half, 0.5 * height, 0.7),
-                stone,
-            )?;
+        };
+        let at = f64::midpoint(a.at, b.at);
+        for face in [-1.0, 1.0] {
+            cutwater(mason, (foot, at, face), (pier, half), (bed, flood))?;
         }
     }
     Some(())
 }
 
-/// On the valley's side a way off from where its road bridges the river,
-/// looking toward the bridge: of a few such places, the dry one on ground
-/// level enough to stand on with the best prospect; `None` if the road
-/// crosses no river.
+/// Lay one bridge over `crossing`, `length` from bank to bank, carrying
+/// `roadway`.
+fn bridge(
+    stage: &mut Stage,
+    dice: &mut Dice,
+    mason: &mut Mason,
+    (crossing, roadway, length): (&Crossing, Roadway, f64),
+) -> Option<()> {
+    let (from, to) = (crossing.from, crossing.to);
+    let heading = mathf::atan2(to.x - from.x, to.z - from.z);
+    let frame = Frame::turned(heading - FRAC_PI_2, 0.0);
+    let middle = Vec3::new(
+        f64::midpoint(from.x, to.x),
+        0.0,
+        f64::midpoint(from.z, to.z),
+    );
+    let half = 0.5 * roadway.width + 0.45;
+    let run = length + 4.0;
+    stage.claim_along(
+        (
+            middle.x - frame.x.x * 0.5 * run,
+            middle.z - frame.x.z * 0.5 * run,
+        ),
+        (
+            middle.x + frame.x.x * 0.5 * run,
+            middle.z + frame.x.z * 0.5 * run,
+        ),
+        half,
+    )?;
+    let bed = crossing.water - 2.5;
+    let springing = crossing.water + 0.35;
+    let fill = 0.85;
+    let arches = (crossing.width / dice.range(11.0, 15.0)).max(1.0);
+    let arches = u32::try_from(mathf::round_i32(mathf::ceil(arches)))
+        .ok()?
+        .clamp(1, 7);
+    let bay = 1.1 * crossing.width / f64::from(arches);
+    let pier = (0.18 * bay).clamp(0.9, 2.4);
+    let span = (bay - if arches > 1 { pier } else { 0.0 }).max(2.0);
+    let ring = (0.06 * span + 0.25).clamp(0.35, 0.8);
+    let rise = (crossing.deck - fill - springing - ring).clamp(0.6, 0.5 * span);
+    let mut openings = [Opening {
+        at: 0.0,
+        span,
+        rise,
+        springing: springing - bed,
+        ring,
+    }; 7];
+    let count = usize::try_from(arches).ok()?.min(openings.len());
+    for (index, opening) in (0u32..).zip(openings.iter_mut().take(count)) {
+        opening.at = bay * (f64::from(index) + 0.5 - 0.5 * f64::from(arches));
+    }
+    let openings = openings.get(..count)?;
+    let foot = Pose::new(Vec3::new(middle.x, bed, middle.z), frame);
+    mason.wall(&Wall {
+        pose: foot,
+        length: run,
+        height: crossing.deck - bed,
+        thickness: 2.0 * half,
+        dressing: Dressing::Squared,
+        rise: (0.26, 0.4),
+        long: (1.3, 2.8),
+        joint: 0.012,
+        openings,
+        back: true,
+    })?;
+    piers(
+        mason,
+        (foot, openings),
+        (pier, half),
+        (bed, springing + 0.45 * rise),
+    )?;
+    for side in [-1.0, 1.0] {
+        parapet(
+            mason,
+            dice,
+            (foot, side * (half - 0.19)),
+            (run, crossing.deck - bed),
+        )?;
+    }
+    deck(
+        mason,
+        dice,
+        (foot, crossing.deck - bed),
+        (run, half - 0.38),
+        roadway,
+    )
+}
+
+/// A pier's cutwater on its `face` of the bridge laid at `foot`, `at` along
+/// it: a wedge of stones `pier` wide pointing into the stream from the
+/// bridge's face `half` out, laid in courses from `bed` to `top`.
+fn cutwater(
+    mason: &mut Mason,
+    (foot, at, face): (Pose, f64, f64),
+    (pier, half): (f64, f64),
+    (bed, top): (f64, f64),
+) -> Option<()> {
+    let out = foot.frame.z * face;
+    let frame = Frame {
+        x: foot.frame.x,
+        y: out,
+        z: foot.frame.x.cross(out),
+    };
+    let reach = 0.5 * pier;
+    let mut level = bed;
+    while level < top - 0.05 {
+        let course = (top - level).min(0.42);
+        let local = Vec3::new(
+            at,
+            level - foot.at.y + 0.5 * course,
+            face * (half + 0.5 * reach),
+        );
+        let middle = foot.point_to_world(local);
+        let half = Vec3::new(0.25 * pier, 0.5 * reach, 0.5 * course - 0.006);
+        mason.unit(
+            (Pose::new(middle, frame), half),
+            Form::Block { fan: -100 },
+            Dressing::Squared,
+        )?;
+        level += course;
+    }
+    Some(())
+}
+
+/// A parapet along the bridge laid at `foot`, `across` from its middle
+/// line: a low wall `run` long on the deck `deck` above the foot, its
+/// coping stones set across its top.
+fn parapet(
+    mason: &mut Mason,
+    dice: &mut Dice,
+    (foot, across): (Pose, f64),
+    (run, deck): (f64, f64),
+) -> Option<()> {
+    let thick = 0.38;
+    let at = foot.point_to_world(Vec3::new(0.0, deck, across));
+    mason.wall(&Wall {
+        pose: Pose::new(at, foot.frame),
+        length: run,
+        height: 0.82,
+        thickness: thick,
+        dressing: Dressing::Squared,
+        rise: (0.2, 0.32),
+        long: (1.4, 2.6),
+        joint: 0.012,
+        openings: &[],
+        back: true,
+    })?;
+    let mut along = -0.5 * run;
+    while along < 0.5 * run - 0.05 {
+        let long = dice.range(0.55, 0.95).min(0.5 * run - along);
+        let middle = foot.point_to_world(Vec3::new(along + 0.5 * long, deck + 0.82 + 0.09, across));
+        let half = Vec3::new(0.5 * long - 0.006, 0.09, 0.5 * thick + 0.035);
+        mason.unit(
+            (Pose::new(middle, foot.frame), half),
+            Form::Block { fan: 0 },
+            Dressing::Rubble,
+        )?;
+        along += long;
+    }
+    Some(())
+}
+
+/// The deck of the bridge laid at `foot`, `deck` above it, `run` long and
+/// `half` either side of its line between the parapets: flagged where its
+/// road is a track or gravel, a slab of tarmac where it is tarmac.
+fn deck(
+    mason: &mut Mason,
+    dice: &mut Dice,
+    (foot, deck): (Pose, f64),
+    (run, half): (f64, f64),
+    roadway: Roadway,
+) -> Option<()> {
+    if roadway.surface == Surface::Tarmac {
+        let middle = foot.point_to_world(Vec3::new(0.0, deck - 0.06, 0.0));
+        return mason.unit(
+            (
+                Pose::new(middle, foot.frame),
+                Vec3::new(0.5 * run, 0.06, half),
+            ),
+            Form::Block { fan: 0 },
+            Dressing::Flag,
+        );
+    }
+    let mut across = -half;
+    while across < half - 0.05 {
+        let wide = dice.range(0.3, 0.5).min(half - across);
+        let mut along = -0.5 * run - dice.range(0.0, 0.4);
+        while along < 0.5 * run - 0.05 {
+            let long = dice.range(0.45, 0.75);
+            let (start, end) = (along.max(-0.5 * run), (along + long).min(0.5 * run));
+            if end - start > 0.08 {
+                let settle = Frame::turned(dice.range(-0.01, 0.01), dice.range(-0.01, 0.01));
+                let middle = foot.point_to_world(Vec3::new(
+                    f64::midpoint(start, end),
+                    deck - 0.07 + dice.range(-0.006, 0.002),
+                    across + 0.5 * wide,
+                ));
+                let half = Vec3::new(0.5 * (end - start) - 0.006, 0.07, 0.5 * wide - 0.006);
+                mason.unit(
+                    (Pose::new(middle, foot.frame.rotated_by(settle)), half),
+                    Form::Block { fan: 0 },
+                    Dressing::Flag,
+                )?;
+            }
+            along += long;
+        }
+        across += wide;
+    }
+    Some(())
+}
+
+/// Partway up the valley's side a way off from where its road bridges the
+/// river, looking down toward the bridge, where the valley reads as one: its
+/// floor below and its far side rising beyond. Of a few such places, the dry
+/// one on ground level enough to stand on, the bridge in sight from it, with
+/// the best prospect; `None` if the road crosses no river.
 fn bridge_vantage(survey: &Survey<'_>, dice: &mut Dice) -> Option<Vantage> {
-    let crossing = *survey.crossings().first()?;
-    let target = (
+    let crossing = *main_crossing(survey.crossings())?;
+    let target = Vec3::new(
         f64::midpoint(crossing.from.x, crossing.to.x),
+        crossing.deck,
         f64::midpoint(crossing.from.z, crossing.to.z),
     );
     let height = |x: f64, z: f64| survey.height(x, z);
+    // The river either side of the bridge, which the eye sees running away
+    // beneath it as well as the bridge itself.
+    let (road_x, road_z) = (
+        crossing.to.x - crossing.from.x,
+        crossing.to.z - crossing.from.z,
+    );
+    let road = mathf::hypot(road_x, road_z).max(1e-9);
+    let river = Vec3::new(-road_z / road, 0.0, road_x / road);
+    let banks = [-1.0, 1.0].map(|side| {
+        let at = target + river * (side * 70.0);
+        Vec3::new(at.x, height(at.x, at.z) + 1.0, at.z)
+    });
+    // Strictest first: the bridge and the river by it both in sight, then
+    // the bridge alone.
+    for needs_river in [true, false] {
+        if let Some(vantage) = bridge_spot(survey, dice, (target, &banks), needs_river) {
+            return Some(vantage);
+        }
+    }
+    None
+}
+
+/// Of a few places partway up the valley's side within sight of the bridge
+/// at `target`, and, where `needs_river` asks, of the river by it at one of
+/// `banks`: the one with the best prospect.
+fn bridge_spot(
+    survey: &Survey<'_>,
+    dice: &mut Dice,
+    (target, banks): (Vec3, &[Vec3; 2]),
+    needs_river: bool,
+) -> Option<Vantage> {
+    let height = |x: f64, z: f64| survey.height(x, z);
     let mut best: Option<(f64, Vantage)> = None;
-    for _ in 0..32 {
+    for _ in 0..96 {
         let angle = dice.range(0.0, TAU);
-        let distance = dice.range(45.0, 220.0);
+        let distance = dice.range(120.0, 320.0);
         let spot = (
-            target.0 + mathf::sin(angle) * distance,
-            target.1 + mathf::cos(angle) * distance,
+            target.x + mathf::sin(angle) * distance,
+            target.z + mathf::cos(angle) * distance,
         );
         let lie = survey.lie(spot.0, spot.1);
         let rise = dice.range(1.6, 3.0);
         let turn = dice.angle(-12.0, 12.0);
-        if lie.upright < 0.86 || lie.road > 0.05 || survey.wet_at(spot.0, spot.1) {
+        if lie.upright < 0.8 || lie.road > 0.05 || survey.wet_at(spot.0, spot.1) {
             continue;
         }
         let eye = Vec3::new(spot.0, lie.height + rise, spot.1);
-        let heading = mathf::atan2(target.0 - spot.0, target.1 - spot.1) + turn;
-        // Standing above the bridge sees it whole and the river either side.
-        let above = smoothstep(0.0, 25.0, eye.y - crossing.deck);
-        let score = prospect(&height, eye, heading) + 0.05 * above;
+        let river = !needs_river || banks.iter().any(|&bank| in_sight(&height, eye, bank));
+        if !in_sight(&height, eye, target) || !river {
+            continue;
+        }
+        let heading = mathf::atan2(target.x - spot.0, target.z - spot.1) + turn;
+        let above = eye.y - target.y;
+        let up_the_side = smoothstep(8.0, 45.0, above) * (1.0 - smoothstep(110.0, 180.0, above));
+        let score = prospect(&height, eye, heading) + 0.25 * up_the_side;
         if best.is_none_or(|(most, _)| score > most) {
             best = Some((score, Vantage { eye, heading }));
         }
     }
     best.map(|(_, vantage)| vantage)
+}
+
+/// Whether the land `height` gives leaves `target` in sight from `eye`: no
+/// ground rising into the line between them.
+fn in_sight(height: &dyn Fn(f64, f64) -> f64, eye: Vec3, target: Vec3) -> bool {
+    let steps = 48;
+    (1..steps).all(|step| {
+        let t = f64::from(step) / f64::from(steps);
+        let at = eye.lerp(target, t);
+        height(at.x, at.z) < at.y - 0.5
+    })
 }
 
 /// Paint `land`'s road onto its ground, the road's course handed to the
@@ -2783,7 +3054,7 @@ pub(super) fn lagoon(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
         )
         .with_relief(Relief::grain(0.075, 9.0, dice.seed())),
     )?;
-    pillars(stage, dice, depth, stone)?;
+    pillars(stage, dice, depth)?;
     if dice.chance(0.6) {
         if let Some((x, z)) = stage.place(dice, ((0.0, 0.0), 3.0), 1.2) {
             let major = dice.range(0.9, 1.4);
@@ -2903,26 +3174,60 @@ fn island(stage: &mut Stage, dice: &mut Dice, facing: f64) -> Option<Build> {
 }
 
 /// Stone pillars rising from a lagoon's floor `depth` below its surface,
-/// some crowned with something precious.
-fn pillars(stage: &mut Stage, dice: &mut Dice, depth: f64, stone: usize) -> Option<()> {
+/// some crowned with something precious: drums of weathered stone, greened
+/// and darkened where the sea washes them.
+fn pillars(stage: &mut Stage, dice: &mut Dice, depth: f64) -> Option<()> {
+    let quarry = dice.pick(&[Quarry::Limestone, Quarry::Sandstone, Quarry::Marble])?;
+    let weathering = Weathering {
+        damp: 1.0,
+        drought: 0.0,
+        foot: 0.25,
+    };
+    let age = dice.range(0.5, 0.9);
+    let work = stage.stonework(dice, quarry, (age, weathering))?;
+    let mut mason = Mason::new(work, dice.seed())?;
     for _ in 0..dice.count(3, 6) {
         let radius = dice.range(0.22, 0.45);
         let Some((x, z)) = stage.place(dice, ((0.0, 0.0), 4.0), radius + 0.2) else {
             continue;
         };
         let height = depth + dice.range(0.4, 2.4);
-        let base = Vec3::new(x, -depth, z);
-        stage.post(base, (radius * 1.08, radius, height), stone, dice)?;
+        let drums = u32::try_from(mathf::round_i32(height / (1.7 * radius)).max(1)).ok()?;
+        let tall = height / f64::from(drums);
+        for drum in 0..drums {
+            let foot = -depth + tall * f64::from(drum);
+            let at = Vec3::new(
+                x + dice.range(-0.004, 0.004),
+                foot + 0.5 * tall,
+                z + dice.range(-0.004, 0.004),
+            );
+            let half = Vec3::new(
+                radius * (1.08 - 0.08 * f64::from(drum) / f64::from(drums)),
+                0.5 * tall - 0.0003,
+                radius,
+            );
+            let pose = Pose::new(at, Frame::turned(dice.range(0.0, TAU), 0.0));
+            mason.unit(
+                (pose, half),
+                Form::Drum {
+                    taper: 5,
+                    swell: 0,
+                    flutes: 0,
+                },
+                Dressing::Ashlar,
+            )?;
+        }
         if dice.chance(0.65) {
             let crown = stage.precious(dice)?;
             stage.ball(
-                base + Vec3::UP * height,
+                Vec3::new(x, height - depth, z),
                 radius * dice.range(0.8, 1.3),
                 crown,
                 dice,
             )?;
         }
     }
+    stage.raise(mason, Pose::new(Vec3::ZERO, Frame::WORLD), dice.seed())?;
     Some(())
 }
 
@@ -3125,8 +3430,8 @@ fn canyon_scene(stage: &mut Stage, dice: &mut Dice, land: &Land, vantage: Vantag
 /// its river runs down it, a road crossing it on a stone bridge.
 pub(super) fn valley(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
     let heading = dice.range(0.0, TAU);
-    let height = dice.range(80.0, 180.0);
-    let floor = dice.range(90.0, 180.0);
+    let height = dice.range(200.0, 380.0);
+    let floor = dice.range(50.0, 110.0);
     let reach = 4000.0;
     let fall = dice.range(0.003, 0.007);
     let relief = Terrain {
@@ -3194,6 +3499,19 @@ pub(super) fn valley(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
 
 fn valley_scene(stage: &mut Stage, dice: &mut Dice, land: &Land, vantage: Vantage) -> Option<Look> {
     bridges(stage, dice, land)?;
+    // The riverside trees leave the bridge in sight.
+    if let Some(crossing) = main_crossing(&land.crossings) {
+        let middle = (
+            f64::midpoint(crossing.from.x, crossing.to.x),
+            f64::midpoint(crossing.from.z, crossing.to.z),
+        );
+        let breadth =
+            0.5 * mathf::hypot(
+                crossing.to.x - crossing.from.x,
+                crossing.to.z - crossing.from.z,
+            ) + 8.0;
+        stage.keep_sight((vantage.eye.x, vantage.eye.z), middle, (3.0, breadth))?;
+    }
     let season = dice.pick(&[
         Season::Spring,
         Season::Summer,
@@ -3259,15 +3577,18 @@ fn valley_scene(stage: &mut Stage, dice: &mut Dice, land: &Land, vantage: Vantag
     }
     let weather = weather::outdoors(stage, dice, &MEADOW, vantage.heading)?;
     let fov = dice.angle(44.0, 58.0);
-    // Framed on its bridge, where it has one, a little below the middle of
-    // the picture, so the river runs off either side of it.
-    let view = match land.crossings.first() {
-        Some(crossing) => {
-            let bridge = Vec3::new(
-                f64::midpoint(crossing.from.x, crossing.to.x),
-                crossing.deck,
-                f64::midpoint(crossing.from.z, crossing.to.z),
-            );
+    // Framed on its bridge, where it has one in sight, a little below the
+    // middle of the picture, so the river runs off either side of it.
+    let height = |x: f64, z: f64| land.grids.height(&stage.fields, x, z);
+    let bridge = main_crossing(&land.crossings).map(|crossing| {
+        Vec3::new(
+            f64::midpoint(crossing.from.x, crossing.to.x),
+            crossing.deck,
+            f64::midpoint(crossing.from.z, crossing.to.z),
+        )
+    });
+    let view = match bridge.filter(|&bridge| in_sight(&height, eye, bridge + Vec3::UP)) {
+        Some(bridge) => {
             let lift = mathf::tan(0.12 * fov) * (bridge - eye).length();
             View::Placed {
                 eye,

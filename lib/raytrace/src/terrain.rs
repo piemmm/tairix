@@ -180,13 +180,23 @@ fn mesas((x, z): (f64, f64), (scale, height, steps): (f64, f64, f64), seed: u32)
 
 fn valley((x, z): (f64, f64), (heading, floor, height): (f64, f64, f64), seed: u32) -> f64 {
     let (along, across) = axes((x, z), heading);
-    // The river's course meanders down the valley.
+    // The river's course meanders down the valley, and the spurs between the
+    // side valleys stand out from its walls by turns.
     let course = across - 0.6 * floor * noise2(along / (4.0 * floor), 0.5, seed);
-    let sides = smoothstep(0.5 * floor, 2.5 * floor, course.abs());
-    let broad = 3.0 * floor;
+    let spurs = 0.4 * floor * noise2(along / (1.7 * floor), 3.5, seed ^ 0x51);
+    let out = (course.abs() - spurs).max(0.0);
+    // Each side climbs from the floor to the upland over the run its height
+    // needs at the slope soil keeps to, so even at its steepest it stands.
+    let run = (height / SIDE_SLOPE).max(1.5 * floor);
+    let sides = smoothstep(0.5 * floor, 0.5 * floor + run, out);
+    let broad = run.max(3.0 * floor);
     let hills = 0.5 + 0.5 * fbm2(x / broad, z / broad, seed ^ 9, (7, 0.5, 2.0));
     height * (0.03 + sides * (0.35 + 0.65 * hills)) - 0.04 * height * (1.0 - sides)
 }
+
+/// A valley side's mean slope, as rise over run: steep, yet under what soil
+/// stands at even where the side is steepest, half again as steep.
+const SIDE_SLOPE: f64 = 0.55;
 
 /// Land drawn over a disc: a landform on a regional slope, levelled in a
 /// clearing at the disc's middle where a scene's pieces stand, and either

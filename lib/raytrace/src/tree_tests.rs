@@ -77,7 +77,7 @@ fn counts(tree: &Prototype) -> (usize, usize) {
         .fold((0, 0), |(tubes, leaves), part| match part {
             Part::Tube(_) => (tubes + 1, leaves),
             Part::Leaf(_) => (tubes, leaves + 1),
-            Part::Facet(_) => (tubes, leaves),
+            Part::Facet(_) | Part::Solid(_) => (tubes, leaves),
         })
 }
 
@@ -104,6 +104,7 @@ fn a_tree_grows_to_its_height_with_limbs_and_leaves_within_its_budget() {
         Part::Facet(facet) => facet
             .material
             .is_some_and(|material| grain.contains(&material)),
+        Part::Solid(_) => false,
     }));
 }
 

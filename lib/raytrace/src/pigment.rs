@@ -9,10 +9,12 @@ use core::f64::consts::TAU;
 use tairix_util::mathf;
 
 use crate::bark::Bark;
+use crate::cover::Cover;
 use crate::grass::{grass_kind, vigour, FLOWER, GRASS_KINDS, HEAD, LITTER, WEED};
 use crate::ground::{Ground, Rock};
 use crate::heightfield::CHANNELS;
 use crate::lily::Lily;
+use crate::masonry::Masonry;
 use crate::mud::Mud;
 use crate::noise::{cell, cells2, cells3, noise3, octaves_within, smoothstep, turbulence3};
 use crate::sample::{mix32, unit};
@@ -54,6 +56,9 @@ pub(crate) struct Spot {
     /// How much of the sky a sward's blades hide from the point, `0.0` in the
     /// open: ground under it shows the thatch at its roots.
     pub(crate) thatch: f64,
+    /// How much of the surface moss covers, where the geometry the ray met
+    /// stood its cushions in relief and so has the say.
+    pub(crate) cover: Option<f64>,
 }
 
 /// A surface's colour.
@@ -168,6 +173,10 @@ pub(crate) enum Pigment {
     Ground(Ground),
     /// Bare rock, bedded and jointed.
     Rock(Rock),
+    /// A structure's stones, bricks or mortar, each unit its own shade.
+    Masonry(Masonry),
+    /// The moss and lichen growing on a structure.
+    Cover(Cover),
 }
 
 impl Pigment {
@@ -264,6 +273,8 @@ impl Pigment {
             Self::Crowd(crowd) => crowd.colour(spot),
             Self::Ground(ground) => ground.colour(spot),
             Self::Rock(rock) => rock.colour(p, spot.normal, width),
+            Self::Masonry(masonry) => masonry.colour(spot),
+            Self::Cover(cover) => cover.colour(spot),
         }
     }
 }
@@ -320,11 +331,15 @@ const MOSS_CUSHIONS: f64 = 40.0;
 
 /// A flecked stone at `q`, in grains of its own units, a footprint `detail`
 /// of them across.
-fn speckle(q: Vec3, (base, flecks): (Vec3, [Vec3; 2]), seed: u32, detail: f64) -> Vec3 {
-    let found = cells3(q, seed, 1.0);
-    let grain = unit(found.id);
+pub(crate) fn speckle(q: Vec3, (base, flecks): (Vec3, [Vec3; 2]), seed: u32, detail: f64) -> Vec3 {
+    let mean = base * 0.68 + flecks[0] * 0.2 + flecks[1] * 0.12;
     // Grains too small to see average into the base.
     let resolved = 1.0 - smoothstep(0.3, 1.5, detail);
+    if resolved <= 0.0 {
+        return mean;
+    }
+    let found = cells3(q, seed, 1.0);
+    let grain = unit(found.id);
     let mineral = if grain < 0.2 {
         flecks[0]
     } else if grain < 0.32 {
@@ -332,7 +347,6 @@ fn speckle(q: Vec3, (base, flecks): (Vec3, [Vec3; 2]), seed: u32, detail: f64) -
     } else {
         base
     };
-    let mean = base * 0.68 + flecks[0] * 0.2 + flecks[1] * 0.12;
     mean.lerp(mineral * (0.92 + 0.16 * unit(mix32(found.id))), resolved)
 }
 

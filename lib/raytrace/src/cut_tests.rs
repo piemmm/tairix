@@ -342,3 +342,62 @@ fn a_hit_at_an_open_ends_rim_faces_out_of_the_side() {
     }
     assert!(met > 36, "{met} of 72 met its side below the rim");
 }
+
+/// Near the eye moss stands proud of the bark by no more than its cushions
+/// rise, only where the march found it covering the bark, and that cover is
+/// what the hit carries to the bark's colour.
+#[test]
+fn moss_on_bark_stands_proud_where_it_covers_and_carries_that_cover() {
+    let bark = Bark {
+        kind: BarkKind::Furrowed,
+        light: Vec3::splat(0.4),
+        dark: Vec3::splat(0.05),
+        accent: Vec3::splat(0.3),
+        rise: 4.0,
+        snow: 0.0,
+        moss: 1.0,
+        bare: 0.0,
+        seed: 9,
+    };
+    let reach = bark.moss_reach();
+    let materials = [Material::new(Pigment::Bark(bark.clone()), Finish::Matte)
+        .with_relief(Relief::Bark { bark, depth: DEPTH })];
+    let near = cutting(&materials, Vec3::new(3.0, 0.2, 0.0));
+    let tube = limb(0.3);
+    let alone = tube_alone(&tube);
+    let (mut proud, mut covered) = (0, 0);
+    for step in 0..3000u32 {
+        // About the foot of the trunk, where moss takes an upright one.
+        let height = 0.05 + 0.3 * f64::from(step % 89) / 89.0;
+        let around = core::f64::consts::TAU * f64::from(step) / 3000.0;
+        let ray = level_ray(height, around, 0.0);
+        let plain = alone
+            .intersect(&ray, (1e-9, f64::INFINITY), None)
+            .expect("the tube");
+        let cut = met(&tube, &ray, &near).expect("the mossed limb, face on");
+        let sunk = cut.t - plain.t;
+        assert!(
+            sunk > -reach - 1e-6,
+            "{step}: proud by {} where moss rises {reach}",
+            -sunk
+        );
+        let cover = cut.cover.map_or(0.0, f64::from);
+        if cover > 0.0 {
+            covered += 1;
+        }
+        if sunk < -1e-4 {
+            proud += 1;
+            assert!(
+                cover > 0.0,
+                "{step}: proud by {} with nothing covering it",
+                -sunk
+            );
+        }
+    }
+    // Moss fills the fissures before it takes the crests, so only where it
+    // has does it stand proud of the limb's round.
+    assert!(
+        proud > 20 && covered > 10 * proud,
+        "{proud} proud, {covered} covered"
+    );
+}

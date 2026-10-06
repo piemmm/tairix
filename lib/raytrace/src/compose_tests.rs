@@ -614,92 +614,22 @@ fn a_druses_crystals_grow_out_of_its_rock() {
     assert!(druses > 8, "{druses} druses in 64 scenes");
 }
 
-/// An Ionic capital's scrolls stand out of the faces of its abacus, where
-/// they are seen, rather than buried inside it.
-#[test]
-fn an_ionic_capitals_scrolls_are_in_sight() {
-    let mut scrolls = 0;
-    for seed in 0..24 {
-        for compose in [
-            architecture::colonnade,
-            architecture::rotunda,
-            architecture::ruins,
-        ] {
-            let mut dice = Dice(NonCryptoRng::seed_from_u64(seed));
-            let mut stage = Stage::new(Detail::Maximum.densities()).expect("a stage");
-            compose(&mut stage, &mut dice).expect("a building");
-            scrolls += buried_scrolls(&stage, seed);
-        }
-    }
-    assert!(scrolls > 0, "no Ionic capital in any building");
-}
-
-/// How many Ionic scrolls `stage` holds, each checked to be in sight.
-fn buried_scrolls(stage: &Stage, seed: u64) -> u32 {
-    let geometry = stage.geometry();
-    // The building stands in its clearing before its land is built, and
-    // nothing on the land stands near a capital.
-    let first = |ray: &Ray, far: f64| {
-        stage
-            .objects
-            .iter()
-            .enumerate()
-            .filter(|(_, object)| {
-                !matches!(
-                    object.shape,
-                    Shape::Land { .. } | Shape::Lawn { .. } | Shape::Plane { .. }
-                )
-            })
-            .filter_map(|(index, object)| {
-                let hit = object.shape.intersect(ray, 1e-9, far, geometry)?;
-                Some((index, hit.t))
-            })
-            .min_by(|a, b| a.1.total_cmp(&b.1))
-            .map(|(index, _)| index)
-    };
-    let mut scrolls = 0;
-    for (index, object) in stage.objects.iter().enumerate() {
-        let Shape::Torus {
-            pose,
-            major,
-            minor,
-            arc,
-        } = object.shape
-        else {
-            continue;
-        };
-        if arc > -1.0 || pose.frame.y.y.abs() > 1e-9 {
-            continue;
-        }
-        scrolls += 1;
-        // Straight at its coil from a little way off either face.
-        let coil = pose.at + pose.frame.x * major;
-        let away = 4.0 * (major + minor);
-        let visible = [1.0, -1.0].into_iter().any(|side| {
-            let from = coil + pose.frame.y * (side * away);
-            first(&Ray::new(from, pose.frame.y * -side), away) == Some(index)
-        });
-        assert!(visible, "{seed}: scroll {index} is buried");
-    }
-    scrolls
-}
-
-/// The pieces a still life or a building is about are in the picture.
+/// The pieces a still life is about are in the picture, and so is the
+/// structure a building's scene is about.
 #[test]
 fn the_pieces_stand_in_the_frame() {
     use Setting::{
         Arcade, Bubbles, Classic, Colonnade, Crystals, Lagoon, Nocturne, Rotunda, Ruins, Studio,
     };
-    let framed_settings = [
-        Classic, Studio, Crystals, Nocturne, Bubbles, Colonnade, Arcade, Rotunda, Ruins, Lagoon,
-    ];
+    let still_lifes = [Classic, Studio, Crystals, Nocturne, Bubbles];
+    let buildings = [Colonnade, Arcade, Rotunda, Ruins, Lagoon];
     for Built {
         setting,
         seed,
         scene,
     } in corpus()
         .iter()
-        .filter(|built| framed_settings.contains(&built.setting))
+        .filter(|built| still_lifes.contains(&built.setting) || buildings.contains(&built.setting))
     {
         let geometry = Geometry {
             faces: &scene.faces,
@@ -710,27 +640,54 @@ fn the_pieces_stand_in_the_frame() {
             materials: &[],
             view: None,
         };
-        let framed = scene
-            .objects
-            .iter()
-            .filter(|object| {
-                !matches!(
-                    object.shape,
-                    Shape::Instance { .. } | Shape::Land { .. } | Shape::Lawn { .. }
-                )
-            })
-            .filter_map(|object| object.shape.bounds(geometry))
-            .filter(|bounds| {
+        // A structure is laid unit by unit into an instance of its own;
+        // every other instance is a plant.
+        let structure = |shape: &Shape| match *shape {
+            Shape::Instance { prototype, .. } => scene
+                .prototypes
+                .get(prototype as usize)
+                .is_some_and(|built| {
+                    built
+                        .parts()
+                        .iter()
+                        .any(|part| matches!(part, crate::prototype::Part::Solid(_)))
+                }),
+            _ => false,
+        };
+        let in_frame = |shape: &Shape| {
+            shape.bounds(geometry).is_some_and(|bounds| {
                 scene
                     .camera
                     .project(bounds.centre())
                     .is_some_and(|(x, y)| x.abs() <= 1.0 && y.abs() <= 1.0)
             })
-            .count();
-        assert!(
-            framed >= 3,
-            "{setting:?} {seed}: {framed} pieces in the frame"
-        );
+        };
+        if buildings.contains(setting) {
+            let framed = scene
+                .objects
+                .iter()
+                .filter(|object| structure(&object.shape) && in_frame(&object.shape))
+                .count();
+            assert!(
+                framed >= 1,
+                "{setting:?} {seed}: its structure out of the frame"
+            );
+        } else {
+            let framed = scene
+                .objects
+                .iter()
+                .filter(|object| {
+                    !matches!(
+                        object.shape,
+                        Shape::Instance { .. } | Shape::Land { .. } | Shape::Lawn { .. }
+                    ) && in_frame(&object.shape)
+                })
+                .count();
+            assert!(
+                framed >= 3,
+                "{setting:?} {seed}: {framed} pieces in the frame"
+            );
+        }
     }
 }
 
@@ -968,7 +925,7 @@ fn deadwood_recipes() -> [Recipe; 2] {
 fn prototypes_grow_a_core_apiece_a_unit_as_each_grows_alone() {
     let recipes = every_recipe();
     let grown = |runner: &dyn tairix_parallel::JobRunner| {
-        let mut grow = Grow::new(recipes.len()).expect("room to grow");
+        let mut grow = Grow::new(recipes.len(), VecDeque::new()).expect("room to grow");
         let mut was = 0;
         while !grow.step(&recipes, runner).expect("room to grow") {
             let now = grow.grown.iter().flatten().count();

@@ -25,7 +25,7 @@ use crate::material::{Material, Relief};
 use crate::noise::smoothstep;
 use crate::prototype::{point, round, Tube};
 use crate::shape::{quadratic, Hit};
-use crate::vector::{Ray, Vec3};
+use crate::vector::{single, Ray, Vec3};
 
 /// Where a scene is seen from: the eye, and the angle a pixel spans.
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -143,6 +143,9 @@ struct Limb<'a> {
     bark: Option<&'a Bark>,
     measure: f64,
     depth: f64,
+    /// The most moss on its bark stands proud of it, in the prototype's own
+    /// units, where its bark is cut.
+    moss: f64,
     flare: Option<&'a Flare>,
 }
 
@@ -210,8 +213,44 @@ impl<'a> Limb<'a> {
                 _ => 1.0,
             },
             depth: cut.map_or(0.0, |(_, deepest)| deepest),
+            moss: match (bark, cutting) {
+                (Some(bark), Some(cutting)) => bark.moss_reach() / cutting.scale,
+                _ => 0.0,
+            },
             flare,
         })
+    }
+
+    /// How much of its full relief the bark shows where it is cut `cut`
+    /// deep: the share a moss cushion stands proud by there too.
+    fn shown(&self, cut: f64) -> f64 {
+        if self.depth > 0.0 {
+            (cut / self.depth).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    }
+
+    /// How far the bark at `at`, facing `out`, stands out of the surface
+    /// the limb is cut to `cut` deep there, its moss raised by as much of
+    /// its relief as shows; and how much of it the moss covers.
+    fn relief(
+        &self,
+        (bark, at): (&Bark, &OnLimb),
+        out: Vec3,
+        cut: f64,
+        cutting: &Cutting<'_>,
+    ) -> (f64, f64) {
+        let height = bark.height(at);
+        let (covered, rise) = if self.moss > 0.0 {
+            bark.moss_cushion(at, out, height)
+        } else {
+            (0.0, 0.0)
+        };
+        (
+            cut * (1.0 - height) - rise * self.shown(cut) / cutting.scale,
+            covered,
+        )
     }
 
     /// Where `p` lies on the limb, seen as `cutting` sees it, if anything
@@ -331,10 +370,11 @@ impl<'a> Limb<'a> {
         let over = place.over;
         match (self.bark, cutting) {
             (Some(bark), Some(cutting))
-                if (-place.cut..=0.0).contains(&over) && place.cut > 0.0 =>
+                if (-place.cut..=self.moss * self.shown(place.cut)).contains(&over)
+                    && place.cut > 0.0 =>
             {
                 let at = self.bark_at((self.stem(place.along), place.radius), place, cutting);
-                over + place.cut * (1.0 - bark.height(&at))
+                over + self.relief((bark, &at), place.out, place.cut, cutting).0
             }
             _ => over,
         }
@@ -351,9 +391,12 @@ impl<'a> Limb<'a> {
     fn beyond(&self, end: &End, place: &Place, cutting: Option<&Cutting<'_>>) -> f64 {
         let over = place.over;
         match (self.bark, cutting) {
-            (Some(bark), Some(cutting)) if (-end.cut..=0.0).contains(&over) && end.cut > 0.0 => {
+            (Some(bark), Some(cutting))
+                if (-end.cut..=self.moss * self.shown(end.cut)).contains(&over)
+                    && end.cut > 0.0 =>
+            {
                 let at = self.bark_at((end.stem, end.girth), place, cutting);
-                over + end.cut * (1.0 - bark.height(&at))
+                over + self.relief((bark, &at), end.out, end.cut, cutting).0
             }
             _ => over,
         }
@@ -390,7 +433,8 @@ pub(crate) fn meet_relieved(
 /// The stretch of `ray` within the limb's bounds, if it crosses any: the
 /// cone the limb and its flare lie in between its ends, and the sphere
 /// rounding each end it rounds, which a narrowing limb's cone run on would
-/// not hold.
+/// not hold; each as far out as its moss stands, so a march never begins
+/// within a cushion.
 fn body_span(limb: &Limb<'_>, ray: &Ray) -> Option<(f64, f64)> {
     let ends = [
         (limb.a, limb.ends.0, limb.tube.open[0]),
@@ -402,7 +446,7 @@ fn body_span(limb: &Limb<'_>, ray: &Ray) -> Option<(f64, f64)> {
     ];
     ends.into_iter()
         .filter(|&(_, _, open)| !open)
-        .filter_map(|(middle, radius, _)| sphere_span(ray, middle, radius))
+        .filter_map(|(middle, radius, _)| sphere_span(ray, middle, radius + limb.moss))
         .chain(cone_span(limb, ray))
         .reduce(|(enter, leave), (from, to)| (enter.min(from), leave.max(to)))
 }
@@ -426,7 +470,10 @@ fn cone_span(limb: &Limb<'_>, ray: &Ray) -> Option<(f64, f64)> {
     let (up, rate) = (offset.dot(limb.axis), ray.dir.dot(limb.axis));
     // The side tangent to the ends' spheres stands outside the cone between
     // their rounds by its lean, and meets them a little past each end.
-    let (low, high) = (-limb.ends.0, limb.length + limb.ends.1);
+    let (low, high) = (
+        -limb.ends.0 - limb.moss,
+        limb.length + limb.ends.1 + limb.moss,
+    );
     let slab = if rate.abs() > 1e-12 {
         let (from, to) = ((low - up) / rate, (high - up) / rate);
         (from.min(to), from.max(to))
@@ -437,7 +484,7 @@ fn cone_span(limb: &Limb<'_>, ray: &Ray) -> Option<(f64, f64)> {
     };
     let most = limb.most() / limb.lean.1;
     let taper = limb.taper * most;
-    let radius = limb.radius * most + taper * up;
+    let radius = limb.radius * most + limb.moss + taper * up;
     let a = 1.0 - rate * rate * (1.0 + taper * taper);
     let half_b = offset.dot(ray.dir) - up * rate - taper * rate * radius;
     let c = offset.dot(offset) - up * up - radius * radius;
@@ -478,6 +525,7 @@ fn march(
                 side
             };
             limb.depth * (limb.measure / cutting.scale) * bark.steepest(thinnest * limb.measure)
+                + bark.moss_steepest() * f64::from(u8::from(limb.moss > 0.0))
         }
         _ => 0.0,
     };
@@ -518,7 +566,9 @@ fn march(
         if above >= 0.0 {
             inside = false;
         }
-        let over = place.over;
+        // Moss may stand proud of the bark's outer surface, so the limb's
+        // own gentle rise bounds a step only beyond the moss's reach.
+        let over = place.over - limb.moss;
         let step = if over > 0.0 {
             over / envelope
         } else {
@@ -556,6 +606,19 @@ fn crossing(
     let p = ray.at(t);
     let place = limb.place(p, cutting);
     let spacing = 4.0 * tolerance;
+    let covered = match (limb.bark, cutting) {
+        (Some(bark), Some(cutting)) if limb.moss > 0.0 => {
+            let (stem, girth, out, cut) = match &place.end {
+                Some(end) => (end.stem, end.girth, end.out, end.cut),
+                None => (limb.stem(place.along), place.radius, place.out, place.cut),
+            };
+            (cut > 0.0).then(|| {
+                let at = limb.bark_at((stem, girth), &place, cutting);
+                limb.relief((bark, &at), out, cut, cutting).1
+            })
+        }
+        _ => None,
+    };
     let ((normal, relieved), (stem, girth)) = if let Some(end) = &place.end {
         let normal = if end.cut > 0.0 {
             gradient(p, spacing, |q| limb.above(&limb.place(q, cutting), cutting))
@@ -588,6 +651,7 @@ fn crossing(
         tangent: limb.axis,
         relieved,
         member: None,
+        cover: covered.map(single),
     }
 }
 
@@ -597,15 +661,25 @@ fn crossing(
 /// it, however steep the bark's walls or the flare's lobes; an end, rounded
 /// or open, is not read by the side's, so a hit at its rim faces out of the
 /// side it is on.
-fn gradient(p: Vec3, step: f64, standing: impl Fn(Vec3) -> f64) -> Vec3 {
-    let rise = |way: Vec3| standing(p + way * step) - standing(p - way * step);
-    Vec3::new(
-        rise(Vec3::new(1.0, 0.0, 0.0)),
-        rise(Vec3::UP),
-        rise(Vec3::new(0.0, 0.0, 1.0)),
-    )
-    .normalized()
+pub(crate) fn gradient(p: Vec3, step: f64, standing: impl Fn(Vec3) -> f64) -> Vec3 {
+    // Four samples at a tetrahedron's corners find as much as six along the
+    // axes would.
+    TETRAHEDRON
+        .iter()
+        .fold(Vec3::ZERO, |sum, &corner| {
+            sum + corner * standing(p + corner * step)
+        })
+        .normalized()
 }
+
+/// The corners of a tetrahedron about the origin, each a step along every
+/// axis.
+const TETRAHEDRON: [Vec3; 4] = [
+    Vec3::new(1.0, -1.0, -1.0),
+    Vec3::new(-1.0, -1.0, 1.0),
+    Vec3::new(-1.0, 1.0, -1.0),
+    Vec3::new(1.0, 1.0, 1.0),
+];
 
 #[cfg(test)]
 #[path = "cut_tests.rs"]

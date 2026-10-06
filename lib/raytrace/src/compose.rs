@@ -10,6 +10,7 @@
 
 mod architecture;
 mod chains;
+mod courses;
 mod cracked;
 mod footprint;
 mod landscape;
@@ -263,6 +264,9 @@ pub(super) enum Recipe {
         seed: u32,
         variant: u32,
     },
+    /// A structure its composer laid unit by unit, its hierarchy still to
+    /// build: the next of the stage's assembled buildings.
+    Assembled,
 }
 
 /// The prototypes a composition's recipes are growing: as many at once as
@@ -273,6 +277,9 @@ struct Grow {
     next: usize,
     active: Vec<(usize, Work)>,
     grown: Vec<Option<Prototype>>,
+    /// The structures assembled while the scene was set out, in the order
+    /// their recipes stand.
+    assembled: VecDeque<Building>,
 }
 
 /// A recipe being grown.
@@ -422,11 +429,13 @@ fn begun(recipe: &Recipe) -> Option<Work> {
             seed,
             variant,
         } => Work::Indexing(tile(crust, material, (seed, variant))?),
+        // Taken from the stage's assembled buildings as the grow begins it.
+        Recipe::Assembled => return None,
     })
 }
 
 impl Grow {
-    fn new(recipes: usize) -> Option<Self> {
+    fn new(recipes: usize, assembled: VecDeque<Building>) -> Option<Self> {
         let mut grown = Vec::new();
         grown.try_reserve_exact(recipes).ok()?;
         grown.resize_with(recipes, || None);
@@ -434,6 +443,7 @@ impl Grow {
             next: 0,
             active: Vec::new(),
             grown,
+            assembled,
         })
     }
 
@@ -453,8 +463,12 @@ impl Grow {
             let Some(&recipe) = recipes.get(self.next) else {
                 break;
             };
+            let work = match recipe {
+                Recipe::Assembled => Work::Indexing(self.assembled.pop_front()?),
+                recipe => Work::Planned(recipe),
+            };
             self.active.try_reserve(1).ok()?;
-            self.active.push((self.next, Work::Planned(recipe)));
+            self.active.push((self.next, work));
             self.next += 1;
         }
         tairix_parallel::for_each(runner, &mut self.active, &|(_, work)| work.step());
@@ -630,8 +644,9 @@ impl Composition {
             .ok()?;
         self.jobs.extend(stage.fills.drain(..).map(Job::Fill));
         if !stage.recipes.is_empty() {
+            let assembled = core::mem::take(&mut stage.assembled);
             self.jobs
-                .push_back(Job::Grow(Grow::new(stage.recipes.len())?));
+                .push_back(Job::Grow(Grow::new(stage.recipes.len(), assembled)?));
         }
         // Measured by their trees' prototypes, so surveyed once those grow.
         self.jobs.extend(
@@ -816,9 +831,11 @@ impl Composition {
                     vantage.eye.y - survey.surface(vantage.eye.x, vantage.eye.z),
                 )
             });
-            landing
-                .build
-                .site(siting.focus, siting.lead, siting.path.as_deref())?;
+            landing.build.site(
+                siting.focus,
+                siting.lead,
+                (siting.path.as_deref(), &siting.cuttings),
+            )?;
             return Some(Progress::Again(Job::Land(landing)));
         }
         let mut land = landing.build.finish()?;
@@ -991,8 +1008,9 @@ struct Stage {
     far_woods: Vec<FarWood>,
     beyond: Vec<Matching>,
     /// The prototypes planned, grown in order into `prototypes` before the
-    /// scene is traced.
+    /// scene is traced, and the structures laid unit by unit among them.
     recipes: Vec<Recipe>,
+    assembled: VecDeque<Building>,
     fills: Vec<Fill>,
     materials: Vec<Material>,
     lights: Vec<Light>,
@@ -1057,6 +1075,7 @@ impl Stage {
             far_woods: Vec::new(),
             beyond: Vec::new(),
             recipes: Vec::new(),
+            assembled: VecDeque::new(),
             fills: Vec::new(),
             materials: Vec::new(),
             lights: Vec::new(),
@@ -1100,6 +1119,19 @@ impl Stage {
     /// scene's once it is grown.
     fn plan(&mut self, recipe: &Recipe) -> Option<u32> {
         u32::try_from(push(&mut self.recipes, MAX_PROTOTYPES, *recipe)?).ok()
+    }
+
+    /// Take `building`, a structure laid unit by unit, among the prototypes
+    /// to grow: the index it will have among the scene's once its hierarchy
+    /// is built.
+    fn assemble(&mut self, building: Building) -> Option<u32> {
+        if self.recipes.len() >= MAX_PROTOTYPES {
+            return None;
+        }
+        self.assembled.try_reserve(1).ok()?;
+        let index = self.plan(&Recipe::Assembled)?;
+        self.assembled.push_back(building);
+        Some(index)
     }
 
     /// How many more prototypes the stage plans.
@@ -1367,6 +1399,26 @@ impl Stage {
     /// pond — though what grows wild may stand there.
     fn keep_open(&mut self, at: (f64, f64), radius: f64) -> Option<()> {
         self.footprints.claim(at, radius, Taken::Open)
+    }
+
+    /// Keep open of trees the way the eye at `from` looks to `to`: a strip
+    /// widening from `near` either side of it at the eye to `far` at `to`.
+    fn keep_sight(
+        &mut self,
+        from: (f64, f64),
+        to: (f64, f64),
+        (near, far): (f64, f64),
+    ) -> Option<()> {
+        let (dx, dz) = (to.0 - from.0, to.1 - from.1);
+        let length = mathf::hypot(dx, dz);
+        let mut along = 0.0;
+        while along < length {
+            let t = along / length.max(1e-9);
+            let radius = near + (far - near) * t;
+            self.keep_open((from.0 + dx * t, from.1 + dz * t), radius)?;
+            along += 0.5 * radius;
+        }
+        self.keep_open(to, far)
     }
 
     /// Mark taken the strip `half` either side of the line from `from` to
@@ -1785,21 +1837,6 @@ impl Stage {
         )
     }
 
-    /// An arch `span` wide standing upright across the heading `yaw`, its
-    /// crown `rise` above `base`, its ring `thickness` thick.
-    fn arch(
-        &mut self,
-        base: Vec3,
-        yaw: f64,
-        (span, thickness): (f64, f64),
-        material: usize,
-    ) -> Option<usize> {
-        // Stood on end, the ring's frame −z points up, so the half the arc
-        // keeps is the upper one.
-        let upright = Frame::turned(yaw, FRAC_PI_2);
-        self.arc(base, upright, (0.5 * span, 0.5 * thickness, 0.0), material)
-    }
-
     /// A dome over `centre`.
     fn dome(&mut self, centre: Vec3, radius: f64, material: usize) -> Option<usize> {
         self.add(
@@ -1877,29 +1914,6 @@ impl Stage {
             material,
             Pose::new(Vec3::ZERO, Frame::WORLD),
             false,
-        )
-    }
-
-    /// A tapering post from `from` to `to`, `bottom` and `top` in radius: a
-    /// trunk, a limb, an arm.
-    fn limb(
-        &mut self,
-        from: Vec3,
-        to: Vec3,
-        (bottom, top): (f64, f64),
-        material: usize,
-    ) -> Option<usize> {
-        let axis = to - from;
-        let length = axis.length();
-        if length <= 0.0 {
-            return None;
-        }
-        let frame = Frame::WORLD.aligning(Vec3::UP, axis / length);
-        self.frustum(
-            Pose::new(from, frame),
-            (bottom, top, length),
-            material,
-            true,
         )
     }
 

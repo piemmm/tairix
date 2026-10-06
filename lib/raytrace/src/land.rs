@@ -786,6 +786,9 @@ pub(crate) struct Build {
     rivers: Courses,
     roads: Courses,
     paths: Courses,
+    /// The level beds a scene cuts into the land about the eye: an
+    /// aqueduct's channel running on into a hillside.
+    cuttings: Courses,
     deltas: Vec<Delta>,
     crossings: Vec<Crossing>,
     /// The lakes: the water surface standing at or beside each coarse
@@ -887,6 +890,7 @@ impl Build {
             rivers: Courses::none(),
             roads: Courses::none(),
             paths: Courses::none(),
+            cuttings: Courses::none(),
             deltas: Vec::new(),
             crossings: Vec::new(),
             lakes: Vec::new(),
@@ -1025,7 +1029,7 @@ impl Build {
         &mut self,
         focus: (f64, f64),
         lead: (f64, f64),
-        path: Option<&[Mark]>,
+        (path, cuttings): (Option<&[Mark]>, &[Vec<Mark>]),
     ) -> Option<()> {
         if !matches!(self.stage, Step::Sited) {
             return None;
@@ -1091,6 +1095,17 @@ impl Build {
                 beyond: 3.0,
             };
             self.paths = Courses::new(&[course], bounds, reach)?;
+        }
+        if let (false, Some(outer)) = (cuttings.is_empty(), outermost) {
+            let bounds = (
+                (outer.centre.0 - outer.reach, outer.centre.1 - outer.reach),
+                2.0 * outer.reach,
+            );
+            let reach = Reach {
+                per_width: 1.0,
+                beyond: CUT_REACH,
+            };
+            self.cuttings = Courses::new(cuttings, bounds, reach)?;
         }
         self.stage = self.next_nest(0);
         Some(())
@@ -2061,19 +2076,21 @@ impl Build {
         (value, du / self.step, dv / self.step)
     }
 
-    /// Hold the rows `rows` of `field` level in the relief's clearing, if it
-    /// has one, whatever the droplets did to it.
+    /// Hold row `row` of a grid placed at `placing` to what was made of the
+    /// land whatever the droplets did to it: level in the relief's clearing,
+    /// if it has one, and down to a cutting's bed, which silt settling in a
+    /// level trench would otherwise fill.
     fn hold_row(&self, (row, heights): (usize, &mut [f32]), placing: ((f64, f64), f64)) {
-        let relief = &self.plan.relief;
-        if relief.clearing.is_none() {
-            return;
-        }
         let ((origin_x, origin_z), step) = placing;
         let z = origin_z + real(row) * step;
         for (column, slot) in heights.iter_mut().enumerate() {
             if slot.is_finite() {
                 let x = origin_x + real(column) * step;
-                *slot = single(relief.pin(x, z, f64::from(*slot)));
+                let mut height = self.plan.relief.pin(x, z, f64::from(*slot));
+                if let Some(near) = self.cuttings.nearest(x, z) {
+                    height = height.min(cutting_bed(&near));
+                }
+                *slot = single(height);
             }
         }
     }
@@ -2518,6 +2535,9 @@ impl Build {
             height -= 0.08 * worn;
             lie.path = worn;
         }
+        if let Some(near) = self.cuttings.nearest(x, z) {
+            height = height.min(cutting_bed(&near));
+        }
         (height, lie, channel)
     }
 
@@ -2880,6 +2900,25 @@ fn road_bed(near: &Nearest, natural: f64, (surface, step): (Surface, f64)) -> (f
     let weight = 1.0 - smoothstep(half - 0.3, half + 0.3 + 0.5 * step, across);
     (height, weight)
 }
+
+/// The ground a cutting `near` leaves: its level floor across its breadth,
+/// and beyond it sides climbing as steeply as cut earth stands, back to the
+/// land; and past its ends nothing, so a cutting ends square at the face a
+/// structure there retains. A cutting only ever takes ground away.
+fn cutting_bed(near: &Nearest) -> f64 {
+    if near.past > 0.0 {
+        return f64::INFINITY;
+    }
+    near.level + (near.distance - 0.5 * near.width).max(0.0) * CUT_SLOPE
+}
+
+/// How steeply a cutting's sides climb, as rise over run, and the deepest a
+/// cutting is dug: a work carried on deeper into a hill tunnels instead.
+pub(crate) const CUT_SLOPE: f64 = 1.1;
+pub(crate) const DEEPEST_CUT: f64 = 4.5;
+/// How far beyond its breadth a cutting reaches: as far as its sides climb
+/// from twice the deepest cut, which no work's sampling overshoots.
+const CUT_REACH: f64 = 2.0 * DEEPEST_CUT / CUT_SLOPE;
 
 /// How far inside a finer grid's border, in the cells of the grid about it,
 /// its own surface begins to show, and from where it shows alone.

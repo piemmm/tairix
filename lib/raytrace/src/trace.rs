@@ -1037,6 +1037,7 @@ impl<'a> Tracer<'a> {
             front: surface.front,
             ground,
             thatch: surface.canopy.map_or(0.0, |canopy| 1.0 - canopy.diffuse()),
+            cover: hit.cover.map(f64::from),
         }
     }
 

@@ -131,6 +131,7 @@ fn a_patch_is_made_in_its_marshs_materials_alone() {
                 Part::Tube(tube) => Some(tube.material),
                 Part::Leaf(blade) => Some(blade.material),
                 Part::Facet(facet) => facet.material,
+                Part::Solid(solid) => Some(solid.material()),
             })
             .collect();
         materials.sort_unstable();

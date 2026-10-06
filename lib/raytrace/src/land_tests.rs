@@ -86,6 +86,15 @@ fn built(plan: Plan) -> (Land, Vec<Heightfield>, Courses, bool) {
 
 /// `plan` built as [`built`] builds it, its far land into `far`.
 fn built_on(plan: Plan, far: Heightfield) -> (Land, Vec<Heightfield>, Courses, bool) {
+    built_cut(plan, far, &[])
+}
+
+/// `plan` built as [`built_on`] builds it, `cuttings` dug into it.
+fn built_cut(
+    plan: Plan,
+    far: Heightfield,
+    cuttings: &[Vec<Mark>],
+) -> (Land, Vec<Heightfield>, Courses, bool) {
     let origin = far.placing().0;
     let placeholder = || Heightfield::new(1, origin, 1.0, false).expect("a grid");
     let mut fields = alloc::vec![far, placeholder(), placeholder(), placeholder()];
@@ -101,7 +110,9 @@ fn built_on(plan: Plan, far: Heightfield) -> (Land, Vec<Heightfield>, Courses, b
     loop {
         let done = build.step(&mut fields, &runner).expect("builds");
         if done && build.waiting() {
-            build.site((0.0, 0.0), (0.0, 0.0), None).expect("sited");
+            build
+                .site((0.0, 0.0), (0.0, 0.0), (None, cuttings))
+                .expect("sited");
         } else if done {
             break;
         }
@@ -381,6 +392,7 @@ fn a_low_rivers_bare_margin_is_soaked_and_its_banks_thin_toward_it() {
         turn: 0.0,
         fall: 0.01,
         toward: (0.0, 1.0),
+        past: 0.0,
     };
     let step = 0.05;
     let at = |distance: f64| river_bed(&banked, &near(distance), 12.0, (step, 0.0));
@@ -478,6 +490,55 @@ fn a_channel_stands_as_carved_against_the_droplets() {
         }
     }
     assert!(checked > 50, "only {checked} places in a channel");
+}
+
+/// A cutting is dug to its level floor, stays dug for all the droplets that
+/// would silt it, and ends square: past its end the land is as it would be
+/// uncut.
+#[test]
+fn a_cutting_is_dug_level_and_square_and_stays_dug() {
+    let far = || {
+        let p = plan(false, 3);
+        Heightfield::new(
+            1,
+            (p.relief.centre.0 - p.reach, p.relief.centre.1 - p.reach),
+            1.0,
+            false,
+        )
+        .expect("a grid")
+    };
+    let (land, fields, _, _) = built_cut(plan(false, 3), far(), &[]);
+    let finest = |fields: &[Heightfield], x: f64| land.grids.height(fields, x, 0.0);
+    let lowest = (0..=40)
+        .map(|step| finest(&fields, -60.0 + 3.0 * f64::from(step)))
+        .fold(f64::INFINITY, f64::min);
+    let level = lowest - 2.0;
+    let marks: Vec<Mark> = (0..=12)
+        .map(|step| Mark {
+            x: -60.0 + 10.0 * f64::from(step),
+            z: 0.0,
+            level,
+            width: 6.0,
+            ..Mark::default()
+        })
+        .collect();
+    let (cut, dug, _, _) = built_cut(plan(false, 3), far(), &[marks]);
+    for step in 0..=56 {
+        let x = -56.0 + 2.0 * f64::from(step);
+        let height = cut.grids.height(&dug, x, 0.0);
+        assert!(
+            (height - level).abs() < 0.05,
+            "{x}: {height} on a floor dug to {level}"
+        );
+    }
+    // Past its end, beyond the step the grid softens it across.
+    for x in [72.0, 80.0] {
+        let (height, uncut) = (cut.grids.height(&dug, x, 0.0), finest(&fields, x));
+        assert!(
+            height > level + 1.0 && (height - uncut).abs() < 0.5,
+            "{x}: {height} past the end, {uncut} uncut"
+        );
+    }
 }
 
 /// The fresh water's finer grid meets the far water grid along its border
@@ -605,7 +666,9 @@ fn a_water_grids_units_reach_only_their_own_rows() {
     loop {
         let done = build.step(&mut fields, &runner).expect("builds");
         if done && build.waiting() {
-            build.site((0.0, 0.0), (0.0, 0.0), None).expect("sited");
+            build
+                .site((0.0, 0.0), (0.0, 0.0), (None, &[]))
+                .expect("sited");
         }
         if let Step::Water(row) = build.stage {
             let water = &fields[2];

@@ -289,6 +289,10 @@ pub(crate) struct Weeds {
 /// the open, as a share.
 const BLOWN: f64 = 0.08;
 
+/// The steepest ground fallen leaves stay on, as rise over run: off any
+/// steeper they slide.
+const LEAF_REPOSE: f64 = 0.7;
+
 /// Fallen leaves: the most lying in a cell, the shortest and longest, the
 /// outline of the tree they fell from, and how long ago the most of them
 /// fell, from `0.0` for this autumn's to `1.0` for last year's, rotted.
@@ -1086,12 +1090,16 @@ impl Lawn {
                 (cell_key, corner, plane),
                 testers,
             ),
-            (Cover::Litter(litter), _) => litter_hits(
-                (&litter, thrives, self.cell),
-                (cell_key, corner, plane),
-                testers,
-            ),
-            (Cover::Grass(_), None) => {}
+            (Cover::Litter(litter), _)
+                if mathf::hypot(plane.slope.0, plane.slope.1) <= LEAF_REPOSE =>
+            {
+                litter_hits(
+                    (&litter, thrives, self.cell),
+                    (cell_key, corner, plane),
+                    testers,
+                );
+            }
+            (Cover::Litter(_), _) | (Cover::Grass(_), None) => {}
         }
     }
 
@@ -1621,6 +1629,7 @@ fn member(t: f64, normal: Vec3, mark: u32, along: f64, uv: (f64, f64)) -> Hit {
         tangent: Vec3::ZERO,
         relieved: false,
         member: None,
+        cover: None,
     }
 }
 

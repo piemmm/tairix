@@ -226,3 +226,49 @@ fn a_valley_runs_along_its_compass_heading() {
         }
     }
 }
+
+/// A valley is a valley, not a plain: wherever its course wanders and its
+/// spurs stand out, its sides climb more than a third of its height out of
+/// its floor within the run soil keeps to, and never climb as a cliff does.
+#[test]
+fn a_valleys_sides_climb_out_of_its_floor() {
+    let (heading, floor, height) = (0.7, 70.0, 260.0);
+    let run = (height / SIDE_SLOPE).max(1.5 * floor);
+    // Past the farthest the course wanders and a spur stands out.
+    let beyond = 0.5 * floor + run + floor;
+    for seed in [3, 11, 29] {
+        let form = Landform::Valley {
+            heading,
+            floor,
+            height,
+            seed,
+        };
+        let (sin, cos) = (mathf::sin(heading), mathf::cos(heading));
+        let at = |along: f64, across: f64| {
+            form.height(along * sin + across * cos, along * cos - across * sin)
+        };
+        for step in -6..=6 {
+            let along = 200.0 * f64::from(step);
+            let lowest = (-40..=40)
+                .map(|k| at(along, 0.03 * floor * f64::from(k)))
+                .fold(f64::INFINITY, f64::min);
+            for side in [-1.0, 1.0] {
+                let upland = at(along, side * beyond);
+                assert!(
+                    upland - lowest > 0.35 * height,
+                    "seed {seed} along {along}: a side climbs {} of {height}",
+                    upland - lowest
+                );
+                let climbs = (0..400).map(|k| {
+                    let across = side * beyond * f64::from(k) / 400.0;
+                    (at(along, across + side * 2.0) - at(along, across)).abs() / 2.0
+                });
+                let steepest = climbs.fold(0.0, f64::max);
+                assert!(
+                    steepest < 1.5,
+                    "seed {seed} along {along}: a side as steep as {steepest}"
+                );
+            }
+        }
+    }
+}

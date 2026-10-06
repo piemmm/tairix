@@ -57,6 +57,9 @@ pub(crate) struct Nearest {
     /// Which way the course runs there, as a unit step in x and z:
     /// downstream along a river.
     pub(crate) toward: (f64, f64),
+    /// How far past one of its ends the place lies, along its line there:
+    /// nought where its nearest point falls within the course.
+    pub(crate) past: f64,
 }
 
 /// How far from a course a point may ask after it: `per_width` times the
@@ -286,11 +289,12 @@ impl Courses {
             };
             let (dx, dz) = (next.x - here.x, next.z - here.z);
             let length2 = dx * dx + dz * dz;
-            let share = if length2 > 0.0 {
-                (((x - here.x) * dx + (z - here.z) * dz) / length2).clamp(0.0, 1.0)
+            let unclamped = if length2 > 0.0 {
+                ((x - here.x) * dx + (z - here.z) * dz) / length2
             } else {
                 0.0
             };
+            let share = unclamped.clamp(0.0, 1.0);
             let (px, pz) = (here.x + dx * share, here.z + dz * share);
             let distance = mathf::hypot(x - px, z - pz);
             if best.is_some_and(|held| held.distance <= distance) {
@@ -306,6 +310,22 @@ impl Courses {
             };
             let length = mathf::sqrt(length2);
             let along = self.along.get(mark).copied().unwrap_or(0.0) + share * length;
+            let first = self
+                .starts
+                .get(course)
+                .is_some_and(|&start| start as usize == mark);
+            let last = self
+                .starts
+                .get(course + 1)
+                .map_or(self.marks.len(), |&next| next as usize)
+                == mark + 2;
+            let past = if unclamped > 1.0 && last {
+                (unclamped - 1.0) * length
+            } else if unclamped < 0.0 && first {
+                -unclamped * length
+            } else {
+                0.0
+            };
             let blend = |from: f64, to: f64| from + (to - from) * share;
             best = Some(Nearest {
                 course,
@@ -324,6 +344,7 @@ impl Courses {
                 } else {
                     (0.0, 1.0)
                 },
+                past,
             });
         }
         best

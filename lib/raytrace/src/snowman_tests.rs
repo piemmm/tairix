@@ -180,6 +180,7 @@ fn spot(p: Vec3, width: f64) -> Spot {
         front: true,
         ground: [0.0; CHANNELS],
         thatch: 0.0,
+        cover: None,
     }
 }
 

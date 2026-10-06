@@ -191,6 +191,7 @@ fn spot(key: u32, (at, size): ((f64, f64), f64), front: bool) -> Spot {
         front,
         ground: [0.0; CHANNELS],
         thatch: 0.0,
+        cover: None,
     }
 }
 

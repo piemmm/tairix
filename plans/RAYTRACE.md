@@ -35,8 +35,8 @@ D503, D505 and D514–D520 (the tracer's open defects).
 | RT17 | Pasture, orchards and vineyards: cow-pats with lusher grass about them, fruit trees in rows, vines on trellised rows | planned |
 | RT18 | Overgrown ground: brambles, nettles, docks, scrub and tall weeds where land is left | planned |
 | RT19 | Flowers and weeds by the score, in patches rather than an even sprinkle: clover, dandelions and their clocks shedding seed, thistles, buttercups, daisies, poppies, roses, ivy, wisteria and more | planned |
-| RT20 | Masonry as geometry: rubble and coursed stone of individual imperfect stones in mortar; brick walls of individual bricks, reclaimed, marked, chipped and now and then missing | planned |
-| RT21 | Moss and lichen as geometry: fibrous moss cushions and crustose lichen on stone, wall, bark and roof | planned |
+| RT20 | Masonry as geometry: rubble and coursed stone of individual imperfect stones in mortar; brick walls of individual bricks, reclaimed, marked, chipped and now and then missing | done |
+| RT21 | Moss and lichen as geometry: fibrous moss cushions and crustose lichen on stone, wall, bark and roof | done |
 | RT22 | Farm buildings: stone farmhouses under thatch, slate or tile; timber outbuildings weathered by age; vines, ivy and wisteria climbing the walls | planned |
 | RT23 | Villages: houses on plots along their roads, front and back gardens, closeboard, post-and-rail or no fences with garden gates, chimneys with smoke now and then | planned |
 | RT24 | Night in a village: lit windows, curtains drawn or left open, interiors lit behind them | planned |
@@ -46,7 +46,7 @@ D503, D505 and D514–D520 (the tracer's open defects).
 | RT28 | Mud cracks as modelled geometry: polygonal plates with curled edges and real depth | done |
 | RT29 | Snow that lies unevenly and drifts; snowmen never quite round | done |
 | RT30 | Mountains near and far, ridged and eroded, some snow-capped | planned |
-| RT31 | Weathered stone everywhere: erosion, chips, cracks, lichen and moss on every stone structure | planned |
+| RT31 | Weathered stone everywhere: erosion, chips, cracks, lichen and moss on every stone structure | done |
 | RT32 | The moon by day or by night, at its phase and lit by earthshine, or not at all | done |
 | RT33 | Aerial views: landscapes from altitude, and detailed abstract views | planned |
 | RT34 | Planetary scenes: gas giants, ringed planets, earthlike and Mars-like worlds, views from icy moons, nebulae, stars, and the sun with its corona and spots | planned |
@@ -643,16 +643,57 @@ blades and heads in drilled rows with tramlines; cut fields stand stubble and
 bales of one kind. Flowers and weeds are drawn per species in patches seeded
 by the field's history, never sprinkled evenly.
 
-## RT20–RT25 — Buildings and settlements
+## RT20, RT21, RT31 — Masonry, its cover and its weathering
 
-Masonry is built from individual stones or bricks, each a prototype drawn
-from its own key and placed in courses with mortar recessed between them;
-weathering is geometry and pigment together (RT31). Thatch is a deep layered
-roof of straw over a ridge; timber is weatherboard silvering and splitting
-with age. Night interiors are real rooms behind real glass, lit by lamps the
-scene holds, so a window glows because a room is lit.
+Every structure a scene sets out is laid unit by unit by one mason
+(`compose::courses::Mason`) into one prototype of `Part::Solid`s
+(`solid`), raised as an instance; nothing built is a primitive stand-in.
 
-## RT26–RT31 — Nature detail
+- **Solids.** A unit is a block (a voussoir's ends leaning in by its fan), a
+  drum (taper, entasis, flutes), a turned moulding or an Ionic volute, kept
+  to 52 bytes. Its wear — rounded arrises, chips struck as shallow scallops,
+  lumps, pits, a crack from one face — only takes stone away, is drawn from
+  its key and its structure's age and stone, and shows only as far as each
+  term spans pixels (1.5 to 3), so far off a unit is its exact dressed form.
+  It is sphere traced against the steepest its surface can rise, never in
+  steps under three quarters of a pixel, and its crossing narrowed by regula
+  falsi; its bounds hold every hit, and a shadow sees what the eye does.
+- **Laying.** Courses snap to an arch's springing; a stretch an opening
+  leaves is faced at its ends with quoins laid through the wall; mortar
+  cores are recessed behind the faces and overlap course to course so no
+  coplanar seam shows; arches are voussoir rings or brick rowlocks; bricks
+  keep their bond with headers closing each course and a few lost; columns
+  rise in drums or break off, a ruin's lying along the way they fell; an
+  opening walled up is rubble in mortar. Arches claim the ground beneath
+  their bays as well as their piers.
+- **Colour.** A unit's key gives it its shade and hue, as a quarry's beds
+  differ; age greys and darkens it, rain streaks it, grime and biofilm
+  blacken it in patches and along its joints, what shelters it crusts, a damp
+  foot greens; bricks darken at their fired ends and a reclaimed one keeps its
+  old mortar.
+- **Cover** (`cover`), one reading carried from the solid's geometry to its
+  pigment. Moss spreads from the joints in mats of packed cushions whose
+  ragged margins break into cushions, with lone cushions lodged here and
+  there, the most in joints, and none on a floor worn smooth; lichen in young
+  lone colonies over the mosaics of old crusts, the orange species where birds
+  perch on what faces the sky, each substrate its own species. Moss on bark
+  (`cut`, `bark`) stands in relief near the eye by the same rule, its share
+  matching its pigment's. A roof RT22 lays as solids carries the same cover.
+- **Aqueducts.** Laid out on the land as sited and founded on the land as
+  built wherever that lies lower; its conduit runs on beyond its arches in a
+  cutting the land digs (`land::Build::site`, held through the droplets) to
+  where the hill stands a cutting's depth over it, then through a portal whose
+  headwall steps with the hill, where the hill as built covers the conduit by
+  `COVER`, or else on buried until it does.
+
+## RT22–RT25 — Farm buildings, villages and their interiors
+
+Buildings are laid by the RT20 mason. Thatch is a deep layered roof of straw
+over a ridge; timber is weatherboard silvering and splitting with age. Night
+interiors are real rooms behind real glass, lit by lamps the scene holds, so
+a window glows because a room is lit.
+
+## RT26–RT30 — Nature detail
 
 Mud cracks (RT28, `mud`, `compose::cracked`) are 3 m tiles of the plates of a
 Voronoi desiccation pattern, 10–25 across: each plate curls toward its rim,

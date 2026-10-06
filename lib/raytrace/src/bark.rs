@@ -15,7 +15,8 @@ use tairix_util::mathf;
 use crate::cactus::{
     self, cushion, profile, Ribs, CORK_ROUGH, CROWN, CUSHION, CUTICLE, FELT, MEAN_RIB, WOOL,
 };
-use crate::noise::{cells3, hash2, noise3, smoothstep};
+use crate::cover::{CRUST, MOSS};
+use crate::noise::{cells3, hash2, noise3, smoothstep, NOISE_SLOPE};
 use crate::pigment::{lying, Spot, SNOW};
 use crate::sample::{mix32, unit};
 use crate::vector::Vec3;
@@ -137,12 +138,10 @@ impl OnLimb {
     }
 }
 
-/// Crustose lichen: its paler and its greener crust.
-const LICHEN: [Vec3; 2] = [Vec3::new(0.46, 0.5, 0.42), Vec3::new(0.36, 0.44, 0.24)];
-
-/// Moss in its shade, and where it catches the light: a dark olive, never
-/// the yellow-green of new leaves.
-const MOSS: [Vec3; 2] = [Vec3::new(0.035, 0.06, 0.014), Vec3::new(0.1, 0.15, 0.032)];
+/// How far a moss cushion on bark stands proud at its crown, in metres, and
+/// how many of its mounds span a metre.
+const MOSS_RISE: f64 = 0.009;
+const MOUNDS: f64 = 60.0;
 
 /// Soil splashed up a trunk's foot.
 const SOIL: Vec3 = Vec3::new(0.12, 0.095, 0.07);
@@ -265,11 +264,11 @@ impl Bark {
         // Where a sheet sloughed away the wood lies open, no fissure's floor.
         let hollow = (1.0 - height) * (1.0 - height) * (1.0 - self.gone(&at));
         let colour = colour * (1.0 - self.cavity() * hollow);
+        let mossed = spot
+            .cover
+            .unwrap_or_else(|| self.mossed(&at, spot.normal, height));
         colour
-            .lerp(
-                self.moss_colour(&at, spot.normal),
-                self.mossed(&at, spot.normal, height),
-            )
+            .lerp(self.moss_colour(&at, spot.normal), mossed)
             .lerp(SNOW, lying(self.snow, spot.normal))
     }
 
@@ -785,8 +784,8 @@ impl Bark {
             noise3(at.at((4.0, 1.6)), seed ^ 0x1c) + 0.35 * noise3(at.at((22.0, 9.0)), seed ^ 0x2c),
         ) * lichen
             * smoothstep(0.3, 0.8, height);
-        let crust = LICHEN[0].lerp(
-            LICHEN[1],
+        let crust = CRUST[0].lerp(
+            CRUST[1],
             smoothstep(-0.4, 0.6, noise3(at.at((9.0, 4.0)), seed ^ 0x3c)),
         );
         let streak = smoothstep(0.35, 0.75, noise3(at.at((12.0, 0.35)), seed ^ 0x5c));
@@ -817,6 +816,40 @@ impl Bark {
         let cushions = noise3(at.at((7.0, 3.5)), self.seed ^ 0x3d)
             + 0.3 * noise3(at.at((18.0, 10.0)), self.seed ^ 0x3e);
         smoothstep(spread - 0.06, spread + 0.06, cushions) * f64::from(u8::from(self.moss > 0.0))
+    }
+
+    /// How much of the bark at `at`, facing `out` and standing `height` out
+    /// of its fissures, moss covers, and how far its cushion stands proud of
+    /// the bark there, in metres: what a limb cut in true relief is raised
+    /// by near the eye.
+    pub(crate) fn moss_cushion(&self, at: &OnLimb, out: Vec3, height: f64) -> (f64, f64) {
+        let share = self.mossed(at, out, height);
+        if share <= 0.0 {
+            return (0.0, 0.0);
+        }
+        let mound = 0.55 + 0.45 * noise3(at.at((MOUNDS, MOUNDS)), self.seed ^ 0x3f);
+        (share, MOSS_RISE * smoothstep(0.3, 0.9, share) * mound)
+    }
+
+    /// The most moss stands proud of the bark, in metres: nought on a bark
+    /// moss never takes.
+    pub(crate) fn moss_reach(&self) -> f64 {
+        if self.moss > 0.0 {
+            MOSS_RISE
+        } else {
+            0.0
+        }
+    }
+
+    /// How steeply moss's cushions can rise round and along a limb, a metre
+    /// to a metre: their crisp edges, over the patches' finest noise, and
+    /// their mounds.
+    pub(crate) fn moss_steepest(&self) -> f64 {
+        if self.moss > 0.0 {
+            MOSS_RISE * (NOISE_SLOPE * 18.0 / 0.12 * 2.5 + NOISE_SLOPE * MOUNDS * 0.45)
+        } else {
+            0.0
+        }
     }
 
     /// Moss's own colour at `at`: its tufts, lit where they face the sky.

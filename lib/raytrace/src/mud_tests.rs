@@ -200,6 +200,7 @@ fn a_plates_face_dries_pale_over_its_damp_wall() {
         front: true,
         ground: [0.0; CHANNELS],
         thatch: 0.0,
+        cover: None,
     };
     let (face, wall) = (mud.colour(&spot((0.5, 0.0))), mud.colour(&spot((0.0, 1.0))));
     assert!(

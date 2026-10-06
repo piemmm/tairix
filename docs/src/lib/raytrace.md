@@ -29,9 +29,21 @@ takes, a seed shows the same place at either detail.
   moon; soap bubbles drifting over a meadow. Only the studio is indoors:
   the others stand under the open sky's weather, dusk and night included.
 - **Buildings** stand on a paved plaza, on tiles to the horizon or on open land
-  with woods about it: a colonnade in three orders, a loggia of arches or a
-  two-tier aqueduct across a valley, a domed rotunda, a ruined temple in long
-  grass; a sculpture stands out in a meadow, on dunes or by a mountain lake.
+  with woods about it: a colonnade in three orders, a loggia of arches in
+  stone or in brick or a two-tier aqueduct across a valley, a domed rotunda,
+  a ruined temple in long grass; a sculpture stands out in a meadow, on dunes
+  or by a mountain lake. Every one is laid stone by stone (below).
+- **An aqueduct** spans its valley in an upper tier of arches carrying its
+  channel's covered conduit and, where the valley lies deep, great arches
+  beneath each two of them. It is laid out on the land as it was sited and
+  founded on the land as built wherever that lies lower, so no pier stands
+  on air over a hollow the coarse land smoothed away. Beyond its arches the
+  conduit runs on into either hill in a cutting dug into the land, until the
+  hill stands a cutting's depth over it; there, where the hill as built
+  covers the conduit, it tunnels through a portal whose headwall steps with
+  the hill it holds back and whose arch's tympanum is walled up in rubble
+  over the conduit, and where the hill is too low it runs on buried until
+  the hill covers it.
 - **Landscapes** are lands: rolling meadows, a forest, mountains over a lake,
   an island's coast, dunes or rocky desert, snow over a frozen pond, a lagoon
   at sunset, canyons between mesas, a river valley crossed by a stone
@@ -192,6 +204,15 @@ the millimetre about nought, where a few centimetres decide what shows: the
 ground's colour shows where less than about 6 cm lies, in patches, and grass
 grows only where it lies thinner than the grass stands, a shoot rooted on the
 snow showing only what stands above it.
+
+A valley's sides climb as steeply as its rock stands, its floor wandering
+between spurs, and its view is taken from partway up one side with what it
+looks at in sight. A work may dig cuttings into a land (`land::Build::site`):
+each a level floor along a course, its sides climbing back to the land as
+steeply as cut earth stands and ending square at the face of whatever it
+leads to. A cutting only takes ground away, and it is held through the
+droplets run over the finer grids after, as a river's channel is, so a level
+trench never silts up.
 
 Stones lie on a land as it would have them (`compose::strewn`), from eight
 rocks of its own stone a scene and draws of their own, so a detail strewing
@@ -477,10 +498,10 @@ each where three faces meet within the rest.
   skipped before its box is built, never left to the slab test.
 - **Prototypes** are built once and placed as often as a scene wants: trees
   grown after Weber and Penn (SIGGRAPH 1995), palms and ferns of fronds,
-  saguaros, rocks cut from noised icospheres, fallen trunks and stumps. Each
-  is a list of parts — tapering limbs with rounded or open ends, a limb's
-  foot flaring, leaves cut to an outline, triangles — under a hierarchy of
-  its own, built a slice at a time. A triangle with no material of its own
+  saguaros, rocks cut from noised icospheres, fallen trunks and stumps, and
+  structures laid unit by unit. Each is a list of parts — tapering limbs with
+  rounded or open ends, a limb's foot flaring, leaves cut to an outline,
+  triangles, solids — under a hierarchy of its own, built a slice at a time. A triangle with no material of its own
   takes the one its placing is made in, so one rock is laid wet, dry or
   mossed. A mesh may be mapped: its vertices carry where on its own surface
   they lie, in metres, and its triangles its key, its size and the outline it
@@ -572,11 +593,44 @@ each where three faces meet within the rest.
   gentler rise. Its normal is the gradient of the surface it crossed, read
   either side of the hit, so it faces whatever ray crossed into it however
   steep the bark's walls or the flare's lobes; an end, rounded or open, is not
-  read, so a hit at an open end's rim faces out of the limb's side.
+  read, so a hit at an open end's rim faces out of the limb's side. Moss on
+  the bark is cut in with it, filling the fissures before it takes the
+  crests and standing proud of them by as much as its cushions rise; the
+  limb's bounds and the shell the bark is read in reach as far out as it
+  stands, and the share of bark the march found it covering is the share its
+  colour shows.
 - **Lawns** root a few blades in each cell of a grid over the ground, each
   leaning no further than its cell's walls; a ray walks the cells it crosses
   low enough to reach anything, and the first thing met in the first cell is
-  the nearest of all.
+  the nearest of all. Fallen leaves lie only where the ground is gentler than
+  they stay on.
+- **Solids** (`solid`) are a structure's units: a block, its ends leaning in
+  as a voussoir's do; a drum, tapering and swelling in its entasis and cut in
+  flutes; a turned moulding; an Ionic volute channelled between its turns.
+  Each is worn as long as its structure stood — its arrises rounded, chips
+  struck from them as shallow scallops, its faces lumped where split or
+  hammer-dressed and pitted as they erode, now and then a crack running in
+  from one face — and wear only ever takes stone away. A solid is found by
+  sphere tracing against the steepest its surface can rise, its crossing
+  narrowed by regula falsi, its wear and its cover shown only as far as each
+  spans pixels and settling to its exact form far off; a block's dressed face
+  is read off its rounded box rather than sampled.
+- **Masonry** (`compose::courses`). A mason lays a wall in courses, each
+  course's top brought to an arch's springing, its stones' lengths drawn and
+  their joints broken course on course; each stretch an opening leaves is
+  faced at its ends with quoins laid through the wall, long and short by
+  turns, and the core between its faces is mortar recessed behind them. An
+  arch is a ring of voussoirs, its keystone proud, or rows of brick rowlocks;
+  a brick wall is laid in stretcher, English, Flemish or garden bond, headers
+  closing each course, a few bricks lost; columns rise in drums to their
+  capitals or break off; a round building's courses are rings of stones; a
+  walled-up opening is filled with rubble in mortar. Each unit's colour
+  (`masonry`) is its own shade and hue, as a quarry's beds differ; old stone
+  is greyed and darkened, streaked below where rain runs off, blackened with
+  grime and biofilm in patches and along the joints water creeps into,
+  crusted under what shelters it and greened at a damp wall's foot; a brick
+  is darker at its fired ends, some burnt through, and a reclaimed one keeps
+  the lime mortar of the wall it came from.
 
 The scene's hierarchy over its objects is built a slice at a time too, each
 step parting about a fixed share of the objects between children; the first
@@ -591,6 +645,26 @@ wait there for one another and cross its cells together, the rays standing in
 one cell working out its ground, its stand and each shoot once between them
 and each testing them as it would alone. Every ray still finds exactly what
 it would alone; only what they share is worked out once.
+
+## Moss and lichen
+
+What grows on a structure's stone (`cover`) is read once where a ray meets a
+solid and carried to its colour, so the cushion of moss standing proud near
+the eye and the green it settles to far off lie in the same places; near the
+eye it is the solid's own relief, found by the same march in a shell outside
+the stone. Moss mantles what faces the sky and climbs a damp wall's shaded
+side and its splashed foot, spreading out of the joints where grit and water
+gather: mats of packed cushions in patches ragged at every scale by a warp,
+tapering at their margins until they break into the cushions they are made
+of, each mat one moss or another, hoary where dry and exposed, browning in
+a dry season; beyond them a lone cushion lodges here and there, most of all
+in a joint. Nothing clings to a floor worn smooth by feet. Lichen colonises
+over decades: young colonies stand alone, most of them small, and where it
+grows thick the old crusts have spread until they meet, a mosaic whose joins
+wander, each crust cracked into areoles and edged in its dark prothallus;
+the orange lichens that feed on what birds leave keep to where they perch on
+what faces the sky, and lime-rich stone and acid stone each carry their own
+species.
 
 ## Water and relief
 

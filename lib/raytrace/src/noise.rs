@@ -104,6 +104,9 @@ fn pick(hashed: u32, bits: u32) -> usize {
     (mix32(hashed) >> (32 - bits)) as usize
 }
 
+/// The steepest gradient noise rises, a lattice cell to a lattice cell.
+pub(crate) const NOISE_SLOPE: f64 = 2.5;
+
 /// Perlin's improved gradient noise in three dimensions: roughly
 /// `-1.0..=1.0`, smooth everywhere, nought on every lattice point.
 pub(crate) fn noise3(p: Vec3, seed: u32) -> f64 {
@@ -291,18 +294,41 @@ pub(crate) fn cells2(x: f64, z: f64, seed: u32, jitter: f64) -> Cells {
 
 /// Worley's cellular noise in three dimensions.
 pub(crate) fn cells3(p: Vec3, seed: u32, jitter: f64) -> Cells {
+    cells3_among(p, seed, jitter, |_| true)
+}
+
+/// Worley's cellular noise in three dimensions among only the features
+/// whose hashes `kept` holds, as a sparse scattering of things is found:
+/// the nearest two of those within the cells about `p`.
+///
+/// The point's own cell is searched first, and a cell whose jittered
+/// feature cannot lie nearer than the second nearest yet found is never
+/// hashed, which spares most of the corners; nor is a feature not kept ever
+/// placed.
+pub(crate) fn cells3_among(p: Vec3, seed: u32, jitter: f64, kept: impl Fn(u32) -> bool) -> Cells {
     let ((cx, fx), (cy, fy), (cz, fz)) = (cell(p.x), cell(p.y), cell(p.z));
     let mut found = Cells::NONE;
     let offset = |d: u32| if d == u32::MAX { -1.0 } else { f64::from(d) };
-    for dz in [u32::MAX, 0, 1] {
-        for dy in [u32::MAX, 0, 1] {
-            for dx in [u32::MAX, 0, 1] {
+    // How near along one axis a feature of the cell `d` away can lie to `f`.
+    let gap = |d: u32, f: f64| ((offset(d) + 0.5 - f).abs() - 0.5 * jitter).max(0.0);
+    for dz in [0, u32::MAX, 1] {
+        let gz = gap(dz, fz);
+        for dy in [0, u32::MAX, 1] {
+            let gy = gap(dy, fy);
+            for dx in [0, u32::MAX, 1] {
+                let gx = gap(dx, fx);
+                if gx * gx + gy * gy + gz * gz >= found.second {
+                    continue;
+                }
                 let id = hash3(
                     cx.wrapping_add(dx),
                     cy.wrapping_add(dy),
                     cz.wrapping_add(dz),
                     seed,
                 );
+                if !kept(id) {
+                    continue;
+                }
                 let jittered = |salt: u32, d: u32, f: f64| {
                     offset(d) + 0.5 + jitter * (unit(mix32(id ^ salt)) - 0.5) - f
                 };

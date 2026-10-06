@@ -18,6 +18,7 @@ use crate::flare::Flare;
 use crate::leaf::Outline;
 use crate::lily::Trim;
 use crate::shape::{Aabb, Hit};
+use crate::solid::Solid;
 use crate::vector::{single, singles, Ray, Vec3};
 
 /// A limb: a tube tapering from radius `radii[0]` at `a` to `radii[1]` at
@@ -197,6 +198,7 @@ pub(crate) enum Part {
     Tube(Tube),
     Leaf(Blade),
     Facet(Facet),
+    Solid(Solid),
 }
 
 /// A shape built once, in its own frame.
@@ -580,6 +582,7 @@ impl Prototype {
             }
             Part::Leaf(blade) => meet_blade(blade, ray, span),
             Part::Facet(facet) => self.meet_facet(facet, ray, span),
+            Part::Solid(solid) => solid.meet(ray, (span, seeking), cutting),
         }
     }
 
@@ -642,6 +645,7 @@ impl Prototype {
             tangent: Vec3::ZERO,
             relieved: false,
             member: None,
+            cover: None,
         })
     }
 
@@ -692,6 +696,7 @@ fn part_bounds(part: &Part, vertices: &[[f32; 3]], flares: &[Flare]) -> Option<A
             }
             bounds.padded()
         }
+        Part::Solid(solid) => solid.bounds(),
     })
 }
 
@@ -778,6 +783,7 @@ pub(crate) fn limb_hit(
         tangent: axis,
         relieved: false,
         member: None,
+        cover: None,
     }
 }
 
@@ -818,6 +824,7 @@ fn meet_blade(blade: &Blade, ray: &Ray, (near, far): (f64, f64)) -> Option<Hit> 
         tangent: axis,
         relieved: false,
         member: None,
+        cover: None,
     })
 }
 

@@ -33,6 +33,7 @@ use super::woodland::{Ranking, Runs, KEPT};
 use super::{rgb, Dice, Recipe, Stage, GRANITES};
 use crate::band;
 use crate::channel::{Banked, Form, Section, Station, BROADEST};
+use crate::cover::MOSS;
 use crate::deadwood::{LOG_TAPER, SUNK};
 use crate::ground::Rock;
 use crate::heightfield::Heightfield;
@@ -233,9 +234,8 @@ const OUTCROP: (f64, f64) = (0.6, 1.6);
 /// out in the channel.
 const AT_THE_FOOT: (f64, f64) = (0.7, 0.2);
 const ADRIFT: f64 = 0.04;
-/// How much of a boulder's faces turned to the sky moss mantles, and the
-/// moss's colour.
-const MOSS: (f64, u32) = (0.7, 0x4A_58_26);
+/// How much of a boulder's faces turned to the sky moss mantles.
+const MOSSED: f64 = 0.7;
 
 /// The steepest ground, as rise over run, gravel rests on and a boulder on
 /// soil does; how far a boulder rolls a step, and the most steps it rolls
@@ -606,7 +606,7 @@ fn materials(
         Material::new(pigment.clone(), Finish::Coated { roughness: 0.78 })
             .with_relief(relief.clone()),
     )?;
-    let mossed = pebbles((MOSS.0, rgb(MOSS.1)));
+    let mossed = pebbles((MOSSED, MOSS[0].lerp(MOSS[1], 0.5)));
     let mossy = stage
         .material(Material::new(mossed, Finish::Coated { roughness: 0.9 }).with_relief(relief))?;
     Some((wet, dry, mossy))

@@ -48,6 +48,22 @@ fn the_nearest_point_is_found_with_its_distance_side_and_blended_level() {
     assert!(courses.course(1).is_empty());
 }
 
+/// How far past a course's ends a place lies, along its line there, and
+/// nought anywhere alongside it.
+#[test]
+fn a_place_past_a_courses_end_knows_how_far() {
+    let courses =
+        Courses::new(&[straight()], ((-200.0, -200.0), 400.0), reach(20.0)).expect("courses");
+    let past = |x: f64, z: f64| courses.nearest(x, z).expect("near").past;
+    assert!(past(2.0, 50.0).abs() < 1e-9, "alongside its middle");
+    assert!(past(2.0, 99.0).abs() < 1e-9, "alongside its last stretch");
+    assert!((past(1.0, 104.0) - 4.0).abs() < 1e-9, "past its last mark");
+    assert!(
+        (past(-1.0, -6.0) - 6.0).abs() < 1e-9,
+        "before its first mark"
+    );
+}
+
 #[test]
 fn nothing_is_found_beyond_the_reach_or_outside_the_index() {
     let courses =

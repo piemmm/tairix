@@ -941,6 +941,7 @@ impl Heightfield {
             tangent: Vec3::ZERO,
             relieved: false,
             member: None,
+            cover: None,
         })
     }
 

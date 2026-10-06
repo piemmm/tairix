@@ -394,6 +394,43 @@ fn weeds_lie_low_and_fallen_leaves_flat_on_the_ground() {
     }
 }
 
+/// Fallen leaves lie where the ground is gentle and slide off a steep bank.
+#[test]
+fn fallen_leaves_slide_off_a_steep_bank() {
+    let litter = Lawn {
+        shade: Some(closed_wood()),
+        floor: -1.2,
+        ceiling: 1.2,
+        ..cover(
+            &Cover::Litter(Litter {
+                most: 6,
+                length: (0.05, 0.12),
+                outline: Outline::Ovate { teeth: 6 },
+                age: 0.5,
+            }),
+            0.32,
+        )
+    };
+    let banked = |slope: f64| {
+        let mut field = Heightfield::new(16, (-4.0, -4.0), 0.5, false).expect("a grid");
+        let side = field.side();
+        for (_, band) in field.bands(0..side, side) {
+            for (index, slot) in band.iter_mut().enumerate() {
+                let x = -4.0 + 0.5 * crate::vector::real(index % side);
+                *slot = crate::vector::single(slope * x);
+            }
+        }
+        field.seal();
+        met(&litter, field, (6000, 1.5)).len()
+    };
+    let (level, gentle, steep) = (banked(0.0), banked(0.3), banked(1.1));
+    assert!(
+        level > 50 && 2 * gentle > level,
+        "{gentle} leaves on a gentle slope, {level} on the level"
+    );
+    assert_eq!(steep, 0, "leaves on a bank steeper than they stay on");
+}
+
 /// Rooted on snow, a shoot shows only what stands above it: thin snow
 /// leaves the grass standing nearly as tall, snow deeper than the grass
 /// grows hides it.

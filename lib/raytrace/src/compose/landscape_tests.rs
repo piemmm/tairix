@@ -119,7 +119,9 @@ fn a_backdrops_clearing_stays_level_once_its_land_is_built() {
     loop {
         let done = build.step(&mut stage.fields, &runner).expect("builds");
         if done && build.waiting() {
-            build.site((0.0, 0.0), (0.0, 0.0), None).expect("sited");
+            build
+                .site((0.0, 0.0), (0.0, 0.0), (None, &[]))
+                .expect("sited");
         } else if done {
             break;
         }
@@ -183,7 +185,7 @@ fn a_stream_scene_away_from_its_stream_still_composes() {
     let siting = Siting::ahead(&vantage);
     landing
         .build
-        .site(siting.focus, siting.lead, None)
+        .site(siting.focus, siting.lead, (None, &[]))
         .expect("sited");
     let runner = Threaded::new(8);
     while !landing
@@ -196,4 +198,63 @@ fn a_stream_scene_away_from_its_stream_still_composes() {
     let look = stream_scene(&mut stage, &mut dice, &land, (vantage, Lithology::Granite));
     assert!(look.is_some(), "the scene composes");
     assert!(stage.bed.is_none(), "with no brook to lay");
+}
+
+/// A valley's view is taken from partway up its side with its main bridge —
+/// the road's over the river lowest in it — in sight, not hidden behind the
+/// ground between.
+#[test]
+fn a_valleys_bridge_is_seen_from_up_its_side() {
+    let mut seen = 0;
+    for seed in 0..4 {
+        let (stage, landing, mut dice) = surveyed(valley, seed);
+        let survey = landing.build.survey(&stage.fields).expect("a survey");
+        let Some(main) = main_crossing(survey.crossings()).copied() else {
+            continue;
+        };
+        assert!(
+            survey
+                .crossings()
+                .iter()
+                .all(|crossing| crossing.water >= main.water),
+            "{seed}: the main crossing is not the lowest"
+        );
+        let Some(vantage) = bridge_vantage(&survey, &mut dice) else {
+            continue;
+        };
+        let middle = Vec3::new(
+            f64::midpoint(main.from.x, main.to.x),
+            main.deck,
+            f64::midpoint(main.from.z, main.to.z),
+        );
+        assert!(
+            in_sight(&|x, z| survey.height(x, z), vantage.eye, middle),
+            "{seed}: the bridge hidden"
+        );
+        assert!(
+            vantage.eye.y > main.deck,
+            "{seed}: looking up at the bridge from {:?}",
+            vantage.eye
+        );
+        seen += 1;
+    }
+    assert!(seen >= 2, "only {seen} valleys looked at their bridge");
+}
+
+/// Ground rising into the line between an eye and what it looks at hides
+/// it; open ground does not.
+#[test]
+fn a_ridge_hides_what_lies_behind_it() {
+    let eye = Vec3::new(0.0, 10.0, 0.0);
+    let target = Vec3::new(200.0, 10.0, 0.0);
+    let open = |_: f64, _: f64| 0.0;
+    let ridged = |x: f64, _: f64| {
+        if (90.0..110.0).contains(&x) {
+            15.0
+        } else {
+            0.0
+        }
+    };
+    assert!(in_sight(&open, eye, target));
+    assert!(!in_sight(&ridged, eye, target));
 }

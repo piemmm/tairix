@@ -27,6 +27,7 @@ fn spot(p: Vec3, width: f64) -> Spot {
         front: true,
         ground: [0.0; CHANNELS],
         thatch: 0.0,
+        cover: None,
     }
 }
 
@@ -362,6 +363,7 @@ fn ground_at(pigment: &Pigment, height: f64, normal: Vec3, lie: [f64; CHANNELS])
         front: true,
         ground: lie,
         thatch: 0.0,
+        cover: None,
     })
 }
 
@@ -444,6 +446,7 @@ fn ground_bare_of_snow_shows_none_wherever_its_patches_lie() {
             front: true,
             ground: bare,
             thatch: 0.0,
+            cover: None,
         });
         assert!(
             colour.luminance() < 0.6,
@@ -511,6 +514,7 @@ fn a_woods_floor_is_its_fallen_leaves_where_the_open_ground_is_grass() {
             front: true,
             ground: [0.0, 0.5, 0.0, 1.0, 0.0],
             thatch: 0.0,
+            cover: None,
         })
     };
     let (under, open) = (at(-50.0), at(60.0));
@@ -570,6 +574,7 @@ fn ground_grain_shows_up_close_and_settles_to_its_mean_far_off() {
             front: true,
             ground,
             thatch: 0.0,
+            cover: None,
         })
     };
     let places: Vec<f64> = (0..40).map(|step| 1.0 + 0.003 * f64::from(step)).collect();

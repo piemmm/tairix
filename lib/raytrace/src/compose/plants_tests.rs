@@ -66,7 +66,7 @@ fn crown_spread(tree: &Prototype, height: f64) -> f64 {
                 reach(tube.b, tube.radii[1]);
             }
             crate::prototype::Part::Leaf(leaf) => reach(leaf.base, leaf.length),
-            crate::prototype::Part::Facet(_) => {}
+            crate::prototype::Part::Facet(_) | crate::prototype::Part::Solid(_) => {}
         }
     }
     0.25 * ((most[0] - least[0]) + (most[1] - least[1]))

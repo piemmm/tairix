@@ -48,6 +48,10 @@ pub(crate) struct Hit {
     /// The cell of a wood far off whose tree the ray met, which places that
     /// tree again; `None` on any other shape.
     pub(crate) member: Option<(u32, u32)>,
+    /// How much of the surface moss covers where its geometry stood the
+    /// moss's cushions in relief, for its pigment to colour alike; `None`
+    /// where the pigment reads it from the point.
+    pub(crate) cover: Option<f32>,
 }
 
 impl Hit {
@@ -65,6 +69,7 @@ impl Hit {
             tangent: Vec3::ZERO,
             relieved: false,
             member: None,
+            cover: None,
         }
     }
 }

@@ -120,6 +120,57 @@ fn cellular_noise_finds_the_nearest_features_and_their_walls() {
     assert_ne!(cells2(4.5, -1.5, 11, 0.0).id, id);
 }
 
+/// Sparing the cells whose features cannot be nearer finds just what a
+/// search of every neighbouring cell finds.
+#[test]
+fn cellular_noise_finds_what_a_search_of_every_cell_finds() {
+    let every = |p: Vec3, seed: u32, jitter: f64| {
+        let ((cx, fx), (cy, fy), (cz, fz)) = (cell(p.x), cell(p.y), cell(p.z));
+        let mut found = Cells::NONE;
+        let offset = |d: u32| if d == u32::MAX { -1.0 } else { f64::from(d) };
+        for dz in [u32::MAX, 0, 1] {
+            for dy in [u32::MAX, 0, 1] {
+                for dx in [u32::MAX, 0, 1] {
+                    let id = hash3(
+                        cx.wrapping_add(dx),
+                        cy.wrapping_add(dy),
+                        cz.wrapping_add(dz),
+                        seed,
+                    );
+                    let jittered = |salt: u32, d: u32, f: f64| {
+                        offset(d) + 0.5 + jitter * (unit(mix32(id ^ salt)) - 0.5) - f
+                    };
+                    record(
+                        &mut found,
+                        Vec3::new(
+                            jittered(1, dx, fx),
+                            jittered(2, dy, fy),
+                            jittered(3, dz, fz),
+                        ),
+                        id,
+                    );
+                }
+            }
+        }
+        (
+            mathf::sqrt(found.nearest),
+            mathf::sqrt(found.second),
+            found.id,
+        )
+    };
+    for jitter in [0.0, 0.5, 0.85, 0.9, 1.0] {
+        for p in spread(4000) {
+            let found = cells3(p, 23, jitter);
+            let (nearest, second, id) = every(p, 23, jitter);
+            assert_eq!(
+                (found.nearest, found.second, found.id),
+                (nearest, second, id),
+                "{p:?} jittered {jitter}"
+            );
+        }
+    }
+}
+
 #[test]
 fn smoothstep_runs_from_nought_to_one_between_its_edges() {
     for (edges, at, expected) in [
