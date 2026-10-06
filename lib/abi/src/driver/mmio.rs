@@ -101,9 +101,6 @@ impl RegisterWindow {
     /// * `base` points at a readable + writable, caching-disabled
     ///   mapping of exactly `len` bytes that stays valid for the
     ///   whole lifetime of the returned window;
-    /// * `base` is aligned to at least 4 bytes (a page-aligned MMIO
-    ///   mapping satisfies this), so a naturally-aligned `offset`
-    ///   yields a naturally-aligned access;
     /// * no other live reference aliases that byte range;
     /// * `phys` is the device-visible physical base of `base[0]`.
     #[must_use]
@@ -130,7 +127,9 @@ impl RegisterWindow {
     }
 
     /// Validate `offset` for an access of `width` bytes, returning the
-    /// in-bounds, correctly-aligned byte pointer.
+    /// in-bounds byte pointer, aligned to `width` in memory. The base is
+    /// wherever a device placed its registers, so the access's own alignment
+    /// is checked rather than inferred from the offset's.
     fn checked_ptr(&self, offset: usize, width: usize) -> Result<*mut u8, WindowError> {
         if !offset.is_multiple_of(width) {
             return Err(WindowError::Misaligned);
@@ -142,7 +141,11 @@ impl RegisterWindow {
         // SAFETY: `offset < len` (since `end <= len` and `width >= 1`),
         // so the pointer stays within the single mapped allocation the
         // construction invariant guarantees.
-        Ok(unsafe { self.base.as_ptr().add(offset) })
+        let ptr = unsafe { self.base.as_ptr().add(offset) };
+        if !ptr.addr().is_multiple_of(width) {
+            return Err(WindowError::Misaligned);
+        }
+        Ok(ptr)
     }
 
     /// Volatile-read a `u8` at `offset`.
@@ -161,11 +164,11 @@ impl RegisterWindow {
     ///
     /// # Errors
     ///
-    /// [`WindowError::Misaligned`] if `offset` is odd, or
-    /// [`WindowError::OutOfBounds`] if the access overruns the window.
-    #[allow(clippy::cast_ptr_alignment)] // base is ≥ 4-byte aligned per
-                                         // `from_mapping`'s contract and `offset` is 2-byte aligned per
-                                         // `checked_ptr`, so the resulting pointer is naturally aligned.
+    /// [`WindowError::Misaligned`] unless the access is 2-byte aligned, at
+    /// `offset` and in memory, or [`WindowError::OutOfBounds`] if it overruns
+    /// the window.
+    // `checked_ptr` proves the pointer aligned to the access's width.
+    #[allow(clippy::cast_ptr_alignment)]
     pub fn read_u16(&self, offset: usize) -> Result<u16, WindowError> {
         let ptr = self.checked_ptr(offset, 2)?;
         // SAFETY: in-bounds and 2-byte aligned per `checked_ptr`.
@@ -176,12 +179,11 @@ impl RegisterWindow {
     ///
     /// # Errors
     ///
-    /// [`WindowError::Misaligned`] if `offset` is not a multiple of
-    /// four, or [`WindowError::OutOfBounds`] if the access overruns
+    /// [`WindowError::Misaligned`] unless the access is 4-byte aligned, at
+    /// `offset` and in memory, or [`WindowError::OutOfBounds`] if it overruns
     /// the window.
-    #[allow(clippy::cast_ptr_alignment)] // base is ≥ 4-byte aligned per
-                                         // `from_mapping`'s contract and `offset` is 4-byte aligned per
-                                         // `checked_ptr`, so the resulting pointer is naturally aligned.
+    // `checked_ptr` proves the pointer aligned to the access's width.
+    #[allow(clippy::cast_ptr_alignment)]
     pub fn read_u32(&self, offset: usize) -> Result<u32, WindowError> {
         let ptr = self.checked_ptr(offset, 4)?;
         // SAFETY: in-bounds and 4-byte aligned per `checked_ptr`.
@@ -193,12 +195,13 @@ impl RegisterWindow {
     /// # Errors
     ///
     /// [`WindowError::Misaligned`] unless the access is 8-byte aligned in
-    /// memory (the window's base is only promised 4), or
-    /// [`WindowError::OutOfBounds`] if it overruns the window.
+    /// memory, or [`WindowError::OutOfBounds`] if it overruns the window.
+    // `checked_ptr` proves the pointer aligned to the access's width.
+    #[allow(clippy::cast_ptr_alignment)]
     pub fn read_u64(&self, offset: usize) -> Result<u64, WindowError> {
-        let ptr = self.checked_ptr_u64(offset)?;
-        // SAFETY: in-bounds and 8-byte aligned per `checked_ptr_u64`.
-        Ok(unsafe { ptr.read_volatile() })
+        let ptr = self.checked_ptr(offset, 8)?;
+        // SAFETY: in-bounds and 8-byte aligned per `checked_ptr`.
+        Ok(unsafe { ptr.cast::<u64>().read_volatile() })
     }
 
     /// Volatile-write a little-endian `u64` at `offset` as one access.
@@ -206,23 +209,15 @@ impl RegisterWindow {
     /// # Errors
     ///
     /// As [`Self::read_u64`].
+    // `checked_ptr` proves the pointer aligned to the access's width.
+    #[allow(clippy::cast_ptr_alignment)]
     pub fn write_u64(&self, offset: usize, value: u64) -> Result<(), WindowError> {
-        let ptr = self.checked_ptr_u64(offset)?;
-        // SAFETY: in-bounds and 8-byte aligned per `checked_ptr_u64`; the
+        let ptr = self.checked_ptr(offset, 8)?;
+        // SAFETY: in-bounds and 8-byte aligned per `checked_ptr`; the
         // construction invariant makes the mapping writable and this window
         // its unique owner.
-        unsafe { ptr.write_volatile(value) };
+        unsafe { ptr.cast::<u64>().write_volatile(value) };
         Ok(())
-    }
-
-    // The alignment is checked at run time just before the cast.
-    #[allow(clippy::cast_ptr_alignment)]
-    fn checked_ptr_u64(&self, offset: usize) -> Result<*mut u64, WindowError> {
-        let ptr = self.checked_ptr(offset, 8)?;
-        if !(ptr as usize).is_multiple_of(8) {
-            return Err(WindowError::Misaligned);
-        }
-        Ok(ptr.cast::<u64>())
     }
 
     /// Volatile-write a `u8` at `offset`.
@@ -243,11 +238,11 @@ impl RegisterWindow {
     ///
     /// # Errors
     ///
-    /// [`WindowError::Misaligned`] if `offset` is odd, or
-    /// [`WindowError::OutOfBounds`] if the access overruns the window.
-    #[allow(clippy::cast_ptr_alignment)] // base is ≥ 4-byte aligned per
-                                         // `from_mapping`'s contract and `offset` is 2-byte aligned per
-                                         // `checked_ptr`, so the resulting pointer is naturally aligned.
+    /// [`WindowError::Misaligned`] unless the access is 2-byte aligned, at
+    /// `offset` and in memory, or [`WindowError::OutOfBounds`] if it overruns
+    /// the window.
+    // `checked_ptr` proves the pointer aligned to the access's width.
+    #[allow(clippy::cast_ptr_alignment)]
     pub fn write_u16(&self, offset: usize, value: u16) -> Result<(), WindowError> {
         let ptr = self.checked_ptr(offset, 2)?;
         // SAFETY: in-bounds and 2-byte aligned per `checked_ptr`.
@@ -259,12 +254,11 @@ impl RegisterWindow {
     ///
     /// # Errors
     ///
-    /// [`WindowError::Misaligned`] if `offset` is not a multiple of
-    /// four, or [`WindowError::OutOfBounds`] if the access overruns
+    /// [`WindowError::Misaligned`] unless the access is 4-byte aligned, at
+    /// `offset` and in memory, or [`WindowError::OutOfBounds`] if it overruns
     /// the window.
-    #[allow(clippy::cast_ptr_alignment)] // base is ≥ 4-byte aligned per
-                                         // `from_mapping`'s contract and `offset` is 4-byte aligned per
-                                         // `checked_ptr`, so the resulting pointer is naturally aligned.
+    // `checked_ptr` proves the pointer aligned to the access's width.
+    #[allow(clippy::cast_ptr_alignment)]
     pub fn write_u32(&self, offset: usize, value: u32) -> Result<(), WindowError> {
         let ptr = self.checked_ptr(offset, 4)?;
         // SAFETY: in-bounds and 4-byte aligned per `checked_ptr`.
@@ -474,9 +468,9 @@ mod tests {
         assert_eq!(w.read_u64(24), Err(WindowError::OutOfBounds));
         assert_eq!(w.write_u64(20, 1), Err(WindowError::Misaligned));
 
-        // A base the contract only promises 4-byte alignment for can make no
-        // 64-bit access: an 8-multiple offset is misaligned in memory, and an
-        // 8-aligned address is not an 8-multiple offset.
+        // A base 4 bytes off 8 can make no 64-bit access: an 8-multiple
+        // offset is misaligned in memory, and an 8-aligned address is not an
+        // 8-multiple offset.
         let base = NonNull::new(buf.0[4..].as_mut_ptr()).expect("non-null");
         // SAFETY: the slice covers 20 bytes of the borrowed buffer, which
         // outlives the window, and nothing else aliases it meanwhile.
@@ -484,6 +478,30 @@ mod tests {
         assert_eq!(shifted.read_u64(0), Err(WindowError::Misaligned));
         assert_eq!(shifted.read_u64(4), Err(WindowError::Misaligned));
         assert_eq!(shifted.read_u32(4).expect("4-aligned"), 0x89AB_CDEF);
+    }
+
+    /// A window's base is wherever a device placed its registers, so an
+    /// odd one is not trusted: every wider access through it is refused,
+    /// never made misaligned.
+    #[test]
+    fn a_base_off_the_access_width_refuses_the_access() {
+        let mut buf = Aligned([0u8; 16]);
+        let base = NonNull::new(buf.0[2..].as_mut_ptr()).expect("non-null");
+        // SAFETY: the slice covers 14 bytes of the borrowed buffer, which
+        // outlives the window, and nothing else aliases it meanwhile.
+        let w = unsafe { RegisterWindow::from_mapping(0, base, 14) };
+        assert_eq!(w.read_u32(0), Err(WindowError::Misaligned));
+        assert_eq!(w.write_u32(4, 1), Err(WindowError::Misaligned));
+        assert_eq!(w.read_u16(0).expect("2-aligned"), 0);
+        w.write_u16(2, 0xBEEF).expect("2-aligned");
+        assert_eq!(buf.0[4..6], [0xEF, 0xBE]);
+
+        let base = NonNull::new(buf.0[1..].as_mut_ptr()).expect("non-null");
+        // SAFETY: as above, over 15 bytes.
+        let odd = unsafe { RegisterWindow::from_mapping(0, base, 15) };
+        assert_eq!(odd.read_u16(0), Err(WindowError::Misaligned));
+        assert_eq!(odd.write_u16(2, 1), Err(WindowError::Misaligned));
+        assert_eq!(odd.read_u8(0).expect("bytes are never misaligned"), 0);
     }
 
     #[test]

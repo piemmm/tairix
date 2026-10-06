@@ -44,6 +44,26 @@ pub const EXTENDED_REGISTER: u16 = 0x100 >> 2;
 /// space.
 const REGISTER_LIMIT: u16 = 0x1000 >> 2;
 
+/// Header dword indices every layout shares (PCI Local Bus 3.0 §6.1): the
+/// command and status register, the header type's, and the first BAR.
+pub(crate) const COMMAND_STATUS: u8 = 1;
+pub(crate) const HEADER_TYPE: u8 = 3;
+pub(crate) const FIRST_BAR: u8 = 4;
+/// A bridge's bus numbers (PCI-to-PCI Bridge 1.2 §3.2.5.3).
+pub(crate) const BUS_NUMBERS: u8 = 6;
+
+/// Header layouts (PCI Local Bus 3.0 §6.1, PCI-to-PCI Bridge 1.2 §3.2).
+pub(crate) const HEADER_DEVICE: u8 = 0;
+pub(crate) const HEADER_BRIDGE: u8 = 1;
+pub(crate) const HEADER_CARDBUS: u8 = 2;
+/// The header type's multi-function bit.
+pub(crate) const MULTIFUNCTION: u8 = 0x80;
+
+/// The BAR slots each layout carries: a bridge's third would be its bus
+/// numbers.
+pub(crate) const DEVICE_BAR_SLOTS: u8 = 6;
+pub(crate) const BRIDGE_BAR_SLOTS: u8 = 2;
+
 impl ConfigAddress {
     /// Encoded `0xCF8` value, with the high enable bit set.
     ///
@@ -119,13 +139,12 @@ impl ConfigAddress {
 ///   (the x86_64 backend lives in the architecture port).
 /// * [`crate::mech_ecam::EcamConfigSpace`] — memory-mapped `PCIe`
 ///   enhanced configuration access over a kernel-mapped
-///   [`tairix_abi::RegisterWindow`], the path the Pi 4 (BCM2711)
-///   root complex and any other `PCIe` host bridge use.
+///   [`tairix_abi::RegisterWindow`], the path of every host bridge with a
+///   flat configuration region.
+/// * [`crate::mech_brcm::BrcmConfigSpace`] — the BCM2711 root complex's
+///   index/data window.
 /// * `tests::MockConfigSpace` — table-driven fixture for the
 ///   in-crate enumeration tests.
-///
-/// The trait is intentionally small: writes only exist to support
-/// the BAR-sizing probe sequence (PCI conformance).
 pub trait ConfigSpace {
     /// Read a 32-bit configuration dword.
     fn read32(&self, addr: ConfigAddress) -> u32;

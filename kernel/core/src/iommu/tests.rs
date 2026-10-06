@@ -145,6 +145,7 @@ fn unit(model: &'static ModelUnit<'static>, reserved: Vec<IommuReservedWindow>) 
         node: UNIT_NODE,
         unit: model,
         reserved,
+        faults: None,
     }
 }
 
@@ -174,14 +175,20 @@ fn started_with(
 ) -> Translation {
     tree.add(&device_node(DEVICE, STREAM));
     let mastering = port.map(|port| Mastering::new(port, audit));
-    let (translation, outcomes) = Translation::start(
+    let (translation, outcomes) = Translation::started(
         vec![unit(model, reserved)],
         vec![REGISTERS],
         tree,
         audit,
         mastering,
     );
-    assert_eq!(outcomes, [(UNIT_NODE, Ok(Quiesced::default()))]);
+    assert_eq!(
+        outcomes,
+        [(
+            UNIT_NODE,
+            UnitOutcome::Translating(Quiesced::default(), tairix_kernel_iommu_api::Stage::Second,)
+        )]
+    );
     translation
 }
 
@@ -260,6 +267,8 @@ impl BusMastering for Port {
             refused: 0,
         }
     }
+
+    fn set_wired_interrupt(&self, _node: u32, _raise: bool) {}
 }
 
 fn streams(stream: u32) -> Named {
@@ -272,10 +281,19 @@ fn a_node_naming_a_stream_on_a_started_unit_is_translated() {
     let translation = started(model, tree, Vec::new());
     assert!(model.enabled());
     assert_eq!(translation.units(), 1);
-    assert!(translation.translates(DEVICE));
+    assert_eq!(translation.dma_path(DEVICE), DmaPath::Translated);
     tree.add(&HwNode::new(8, HW_NODE_ROOT_ID, HwDeviceClass::Network));
-    assert!(!translation.translates(8), "a node naming no stream");
-    assert!(!translation.translates(9), "a node the tree does not hold");
+    assert_eq!(
+        translation.dma_path(8),
+        DmaPath::Untranslated,
+        "a node naming no stream"
+    );
+    assert_eq!(
+        translation.dma_path(9),
+        DmaPath::Stranded { unit: None },
+        "a node the tree does not hold masters nothing"
+    );
+    assert!(!translation.strands());
 }
 
 #[test]
@@ -527,6 +545,22 @@ fn firmware_windows_stay_reachable_before_during_and_after_an_owner() {
     assert_eq!(model.access(STREAM, iova, true), None);
 }
 
+/// A window firmware keeps for reading alone is kept for reading alone,
+/// before an owner and under one.
+#[test]
+fn a_firmware_window_keeps_only_the_access_firmware_allows() {
+    let (model, tree) = rig!(Behaviour::Correct);
+    let window =
+        IommuReservedWindow::new(STREAM, 0x7B80_0000, 0x10_0000, ReservedAccess::Read).unwrap();
+    let translation = started(model, tree, vec![window]);
+    let inside = 0x7B80_0040;
+    assert_eq!(model.access(STREAM, inside, false), Some(inside));
+    assert_eq!(model.access(STREAM, inside, true), None, "before an owner");
+    translation.map(DEVICE, 1, block(0x8000_0000), 0).unwrap();
+    assert_eq!(model.access(STREAM, inside, false), Some(inside));
+    assert_eq!(model.access(STREAM, inside, true), None, "under the owner");
+}
+
 /// A unit noting, at each attach, whether the owner it watches held its state.
 struct Watching {
     model: &'static ModelUnit<'static>,
@@ -585,8 +619,8 @@ impl IommuUnit for Watching {
         self.model.sync(domain)
     }
 
-    fn route_faults(&self, address: u64, data: u32) -> Result<(), IommuError> {
-        self.model.route_faults(address, data)
+    fn route_faults(&self, route: tairix_kernel_iommu_api::FaultRoute) -> Result<(), IommuError> {
+        self.model.route_faults(route)
     }
 
     fn drain_faults(&self, sink: &mut dyn FnMut(Fault)) -> bool {
@@ -603,18 +637,25 @@ fn an_end_is_published_only_once_its_streams_are_back_with_firmware() {
         attaches: SpinLock::new(Vec::new()),
     }));
     tree.add(&device_node(DEVICE, STREAM));
-    let (translation, outcomes) = Translation::start(
+    let (translation, outcomes) = Translation::started(
         vec![Unit {
             node: UNIT_NODE,
             unit: watching,
             reserved: vec![firmware_window(STREAM)],
+            faults: None,
         }],
         vec![REGISTERS],
         tree,
         audit_sink(),
         None,
     );
-    assert_eq!(outcomes, [(UNIT_NODE, Ok(Quiesced::default()))]);
+    assert_eq!(
+        outcomes,
+        [(
+            UNIT_NODE,
+            UnitOutcome::Translating(Quiesced::default(), tairix_kernel_iommu_api::Stage::Second,)
+        )]
+    );
     translation.map(DEVICE, 1, block(0x8000_0000), 0).unwrap();
     *watching.owner.lock() = translation.owners.lock().nodes.get(&DEVICE).cloned();
 
@@ -636,16 +677,29 @@ fn a_unit_that_will_not_enable_is_dropped_and_translates_nothing() {
     let (model, tree) = rig!(Behaviour::RefusesEnable);
     tree.add(&device_node(DEVICE, STREAM));
     let audit = audit_sink();
-    let (translation, outcomes) = Translation::start(
+    let (translation, outcomes) = Translation::started(
         vec![unit(model, Vec::new())],
         vec![REGISTERS],
         tree,
         audit,
         None,
     );
-    assert_eq!(outcomes, [(UNIT_NODE, Err(IommuError::Hardware))]);
+    assert_eq!(
+        outcomes,
+        [(
+            UNIT_NODE,
+            UnitOutcome::Stranded(Refusal::Unit(IommuError::Hardware), Quiesced::default())
+        )]
+    );
     assert_eq!(translation.units(), 0);
-    assert!(!translation.translates(DEVICE));
+    assert_eq!(
+        translation.dma_path(DEVICE),
+        DmaPath::Stranded {
+            unit: Some(UNIT_NODE)
+        },
+        "behind a unit that translates nothing, no DMA at all"
+    );
+    assert!(translation.strands());
 }
 
 #[test]
@@ -663,16 +717,17 @@ fn a_unit_s_registers_are_guarded() {
 }
 
 #[test]
-fn a_unit_no_family_drives_is_left_untranslated() {
+fn a_unit_no_family_drives_or_whose_registers_are_unreachable_is_refused() {
     let env = UnitEnv {
         mmio: &|_, _| None,
         frames: &NO_FRAMES,
         coherence: None,
         clock: &NoClock,
+        function: None,
     };
     let mut other = HwNode::new(UNIT_NODE, HW_NODE_ROOT_ID, HwDeviceClass::Iommu);
     other
-        .push_match_key(HwMatchKey::compatible(b"arm,smmu-v3").unwrap())
+        .push_match_key(HwMatchKey::compatible(b"example,iommu").unwrap())
         .unwrap();
     assert_eq!(take_over(&other, &env).err(), Some(Refusal::Unmatched));
 
@@ -706,6 +761,7 @@ fn a_mapped_unit_its_family_cannot_drive_is_refused() {
         frames: &NO_FRAMES,
         coherence: None,
         clock: &NoClock,
+        function: None,
     };
     let mut vtd = HwNode::new(UNIT_NODE, HW_NODE_ROOT_ID, HwDeviceClass::Iommu);
     vtd.push_match_key(HwMatchKey::compatible(tairix_kernel_iommu_vtd::COMPATIBLE).unwrap())
@@ -716,6 +772,56 @@ fn a_mapped_unit_its_family_cannot_drive_is_refused() {
         take_over(&vtd, &env).err(),
         Some(Refusal::Unit(IommuError::OutOfRange))
     );
+}
+
+/// An AMD-Vi node is taken over by its own family, which reads the unit
+/// through the mapped window: one without host translation is refused, one
+/// whose tables cannot be had is exhausted, and one whose can is kept.
+#[test]
+fn an_amd_vi_unit_is_taken_over_by_its_own_family() {
+    const LEN: u64 = 0x4000;
+    #[repr(C, align(4096))]
+    struct Registers([u64; 0x800]);
+    // Leaked: a unit taken over keeps reaching its registers.
+    let registers = Box::leak(Box::new(Registers([0; 0x800])));
+    let window = NonNull::from(&mut registers.0).cast::<u8>();
+    let mut amdvi = HwNode::new(UNIT_NODE, HW_NODE_ROOT_ID, HwDeviceClass::Iommu);
+    amdvi
+        .push_match_key(HwMatchKey::compatible(tairix_kernel_iommu_amdvi::COMPATIBLE).unwrap())
+        .unwrap();
+    amdvi
+        .push_resource(HwResource::mmio(0xFED8_0000, LEN))
+        .unwrap();
+    let starved: &'static tairix_kernel_iommu_api::hostmem::HostFrames = Box::leak(Box::new(
+        tairix_kernel_iommu_api::hostmem::HostFrames::new(0x3_0000_0000),
+    ));
+    starved.limit(0);
+    for (features, frames, refusal) in [
+        (0b11 << 10, &NO_FRAMES, Some(IommuError::OutOfRange)),
+        (0, starved, Some(IommuError::Exhausted)),
+        (0, &NO_FRAMES, None),
+    ] {
+        // SAFETY: the window is this test's own, and no access through it is
+        // live while the features word is written.
+        unsafe { window.cast::<u64>().add(6).write_volatile(features) };
+        let env = UnitEnv {
+            mmio: &move |base, len| {
+                (base == 0xFED8_0000 && usize::try_from(LEN) == Ok(len)).then_some(window)
+            },
+            frames,
+            coherence: None,
+            clock: &NoClock,
+            function: None,
+        };
+        match take_over(&amdvi, &env) {
+            Ok(unit) => {
+                assert_eq!(refusal, None);
+                assert_eq!(unit.node, UNIT_NODE);
+                assert_eq!(unit.unit.profile().reach.input_bits, 48);
+            }
+            Err(refused) => assert_eq!(Some(refused), refusal.map(Refusal::Unit)),
+        }
+    }
 }
 
 struct NoClock;
@@ -782,6 +888,24 @@ fn a_fault_on_an_owned_stream_is_recorded_against_its_device() {
 }
 
 #[test]
+fn a_full_queue_of_one_stream_s_records_drained_at_once_storms_nothing() {
+    let (model, tree) = rig!(Behaviour::Correct);
+    let translation = started(model, tree, Vec::new());
+    translation.map(DEVICE, 1, block(0x8000_0000), 0).unwrap();
+    for _ in 0..tairix_kernel_iommu_api::FAULT_QUEUE_RECORDS {
+        assert_eq!(model.access(STREAM, PAGE, true), None);
+    }
+    let sink = audit_sink();
+    let mut budget = FaultBudget::new(FAULT_LIMITS, 0).unwrap();
+    translation.drain_pass(0, &mut budget, sink, &NoClock);
+    assert!(
+        recorded(sink, AuditEvent::DmaTranslationStorm).is_empty(),
+        "a backlog one drain finds is no storm"
+    );
+    assert!(!model.silenced(STREAM));
+}
+
+#[test]
 fn a_fault_no_owner_holds_is_recorded_against_the_unit() {
     let (model, tree) = rig!(Behaviour::Correct);
     let translation = started(model, tree, Vec::new());
@@ -843,6 +967,32 @@ fn a_storm_silences_the_stream_marks_its_node_offline_and_is_recorded_once() {
     );
 }
 
+/// A storm the unit refuses to silence is recorded even once the unit's
+/// share of the window is spent: containment failing is never anonymous.
+#[test]
+fn a_storm_left_uncontained_is_recorded_whatever_the_share() {
+    let (model, tree) = rig!(Behaviour::RefusesSilence);
+    let translation = started(model, tree, Vec::new());
+    translation.map(DEVICE, 1, block(0x8000_0000), 0).unwrap();
+    for page in 1..=5 {
+        let _ = model.access(STREAM, page * PAGE, true);
+    }
+    let sink = audit_sink();
+    let mut budget = FaultBudget::new(
+        FaultLimits {
+            unit_records: 1,
+            ..SMALL
+        },
+        0,
+    )
+    .unwrap();
+    translation.drain_pass(0, &mut budget, sink, &NoClock);
+    assert_eq!(recorded(sink, AuditEvent::DmaTranslationFault).len(), 1);
+    let storms = recorded(sink, AuditEvent::DmaTranslationStorm);
+    assert_eq!(storms.len(), 1, "past the share, yet recorded");
+    assert_eq!(field(&storms[0], "outcome"), Some("refused"));
+}
+
 /// An adoption that fails puts the node's record back, so a revoked
 /// generation still carves nothing, and leaves the stream's attribution with
 /// the owner that holds it.
@@ -897,12 +1047,20 @@ fn serving(
     translation: Translation,
     msi: &dyn MsiAllocFacility,
 ) -> (&'static IrqTable, &'static TestSink, usize) {
+    serving_through(translation, msi, &OK_CONTROLLER)
+}
+
+fn serving_through(
+    translation: Translation,
+    msi: &dyn MsiAllocFacility,
+    controller: &'static (dyn IrqController + Sync),
+) -> (&'static IrqTable, &'static TestSink, usize) {
     let translation: &'static Translation = Box::leak(Box::new(translation));
     let table: &'static IrqTable = Box::leak(Box::new(IrqTable::new(31)));
     let sink = audit_sink();
     let env = FaultEnv {
         table,
-        controller: &OK_CONTROLLER,
+        controller,
         msi,
         audit: sink,
         clock: &NoClock,
@@ -915,12 +1073,72 @@ fn serving(
     (table, sink, admitted)
 }
 
+/// A controller that counts the lines re-armed through it.
+#[derive(Default)]
+struct Rearms(core::sync::atomic::AtomicUsize);
+
+impl IrqController for Rearms {
+    fn mask(&self, _line: u32) -> Result<(), MaskError> {
+        Ok(())
+    }
+
+    fn rearm(&self, _line: u32) -> Result<(), MaskError> {
+        self.0.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+struct Spins;
+
+impl crate::kthread::YieldHandle for Spins {
+    fn yield_now(&mut self) {}
+
+    fn park(&mut self) {}
+}
+
+/// A unit whose records never run out spends the window's drains; its
+/// service then sleeps the window out with the line still masked, never
+/// re-arming a line the unit may still assert.
+#[test]
+fn a_window_whose_drains_are_spent_is_slept_out_with_the_line_masked() {
+    let (model, tree) = rig!(Behaviour::EndlessFaults);
+    let translation: &'static Translation = Box::leak(Box::new(started(model, tree, Vec::new())));
+    let table: &'static IrqTable = Box::leak(Box::new(IrqTable::new(31)));
+    let controller: &'static Rearms = Box::leak(Box::new(Rearms::default()));
+    let sink = audit_sink();
+    let env = FaultEnv {
+        table,
+        controller,
+        msi: &VECTOR,
+        audit: sink,
+        clock: &NoClock,
+    };
+    let mut bodies = Vec::new();
+    translation.serve_faults(&env, |body| {
+        bodies.push(body);
+        Some(0x77)
+    });
+    let mut body = bodies.pop().expect("one unit served");
+    body(&mut Spins);
+    assert_eq!(
+        controller.0.load(core::sync::atomic::Ordering::Relaxed),
+        0,
+        "no line re-armed while its window's drains are spent"
+    );
+}
+
 #[test]
 fn each_unit_s_fault_interrupt_is_routed_bound_to_the_kernel_and_served() {
     let (model, tree) = rig!(Behaviour::Correct);
     let (table, sink, admitted) = serving(started(model, tree, Vec::new()), &VECTOR);
     assert_eq!(admitted, 1);
-    assert_eq!(model.routed(), Some((0xFEE0_0000, 0x41)));
+    assert_eq!(
+        model.routed(),
+        Some(tairix_kernel_iommu_api::FaultRoute::Message {
+            address: 0xFEE0_0000,
+            data: 0x41
+        })
+    );
     assert_eq!(table.owner_of_line(LINE), Some(FAULT_OWNER));
     assert!(recorded(sink, AuditEvent::DmaTranslationUnit).is_empty());
 }
@@ -934,6 +1152,150 @@ fn a_unit_that_refuses_its_route_is_audited_and_its_line_released() {
     let unit = recorded(sink, AuditEvent::DmaTranslationUnit);
     assert_eq!(field(&unit[0], "outcome"), Some("faults_unrouted"));
     assert_eq!(field(&unit[0], "reason"), Some("refused"));
+}
+
+/// Records each line it is asked to trigger, and gives an edge only where it
+/// can.
+struct Triggering {
+    edge: bool,
+    asked: SpinLock<Vec<(u32, tairix_kernel_irq::Trigger)>>,
+}
+
+impl IrqController for Triggering {
+    fn mask(&self, _line: u32) -> Result<(), MaskError> {
+        Ok(())
+    }
+
+    fn set_trigger(&self, line: u32, trigger: tairix_kernel_irq::Trigger) -> Result<(), MaskError> {
+        self.asked.lock().push((line, trigger));
+        if trigger == tairix_kernel_irq::Trigger::Edge && !self.edge {
+            return Err(MaskError::Unsupported);
+        }
+        Ok(())
+    }
+}
+
+const WIRED: WiredFaults = WiredFaults {
+    line: 20,
+    trigger: tairix_kernel_irq::Trigger::Edge,
+    place: 1,
+};
+
+fn wired(model: &'static ModelUnit<'static>, tree: &'static Tree) -> Translation {
+    Translation::started(
+        vec![Unit {
+            node: UNIT_NODE,
+            unit: model,
+            reserved: Vec::new(),
+            faults: Some(WIRED),
+        }],
+        vec![REGISTERS],
+        tree,
+        audit_sink(),
+        None,
+    )
+    .0
+}
+
+/// A unit whose node names a wired fault line is served on it, edge-triggered
+/// as its node says, with no message the port need allocate.
+#[test]
+fn a_unit_naming_a_wired_fault_line_is_served_there() {
+    let (model, tree) = rig!(Behaviour::Correct);
+    let controller: &'static Triggering = Box::leak(Box::new(Triggering {
+        edge: true,
+        asked: SpinLock::new(Vec::new()),
+    }));
+    let (table, _, admitted) = serving_through(
+        wired(model, tree),
+        &crate::devres::NULL_MSI_ALLOC_FACILITY,
+        controller,
+    );
+    assert_eq!(admitted, 1);
+    assert_eq!(
+        model.routed(),
+        Some(tairix_kernel_iommu_api::FaultRoute::Wired { place: 1 })
+    );
+    assert_eq!(table.owner_of_line(WIRED.line), Some(FAULT_OWNER));
+    assert_eq!(
+        controller.asked.lock().as_slice(),
+        [(WIRED.line, WIRED.trigger)]
+    );
+}
+
+/// A wired line its controller cannot trigger as the node says would lose its
+/// pulses, so the unit's faults stay unrouted and the line unbound.
+#[test]
+fn a_wired_fault_line_its_controller_cannot_trigger_is_unrouted() {
+    let (model, tree) = rig!(Behaviour::Correct);
+    let controller: &'static Triggering = Box::leak(Box::new(Triggering {
+        edge: false,
+        asked: SpinLock::new(Vec::new()),
+    }));
+    let (table, sink, admitted) = serving_through(
+        wired(model, tree),
+        &crate::devres::NULL_MSI_ALLOC_FACILITY,
+        controller,
+    );
+    assert_eq!(admitted, 0);
+    assert_eq!(model.routed(), None);
+    assert_eq!(table.owner_of_line(WIRED.line), None);
+    let unit = recorded(sink, AuditEvent::DmaTranslationUnit);
+    assert_eq!(field(&unit[0], "reason"), Some("untriggerable"));
+}
+
+/// A wired line another owner holds is not the kernel's to retrigger: the
+/// unit's faults stay unrouted and the holder's line is left as it was.
+#[test]
+fn a_wired_fault_line_another_owner_holds_keeps_its_trigger() {
+    let (model, tree) = rig!(Behaviour::Correct);
+    let controller: &'static Triggering = Box::leak(Box::new(Triggering {
+        edge: true,
+        asked: SpinLock::new(Vec::new()),
+    }));
+    let translation: &'static Translation = Box::leak(Box::new(wired(model, tree)));
+    let table: &'static IrqTable = Box::leak(Box::new(IrqTable::new(31)));
+    let holder = tairix_kernel_sec::ProcessId(0x99);
+    table.bind_exclusive(WIRED.line, holder).unwrap();
+    let sink = audit_sink();
+    let env = FaultEnv {
+        table,
+        controller,
+        msi: &crate::devres::NULL_MSI_ALLOC_FACILITY,
+        audit: sink,
+        clock: &NoClock,
+    };
+    translation.serve_faults(&env, |_body| Some(0x77));
+    assert!(controller.asked.lock().is_empty(), "no trigger changed");
+    assert_eq!(table.owner_of_line(WIRED.line), Some(holder));
+    let unit = recorded(sink, AuditEvent::DmaTranslationUnit);
+    assert_eq!(field(&unit[0], "reason"), Some("unbound"));
+}
+
+/// The line a unit's node names for its faults is the interrupt at the place
+/// the node states, with that interrupt's trigger.
+#[test]
+fn a_unit_s_fault_line_is_the_interrupt_at_the_place_its_node_states() {
+    let mut node = HwNode::new(UNIT_NODE, HW_NODE_ROOT_ID, HwDeviceClass::Iommu);
+    node.push_resource(HwResource::irq_at(106, 0)).unwrap();
+    node.push_resource(HwResource::edge_irq_at(109, 3)).unwrap();
+    assert_eq!(WiredFaults::of(&node), None, "no place stated");
+    node.push_resource(HwResource::property(HwProperty::FaultInterrupt, 3))
+        .unwrap();
+    assert_eq!(
+        WiredFaults::of(&node),
+        Some(WiredFaults {
+            line: 109,
+            trigger: tairix_kernel_irq::Trigger::Edge,
+            place: 3,
+        })
+    );
+    let mut stray = HwNode::new(UNIT_NODE, HW_NODE_ROOT_ID, HwDeviceClass::Iommu);
+    stray.push_resource(HwResource::irq_at(106, 0)).unwrap();
+    stray
+        .push_resource(HwResource::property(HwProperty::FaultInterrupt, 1))
+        .unwrap();
+    assert_eq!(WiredFaults::of(&stray), None, "a place with no line");
 }
 
 #[test]
@@ -955,7 +1317,7 @@ fn an_unconfirmed_free_is_audited_once_per_owner() {
     let (model, tree) = rig!(Behaviour::UnconfirmedSync);
     tree.add(&device_node(DEVICE, STREAM));
     let sink = audit_sink();
-    let (translation, _) = Translation::start(
+    let (translation, _) = Translation::started(
         vec![unit(model, Vec::new())],
         vec![REGISTERS],
         tree,
@@ -977,7 +1339,7 @@ fn an_unconfirmed_free_is_audited_once_per_owner() {
 
 /// A firmware window on `stream`.
 fn firmware_window(stream: u32) -> IommuReservedWindow {
-    IommuReservedWindow::new(stream, 0x7B80_0000, 0x10_0000).unwrap()
+    IommuReservedWindow::new(stream, 0x7B80_0000, 0x10_0000, ReservedAccess::ReadWrite).unwrap()
 }
 
 #[test]
@@ -1130,7 +1492,7 @@ fn take_over_counts_the_functions_still_mastering_without_a_firmware_window() {
     tree.add(&device_node(DEVICE, STREAM));
     let port = Port::new(model, vec![STREAM, 0x0018]);
     let audit = audit_sink();
-    let (_translation, outcomes) = Translation::start(
+    let (_translation, outcomes) = Translation::started(
         vec![unit(model, vec![firmware_window(0x0018)])],
         vec![REGISTERS],
         tree,
@@ -1141,11 +1503,89 @@ fn take_over_counts_the_functions_still_mastering_without_a_firmware_window() {
         outcomes,
         [(
             UNIT_NODE,
-            Ok(Quiesced {
-                stopped: 1,
-                refused: 0,
-            })
+            UnitOutcome::Translating(
+                Quiesced {
+                    stopped: 1,
+                    refused: 0,
+                },
+                tairix_kernel_iommu_api::Stage::Second,
+            )
         )]
+    );
+}
+
+#[test]
+fn a_refused_unit_s_functions_are_all_stopped_and_master_nothing() {
+    let (model, tree) = rig!(Behaviour::Correct);
+    tree.add(&device_node(DEVICE, STREAM));
+    let port = Port::new(model, vec![STREAM, 0x0018]);
+    let audit = audit_sink();
+    let mut outcomes = Vec::new();
+    let translation = Translation::start(
+        Vec::new(),
+        &[(UNIT_NODE, Refusal::Unmatched)],
+        vec![REGISTERS],
+        tree,
+        audit,
+        Some(Mastering::new(port, audit)),
+        &mut |node, outcome| outcomes.push((node, outcome)),
+    );
+    assert_eq!(
+        outcomes,
+        [(
+            UNIT_NODE,
+            UnitOutcome::Stranded(
+                Refusal::Unmatched,
+                Quiesced {
+                    stopped: 2,
+                    refused: 0,
+                }
+            )
+        )],
+        "no window is kept for anything behind a unit that translates nothing"
+    );
+    assert_eq!(
+        translation.dma_path(DEVICE),
+        DmaPath::Stranded {
+            unit: Some(UNIT_NODE)
+        }
+    );
+    assert!(translation.strands());
+}
+
+#[test]
+fn a_unit_that_will_not_enable_stops_what_its_firmware_windows_kept() {
+    let (model, tree) = rig!(Behaviour::RefusesEnable);
+    tree.add(&device_node(DEVICE, STREAM));
+    let port = Port::new(model, vec![STREAM, 0x0018]);
+    let audit = audit_sink();
+    let (translation, outcomes) = Translation::started(
+        vec![unit(model, vec![firmware_window(0x0018)])],
+        vec![REGISTERS],
+        tree,
+        audit,
+        Some(Mastering::new(port, audit)),
+    );
+    assert_eq!(
+        outcomes,
+        [(
+            UNIT_NODE,
+            UnitOutcome::Stranded(
+                Refusal::Unit(IommuError::Hardware),
+                Quiesced {
+                    stopped: 3,
+                    refused: 0,
+                }
+            )
+        )],
+        "the one stopped at take-over, then both again with no window kept"
+    );
+    assert_eq!(translation.units(), 0);
+    assert_eq!(
+        translation.dma_path(DEVICE),
+        DmaPath::Stranded {
+            unit: Some(UNIT_NODE)
+        }
     );
 }
 
@@ -1287,8 +1727,9 @@ fn a_node_without_exactly_one_group_on_its_unit_carves_nothing() {
         .unwrap();
     for node in [&ungrouped, &twice, &astray] {
         tree.add(node);
-        assert!(
-            translation.translates(node.id()),
+        assert_eq!(
+            translation.dma_path(node.id()),
+            DmaPath::Translated,
             "behind the unit all the same"
         );
         assert_eq!(
@@ -1458,7 +1899,7 @@ fn a_refused_group_is_audited_with_its_holder_let_go() {
         held: SpinLock::new(Vec::new()),
     }));
     tree.add(&device_node(DEVICE, STREAM));
-    let (translation, _) = Translation::start(
+    let (translation, _) = Translation::started(
         vec![unit(model, Vec::new())],
         vec![REGISTERS],
         tree,
@@ -1485,4 +1926,132 @@ fn a_refused_group_is_audited_with_its_holder_let_go() {
         Err(DmaError::GroupBusy)
     );
     assert_eq!(*witness.held.lock(), [false]);
+}
+
+/// Remapping is built on every unit before an entry is made, its entries
+/// deliver once it is enabled, and only then is the machine said to remap.
+#[test]
+fn interrupts_are_remapped_through_the_unit_once_every_entry_is_made() {
+    use tairix_kernel_iommu_api::conformance::InterruptProbe;
+
+    let (model, tree) = rig!(Behaviour::Correct);
+    let translation = started(model, tree, vec![]);
+    let target = InterruptTarget {
+        vector: 0x51,
+        destination: 0,
+        level: false,
+    };
+    assert_eq!(
+        translation.remap(UNIT_NODE, InterruptSource::Requester(0x10), target),
+        Err(RemapError::UnknownUnit),
+        "nothing is remapped before the tables are built"
+    );
+    assert!(translation.extended());
+    translation.prepare(false, 64).unwrap();
+    assert_eq!(
+        translation.remap(UNIT_NODE + 1, InterruptSource::Requester(0x10), target),
+        Err(RemapError::UnknownUnit)
+    );
+    let entry = translation
+        .remap(UNIT_NODE, InterruptSource::Requester(0x10), target)
+        .unwrap();
+    assert!(!model.remapping());
+    translation.enable().unwrap();
+    assert!(model.remapping());
+    let remapped = entry.remapped;
+    assert_eq!(
+        model.interrupt(0x10, remapped.address, remapped.data),
+        Some(target)
+    );
+    translation.release(entry);
+    assert_eq!(
+        model.interrupt(0x10, remapped.address, remapped.data),
+        None,
+        "a released entry raises nothing"
+    );
+}
+
+/// A unit that cannot turn remapping on turns it back off at every unit
+/// that could, so no device is left refused its compatibility interrupts.
+#[test]
+fn a_machine_remaps_whole_or_not_at_all() {
+    use tairix_kernel_iommu_api::conformance::InterruptProbe;
+
+    let (willing, tree) = rig!(Behaviour::Correct);
+    let (refusing, _) = rig!(Behaviour::RefusesRemapping);
+    let (translation, _) = Translation::started(
+        vec![
+            unit(willing, Vec::new()),
+            Unit {
+                node: UNIT_NODE + 1,
+                unit: refusing,
+                reserved: Vec::new(),
+                faults: None,
+            },
+        ],
+        vec![REGISTERS],
+        tree,
+        audit_sink(),
+        None,
+    );
+    translation.prepare(false, 64).unwrap();
+    assert_eq!(
+        translation.enable(),
+        Err(RemapError::Unit(IommuError::Hardware))
+    );
+    assert!(!willing.remapping() && !refusing.remapping());
+    assert!(
+        willing.interrupt(0x10, 0xFEE0_0000, 0x41).is_some(),
+        "the unit that had turned remapping on refuses compatibility interrupts"
+    );
+}
+
+#[test]
+fn a_machine_with_no_translating_unit_does_not_remap() {
+    let (_, tree) = rig!(Behaviour::Correct);
+    let (translation, _) = Translation::started(vec![], vec![], tree, audit_sink(), None);
+    assert!(!translation.extended(), "no unit to remap with");
+    assert_eq!(translation.prepare(false, 64), Err(RemapError::Unsupported));
+    assert_eq!(translation.enable(), Err(RemapError::UnknownUnit));
+}
+
+/// A unit the kernel discovered but does not drive passes its devices'
+/// forged messages, so the machine keeps compatibility delivery even though
+/// the unit it does drive could remap.
+#[test]
+fn a_stranded_unit_keeps_the_whole_machine_unremapped() {
+    let (model, tree) = rig!(Behaviour::Correct);
+    tree.add(&device_node(DEVICE, STREAM));
+    let refused = [(UNIT_NODE + 1, Refusal::Unmatched)];
+    let mut outcomes = Vec::new();
+    let translation = Translation::start(
+        vec![unit(model, Vec::new())],
+        &refused,
+        vec![REGISTERS],
+        tree,
+        audit_sink(),
+        None,
+        &mut |node, outcome| outcomes.push((node, outcome)),
+    );
+    assert_eq!(
+        outcomes,
+        [
+            (
+                UNIT_NODE + 1,
+                UnitOutcome::Stranded(Refusal::Unmatched, Quiesced::default())
+            ),
+            (
+                UNIT_NODE,
+                UnitOutcome::Translating(
+                    Quiesced::default(),
+                    tairix_kernel_iommu_api::Stage::Second,
+                )
+            ),
+        ]
+    );
+    assert!(translation.strands());
+    assert!(!translation.extended());
+    assert_eq!(translation.prepare(false, 64), Err(RemapError::Unsupported));
+    assert!(!model.remapping());
+    assert_eq!(translation.dma_path(DEVICE), DmaPath::Translated);
 }

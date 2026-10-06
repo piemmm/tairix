@@ -16,7 +16,8 @@ workspace = true
 # the audit sink the subsystem's diagnostic records route through;
 # `kernel/sec` for `TaskId` (the security-attribution identifier the
 # IRQ table binds against); `kernel/sync` for the writer-preference
-# `RwLock` mirroring the `CapTable` lock-ordering policy.
+# `RwLock` mirroring the `CapTable` lock-ordering policy; `lib/collections`
+# and `lib/hash` for the fallible handle map a bind records itself in.
 #
 # `kernel/sched` is **not** depended on. The wait-queue substrate is
 # expressed through the `IrqHost` trait so this crate stays free of a
@@ -29,3 +30,5 @@ tairix-kernel-sec = { path = "../sec", version = "=0.0.0" }
 tairix-sync = { path = "../../lib/sync", version = "=0.0.0" }
 tairix-log = { path = "../../lib/log", version = "=0.0.0" }
 tairix-util = { path = "../../lib/util", version = "=0.0.0" }
+tairix-collections = { path = "../../lib/collections", version = "=0.0.0" }
+tairix-hash = { path = "../../lib/hash", version = "=0.0.0" }

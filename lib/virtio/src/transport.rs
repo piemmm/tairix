@@ -281,12 +281,12 @@ pub trait Transport {
     /// edge — corrupting back-to-back requests. A driver calls this once
     /// per `notify_wait` + drain cycle.
     ///
-    /// The default is a no-op: it is correct for transports that need no
-    /// explicit device-side acknowledge — MSI-X PCI (each completion is a
-    /// fresh edge with no shared status to clear) and the in-process
-    /// `MockTransport` (no real device). The modern **MMIO** transport
-    /// overrides it to read `InterruptStatus` and write the handled bits
-    /// back to `InterruptACK` (virtio 1.1 §4.2.2).
+    /// The default is a no-op, correct where nothing is left raised: the
+    /// in-process `MockTransport`. The **MMIO** transport writes the
+    /// handled `InterruptStatus` bits back to `InterruptACK` (virtio 1.1
+    /// §4.2.2); the **PCI** transport over INTx reads the ISR status,
+    /// which clears it, and over MSI-X does nothing, each completion being
+    /// an edge of its own.
     fn ack_interrupt(&mut self) {}
 }
 

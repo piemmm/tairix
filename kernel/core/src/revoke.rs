@@ -28,13 +28,14 @@ use alloc::sync::Arc;
 
 use tairix_abi::hwtree::{HwResource, HwResourceKind};
 use tairix_abi::{Errno, IrqHandle, Signal};
-use tairix_kernel_irq::IrqTable;
+use tairix_kernel_irq::{IrqController, IrqTable, ReleaseOutcome};
 use tairix_kernel_sec::ProcessId;
 use tairix_sync::RwLock;
 
 use crate::aspace::pages_spanning;
 use crate::aspace::AddressSpaceRegistry;
 use crate::devres::SharedMemFacility;
+use crate::iommu::Mastering;
 use crate::live_producer::live_errno;
 use crate::procsignal::ProcessSignal;
 use crate::procspace::ProcessSpace;
@@ -50,12 +51,40 @@ pub struct Revoked {
     pub killed: usize,
 }
 
+/// Release every interrupt binding of `process`, first stopping each wired
+/// source it was taking: a shared line it was holding masked is re-armed for
+/// the other sharers, so a device still raising it would otherwise storm it.
+pub(crate) fn release_interrupts(
+    irq: &IrqTable,
+    controller: &dyn IrqController,
+    aspaces: &RwLock<AddressSpaceRegistry>,
+    mastering: Option<Mastering>,
+    process: ProcessId,
+) -> ReleaseOutcome {
+    if let Some(mastering) = mastering {
+        let mut after = None;
+        while let Some(binding) = irq.next_binding_of(process, after) {
+            after = Some(binding.line);
+            let origin = aspaces.read().wired_irq_origin(process, binding.line);
+            if let Some(node) = origin {
+                mastering.set_wired_interrupt(node, false);
+            }
+        }
+    }
+    irq.release_for(process, controller)
+}
+
 /// The kernel state a revocation reaches.
 pub struct Revoker<'a> {
     /// Where the grants, the live spaces and the snapshots are.
     pub aspaces: &'a RwLock<AddressSpaceRegistry>,
     /// The interrupt bindings.
     pub irq: &'a IrqTable,
+    /// What a released binding's shared line is re-armed through.
+    pub irq_controller: &'a dyn IrqController,
+    /// The port's control over removed devices' wired interrupts, where the
+    /// kernel owns their configuration space.
+    pub mastering: Option<Mastering>,
     /// What frees a shared region's frames at its last reference.
     pub shared: &'a dyn SharedMemFacility,
     /// What kills a holder whose access cannot be withdrawn in place.
@@ -76,6 +105,13 @@ impl Revoker<'_> {
         };
         if grants == 0 {
             return revoked;
+        }
+        // A device gone from the tree must not hold a line it shared raised
+        // once its holders' bindings go and the line is re-armed for the rest.
+        if let Some(mastering) = self.mastering {
+            for &node in nodes {
+                mastering.set_wired_interrupt(node, false);
+            }
         }
         let mut after = None;
         loop {
@@ -175,7 +211,8 @@ impl Revoker<'_> {
         if self.aspaces.read().holds_irq_line(process, line) {
             return Ok(handle);
         }
-        self.irq.release_binding(handle, process);
+        self.irq
+            .release_binding(handle, process, self.irq_controller);
         Err(Errno::PermissionDenied)
     }
 
@@ -188,7 +225,9 @@ impl Revoker<'_> {
         while let Some(binding) = self.irq.next_binding_of(holder, after) {
             after = Some(binding.line);
             if !self.aspaces.read().holds_irq_line(holder, binding.line) {
-                released |= self.irq.release_binding(binding.handle, holder);
+                released |= self
+                    .irq
+                    .release_binding(binding.handle, holder, self.irq_controller);
             }
         }
         if released {
@@ -410,6 +449,8 @@ mod tests {
             Revoker {
                 aspaces: &self.aspaces,
                 irq: &self.irq,
+                irq_controller: &tairix_kernel_irq::UNSUPPORTED_CONTROLLER,
+                mastering: None,
                 shared,
                 signal: &self.kills,
             }

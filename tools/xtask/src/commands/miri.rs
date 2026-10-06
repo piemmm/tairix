@@ -367,6 +367,60 @@ pub const TARGETS: &[Target] = &[
         scope: Scope::AllTargets,
         spread: Spread::OneProcess,
     },
+    Target {
+        package: "tairix-kernel-iommu-smmuv3",
+        description: "the stream table, context descriptors and both queues the SMMUv3 family \
+                      reads and writes through its frame source's pointers",
+        features: &[],
+        scope: Scope::AllTargets,
+        spread: Spread::OneProcess,
+    },
+    Target {
+        package: "tairix-kernel-iommu-riscv",
+        description: "the device directory, its contexts and both queues the RISC-V IOMMU \
+                      family reads and writes through its frame source's pointers, and the \
+                      sixteen-kilobyte second-stage roots the engine walks as blocks",
+        features: &[],
+        scope: Scope::LibOnly(
+            "the library is the crate's only test target; naming it is what lets its tests be \
+             dealt across cores",
+        ),
+        spread: Spread::PerCore(
+            "interpreted, its tests cost two minutes in one process, most of it the fault \
+             queue's overflow and the two conformance suites. Dealt across the host's cores \
+             the work is unchanged and the makespan falls to the longest single test",
+        ),
+    },
+    Target {
+        package: "tairix-kernel-iommu-amdvi",
+        description: "the device table, interrupt remapping tables and both rings the AMD-Vi \
+                      family reads and writes through its frame source's pointers",
+        features: &[],
+        scope: Scope::LibExcept {
+            skip: &[
+                "tests::a_bridge_s_table_is_forgotten_at_once_where_the_unit_can",
+                "tests::an_entry_the_unit_cannot_confirm_is_never_handed_out",
+                "tests::an_io_apic_pin_raises_its_entry_by_index",
+                "tests::a_remapping_unit_passes_the_interrupt_suite",
+                "tests::a_source_remapped_after_the_switch_is_pointed_at_once",
+                "tests::a_unit_flushing_every_device_passes_the_interrupt_suite",
+                "tests::a_unit_running_commands_only_once_translating_passes",
+                "tests::a_unit_that_cannot_flush_at_once_flushes_every_device_and_passes",
+                "tests::extended_entries_deliver_32_bit_destinations",
+            ],
+            reason: "each switches interrupt remapping, which rewrites every one of the 65,536 \
+                     device table entries and, on a unit without INVALIDATE_ALL, flushes each \
+                     device: seven to twelve minutes a test interpreted. The family carries no \
+                     `unsafe` of its own, every entry they write goes through the frame memory \
+                     accessors the kept tests interpret, and all nine run in full under the \
+                     ordinary test matrix",
+        },
+        spread: Spread::PerCore(
+            "interpreted, the kept tests take tens of minutes in one process, most of it the \
+             conformance suites and the one remapping switch kept; dealt across the host's \
+             cores the work is unchanged and the makespan falls to the longest single test",
+        ),
+    },
 ];
 
 /// Miri's own flags.

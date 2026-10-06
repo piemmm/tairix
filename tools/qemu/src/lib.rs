@@ -822,6 +822,35 @@ pub fn input_device_args(spec: &Spec, suffix: &str) -> Vec<OsString> {
     .collect()
 }
 
+/// The options every virtio PCI function takes: the modern-only layout the
+/// boot walk decodes, and, behind a translation unit, reaching memory
+/// through it rather than around it.
+pub(crate) fn virtio_pci_options(spec: &Spec) -> &'static str {
+    if spec.dma_translation == DmaTranslation::Absent {
+        "disable-legacy=on"
+    } else {
+        "disable-legacy=on,iommu_platform=on"
+    }
+}
+
+/// The input devices as PCI functions on an FDT board's host bridge, each
+/// in a slot four past the last: the host's `interrupt-map` keys on the slot
+/// modulo four, so every INTA pin lands on one line they all share.
+pub(crate) fn shared_line_input_args(spec: &Spec) -> Vec<OsString> {
+    let input = input_device_args(spec, &format!("-pci,{}", virtio_pci_options(spec)));
+    // `input` is `-device <arg>` pairs.
+    input
+        .into_iter()
+        .skip(1)
+        .step_by(2)
+        .zip((1u8..).step_by(4))
+        .flat_map(|(mut arg, slot)| {
+            arg.push(format!(",addr=0x{slot:x}"));
+            [OsString::from("-device"), arg]
+        })
+        .collect()
+}
+
 /// Multiple of the inactivity budget that bounds a run's total wall clock
 /// when the run does not declare a ceiling of its own.
 ///
@@ -859,11 +888,25 @@ pub struct AttachedDevices {
     pub crypto_accelerator: bool,
     /// The pointing devices beside the keyboard.
     pub pointing: PointingDevices,
-    /// The input devices sit behind a PCIe-to-PCI bridge, which tags their
-    /// DMA with its own alias, so a translation unit sees the alias rather
-    /// than the device. Only x86_64's `q35` board has a PCIe root to hang the
-    /// bridge from.
-    pub input_bridge: bool,
+    /// Where the input devices sit.
+    pub input: InputPlacement,
+}
+
+/// Where a run's input devices sit.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum InputPlacement {
+    /// The board's own place: virtio-mmio devices on aarch64 and riscv64,
+    /// PCI functions on x86_64's root bus.
+    #[default]
+    Board,
+    /// Behind a PCIe-to-PCI bridge, which tags their DMA with its own alias,
+    /// so a translation unit sees the alias rather than the device. Only the
+    /// translated x86_64 `q35` board has a PCIe root to hang it from.
+    Bridged,
+    /// PCI functions on an aarch64 or riscv64 `virt` board's generic host
+    /// bridge, each in a slot four past the last, so the host's
+    /// `interrupt-map` routes every INTA pin to one line.
+    SharedLine,
 }
 
 /// The pointing devices a run attaches after its keyboard, in this order on
@@ -903,20 +946,49 @@ impl AttachedDevices {
         ramfb: false,
         crypto_accelerator: false,
         pointing: PointingDevices::NONE,
-        input_bridge: false,
+        input: InputPlacement::Board,
     };
 }
 
-/// How the board's PCI devices reach memory.
+/// How the board's PCI devices reach memory: directly, or through a
+/// translation unit at the addresses the guest's domains give them. A board
+/// with no such unit to attach refuses the run rather than start it
+/// untranslated.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum DmaTranslation {
     /// Directly, at the addresses the guest programs.
     #[default]
     Absent,
-    /// Through a translation unit, at the addresses the guest's domains give
-    /// them: on x86_64 the `q35` machine with an `intel-iommu`. A board with
-    /// no unit to attach refuses the run rather than start it untranslated.
-    Present,
+    /// Through an Intel VT-d unit: the x86_64 `q35` machine's `intel-iommu`.
+    Vtd,
+    /// Through an AMD-Vi unit: the x86_64 `q35` machine's `amd-iommu`.
+    AmdVi,
+    /// Through an Arm `SMMUv3` offering stage 1 alone: the aarch64
+    /// `virt-9.1` machine's `iommu=smmuv3`.
+    Smmuv3Stage1,
+    /// Through an Arm `SMMUv3` offering both stages, of which the kernel
+    /// takes stage 2: the `virt` machine's `iommu=smmuv3`.
+    Smmuv3Stage2,
+    /// Through a RISC-V IOMMU translating at the second stage: the riscv64
+    /// `virt` machine's `iommu-sys`.
+    RiscvStage2,
+    /// Through a RISC-V IOMMU with the first stage alone: the same unit with
+    /// `riscv-iommu-device.g-stage=false`.
+    RiscvStage1,
+}
+
+impl DmaTranslation {
+    /// The architecture whose board can attach the unit; [`None`] for
+    /// [`Self::Absent`], which every board can run.
+    #[must_use]
+    pub const fn arch(self) -> Option<Arch> {
+        match self {
+            Self::Absent => None,
+            Self::Vtd | Self::AmdVi => Some(Arch::X86_64),
+            Self::Smmuv3Stage1 | Self::Smmuv3Stage2 => Some(Arch::Aarch64),
+            Self::RiscvStage1 | Self::RiscvStage2 => Some(Arch::Riscv64),
+        }
+    }
 }
 
 /// Architecture-neutral configuration for a single QEMU test invocation.
@@ -1474,19 +1546,27 @@ impl Spec {
         self
     }
 
-    /// Put a DMA translation unit in front of the PCI devices, so every
+    /// Put the translation unit `unit` in front of the PCI devices, so every
     /// virtio function reaches memory through the domain the guest gave it.
     #[must_use]
-    pub fn with_dma_translation(mut self) -> Self {
-        self.dma_translation = DmaTranslation::Present;
+    pub fn with_dma_translation(mut self, unit: DmaTranslation) -> Self {
+        self.dma_translation = unit;
         self
     }
 
     /// Put the input devices behind a PCIe-to-PCI bridge
-    /// ([`AttachedDevices::input_bridge`]).
+    /// ([`InputPlacement::Bridged`]).
     #[must_use]
     pub fn with_input_bridge(mut self) -> Self {
-        self.devices.input_bridge = true;
+        self.devices.input = InputPlacement::Bridged;
+        self
+    }
+
+    /// Put the input devices on the board's PCI host, sharing one INTx line
+    /// ([`InputPlacement::SharedLine`]).
+    #[must_use]
+    pub fn with_shared_line_input(mut self) -> Self {
+        self.devices.input = InputPlacement::SharedLine;
         self
     }
 
@@ -1852,7 +1932,11 @@ impl Runner {
 fn validate_boot_inputs(spec: &Spec) -> io::Result<()> {
     // A run that asked for translation and got none would pass on DMA that
     // never crossed a unit.
-    if spec.dma_translation == DmaTranslation::Present && spec.arch != Arch::X86_64 {
+    if spec
+        .dma_translation
+        .arch()
+        .is_some_and(|arch| arch != spec.arch)
+    {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
             format!("no DMA translation unit to attach on {:?}", spec.arch),
@@ -1860,13 +1944,16 @@ fn validate_boot_inputs(spec: &Spec) -> io::Result<()> {
     }
     // The bridge hangs from the `q35` PCIe root, which only a translated
     // x86_64 run boots.
-    if spec.devices.input_bridge
-        && (spec.arch != Arch::X86_64 || spec.dma_translation != DmaTranslation::Present)
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "an input bridge needs the translated x86_64 q35 board",
-        ));
+    let refused = match spec.devices.input {
+        InputPlacement::Board => None,
+        InputPlacement::Bridged => (spec.arch != Arch::X86_64
+            || spec.dma_translation == DmaTranslation::Absent)
+            .then_some("an input bridge needs the translated x86_64 q35 board"),
+        InputPlacement::SharedLine => (!matches!(spec.arch, Arch::Aarch64 | Arch::Riscv64))
+            .then_some("a shared input line needs an aarch64 or riscv64 virt board"),
+    };
+    if let Some(refused) = refused {
+        return Err(io::Error::new(io::ErrorKind::Unsupported, refused));
     }
     if !spec.kernel.is_file() {
         return Err(io::Error::new(
@@ -5169,28 +5256,39 @@ mod tests {
 
 #[cfg(test)]
 mod dma_translation_tests {
-    use super::{validate_boot_inputs, Spec};
+    use super::{validate_boot_inputs, DmaTranslation, Spec};
 
-    /// A run that asked for a translation unit is refused where the board has
-    /// none to attach, before anything is checked or started.
+    /// A run that asked for a translation unit is refused on every board but
+    /// the one that attaches it, before anything is checked or started.
     #[test]
-    fn a_board_with_no_unit_refuses_a_translated_run() {
-        for spec in [
-            Spec::for_aarch64_kernel("/nonexistent/kernel"),
-            Spec::for_riscv64_kernel("/nonexistent/kernel"),
+    fn a_board_with_no_such_unit_refuses_a_translated_run() {
+        let boards = || {
+            [
+                Spec::for_x86_64_kernel("/nonexistent/kernel"),
+                Spec::for_aarch64_kernel("/nonexistent/kernel"),
+                Spec::for_riscv64_kernel("/nonexistent/kernel"),
+            ]
+        };
+        for unit in [
+            DmaTranslation::Vtd,
+            DmaTranslation::AmdVi,
+            DmaTranslation::Smmuv3Stage1,
+            DmaTranslation::Smmuv3Stage2,
+            DmaTranslation::RiscvStage1,
+            DmaTranslation::RiscvStage2,
         ] {
-            let refused = validate_boot_inputs(&spec.with_dma_translation()).expect_err("refused");
-            assert_eq!(refused.kind(), std::io::ErrorKind::Unsupported);
+            for spec in boards() {
+                let attaches = unit.arch() == Some(spec.arch);
+                let outcome = validate_boot_inputs(&spec.with_dma_translation(unit))
+                    .expect_err("refused, or no kernel");
+                let expected = if attaches {
+                    std::io::ErrorKind::NotFound
+                } else {
+                    std::io::ErrorKind::Unsupported
+                };
+                assert_eq!(outcome.kind(), expected, "{unit:?}");
+            }
         }
-        let x86 = validate_boot_inputs(
-            &Spec::for_x86_64_kernel("/nonexistent/kernel").with_dma_translation(),
-        )
-        .expect_err("no kernel");
-        assert_eq!(
-            x86.kind(),
-            std::io::ErrorKind::NotFound,
-            "x86_64 attaches one"
-        );
     }
 
     /// The input bridge hangs from the translated `q35` board's PCIe root.
@@ -5205,10 +5303,28 @@ mod dma_translation_tests {
         }
         let x86 = validate_boot_inputs(
             &Spec::for_x86_64_kernel("/nonexistent/kernel")
-                .with_dma_translation()
+                .with_dma_translation(DmaTranslation::AmdVi)
                 .with_input_bridge(),
         )
         .expect_err("no kernel");
         assert_eq!(x86.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    /// A shared input line needs an FDT board's generic host bridge.
+    #[test]
+    fn a_shared_input_line_needs_an_fdt_board() {
+        let x86 = Spec::for_x86_64_kernel("/nonexistent/kernel").with_shared_line_input();
+        let refused = validate_boot_inputs(&x86).expect_err("refused");
+        assert_eq!(refused.kind(), std::io::ErrorKind::Unsupported);
+        for spec in [
+            Spec::for_aarch64_kernel("/nonexistent/kernel"),
+            Spec::for_riscv64_kernel("/nonexistent/kernel"),
+        ] {
+            let checked = validate_boot_inputs(&spec.with_shared_line_input());
+            assert_eq!(
+                checked.expect_err("no kernel").kind(),
+                std::io::ErrorKind::NotFound
+            );
+        }
     }
 }

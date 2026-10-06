@@ -108,15 +108,13 @@ mod tests {
     use core::cell::Cell;
     use core::ptr::NonNull;
 
-    /// 4-byte-aligned backing store for the one 16-byte table entry a
-    /// `FakeBus` programs.
-    static mut ENTRY: [u32; 4] = [0u32; 4];
-
-    /// Mapper handing out a window over [`ENTRY`], recording the
-    /// `(phys, len)` it was asked for and whether the grant succeeds.
+    /// Mapper handing out a window over its own backing store, the one
+    /// 16-byte table entry a `FakeBus` programs, recording the `(phys, len)`
+    /// it was asked for and whether the grant succeeds.
     struct FakeMapper {
         last: Cell<Option<(u64, usize)>>,
         grant: bool,
+        entry: core::cell::UnsafeCell<[u32; 4]>,
     }
 
     impl MmioMapper for FakeMapper {
@@ -125,12 +123,20 @@ mod tests {
                 return Err(MmioMapError::CapabilityMissing);
             }
             self.last.set(Some((phys_base, len)));
-            // SAFETY: single-threaded test; the static lives for the
-            // whole process and the returned window only performs
-            // volatile accesses within `len <= 16` bytes.
-            let base = NonNull::new(core::ptr::addr_of_mut!(ENTRY).cast::<u8>())
-                .expect("static is non-null");
+            let base = NonNull::new(self.entry.get().cast::<u8>()).expect("non-null entry");
+            // SAFETY: the entry lives as long as the mapper, which outlives
+            // every window a test mints from it; the window performs only
+            // volatile accesses within its `len <= 16` bytes, and nothing
+            // else references the entry while one is live.
             Ok(unsafe { RegisterWindow::from_mapping(phys_base, base, len.min(16)) })
+        }
+    }
+
+    fn mapper(grant: bool) -> FakeMapper {
+        FakeMapper {
+            last: Cell::new(None),
+            grant,
+            entry: core::cell::UnsafeCell::new([0; 4]),
         }
     }
 
@@ -191,10 +197,7 @@ mod tests {
     #[test]
     fn trait_object_routes_a_message() {
         let bus: &dyn MsixBus = &FakeBus { table_size: 4 };
-        let mapper = FakeMapper {
-            last: Cell::new(None),
-            grant: true,
-        };
+        let mapper = mapper(true);
         let message = MsiMessage {
             address: 0xFEE0_1000,
             data: 0x0000_0041,
@@ -202,23 +205,16 @@ mod tests {
         bus.route_msix(0x0800, 1, message, &mapper)
             .expect("routes the entry");
         assert_eq!(mapper.last.get(), Some((0xC100_0010, 16)));
-        // SAFETY: single-threaded test reading the static the mapper
-        // window wrote through.
-        unsafe {
-            assert_eq!(ENTRY[0], 0xFEE0_1000);
-            assert_eq!(ENTRY[1], 0);
-            assert_eq!(ENTRY[2], 0x0000_0041);
-            assert_eq!(ENTRY[3], 0);
-        }
+        // SAFETY: the window the route wrote through has been dropped, so
+        // nothing else references the entry.
+        let entry = unsafe { *mapper.entry.get() };
+        assert_eq!(entry, [0xFEE0_1000, 0, 0x0000_0041, 0]);
     }
 
     #[test]
     fn entry_beyond_table_is_out_of_range() {
         let bus: &dyn MsixBus = &FakeBus { table_size: 2 };
-        let mapper = FakeMapper {
-            last: Cell::new(None),
-            grant: true,
-        };
+        let mapper = mapper(true);
         let message = MsiMessage {
             address: 0xFEE0_0000,
             data: 0x30,
@@ -232,10 +228,7 @@ mod tests {
     #[test]
     fn missing_capability_propagates_as_permission_denied() {
         let bus: &dyn MsixBus = &FakeBus { table_size: 4 };
-        let mapper = FakeMapper {
-            last: Cell::new(None),
-            grant: false,
-        };
+        let mapper = mapper(false);
         let message = MsiMessage {
             address: 0xFEE0_0000,
             data: 0x30,

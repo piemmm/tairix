@@ -252,7 +252,7 @@ mod kernel {
         // per-CPU bookkeeping is sized to one slot (no
         // baked-in `MAX_CPUS`).
         static ARCH_STORAGE: X86_64ArchStorage<1> = X86_64ArchStorage::new();
-        let cpu_to_lapic: [Option<u8>; 1] = [Some(0)];
+        let cpu_to_lapic: [Option<u32>; 1] = [Some(0)];
         let Ok(arch_inner) = X86_64Arch::new(&ARCH_STORAGE, 0, 0, &cpu_to_lapic) else {
             qemu_exit::exit_failure();
         };

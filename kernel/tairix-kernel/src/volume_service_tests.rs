@@ -50,21 +50,16 @@ use tairix_kernel_sec::captable::TaskCapabilities;
 use tairix_kernel_sec::{
     GroupId, GroupRecord, IdentityTableBuilder, ProcessId, UserId, UserRecord,
 };
-use tairix_log::Sink;
 use tairix_reclaim::{FreeMemorySource, MemoryPressure};
 
 use crate::root_mount::LATE_IDENTITY;
 use crate::system_mount::{FS_SERVICE, LATE_FILESYSTEM, VOLUME_FOREST};
+use crate::test_support::NullSink;
 use crate::test_support::{RamBlock, BLOCK_SIZE};
 use crate::volume_policy::LATE_STORAGE_GID;
 use crate::volume_service::{RuntimeVolumeService, VOLUME_SERVICE};
 use tairix_kernel_core::VolumeService as _;
 
-/// A throwaway audit sink.
-struct NullSink;
-impl Sink for NullSink {
-    fn write_event(&self, _event: &tairix_log::Event<'_>) {}
-}
 static SINK: NullSink = NullSink;
 
 /// The address-space registry endpoint teardown revokes per-endpoint

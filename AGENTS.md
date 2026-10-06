@@ -550,7 +550,10 @@ tairix/
 │   ├── virtio/          # Arch-neutral kernel-side virtio hosts.
 │   ├── iommu/           # DMA translation units — pluggable:
 │   │   ├── api/         #   Unit contract, domains, IOVA space, conformance suite.
-│   │   └── vtd/         #   Intel VT-d.
+│   │   ├── vtd/         #   Intel VT-d.
+│   │   ├── amdvi/       #   AMD-Vi.
+│   │   ├── smmuv3/      #   Arm SMMUv3.
+│   │   └── riscv/       #   The RISC-V IOMMU.
 │   ├── arch/            # Pluggable architecture backends:
 │   │   ├── api/         #   The closed Arch HAL trait surface.
 │   │   ├── x86_64/

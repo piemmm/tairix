@@ -8,6 +8,15 @@ use crate::hostmem::HostFrames;
 use crate::TableCoherence;
 
 const PAGE: u64 = IO_PAGE_SIZE;
+
+/// What a tree of `levels` levels with a root of `2^order` pages resolves,
+/// onto every address a test format names.
+const fn reach(levels: u32, order: u32) -> Reach {
+    Reach {
+        input_bits: reach_bits(levels) + order,
+        output_bits: 52,
+    }
+}
 const MIB2: u64 = 2 << 20;
 const GIB: u64 = 1 << 30;
 const ADDRESS: u64 = 0x000F_FFFF_FFFF_F000;
@@ -51,11 +60,103 @@ impl PteFormat for TestFormat {
     }
 }
 
+/// [`TestFormat`] with a root of four pages, as RISC-V's second stage has.
+struct WideRoot;
+
+impl PteFormat for WideRoot {
+    fn leaf_allowed(&self, level: u32) -> bool {
+        TestFormat { large_leaves: true }.leaf_allowed(level)
+    }
+
+    fn table(&self, phys: u64, level: u32) -> u64 {
+        TestFormat { large_leaves: true }.table(phys, level)
+    }
+
+    fn leaf(&self, phys: u64, level: u32, access: Access) -> u64 {
+        TestFormat { large_leaves: true }.leaf(phys, level, access)
+    }
+
+    fn decode(&self, entry: u64, level: u32) -> Pte {
+        TestFormat { large_leaves: true }.decode(entry, level)
+    }
+
+    fn root_order(&self) -> u32 {
+        2
+    }
+}
+
+/// A root four pages wide resolves two more bits: an IOVA past a 4 KiB
+/// root's reach lands in its last page, translates, unmaps, and the whole
+/// root is the one block given back.
+#[test]
+fn a_wide_root_resolves_two_more_bits_and_is_freed_whole() {
+    let frames = HostFrames::new(0x1000_0000);
+    let mut table =
+        IoPageTable::new(WideRoot, 3, TableMemory::new(&frames, None), reach(3, 2)).unwrap();
+    assert_eq!(table.input_bits(), 41);
+    assert_eq!(table.root() % (4 * PAGE), 0, "aligned to its size");
+    assert_eq!(frames.live_blocks(), 1);
+    let high = (1 << 40) + (3 << 30);
+    table.map(high, 0x8_0000_0000, PAGE, Access::READ).unwrap();
+    assert_eq!(
+        table.translate(high + 8),
+        Some((0x8_0000_0008, Access::READ))
+    );
+    // Root entry 1536 + 3 lies in the root's fourth page.
+    let index = usize::try_from(high >> 30).unwrap();
+    assert_ne!(frames.word(table.root() + 8 * index as u64), Some(0));
+    assert_eq!(
+        table.map(1 << 41, 0, PAGE, Access::READ),
+        Err(IommuError::OutOfRange),
+        "past the wide root's reach"
+    );
+    table.unmap(high, PAGE).unwrap();
+    table.release_retired();
+    assert_eq!(table.translate(high), None);
+    assert_eq!(frames.word(table.root() + 8 * index as u64), Some(0));
+    table
+        .map(high, 0x8_0000_0000, GIB, Access::READ_WRITE)
+        .unwrap();
+    drop(table);
+    assert_eq!(frames.live(), 0, "every table below the root is freed");
+    assert_eq!(frames.live_blocks(), 0, "and the root with them");
+}
+
+/// A root wider than any family's is refused, not allocated.
+#[test]
+fn a_root_wider_than_sixty_four_kib_is_refused() {
+    struct Wider;
+    impl PteFormat for Wider {
+        fn leaf_allowed(&self, level: u32) -> bool {
+            level == 0
+        }
+        fn table(&self, phys: u64, _level: u32) -> u64 {
+            phys | READ_WRITE
+        }
+        fn leaf(&self, phys: u64, _level: u32, _access: Access) -> u64 {
+            phys | READ_WRITE
+        }
+        fn decode(&self, _entry: u64, _level: u32) -> Pte {
+            Pte::Absent
+        }
+        fn root_order(&self) -> u32 {
+            5
+        }
+    }
+    let frames = HostFrames::new(0x1000_0000);
+    assert!(matches!(
+        IoPageTable::new(Wider, 3, TableMemory::new(&frames, None), reach(3, 5)),
+        Err(IommuError::OutOfRange)
+    ));
+    assert_eq!(frames.live_blocks(), 0);
+}
+
 fn tree(frames: &HostFrames, levels: u32, large_leaves: bool) -> IoPageTable<'_, TestFormat> {
     IoPageTable::new(
         TestFormat { large_leaves },
         levels,
         TableMemory::new(frames, None),
+        reach(levels, 0),
     )
     .unwrap()
 }
@@ -224,7 +325,8 @@ fn a_bad_range_is_refused_before_anything_changes() {
         IoPageTable::new(
             TestFormat { large_leaves: true },
             0,
-            TableMemory::new(&frames, None)
+            TableMemory::new(&frames, None),
+            reach(0, 0)
         )
         .err(),
         Some(IommuError::OutOfRange)
@@ -233,10 +335,51 @@ fn a_bad_range_is_refused_before_anything_changes() {
         IoPageTable::new(
             TestFormat { large_leaves: true },
             7,
-            TableMemory::new(&frames, None)
+            TableMemory::new(&frames, None),
+            reach(6, 0)
         )
         .err(),
         Some(IommuError::OutOfRange)
+    );
+}
+
+/// The unit's reach bounds the tree at both ends: an IOVA the tree could
+/// resolve but the unit does not translate is refused, and so is a frame its
+/// entries cannot name rather than mapped as whatever the format's mask leaves.
+#[test]
+fn nothing_past_the_unit_s_reach_is_mapped_at_either_end() {
+    let frames = HostFrames::new(0x1000_0000);
+    let mut table = IoPageTable::new(
+        TestFormat { large_leaves: true },
+        3,
+        TableMemory::new(&frames, None),
+        Reach {
+            input_bits: 38,
+            output_bits: 40,
+        },
+    )
+    .unwrap();
+    assert_eq!(table.input_bits(), 38);
+    for (iova, phys) in [(1 << 38, 0x2000), (0x1000, 1 << 40)] {
+        assert_eq!(
+            table.map(iova, phys, PAGE, Access::READ),
+            Err(IommuError::OutOfRange),
+            "{iova:#x} onto {phys:#x}"
+        );
+    }
+    table
+        .map((1 << 38) - PAGE, (1 << 40) - PAGE, PAGE, Access::READ)
+        .unwrap();
+    assert_eq!(
+        IoPageTable::new(
+            TestFormat { large_leaves: true },
+            3,
+            TableMemory::new(&frames, None),
+            reach(4, 0)
+        )
+        .err(),
+        Some(IommuError::OutOfRange),
+        "a reach past what three levels resolve"
     );
 }
 
@@ -290,6 +433,7 @@ fn a_non_snooping_walker_has_every_touched_line_written_back() {
         TestFormat { large_leaves: true },
         2,
         TableMemory::new(&frames, Some(&recorder)),
+        reach(2, 0),
     )
     .unwrap();
     let root = table.root();

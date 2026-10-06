@@ -101,49 +101,6 @@ static TIMER_CALLBACK_FN: FnCell<extern "C" fn(u32)> = FnCell::empty();
 /// can never accidentally preempt the kernel.
 static PREEMPT_CALLBACK_FN: FnCell<extern "C" fn(u32)> = FnCell::empty();
 
-/// LAPIC EOI register MMIO offset (Intel SDM Vol 3A §11.4.1 Table 11-1).
-/// Re-declared here so the dispatcher can write through a bare-metal
-/// raw-pointer write without going through the `Lapic<M>` driver
-/// (the driver needs `&mut`, which the ISR cannot hold).
-pub const LAPIC_EOI_OFFSET: usize = 0xB0;
-
-/// LAPIC base MMIO address (the architecturally-fixed value Intel CPUs
-/// expose after reset; OVMF and QEMU agree on the same default).
-///
-/// This is the *physical* base, which is what a device-visible message
-/// address needs (the MSI/IPI destination encoding). Anything that
-/// dereferences the register block names [`LAPIC_BASE_VIRT`] instead.
-/// Re-declared here rather than imported from `apic.rs` to avoid a
-/// dependency cycle in the ISR-fast path.
-pub const LAPIC_BASE_PHYS: u64 = 0xFEE0_0000;
-
-/// LAPIC register block as the CPU reaches it: the physical base through
-/// the port's direct physical map, which every translation root carries.
-///
-/// The interrupt paths that write EOI or arm the timer run under whichever
-/// root the interrupted task had loaded, and a process root carries no
-/// identity map — so a raw physical dereference would fault there. A
-/// `const`, so naming it costs the ISR path nothing.
-pub const LAPIC_BASE_VIRT: u64 = crate::paging::physmap_virt(LAPIC_BASE_PHYS);
-
-/// LAPIC ID register MMIO offset (Intel SDM Vol 3A §11.4.6, Table 11-1).
-/// Re-declared here, like [`LAPIC_EOI_OFFSET`], because the paths that read
-/// it — `local_lapic_id` and its callers — run where the `Lapic<M>` driver's
-/// `&mut` cannot be held.
-pub const LAPIC_ID_OFFSET: usize = 0x20;
-
-/// LAPIC Timer LVT register MMIO offset (Intel SDM Vol 3A §11.5.4,
-/// Table 11-1). Re-declared here, like [`LAPIC_EOI_OFFSET`], so the
-/// tickless one-shot arm path writes the LAPIC through a bare-metal
-/// raw-pointer write without holding the `&mut Lapic<M>` driver the
-/// scheduler-context arming path cannot own.
-pub const LAPIC_TIMER_LVT_OFFSET: usize = 0x320;
-
-/// LAPIC Timer Initial-Count register MMIO offset (SDM Table 11-1).
-/// Writing it starts the one-shot countdown; writing `0` halts the timer
-/// (SDM §11.5.4).
-pub const LAPIC_TIMER_INITIAL_COUNT_OFFSET: usize = 0x380;
-
 /// The LAPIC one-shot initial-count for a single scheduling quantum,
 /// recorded by [`init_local_preempt`] from the boot calibration.
 ///
@@ -295,21 +252,31 @@ static LAPIC_TO_CPU_ID: [core::sync::atomic::AtomicU32; 256] = {
 /// Called from each CPU's bring-up path *before* it enables interrupts.
 /// `u32::MAX` is reserved as the "unmapped" sentinel; passing it is
 /// equivalent to clearing the slot.
-pub fn set_cpu_id_for_lapic(lapic_id: u8, cpu_id: u32) {
+pub fn set_cpu_id_for_lapic(lapic_id: u32, cpu_id: u32) {
     #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-    LAPIC_TO_CPU_ID[lapic_id as usize].store(cpu_id, Ordering::Relaxed);
+    if let Some(slot) = usize::try_from(lapic_id)
+        .ok()
+        .and_then(|id| LAPIC_TO_CPU_ID.get(id))
+    {
+        slot.store(cpu_id, Ordering::Relaxed);
+    }
     #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
     {
         let _ = (lapic_id, cpu_id);
     }
 }
 
-/// Test-only accessor for the LAPIC→CpuId mapping table.
+/// The dense id of the CPU whose APIC id is `lapic_id`, or [`u32::MAX`] for
+/// one unmapped, as is every id past the eight bits xAPIC names: no such CPU
+/// is brought up.
 #[must_use]
-pub fn cpu_id_for_lapic(lapic_id: u8) -> u32 {
+pub fn cpu_id_for_lapic(lapic_id: u32) -> u32 {
     #[cfg(all(target_arch = "x86_64", target_os = "none"))]
     {
-        LAPIC_TO_CPU_ID[lapic_id as usize].load(Ordering::Relaxed)
+        usize::try_from(lapic_id)
+            .ok()
+            .and_then(|id| LAPIC_TO_CPU_ID.get(id))
+            .map_or(u32::MAX, |slot| slot.load(Ordering::Relaxed))
     }
     #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
     {
@@ -376,14 +343,7 @@ unsafe extern "C" fn tairix_arch_x86_64_timer_dispatch(regs: *mut SavedRegs) {
     // the scheduler has no secondaries and nothing to stop.
     #[cfg(feature = "sched-arch")]
     if tairix_arch_api::quiesce_stop_requested(cpu_id) {
-        // SAFETY: LAPIC_EOI_OFFSET is the architecturally-fixed EOI register
-        // (Intel SDM Vol 3A §11.8.5); writing `0` is the documented
-        // end-of-interrupt sequence, and the register block is reachable
-        // through the direct physical map under every root.
-        unsafe {
-            let eoi = (LAPIC_BASE_VIRT + LAPIC_EOI_OFFSET as u64) as *mut u32;
-            core::ptr::write_volatile(eoi, 0);
-        }
+        crate::apic::local_eoi();
         tairix_arch_api::quiesce_acknowledge(cpu_id);
         crate::kernel_arch::halt();
     }
@@ -412,15 +372,9 @@ unsafe extern "C" fn tairix_arch_x86_64_timer_dispatch(regs: *mut SavedRegs) {
         }
     }
 
-    // SAFETY: LAPIC_EOI_OFFSET is the architecturally-fixed EOI
-    // register; writing `0` is the documented "end-of-interrupt"
-    // sequence (Intel SDM Vol 3A §11.8.5). EOI is written *before* the
-    // preemptive switch below so the in-service bit is released and a
-    // later resumed task can be preempted again.
-    unsafe {
-        let eoi = (LAPIC_BASE_VIRT + LAPIC_EOI_OFFSET as u64) as *mut u32;
-        core::ptr::write_volatile(eoi, 0);
-    }
+    // Before the preemptive switch below, so the in-service bit is released
+    // and a later resumed task can be preempted again.
+    crate::apic::local_eoi();
 
     // Involuntary preemption (`plans/PI.md` D2b-2b-A P-1c), honoured on
     // return to ring 3 for a quantum expiry or a reschedule IPI (which
@@ -440,30 +394,13 @@ unsafe extern "C" fn tairix_arch_x86_64_timer_dispatch(regs: *mut SavedRegs) {
     }
 }
 
-/// This CPU's architectural LAPIC id, read from its own LAPIC ID register.
-///
-/// The one definition of that read, so every path that has to name the
-/// running CPU without a scheduler handle — the dense-id lookup below, the
-/// `SchedulerArch::current_cpu` mapping, the TLB-shootdown serve path — names
-/// it the same way.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
-#[must_use]
-pub fn local_lapic_id() -> u8 {
-    // SAFETY: the LAPIC register block is reachable through the direct
-    // physical map under every root; the ID register is read-only and
-    // reading it has no side effects.
-    unsafe {
-        let id_reg = (LAPIC_BASE_VIRT + LAPIC_ID_OFFSET as u64) as *const u32;
-        (core::ptr::read_volatile(id_reg) >> 24) as u8
-    }
-}
-
 /// The running CPU's dense id, read from its LAPIC ID register through the
 /// `LAPIC_TO_CPU_ID` map, or [`u32::MAX`] when the id is unmapped. Shared
 /// by every ISR that needs the CPU id (the timer and external-IRQ paths).
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[must_use]
 pub fn current_cpu_id_from_lapic() -> u32 {
-    LAPIC_TO_CPU_ID[local_lapic_id() as usize].load(Ordering::Relaxed)
+    cpu_id_for_lapic(crate::apic::local_apic_id())
 }
 
 /// Drive the installed ring-3 preemption callback iff the interrupted
@@ -548,15 +485,14 @@ pub fn timer_isr_addr() -> u64 {
     tairix_arch_x86_64_isr_timer as *const () as usize as u64
 }
 
-// --- One-shot arming (scheduler-context, raw-pointer LAPIC writes) --
+// --- One-shot arming (scheduler context) ---------------------------
 
 /// Arm the calling CPU's LAPIC timer **one-shot** to fire once after
 /// `ticks_from_now` LAPIC ticks (clamped to one tick).
 ///
-/// Writes the LAPIC initial-count register through a bare-metal
-/// raw-pointer write to `LAPIC_BASE_PHYS`, exactly like the ISR's EOI
-/// write — the scheduler-context arming path cannot hold the `&mut
-/// Lapic<M>` driver. The LVT was set to one-shot mode + [`TIMER_VECTOR`]
+/// Writes the calling CPU's LAPIC initial-count register; the
+/// scheduler-context arming path holds no `Lapic<M>` driver. The LVT was set
+/// to one-shot mode + [`TIMER_VECTOR`]
 /// by [`init_local_preempt`] and persists, so writing the initial-count
 /// (re)starts the one-shot countdown. There is no periodic re-arm; the
 /// next fire happens only if the scheduler arms again.
@@ -565,14 +501,8 @@ pub fn arm_oneshot(ticks_from_now: u64) {
     // The LAPIC initial-count register is 32-bit; clamp to the register
     // width and to at least one tick.
     let count = u32::try_from(ticks_from_now).unwrap_or(u32::MAX).max(1);
-    // SAFETY: the LAPIC register block is reachable through the direct
-    // physical map under every root; the initial-count register accepts any
-    // 32-bit write, which (re)starts the one-shot countdown (Intel SDM
-    // §11.5.4).
-    unsafe {
-        let icr = (LAPIC_BASE_VIRT + LAPIC_TIMER_INITIAL_COUNT_OFFSET as u64) as *mut u32;
-        core::ptr::write_volatile(icr, count);
-    }
+    // Any write (re)starts the one-shot countdown (Intel SDM §11.5.4).
+    crate::apic::local_write(crate::apic::lapic_reg::TIMER_INITIAL_COUNT, count);
 }
 
 /// Disarm the calling CPU's LAPIC timer so no further interrupt fires
@@ -583,12 +513,7 @@ pub fn arm_oneshot(ticks_from_now: u64) {
 /// harmless no-op.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub fn disarm() {
-    // SAFETY: as in `arm_oneshot`; writing `0` to the initial-count
-    // register is the documented "halt the timer" sequence.
-    unsafe {
-        let icr = (LAPIC_BASE_VIRT + LAPIC_TIMER_INITIAL_COUNT_OFFSET as u64) as *mut u32;
-        core::ptr::write_volatile(icr, 0);
-    }
+    crate::apic::local_write(crate::apic::lapic_reg::TIMER_INITIAL_COUNT, 0);
 }
 
 /// The recorded per-quantum LAPIC initial-count, or `0` before
@@ -765,14 +690,6 @@ mod tests {
         // ever needs to change, the scheduler_stress_qemu binary
         // must be updated in lock-step — there is no other consumer.
         assert_eq!(TIMER_VECTOR, 0x20);
-    }
-
-    #[test]
-    fn lapic_constants_match_intel_sdm() {
-        // EOI = 0xB0 per Intel SDM Vol 3A §11.4.1 Table 11-1.
-        assert_eq!(LAPIC_EOI_OFFSET, 0xB0);
-        // LAPIC default base = 0xFEE0_0000 per SDM §11.4.5.
-        assert_eq!(LAPIC_BASE_PHYS, 0xFEE0_0000);
     }
 
     /// The callback slots are live on the host exactly as the aarch64 and

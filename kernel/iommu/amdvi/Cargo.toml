@@ -1,0 +1,23 @@
+[package]
+name = "tairix-kernel-iommu-amdvi"
+description = "TAIRiX AMD-Vi translation unit: the device table, command buffer, event log, v1 page tables and interrupt remapping tables."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tairix-arch-api = { path = "../../arch/api", version = "=0.0.0" }
+tairix-collections = { path = "../../../lib/collections", version = "=0.0.0" }
+tairix-dma-barrier = { path = "../../../lib/dma-barrier", version = "=0.0.0" }
+tairix-hash = { path = "../../../lib/hash", version = "=0.0.0" }
+tairix-kernel-iommu-api = { path = "../api", version = "=0.0.0" }
+tairix-sync = { path = "../../../lib/sync", version = "=0.0.0" }
+
+[dev-dependencies]
+tairix-kernel-iommu-api = { path = "../api", version = "=0.0.0", features = ["host-tests"] }

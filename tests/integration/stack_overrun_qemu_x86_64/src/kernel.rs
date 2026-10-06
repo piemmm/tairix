@@ -22,7 +22,7 @@ use tairix_arch_api::{fatal::KernelFault, BOOT_CPU};
 use tairix_arch_x86_64::context_hal::ContextSwitchHal;
 use tairix_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
 use tairix_arch_x86_64::paging::PAGE_SIZE;
-use tairix_arch_x86_64::{fault, qemu_exit, smp};
+use tairix_arch_x86_64::{fault, qemu_exit};
 use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
 use tairix_kernel::{
     boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
@@ -214,10 +214,10 @@ fn run_overrun_test() -> ! {
     // Build the live scheduler over a fresh production arch handle (the
     // cooperative `step` loop drives dispatch; interrupts are masked, so the
     // spawn-time self-IPI is latched and never delivered).
-    let bsp_id = smp::bsp_lapic_id();
+    let bsp_id = tairix_arch_x86_64::apic::local_apic_id();
     // Single-CPU vertical (BSP, dense id 0): per-CPU bookkeeping is sized
     // to one slot (no baked-in `MAX_CPUS`).
-    let cpu_to_lapic: [Option<u8>; 1] = [Some(bsp_id)];
+    let cpu_to_lapic: [Option<u32>; 1] = [Some(bsp_id)];
     // The arch handle borrows its per-CPU bookkeeping from a caller-sized
     // `&'static` backing; `run_overrun_test` runs once,
     // so a function-local `static` is sound and needs no allocator.

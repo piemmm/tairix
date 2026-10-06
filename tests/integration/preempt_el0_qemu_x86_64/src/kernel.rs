@@ -14,7 +14,7 @@ use tairix_arch_x86_64::context_hal::ContextSwitchHal;
 use tairix_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
 use tairix_arch_x86_64::paging::{self, activate_user_root, KERNEL_VMA_BASE};
 use tairix_arch_x86_64::userentry::UserMode;
-use tairix_arch_x86_64::{preempt, qemu_exit, smp, syscall_entry};
+use tairix_arch_x86_64::{preempt, qemu_exit, syscall_entry};
 use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
 use tairix_kernel::{
     boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
@@ -320,8 +320,8 @@ fn run_preempt() -> ! {
     // Build the live scheduler over the production arch handle. Interrupts stay
     // masked in the kernel (no `sti`), so the cooperative `step` loop drives
     // dispatch and the only ticks taken are in ring 3.
-    let bsp_id = smp::bsp_lapic_id();
-    let cpu_to_lapic: [Option<u8>; 1] = [Some(bsp_id)];
+    let bsp_id = tairix_arch_x86_64::apic::local_apic_id();
+    let cpu_to_lapic: [Option<u32>; 1] = [Some(bsp_id)];
     static ARCH_STORAGE: X86_64ArchStorage<1> = X86_64ArchStorage::new();
     let Ok(arch) = X86_64Arch::new(&ARCH_STORAGE, 0, bsp_id, &cpu_to_lapic) else {
         note(TEST_FAIL, "P-1c test: X86_64Arch::new failed");

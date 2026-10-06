@@ -1,9 +1,11 @@
-//! The VT-d register set and the one seam the unit reaches it through.
+//! The VT-d register set.
 //!
 //! Offsets and fields are those of Intel VT-d rev. 4.1 §11.4.
 
-use tairix_abi::RegisterWindow;
-use tairix_kernel_iommu_api::IommuError;
+/// Bits of `CAP.NFR`, the fault recording registers less one.
+const NFR_BITS: u32 = 8;
+/// The most fault recording registers a unit can have.
+pub(crate) const MOST_FAULT_RECORDS: usize = 1 << NFR_BITS;
 
 pub(crate) const VER: usize = 0x000;
 pub(crate) const CAP: usize = 0x008;
@@ -21,6 +23,7 @@ pub(crate) const PMEN: usize = 0x064;
 pub(crate) const IQH: usize = 0x080;
 pub(crate) const IQT: usize = 0x088;
 pub(crate) const IQA: usize = 0x090;
+pub(crate) const IRTA: usize = 0x0B8;
 
 /// The IOTLB invalidate register, at this offset past `ECAP.IRO * 16`.
 pub(crate) const IOTLB_REG: usize = 0x8;
@@ -32,10 +35,16 @@ pub(crate) const GCMD_TE: u32 = 1 << 31;
 pub(crate) const GCMD_SRTP: u32 = 1 << 30;
 pub(crate) const GCMD_WBF: u32 = 1 << 27;
 pub(crate) const GCMD_QIE: u32 = 1 << 26;
+pub(crate) const GCMD_IRE: u32 = 1 << 25;
+pub(crate) const GCMD_SIRTP: u32 = 1 << 24;
+pub(crate) const GCMD_CFI: u32 = 1 << 23;
 pub(crate) const GSTS_TES: u32 = 1 << 31;
 pub(crate) const GSTS_RTPS: u32 = 1 << 30;
 pub(crate) const GSTS_WBFS: u32 = 1 << 27;
 pub(crate) const GSTS_QIES: u32 = 1 << 26;
+pub(crate) const GSTS_IRES: u32 = 1 << 25;
+pub(crate) const GSTS_IRTPS: u32 = 1 << 24;
+pub(crate) const GSTS_CFIS: u32 = 1 << 23;
 /// Status bits whose command is one-shot: writing them back would re-issue
 /// the command, so a read-modify-write of GCMD masks them out.
 pub(crate) const GSTS_ONE_SHOT: u32 = (1 << 30) | (1 << 29) | (1 << 27) | (1 << 24);
@@ -59,6 +68,10 @@ pub(crate) const FSTS_ITE: u32 = 1 << 6;
 pub(crate) const FSTS_ERRORS: u32 = FSTS_PFO | FSTS_IQE | FSTS_ICE | FSTS_ITE;
 pub(crate) const FECTL_IM: u32 = 1 << 31;
 
+/// The interrupt remapping table address register's extended interrupt
+/// mode bit: 32-bit x2APIC destinations.
+pub(crate) const IRTA_EIME: u64 = 1 << 11;
+
 pub(crate) const PMEN_EPM: u32 = 1 << 31;
 pub(crate) const PMEN_PRS: u32 = 1 << 0;
 
@@ -78,7 +91,7 @@ pub(crate) fn low32(value: u64) -> u32 {
 }
 
 /// Descriptors one queue page holds: two entries each.
-pub(crate) const QUEUE_SLOTS: usize = tairix_arch_api::PAGE_TABLE_ENTRIES / 2;
+pub(crate) const QUEUE_SLOTS: usize = tairix_kernel_iommu_api::CommandQueue::SLOTS;
 
 /// The descriptor slot a queue head or tail register names.
 pub(crate) fn queue_index(register: u64) -> usize {
@@ -90,8 +103,10 @@ pub(crate) fn queue_index(register: u64) -> usize {
 pub(crate) struct Cap(pub u64);
 
 impl Cap {
+    /// The domain ids the unit takes: no more than its 16-bit domain field
+    /// names, whatever a reserved encoding claims.
     pub fn domains(self) -> u32 {
-        1 << (4 + 2 * field(self.0, 0, 3))
+        (1u32 << (4 + 2 * field(self.0, 0, 3))).min(1 << 16)
     }
     pub fn required_write_buffer_flush(self) -> bool {
         self.0 & (1 << 4) != 0
@@ -124,7 +139,7 @@ impl Cap {
         self.0 & (1 << 35) != 0
     }
     pub fn fault_records(self) -> usize {
-        field_usize(self.0, 40, 8) + 1
+        field_usize(self.0, 40, NFR_BITS) + 1
     }
     pub fn drain_writes(self) -> bool {
         self.0 & (1 << 54) != 0
@@ -148,63 +163,10 @@ impl Ecap {
     pub fn iotlb_offset(self) -> usize {
         field_usize(self.0, 8, 10) * 16
     }
-}
-
-/// How the unit reaches its registers: the production window, or a
-/// register-level model in the host tests.
-pub trait Registers: Send {
-    /// Read the 32-bit register at `offset`.
-    ///
-    /// # Errors
-    ///
-    /// [`IommuError::Hardware`] for an offset outside the register set.
-    fn read32(&self, offset: usize) -> Result<u32, IommuError>;
-
-    /// Write the 32-bit register at `offset`.
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::read32`].
-    fn write32(&self, offset: usize, value: u32) -> Result<(), IommuError>;
-
-    /// Read the 64-bit register at `offset` as one access.
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::read32`].
-    fn read64(&self, offset: usize) -> Result<u64, IommuError>;
-
-    /// Write the 64-bit register at `offset` as one access.
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::read32`].
-    fn write64(&self, offset: usize, value: u64) -> Result<(), IommuError>;
-
-    /// Bytes of register set the window reaches.
-    fn window_len(&self) -> usize;
-}
-
-impl Registers for RegisterWindow {
-    fn read32(&self, offset: usize) -> Result<u32, IommuError> {
-        self.read_u32(offset).map_err(|_| IommuError::Hardware)
+    pub fn interrupt_remapping(self) -> bool {
+        self.0 & (1 << 3) != 0
     }
-
-    fn write32(&self, offset: usize, value: u32) -> Result<(), IommuError> {
-        self.write_u32(offset, value)
-            .map_err(|_| IommuError::Hardware)
-    }
-
-    fn read64(&self, offset: usize) -> Result<u64, IommuError> {
-        self.read_u64(offset).map_err(|_| IommuError::Hardware)
-    }
-
-    fn write64(&self, offset: usize, value: u64) -> Result<(), IommuError> {
-        self.write_u64(offset, value)
-            .map_err(|_| IommuError::Hardware)
-    }
-
-    fn window_len(&self) -> usize {
-        self.len()
+    pub fn extended_interrupts(self) -> bool {
+        self.0 & (1 << 4) != 0
     }
 }

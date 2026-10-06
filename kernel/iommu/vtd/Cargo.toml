@@ -17,7 +17,6 @@ tairix-arch-api = { path = "../../arch/api", version = "=0.0.0" }
 tairix-collections = { path = "../../../lib/collections", version = "=0.0.0" }
 tairix-dma-barrier = { path = "../../../lib/dma-barrier", version = "=0.0.0" }
 tairix-hash = { path = "../../../lib/hash", version = "=0.0.0" }
-tairix-inline = { path = "../../../lib/inline", version = "=0.0.0" }
 tairix-kernel-iommu-api = { path = "../api", version = "=0.0.0" }
 tairix-sync = { path = "../../../lib/sync", version = "=0.0.0" }
 

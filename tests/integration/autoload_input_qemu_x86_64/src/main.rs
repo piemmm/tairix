@@ -45,7 +45,7 @@
 //!    process** with exactly the node's resource grants — the four
 //!    role-tagged windows + DMA + the routed MSI-X line.
 //! 4. The spawned driver instance maps its register windows, brings its
-//!    virtio-input device up over `PciTransport` (`enable_msix(0)`), **then
+//!    virtio-input device up over `PciTransport` (the MSI-X entry its grant names), **then
 //!    binds its granted interrupt line and parks on `irq_wait`**
 //!    (interrupt-driven, never a busy poll), and on each device interrupt
 //!    pumps decoded events into the arbiter via `key_inject`.

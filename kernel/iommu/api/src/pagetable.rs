@@ -2,7 +2,8 @@
 //!
 //! Every table-walking family (VT-d, AMD-Vi, the Arm SMMU, the RISC-V IOMMU) walks
 //! a radix tree of 4 KiB tables of 512 entries; they differ only in how an
-//! entry is encoded and at which levels a leaf may sit. The walk, the
+//! entry is encoded, at which levels a leaf may sit, and whether the root
+//! resolves more bits in a larger table (RISC-V's second stage). The walk, the
 //! choice of leaf size, the allocation of tables, their release once
 //! emptied, and the ordering that makes an entry visible to the walker are
 //! written once here, over a [`PteFormat`].
@@ -11,8 +12,8 @@ use alloc::vec::Vec;
 
 use tairix_arch_api::PAGE_TABLE_ENTRIES;
 
-use crate::memory::{Table, TableMemory};
-use crate::{Access, IommuError, IO_PAGE_SHIFT, IO_PAGE_SIZE};
+use crate::memory::{Block, Table, TableMemory};
+use crate::{Access, IommuError, Reach, IO_PAGE_SHIFT, IO_PAGE_SIZE};
 
 /// Bits of IOVA one level resolves.
 const LEVEL_BITS: u32 = PAGE_TABLE_ENTRIES.trailing_zeros();
@@ -49,6 +50,32 @@ pub trait PteFormat: Send + Sync {
 
     /// What `entry`, read at `level`, holds.
     fn decode(&self, entry: u64, level: u32) -> Pte;
+
+    /// `log2` of the pages the root spans, each further bit of it a bit more
+    /// of IOVA the root resolves.
+    fn root_order(&self) -> u32 {
+        0
+    }
+}
+
+/// The widest root any family walks, as an order of tables: an `SMMUv3`
+/// stage 2 walk's sixteen concatenated tables, 64 KiB.
+pub const MAX_ROOT_ORDER: u32 = 4;
+
+/// Bits of IOVA a tree of `levels` levels translates.
+#[must_use]
+pub const fn reach_bits(levels: u32) -> u32 {
+    IO_PAGE_SHIFT + LEVEL_BITS * levels
+}
+
+/// The exclusive physical address `reach`'s tables can name up to.
+#[must_use]
+pub(crate) const fn output_limit(reach: Reach) -> u64 {
+    if reach.output_bits >= 64 {
+        u64::MAX
+    } else {
+        1 << reach.output_bits
+    }
 }
 
 /// Bytes one entry at `level` spans.
@@ -56,10 +83,25 @@ const fn span(level: u32) -> u64 {
     IO_PAGE_SIZE << (LEVEL_BITS * level)
 }
 
-// Masked to the table's entries before the cast, so nothing is truncated.
+// Masked to the table's `entries` before the cast, so nothing is truncated.
 #[allow(clippy::cast_possible_truncation)]
-fn index_of(iova: u64, level: u32) -> usize {
-    ((iova >> (IO_PAGE_SHIFT + LEVEL_BITS * level)) & (PAGE_TABLE_ENTRIES as u64 - 1)) as usize
+fn index_of(iova: u64, level: u32, entries: usize) -> usize {
+    ((iova >> (IO_PAGE_SHIFT + LEVEL_BITS * level)) & (entries as u64 - 1)) as usize
+}
+
+/// The root: one table, or a block of them the format's root spans.
+enum Root {
+    Table(Table),
+    Block(Block),
+}
+
+impl Root {
+    const fn phys(&self) -> u64 {
+        match self {
+            Self::Table(table) => table.phys(),
+            Self::Block(block) => block.phys(),
+        }
+    }
 }
 
 /// One domain's table tree.
@@ -73,28 +115,55 @@ fn index_of(iova: u64, level: u32) -> usize {
 pub struct IoPageTable<'f, F: PteFormat> {
     format: F,
     levels: u32,
-    root: Table,
+    root: Root,
+    /// `log2` of the pages the root spans.
+    root_order: u32,
+    /// Bits of IOVA the unit translates, which the tree may reach past.
+    input_bits: u32,
+    /// The exclusive physical address the unit's entries can name up to,
+    /// past which a format's entry would silently name another page.
+    output_limit: u64,
     memory: TableMemory<'f>,
     /// Tables an unmap emptied, freed at the next [`Self::release_retired`].
     retired: Vec<u64>,
 }
 
 impl<'f, F: PteFormat> IoPageTable<'f, F> {
-    /// An empty tree of `levels` levels drawing its tables from `memory`.
+    /// An empty tree of `levels` levels drawing its tables from `memory`,
+    /// mapping only within `reach`.
     ///
     /// # Errors
     ///
-    /// [`IommuError::OutOfRange`] for a depth outside `1..=`[`MAX_LEVELS`] or a
-    /// format without 4 KiB leaves, and [`IommuError::Exhausted`] when no
-    /// root table can be had.
-    pub fn new(format: F, levels: u32, memory: TableMemory<'f>) -> Result<Self, IommuError> {
-        if !(1..=MAX_LEVELS).contains(&levels) || !format.leaf_allowed(0) {
+    /// [`IommuError::OutOfRange`] for a depth outside `1..=`[`MAX_LEVELS`], a
+    /// root wider than 64 KiB, a format without 4 KiB leaves, or a reach
+    /// translating more IOVA than the tree resolves, and
+    /// [`IommuError::Exhausted`] when no root can be had.
+    pub fn new(
+        format: F,
+        levels: u32,
+        memory: TableMemory<'f>,
+        reach: Reach,
+    ) -> Result<Self, IommuError> {
+        let order = format.root_order();
+        if !(1..=MAX_LEVELS).contains(&levels)
+            || order > MAX_ROOT_ORDER
+            || !format.leaf_allowed(0)
+            || reach.input_bits > reach_bits(levels) + order
+        {
             return Err(IommuError::OutOfRange);
         }
+        let root = if order == 0 {
+            Root::Table(memory.alloc()?)
+        } else {
+            Root::Block(memory.alloc_block(order)?)
+        };
         Ok(Self {
             format,
             levels,
-            root: memory.alloc()?,
+            root,
+            root_order: order,
+            input_bits: reach.input_bits,
+            output_limit: output_limit(reach),
             memory,
             retired: Vec::new(),
         })
@@ -115,7 +184,7 @@ impl<'f, F: PteFormat> IoPageTable<'f, F> {
     /// Bits of IOVA the tree translates.
     #[must_use]
     pub const fn input_bits(&self) -> u32 {
-        IO_PAGE_SHIFT + LEVEL_BITS * self.levels
+        self.input_bits
     }
 
     /// Map `[iova, iova + len)` onto `[phys, phys + len)` with the largest
@@ -124,9 +193,10 @@ impl<'f, F: PteFormat> IoPageTable<'f, F> {
     ///
     /// # Errors
     ///
-    /// [`IommuError::OutOfRange`] for a misaligned or empty range or one past
-    /// the tree's reach, [`IommuError::AlreadyMapped`] where something is
-    /// mapped, and [`IommuError::Exhausted`] when a table cannot be had.
+    /// [`IommuError::OutOfRange`] for a misaligned or empty range, or one past
+    /// the unit's reach at either end, [`IommuError::AlreadyMapped`] where
+    /// something is mapped, and [`IommuError::Exhausted`] when a table cannot
+    /// be had.
     pub fn map(
         &mut self,
         iova: u64,
@@ -135,7 +205,8 @@ impl<'f, F: PteFormat> IoPageTable<'f, F> {
         access: Access,
     ) -> Result<(), IommuError> {
         self.check_range(iova, len)?;
-        if !phys.is_multiple_of(IO_PAGE_SIZE) || phys.checked_add(len).is_none() {
+        let end = phys.checked_add(len).ok_or(IommuError::OutOfRange)?;
+        if !phys.is_multiple_of(IO_PAGE_SIZE) || end > self.output_limit {
             return Err(IommuError::OutOfRange);
         }
         let mut done = 0;
@@ -199,7 +270,7 @@ impl<'f, F: PteFormat> IoPageTable<'f, F> {
         loop {
             match self
                 .format
-                .decode(self.read(table, index_of(iova, level)).ok()?, level)
+                .decode(self.read(table, self.index(iova, level)).ok()?, level)
             {
                 Pte::Leaf(phys, access) => {
                     return Some((phys + (iova & (span(level) - 1)), access))
@@ -250,7 +321,7 @@ impl<'f, F: PteFormat> IoPageTable<'f, F> {
         let mut table = self.root();
         let mut level = self.levels - 1;
         loop {
-            let index = index_of(iova, level);
+            let index = self.index(iova, level);
             let entry = self.read(table, index)?;
             if level == target {
                 if self.format.decode(entry, level) != Pte::Absent {
@@ -281,8 +352,8 @@ impl<'f, F: PteFormat> IoPageTable<'f, F> {
         end: u64,
     ) -> Result<(), IommuError> {
         let size = span(level);
-        let first = index_of(start, level);
-        let last = index_of(end - 1, level);
+        let first = self.index(start, level);
+        let last = self.index(end - 1, level);
         for index in first..=last {
             let entry_base = base + (index as u64) * size;
             let entry = self.read(table, index)?;
@@ -322,8 +393,28 @@ impl<'f, F: PteFormat> IoPageTable<'f, F> {
         (0..PAGE_TABLE_ENTRIES).all(|index| self.read(table, index) == Ok(0))
     }
 
+    /// The entry `iova` falls in of a table at `level`: the root's if the
+    /// level is the root's.
+    fn index(&self, iova: u64, level: u32) -> usize {
+        let entries = if level == self.levels - 1 {
+            self.root_entries()
+        } else {
+            PAGE_TABLE_ENTRIES
+        };
+        index_of(iova, level, entries)
+    }
+
+    const fn root_entries(&self) -> usize {
+        PAGE_TABLE_ENTRIES << self.root_order
+    }
+
     /// `table` is one this tree names, so it came from `self.memory`.
     fn read(&self, table: u64, index: usize) -> Result<u64, IommuError> {
+        if let Root::Block(root) = &self.root {
+            if root.phys() == table {
+                return self.memory.read_block(root, index);
+            }
+        }
         // SAFETY: the tree only names tables its memory allocated and unlinks
         // each before freeing it, and its owner serialises its writers.
         unsafe { self.memory.read_at(table, index) }
@@ -332,31 +423,45 @@ impl<'f, F: PteFormat> IoPageTable<'f, F> {
     /// Store `entry` whole, so the walker never reads half of one, then make
     /// it visible to a walker that does not snoop.
     fn write(&self, table: u64, index: usize, entry: u64) -> Result<(), IommuError> {
+        if let Root::Block(root) = &self.root {
+            if root.phys() == table {
+                self.memory.write_block(root, index, entry)?;
+                self.memory.publish_block(root, index, 1);
+                return Ok(());
+            }
+        }
         // SAFETY: as `read`.
         unsafe { self.memory.write_at(table, index, entry) }?;
         self.memory.publish_at(table, index, 1);
         Ok(())
     }
 
-    fn free_tree(&self, table: u64, level: u32) {
-        if level > 0 {
-            for index in 0..PAGE_TABLE_ENTRIES {
-                if let Ok(Pte::Table(child)) = self
-                    .read(table, index)
-                    .map(|entry| self.format.decode(entry, level))
-                {
-                    self.free_tree(child, level - 1);
-                }
+    /// Free every table below the entries `[0, entries)` of `table` at
+    /// `level`.
+    fn free_below(&self, table: u64, level: u32, entries: usize) {
+        if level == 0 {
+            return;
+        }
+        for index in 0..entries {
+            if let Ok(Pte::Table(child)) = self
+                .read(table, index)
+                .map(|entry| self.format.decode(entry, level))
+            {
+                self.free_below(child, level - 1, PAGE_TABLE_ENTRIES);
+                self.memory.free_at(child);
             }
         }
-        self.memory.free_at(table);
     }
 }
 
 impl<F: PteFormat> Drop for IoPageTable<'_, F> {
     fn drop(&mut self) {
         self.release_retired();
-        self.free_tree(self.root(), self.levels - 1);
+        self.free_below(self.root(), self.levels - 1, self.root_entries());
+        match &self.root {
+            Root::Table(table) => self.memory.free_at(table.phys()),
+            Root::Block(block) => self.memory.free_block_at(block.phys(), block.order()),
+        }
     }
 }
 

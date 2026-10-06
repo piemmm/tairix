@@ -9,7 +9,7 @@ use alloc::sync::Arc;
 
 use tairix_arch_api::SecondaryBringup;
 use tairix_arch_x86_64::acpi::{self, MadtEntry};
-use tairix_arch_x86_64::apic::{Lapic, VolatileLapicMmio};
+use tairix_arch_x86_64::apic::{Lapic, LocalApic};
 use tairix_arch_x86_64::apic_timer::{self, Calibration, PolledPit, Rdtsc};
 use tairix_arch_x86_64::bootinfo::BootData;
 use tairix_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
@@ -294,7 +294,7 @@ struct SmpArch;
 
 impl SchedulerArch for SmpArch {
     fn current_cpu(&self) -> u32 {
-        u32::from(smp::bsp_lapic_id())
+        tairix_arch_x86_64::apic::local_apic_id()
     }
     fn ticks_now(&self) -> u64 {
         // RDTSC has been available since the Pentium and is universally
@@ -388,9 +388,9 @@ pub extern "C" fn kernel_main(boot_info: u64) -> ! {
     }
 
     // Software-enable the BSP's LAPIC so we can drive IPIs.
-    let mut lapic = make_lapic();
+    let mut lapic = Lapic::new(LocalApic);
     lapic.software_enable(0xFF);
-    let bsp_id = smp::bsp_lapic_id();
+    let bsp_id = u8::try_from(lapic.id()).expect("the boot CPU has an xAPIC id");
     let _ = writeln!(com1, "[scheduler_stress_qemu] BSP LAPIC id = {bsp_id}");
 
     // Calibrate the LAPIC timer against the PIT *once*, on the BSP. APs
@@ -423,7 +423,7 @@ pub extern "C" fn kernel_main(boot_info: u64) -> ! {
     );
     BSP_CALIBRATION_PACKED.store(pack_calibration(calibration), Ordering::Release);
     QUANTUM_TSC.store(calibration.quantum_tsc(), Ordering::Release);
-    preempt::set_cpu_id_for_lapic(bsp_id, 0);
+    preempt::set_cpu_id_for_lapic(u32::from(bsp_id), 0);
 
     // Discover APs.
     let Some(ap_ids) = discover_aps(boot_info, bsp_id, &mut com1) else {
@@ -470,7 +470,7 @@ pub extern "C" fn kernel_main(boot_info: u64) -> ! {
     // (typically right after `sti`) finds the mapping populated.
     for i in 0..ap_ids.count {
         let cpu_id = (i + 1) as u32;
-        preempt::set_cpu_id_for_lapic(ap_ids.ids[i], cpu_id);
+        preempt::set_cpu_id_for_lapic(u32::from(ap_ids.ids[i]), cpu_id);
     }
 
     // Build the bring-up handle from the discovered LAPIC map and start
@@ -478,10 +478,10 @@ pub extern "C" fn kernel_main(boot_info: u64) -> ! {
     // INIT-SIPI-SIPI orchestration now lives in `tairix_arch_x86_64::smp`
     // (`plans/WIRING.md` Stage W14); this vertical exercises it
     // end-to-end on ≥ 4 real (emulated) cores.
-    let mut cpu_to_lapic: [Option<u8>; MAX_CPUS] = [None; MAX_CPUS];
-    cpu_to_lapic[0] = Some(bsp_id);
+    let mut cpu_to_lapic: [Option<u32>; MAX_CPUS] = [None; MAX_CPUS];
+    cpu_to_lapic[0] = Some(u32::from(bsp_id));
     for i in 0..ap_ids.count {
-        cpu_to_lapic[i + 1] = Some(ap_ids.ids[i]);
+        cpu_to_lapic[i + 1] = Some(u32::from(ap_ids.ids[i]));
     }
     // The bring-up handle borrows its per-CPU bookkeeping from a
     // caller-sized `&'static` backing (sized to this
@@ -489,7 +489,7 @@ pub extern "C" fn kernel_main(boot_info: u64) -> ! {
     // crate). `kernel_main` runs once, so a function-local `static` is
     // sound and needs no allocator.
     static ARCH_STORAGE: X86_64ArchStorage<MAX_CPUS> = X86_64ArchStorage::new();
-    let bringup = match X86_64Arch::new(&ARCH_STORAGE, 0, bsp_id, &cpu_to_lapic) {
+    let bringup = match X86_64Arch::new(&ARCH_STORAGE, 0, u32::from(bsp_id), &cpu_to_lapic) {
         Ok(handle) => handle,
         Err(e) => {
             let _ = writeln!(
@@ -584,7 +584,7 @@ pub extern "C" fn kernel_main(boot_info: u64) -> ! {
                 // Each CPU's execution counter is incremented by the
                 // *executing* CPU, not the home CPU — that's what proves
                 // multi-core dispatch happened.
-                let me = smp::bsp_lapic_id() as usize;
+                let me = tairix_arch_x86_64::apic::local_apic_id() as usize;
                 if me < MAX_CPUS {
                     PER_CPU_EXEC[me].fetch_add(1, Ordering::Relaxed);
                 }
@@ -763,7 +763,7 @@ extern "C" fn ap_entry(cpu_id: u32) -> ! {
             }
         }
     };
-    let mut ap_lapic = make_lapic();
+    let mut ap_lapic = Lapic::new(LocalApic);
     ap_lapic.software_enable(0xFF);
     // SAFETY: this AP, `percpu::init(cpu_id)` ran above, interrupts
     // are disabled (we haven't `sti`-d yet), `ap_lapic` is this AP's
@@ -810,16 +810,6 @@ fn run_step_loop(cpu_id: u32, sched: &Scheduler<SmpArch>) {
             return;
         }
     }
-}
-
-// --- LAPIC helper --------------------------------------------------
-
-fn make_lapic() -> Lapic<VolatileLapicMmio> {
-    // SAFETY: LAPIC MMIO base is 0xFEE00000 on every Intel-architecture
-    // system QEMU emulates. The frame is identity-mapped by `boot.s`
-    // (SAFETY-INVARIANT 4 — 0..4 GiB identity map).
-    let mmio = unsafe { VolatileLapicMmio::new(0xFEE0_0000 as *mut u32) };
-    Lapic::new(mmio)
 }
 
 // --- MADT discovery -----------------------------------------------

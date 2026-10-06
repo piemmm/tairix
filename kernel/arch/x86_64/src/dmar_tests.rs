@@ -4,6 +4,7 @@ use std::vec;
 use std::vec::Vec;
 
 use super::*;
+use crate::acpi::UnitNodes;
 
 fn table(host_address_bits: u8, flags: u8, structures: &[u8]) -> Vec<u8> {
     let total = REMAPPING_OFFSET + structures.len();
@@ -82,12 +83,23 @@ impl BridgeBuses for Bridges {
 
 const NO_BRIDGES: &Bridges = &Bridges(Vec::new());
 
-/// Each function's aliases, by its source id.
-struct Aliases(Vec<(SourceId, SourceId)>);
+/// One segment's walk as a test sets it out: each function's aliases by its
+/// source id, and the functions below an external-facing port.
+#[derive(Default)]
+struct Walk {
+    aliases: Vec<(SourceId, SourceId)>,
+    untrusted: Vec<SourceId>,
+}
 
-impl DmaAliases for Aliases {
+impl BridgeBuses for Walk {
+    fn bus_range(&self, _bridge: SourceId) -> Option<(u8, u8)> {
+        None
+    }
+}
+
+impl DmaAliases for Walk {
     fn aliases(&self, source: SourceId, visit: &mut dyn FnMut(SourceId)) {
-        for &(of, alias) in &self.0 {
+        for &(of, alias) in &self.aliases {
             if of == source {
                 visit(alias);
             }
@@ -95,7 +107,21 @@ impl DmaAliases for Aliases {
     }
 }
 
-const NO_ALIASES: &Aliases = &Aliases(Vec::new());
+impl Fabric for Walk {
+    fn untrusted(&self, source: SourceId) -> bool {
+        self.untrusted.contains(&source)
+    }
+}
+
+/// `walk` as the walk of segment 0, and no other segment walked.
+fn segment_zero<'w>(walk: &'w Walk) -> impl Fn(u16) -> Option<&'w dyn Fabric> {
+    move |segment| (segment == 0).then_some(walk as &dyn Fabric)
+}
+
+/// No segment walked.
+fn unwalked(_segment: u16) -> Option<&'static dyn Fabric> {
+    None
+}
 
 /// The shape QEMU's `intel-iommu` reports: one catch-all unit whose only
 /// scope names the I/O APIC.
@@ -344,8 +370,7 @@ fn every_unit_becomes_a_node_carrying_its_registers_and_reserved_windows() {
         &dmar,
         0x800A_0000,
         b"intel,vtd",
-        0,
-        Some((NO_BRIDGES, NO_ALIASES)),
+        &segment_zero(&Walk::default()),
         &mut sink,
     )
     .unwrap();
@@ -353,7 +378,8 @@ fn every_unit_becomes_a_node_carrying_its_registers_and_reserved_windows() {
         placed,
         UnitNodes {
             emitted: 2,
-            dropped: 0
+            dropped: 0,
+            untrusted: 0,
         }
     );
     assert_eq!(sink.0.len(), 2);
@@ -378,18 +404,24 @@ fn every_unit_becomes_a_node_carrying_its_registers_and_reserved_windows() {
     };
     assert_eq!(
         window(first),
-        [
-            IommuReservedWindow::new(u32::from(sid(0, 2, 0).raw()), 0x8000_0000, 0x0400_0000)
-                .unwrap()
-        ],
+        [IommuReservedWindow::new(
+            u32::from(sid(0, 2, 0).raw()),
+            0x8000_0000,
+            0x0400_0000,
+            ReservedAccess::ReadWrite,
+        )
+        .unwrap()],
         "the graphics unit keeps the graphics function's window"
     );
     assert_eq!(
         window(second),
-        [
-            IommuReservedWindow::new(u32::from(sid(0, 0x14, 0).raw()), 0x7B80_0000, 0x10_0000)
-                .unwrap()
-        ],
+        [IommuReservedWindow::new(
+            u32::from(sid(0, 0x14, 0).raw()),
+            0x7B80_0000,
+            0x10_0000,
+            ReservedAccess::ReadWrite,
+        )
+        .unwrap()],
         "the catch-all unit keeps the USB function's window"
     );
 }
@@ -406,12 +438,13 @@ fn without_a_hierarchy_every_unit_comes_up_keeping_no_window() {
     let bytes = table(46, 0, &[graphics, rest, usb, stolen].concat());
     let dmar = Dmar::parse(&bytes).unwrap();
     let mut sink = Sink(Vec::new());
-    let placed = emit_unit_nodes(&dmar, 1, b"intel,vtd", 0, None, &mut sink).unwrap();
+    let placed = emit_unit_nodes(&dmar, 1, b"intel,vtd", &unwalked, &mut sink).unwrap();
     assert_eq!(
         placed,
         UnitNodes {
             emitted: 2,
-            dropped: 2
+            dropped: 2,
+            untrusted: 0,
         }
     );
     let registers = [
@@ -444,8 +477,7 @@ fn reserved_windows_past_a_node_s_room_are_counted_not_forced() {
         &dmar,
         1,
         b"intel,vtd",
-        0,
-        Some((NO_BRIDGES, NO_ALIASES)),
+        &segment_zero(&Walk::default()),
         &mut sink,
     )
     .unwrap();
@@ -464,7 +496,7 @@ fn a_function_is_translated_by_the_unit_node_its_scopes_name() {
     let dmar = Dmar::parse(&bytes).unwrap();
     let both = UnitNodes {
         emitted: 2,
-        dropped: 0,
+        ..UnitNodes::default()
     };
     let unit = |source| unit_node(&dmar, 0x800A_0000, both, 0, source, NO_BRIDGES);
     assert_eq!(unit(sid(0, 2, 0)), Some(0x800A_0000));
@@ -475,7 +507,7 @@ fn a_function_is_translated_by_the_unit_node_its_scopes_name() {
     );
     let first_only = UnitNodes {
         emitted: 1,
-        dropped: 0,
+        ..UnitNodes::default()
     };
     assert_eq!(
         unit_node(&dmar, 0x800A_0000, first_only, 0, sid(0, 3, 0), NO_BRIDGES),
@@ -495,17 +527,13 @@ fn a_reserved_window_is_kept_for_every_alias_of_its_function() {
     let bytes = table(46, 0, &[rest, first, second].concat());
     let dmar = Dmar::parse(&bytes).unwrap();
     let alias = sid(2, 0, 0);
-    let aliases = Aliases(vec![(sid(2, 1, 0), alias), (sid(2, 2, 0), alias)]);
+    let aliases = Walk {
+        aliases: vec![(sid(2, 1, 0), alias), (sid(2, 2, 0), alias)],
+        ..Walk::default()
+    };
     let mut sink = Sink(Vec::new());
-    let placed = emit_unit_nodes(
-        &dmar,
-        1,
-        b"intel,vtd",
-        0,
-        Some((NO_BRIDGES, &aliases)),
-        &mut sink,
-    )
-    .unwrap();
+    let placed =
+        emit_unit_nodes(&dmar, 1, b"intel,vtd", &segment_zero(&aliases), &mut sink).unwrap();
     assert_eq!(placed.dropped, 0);
     let streams: Vec<u32> = sink.0[0]
         .resources()
@@ -567,8 +595,7 @@ fn a_window_firmware_names_twice_takes_one_slot() {
         &dmar,
         1,
         b"intel,vtd",
-        0,
-        Some((NO_BRIDGES, NO_ALIASES)),
+        &segment_zero(&Walk::default()),
         &mut sink,
     )
     .unwrap();
@@ -581,8 +608,8 @@ fn a_window_firmware_names_twice_takes_one_slot() {
     assert_eq!(windows, 1);
 }
 
-/// A window on a segment the bridges do not reach would be resolved through
-/// another segment's configuration space; it is counted, never placed.
+/// A window on a segment no walk reaches would be resolved through another
+/// segment's configuration space; it is counted, never placed.
 #[test]
 fn a_window_on_a_segment_discovery_does_not_walk_is_never_resolved() {
     let near = drhd(DRHD_INCLUDE_PCI_ALL, 0, 0, 0xFED9_0000, &[]);
@@ -595,8 +622,7 @@ fn a_window_on_a_segment_discovery_does_not_walk_is_never_resolved() {
         &dmar,
         1,
         b"intel,vtd",
-        0,
-        Some((NO_BRIDGES, NO_ALIASES)),
+        &segment_zero(&Walk::default()),
         &mut sink,
     )
     .unwrap();
@@ -630,16 +656,133 @@ fn a_full_tree_keeps_the_units_it_could_hold() {
         &dmar,
         1,
         b"intel,vtd",
-        0,
-        Some((NO_BRIDGES, NO_ALIASES)),
+        &segment_zero(&Walk::default()),
         &mut room,
     )
     .unwrap();
     assert_eq!(placed.emitted, 1);
     assert_eq!(room.1.len(), 1);
     assert!(
-        placed.strand(&dmar, 0),
+        placed.strands(dmar.units().map(|unit| unit.segment()), 0),
         "the unit left out strands its segment"
     );
-    assert!(!placed.strand(&dmar, 1), "and no other");
+    assert!(
+        !placed.strands(dmar.units().map(|unit| unit.segment()), 1),
+        "and no other"
+    );
+}
+
+/// A function below an external-facing port is untrusted: firmware keeps no
+/// window for it, however its table names one.
+#[test]
+fn no_window_is_kept_for_a_function_below_an_external_facing_port() {
+    let unit = drhd(DRHD_INCLUDE_PCI_ALL, 0, 0, 0xFED9_0000, &[]);
+    let usb = rmrr(0, 0x7B80_0000, 0x7B8F_FFFF, &scope(1, 0, 0, &[(0x14, 0)]));
+    let dock = rmrr(0, 0x7C00_0000, 0x7C0F_FFFF, &scope(1, 0, 0, &[(0x1C, 0)]));
+    let bytes = table(46, 0, &[unit, usb, dock].concat());
+    let dmar = Dmar::parse(&bytes).unwrap();
+    let walk = Walk {
+        untrusted: vec![sid(0, 0x1C, 0)],
+        ..Walk::default()
+    };
+    let mut sink = Sink(Vec::new());
+    let placed = emit_unit_nodes(&dmar, 1, b"intel,vtd", &segment_zero(&walk), &mut sink).unwrap();
+    assert_eq!((placed.dropped, placed.untrusted), (0, 1));
+    let streams: Vec<u32> = sink.0[0]
+        .resources()
+        .iter()
+        .filter_map(|r| r.iommu_reserved().ok())
+        .map(IommuReservedWindow::stream)
+        .collect();
+    assert_eq!(streams, [u32::from(sid(0, 0x14, 0).raw())]);
+}
+
+/// Each unit is emitted once whatever segment it covers, its windows
+/// resolved through its own segment's walk.
+#[test]
+fn units_of_two_segments_each_keep_their_own_segment_s_windows() {
+    let near = drhd(DRHD_INCLUDE_PCI_ALL, 0, 0, 0xFED9_0000, &[]);
+    let far = drhd(DRHD_INCLUDE_PCI_ALL, 0, 1, 0xFED9_1000, &[]);
+    let near_window = rmrr(0, 0x7B80_0000, 0x7B8F_FFFF, &scope(1, 0, 0, &[(0x14, 0)]));
+    let far_window = rmrr(1, 0x7C00_0000, 0x7C0F_FFFF, &scope(1, 0, 0, &[(0x02, 0)]));
+    let bytes = table(46, 0, &[near, far, near_window, far_window].concat());
+    let dmar = Dmar::parse(&bytes).unwrap();
+    let walk = Walk::default();
+    let both = |_segment: u16| Some(&walk as &dyn Fabric);
+    let mut sink = Sink(Vec::new());
+    let placed = emit_unit_nodes(&dmar, 1, b"intel,vtd", &both, &mut sink).unwrap();
+    assert_eq!((placed.emitted, placed.dropped), (2, 0));
+    let windows = |node: &HwNode| {
+        node.resources()
+            .iter()
+            .filter_map(|r| r.iommu_reserved().ok())
+            .map(|w| (w.stream(), w.base()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        windows(&sink.0[0]),
+        [(u32::from(sid(0, 0x14, 0).raw()), 0x7B80_0000)]
+    );
+    assert_eq!(
+        windows(&sink.0[1]),
+        [(u32::from(sid(0, 0x02, 0).raw()), 0x7C00_0000)]
+    );
+}
+
+/// Each I/O APIC a unit with a node names is reported with that unit's node
+/// and the requester id its path resolves to; one named by a unit without a
+/// node, or by no unit, is not.
+#[test]
+fn an_io_apic_is_remapped_by_the_unit_whose_scope_names_it() {
+    let first = drhd(0, 0, 0, 0xFED9_0000, &scope(3, 2, 0xF0, &[(0x1F, 0)]));
+    let second = drhd(
+        DRHD_INCLUDE_PCI_ALL,
+        0,
+        0,
+        0xFED9_1000,
+        &[
+            scope(3, 8, 0x00, &[(0x1E, 7)]),
+            scope(4, 0, 0x00, &[(0x1E, 6)]),
+        ]
+        .concat(),
+    );
+    let bytes = table(46, 0, &[first, second].concat());
+    let dmar = Dmar::parse(&bytes).unwrap();
+    let mut seen = Vec::new();
+    let both = UnitNodes {
+        emitted: 2,
+        ..UnitNodes::default()
+    };
+    ioapic_sources(
+        &dmar,
+        0x800A_0000,
+        both,
+        &unwalked,
+        &mut |id, node, source| {
+            seen.push((id, node, source));
+        },
+    );
+    assert_eq!(
+        seen,
+        [
+            (2, 0x800A_0000, sid(0xF0, 0x1F, 0)),
+            (8, 0x800A_0001, sid(0, 0x1E, 7)),
+        ],
+        "an HPET scope is no I/O APIC"
+    );
+    seen.clear();
+    let first_only = UnitNodes {
+        emitted: 1,
+        ..UnitNodes::default()
+    };
+    ioapic_sources(
+        &dmar,
+        0x800A_0000,
+        first_only,
+        &unwalked,
+        &mut |id, node, source| {
+            seen.push((id, node, source));
+        },
+    );
+    assert_eq!(seen, [(2, 0x800A_0000, sid(0xF0, 0x1F, 0))]);
 }

@@ -756,9 +756,8 @@ supplied via `-kernel`. The kernel ELF is therefore the bootable
 artifact directly — `Runner::run` passes `spec.kernel` straight through
 to the riscv64 argv builder.
 
-The `virt` board carries the devices the Stage 4.D drivers exercise: a
-SiFive Test device, eight virtio-mmio transports, and a generic PCIe
-host bridge. Every virtio-mmio transport is forced to the modern
+The `virt` board carries a SiFive Test device, eight virtio-mmio
+transports, and a generic PCIe host bridge. Every virtio-mmio transport is forced to the modern
 (virtio 1.x, version 2) interface with `-global
 virtio-mmio.force-legacy=false` — QEMU defaults to the legacy (version 1)
 interface, but TAIRiX' `MmioTransport` only drives the modern layout. A
@@ -857,12 +856,15 @@ The riscv64 port implements the Arch HAL `PlatformDiscovery` slice
 device-tree parser now lives once in the shared `lib/fdt` crate (§2.2);
 `kernel/arch/riscv64::fdt` re-exports it so the boot path and the QEMU
 integration tests keep naming `tairix_arch_riscv64::fdt::Fdt`.
-`FdtDiscovery` normalises the two facts the reader extracts — the first
-`/memory` region and the `/cpus` `timebase-frequency` — into the single
-`lib/abi` hardware tree: a root node, a `Memory` node carrying the RAM
-window as a capability-gated (`CAP_MMIO_MAP`) resource, and a `Timer`
-node. It is host-tested against the shared DTB fixture and exercised by
-the port's `passes_arch_hal_conformance_suite`.
+`FdtDiscovery` is the walk every FDT port shares
+(`tairix_arch_api::fdtwalk`), over the PLIC's one-cell interrupt specifier
+and the `riscv,ndev` source count: the same emission the aarch64 port
+describes ([Platform discovery](aarch64.md#platform-discovery-hardware-tree)),
+usable nodes only, translation units and their masters' streams included;
+the kernel drives a `riscv,iommu` unit itself (`kernel/iommu/riscv`),
+mapping its registers through the identity map.
+It is host-tested against the shared DTB fixture and exercised by the
+port's `passes_arch_hal_conformance_suite`.
 
 The boot pipeline publishes that discovered tree to user space: after it
 extracts the timer rate, memory map, and CPU name, `try_boot` runs
@@ -872,11 +874,19 @@ and seeds the authoritative `HW_TREE` the `hw_tree_read` / `hw_tree_wait`
 syscalls read. This is **pure device-tree normalisation — no MMIO register
 access** — so it is safe before any bootstrap-floor bus bring-up: a
 malformed tree seeds an empty inventory (fail closed), never a boot
-failure. The bootstrap-floor virtio-MMIO `DeviceID` probe (which reads
-device MMIO to publish per-device autoloadable `Block`/`Input`/`Network`
-nodes) and the driver-autoload-into-user-process path are the staged next
-step for the port (`plans/NETWORK.md` N4e-riscv64); until they land the
-riscv64 tree carries the platform (root/memory/timer) nodes only.
+failure. The bootstrap-floor virtio-MMIO `DeviceID` probe then reads each
+transport and publishes its device for autoload.
+
+### The generic PCI host
+
+The kernel takes the `virt` board's `pci-host-ecam-generic` host as it
+takes x86_64's ([Constructing the real-hardware
+bus](../drivers/bus.md#constructing-the-real-hardware-bus)): its
+configuration region and both memory windows lie inside the identity
+map's lower 256 GiB, typed by the PMAs, and each function's INTx reaches
+a PLIC source through the host's `interrupt-map`.
+`tairix-test-autoload-input-pci-qemu-riscv64` delivers a key from a
+keyboard whose line a mouse shares.
 
 ## Per-CPU storage (`tp`)
 

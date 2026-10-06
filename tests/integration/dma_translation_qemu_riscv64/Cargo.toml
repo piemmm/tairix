@@ -1,0 +1,34 @@
+[package]
+name = "tairix-test-dma-translation-qemu-riscv64"
+description = "QEMU integration test (plans/IOMMU.md IOM16): boot the production riscv64 pipeline on the virt board behind its RISC-V IOMMU (iommu-sys), the keyboard and mouse virtio-pci functions iommu_platform=on on the ECAM host the unit fronts. One binary runs the unit at the second stage, the other with the first stage alone. PASS via the SiFive Test finisher once a key is delivered after the unit audited translating with nothing stopped or refused and the keyboard was granted bus mastering; any other unit outcome, a translation fault, or a key first fails the run."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Reuses the entire production riscv64 boot pipeline through `tairix-kernel`'s
+# library half and only swaps the audit sink for the witness. The QEMU-exit
+# shortcut stays in these dedicated bins, never a feature on a production
+# crate.
+
+[[bin]]
+name = "tairix-test-dma-translation-qemu-riscv64"
+path = "src/main.rs"
+
+[[bin]]
+name = "tairix-test-dma-translation-stage1-qemu-riscv64"
+path = "src/stage1.rs"
+
+[target.'cfg(all(target_arch = "riscv64", target_os = "none"))'.dependencies]
+tairix-arch-riscv64 = { path = "../../../kernel/arch/riscv64", version = "=0.0.0" }
+tairix-itest-translation-witness = { path = "../translation_witness", version = "=0.0.0" }
+tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

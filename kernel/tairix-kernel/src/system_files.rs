@@ -171,19 +171,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::NullSink;
 
     use alloc::vec;
     use tairix_kernel_core::SYSTEM_VOLUME_STORE_PATH;
 
     use crate::test_support::MockRootFs;
-
-    /// A sink that discards every event; the list walk audits its outcome
-    /// but these tests assert the returned paths, not the audit trail.
-    struct NullSink;
-
-    impl Sink for NullSink {
-        fn write_event(&self, _event: &tairix_log::Event<'_>) {}
-    }
 
     #[test]
     fn list_store_walks_the_mounted_store_directory() {

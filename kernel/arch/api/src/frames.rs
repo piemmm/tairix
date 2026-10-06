@@ -128,6 +128,32 @@ pub trait PageTableFrames: Sync {
     /// *foreign* `phys` from a reserved frame, so passing one is a
     /// caller bug, not a checked error.
     fn free_table(&self, phys: u64);
+
+    /// Allocate a zeroed block of `2^order` physically contiguous table
+    /// frames aligned to its own size, for a structure hardware reads as one
+    /// (a DMA translation unit's device table, command queue or interrupt
+    /// remapping table), and answer its physical address.
+    ///
+    /// [`None`] when the source is exhausted, or, by default, for a source
+    /// that hands out single frames only.
+    fn alloc_block(&self, order: u32) -> Option<u64> {
+        let _ = order;
+        None
+    }
+
+    /// The CPU-dereferenceable view of the block of `2^order` frames at
+    /// `phys`, or [`None`] for a block this source did not hand out. Valid
+    /// for the block's whole length, as [`Self::table_at`] is for a frame.
+    fn block_at(&self, phys: u64, order: u32) -> Option<*mut u64> {
+        let _ = (phys, order);
+        None
+    }
+
+    /// Return the block of `2^order` frames at `phys`, which
+    /// [`Self::alloc_block`] handed out and no hardware reads any more.
+    fn free_block(&self, phys: u64, order: u32) {
+        let _ = (phys, order);
+    }
 }
 
 /// The frame source a walk of a CPU's **active** translation root

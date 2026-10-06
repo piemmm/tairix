@@ -2406,8 +2406,9 @@ nothing of its own.
 `exit` additionally calls `IrqTable::release_for(caller.task_id)`
 **before** the capability-record / scheduler eviction so no audited
 capability bit survives past the IRQ subsystem's binding release
-(`docs/src/security/irq.md` — the kernel unmasks no lines on exit;
-a freshly created task that wants the same line must re-issue
+(`docs/src/security/irq.md`: a line the task held alone stays masked; a
+shared one is re-armed only once every remaining sharer has come back to
+wait; a freshly created task that wants the same line must re-issue
 `irq_bind`).
 
 The Stage 2.7 follow-up tracker in `PLAN.md` records the remaining

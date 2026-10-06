@@ -23,6 +23,8 @@ struct State {
     base: u64,
     next: u64,
     live: BTreeMap<u64, *mut Table>,
+    /// Blocks handed out, by base: their order and their words.
+    blocks: BTreeMap<u64, (u32, *mut [u64])>,
     /// Frames still allowed to be handed out, or [`None`] for no limit.
     budget: Option<usize>,
 }
@@ -40,6 +42,7 @@ impl HostFrames {
                 base,
                 next: 0,
                 live: BTreeMap::new(),
+                blocks: BTreeMap::new(),
                 budget: None,
             }),
         }
@@ -54,6 +57,12 @@ impl HostFrames {
     #[must_use]
     pub fn live(&self) -> usize {
         self.state.lock().live.len()
+    }
+
+    /// Blocks handed out and not yet freed.
+    #[must_use]
+    pub fn live_blocks(&self) -> usize {
+        self.state.lock().blocks.len()
     }
 
     /// Entry `index` of the table at `phys`, as a unit walking memory reads
@@ -84,6 +93,47 @@ impl HostFrames {
     }
 }
 
+impl HostFrames {
+    /// The 8-byte word at physical `address` in any live table or block, as
+    /// a unit reading memory does, or [`None`] where nothing lives there.
+    #[must_use]
+    pub fn word(&self, address: u64) -> Option<u64> {
+        let state = self.state.lock();
+        let (words, index) = Self::locate(&state, address)?;
+        // SAFETY: the table or block is live (the arena frees it only under
+        // this lock) and `index` lies inside it.
+        Some(unsafe { *words.add(index) })
+    }
+
+    /// Store `value` at physical `address` in a live table or block, as a
+    /// unit writing memory does; `false` where nothing lives there.
+    pub fn store_word(&self, address: u64, value: u64) -> bool {
+        let state = self.state.lock();
+        let Some((words, index)) = Self::locate(&state, address) else {
+            return false;
+        };
+        // SAFETY: as `word`; the arena's lock serialises the store.
+        unsafe { *words.add(index) = value };
+        true
+    }
+
+    fn locate(state: &State, address: u64) -> Option<(*mut u64, usize)> {
+        if !address.is_multiple_of(8) {
+            return None;
+        }
+        let page = address & !(IO_PAGE_SIZE - 1);
+        if let Some(&table) = state.live.get(&page) {
+            return Some((
+                table.cast::<u64>(),
+                usize::try_from((address - page) / 8).ok()?,
+            ));
+        }
+        let (&base, &(_, words)) = state.blocks.range(..=address).next_back()?;
+        let index = usize::try_from((address - base) / 8).ok()?;
+        (index < words.len()).then_some((words.cast::<u64>(), index))
+    }
+}
+
 impl Drop for HostFrames {
     fn drop(&mut self) {
         let state = self.state.get_mut();
@@ -91,6 +141,10 @@ impl Drop for HostFrames {
             // SAFETY: every pointer in the map came from `Box::into_raw` and
             // is freed exactly once, here or in `free_table`.
             drop(unsafe { Box::from_raw(table) });
+        }
+        for (_, (_, words)) in core::mem::take(&mut state.blocks) {
+            // SAFETY: as above, for `alloc_block`'s boxes.
+            drop(unsafe { Box::from_raw(words) });
         }
     }
 }
@@ -120,6 +174,45 @@ impl PageTableFrames for HostFrames {
             // SAFETY: the pointer came from `Box::into_raw` and has just left
             // the map, so it is freed exactly once.
             drop(unsafe { Box::from_raw(table) });
+        }
+    }
+
+    fn alloc_block(&self, order: u32) -> Option<u64> {
+        let frames = 1u64.checked_shl(order)?;
+        let words = usize::try_from(frames)
+            .ok()?
+            .checked_mul(PAGE_TABLE_ENTRIES)?;
+        let mut state = self.state.lock();
+        if let Some(budget) = state.budget.as_mut() {
+            *budget = budget.checked_sub(usize::try_from(frames).ok()?)?;
+        }
+        // Aligned to its own size, as a buddy block is.
+        let next = state.next.next_multiple_of(frames);
+        let phys = state.base + next * IO_PAGE_SIZE;
+        state.next = next + frames;
+        let block = Box::into_raw(alloc::vec![0u64; words].into_boxed_slice());
+        state.blocks.insert(phys, (order, block));
+        Some(phys)
+    }
+
+    fn block_at(&self, phys: u64, order: u32) -> Option<*mut u64> {
+        let state = self.state.lock();
+        let &(held, words) = state.blocks.get(&phys)?;
+        (held == order).then_some(words.cast::<u64>())
+    }
+
+    fn free_block(&self, phys: u64, order: u32) {
+        let mut state = self.state.lock();
+        if state
+            .blocks
+            .get(&phys)
+            .is_some_and(|&(held, _)| held == order)
+        {
+            if let Some((_, words)) = state.blocks.remove(&phys) {
+                // SAFETY: the pointer came from `Box::into_raw` and has just
+                // left the map, so it is freed exactly once.
+                drop(unsafe { Box::from_raw(words) });
+            }
         }
     }
 }

@@ -46,6 +46,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use tairix_arch_api::{CpuId, StuckInterrupt};
 use tairix_fdt::Fdt;
+use tairix_sync::SpinLock;
 
 /// MMIO base the distributor points at before any discovery runs: the
 /// QEMU `virt` board's GICv2 distributor. A board with a different GIC
@@ -239,6 +240,10 @@ const GICD_ITARGETSR: usize = 0x800;
 /// `GICD_SGIR` — software-generated interrupt control (offset 0xF00).
 const GICD_SGIR: usize = 0xF00;
 
+/// `GICD_ICFGRn`: each interrupt's two-bit configuration field, sixteen to a
+/// register; the field's upper bit selects edge (set) or level (clear).
+const GICD_ICFGR: usize = 0xC00;
+
 /// `GICC_CTLR` — CPU-interface control (offset 0x000). Bit 0 enables
 /// signalling of interrupts to the CPU.
 const GICC_CTLR: usize = 0x000;
@@ -334,6 +339,18 @@ pub const fn sgir_value(intid: u32, target_list: u8) -> u32 {
 #[must_use]
 const fn gicd_bit_word_offset(base: usize, intid: u32) -> usize {
     base + ((intid / 32) as usize) * 4
+}
+
+/// Byte offset of the `GICD_ICFGR` register holding `intid`'s field.
+#[must_use]
+pub const fn icfgr_offset(intid: u32) -> usize {
+    GICD_ICFGR + (intid as usize / 16) * 4
+}
+
+/// The bit of `intid`'s `GICD_ICFGR` field that makes it edge-triggered.
+#[must_use]
+pub const fn icfgr_edge_bit(intid: u32) -> u32 {
+    1 << (2 * (intid % 16) + 1)
 }
 
 /// Byte offset of the `GICD_ISENABLER` word covering interrupt `intid`.
@@ -534,6 +551,28 @@ impl<M: GicMmio> Gicv2<M> {
             .gicd_write(icenabler_offset(intid), isenabler_bit(intid));
     }
 
+    /// Whether `intid` is enabled at the distributor.
+    #[must_use]
+    pub fn is_enabled(&self, intid: u32) -> bool {
+        self.mmio.gicd_read(isenabler_offset(intid)) & isenabler_bit(intid) != 0
+    }
+
+    /// Whether `intid` is edge-triggered.
+    #[must_use]
+    pub fn is_edge_triggered(&self, intid: u32) -> bool {
+        self.mmio.gicd_read(icfgr_offset(intid)) & icfgr_edge_bit(intid) != 0
+    }
+
+    /// Make `intid` edge- or level-triggered. Its configuration register holds
+    /// fifteen other interrupts' fields, so the caller serialises changes.
+    pub fn set_edge_triggered(&self, intid: u32, edge: bool) {
+        let offset = icfgr_offset(intid);
+        let word = self.mmio.gicd_read(offset);
+        let bit = icfgr_edge_bit(intid);
+        self.mmio
+            .gicd_write(offset, if edge { word | bit } else { word & !bit });
+    }
+
     /// Set `intid`'s GIC priority byte (`GICD_IPRIORITYR`); a numerically
     /// *lower* value is a *higher* priority. For an SGI/PPI (`intid < 32`)
     /// the priority register is banked per CPU, so this sets the **calling**
@@ -720,7 +759,13 @@ impl<M: GicMmio> Gicv2<M> {
 pub struct GicController<M: GicMmio> {
     gic: Gicv2<M>,
     max_intid: u32,
+    /// Serialises changes to the configuration registers lines share.
+    config: SpinLock<()>,
 }
+
+/// A trigger [`GicController::set_trigger`] cannot give a line.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct TriggerRefused;
 
 impl<M: GicMmio> GicController<M> {
     /// Build a controller over `gic` whose highest valid INTID is
@@ -732,7 +777,41 @@ impl<M: GicMmio> GicController<M> {
         } else {
             max_intid
         };
-        Self { gic, max_intid }
+        Self {
+            gic,
+            max_intid,
+            config: SpinLock::new(()),
+        }
+    }
+
+    /// Make shared-peripheral interrupt `line` edge- or level-triggered
+    /// before it is first unmasked. A line already so configured is left as
+    /// it is; any other changes only while disabled, as a change to an
+    /// enabled interrupt is unpredictable (Arm GICv2 architecture
+    /// specification §4.3.13).
+    ///
+    /// # Errors
+    ///
+    /// [`TriggerRefused`] for a line past the controller, a private
+    /// interrupt, whose configuration is fixed, an enabled line asked to
+    /// change, or one whose configuration did not take — a Secure line
+    /// ignores the write.
+    pub fn set_trigger(&self, line: u32, edge: bool) -> Result<(), TriggerRefused> {
+        if !self.in_range(line) {
+            return Err(TriggerRefused);
+        }
+        let _changing = self.config.lock();
+        if self.gic.is_edge_triggered(line) == edge {
+            return Ok(());
+        }
+        if line < MIN_SPI_INTID || self.gic.is_enabled(line) {
+            return Err(TriggerRefused);
+        }
+        self.gic.set_edge_triggered(line, edge);
+        if self.gic.is_edge_triggered(line) != edge {
+            return Err(TriggerRefused);
+        }
+        Ok(())
     }
 
     /// Inclusive upper bound on accepted INTIDs.
@@ -749,7 +828,7 @@ impl<M: GicMmio> GicController<M> {
 impl<M: GicMmio + Send + Sync> tairix_arch_api::IrqController for GicController<M> {
     /// Mask `line` by clearing its distributor enable bit, then emit a
     /// `SeqCst` fence so the masked state is globally visible before a
-    /// waiter observes `ready = true` (`docs/src/security/irq.md`).
+    /// waiter observes the fire (`docs/src/security/irq.md`).
     fn mask(&self, line: u32) -> Result<(), tairix_arch_api::IrqControlError> {
         if !self.in_range(line) {
             return Err(tairix_arch_api::IrqControlError::OutOfRange);
@@ -1182,6 +1261,9 @@ mod tests {
         gicd: std::sync::Mutex<std::collections::HashMap<usize, u32>>,
         gicc: std::sync::Mutex<std::collections::HashMap<usize, u32>>,
         ops: std::sync::Mutex<std::vec::Vec<MockOp>>,
+        /// Distributor registers that ignore writes, as a Secure line's do
+        /// to Non-secure software.
+        secure: std::sync::Mutex<std::vec::Vec<usize>>,
     }
 
     impl MockGicMmio {
@@ -1190,6 +1272,7 @@ mod tests {
                 gicd: std::sync::Mutex::new(std::collections::HashMap::new()),
                 gicc: std::sync::Mutex::new(std::collections::HashMap::new()),
                 ops: std::sync::Mutex::new(std::vec::Vec::new()),
+                secure: std::sync::Mutex::new(std::vec::Vec::new()),
             }
         }
 
@@ -1207,6 +1290,9 @@ mod tests {
             if off == GICD_SGIR {
                 self.ops.lock().unwrap().push(MockOp::SgirWrite);
             }
+            if self.secure.lock().unwrap().contains(&off) {
+                return;
+            }
             self.gicd.lock().unwrap().insert(off, val);
         }
         fn gicd_write_byte(&self, off: usize, val: u8) {
@@ -1221,6 +1307,73 @@ mod tests {
         fn publish_barrier(&self) {
             self.ops.lock().unwrap().push(MockOp::Barrier);
         }
+    }
+
+    /// A line whose configuration ignores the write — a Secure one — is
+    /// refused, not reported configured.
+    #[test]
+    fn a_trigger_change_that_does_not_take_is_refused() {
+        let controller = GicController::new(Gicv2::new(MockGicMmio::new()), 255);
+        controller
+            .gic
+            .mmio
+            .secure
+            .lock()
+            .unwrap()
+            .push(icfgr_offset(50));
+        assert_eq!(controller.set_trigger(50, true), Err(TriggerRefused));
+        assert!(!controller.gic.is_edge_triggered(50));
+    }
+
+    #[test]
+    fn a_trigger_change_touches_only_its_own_field_and_only_while_disabled() {
+        let controller = GicController::new(Gicv2::new(MockGicMmio::new()), 255);
+        let word = icfgr_offset(40);
+        controller
+            .gic
+            .mmio
+            .gicd_write(word, 0b10 << (2 * (41 % 16)));
+        controller
+            .set_trigger(40, true)
+            .expect("a disabled SPI changes");
+        assert_eq!(
+            controller.gic.mmio.gicd_read(word),
+            0b10 << (2 * (41 % 16)) | 0b10 << (2 * (40 % 16)),
+            "its neighbour's field is kept"
+        );
+        assert!(controller.gic.is_edge_triggered(40));
+        controller
+            .set_trigger(40, true)
+            .expect("an edge line stays one");
+        controller
+            .gic
+            .mmio
+            .gicd_write(isenabler_offset(40), isenabler_bit(40));
+        assert_eq!(
+            controller.set_trigger(40, true),
+            Ok(()),
+            "unchanged, so allowed"
+        );
+        assert_eq!(
+            controller.set_trigger(40, false),
+            Err(TriggerRefused),
+            "enabled"
+        );
+        assert_eq!(
+            controller.set_trigger(27, true),
+            Err(TriggerRefused),
+            "a PPI's is fixed"
+        );
+        assert_eq!(
+            controller.set_trigger(27, false),
+            Ok(()),
+            "and already level"
+        );
+        assert_eq!(
+            controller.set_trigger(256, false),
+            Err(TriggerRefused),
+            "past the controller"
+        );
     }
 
     #[test]

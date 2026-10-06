@@ -58,7 +58,7 @@ use tairix_kernel_core::{
     AddressSpaceRegistry, InitSpawnCtx, KernelArch, KernelInitSpawner, NULL_PROCESS_WAIT,
     NULL_SHARED_MEM_FACILITY,
 };
-use tairix_kernel_irq::IrqTable;
+use tairix_kernel_irq::{IrqTable, UnsupportedController};
 use tairix_kernel_mem::{
     BootMemoryMap, FrameAllocator, MemoryRegion, PhysAddr, RegionKind, PAGE_SIZE,
 };
@@ -402,6 +402,8 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         sys.arch,
         &NULL_PROCESS_WAIT,
         sys.irq_table,
+        // No line is bound: the table holds none.
+        &UnsupportedController,
         &NULL_SHARED_MEM_FACILITY,
         KernelArch::cross_cpu_tlb_shootdown(sys.arch),
     );

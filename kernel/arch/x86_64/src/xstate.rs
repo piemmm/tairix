@@ -225,18 +225,6 @@ pub const fn flavour_for(leaf1_ecx: u32, leaf_d1_eax: u32) -> Flavour {
     }
 }
 
-/// A 64-bit component mask as the `EDX:EAX` pair XSETBV, XSAVE and XRSTOR
-/// take it in.
-#[must_use]
-#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
-pub(crate) const fn halves(mask: u64) -> (u32, u32) {
-    // Each half is masked or shifted to 32 bits, so neither narrowing loses
-    // anything.
-    #[allow(clippy::cast_possible_truncation)]
-    let halves = ((mask & 0xFFFF_FFFF) as u32, (mask >> 32) as u32);
-    halves
-}
-
 /// The published [`Config::packed`] word, zero until the boot CPU sets up
 /// its state. Written once; every later CPU must match it.
 pub(crate) static PUBLISHED: AtomicU64 = AtomicU64::new(0);
@@ -433,7 +421,7 @@ pub(crate) unsafe fn init_cpu() -> Result<(), Mismatch> {
     } else {
         let leaf_d0 = __cpuid_count(0xD, 0);
         let xcr0 = xcr0_for((u64::from(leaf_d0.edx) << 32) | u64::from(leaf_d0.eax));
-        let (lo, hi) = halves(xcr0);
+        let (lo, hi) = crate::msr::halves(xcr0);
         // SAFETY: CPUID advertises XSAVE, so `CR4.OSXSAVE` exists; with it set,
         // XSETBV accepts an `XCR0` built from the supported components under
         // the architecture's rules, which `xcr0_for` keeps.
@@ -524,7 +512,7 @@ pub(crate) unsafe fn resume_current() {
 /// `image` must be a 64-byte-aligned area image of `config`'s size.
 #[cfg(all(target_arch = "x86_64", target_os = "none", feature = "sched-arch"))]
 unsafe fn save(config: Config, image: u64) {
-    let (lo, hi) = halves(config.park_mask());
+    let (lo, hi) = crate::msr::halves(config.park_mask());
     // SAFETY: each form writes at most `config`'s image size at the aligned
     // `image` and reads the registers without changing them.
     unsafe {

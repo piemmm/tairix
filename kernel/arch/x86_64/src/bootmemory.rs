@@ -19,10 +19,10 @@
 //! breaks — exactly the duplication-detection signal
 //! requires.
 
-use crate::multiboot2::{
-    EfiMemoryDescriptor, EfiMemoryMap, Mb2MemoryEntry, Mb2MemoryKind, MemoryMap,
-};
-use crate::pvh::{self, PvhMemoryEntry, PvhMemoryKind};
+use core::ops::Range;
+
+use crate::multiboot2::{EfiMemoryDescriptor, Mb2MemoryEntry, Mb2MemoryKind};
+use crate::pvh::{PvhMemoryEntry, PvhMemoryKind};
 
 /// Mirror of `tairix_kernel_mem::RegionKind`. Locked by a host-side
 /// round-trip test in the `tests` module (`#[cfg(test)]`-only).
@@ -63,7 +63,8 @@ pub fn from_multiboot2(entry: Mb2MemoryEntry) -> MemoryRegionDescriptor {
         Mb2MemoryKind::AcpiReclaimable
         | Mb2MemoryKind::AcpiNvs
         | Mb2MemoryKind::Defective
-        | Mb2MemoryKind::Reserved => RegionKind::Reserved,
+        | Mb2MemoryKind::Reserved
+        | Mb2MemoryKind::Other(_) => RegionKind::Reserved,
     };
     MemoryRegionDescriptor {
         start: entry.base,
@@ -118,25 +119,59 @@ pub fn from_pvh(entry: PvhMemoryEntry) -> MemoryRegionDescriptor {
     }
 }
 
-/// Iterator adapter: Multiboot2 BIOS memory-map → descriptors.
-pub fn iter_from_multiboot2<'a>(
-    map: &MemoryMap<'a>,
-) -> impl Iterator<Item = MemoryRegionDescriptor> + 'a {
-    map.entries().map(from_multiboot2)
+/// `EfiReservedMemoryType`, `EfiMemoryMappedIO` and
+/// `EfiMemoryMappedIOPortSpace` (UEFI 2.10 Table 7-9): the UEFI types that
+/// may hold device registers.
+const UEFI_NOT_MEMORY: [u32; 3] = [0, 11, 12];
+
+/// One region of the memory map firmware gave, from whichever map it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FirmwareRegion {
+    /// A Multiboot2 BIOS memory-map entry.
+    Bios(Mb2MemoryEntry),
+    /// A UEFI memory descriptor.
+    Uefi(EfiMemoryDescriptor),
+    /// A PVH memory-map entry.
+    Pvh(PvhMemoryEntry),
 }
 
-/// Iterator adapter: UEFI memory map → descriptors.
-pub fn iter_from_uefi<'a>(
-    map: &EfiMemoryMap<'a>,
-) -> impl Iterator<Item = MemoryRegionDescriptor> + 'a {
-    map.entries().map(from_uefi)
-}
+impl FirmwareRegion {
+    /// The descriptor the kernel's memory map takes for it.
+    #[must_use]
+    pub fn descriptor(self) -> MemoryRegionDescriptor {
+        match self {
+            Self::Bios(entry) => from_multiboot2(entry),
+            Self::Uefi(desc) => from_uefi(desc),
+            Self::Pvh(entry) => from_pvh(entry),
+        }
+    }
 
-/// Iterator adapter: PVH memory map → descriptors.
-pub fn iter_from_pvh<'a>(
-    map: &pvh::MemoryMap<'a>,
-) -> impl Iterator<Item = MemoryRegionDescriptor> + 'a {
-    map.entries().map(from_pvh)
+    /// Its span where it is memory of any kind — RAM the kernel takes, RAM
+    /// firmware keeps (ACPI tables and NVS, runtime services), defective or
+    /// persistent memory, or a type the kernel does not know — rather than a
+    /// reservation that may hold device registers: what no BAR may decode
+    /// over.
+    #[must_use]
+    pub fn memory(self) -> Option<Range<u64>> {
+        let (start, length, memory) = match self {
+            Self::Bios(entry) => (
+                entry.base,
+                entry.length,
+                entry.kind != Mb2MemoryKind::Reserved,
+            ),
+            Self::Uefi(desc) => (
+                desc.physical_start,
+                desc.length_bytes(),
+                !UEFI_NOT_MEMORY.contains(&desc.kind),
+            ),
+            Self::Pvh(entry) => (
+                entry.addr,
+                entry.size,
+                entry.kind != PvhMemoryKind::Reserved,
+            ),
+        };
+        memory.then(|| start..start.saturating_add(length))
+    }
 }
 
 #[cfg(test)]
@@ -265,6 +300,55 @@ mod tests {
             attribute: 0,
         });
         assert_eq!(reserved.kind, RegionKind::Reserved);
+    }
+
+    /// Memory of every kind is memory to a BAR: RAM, what firmware keeps,
+    /// defective RAM and a type the kernel does not know; only a
+    /// reservation, or a UEFI register window, may hold device registers.
+    #[test]
+    fn a_firmware_region_is_memory_unless_it_may_hold_registers() {
+        let uefi = |kind| {
+            FirmwareRegion::Uefi(EfiMemoryDescriptor {
+                kind,
+                physical_start: 0x8000_0000,
+                virtual_start: 0,
+                number_of_pages: 2,
+                attribute: 0,
+            })
+            .memory()
+        };
+        for kind in [1, 5, 6, 7, 8, 9, 10, 14, 0x7000_0001] {
+            assert_eq!(uefi(kind), Some(0x8000_0000..0x8000_2000), "type {kind}");
+        }
+        for kind in [0, 11, 12] {
+            assert_eq!(uefi(kind), None, "type {kind}");
+        }
+        let pvh = |kind| {
+            FirmwareRegion::Pvh(PvhMemoryEntry {
+                addr: 0x1000,
+                size: 0x1000,
+                kind,
+            })
+            .memory()
+        };
+        assert_eq!(pvh(PvhMemoryKind::AcpiNvs), Some(0x1000..0x2000));
+        assert_eq!(pvh(PvhMemoryKind::Other(7)), Some(0x1000..0x2000));
+        assert_eq!(pvh(PvhMemoryKind::Reserved), None);
+        let bios = |kind| {
+            FirmwareRegion::Bios(Mb2MemoryEntry {
+                base: 0x1000,
+                length: 0x1000,
+                kind,
+            })
+            .memory()
+        };
+        assert_eq!(bios(Mb2MemoryKind::Defective), Some(0x1000..0x2000));
+        assert_eq!(
+            bios(Mb2MemoryKind::from_raw(7)),
+            Some(0x1000..0x2000),
+            "persistent memory"
+        );
+        assert_eq!(bios(Mb2MemoryKind::Reserved), None);
     }
 
     #[test]

@@ -21,6 +21,7 @@ use core::cell::RefCell;
 use core::ptr::NonNull;
 
 use tairix_abi::driver::bus::{Bus, BusDevice};
+use tairix_abi::driver::pci::INTERRUPT_DISABLE;
 use tairix_abi::driver::virtio_pci::{
     VirtioPciBus, VIRTIO_PCI_CFG_COMMON, VIRTIO_PCI_CFG_DEVICE, VIRTIO_PCI_CFG_ISR,
     VIRTIO_PCI_CFG_NOTIFY, VIRTIO_PCI_CFG_PCI,
@@ -275,7 +276,7 @@ fn q35_fixture() -> MockConfigSpace {
 
 #[test]
 fn q35_enumeration_matches_exact_device_list() {
-    let pci = Pci::new(q35_fixture());
+    let pci = Pci::new(q35_fixture(), None);
     let mut buf = [BusDevice {
         vendor: 0,
         device: 0,
@@ -364,7 +365,7 @@ fn q35_enumeration_matches_exact_device_list() {
 
 #[test]
 fn short_buffer_yields_buffer_too_small_with_partial_fill() {
-    let pci = Pci::new(q35_fixture());
+    let pci = Pci::new(q35_fixture(), None);
     let mut buf = [BusDevice {
         vendor: 0,
         device: 0,
@@ -381,7 +382,7 @@ fn short_buffer_yields_buffer_too_small_with_partial_fill() {
 
 #[test]
 fn capabilities_walker_decodes_pm_and_msix_in_order() {
-    let pci = Pci::new(q35_fixture());
+    let pci = Pci::new(q35_fixture(), None);
     let virtio_bdf = ConfigAddress {
         bus: 0,
         device: 3,
@@ -422,7 +423,7 @@ fn capabilities_walker_decodes_pm_and_msix_in_order() {
 
 #[test]
 fn capabilities_walker_reports_not_found_when_status_bit_clear() {
-    let pci = Pci::new(q35_fixture());
+    let pci = Pci::new(q35_fixture(), None);
     let lpc_bdf = ConfigAddress {
         bus: 0,
         device: 0x1F,
@@ -440,24 +441,9 @@ fn capabilities_walker_reports_not_found_when_status_bit_clear() {
 
 #[test]
 fn bar_decoder_resolves_io_and_64bit_memory_with_sizes() {
-    let pci = Pci::new(q35_fixture());
-    let virtio_bdf = ConfigAddress {
-        bus: 0,
-        device: 3,
-        function: 0,
-        register: 0,
-    }
-    .pack_bdf()
-    .unwrap();
-    let mut bars = [crate::config::BarDescriptor {
-        index: 0,
-        kind: BarKind::Memory32,
-        base: 0,
-        size: 0,
-        prefetchable: false,
-    }; 6];
-    let n = pci.bars(virtio_bdf, &mut bars).expect("BAR walk ok");
-    assert_eq!(n, 2);
+    let pci = Pci::new(q35_fixture(), None);
+    let bars = pci.bars_of(virtio_address(), 6).expect("BAR walk ok");
+    assert_eq!(bars.len(), 2);
     assert_eq!(bars[0].index, 0);
     assert_eq!(bars[0].kind, BarKind::Io);
     assert_eq!(bars[0].base, 0xC000);
@@ -472,7 +458,7 @@ fn bar_decoder_resolves_io_and_64bit_memory_with_sizes() {
 #[test]
 fn enumeration_skips_invalid_vendor_sentinel() {
     // Empty fixture — every slot reads 0xFFFFFFFF (no devices).
-    let pci = Pci::new(MockConfigSpace::new(vec![]));
+    let pci = Pci::new(MockConfigSpace::new(vec![]), None);
     let mut buf = [BusDevice {
         vendor: 0,
         device: 0,
@@ -483,20 +469,22 @@ fn enumeration_skips_invalid_vendor_sentinel() {
     assert_eq!((&pci as &dyn Bus).enumerate(&mut buf), Ok(0));
 }
 
-fn virtio_bdf() -> u64 {
+fn virtio_address() -> ConfigAddress {
     ConfigAddress {
         bus: 0,
         device: 3,
         function: 0,
         register: 0,
     }
-    .pack_bdf()
-    .unwrap()
+}
+
+fn virtio_bdf() -> u64 {
+    virtio_address().pack_bdf().unwrap()
 }
 
 #[test]
 fn map_bar_window_hands_off_memory_bar_to_kernel_mapper() {
-    let pci = Pci::new(q35_fixture());
+    let pci = Pci::new(q35_fixture(), None);
     let mapper = MockMapper::new(true);
     // BAR1 is the 16 KiB 64-bit memory BAR at 0xFEBF_0000.
     let window = pci
@@ -511,7 +499,7 @@ fn map_bar_window_hands_off_memory_bar_to_kernel_mapper() {
 
 #[test]
 fn map_bar_window_refuses_io_bar() {
-    let pci = Pci::new(q35_fixture());
+    let pci = Pci::new(q35_fixture(), None);
     let mapper = MockMapper::new(true);
     // BAR0 is an I/O-port BAR — not mappable as a register window.
     assert_eq!(
@@ -522,7 +510,7 @@ fn map_bar_window_refuses_io_bar() {
 
 #[test]
 fn map_bar_window_reports_not_found_for_absent_bar() {
-    let pci = Pci::new(q35_fixture());
+    let pci = Pci::new(q35_fixture(), None);
     let mapper = MockMapper::new(true);
     // BAR5 is unused on the virtio function.
     assert_eq!(
@@ -533,7 +521,7 @@ fn map_bar_window_reports_not_found_for_absent_bar() {
 
 #[test]
 fn map_bar_window_propagates_capability_denial() {
-    let pci = Pci::new(q35_fixture());
+    let pci = Pci::new(q35_fixture(), None);
     // Mapper without CAP_MMIO_MAP: the hand-off must surface the
     // kernel's refusal, not synthesise a pointer.
     let mapper = MockMapper::new(false);
@@ -587,7 +575,7 @@ fn vl805_bdf() -> u64 {
 fn assign_bar_places_an_unassigned_64bit_bar_in_the_window() {
     let cfg = vl805_like_fixture();
     let state = cfg.shared_state();
-    let pci = Pci::new(cfg);
+    let pci = Pci::new(cfg, None);
     let base = pci
         .assign_bar(vl805_bdf(), 0, 0xC000_0000, 0x4000_0000)
         .expect("the unassigned BAR is placed in the window");
@@ -617,7 +605,7 @@ fn assign_bar_leaves_an_already_based_bar_untouched() {
     // The q35 virtio function's BAR1 is firmware-based at 0xFEBF_0000.
     let cfg = q35_fixture();
     let state = cfg.shared_state();
-    let pci = Pci::new(cfg);
+    let pci = Pci::new(cfg, None);
     let base = pci
         .assign_bar(virtio_bdf(), 1, 0xC000_0000, 0x4000_0000)
         .expect("an already-based BAR is respected");
@@ -644,7 +632,7 @@ fn assign_bar_leaves_an_already_based_bar_untouched() {
 
 #[test]
 fn assign_bar_refuses_a_bar_that_does_not_fit_the_window() {
-    let pci = Pci::new(vl805_like_fixture());
+    let pci = Pci::new(vl805_like_fixture(), None);
     // The window is smaller than the 4 KiB BAR: fail closed rather than
     // place the BAR partially outside it.
     assert_eq!(
@@ -656,7 +644,7 @@ fn assign_bar_refuses_a_bar_that_does_not_fit_the_window() {
 
 #[test]
 fn assign_bar_refuses_an_io_bar() {
-    let pci = Pci::new(q35_fixture());
+    let pci = Pci::new(q35_fixture(), None);
     // BAR0 of the virtio function is an I/O-port BAR.
     assert_eq!(
         pci.assign_bar(virtio_bdf(), 0, 0xC000_0000, 0x4000_0000)
@@ -667,7 +655,7 @@ fn assign_bar_refuses_an_io_bar() {
 
 #[test]
 fn assign_bar_reports_not_found_for_an_absent_bar() {
-    let pci = Pci::new(q35_fixture());
+    let pci = Pci::new(q35_fixture(), None);
     // BAR5 is unused on the virtio function.
     assert_eq!(
         pci.assign_bar(virtio_bdf(), 5, 0xC000_0000, 0x4000_0000)
@@ -767,7 +755,7 @@ fn virtio_blk_bdf() -> u64 {
 
 #[test]
 fn capabilities_walker_decodes_virtio_structures_in_order() {
-    let pci = Pci::new(virtio_blk_fixture());
+    let pci = Pci::new(virtio_blk_fixture(), None);
     let mut out = [Capability::Other { offset: 0, id: 0 }; 8];
     let n = pci
         .capabilities(virtio_blk_bdf(), &mut out)
@@ -817,7 +805,7 @@ fn capabilities_walker_decodes_virtio_structures_in_order() {
 
 #[test]
 fn map_virtio_window_hands_off_each_cfg_region() {
-    let pci = Pci::new(virtio_blk_fixture());
+    let pci = Pci::new(virtio_blk_fixture(), None);
     let bus: &dyn VirtioPciBus = &pci;
     let mapper = MockMapper::new(true);
     let bdf = virtio_blk_bdf();
@@ -852,7 +840,7 @@ fn map_virtio_window_hands_off_each_cfg_region() {
 
 #[test]
 fn virtio_notify_off_multiplier_reads_notify_cap() {
-    let pci = Pci::new(virtio_blk_fixture());
+    let pci = Pci::new(virtio_blk_fixture(), None);
     assert_eq!(pci.virtio_notify_off_multiplier(virtio_blk_bdf()), Ok(4));
 }
 
@@ -861,14 +849,14 @@ fn virtio_notify_off_multiplier_reads_notify_cap() {
 /// inherent one alone would leave a mis-wired forward invisible.
 #[test]
 fn virtio_pci_bus_seam_forwards_notify_multiplier() {
-    let pci = Pci::new(virtio_blk_fixture());
+    let pci = Pci::new(virtio_blk_fixture(), None);
     let bus: &dyn VirtioPciBus = &pci;
     assert_eq!(bus.notify_off_multiplier(virtio_blk_bdf()), Ok(4));
 }
 
 #[test]
 fn map_virtio_window_reports_not_found_for_absent_cfg_type() {
-    let pci = Pci::new(virtio_blk_fixture());
+    let pci = Pci::new(virtio_blk_fixture(), None);
     let bus: &dyn VirtioPciBus = &pci;
     let mapper = MockMapper::new(true);
     // The fixture advertises no PCI-window structure (cfg_type 5).
@@ -881,7 +869,7 @@ fn map_virtio_window_reports_not_found_for_absent_cfg_type() {
 
 #[test]
 fn map_virtio_window_propagates_capability_denial() {
-    let pci = Pci::new(virtio_blk_fixture());
+    let pci = Pci::new(virtio_blk_fixture(), None);
     let bus: &dyn VirtioPciBus = &pci;
     // Mapper without CAP_MMIO_MAP: the hand-off surfaces the kernel's
     // refusal rather than synthesising a pointer.
@@ -939,7 +927,7 @@ fn msix_io_table_bdf() -> u64 {
 fn route_msix_programs_entry_and_enables_function() {
     let config = q35_fixture();
     let state = config.shared_state();
-    let pci = Pci::new(config);
+    let pci = Pci::new(config, None);
     let mapper = MockMapper::new(true);
     let message = MsiMessage {
         address: 0xFEE0_1000,
@@ -969,6 +957,20 @@ fn route_msix_programs_entry_and_enables_function() {
         .rev()
         .find(|(a, _)| a.bus == 0 && a.device == 3 && a.function == 0 && a.register == 20);
     assert_eq!(enable.map(|(_, v)| *v), Some(0x8003_0011));
+}
+
+/// An entry is masked before its address and data change and unmasked
+/// only once both hold the new message.
+#[test]
+fn an_msix_entry_is_rewritten_masked() {
+    let message = MsiMessage {
+        address: 0x0000_0001_FEE0_0010,
+        data: 0x41,
+    };
+    assert_eq!(
+        crate::enumerate::msix_entry_writes(message),
+        [(12, 1), (0, 0xFEE0_0010), (4, 1), (8, 0x41), (12, 0)]
+    );
 }
 
 /// The q35 fixture with the virtio function `00:03.0`'s command half
@@ -1006,15 +1008,16 @@ fn route_msix_turns_decoding_on_and_leaves_bus_mastering_as_it_was() {
         data: 0x0000_0030,
     };
     // Decoding off, mastering off; mastering on but decoding off; both
-    // already as wanted. The status half is written as zero (RW1C).
+    // already as wanted, where sizing the table's BAR turns decoding off and
+    // puts it back. The status half is written as zero (RW1C).
     for (command, written) in [
         (0x0000, Some(0x0002)),
         (0x0004, Some(0x0006)),
-        (0x0002, None),
+        (0x0002, Some(0x0002)),
     ] {
         let config = with_virtio_command(command);
         let state = config.shared_state();
-        let pci = Pci::new(config);
+        let pci = Pci::new(config, None);
         pci.route_msix(virtio_bdf(), 0, message, &MockMapper::new(true))
             .expect("routes entry 0");
         assert_eq!(
@@ -1029,7 +1032,7 @@ fn route_msix_turns_decoding_on_and_leaves_bus_mastering_as_it_was() {
 fn an_unchanged_command_bit_is_not_written() {
     let config = with_virtio_command(0x0006);
     let state = config.shared_state();
-    let pci = Pci::new(config);
+    let pci = Pci::new(config, None);
     pci.set_bus_master(virtio_bdf(), true);
     pci.enable_memory_space(virtio_bdf());
     assert!(command_writes(&state.borrow(), 3).is_empty());
@@ -1039,7 +1042,7 @@ fn an_unchanged_command_bit_is_not_written() {
 
 #[test]
 fn route_msix_reports_not_found_without_msix_capability() {
-    let pci = Pci::new(q35_fixture());
+    let pci = Pci::new(q35_fixture(), None);
     let mapper = MockMapper::new(true);
     // The LPC function advertises no capability list at all.
     let lpc_bdf = ConfigAddress {
@@ -1064,7 +1067,7 @@ fn route_msix_reports_not_found_without_msix_capability() {
 fn route_msix_rejects_entry_beyond_table() {
     let config = q35_fixture();
     let state = config.shared_state();
-    let pci = Pci::new(config);
+    let pci = Pci::new(config, None);
     let mapper = MockMapper::new(true);
     let message = MsiMessage {
         address: 0xFEE0_0000,
@@ -1084,7 +1087,7 @@ fn route_msix_rejects_entry_beyond_table() {
 
 #[test]
 fn route_msix_refuses_io_bar_table() {
-    let pci = Pci::new(msix_io_table_fixture());
+    let pci = Pci::new(msix_io_table_fixture(), None);
     let mapper = MockMapper::new(true);
     let message = MsiMessage {
         address: 0xFEE0_0000,
@@ -1099,7 +1102,7 @@ fn route_msix_refuses_io_bar_table() {
 
 #[test]
 fn route_msix_propagates_capability_denial() {
-    let pci = Pci::new(q35_fixture());
+    let pci = Pci::new(q35_fixture(), None);
     // Mapper without CAP_MMIO_MAP: the table write must surface the
     // kernel's refusal rather than synthesise a pointer.
     let mapper = MockMapper::new(false);
@@ -1161,7 +1164,7 @@ fn msi_bdf() -> u64 {
 fn route_msi_programs_address_data_and_enables_single_vector() {
     let config = msi_fixture(true, false);
     let state = config.shared_state();
-    let pci = Pci::new(config);
+    let pci = Pci::new(config, None);
     // A BCM2711-style doorbell pair: the RC MSI controller's target
     // address and the data word selecting one vector.
     let message = MsiMessage {
@@ -1194,11 +1197,48 @@ fn route_msi_programs_address_data_and_enables_single_vector() {
     assert_eq!(find(1), None, "bus mastering is the function's owner's");
 }
 
+/// MSI is turned off before its message changes and back on only after,
+/// so the function never raises the old address with the new data.
+#[test]
+fn route_msi_rewrites_the_message_with_msi_off() {
+    let config = msi_fixture(true, false);
+    let state = config.shared_state();
+    let pci = Pci::new(config, None);
+    let message = MsiMessage {
+        address: 0xFEE0_0000,
+        data: 0x41,
+    };
+    pci.route_msi(msi_bdf(), message).unwrap();
+    let st = state.borrow();
+    let ours: Vec<(u16, u32)> = st
+        .writes
+        .iter()
+        .filter(|(a, _)| a.bus == 0 && a.device == 6 && a.function == 0)
+        .map(|(a, v)| (a.register, *v))
+        .collect();
+    let header = |&(register, _): &(u16, u32)| register == 20;
+    let first_header = ours.iter().position(header).expect("header written");
+    assert_eq!(ours[first_header].1 & (1 << 16), 0, "MSI off first");
+    let message_writes = ours
+        .iter()
+        .enumerate()
+        .filter(|(_, &(register, _))| (21..=23).contains(&register))
+        .map(|(at, _)| at);
+    let last_header = ours.iter().rposition(header).unwrap();
+    for at in message_writes {
+        assert!(
+            first_header < at && at < last_header,
+            "the message changes while MSI is off"
+        );
+    }
+    assert_eq!(ours[last_header].1 & (1 << 16), 1 << 16, "MSI on last");
+}
+
 #[test]
 fn route_msi_unmasks_64bit_per_vector_mask_register() {
     let config = msi_fixture(true, true);
     let state = config.shared_state();
-    let pci = Pci::new(config);
+    let pci = Pci::new(config, None);
     let message = MsiMessage {
         address: 0xFFFF_FFFC,
         data: 0x0000_6540,
@@ -1219,7 +1259,7 @@ fn route_msi_unmasks_64bit_per_vector_mask_register() {
 fn route_msi_unmasks_32bit_per_vector_mask_register() {
     let config = msi_fixture(false, true);
     let state = config.shared_state();
-    let pci = Pci::new(config);
+    let pci = Pci::new(config, None);
     let message = MsiMessage {
         address: 0xFFFF_FFFC,
         data: 0x0000_6540,
@@ -1239,7 +1279,7 @@ fn route_msi_unmasks_32bit_per_vector_mask_register() {
 #[test]
 fn route_msi_reports_not_found_without_msi_capability() {
     // The q35 virtio function advertises MSI-X, not legacy MSI.
-    let pci = Pci::new(q35_fixture());
+    let pci = Pci::new(q35_fixture(), None);
     let message = MsiMessage {
         address: 0xFFFF_FFFC,
         data: 0x6540,
@@ -1255,7 +1295,7 @@ fn route_msi_rejects_a_64bit_address_on_a_32bit_capability() {
     // A 32-bit-only MSI capability cannot express a doorbell above 4 GiB:
     // writing the low half alone would deliver to the wrong address, so
     // fail closed rather than silently truncate.
-    let pci = Pci::new(msi_fixture(false, false));
+    let pci = Pci::new(msi_fixture(false, false), None);
     let message = MsiMessage {
         address: 0x1_0000_0000,
         data: 0x6540,
@@ -1290,7 +1330,7 @@ fn mechanism_one_exposes_the_frozen_bus_seams() {
 
     fn assert_seams(_: &dyn Bus, _: &dyn VirtioPciBus, _: &dyn MsixBus) {}
 
-    let bus = crate::mechanism_one(NoopPortIo);
+    let bus = crate::mechanism_one(NoopPortIo, crate::Apertures::default());
     assert_seams(&bus, &bus, &bus);
 }
 
@@ -1375,7 +1415,10 @@ fn vl805_ecam_region() -> (Vec<u32>, RegisterWindow) {
 #[test]
 fn ecam_enumeration_finds_root_port_and_vl805() {
     let (_backing, window) = vl805_ecam_region();
-    let pci = Pci::new(EcamConfigSpace::new(window));
+    let pci = Pci::new(
+        EcamConfigSpace::new(vec![crate::EcamRegion::new(window, 0..=1)]),
+        None,
+    );
     let mut buf = [BusDevice {
         vendor: 0,
         device: 0,
@@ -1421,7 +1464,10 @@ fn ecam_enumeration_finds_root_port_and_vl805() {
 #[test]
 fn ecam_capability_walk_decodes_vl805_msix() {
     let (_backing, window) = vl805_ecam_region();
-    let pci = Pci::new(EcamConfigSpace::new(window));
+    let pci = Pci::new(
+        EcamConfigSpace::new(vec![crate::EcamRegion::new(window, 0..=1)]),
+        None,
+    );
     let vl805 = ConfigAddress {
         bus: 1,
         device: 0,
@@ -1457,7 +1503,7 @@ fn mechanism_ecam_exposes_the_frozen_bus_seams() {
     fn assert_seams(_: &dyn Bus, _: &dyn VirtioPciBus, _: &dyn MsixBus) {}
 
     let (_backing, window) = vl805_ecam_region();
-    let bus = crate::mechanism_ecam(window);
+    let bus = crate::mechanism_ecam(vec![crate::EcamRegion::new(window, 0..=1)], everywhere());
     assert_seams(&bus, &bus, &bus);
 }
 
@@ -1472,14 +1518,14 @@ fn mechanism_ecam_exposes_the_pci_bus_seam() {
     fn assert_pci_bus(_: &dyn PciBus) {}
 
     let (_backing, window) = vl805_ecam_region();
-    let bus = crate::mechanism_ecam(window);
+    let bus = crate::mechanism_ecam(vec![crate::EcamRegion::new(window, 0..=1)], everywhere());
     assert_pci_bus(&bus);
 }
 
-/// Decoding and bus mastering each change only their own command bit on
-/// the VL805, the RW1C status half written as zero.
+/// Decoding, bus mastering and the INTx pin each change only their own
+/// command bit on the VL805, the RW1C status half written as zero.
 #[test]
-fn pci_bus_decoding_and_bus_mastering_change_only_their_own_bits() {
+fn pci_bus_decoding_mastering_and_intx_change_only_their_own_bits() {
     use tairix_abi::driver::pci::PciBus;
 
     let (backing, window) = vl805_ecam_region();
@@ -1499,7 +1545,10 @@ fn pci_bus_decoding_and_bus_mastering_change_only_their_own_bits() {
     }
     .ecam_offset()
     .expect("address in range");
-    let pci = crate::mechanism_ecam(window);
+    let pci = Pci::new(
+        EcamConfigSpace::new(vec![crate::EcamRegion::new(window, 0..=1)]),
+        Some(everywhere()),
+    );
     let bus: &dyn PciBus = &pci;
     bus.enable_memory_space(vl805).expect("decode");
     assert_eq!(backing[off / 4], 0x2);
@@ -1507,6 +1556,10 @@ fn pci_bus_decoding_and_bus_mastering_change_only_their_own_bits() {
     assert_eq!(backing[off / 4], 0x6);
     bus.set_bus_master(vl805, false).expect("stop");
     assert_eq!(backing[off / 4], 0x2);
+    bus.set_intx(vl805, false).expect("stop the pin");
+    assert_eq!(backing[off / 4], 0x2 | INTERRUPT_DISABLE);
+    bus.set_intx(vl805, true).expect("raise the pin");
+    assert_eq!(backing[off / 4], 0x2, "only the pin's bit changes");
 }
 
 /// `map_bar_window` resolves the VL805's memory BAR0 and routes the
@@ -1525,7 +1578,7 @@ fn pci_bus_map_bar_window_maps_vl805_bar0() {
     }
     .pack_bdf()
     .unwrap();
-    let pci = crate::mechanism_ecam(window);
+    let pci = crate::mechanism_ecam(vec![crate::EcamRegion::new(window, 0..=1)], everywhere());
     let mapper = MockMapper::new(true);
     let bar = (&pci as &dyn PciBus)
         .map_bar_window(vl805, 0, &mapper)
@@ -1549,7 +1602,7 @@ fn pci_bus_map_bar_window_rejects_absent_bar() {
     }
     .pack_bdf()
     .unwrap();
-    let pci = crate::mechanism_ecam(window);
+    let pci = crate::mechanism_ecam(vec![crate::EcamRegion::new(window, 0..=1)], everywhere());
     let mapper = MockMapper::new(true);
     // BAR5 was never planted; it reads as the all-ones sentinel and
     // resolves to an (I/O-looking) unused slot — not a mappable
@@ -1577,7 +1630,7 @@ fn describe_function_emits_the_vl805_child_node() {
     }
     .pack_bdf()
     .unwrap();
-    let pci = crate::mechanism_ecam(window);
+    let pci = crate::mechanism_ecam(vec![crate::EcamRegion::new(window, 0..=1)], everywhere());
     let node = (&pci as &dyn PciBus)
         .describe_function(vl805)
         .expect("describes the VL805");
@@ -1619,7 +1672,7 @@ fn describe_function_classes_a_processing_accelerator() {
     }
     .pack_bdf()
     .unwrap();
-    let pci = crate::mechanism_ecam(window);
+    let pci = crate::mechanism_ecam(vec![crate::EcamRegion::new(window, 0..=1)], everywhere());
     let node = (&pci as &dyn PciBus)
         .describe_function(accelerator)
         .expect("describes the accelerator");
@@ -1643,122 +1696,112 @@ fn describe_function_rejects_an_absent_function() {
     }
     .pack_bdf()
     .unwrap();
-    let pci = crate::mechanism_ecam(window);
+    let pci = crate::mechanism_ecam(vec![crate::EcamRegion::new(window, 0..=1)], everywhere());
     assert!(matches!(
         (&pci as &dyn PciBus).describe_function(absent),
         Err(DriverError::NotFound)
     ));
 }
 
-/// A virtio function whose configuration-access capability is live: writes to
-/// its `bar`, `offset` and `length` fields aim the data window, and a data
-/// access reaches a modelled common configuration offering `features`.
-struct WindowedVirtio {
-    features: u64,
-    common_len: u32,
-    access_cap: bool,
-    window: RefCell<[u32; 3]>,
-    select: RefCell<u32>,
+/// Apertures letting every memory BAR decode where it says.
+fn everywhere() -> crate::Apertures {
+    crate::Apertures::new(vec![crate::Aperture::identity(0..u64::MAX)], vec![])
 }
 
-/// Dword indices of the capabilities' fields: common at `0x40`, the access
-/// window at `0x88`.
-const COMMON_DWORD: u16 = 16;
-const ACCESS_DWORD: u16 = 34;
-
-impl WindowedVirtio {
-    fn new(features: u64) -> Self {
-        Self {
-            features,
-            common_len: 0x38,
-            access_cap: true,
-            window: RefCell::new([0; 3]),
-            select: RefCell::new(0),
-        }
-    }
-
-    fn function(addr: ConfigAddress) -> bool {
-        (addr.bus, addr.device, addr.function) == (0, 4, 0)
-    }
-}
-
-impl ConfigSpace for WindowedVirtio {
-    fn read32(&self, addr: ConfigAddress) -> u32 {
-        if !Self::function(addr) {
-            return 0xFFFF_FFFF;
-        }
-        let next = if self.access_cap { 0x88 } else { 0 };
-        let [bar, offset, length] = *self.window.borrow();
-        match addr.register {
-            0 => id(0x1AF4, 0x1042).1,
-            1 => status_with_caplist().1,
-            13 => cap_pointer(0x40).1,
-            COMMON_DWORD => virtio_cap_header(0, next, 0x10, VIRTIO_PCI_CFG_COMMON).1,
-            17 => 4,
-            18 => 0,
-            19 => self.common_len,
-            ACCESS_DWORD if self.access_cap => virtio_cap_header(0, 0, 0x14, VIRTIO_PCI_CFG_PCI).1,
-            35 => 0x0100 | bar,
-            36 => offset,
-            37 => length,
-            38 if (bar, offset, length) == (4, 4, 4) => {
-                let shift = 32 * u64::from(*self.select.borrow() & 1);
-                u32::try_from((self.features >> shift) & 0xFFFF_FFFF).unwrap()
-            }
-            _ => 0,
-        }
-    }
-
-    fn write32(&self, addr: ConfigAddress, value: u32) {
-        if !Self::function(addr) {
-            return;
-        }
-        let mut window = self.window.borrow_mut();
-        match addr.register {
-            35 => window[0] = value & 0xFF,
-            36 => window[1] = value,
-            37 => window[2] = value,
-            38 if *window == [4, 0, 4] => *self.select.borrow_mut() = value,
-            _ => {}
-        }
-    }
-}
-
-fn windowed_bdf() -> u64 {
-    ConfigAddress {
+/// A function decoding memory and I/O, with a 64-bit memory BAR of `size`
+/// based at `base`.
+fn decoding_fixture(base: u64, size: u64) -> MockConfigSpace {
+    let mask = !(size - 1);
+    let [low_mask, high_mask] =
+        [mask & 0xFFFF_FFF0, mask >> 32].map(|half| u32::try_from(half & 0xFFFF_FFFF).unwrap());
+    MockConfigSpace::new(vec![MockFunction {
         bus: 0,
-        device: 4,
+        device: 3,
         function: 0,
-        register: 0,
+        regs: vec![
+            id(0x1AF4, 0x1041),
+            (1, 0x0000_0007),
+            class(0x0100),
+            header(0x00),
+            (4, u32::try_from(base & 0xFFFF_FFF0).unwrap() | 0x4),
+            (5, u32::try_from(base >> 32).unwrap()),
+        ],
+        sizing: vec![(4, low_mask | 0x4), (5, high_mask)],
+    }])
+}
+
+/// A BAR written all ones claims that address while it is sized, so the
+/// function decodes nothing until it is put back.
+#[test]
+fn a_bar_is_sized_with_decoding_off_and_decoding_put_back() {
+    let cfg = decoding_fixture(0xFEB0_0000, 0x4000);
+    let state = cfg.shared_state();
+    let pci = Pci::new(cfg, None);
+    assert_eq!(
+        pci.bars_of(virtio_address(), 6).map(|bars| bars.len()),
+        Ok(1)
+    );
+    let writes: Vec<(u16, u32)> = state
+        .borrow()
+        .writes
+        .iter()
+        .map(|(addr, value)| (addr.register, *value))
+        .collect();
+    let first_probe = writes
+        .iter()
+        .position(|&(_, value)| value == u32::MAX)
+        .unwrap();
+    assert_eq!(
+        writes.first(),
+        Some(&(1, 0x0000_0004)),
+        "decoding off first"
+    );
+    assert!(first_probe > 0);
+    assert_eq!(writes.last(), Some(&(1, 0x0000_0007)), "and put back last");
+}
+
+/// A 64-bit BAR of 4 GiB or more has no writable bit in its low half.
+#[test]
+fn a_64_bit_bar_past_4_gib_is_sized_from_both_halves() {
+    let pci = Pci::new(decoding_fixture(0x80_0000_0000, 1 << 33), None);
+    let bars = pci.bars_of(virtio_address(), 6).unwrap();
+    assert_eq!(bars.len(), 1);
+    assert_eq!(bars[0].kind, BarKind::Memory64);
+    assert_eq!(bars[0].size, 1 << 33);
+    assert_eq!(bars[0].base, 0x80_0000_0000);
+}
+
+/// A function chooses what its BAR reads back: one outside the host's
+/// windows, or over memory, maps nothing, and one inside is reached at the
+/// CPU address its window gives.
+#[test]
+fn a_bar_resolves_only_inside_the_apertures_and_off_memory() {
+    let apertures = || {
+        crate::Apertures::new(
+            vec![
+                crate::Aperture::identity(0xFE00_0000..0xFF00_0000),
+                crate::Aperture::identity(0x7F00_0000..0x7F10_0000),
+                crate::Aperture {
+                    pci: 0x1000_0000..0x2000_0000,
+                    cpu: 0x40_1000_0000,
+                },
+            ],
+            vec![0..0x4000_0000, 0x4000_0000..0x8000_0000],
+        )
+    };
+    let mapper = MockMapper::new(true);
+    let inside = Pci::new(decoding_fixture(0xFEB0_0000, 0x4000), Some(apertures()));
+    let window = inside.map_bar_window(virtio_bdf(), 0, &mapper).unwrap();
+    assert_eq!(window.phys_base(), 0xFEB0_0000);
+    let translated = Pci::new(decoding_fixture(0x1000_4000, 0x4000), Some(apertures()));
+    let window = translated.map_bar_window(virtio_bdf(), 0, &mapper).unwrap();
+    assert_eq!(window.phys_base(), 0x40_1000_4000, "through its window");
+    for base in [0x4000_0000, 0x1_0000_0000, 0x7F00_0000] {
+        let hostile = Pci::new(decoding_fixture(base, 0x4000), Some(apertures()));
+        assert_eq!(
+            hostile.map_bar_window(virtio_bdf(), 0, &mapper).err(),
+            Some(DriverError::PermissionDenied),
+            "{base:#x}"
+        );
     }
-    .pack_bdf()
-    .unwrap()
-}
-
-#[test]
-fn offered_features_are_read_through_the_access_window_without_a_mapping() {
-    const OFFERED: u64 = (1 << 33) | (1 << 32) | 0x0A5C;
-    let pci = Pci::new(WindowedVirtio::new(OFFERED));
-    assert_eq!(pci.offered_features(windowed_bdf()), Ok(OFFERED));
-    assert_eq!(
-        pci.offered_features(windowed_bdf()),
-        Ok(OFFERED),
-        "a second read selects each half again"
-    );
-}
-
-#[test]
-fn a_function_the_window_cannot_reach_is_refused() {
-    let mut no_window = WindowedVirtio::new(u64::MAX);
-    no_window.access_cap = false;
-    assert_eq!(
-        Pci::new(no_window).offered_features(windowed_bdf()),
-        Err(DriverError::NotFound)
-    );
-    let mut short = WindowedVirtio::new(u64::MAX);
-    short.common_len = 4;
-    assert_eq!(
-        Pci::new(short).offered_features(windowed_bdf()),
-        Err(DriverError::OutOfRange)
-    );
 }

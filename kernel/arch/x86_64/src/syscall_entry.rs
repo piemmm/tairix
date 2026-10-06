@@ -748,7 +748,7 @@ unsafe extern "C" fn tairix_arch_x86_64_syscall_dispatch(
     // whose kernel installed no observer.
     if let Some(observe) = tairix_arch_api::userentry::user_entry_observer() {
         observe(
-            crate::preempt::cpu_id_for_lapic(crate::preempt::local_lapic_id()),
+            crate::preempt::cpu_id_for_lapic(crate::apic::local_apic_id()),
             user_pc,
             user_frame_ptr,
             true,
@@ -964,63 +964,8 @@ pub unsafe fn init_local_syscalls(
 
 // --- MSR primitives ------------------------------------------------
 
-/// Read MSR `msr` into a 64-bit value.
-///
-/// # Safety
-///
-/// * The current privilege level must be 0 (CPL=0). `rdmsr` `#GP`s
-///   otherwise.
-/// * The MSR address must be implemented on this CPU (the four
-///   syscall MSRs and `KERNEL_GS_BASE` are mandatory on every
-///   long-mode CPU since AMD64 1.0 / Intel 64).
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-#[inline]
-unsafe fn rdmsr(msr: u32) -> u64 {
-    let lo: u32;
-    let hi: u32;
-    // SAFETY: see function-level contract.
-    unsafe {
-        core::arch::asm!(
-            "rdmsr",
-            in("ecx") msr,
-            out("eax") lo,
-            out("edx") hi,
-            options(nomem, nostack, preserves_flags),
-        );
-    }
-    (u64::from(hi) << 32) | u64::from(lo)
-}
-
-/// Write `value` to MSR `msr`.
-///
-/// # Safety
-///
-/// As for [`rdmsr`], plus: `value` must be valid for the addressed
-/// MSR (see Intel SDM Vol 4 for the per-MSR encoding). The five MSRs
-/// this module writes are constructed by host-tested encoders.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
-#[inline]
-unsafe fn wrmsr(msr: u32, value: u64) {
-    // Splitting the 64-bit MSR value into eax:edx is the documented
-    // wrmsr ABI (Intel SDM Vol 2B §4.3); each half is exactly 32 bits
-    // by construction, so the `as u32` truncations are lossless.
-    #[allow(clippy::cast_possible_truncation)]
-    let lo = value as u32;
-    // The MSR takes the value as two halves; the shift moves the high 32 bits
-    // into range, so the pair reconstructs it exactly.
-    #[allow(clippy::cast_possible_truncation)]
-    let hi = (value >> 32) as u32;
-    // SAFETY: see function-level contract.
-    unsafe {
-        core::arch::asm!(
-            "wrmsr",
-            in("ecx") msr,
-            in("eax") lo,
-            in("edx") hi,
-            options(nomem, nostack, preserves_flags),
-        );
-    }
-}
+use crate::msr::{read as rdmsr, write as wrmsr};
 
 // --- Tests ---------------------------------------------------------
 

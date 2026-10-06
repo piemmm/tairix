@@ -216,6 +216,16 @@ fn leaf_attrs_select_the_right_mair_index() {
         device_leaf_attrs(true) & (0b111 << 2),
         attrs::ATTR_IDX_DEVICE
     );
+    assert_eq!(
+        config_leaf_attrs(true) & (0b111 << 2),
+        attrs::ATTR_IDX_DEVICE_NONPOSTED
+    );
+    assert_eq!(
+        (MAIR_VALUE >> 24) & 0xFF,
+        0x00,
+        "attribute 3 is Device-nGnRnE"
+    );
+    assert!(page_flags_from_leaf(config_leaf_attrs(false)).contains(PageFlags::DEVICE));
     // Both set the access flag so first touch does not fault.
     assert_ne!(normal_leaf_attrs(true) & attrs::AF, 0);
     assert_ne!(device_leaf_attrs(true) & attrs::AF, 0);
@@ -460,7 +470,7 @@ fn identity_device_mask_derives_the_virt_layout() {
     // GiB 1 (`aarch64-virt.ld`, load 0x4020_0000) — the historic
     // "GiB 0 Device" layout falls out of the derivation.
     let mask = identity_device_mask(
-        &[0x0900_0000, 0x0800_0000, 0x0801_0000],
+        &[(0x0900_0000, 1), (0x0800_0000, 1), (0x0801_0000, 1)],
         0x4020_0000,
         0x4060_0000,
     );
@@ -474,7 +484,7 @@ fn identity_device_mask_derives_the_pi4_layout() {
     // bases put GiB 3 — the BCM2711 high-peripheral window — on the
     // Device side.
     let mask = identity_device_mask(
-        &[0xFE20_1000, 0xFF84_1000, 0xFF84_2000],
+        &[(0xFE20_1000, 1), (0xFF84_1000, 1), (0xFF84_2000, 1)],
         0x8_0000,
         0x48_0000,
     );
@@ -490,12 +500,23 @@ fn identity_device_mask_keeps_the_kernel_gigapages_normal() {
     // A discovered MMIO base sharing the kernel image's gigapage cannot
     // be expressed at 1 GiB granularity; the kernel's gigapages win
     // (Normal, executable) — including every gigapage the image spans.
-    let mask = identity_device_mask(&[0x0900_0000], 0, 0x8000_0000);
+    let mask = identity_device_mask(&[(0x0900_0000, 1)], 0, 0x8000_0000);
     assert_eq!(mask, [0u64; GIGAPAGE_MASK_WORDS]);
 
     // A base beyond the 512 GiB identity window has no slot to set.
-    let mask = identity_device_mask(&[1u64 << 60], 0x4020_0000, 0x4060_0000);
+    let mask = identity_device_mask(&[(1u64 << 60, 1)], 0x4020_0000, 0x4060_0000);
     assert_eq!(mask, [0u64; GIGAPAGE_MASK_WORDS]);
+
+    // An extent marks every gigapage it overlaps: a host's configuration
+    // region and windows spanning several.
+    let mask = identity_device_mask(
+        &[(0x40_1000_0000, 0x1000_0000), (0x8000_0000, 3 << 30)],
+        0x4020_0000,
+        0x4060_0000,
+    );
+    assert!(gigapage_is_device(&mask, 256));
+    assert!((2..5).all(|index| gigapage_is_device(&mask, index)));
+    assert!(!gigapage_is_device(&mask, 5));
 }
 
 #[test]
@@ -1101,16 +1122,22 @@ fn physmap_virt_offsets_by_the_map_base() {
 #[test]
 fn the_direct_map_covers_exactly_the_ram_it_was_given() {
     let mut covered = [0u64; GIGAPAGE_MASK_WORDS];
-    for gigapage in [1usize, 2, 5] {
+    for gigapage in [1usize, 2, 5, 6] {
         covered[gigapage / 64] |= 1 << (gigapage % 64);
     }
     // Gigapage 0 is Device under the default mask, so asking for it changes
     // nothing: a Normal-cacheable alias of MMIO would be mismatched memory
     // attributes for one physical address.
     covered[0] |= 1;
+    // A configuration region past the identity window, and one sharing a
+    // gigapage RAM also asked for: Device wins it.
+    configure_kernel_device_gigapages(gigapage_mask_from_extents(&[
+        (256 << 30, 1 << 28),
+        (6 << 30, 1 << 20),
+    ]));
 
     assert!(install_boot_physmap(&covered), "the first publication");
-    assert_eq!(physmap_gigapages(), 3, "the Device gigapage was dropped");
+    assert_eq!(physmap_gigapages(), 3, "the Device gigapages were dropped");
     assert!(
         !install_boot_physmap(&covered),
         "the map is installed once per boot"
@@ -1150,6 +1177,34 @@ fn the_direct_map_covers_exactly_the_ram_it_was_given() {
     assert_eq!(leaf & (0b111 << 2), attrs::ATTR_IDX_NORMAL);
     assert_ne!(leaf & attrs::PXN, 0);
     assert_ne!(leaf & attrs::UXN, 0);
+
+    // The registers are Device in the kernel regime alone, at their
+    // direct-map address, and no RAM leaf shares their gigapage.
+    assert!(kernel_device_covers(256 << 30, 1 << 28));
+    assert!(kernel_device_covers(6 << 30, PAGE_SIZE as u64));
+    assert!(!physmap_covers(6 << 30, PAGE_SIZE as u64));
+    assert!(
+        !kernel_device_covers(1 << 30, PAGE_SIZE as u64),
+        "RAM is not registers"
+    );
+    assert!(
+        !kernel_device_covers(255 << 30, 2 << 30),
+        "a straddle fails closed"
+    );
+    // SAFETY: as above.
+    let device = unsafe { (*kernel_root_table())[PHYSMAP_FIRST_SLOT + 256] };
+    assert!(is_block(device));
+    assert_eq!(phys_from_descriptor(device), 256 << 30);
+    assert_eq!(
+        device & (0b111 << 2),
+        attrs::ATTR_IDX_DEVICE_NONPOSTED,
+        "configuration writes are non-posted"
+    );
+    assert_ne!(device & attrs::PXN, 0);
+    assert_eq!(
+        table_index(physmap_virt(256 << 30), 1),
+        PHYSMAP_FIRST_SLOT + 256
+    );
 }
 
 /// The refusal runs before the set-once gate, so this holds whether or not

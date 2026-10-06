@@ -33,6 +33,8 @@
 #define TAIRIX_HW_MATCH_KEY_WIRE_LEN 76u
 #define TAIRIX_HW_RESOURCE_WIRE_LEN 32u
 #define TAIRIX_HW_RES_FLAG_DMA_TRANSLATED 1u
+#define TAIRIX_HW_RES_FLAG_IRQ_MESSAGE 1u
+#define TAIRIX_HW_RES_FLAG_IRQ_EDGE 2u
 #define TAIRIX_HW_NODE_HEADER_LEN 17u
 #define TAIRIX_HW_NODE_WIRE_LEN 833u
 
@@ -82,6 +84,7 @@
 
 /* Property keys (uint32_t). */
 #define TAIRIX_HW_PROPERTY_USB_INTERFACE ((uint32_t)1u)
+#define TAIRIX_HW_PROPERTY_FAULT_INTERRUPT ((uint32_t)2u)
 
 /* One match key on a node. Mirrors the #[repr(C)] layout; the packed
 * little-endian wire size is TAIRIX_HW_MATCH_KEY_WIRE_LEN. */

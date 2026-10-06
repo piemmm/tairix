@@ -26,7 +26,7 @@ implementation may not depart from it.
 ## Invariants
 
 1. **Mask-before-wake.** `IrqTable::fire(line)` calls
-   `IrqHost::mask(line)` **before** it sets the `ready` flag and
+   `IrqHost::mask(line)` **before** it advances the line's fire count and
    **before** it wakes a parked waiter. The unit test
    `mask_is_observed_before_wake` exercises this ordering against a
    deterministic mock host whose `mask` records its call order

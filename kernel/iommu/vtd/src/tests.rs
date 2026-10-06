@@ -3,9 +3,12 @@ extern crate std;
 use core::sync::atomic::{AtomicU64, Ordering};
 use std::vec::Vec;
 
-use tairix_kernel_iommu_api::conformance::{self, Fixture, TranslationProbe};
+use tairix_kernel_iommu_api::conformance::{self, Fixture, InterruptProbe, TranslationProbe};
 use tairix_kernel_iommu_api::hostmem::HostFrames;
-use tairix_kernel_iommu_api::{Clock, Domain, FaultReason, IommuError, IommuUnit, TableCoherence};
+use tairix_kernel_iommu_api::{
+    Clock, Domain, Fault, FaultReason, InterruptRemapping, InterruptSource, InterruptTarget,
+    IommuError, IommuUnit, TableCoherence,
+};
 
 use super::*;
 use crate::model::{self, Model, Quirks};
@@ -87,12 +90,9 @@ fn bring_up_blocks_every_stream_once_translation_is_enabled() {
     for stream in [0, 0x0010, 0xFFFF] {
         assert_eq!(model.access(stream, 0x1000, false), None);
     }
-    assert_eq!(
-        unit.profile().reserved,
-        core::slice::from_ref(&INTERRUPT_WINDOW)
-    );
-    assert_eq!(unit.profile().input_bits, 48);
-    assert_eq!(unit.profile().output_bits, 52);
+    assert_eq!(unit.profile().reserved, &RESERVED[..]);
+    assert_eq!(unit.profile().reach.input_bits, 48);
+    assert_eq!(unit.profile().reach.output_bits, 52);
 }
 
 #[test]
@@ -144,6 +144,23 @@ fn a_unit_this_family_cannot_drive_is_refused() {
         VtdUnit::new(&records_past_window, &frames, None, &clock).err(),
         Some(IommuError::OutOfRange)
     );
+}
+
+/// What the constructor took is given back when it fails before the unit
+/// was pointed at any of it.
+#[test]
+fn a_constructor_that_fails_gives_back_what_it_took() {
+    for budget in [1, 2] {
+        let frames = HostFrames::new(0x1_0000_0000);
+        frames.limit(budget);
+        let model = coherent_model(&frames);
+        let clock = clock();
+        assert_eq!(
+            VtdUnit::new(&model, &frames, None, &clock).err(),
+            Some(IommuError::Exhausted)
+        );
+        assert_eq!(frames.live(), 0, "a budget of {budget} frames leaked");
+    }
 }
 
 #[test]
@@ -355,7 +372,15 @@ fn the_fault_event_is_routed_and_unmasked() {
     let model = coherent_model(&frames);
     let clock = clock();
     let unit = VtdUnit::new(&model, &frames, None, &clock).unwrap();
-    unit.route_faults(0xFEE0_1000, 0x41).unwrap();
+    unit.route_faults(FaultRoute::Message {
+        address: 0xFEE0_1000,
+        data: 0x41,
+    })
+    .unwrap();
+    assert_eq!(
+        unit.route_faults(FaultRoute::Wired { place: 0 }),
+        Err(IommuError::OutOfRange)
+    );
     assert_eq!(model.register(regs::FEDATA), 0x41);
     assert_eq!(model.register(regs::FEADDR), 0xFEE0_1000);
     assert_eq!(model.register(regs::FEUADDR), 0);
@@ -425,7 +450,13 @@ fn fault_records_decode_their_stream_address_access_and_reason() {
     assert!(!read_unmapped.write);
     assert_eq!(read_unmapped.reason, FaultReason::Unmapped);
     assert_eq!(decode_fault(0, 0x9 << 32).reason, FaultReason::Malformed);
-    assert_eq!(decode_fault(0, 0x20 << 32).reason, FaultReason::Other(0x20));
+    assert_eq!(decode_fault(0, 0xD << 32).reason, FaultReason::Translated);
+    for code in 0x20..=0x27u64 {
+        let refused = decode_fault(0x0123 << 48, code << 32);
+        assert_eq!(refused.reason, FaultReason::Interrupt, "reason {code:#x}");
+        assert_eq!(refused.iova, 0x0123, "the entry the request named");
+    }
+    assert_eq!(decode_fault(0, 0x30 << 32).reason, FaultReason::Other(0x30));
     assert!(!decode_fault(0, FAULT_T2).write);
 }
 
@@ -592,4 +623,248 @@ fn freed_domain_ids_are_reused_last_and_in_order() {
     assert_eq!(unit.create_domain(), Ok(second), "then the oldest freed");
     assert_eq!(unit.create_domain(), Ok(first));
     assert_eq!(unit.create_domain(), Err(IommuError::Exhausted));
+}
+
+fn remapping_model(frames: &HostFrames, extra: u64) -> Model<'_> {
+    Model::new(
+        frames,
+        model::cap(2, 0),
+        model::ecap(true) | model::ECAP_IR | extra,
+    )
+}
+
+#[test]
+fn a_remapping_unit_passes_the_interrupt_suite() {
+    let frames = HostFrames::new(0x1_0000_0000);
+    let model = remapping_model(&frames, 0);
+    let clock = clock();
+    let unit = VtdUnit::new(&model, &frames, None, &clock).unwrap();
+    unit.enable().unwrap();
+    conformance::run_interrupts(&unit, &model, [0x0010, 0x0208]);
+}
+
+#[test]
+fn a_unit_without_remapping_offers_none() {
+    let frames = HostFrames::new(0x1_0000_0000);
+    let model = coherent_model(&frames);
+    let clock = clock();
+    let unit = VtdUnit::new(&model, &frames, None, &clock).unwrap();
+    assert!(unit.interrupt_remapping().is_none());
+    assert_eq!(
+        InterruptRemapping::prepare_remapping(&unit, false, 16),
+        Err(IommuError::OutOfRange)
+    );
+}
+
+/// The table holds at least the entries asked for, a power of two of them,
+/// no fewer than one frame's; 32-bit destinations need the unit to say it
+/// takes them.
+#[test]
+fn the_table_is_sized_to_the_machine_and_its_destinations_to_the_unit() {
+    let frames = HostFrames::new(0x1_0000_0000);
+    let model = remapping_model(&frames, 0);
+    let clock = clock();
+    let unit = VtdUnit::new(&model, &frames, None, &clock).unwrap();
+    assert!(!InterruptRemapping::supports_extended(&unit));
+    assert_eq!(
+        InterruptRemapping::prepare_remapping(&unit, true, 16),
+        Err(IommuError::OutOfRange),
+        "no extended interrupt mode"
+    );
+    InterruptRemapping::prepare_remapping(&unit, false, 1000).unwrap();
+    assert_eq!(
+        model.register(regs::IRTA) & 0xF,
+        9,
+        "1024 entries: two to the size field plus one"
+    );
+    assert_eq!(model.register(regs::IRTA) & regs::IRTA_EIME, 0);
+
+    let frames = HostFrames::new(0x1_0000_0000);
+    let model = remapping_model(&frames, model::ECAP_EIM);
+    let unit = VtdUnit::new(&model, &frames, None, &clock).unwrap();
+    assert!(InterruptRemapping::supports_extended(&unit));
+    InterruptRemapping::prepare_remapping(&unit, true, 1).unwrap();
+    assert_eq!(
+        model.register(regs::IRTA) & 0xF,
+        7,
+        "one frame's 256 entries"
+    );
+    InterruptRemapping::enable_remapping(&unit).unwrap();
+    let far = InterruptTarget {
+        vector: 0x70,
+        destination: 0x0001_0203,
+        level: false,
+    };
+    let entry =
+        InterruptRemapping::remap_interrupt(&unit, InterruptSource::Requester(0x10), far).unwrap();
+    assert_eq!(model.interrupt(0x10, entry.address, entry.data), Some(far));
+}
+
+/// A machine asking for more entries than a table holds gets the largest
+/// table the unit can point at.
+#[test]
+fn a_table_never_outgrows_what_the_unit_can_point_at() {
+    let frames = HostFrames::new(0x1_0000_0000);
+    let model = remapping_model(&frames, 0);
+    let clock = clock();
+    let unit = VtdUnit::new(&model, &frames, None, &clock).unwrap();
+    InterruptRemapping::prepare_remapping(&unit, false, u32::MAX).unwrap();
+    assert_eq!(
+        model.register(regs::IRTA) & 0xF,
+        15,
+        "2^16 entries, the most S names"
+    );
+}
+
+#[test]
+fn remapping_firmware_left_on_is_turned_off_at_take_over() {
+    let frames = HostFrames::new(0x1_0000_0000);
+    let model = remapping_model(&frames, 0);
+    model.firmware_left_running();
+    let clock = clock();
+    let _unit = VtdUnit::new(&model, &frames, None, &clock).unwrap();
+    assert_eq!(
+        regs::low32(model.register(regs::GSTS)) & regs::GSTS_IRES,
+        0,
+        "firmware's table delivers nothing once the unit is taken over"
+    );
+}
+
+/// An enabled table refuses compatibility interrupts even where firmware had
+/// allowed them, and a refused request is reported against its source with
+/// the entry it named.
+#[test]
+fn a_refused_interrupt_is_reported_with_its_source_and_entry() {
+    let frames = HostFrames::new(0x1_0000_0000);
+    let model = remapping_model(&frames, 0);
+    model.firmware_left_running();
+    let clock = clock();
+    let unit = VtdUnit::new(&model, &frames, None, &clock).unwrap();
+    InterruptRemapping::prepare_remapping(&unit, false, 16).unwrap();
+    let target = InterruptTarget {
+        vector: 0x44,
+        destination: 0,
+        level: false,
+    };
+    let entry =
+        InterruptRemapping::remap_interrupt(&unit, InterruptSource::Requester(0x18), target)
+            .unwrap();
+    InterruptRemapping::enable_remapping(&unit).unwrap();
+    assert_eq!(model.gcmd_overloaded(), 0, "one command per write");
+    assert_eq!(
+        model.interrupt(0x18, 0xFEE0_0000, 0x44),
+        None,
+        "compatibility blocked"
+    );
+    assert_eq!(model.interrupt(0x20, entry.address, entry.data), None);
+    let mut faults = Vec::new();
+    while unit.drain_faults(&mut |fault| faults.push(fault)) {}
+    assert_eq!(
+        faults,
+        [
+            Fault {
+                stream: 0x18,
+                iova: 0,
+                write: true,
+                reason: FaultReason::Interrupt,
+            },
+            Fault {
+                stream: 0x20,
+                iova: u64::from(entry.entry),
+                write: true,
+                reason: FaultReason::Interrupt,
+            },
+        ]
+    );
+}
+
+/// An entry the unit could not confirm written is taken back and never
+/// handed out again, so no source is ever programmed with it.
+#[test]
+fn an_entry_the_unit_cannot_confirm_is_never_handed_out() {
+    let frames = HostFrames::new(0x1_0000_0000);
+    let model = remapping_model(&frames, 0);
+    let clock = clock();
+    let unit = VtdUnit::new(&model, &frames, None, &clock).unwrap();
+    InterruptRemapping::prepare_remapping(&unit, false, 16).unwrap();
+    let target = InterruptTarget {
+        vector: 0x44,
+        destination: 0,
+        level: false,
+    };
+    model.quirk(Quirks {
+        ignore_waits: true,
+        ..Quirks::default()
+    });
+    assert_eq!(
+        InterruptRemapping::remap_interrupt(&unit, InterruptSource::Requester(1), target),
+        Err(IommuError::Unconfirmed)
+    );
+    model.quirk(Quirks::default());
+    let next =
+        InterruptRemapping::remap_interrupt(&unit, InterruptSource::Requester(1), target).unwrap();
+    assert_ne!(next.entry, 0, "the unconfirmed entry is not reused");
+}
+
+/// A silenced stream whose attach failed after its context was cleared is
+/// blocked, not silent, so silencing it again silences it.
+/// A context change the unit never confirmed may leave it caching the entry
+/// it replaced, under a domain id the next context does not name, so the next
+/// context published flushes every cached one rather than trusting it gone.
+#[test]
+fn a_context_change_left_unconfirmed_is_flushed_before_the_next_is_trusted() {
+    let frames = HostFrames::new(0x1_0000_0000);
+    let model = coherent_model(&frames);
+    let clock = clock();
+    let unit = VtdUnit::new(&model, &frames, None, &clock).unwrap();
+    unit.enable().unwrap();
+    let first = unit.create_domain().unwrap();
+    let second = unit.create_domain().unwrap();
+    unit.map(second, IOVA, PAGES[0], IO_PAGE_SIZE, Access::READ_WRITE)
+        .unwrap();
+    unit.silence(STREAMS[0]).unwrap();
+    assert_eq!(model.access(STREAMS[0], IOVA, true), None);
+    model.quirk(Quirks {
+        ignore_waits: true,
+        lose_context_invalidations: true,
+        ..Quirks::default()
+    });
+    assert_eq!(unit.attach(STREAMS[0], first), Err(IommuError::Unconfirmed));
+    model.quirk(Quirks::default());
+    unit.attach(STREAMS[0], second).unwrap();
+    assert_eq!(model.access(STREAMS[0], IOVA, true), Some(PAGES[0]));
+}
+
+#[test]
+fn a_silenced_stream_whose_attach_failed_can_be_silenced_again() {
+    let frames = HostFrames::new(0x1_0000_0000);
+    let model = caching_model(&frames);
+    let clock = clock();
+    let unit = VtdUnit::new(&model, &frames, None, &clock).unwrap();
+    unit.enable().unwrap();
+    let domain = unit.create_domain().unwrap();
+    unit.silence(STREAMS[0]).unwrap();
+    model.quirk(Quirks {
+        ignore_waits: true,
+        ..Quirks::default()
+    });
+    assert_eq!(
+        unit.attach(STREAMS[0], domain),
+        Err(IommuError::Unconfirmed)
+    );
+    model.quirk(Quirks::default());
+    unit.silence(STREAMS[0]).unwrap();
+    assert_eq!(model.access(STREAMS[0], 0x1000, true), None);
+    let mut faults = Vec::new();
+    unit.drain_faults(&mut |fault| faults.push(fault));
+    assert!(faults.is_empty(), "{faults:?}");
+}
+
+/// A reserved domain-count encoding names no more ids than the 16-bit domain
+/// field holds.
+#[test]
+fn a_unit_s_domain_ids_fit_the_domain_field() {
+    assert_eq!(regs::Cap(model::cap(2, 0)).domains(), 256);
+    assert_eq!(regs::Cap(model::cap(6, 0)).domains(), 1 << 16);
+    assert_eq!(regs::Cap(model::cap(7, 0)).domains(), 1 << 16);
 }

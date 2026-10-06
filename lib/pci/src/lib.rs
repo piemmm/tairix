@@ -50,6 +50,8 @@ use crate::topology::PciTopology;
 
 extern crate alloc;
 
+pub mod aperture;
+pub mod assign;
 pub(crate) mod config;
 pub(crate) mod enumerate;
 mod locate;
@@ -65,10 +67,15 @@ mod tests;
 // definition the generic xHCI driver and a root-complex bus driver both
 // reach, re-exported at the crate root beside the
 // `mechanism_*` constructors.
+pub use aperture::{Aperture, Apertures};
+pub use assign::{Assigned, PciResources, Windows};
 pub use locate::{
     assign_and_map_bar, bus_to_cpu_phys, find_function_by_class, USB_CONTROLLER_CLASS,
 };
+pub use mech_ecam::EcamRegion;
 pub use mech_one::reaches_config_ports;
+
+use alloc::vec::Vec;
 
 // --- Real-hardware construction seam --------------------------------------
 
@@ -110,9 +117,15 @@ pub use mech_one::reaches_config_ports;
 /// architecture-neutral and carries no target-conditional `cfg` gate; architectures without an I/O port
 /// space simply never call it and reach `PCIe` through memory-mapped
 /// ECAM, a separate seam.
+///
+/// Every memory BAR resolves through `apertures`: one outside them, or over
+/// memory, is refused.
 #[must_use]
-pub fn mechanism_one<P: PortIo>(pio: P) -> impl VirtioPciBus + MsixBus + PciBus + PciTopology {
-    Pci::new(mech_one::PortIoConfigSpace::new(pio))
+pub fn mechanism_one<P: PortIo>(
+    pio: P,
+    apertures: Apertures,
+) -> impl VirtioPciBus + MsixBus + PciBus + PciTopology {
+    Pci::new(mech_one::PortIoConfigSpace::new(pio), Some(apertures))
 }
 
 /// Construct a real-hardware `PCIe` root bus over the **enhanced
@@ -122,35 +135,32 @@ pub fn mechanism_one<P: PortIo>(pio: P) -> impl VirtioPciBus + MsixBus + PciBus 
 /// configuration dword is reached by a naturally-aligned access at the
 /// computed offset within `window`.
 ///
-/// `window` is the kernel-mapped [`RegisterWindow`] over the host
-/// bridge's configuration region, obtained from the MMIO-map facility
-/// after a [`CapabilityId::MMIO_MAP`](tairix_abi::CapabilityId::MMIO_MAP)
-/// check. Its base
-/// is the physical base of `(bus 0, device 0, function 0, register 0)`
-/// and its length bounds the buses the enumeration can reach: an
-/// access past the window resolves to the PCI "no device" sentinel, so
-/// the walk fails closed rather than reading out of bounds.
+/// `regions` are kernel mappings of the segment's configuration regions,
+/// each of its buses from its first bus's block; an access to a bus no
+/// region covers, or past a window, resolves to the PCI "no device"
+/// sentinel, so the walk fails closed rather than reading out of bounds.
 ///
-/// The returned value is the bus the ring-0 boot pipeline drives
-/// through the [`Bus`], [`VirtioPciBus`], and [`MsixBus`] seams,
-/// identically to [`mechanism_one`]; the concrete `Pci` type stays
-/// crate-private.
-///
-/// Construction performs **no** I/O — it only stores the supplied
-/// window. Configuration access happens lazily on the trait methods.
+/// The returned value is driven through the [`Bus`], [`VirtioPciBus`],
+/// [`MsixBus`] and [`PciBus`] seams, identically to [`mechanism_one`]; the
+/// concrete `Pci` type stays crate-private. Construction performs **no**
+/// I/O.
 ///
 /// # Platform
 ///
-/// ECAM is architecture-neutral: the window is just mapped memory, so
-/// this constructor carries no target-conditional `cfg` gate. It is the path the Raspberry Pi 4
-/// (BCM2711) root complex uses to reach the VL805 USB host
-/// controller, and the path any `PCIe` host bridge without an I/O-port
-/// space uses.
+/// ECAM is architecture-neutral: the window is just mapped memory, so this
+/// constructor carries no target-conditional `cfg` gate. It is the path of
+/// every `PCIe` host bridge described by an ACPI MCFG or a
+/// `pci-host-ecam-generic` device-tree node.
+///
+/// Every memory BAR resolves through `apertures`, as [`mechanism_one`]'s do;
+/// a host whose firmware set nothing has its resources set out through
+/// [`PciResources`].
 #[must_use]
 pub fn mechanism_ecam(
-    window: RegisterWindow,
-) -> impl VirtioPciBus + MsixBus + PciBus + PciTopology {
-    Pci::new(mech_ecam::EcamConfigSpace::new(window))
+    regions: Vec<EcamRegion>,
+    apertures: Apertures,
+) -> impl VirtioPciBus + MsixBus + PciBus + PciTopology + PciResources {
+    Pci::new(mech_ecam::EcamConfigSpace::new(regions), Some(apertures))
 }
 
 /// Construct a real-hardware `PCIe` root bus over the BCM2711
@@ -188,12 +198,15 @@ pub fn mechanism_ecam(
 /// entirely as offsets within the supplied memory window, so this
 /// constructor carries no target-conditional `cfg` gate: an architecture without a BCM2711 root complex
 /// simply never calls it.
+///
+/// Its BARs resolve as the bus addresses they hold: the bus driver maps them
+/// only through windows the kernel checks against its own grants.
 #[must_use]
 pub fn mechanism_brcm(
     window: RegisterWindow,
     secondary_bus: u8,
 ) -> impl VirtioPciBus + MsixBus + PciBus + PciTopology {
-    Pci::new(mech_brcm::BrcmConfigSpace::new(window, secondary_bus))
+    Pci::new(mech_brcm::BrcmConfigSpace::new(window, secondary_bus), None)
 }
 
 // --- Trait-object seams over the concrete `Pci<C>` ------------------------
@@ -226,10 +239,6 @@ impl<C: ConfigSpace> VirtioPciBus for Pci<C> {
 
     fn notify_off_multiplier(&self, bdf: u64) -> Result<u32, DriverError> {
         self.virtio_notify_off_multiplier(bdf)
-    }
-
-    fn offered_features(&self, bdf: u64) -> Result<u64, DriverError> {
-        self.virtio_offered_features(bdf)
     }
 }
 
@@ -273,6 +282,11 @@ impl<C: ConfigSpace> PciBus for Pci<C> {
 
     fn set_bus_master(&self, bdf: u64, master: bool) -> Result<(), DriverError> {
         Pci::set_bus_master(self, bdf, master);
+        Ok(())
+    }
+
+    fn set_intx(&self, bdf: u64, raise: bool) -> Result<(), DriverError> {
+        Pci::set_intx(self, bdf, raise);
         Ok(())
     }
 

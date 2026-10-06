@@ -29,7 +29,7 @@
 //!    user-space driver never touches PCI config or the MSI-X BAR.
 //! 2. **Autoloads** the signed virtio-net bundle from the mounted `/System`
 //!    store into its own user-space process; the driver brings the device up
-//!    over `PciTransport` (`enable_msix(0)`), claims its reserved
+//!    over `PciTransport` (the MSI-X entry its grant names), claims its reserved
 //!    device-channel endpoint under `CAP_IPC_BIND_PRIVILEGED`, and publishes a
 //!    `netchan` hardware-tree node. The `/System` store binds independently of
 //!    the encrypted-root passphrase, so the network driver autoloads

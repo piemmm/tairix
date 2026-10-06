@@ -97,6 +97,11 @@ tairix-kernel-mem = { path = "../mem", version = "=0.0.0" }
 # The DMA translation unit contract: a port's table write-back for a unit
 # whose walker does not snoop the caches (`plans/IOMMU.md`).
 tairix-kernel-iommu-api = { path = "../iommu/api", version = "=0.0.0" }
+# The SMMUv3 and RISC-V families' rules for the line a unit raises its faults
+# on, which the device-tree topology records on each such unit
+# (`plans/IOMMU.md`).
+tairix-kernel-iommu-smmuv3 = { path = "../iommu/smmuv3", version = "=0.0.0" }
+tairix-kernel-iommu-riscv = { path = "../iommu/riscv", version = "=0.0.0" }
 # The shared reclaimable-memory model: the boot path classifies the
 # block, transform, and filesystem caches it installs through this one
 # gate, budgets them against it, and governs them by its pressure band.
@@ -110,6 +115,9 @@ tairix-inline = { path = "../../lib/inline", version = "=0.0.0" }
 # configuration space through, and the topology walk `pci_probe` reads each
 # function's isolation from.
 tairix-pci = { path = "../../lib/pci", version = "=0.0.0" }
+# The shared FDT reader: the FDT ports' boot discovery, and the generic ECAM
+# host bring-up every port compiles (`plans/IOMMU.md` IOM13).
+tairix-fdt = { path = "../../lib/fdt", version = "=0.0.0" }
 # The shared non-cryptographic hash the build-provenance fingerprint
 # (`src/build_support.rs`) is taken with, so the kernel carries no private
 # copy of a hash function.
@@ -248,9 +256,10 @@ zeroize = { version = "1.8.1", default-features = false }
 # DMA/MMIO hosts live in `kernel/virtio`.
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 tairix-arch-x86_64 = { path = "../arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
-# The VT-d family's bind key, which the DMAR discovery keys each unit's node
-# by (`plans/IOMMU.md`).
+# The VT-d and AMD-Vi families' bind keys, which the DMAR and IVRS
+# discoveries key each unit's node by (`plans/IOMMU.md`).
 tairix-kernel-iommu-vtd = { path = "../iommu/vtd", version = "=0.0.0" }
+tairix-kernel-iommu-amdvi = { path = "../iommu/amdvi", version = "=0.0.0" }
 tairix-drvhost = { path = "../../userland/system/drvhost", version = "=0.0.0" }
 tairix-drv-bus-virtio = { path = "../../drivers/bus/virtio", version = "=0.0.0" }
 # The user-space device manager's autoload policy: the
@@ -289,10 +298,6 @@ tairix-vcmailbox = { path = "../../lib/vcmailbox", version = "=0.0.0" }
 # Linked with `default-features = false` so the device manager's `program`
 # feature (its `tairix-rt` userland runtime) never enters the kernel image.
 tairix-devmgr = { path = "../../userland/system/devmgr", version = "=0.0.0", default-features = false }
-# The shared FDT reader: `boot_aarch64` parses the
-# firmware device tree the loader hands the kernel to discover the board
-# console base (`plans/PI.md` P2).
-tairix-fdt = { path = "../../lib/fdt", version = "=0.0.0" }
 # The signed-manifest driver-load gate (`plans/PI.md`
 # P10 5c-ii): the root-storage bring-up admits each statically-linked
 # bootstrap-floor block driver through `drvhost::Host::load` (Ed25519
@@ -389,6 +394,8 @@ tairix-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
 tairix-hash = { path = "../../lib/hash", version = "=0.0.0" }
 
 [dev-dependencies]
+# The shared device-tree builder, for the generic ECAM host bring-up's tests.
+tairix-fdt = { path = "../../lib/fdt", version = "=0.0.0", features = ["test-fixtures"] }
 # The fatal bridge's host test returns the shared fatal latch to its boot
 # state around the reports it drives, which the Arch HAL exposes only to tests.
 tairix-arch-api = { path = "../arch/api", version = "=0.0.0", features = ["host-tests"] }
@@ -407,6 +414,9 @@ tairix-arch-riscv64 = { path = "../arch/riscv64", version = "=0.0.0" }
 # running whichever machine the host stage runs on.
 tairix-arch-aarch64 = { path = "../arch/aarch64", version = "=0.0.0" }
 tairix-arch-x86_64 = { path = "../arch/x86_64", version = "=0.0.0" }
+# The x86_64 interrupt-remapping plan is proven against the facility over the
+# reference model unit, which the API crate exposes only to host tests.
+tairix-kernel-iommu-api = { path = "../iommu/api", version = "=0.0.0", features = ["host-tests"] }
 # The transform-cache host tests capture the reclaim audit records
 # (`plans/SMARTRAM.md` SMART9) through `kernel/core`'s `TestSink`,
 # exposed by its host-only `test-arch` feature. Feature unification

@@ -990,6 +990,11 @@ impl PciBus for StubPciBus {
         Ok(())
     }
 
+    fn set_intx(&self, _bdf: u64, _raise: bool) -> Result<(), DriverError> {
+        self.calls.borrow_mut().push("intx");
+        Ok(())
+    }
+
     fn assign_bar(
         &self,
         _bdf: u64,

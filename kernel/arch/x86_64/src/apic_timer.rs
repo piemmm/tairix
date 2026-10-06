@@ -36,7 +36,7 @@
 //! * Intel SDM Vol. 3A §11.5.4 (LAPIC timer).
 //! * Intel 8254 Programmable Interval Timer datasheet.
 
-use crate::apic::{Lapic, LapicMmio};
+use crate::apic::{lapic_reg, Lapic, LapicMmio};
 
 /// PIT base frequency (Hz). This is fixed by the 8254 part — the
 /// classical 14.31818 MHz / 12.
@@ -253,15 +253,14 @@ pub fn calibrate<L: LapicMmio, P: PortIo, T: TscReader>(
     let reload = compute_pit_reload(calibration_window_us)?;
 
     // Set LAPIC divisor.
-    lapic.mmio_mut().write(
-        Lapic::<L>::TIMER_DIVIDE_CONFIG_OFFSET,
-        LAPIC_TIMER_DIVIDE_16_RAW,
-    );
+    lapic
+        .mmio_mut()
+        .write(lapic_reg::TIMER_DIVIDE_CONFIG, LAPIC_TIMER_DIVIDE_16_RAW);
     // Mask the LVT and select one-shot mode for the calibration pass.
     let lvt_masked_oneshot = (1u32 << 16) | timer_mode::ONE_SHOT;
     lapic
         .mmio_mut()
-        .write(Lapic::<L>::TIMER_LVT_OFFSET, lvt_masked_oneshot);
+        .write(lapic_reg::TIMER_LVT, lvt_masked_oneshot);
 
     // Arm PIT channel 2 in one-shot mode: write CW = 0xB0 (chan 2,
     // access lobyte/hibyte, mode 0, binary), then the reload, low
@@ -278,7 +277,7 @@ pub fn calibrate<L: LapicMmio, P: PortIo, T: TscReader>(
     // how many ticks pass during the PIT pulse.
     lapic
         .mmio_mut()
-        .write(Lapic::<L>::TIMER_INITIAL_COUNT_OFFSET, u32::MAX);
+        .write(lapic_reg::TIMER_INITIAL_COUNT, u32::MAX);
     let tsc_start = tsc.read();
 
     // Busy-wait until PIT channel 2 OUT goes high (port 0x61 bit 5
@@ -293,12 +292,8 @@ pub fn calibrate<L: LapicMmio, P: PortIo, T: TscReader>(
 
     // Stop the LAPIC counter by writing 0 to initial-count (SDM
     // §11.5.4: writing 0 to ICR halts the timer).
-    let current = lapic
-        .mmio_mut()
-        .read(Lapic::<L>::TIMER_CURRENT_COUNT_OFFSET);
-    lapic
-        .mmio_mut()
-        .write(Lapic::<L>::TIMER_INITIAL_COUNT_OFFSET, 0);
+    let current = lapic.mmio_mut().read(lapic_reg::TIMER_CURRENT_COUNT);
+    lapic.mmio_mut().write(lapic_reg::TIMER_INITIAL_COUNT, 0);
 
     if current == u32::MAX {
         return Err(CalibrationError::NoLapicTickDetected);
@@ -342,17 +337,14 @@ pub fn calibrate<L: LapicMmio, P: PortIo, T: TscReader>(
 ///
 /// `vector` is the CPU interrupt vector the timer LVT fires on.
 pub fn program_oneshot_disarmed<L: LapicMmio>(lapic: &mut Lapic<L>, vector: u8) {
-    lapic.mmio_mut().write(
-        Lapic::<L>::TIMER_DIVIDE_CONFIG_OFFSET,
-        LAPIC_TIMER_DIVIDE_16_RAW,
-    );
-    let lvt = u32::from(vector) | timer_mode::ONE_SHOT;
-    lapic.mmio_mut().write(Lapic::<L>::TIMER_LVT_OFFSET, lvt);
-    // Initial-count 0 halts the timer: it stays disarmed until the
-    // scheduler arms a one-shot quantum.
     lapic
         .mmio_mut()
-        .write(Lapic::<L>::TIMER_INITIAL_COUNT_OFFSET, 0);
+        .write(lapic_reg::TIMER_DIVIDE_CONFIG, LAPIC_TIMER_DIVIDE_16_RAW);
+    let lvt = u32::from(vector) | timer_mode::ONE_SHOT;
+    lapic.mmio_mut().write(lapic_reg::TIMER_LVT, lvt);
+    // Initial-count 0 halts the timer: it stays disarmed until the
+    // scheduler arms a one-shot quantum.
+    lapic.mmio_mut().write(lapic_reg::TIMER_INITIAL_COUNT, 0);
 }
 
 // --- Production PIT impl --------------------------------------------
@@ -530,10 +522,10 @@ mod tests {
     fn calibrate_records_pit_program_sequence() {
         let mut lapic = Lapic::new(MockLapicMmio::default());
         // Pre-load LAPIC current-count so the calibration sees a decrement.
-        lapic.mmio_mut().regs.insert(
-            Lapic::<MockLapicMmio>::TIMER_CURRENT_COUNT_OFFSET,
-            u32::MAX - 1_000,
-        );
+        lapic
+            .mmio_mut()
+            .regs
+            .insert(lapic_reg::TIMER_CURRENT_COUNT, u32::MAX - 1_000);
         let mut pit = MockPortIo::new(1);
 
         let mut tsc = MockTsc::new(0, 250_000); // 250k ticks between two reads
@@ -564,7 +556,7 @@ mod tests {
         lapic
             .mmio_mut()
             .regs
-            .insert(Lapic::<MockLapicMmio>::TIMER_CURRENT_COUNT_OFFSET, u32::MAX);
+            .insert(lapic_reg::TIMER_CURRENT_COUNT, u32::MAX);
         let mut pit = MockPortIo::new(1);
         let mut tsc = MockTsc::new(0, 1);
         assert_eq!(
@@ -636,11 +628,11 @@ mod tests {
         program_oneshot_disarmed(&mut lapic, 0x40);
         let w = &lapic.mmio_mut().writes;
         // Three writes: divide, LVT (one-shot), initial-count 0 (disarmed).
-        assert_eq!(w[0].0, Lapic::<MockLapicMmio>::TIMER_DIVIDE_CONFIG_OFFSET);
+        assert_eq!(w[0].0, lapic_reg::TIMER_DIVIDE_CONFIG);
         assert_eq!(w[0].1, LAPIC_TIMER_DIVIDE_16_RAW);
-        assert_eq!(w[1].0, Lapic::<MockLapicMmio>::TIMER_LVT_OFFSET);
+        assert_eq!(w[1].0, lapic_reg::TIMER_LVT);
         assert_eq!(w[1].1, 0x40 | timer_mode::ONE_SHOT);
-        assert_eq!(w[2].0, Lapic::<MockLapicMmio>::TIMER_INITIAL_COUNT_OFFSET);
+        assert_eq!(w[2].0, lapic_reg::TIMER_INITIAL_COUNT);
         assert_eq!(w[2].1, 0, "timer must be left disarmed (initial-count 0)");
     }
 }

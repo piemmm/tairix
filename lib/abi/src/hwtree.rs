@@ -582,12 +582,13 @@ pub enum HwResourceKind {
     /// still masters it (a VT-d RMRR, an AMD-Vi IVMD unity range). Recovered
     /// through [`HwResource::iommu_reserved`].
     IommuReserved = 13,
-    /// A **named fact** the node's driver needs: `base` is the
-    /// [`HwProperty`] key, `xlate` its value, `len` `1`. Recovered through
-    /// [`HwResource::property`].
+    /// A **named fact** about the node: `base` is the [`HwProperty`] key,
+    /// `xlate` its value, `len` `1`. Recovered through
+    /// [`HwResource::property_value`].
     ///
-    /// The publisher states it about the device it describes; the kernel
-    /// never reads one and holding one authorises nothing.
+    /// The publisher states it about the device it describes, and holding one
+    /// authorises nothing. A node's driver reads it; the kernel reads only
+    /// those of the translation units it drives itself.
     Property = 14,
     /// The fabric **also delivers the node's DMA as these stream ids**:
     /// `base` is the unit's node id, `xlate` the first id, `len` how many. A
@@ -613,12 +614,15 @@ pub enum HwProperty {
     /// The node is a USB interface: its `bInterfaceNumber`, which the
     /// `wIndex` of its interface requests names (USB 2.0 §9.3.4).
     UsbInterface = 1,
+    /// The node is a translation unit: the place in its `interrupts` list of
+    /// the wired line it raises its faults on.
+    FaultInterrupt = 2,
 }
 
 impl HwProperty {
     /// Every key, so the C view is generated from the ABI rather than a
     /// hand-kept list.
-    pub const ALL: &'static [Self] = &[Self::UsbInterface];
+    pub const ALL: &'static [Self] = &[Self::UsbInterface, Self::FaultInterrupt];
 
     /// Raw on-wire key.
     #[must_use]
@@ -631,6 +635,7 @@ impl HwProperty {
     pub const fn from_u32(v: u32) -> Option<Self> {
         match v {
             1 => Some(Self::UsbInterface),
+            2 => Some(Self::FaultInterrupt),
             _ => None,
         }
     }
@@ -820,6 +825,16 @@ impl HwResourceKind {
 /// driver's `BIND_KEYS` can never drift.
 pub const SIMPLE_FRAMEBUFFER_COMPATIBLE: &[u8] = b"simple-framebuffer";
 
+/// An [`Irq`](HwResourceKind::Irq)'s flag: [`HwResource::message_irq`].
+pub const IRQ_MESSAGE: u32 = 1 << 0;
+
+/// An [`Irq`](HwResourceKind::Irq)'s flag: [`HwResource::edge_irq_at`].
+pub const IRQ_EDGE: u32 = 1 << 1;
+
+/// A message-raised line's entry when it names none: past every MSI-X table
+/// entry.
+const NO_MESSAGE_ENTRY: u64 = 1 << 16;
+
 /// One resource a hardware-tree node exposes, expressed as a
 /// capability-grant request.
 ///
@@ -935,6 +950,37 @@ impl IommuStreams {
     }
 }
 
+/// What firmware lets a stream do in a window it keeps.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum ReservedAccess {
+    /// Read it.
+    Read,
+    /// Write it.
+    Write,
+    /// Read and write it.
+    ReadWrite,
+}
+
+impl ReservedAccess {
+    /// The resource flags spelling it.
+    const fn flags(self) -> u32 {
+        match self {
+            Self::Read => 0b01,
+            Self::Write => 0b10,
+            Self::ReadWrite => 0b11,
+        }
+    }
+
+    const fn from_flags(flags: u32) -> Option<Self> {
+        match flags {
+            0b01 => Some(Self::Read),
+            0b10 => Some(Self::Write),
+            0b11 => Some(Self::ReadWrite),
+            _ => None,
+        }
+    }
+}
+
 /// A firmware reserved window: memory one stream keeps an identity mapping of
 /// ([`HwResourceKind::IommuReserved`]).
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -942,16 +988,23 @@ pub struct IommuReservedWindow {
     stream: u32,
     base: u64,
     len: u64,
+    access: ReservedAccess,
 }
 
 impl IommuReservedWindow {
-    /// Stream `stream` keeps reaching `[base, base + len)` at its own address.
+    /// Stream `stream` keeps reaching `[base, base + len)` at its own address
+    /// for `access`.
     ///
     /// # Errors
     ///
     /// [`Errno::LengthOutOfRange`] for an empty window, one that is not whole
     /// pages (a unit maps nothing finer), or one whose end overflows.
-    pub const fn new(stream: u32, base: u64, len: u64) -> Result<Self, Errno> {
+    pub const fn new(
+        stream: u32,
+        base: u64,
+        len: u64,
+        access: ReservedAccess,
+    ) -> Result<Self, Errno> {
         let page = crate::memory::PAGE_SIZE as u64;
         if len == 0
             || !base.is_multiple_of(page)
@@ -960,7 +1013,18 @@ impl IommuReservedWindow {
         {
             return Err(Errno::LengthOutOfRange);
         }
-        Ok(Self { stream, base, len })
+        Ok(Self {
+            stream,
+            base,
+            len,
+            access,
+        })
+    }
+
+    /// What the stream may do there.
+    #[must_use]
+    pub const fn access(self) -> ReservedAccess {
+        self.access
     }
 
     /// The stream the window is kept for.
@@ -1070,6 +1134,39 @@ impl HwResource {
         Self::new(HwResourceKind::Irq, line, count, 0)
     }
 
+    /// Interrupt `line`, raised by the message the device writes for its
+    /// MSI-X table entry `entry` rather than a wire it holds: each interrupt
+    /// is an edge of its own, with no device status to acknowledge.
+    #[must_use]
+    pub fn message_irq(line: u64, entry: u16) -> Self {
+        Self::new_xlate(HwResourceKind::Irq, line, 1, IRQ_MESSAGE, u64::from(entry))
+    }
+
+    /// Interrupt `line`, a vector the kernel allocated a driver, raised by
+    /// a message whose MSI-X table entry the driver chooses: it names none.
+    #[must_use]
+    pub fn message_vector(line: u64) -> Self {
+        Self::new_xlate(HwResourceKind::Irq, line, 1, IRQ_MESSAGE, NO_MESSAGE_ENTRY)
+    }
+
+    /// Whether this is an [`Irq`](HwResourceKind::Irq) raised by a message
+    /// rather than a wire the device holds.
+    #[must_use]
+    pub fn is_message(&self) -> bool {
+        self.kind() == Some(HwResourceKind::Irq) && self.flags & IRQ_MESSAGE != 0
+    }
+
+    /// The MSI-X table entry a message-raised [`Irq`](HwResourceKind::Irq)
+    /// was routed through; [`None`] for a vector that names none
+    /// ([`Self::message_vector`]), a wired one, or any other kind.
+    #[must_use]
+    pub fn message_entry(&self) -> Option<u16> {
+        if self.kind() != Some(HwResourceKind::Irq) || self.flags & IRQ_MESSAGE == 0 {
+            return None;
+        }
+        u16::try_from(self.xlate).ok()
+    }
+
     /// Interrupt `line`, entry `position` of its node's `interrupts` list.
     ///
     /// A binding names each of a node's interrupts by its place in the list,
@@ -1079,6 +1176,21 @@ impl HwResource {
     #[must_use]
     pub fn irq_at(line: u64, position: u32) -> Self {
         Self::new_xlate(HwResourceKind::Irq, line, 1, 0, u64::from(position))
+    }
+
+    /// Interrupt `line`, entry `position` of its node's `interrupts` list,
+    /// raised by edges: a pulse its controller must latch while the line is
+    /// masked, so the line is programmed edge-triggered before it is first
+    /// unmasked.
+    #[must_use]
+    pub fn edge_irq_at(line: u64, position: u32) -> Self {
+        Self::new_xlate(HwResourceKind::Irq, line, 1, IRQ_EDGE, u64::from(position))
+    }
+
+    /// Whether an [`Irq`](HwResourceKind::Irq) is a wired line raised by edges.
+    #[must_use]
+    pub fn is_edge_triggered(&self) -> bool {
+        self.kind() == Some(HwResourceKind::Irq) && self.flags & IRQ_EDGE != 0
     }
 
     /// Where an [`Irq`](HwResourceKind::Irq) sits in its node's `interrupts`
@@ -1410,7 +1522,7 @@ impl HwResource {
             HwResourceKind::IommuReserved,
             window.base(),
             window.len(),
-            0,
+            window.access().flags(),
             u64::from(window.stream()),
         )
     }
@@ -1420,17 +1532,18 @@ impl HwResource {
     /// # Errors
     ///
     /// [`Errno::OutOfRange`] for another kind, or [`Errno::BadMagic`] for a
-    /// capability or flag the kind does not carry, a stream id that does not
-    /// fit, or a window that is not whole pages.
+    /// capability the kind does not carry, flags naming no access, a stream id
+    /// that does not fit, or a window that is not whole pages.
     pub fn iommu_reserved(&self) -> Result<IommuReservedWindow, Errno> {
         if self.kind() != Some(HwResourceKind::IommuReserved) {
             return Err(Errno::OutOfRange);
         }
-        if self.capability != 0 || self.flags != 0 {
+        let access = ReservedAccess::from_flags(self.flags).ok_or(Errno::BadMagic)?;
+        if self.capability != 0 {
             return Err(Errno::BadMagic);
         }
         let stream = u32::try_from(self.xlate).map_err(|_| Errno::BadMagic)?;
-        IommuReservedWindow::new(stream, self.base, self.len).map_err(|_| Errno::BadMagic)
+        IommuReservedWindow::new(stream, self.base, self.len, access).map_err(|_| Errno::BadMagic)
     }
 
     /// A [`HwResourceKind::Property`] stating `value` for `key`.
@@ -3056,7 +3169,9 @@ mod tests {
 
     #[test]
     fn an_iommu_reserved_window_is_whole_pages_and_covers_only_itself() {
-        let window = IommuReservedWindow::new(0x10, 0x7b80_0000, 0x0480_0000).unwrap();
+        let window =
+            IommuReservedWindow::new(0x10, 0x7b80_0000, 0x0480_0000, ReservedAccess::ReadWrite)
+                .unwrap();
         let resource = HwResource::iommu_reserved_window(window);
         assert_eq!(resource.kind(), Some(HwResourceKind::IommuReserved));
         assert_eq!(resource.required_capability(), Ok(None));
@@ -3067,7 +3182,8 @@ mod tests {
         );
         assert!(resource.covers(&resource));
         let other = HwResource::iommu_reserved_window(
-            IommuReservedWindow::new(0x11, 0x7b80_0000, 0x0480_0000).unwrap(),
+            IommuReservedWindow::new(0x11, 0x7b80_0000, 0x0480_0000, ReservedAccess::ReadWrite)
+                .unwrap(),
         );
         assert!(!resource.covers(&other));
         for (base, len) in [
@@ -3077,7 +3193,7 @@ mod tests {
             (u64::MAX - 0xFFF, 0x2000),
         ] {
             assert_eq!(
-                IommuReservedWindow::new(1, base, len),
+                IommuReservedWindow::new(1, base, len, ReservedAccess::Read),
                 Err(Errno::LengthOutOfRange)
             );
         }
@@ -3085,6 +3201,30 @@ mod tests {
             HwResource::dma(0, 0).iommu_reserved(),
             Err(Errno::OutOfRange)
         );
+    }
+
+    /// A window's access survives the tree, and a window naming none is
+    /// refused rather than read as any.
+    #[test]
+    fn a_reserved_window_keeps_its_access_and_one_naming_none_is_refused() {
+        for access in [
+            ReservedAccess::Read,
+            ReservedAccess::Write,
+            ReservedAccess::ReadWrite,
+        ] {
+            let window = IommuReservedWindow::new(3, 0x1000, 0x1000, access).unwrap();
+            let resource = HwResource::iommu_reserved_window(window);
+            assert_eq!(
+                resource
+                    .iommu_reserved()
+                    .map(super::IommuReservedWindow::access),
+                Ok(access)
+            );
+        }
+        let none = HwResource::new_xlate(HwResourceKind::IommuReserved, 0x1000, 0x1000, 0, 3);
+        assert_eq!(none.iommu_reserved(), Err(Errno::BadMagic));
+        let stray = HwResource::new_xlate(HwResourceKind::IommuReserved, 0x1000, 0x1000, 0b111, 3);
+        assert_eq!(stray.iommu_reserved(), Err(Errno::BadMagic));
     }
 
     #[test]
@@ -3926,6 +4066,36 @@ mod tests {
         assert!(HwResource::irq_at(119, 7).covers(&HwResource::irq(119, 1)));
         assert_eq!(HwResource::from_bytes(&eighth.to_le_bytes()), Ok(eighth));
         assert_eq!(HwResource::mmio(0, 4).interrupt_position(), None);
+    }
+
+    #[test]
+    fn an_edge_line_says_so_and_keeps_its_place() {
+        let edge = HwResource::edge_irq_at(74, 2);
+        assert!(edge.is_edge_triggered());
+        assert_eq!(edge.interrupt_position(), Some(2));
+        assert_eq!(edge.message_entry(), None);
+        assert!(!HwResource::irq_at(74, 2).is_edge_triggered());
+        assert!(!HwResource::message_irq(74, 0).is_edge_triggered());
+        assert!(!HwResource::mmio(74, 1).is_edge_triggered());
+        let decoded = HwResource::from_bytes(&edge.to_le_bytes()).expect("round trip");
+        assert_eq!(decoded, edge);
+    }
+
+    #[test]
+    fn a_message_interrupt_names_its_table_entry_and_a_wire_names_none() {
+        let message = HwResource::message_irq(4100, 3);
+        assert_eq!(message.message_entry(), Some(3));
+        assert_eq!(message.base(), 4100);
+        assert_eq!(HwResource::from_bytes(&message.to_le_bytes()), Ok(message));
+        assert_eq!(HwResource::irq(4100, 1).message_entry(), None);
+        assert_eq!(HwResource::irq_at(4100, 3).message_entry(), None);
+        assert_eq!(HwResource::mmio(4100, 3).message_entry(), None);
+        assert!(message.is_message());
+        assert!(!HwResource::irq(4100, 1).is_message());
+        let vector = HwResource::message_vector(4100);
+        assert!(vector.is_message(), "a vector is raised by a message");
+        assert_eq!(vector.message_entry(), None, "whose entry its driver picks");
+        assert_eq!(HwResource::from_bytes(&vector.to_le_bytes()), Ok(vector));
     }
 
     #[test]

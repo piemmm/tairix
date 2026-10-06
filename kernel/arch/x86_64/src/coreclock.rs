@@ -60,22 +60,9 @@ fn aperf_mperf_present() -> bool {
 #[inline]
 #[must_use]
 fn rdmsr(msr: u32) -> u64 {
-    let lo: u32;
-    let hi: u32;
-    // SAFETY: `rdmsr` runs at ring 0 (the kernel's only privilege level) and
-    // the caller has confirmed `msr` (APERF/MPERF) exists via
-    // `CPUID.06H:ECX.0`, so the read cannot `#GP`. It has no memory side
-    // effect.
-    unsafe {
-        core::arch::asm!(
-            "rdmsr",
-            in("ecx") msr,
-            out("eax") lo,
-            out("edx") hi,
-            options(nomem, nostack, preserves_flags),
-        );
-    }
-    (u64::from(hi) << 32) | u64::from(lo)
+    // SAFETY: the kernel runs at ring 0 and the caller has confirmed `msr`
+    // (APERF/MPERF) exists via `CPUID.06H:ECX.0`, so the read cannot `#GP`.
+    unsafe { crate::msr::read(msr) }
 }
 
 /// x86_64 implementation of the Arch HAL core-clock surface: `IA32_APERF`

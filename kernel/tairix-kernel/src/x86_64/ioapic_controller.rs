@@ -17,8 +17,8 @@
 //! globally observable) before the `ready` flag flips. This
 //! controller honours the contract by:
 //!
-//! 1. Re-writing the IO-APIC redirection entry through the
-//!    audited [`IoApic::set_redirection_entry`] driver, which uses
+//! 1. Re-writing the IO-APIC redirection entry's low half through the
+//!    audited [`IoApic::write_redirection_low`] driver, which uses
 //!    volatile MMIO (`VolatileIoApicMmio`), so the mask bit lands
 //!    on the CPU's write-combining store buffer before the function
 //!    returns.
@@ -40,18 +40,20 @@
 //! Each `MadtEntry::IoApic` carries an `address`, an `id`, and a
 //! `gsi_base` — the GSI range this IO-APIC owns is
 //! `gsi_base .. gsi_base + max_redirection_entry + 1`. The
-//! controller stores one block per IO-APIC and routes the
-//! kernel-neutral "line" parameter (a GSI) by linear scan; the table
-//! is bounded by `MAX_IO_APICS` (8 by-line-budget; QEMU has 1).
+//! controller stores one block per IO-APIC the MADT names and routes the
+//! kernel-neutral "line" parameter (a GSI) by linear scan.
 
 extern crate alloc;
 use alloc::vec::Vec;
 
 use core::sync::atomic::{fence, Ordering};
 
-use tairix_arch_x86_64::apic::{IoApic, IoApicMmio};
+use tairix_arch_x86_64::apic::{
+    compatibility_entry, IoApic, IoApicMmio, PinWiring, IOAPIC_EOI_VERSION, REDIRECTION_MASKED,
+};
+use tairix_arch_x86_64::msr::halves;
 use tairix_kernel_irq::{IrqController, MaskError};
-use tairix_sync::spinlock::SpinLock;
+use tairix_sync::{InterruptControl, IrqSafeSpinLock};
 
 /// Set-once typed publication of the production
 /// `IoApicController<VolatileIoApicMmio>` constructed by
@@ -108,93 +110,157 @@ pub fn published_typed(
     }
 }
 
-/// Cached pre-image of one IO-APIC redirection entry's
-/// non-mask-bit state. Refreshed whenever the kernel re-writes the
-/// entry; consulted by [`IoApicController::mask`] so the mask write
-/// preserves the vector / destination programmed at install time.
+/// One programmed pin: its entry with the mask clear, whether it is masked,
+/// and the APIC id it delivers to.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 struct PinSettings {
-    vector: u8,
-    dest_apic_id: u8,
+    entry: u64,
     masked: bool,
+    destination: u32,
 }
 
-/// One IO-APIC and its cached per-pin state.
-///
-/// `inner` is wrapped in a [`SpinLock`] because the [`IoApic`] driver
-/// requires `&mut self` for any MMIO operation (the IOREGSEL/IOWIN
-/// indirection is inherently non-reentrant — Intel SDM Vol 3A §11.4).
-/// The lock is acquired only from controller methods running at the
-/// kernel-trap or boot context, so contention is bounded and the
-/// critical section is short.
-struct Block<M: IoApicMmio + Send> {
+impl PinSettings {
+    const fn written(self) -> u64 {
+        if self.masked {
+            self.entry | REDIRECTION_MASKED
+        } else {
+            self.entry
+        }
+    }
+}
+
+/// One IO-APIC the MADT names: its id, its first global system interrupt,
+/// the controller, and how each of its pins is wired.
+pub struct IoApicBlock<M: IoApicMmio> {
+    /// Its APIC id.
+    pub id: u8,
+    /// The global system interrupt of its pin 0.
+    pub gsi_base: u32,
+    /// The controller.
+    pub ioapic: IoApic<M>,
+    /// Each pin's wiring, one per pin.
+    pub wiring: Vec<PinWiring>,
+}
+
+impl<M: IoApicMmio> IoApicBlock<M> {
+    /// How many pins it has.
+    #[must_use]
+    pub fn pins(&self) -> u32 {
+        u32::try_from(self.wiring.len()).unwrap_or(u32::MAX)
+    }
+}
+
+/// Whether an IO-APIC with `pins` pins from global system interrupt
+/// `gsi_base` can take them: all below `ceiling`, where the line space
+/// stops being GSIs, and none held by one of `blocks`, so no GSI reaches
+/// two pins.
+#[must_use]
+pub fn gsis_free<M: IoApicMmio>(
+    blocks: &[IoApicBlock<M>],
+    gsi_base: u32,
+    pins: u32,
+    ceiling: u32,
+) -> bool {
+    let Some(end) = gsi_base.checked_add(pins) else {
+        return false;
+    };
+    end <= ceiling
+        && blocks.iter().all(|block| {
+            end <= block.gsi_base || block.gsi_base.saturating_add(block.pins()) <= gsi_base
+        })
+}
+
+/// What a block's lock masks while held: the interrupt path masks a pin
+/// under the same lock task context re-arms one under, so an interrupt taken
+/// while it is held would spin on it for ever.
+#[cfg(freestanding)]
+type BlockIrqs = tairix_arch_x86_64::irqmask::RflagsIrqControl;
+#[cfg(not(freestanding))]
+type BlockIrqs = tairix_sync::NopInterruptControl;
+
+struct Block<M: IoApicMmio + Send, I: InterruptControl> {
+    id: u8,
     gsi_base: u32,
     pin_count: u32,
-    inner: SpinLock<BlockInner<M>>,
+    /// It has an EOI register.
+    eoi_register: bool,
+    inner: IrqSafeSpinLock<BlockInner<M>, I>,
 }
 
 struct BlockInner<M: IoApicMmio + Send> {
     ioapic: IoApic<M>,
-    /// `pin_cache[pin]` = `Some(settings)` once
-    /// [`IoApicController::program_pin`] has run for that pin.
-    /// `None` for pins never wired by the kernel binary's IDT-install
-    /// pass; `mask` on such a pin returns
-    /// [`MaskError::OutOfRange`] (fail-closed).
+    wiring: Vec<PinWiring>,
     pin_cache: Vec<Option<PinSettings>>,
 }
 
-/// Production [`IrqController`] backed by one-or-more IO-APICs.
-pub struct IoApicController<M: IoApicMmio + Send + 'static> {
-    blocks: Vec<Block<M>>,
+/// One programmed pin, as interrupt remapping takes it over.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ProgrammedPin {
+    /// Its global system interrupt.
+    pub gsi: u32,
+    /// The APIC id of the IO-APIC it is on.
+    pub ioapic: u8,
+    /// The vector it delivers.
+    pub vector: u8,
+    /// The APIC id of the CPU it delivers to.
+    pub destination: u32,
+    /// Whether it is level-triggered.
+    pub level: bool,
 }
 
-// `Vec<Block<M>>` is `Send + Sync` whenever `M: Send` because the
-// `SpinLock<BlockInner<M>>` lifts the mutability requirement off the
-// public surface and `IoApic<M>` carries no thread-affinity.
-unsafe impl<M: IoApicMmio + Send + 'static> Sync for IoApicController<M> {}
+/// The production x86_64 [`IrqController`]: every IO-APIC the firmware
+/// advertises, addressed by global system interrupt.
+pub struct IoApicController<M: IoApicMmio + Send + 'static, I: InterruptControl = BlockIrqs> {
+    blocks: Vec<Block<M, I>>,
+}
 
-/// Failure modes of [`IoApicController::program_pin`].
+// SAFETY: every block's state is reached only under its lock, and `IoApic<M>`
+// carries no thread affinity, so `M: Send` is all sharing needs.
+unsafe impl<M: IoApicMmio + Send + 'static, I: InterruptControl> Sync for IoApicController<M, I> {}
+
+/// Why a pin could not be programmed.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum ProgramError {
-    /// No block in this controller owns `gsi`. Either the GSI is
-    /// above every IO-APIC's range, or the `Phase::Irq` boot step
-    /// did not discover this IO-APIC.
+    /// No block owns the global system interrupt, or it was never
+    /// programmed.
     GsiOutOfRange,
 }
 
-impl<M: IoApicMmio + Send + 'static> IoApicController<M> {
-    /// Build a controller from a list of IO-APIC `(gsi_base, ioapic,
-    /// pin_count)` triples.
-    ///
-    /// `pin_count` is `max_redirection_entry + 1` as read from each
-    /// IO-APIC's identification register at boot. The order of
-    /// entries in `blocks` is insignificant — lookups walk the list.
+impl<M: IoApicMmio + Send + 'static, I: InterruptControl> IoApicController<M, I> {
+    /// The controller over `blocks`, or [`None`] where its bookkeeping
+    /// cannot be had.
     #[must_use]
-    pub fn new(blocks: Vec<(u32, IoApic<M>, u32)>) -> Self {
-        let blocks = blocks
-            .into_iter()
-            .map(|(gsi_base, ioapic, pin_count)| Block {
-                gsi_base,
-                pin_count,
-                inner: SpinLock::new(BlockInner {
-                    ioapic,
-                    pin_cache: alloc::vec![None; pin_count as usize],
+    pub fn new(blocks: Vec<IoApicBlock<M>>) -> Option<Self> {
+        let mut built = Vec::new();
+        built.try_reserve_exact(blocks.len()).ok()?;
+        for mut block in blocks {
+            let pins = block.wiring.len();
+            let mut pin_cache = Vec::new();
+            pin_cache.try_reserve_exact(pins).ok()?;
+            pin_cache.resize(pins, None);
+            built.push(Block {
+                id: block.id,
+                gsi_base: block.gsi_base,
+                pin_count: u32::try_from(pins).ok()?,
+                eoi_register: block.ioapic.version() >= IOAPIC_EOI_VERSION,
+                inner: IrqSafeSpinLock::new(BlockInner {
+                    ioapic: block.ioapic,
+                    wiring: block.wiring,
+                    pin_cache,
                 }),
-            })
-            .collect();
-        Self { blocks }
+            });
+        }
+        Some(Self { blocks: built })
     }
 
-    /// Program one redirection entry and cache its settings.
+    /// Program `gsi` to deliver `vector` to the APIC at `dest_apic_id` in
+    /// compatibility format, wired as the firmware says, masked where
+    /// `masked` says so: the boot's setup, before interrupt remapping takes
+    /// the pin over and refuses that format.
     ///
-    /// Returns the block index `gsi` maps to so the caller can keep
-    /// driver-host bookkeeping in sync; returns
-    /// [`ProgramError::GsiOutOfRange`] when no block owns `gsi`.
+    /// # Errors
     ///
-    /// `masked` is the initial mask state. The kernel binary's boot
-    /// pipeline programs every line `masked = true` and unmasks via
-    /// a subsequent driver-side `unmask` follow-up (Item 2-tail.3,
-    /// out of scope here).
+    /// [`ProgramError::GsiOutOfRange`] for a GSI no block owns.
     pub fn program_pin(
         &self,
         gsi: u32,
@@ -202,163 +268,212 @@ impl<M: IoApicMmio + Send + 'static> IoApicController<M> {
         dest_apic_id: u8,
         masked: bool,
     ) -> Result<(), ProgramError> {
+        self.write_pin(
+            gsi,
+            |wiring, _| {
+                (
+                    compatibility_entry(vector, dest_apic_id, wiring),
+                    u32::from(dest_apic_id),
+                )
+            },
+            Some(masked),
+        )
+    }
+
+    /// Re-program `gsi` to raise the remapping entry `redirection` names,
+    /// keeping its wiring and its mask: the entry's vector and trigger are
+    /// the pin's own.
+    ///
+    /// # Errors
+    ///
+    /// [`ProgramError::GsiOutOfRange`] for a GSI no block owns or one never
+    /// programmed.
+    pub fn remap_pin(&self, gsi: u32, redirection: u64) -> Result<(), ProgramError> {
+        let wiring_bits = PinWiring {
+            level: true,
+            active_low: true,
+        }
+        .bits();
+        self.write_pin(
+            gsi,
+            |wiring, current| {
+                (
+                    (redirection & !wiring_bits & !REDIRECTION_MASKED) | wiring.bits(),
+                    current.map_or(0, |settings| settings.destination),
+                )
+            },
+            None,
+        )
+    }
+
+    /// Write `gsi`'s entry, and the APIC id it delivers to, as `entry` makes
+    /// them from the pin's wiring and its current settings, masked as
+    /// `masked` says or as it was.
+    fn write_pin(
+        &self,
+        gsi: u32,
+        entry: impl FnOnce(PinWiring, Option<PinSettings>) -> (u64, u32),
+        masked: Option<bool>,
+    ) -> Result<(), ProgramError> {
         let (idx, pin) = self.locate(gsi).ok_or(ProgramError::GsiOutOfRange)?;
-        let block = &self.blocks[idx];
-        let mut inner = block.inner.lock();
-        // `pin < pin_count` by construction; `as u8` truncates from
-        // a u32 < 256 (IO-APIC max redirection entries fit in u8).
+        let mut inner = self.blocks[idx].inner.lock();
+        let slot = pin as usize;
+        let current = inner.pin_cache[slot];
+        let masked = masked
+            .or_else(|| current.map(|settings| settings.masked))
+            .ok_or(ProgramError::GsiOutOfRange)?;
+        let (entry, destination) = entry(inner.wiring[slot], current);
+        let settings = PinSettings {
+            entry,
+            masked,
+            destination,
+        };
+        // `pin < pin_count`, an IO-APIC's redirection count, which fits a
+        // `u8`.
         #[allow(clippy::cast_possible_truncation)]
-        let pin_u8 = pin as u8;
         inner
             .ioapic
-            .set_redirection_entry(pin_u8, vector, dest_apic_id, masked);
-        inner.pin_cache[pin as usize] = Some(PinSettings {
-            vector,
-            dest_apic_id,
-            masked,
-        });
+            .write_redirection_entry(pin as u8, settings.written());
+        inner.pin_cache[slot] = Some(settings);
         Ok(())
     }
 
-    /// Locate the block + pin that own `gsi`.
-    fn locate(&self, gsi: u32) -> Option<(usize, u32)> {
-        for (idx, block) in self.blocks.iter().enumerate() {
-            if gsi >= block.gsi_base && gsi < block.gsi_base + block.pin_count {
-                return Some((idx, gsi - block.gsi_base));
-            }
+    /// Mask or unmask `gsi`, writing only the half of its entry that holds
+    /// the mask.
+    fn set_masked(&self, gsi: u32, masked: bool) -> Result<(), ProgramError> {
+        let (idx, pin) = self.locate(gsi).ok_or(ProgramError::GsiOutOfRange)?;
+        let mut inner = self.blocks[idx].inner.lock();
+        let slot = pin as usize;
+        let mut settings = inner.pin_cache[slot].ok_or(ProgramError::GsiOutOfRange)?;
+        if settings.masked == masked {
+            return Ok(());
         }
-        None
+        settings.masked = masked;
+        // As `write_pin`.
+        #[allow(clippy::cast_possible_truncation)]
+        inner
+            .ioapic
+            .write_redirection_low(pin as u8, halves(settings.written()).0);
+        inner.pin_cache[slot] = Some(settings);
+        Ok(())
     }
 
-    /// Number of IO-APICs the controller spans. Test-only accessor.
+    /// Unmask `gsi` after a completion that masked it. A level-triggered pin
+    /// first has its remote IRR cleared: an interrupt it raised that reached
+    /// its CPU edge-triggered, as one an AMD-Vi unit remaps does, sends no
+    /// end of interrupt back to it, and the pin would never raise another.
+    /// An unmasked pin is left as it is, so no end of interrupt lands while
+    /// one may be in service.
+    fn rearm_pin(&self, gsi: u32) -> Result<(), ProgramError> {
+        let (idx, pin) = self.locate(gsi).ok_or(ProgramError::GsiOutOfRange)?;
+        let block = &self.blocks[idx];
+        let mut inner = block.inner.lock();
+        let slot = pin as usize;
+        let mut settings = inner.pin_cache[slot].ok_or(ProgramError::GsiOutOfRange)?;
+        if !settings.masked {
+            return Ok(());
+        }
+        // `pin < pin_count`, an IO-APIC's redirection count, which fits a
+        // `u8`.
+        #[allow(clippy::cast_possible_truncation)]
+        let pin = pin as u8;
+        if inner.wiring[slot].level {
+            if block.eoi_register {
+                inner
+                    .ioapic
+                    .end_of_interrupt(settings.entry.to_le_bytes()[0]);
+            } else {
+                // Taking the pin through edge triggering clears it.
+                let masked = settings.entry | REDIRECTION_MASKED;
+                let edge = masked
+                    & !PinWiring {
+                        level: true,
+                        active_low: false,
+                    }
+                    .bits();
+                inner.ioapic.write_redirection_low(pin, halves(edge).0);
+                inner.ioapic.write_redirection_low(pin, halves(masked).0);
+            }
+        }
+        settings.masked = false;
+        inner
+            .ioapic
+            .write_redirection_low(pin, halves(settings.written()).0);
+        inner.pin_cache[slot] = Some(settings);
+        Ok(())
+    }
+
+    /// Every pin programmed so far, block by block.
+    pub fn programmed(&self, visit: &mut dyn FnMut(ProgrammedPin)) {
+        for block in &self.blocks {
+            let inner = block.inner.lock();
+            for (pin, settings) in inner.pin_cache.iter().enumerate() {
+                let Some(settings) = settings else {
+                    continue;
+                };
+                let offset = u32::try_from(pin).unwrap_or(u32::MAX);
+                visit(ProgrammedPin {
+                    gsi: block.gsi_base + offset,
+                    ioapic: block.id,
+                    vector: settings.entry.to_le_bytes()[0],
+                    destination: settings.destination,
+                    level: inner.wiring[pin].level,
+                });
+            }
+        }
+    }
+
+    fn locate(&self, gsi: u32) -> Option<(usize, u32)> {
+        self.blocks.iter().enumerate().find_map(|(idx, block)| {
+            let pin = gsi.checked_sub(block.gsi_base)?;
+            (pin < block.pin_count).then_some((idx, pin))
+        })
+    }
+
+    /// IO-APICs the controller owns.
     #[must_use]
     pub fn block_count(&self) -> usize {
         self.blocks.len()
     }
 
-    /// Re-program the redirection entry owning `gsi` with the cached
-    /// `(vector, dest)` and `masked = false`.
+    /// Unmask `gsi`.
     ///
-    /// Returns [`ProgramError::GsiOutOfRange`] when no block owns
-    /// `gsi`, or when the pin was never programmed (in which case
-    /// there is no cached `(vector, dest)` to re-apply). Symmetric
-    /// counterpart of [`IrqController::mask`]: that method
-    /// re-asserts the mask bit using the cached state; this one
-    /// clears it.
+    /// # Errors
     ///
-    /// Stage 4.D Item 2-tail.2 QEMU validation. The QEMU integration
-    /// test programs a legacy line (boot pipeline left it
-    /// `masked = true` per `discover_and_program_io_apics`) and
-    /// unmasks it through this method before arming the PIT. Driver
-    /// hosts will use the same method during Item 2-tail.3.
+    /// [`ProgramError::GsiOutOfRange`] for a GSI no block owns or one never
+    /// programmed.
     pub fn unmask(&self, gsi: u32) -> Result<(), ProgramError> {
-        let (idx, pin) = self.locate(gsi).ok_or(ProgramError::GsiOutOfRange)?;
-        let block = &self.blocks[idx];
-        let mut inner = block.inner.lock();
-        let cache_slot = inner.pin_cache[pin as usize].ok_or(ProgramError::GsiOutOfRange)?;
-        // `pin < pin_count` by construction, and an IO-APIC's max redirection
-        // entry fits a `u8`.
-        #[allow(clippy::cast_possible_truncation)]
-        let pin_u8 = pin as u8;
-        inner.ioapic.set_redirection_entry(
-            pin_u8,
-            cache_slot.vector,
-            cache_slot.dest_apic_id,
-            false,
-        );
-        inner.pin_cache[pin as usize] = Some(PinSettings {
-            masked: false,
-            ..cache_slot
-        });
-        Ok(())
+        self.set_masked(gsi, false)
     }
 
-    /// Read the low half of the IO-APIC redirection entry owning
-    /// `gsi`, issued through the same volatile MMIO path the
-    /// production [`Self::program_pin`] / [`Self::mask`] writes use.
-    ///
-    /// Returns `None` if no block owns `gsi`. The low half carries
-    /// the vector (bits 0..7), delivery mode (bits 8..10),
-    /// destination mode (bit 11), pending (bit 12), polarity
-    /// (bit 13), remote IRR (bit 14), trigger (bit 15), and — the
-    /// load-bearing observation for the mask-before-wake invariant
-    /// — the mask bit (bit 16).
-    ///
-    /// Stage 4.D Item 2-tail.2 QEMU validation. The
-    /// `tests/integration/irq_qemu_x86_64` integration test calls
-    /// this after observing [`tairix_kernel_irq::WaitStep::Ready`]
-    /// to re-read the redirection entry and assert
-    /// `low & (1 << 16) != 0` — i.e. that
-    /// [`tairix_kernel_irq::IrqTable::fire`]'s controller-side mask
-    /// write reached the hardware.
+    /// The low half of `gsi`'s redirection entry as the IO-APIC reads it, or
+    /// [`None`] for a GSI no block owns.
     #[must_use]
     pub fn read_pin_low(&self, gsi: u32) -> Option<u32> {
         let (idx, pin) = self.locate(gsi)?;
-        let block = &self.blocks[idx];
-        let mut inner = block.inner.lock();
-        // `pin < pin_count` (bounded by `locate`); `pin_count` is the
-        // IO-APIC's `max_redirection_entry + 1`, which fits in `u8`
-        // by the architectural register layout (Intel SDM Vol 3A §11.5).
+        let mut inner = self.blocks[idx].inner.lock();
+        // As `write_pin`.
         #[allow(clippy::cast_possible_truncation)]
-        let pin_u8 = pin as u8;
-        Some(inner.ioapic.read_redirection_entry_low(pin_u8))
+        Some(inner.ioapic.read_redirection_entry_low(pin as u8))
     }
 }
 
-impl<M: IoApicMmio + Send + 'static> IrqController for IoApicController<M> {
+impl<M: IoApicMmio + Send + 'static, I: InterruptControl> IrqController for IoApicController<M, I> {
     fn mask(&self, line: u32) -> Result<(), MaskError> {
-        let (idx, pin) = self.locate(line).ok_or(MaskError::OutOfRange)?;
-        let block = &self.blocks[idx];
-        let mut inner = block.inner.lock();
-        let cache_slot = inner.pin_cache[pin as usize].ok_or(MaskError::OutOfRange)?;
-
-        // Re-write the redirection entry with the cached vector +
-        // destination + masked=true. The IoApic driver writes the
-        // low half (which carries the mask bit) through
-        // `VolatileIoApicMmio::write`, which is a `write_volatile`
-        // — sufficient to push the masked state to the IO-APIC's
-        // MMIO window.
-        #[allow(clippy::cast_possible_truncation)]
-        let pin_u8 = pin as u8;
-        inner.ioapic.set_redirection_entry(
-            pin_u8,
-            cache_slot.vector,
-            cache_slot.dest_apic_id,
-            true,
-        );
-        inner.pin_cache[pin as usize] = Some(PinSettings {
-            masked: true,
-            ..cache_slot
-        });
-
-        // Drop the spinlock before issuing the global fence so the
-        // fence orders against the lock's `Release` — `IrqTable::fire`
-        // sets `ready = true` *after* this function returns, and the
-        // SeqCst fence here pairs with the SeqCst load `try_wait_step`
-        // performs on `ready`, guaranteeing every CPU that observes
-        // `ready = true` also observes the masked redirection entry.
-        drop(inner);
+        self.set_masked(line, true)
+            .map_err(|_| MaskError::OutOfRange)?;
+        // The lock's release orders the mask write before this fence, which
+        // pairs with the SeqCst load `try_wait_step` performs on `ready`:
+        // every CPU that sees `ready = true` sees the masked entry.
         fence(Ordering::SeqCst);
         Ok(())
     }
 
+    /// [`tairix_kernel_irq::IrqTable::fire`] masks a line before its waiter
+    /// sees the wake, and a user-space driver cannot reach the IO-APIC, so its
+    /// `irq_wait` re-arms the line here once it has drained the completion.
     fn rearm(&self, line: u32) -> Result<(), MaskError> {
-        // Re-enable the line at the controller after a completion.
-        // [`tairix_kernel_irq::IrqTable::fire`] masks a line before its
-        // waiter observes the wake (mask-before-wake), so once a driver has
-        // drained the completion the line must be unmasked for the next
-        // device interrupt — a user-space interrupt-driven driver cannot
-        // touch the IO-APIC, so its `irq_wait` park path re-arms the bound
-        // line through this method on the driver's behalf (no ambient
-        // hardware access). The default no-op would leave an INTx line
-        // masked-forever after the first completion, so the override is
-        // required — the sibling of the aarch64 `GicIrqController` /
-        // riscv64 `PlicIrqController` re-arm. Re-uses the cached
-        // vector + destination the boot pipeline programmed; a line no
-        // block owns, or one never programmed, maps to
-        // [`MaskError::OutOfRange`] (fail closed). Idempotent: unmasking an
-        // already-unmasked line is a no-op.
-        self.unmask(line).map_err(|_| MaskError::OutOfRange)
+        self.rearm_pin(line).map_err(|_| MaskError::OutOfRange)
     }
 }
 
@@ -379,7 +494,9 @@ impl<M: IoApicMmio + Send + 'static> IrqController for IoApicController<M> {
 /// line — so it deliberately does **not** implement
 /// [`tairix_arch_api::InterruptEntry`]; there is no claim register to
 /// model, and faking one would be a fake primitive.
-impl<M: IoApicMmio + Send + 'static> tairix_arch_api::IrqController for IoApicController<M> {
+impl<M: IoApicMmio + Send + 'static, I: InterruptControl> tairix_arch_api::IrqController
+    for IoApicController<M, I>
+{
     fn mask(&self, line: u32) -> Result<(), tairix_arch_api::IrqControlError> {
         <Self as IrqController>::mask(self, line)
             .map_err(|_| tairix_arch_api::IrqControlError::OutOfRange)
@@ -393,6 +510,10 @@ impl<M: IoApicMmio + Send + 'static> tairix_arch_api::IrqController for IoApicCo
 
 #[cfg(test)]
 mod tests {
+    /// The controller as boot builds it, its blocks' locks masking nothing on
+    /// the host.
+    type Controller<M> = IoApicController<M, BlockIrqs>;
+
     use super::*;
     use std::sync::{Arc, Mutex};
     use std::vec::Vec as StdVec;
@@ -408,6 +529,34 @@ mod tests {
     struct RecordingMmio {
         log: Arc<Mutex<StdVec<(u8, u32)>>>,
         last_writes: Arc<Mutex<std::collections::HashMap<u8, u32>>>,
+        /// Each end of interrupt, with how many writes preceded it.
+        eois: Arc<Mutex<StdVec<(usize, u8)>>>,
+        /// Register accesses made while [`Masking`] held no CPU masked.
+        unmasked: Arc<core::sync::atomic::AtomicUsize>,
+    }
+
+    std::thread_local! {
+        /// How deep this thread's [`Masking`] nests.
+        static MASKED: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+    }
+
+    /// Interrupt control counting how deep a thread has masked, so a test can
+    /// see whether a register was reached with interrupts masked.
+    struct Masking;
+
+    // SAFETY: a test double: it masks nothing, and its state is the
+    // thread-local depth `restore` puts back.
+    unsafe impl InterruptControl for Masking {
+        type State = tairix_sync::NopIrqState;
+
+        fn disable() -> Self::State {
+            MASKED.with(|depth| depth.set(depth.get() + 1));
+            tairix_sync::NopIrqState::default()
+        }
+
+        unsafe fn restore(_: Self::State) {
+            MASKED.with(|depth| depth.set(depth.get() - 1));
+        }
     }
 
     impl RecordingMmio {
@@ -415,15 +564,36 @@ mod tests {
             Self {
                 log: Arc::new(Mutex::new(StdVec::new())),
                 last_writes: Arc::new(Mutex::new(std::collections::HashMap::new())),
+                eois: Arc::new(Mutex::new(StdVec::new())),
+                unmasked: Arc::new(core::sync::atomic::AtomicUsize::new(0)),
             }
+        }
+        /// An IO-APIC reporting `version`.
+        fn versioned(version: u8) -> Self {
+            let mmio = Self::new();
+            mmio.last_writes
+                .lock()
+                .unwrap()
+                .insert(0x01, 0x0017_0000 | u32::from(version));
+            mmio
         }
         fn snapshot(&self) -> StdVec<(u8, u32)> {
             self.log.lock().unwrap().clone()
+        }
+        fn eois(&self) -> StdVec<(usize, u8)> {
+            self.eois.lock().unwrap().clone()
+        }
+        fn note_masking(&self) {
+            if MASKED.with(core::cell::Cell::get) == 0 {
+                self.unmasked
+                    .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
         }
     }
 
     impl IoApicMmio for RecordingMmio {
         fn read(&mut self, reg: u8) -> u32 {
+            self.note_masking();
             // Surface the last write to `reg` so `read_pin_low`
             // tests observe the mask state set by `program_pin` /
             // `IrqController::mask`. The IoApic driver reads
@@ -433,8 +603,29 @@ mod tests {
             *self.last_writes.lock().unwrap().get(&reg).unwrap_or(&0)
         }
         fn write(&mut self, reg: u8, value: u32) {
+            self.note_masking();
             self.log.lock().unwrap().push((reg, value));
             self.last_writes.lock().unwrap().insert(reg, value);
+        }
+        fn end_of_interrupt(&mut self, vector: u8) {
+            let at = self.log.lock().unwrap().len();
+            self.eois.lock().unwrap().push((at, vector));
+        }
+    }
+
+    fn block(
+        id: u8,
+        gsi_base: u32,
+        pin_count: u32,
+        mmio: &RecordingMmio,
+    ) -> IoApicBlock<RecordingMmio> {
+        IoApicBlock {
+            id,
+            gsi_base,
+            ioapic: IoApic::new(mmio.clone()),
+            wiring: (0..pin_count)
+                .map(|pin| PinWiring::of(gsi_base + pin, None))
+                .collect(),
         }
     }
 
@@ -443,9 +634,99 @@ mod tests {
         pin_count: u32,
     ) -> (IoApicController<RecordingMmio>, RecordingMmio) {
         let mmio = RecordingMmio::new();
-        let ioapic = IoApic::new(mmio.clone());
-        let controller = IoApicController::new(alloc::vec![(gsi_base, ioapic, pin_count)]);
+        let controller =
+            Controller::new(alloc::vec![block(0, gsi_base, pin_count, &mmio)]).unwrap();
         (controller, mmio)
+    }
+
+    /// The interrupt path masks a pin under the lock task context re-arms one
+    /// under, so every register is reached with this CPU's interrupts masked:
+    /// one taken while the lock is held would spin on it for ever.
+    #[test]
+    fn every_register_is_reached_with_interrupts_masked() {
+        use core::sync::atomic::Ordering;
+        let mmio = RecordingMmio::new();
+        let mut wired = block(0, 0, 24, &mmio);
+        wired.wiring[9] = PinWiring::of(9, Some(0b1111));
+        let controller = IoApicController::<_, Masking>::new(alloc::vec![wired]).unwrap();
+        mmio.unmasked.store(0, Ordering::Relaxed);
+        controller.program_pin(9, 0x39, 0, true).unwrap();
+        IrqController::mask(&controller, 9).unwrap();
+        IrqController::rearm(&controller, 9).unwrap();
+        controller.unmask(9).unwrap();
+        let _ = controller.read_pin_low(9);
+        assert_eq!(mmio.unmasked.load(Ordering::Relaxed), 0);
+        assert!(!mmio.snapshot().is_empty(), "the pin was reached");
+    }
+
+    /// A pin is programmed as the firmware wired it: a level-triggered,
+    /// active-low line is never delivered as an edge, whose second assertion
+    /// would be lost.
+    #[test]
+    fn a_pin_is_programmed_with_its_firmware_wiring() {
+        let mmio = RecordingMmio::new();
+        let mut wired = block(0, 0, 24, &mmio);
+        wired.wiring[9] = PinWiring::of(9, Some(0b1111));
+        let controller = Controller::new(alloc::vec![wired]).unwrap();
+        controller.program_pin(9, 0x39, 0, true).unwrap();
+        controller.program_pin(4, 0x34, 0, true).unwrap();
+        let low = |gsi| controller.read_pin_low(gsi).unwrap();
+        assert_eq!(
+            low(9) & (1 << 15 | 1 << 13),
+            1 << 15 | 1 << 13,
+            "level, active low"
+        );
+        assert_eq!(
+            low(4) & (1 << 15 | 1 << 13),
+            0,
+            "an ISA line: edge, active high"
+        );
+    }
+
+    /// Remapping replaces a pin's whole entry with the remappable one, its
+    /// wiring and mask kept, and masking it afterwards keeps the format.
+    #[test]
+    fn a_remapped_pin_keeps_its_wiring_and_mask() {
+        let mmio = RecordingMmio::new();
+        let mut wired = block(2, 0, 24, &mmio);
+        wired.wiring[9] = PinWiring::of(9, Some(0b1111));
+        let controller = Controller::new(alloc::vec![wired]).unwrap();
+        controller.program_pin(9, 0x39, 3, true).unwrap();
+        let mut programmed = StdVec::new();
+        controller.programmed(&mut |pin| programmed.push(pin));
+        let pin = ProgrammedPin {
+            gsi: 9,
+            ioapic: 2,
+            vector: 0x39,
+            destination: 3,
+            level: true,
+        };
+        assert_eq!(programmed, [pin]);
+        let remappable = (5 << 49) | (1 << 48) | 0x39;
+        controller.remap_pin(9, remappable).unwrap();
+        programmed.clear();
+        controller.programmed(&mut |pin| programmed.push(pin));
+        assert_eq!(programmed, [pin], "the remapped pin still names its target");
+        let entry = |gsi| {
+            let low = u64::from(controller.read_pin_low(gsi).unwrap());
+            let high = u64::from(*mmio.last_writes.lock().unwrap().get(&0x23).unwrap_or(&0));
+            low | high << 32
+        };
+        let wiring = 1 << 15 | 1 << 13;
+        assert_eq!(
+            entry(9),
+            remappable | wiring | REDIRECTION_MASKED,
+            "still masked"
+        );
+        controller.unmask(9).unwrap();
+        assert_eq!(entry(9), remappable | wiring);
+        IrqController::mask(&controller, 9).unwrap();
+        assert_eq!(entry(9), remappable | wiring | REDIRECTION_MASKED);
+        assert_eq!(
+            controller.remap_pin(10, remappable),
+            Err(ProgramError::GsiOutOfRange),
+            "a pin never programmed"
+        );
     }
 
     #[test]
@@ -500,12 +781,11 @@ mod tests {
         IrqController::mask(&controller, 7).expect("mask succeeds");
 
         let writes = mmio.snapshot();
-        assert_eq!(writes.len(), 2, "mask must write low+high");
+        assert_eq!(writes.len(), 1, "a mask writes the half holding it");
         assert_eq!(writes[0].0, 0x10 + 14);
         assert_eq!(writes[0].1 & 0xFF, 0x30, "vector preserved");
         assert!(writes[0].1 & (1 << 16) != 0, "mask bit set in low half");
-        assert_eq!(writes[1].0, 0x10 + 15);
-        assert_eq!(writes[1].1, (0xABu32) << 24, "destination preserved");
+        assert_eq!(controller.read_pin_low(7).map(|low| low & 0xFF), Some(0x30));
     }
 
     #[test]
@@ -530,13 +810,31 @@ mod tests {
         );
     }
 
+    /// A block whose global system interrupts wrap, run into the MSI lines,
+    /// or overlap a block already taken is refused; one beside it is not.
+    #[test]
+    fn a_block_takes_only_global_system_interrupts_no_other_holds() {
+        let mmio = RecordingMmio::new();
+        let held = [block(0, 0, 24, &mmio), block(1, 40, 8, &mmio)];
+        assert!(gsis_free(&held, 24, 16, 4096), "between the two");
+        assert!(gsis_free(&held, 48, 24, 4096), "after both");
+        assert!(!gsis_free(&held, 16, 16, 4096), "overlaps the first");
+        assert!(!gsis_free(&held, 30, 16, 4096), "overlaps the second");
+        assert!(!gsis_free(&held, 44, 2, 4096), "inside the second");
+        assert!(!gsis_free(&held, 4090, 24, 4096), "runs into the MSI lines");
+        assert!(!gsis_free(&held, u32::MAX - 4, 24, u32::MAX), "wraps");
+        assert!(gsis_free::<RecordingMmio>(&[], 0, 24, 4096));
+    }
+
     #[test]
     fn multi_ioapic_controller_routes_by_gsi_base() {
         let mmio0 = RecordingMmio::new();
         let mmio1 = RecordingMmio::new();
-        let ioapic0 = IoApic::new(mmio0.clone());
-        let ioapic1 = IoApic::new(mmio1.clone());
-        let controller = IoApicController::new(alloc::vec![(0, ioapic0, 24), (24, ioapic1, 8)]);
+        let controller = Controller::new(alloc::vec![
+            block(0, 0, 24, &mmio0),
+            block(1, 24, 8, &mmio1)
+        ])
+        .unwrap();
         assert_eq!(controller.block_count(), 2);
         controller.program_pin(5, 0x40, 1, true).expect("block 0");
         controller.program_pin(27, 0x41, 2, true).expect("block 1");
@@ -601,7 +899,7 @@ mod tests {
         let post_fire_writes = mmio.snapshot().len();
         assert_eq!(
             post_fire_writes - pre_fire_writes,
-            2,
+            1,
             "controller.mask must complete before IrqTable::fire returns Marked"
         );
         // The write at offset 0x10 + 14 must carry the mask bit set.
@@ -700,6 +998,52 @@ mod tests {
         let low = controller.read_pin_low(7).expect("readable");
         assert_eq!(low & 0xFF, 0x61, "vector preserved");
         assert_eq!(low & (1 << 16), 0, "mask bit cleared by rearm");
+    }
+
+    /// A level pin's remote IRR is cleared through the EOI register before
+    /// it is unmasked, so a pin whose interrupt reached its CPU edge-triggered
+    /// raises another; an edge pin, or one already unmasked, ends nothing.
+    #[test]
+    fn rearm_ends_a_level_pin_s_interrupt_before_unmasking() {
+        let mmio = RecordingMmio::versioned(IOAPIC_EOI_VERSION);
+        let controller = Controller::new(alloc::vec![block(0, 0, 24, &mmio)]).unwrap();
+        controller.program_pin(20, 0x07, 0, false).unwrap();
+        controller.program_pin(4, 0x08, 0, false).unwrap();
+        IrqController::rearm(&controller, 20).unwrap();
+        assert!(
+            mmio.eois().is_empty(),
+            "an unmasked pin may have one in service"
+        );
+        IrqController::mask(&controller, 20).unwrap();
+        IrqController::mask(&controller, 4).unwrap();
+        IrqController::rearm(&controller, 4).unwrap();
+        assert!(mmio.eois().is_empty(), "an edge pin holds no remote IRR");
+        let writes = mmio.snapshot().len();
+        IrqController::rearm(&controller, 20).unwrap();
+        assert_eq!(mmio.eois(), [(writes, 0x07)], "ended before the unmask");
+        assert_eq!(controller.read_pin_low(20).unwrap() & (1 << 16), 0);
+    }
+
+    /// An IO-APIC older than the EOI register has the pin taken through edge
+    /// triggering instead, masked throughout.
+    #[test]
+    fn rearm_takes_an_old_io_apic_s_level_pin_through_edge() {
+        let mmio = RecordingMmio::versioned(0x11);
+        let controller = Controller::new(alloc::vec![block(0, 0, 24, &mmio)]).unwrap();
+        controller.program_pin(20, 0x07, 0, true).unwrap();
+        let writes = mmio.snapshot().len();
+        IrqController::rearm(&controller, 20).unwrap();
+        assert!(mmio.eois().is_empty());
+        let low = |entry: u32| (0x10 + 2 * 20, entry);
+        let level = 0x07 | (1 << 15) | (1 << 13);
+        assert_eq!(
+            mmio.snapshot()[writes..],
+            [
+                low((level & !(1 << 15)) | (1 << 16)),
+                low(level | (1 << 16)),
+                low(level),
+            ]
+        );
     }
 
     /// `rearm` on a line no block owns fails closed with

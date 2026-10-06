@@ -428,6 +428,9 @@ fn describe_resource(resource: &HwResource, line: &mut String) {
             Ok((HwProperty::UsbInterface, number)) => {
                 let _ = write!(line, "USB interface {number}");
             }
+            Ok((HwProperty::FaultInterrupt, place)) => {
+                let _ = write!(line, "Faults raised on interrupt {place} of the node");
+            }
             Err(_) => line.push_str("Property (malformed)"),
         },
         None => line.push_str("resource (unknown kind)"),
@@ -480,6 +483,11 @@ fn describe_iommu_reserved(resource: &HwResource, line: &mut String) {
         window.len(),
         window.stream()
     );
+    match window.access() {
+        tairix_abi::ReservedAccess::Read => line.push_str(", read only"),
+        tairix_abi::ReservedAccess::Write => line.push_str(", write only"),
+        tairix_abi::ReservedAccess::ReadWrite => {}
+    }
 }
 
 /// Append a DMA controller duty: the endpoint it serves and its channels.
@@ -847,7 +855,13 @@ C 02  Network controller
             HwResource::iommu_alias(tairix_abi::IommuStreams::new(40, 0x0200, 1).expect("valid")),
             HwResource::iommu_group_member(tairix_abi::IommuGroup::new(40, 0x10)),
             HwResource::iommu_reserved_window(
-                tairix_abi::IommuReservedWindow::new(0x18, 0x7b80_0000, 0x10_0000).expect("valid"),
+                tairix_abi::IommuReservedWindow::new(
+                    0x18,
+                    0x7b80_0000,
+                    0x10_0000,
+                    tairix_abi::ReservedAccess::Read,
+                )
+                .expect("valid"),
             ),
         ] {
             function.push_resource(resource).expect("resource fits");
@@ -863,7 +877,7 @@ C 02  Network controller
                 "  DMA translated by unit node 40 as streams 0x20 (count 4)",
                 "  DMA aliased on unit node 40 as stream 0x200",
                 "  DMA isolation group 0x10 on unit node 40",
-                "  Firmware DMA window at 0x7b800000 [size=0x100000] for stream 0x18",
+                "  Firmware DMA window at 0x7b800000 [size=0x100000] for stream 0x18, read only",
             ]
         );
     }
@@ -882,6 +896,23 @@ C 02  Network controller
         let (out, result) = run_case(&["-v"], Ok(blob), true);
         result.expect("listing succeeds");
         assert_eq!(out.lines()[1..], ["  USB interface 1"]);
+    }
+
+    #[test]
+    fn verbose_names_the_interrupt_a_unit_raises_its_faults_on() {
+        let mut unit = HwNode::new(2, HW_NODE_ROOT, HwDeviceClass::Iommu);
+        unit.push_match_key(HwMatchKey::pci(0x1022, 0x1419, 0x08_06_00))
+            .expect("key fits");
+        unit.push_resource(HwResource::property(HwProperty::FaultInterrupt, 1))
+            .expect("resource fits");
+        let mut blob = HwTreeHeader::new(1, 1).to_le_bytes().to_vec();
+        blob.extend_from_slice(&unit.to_le_bytes());
+        let (out, result) = run_case(&["-v"], Ok(blob), true);
+        result.expect("listing succeeds");
+        assert_eq!(
+            out.lines()[1..],
+            ["  Faults raised on interrupt 1 of the node"]
+        );
     }
 
     #[test]

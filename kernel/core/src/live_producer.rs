@@ -422,7 +422,7 @@ where
             return Err(Errno::LengthOutOfRange);
         }
         // Allocate the backing as a set of physically-contiguous buddy chunks
-        // (one for a small region, several for one larger than the 8 MiB
+        // (one for a small region, several for one larger than the
         // single-block ceiling), so the region size is bounded by RAM.
         let blocks = self
             .frames

@@ -29,6 +29,7 @@ doc-valid-idents = [
     "GIC",
     "GICv2",
     "PCIe",
+    "INTx",
     "SerDes",
     "IDDQ",
     "AArch64",

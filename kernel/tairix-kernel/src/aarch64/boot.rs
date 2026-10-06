@@ -53,8 +53,9 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, AtomicU8};
 use tairix_arch_aarch64::kernel_arch::{read_cntfrq, timer_frequency_hz, SecondaryStart};
 use tairix_arch_aarch64::paging::{
-    configure_device_gigapages, configure_kernel_gigapages, gigapage_mask_from_extents,
-    identity_device_mask, install_boot_physmap, AddressSpace, PageTablePool, GIGAPAGE_MASK_WORDS,
+    configure_device_gigapages, configure_kernel_device_gigapages, configure_kernel_gigapages,
+    gigapage_mask_from_extents, identity_device_mask, install_boot_physmap, AddressSpace,
+    PageTablePool, GIGAPAGE_MASK_WORDS,
 };
 
 use tairix_arch_aarch64::{
@@ -507,33 +508,44 @@ fn configure_identity_typing(dtb: u64) -> (EarlyDiscovered, [u64; GIGAPAGE_MASK_
         .map_or((console_base as u64, console_base as u64), |p| {
             (p.regs_phys, p.outbound_cpu_base)
         });
-    let device_mask = identity_device_mask(
-        &[
-            console_base as u64,
-            distributor_base as u64,
-            cpu_interface_base as u64,
-            video_doorbell,
-            pcie_regs,
-            pcie_outbound,
-        ],
-        kernel_start_addr(),
-        kernel_end_addr(),
-    );
-    configure_device_gigapages(device_mask);
+    let extents = [
+        console_base as u64,
+        distributor_base as u64,
+        cpu_interface_base as u64,
+        video_doorbell,
+        pcie_regs,
+        pcie_outbound,
+    ]
+    .map(|base| (base, 1));
+    let identity_mask = identity_device_mask(&extents, kernel_start_addr(), kernel_end_addr());
+    configure_device_gigapages(identity_mask);
     let (fb_base, fb_len) = early.video.map_or((0, 0), |v| (v.fb_base, v.fb_len_bytes));
     // Exactly what the kernel addresses *physically* — its own image and
     // boot heap, the firmware tree, the scan-out surface. Allocator RAM is
     // deliberately absent: it is reached through the direct physical map in
     // the kernel regime, so a process root carries no mapping of RAM in the
     // half user code addresses.
-    configure_kernel_gigapages(gigapage_mask_from_extents(&[
+    let normal = gigapage_mask_from_extents(&[
         (
             kernel_start_addr(),
             kernel_end_addr().saturating_sub(kernel_start_addr()),
         ),
         (dtb, early.dtb_len),
         (fb_base, fb_len),
-    ]));
+    ]);
+    // A gigapage takes one memory type, so a configuration region sharing one
+    // with anything mapped Normal is left unmapped and its host unprobed.
+    let mut config_mask = early.pci_config;
+    for (word, normal) in config_mask.iter_mut().zip(normal) {
+        *word &= !normal;
+    }
+    configure_kernel_device_gigapages(config_mask);
+    // RAM stays off every gigapage registers occupy, in either regime.
+    let mut device_mask = identity_mask;
+    for (word, config) in device_mask.iter_mut().zip(config_mask) {
+        *word |= config;
+    }
+    configure_kernel_gigapages(normal);
     (early, device_mask)
 }
 
@@ -1354,9 +1366,62 @@ fn audit_root_storage_binding(
         );
     }
 
+    // Every generic ECAM host the tree describes becomes the kernel's own.
+    // SAFETY: as the probes' closures above — `dtb` bounds the firmware blob
+    // validated at boot, identity-mapped and immutable for the kernel's life,
+    // MMU on.
+    if let Ok(fdt) = unsafe { Fdt::from_ptr(dtb as *const u8) } {
+        crate::pci_fdt::seed(&fdt, &PciPort, &mut sink, log_sink);
+    }
+
     // The MMU is on here (the caller enabled it), as the boot record's
     // `SpinLock` stash requires.
     crate::unlock_service::record_boot(dtb, sink.into_vec(), log_sink);
+}
+
+/// A kernel mapping of the device registers at `[base, base + len)`: a
+/// window wholly inside the kernel regime's Device gigapages, at its
+/// direct-map address, else wholly inside the identity window's, at its
+/// physical one. Anything else fails closed: no other mapping of a register
+/// window is uncached.
+pub(crate) fn device_registers(base: u64, len: usize) -> Option<core::ptr::NonNull<u8>> {
+    use tairix_arch_aarch64::paging::{identity_device_covers, kernel_device_covers, physmap_virt};
+    let span = u64::try_from(len).ok()?;
+    let virt = if kernel_device_covers(base, span) {
+        physmap_virt(base)
+    } else if identity_device_covers(base, span) {
+        base
+    } else {
+        return None;
+    };
+    core::ptr::NonNull::new(core::ptr::with_exposed_provenance_mut(
+        usize::try_from(virt).ok()?,
+    ))
+}
+
+/// How a generic ECAM host reaches this port: its configuration region
+/// through the kernel's Device windows, its INTx on the GIC.
+struct PciPort;
+
+impl crate::pci_fdt::FdtPort for PciPort {
+    fn registers(&self, base: u64, len: usize) -> Option<core::ptr::NonNull<u8>> {
+        device_registers(base, len)
+    }
+
+    fn reach(&self) -> u64 {
+        tairix_arch_aarch64::paging::KERNEL_DEVICE_REACH
+    }
+
+    fn interrupt(&self, fdt: &Fdt<'_>, spec: &tairix_fdt::pci::InterruptSpec) -> Option<u32> {
+        let gic = gic::find_gic(fdt)?;
+        if gic.phandle != Some(spec.parent) {
+            return None;
+        }
+        match spec.cells() {
+            &[kind, number, _] => fdt::gic_intid_from_cells(kind, number),
+            _ => None,
+        }
+    }
 }
 
 /// The two memory figures the hand-off carries, which discovery produces
@@ -1571,6 +1636,9 @@ struct EarlyDiscovered {
     /// identity Device mask. `None` on a board with no bridge (the QEMU
     /// `virt` shape).
     pcie: Option<platform::PcieDiscovery>,
+    /// The gigapages holding a generic ECAM host's configuration region,
+    /// which the kernel maps in its own regime (`plans/IOMMU.md` IOM13).
+    pci_config: [u64; GIGAPAGE_MASK_WORDS],
     /// The rate in Hz the firmware was asked to run the ARM cores at, or `0`
     /// on a board with no firmware clock (the QEMU `virt` shape) or where the
     /// request failed. Recorded so the boot log can state the speed the rest
@@ -1599,6 +1667,7 @@ fn configure_mmio_from_dtb(dtb: u64) -> EarlyDiscovered {
         video: None,
         dtb_len: 0,
         pcie: None,
+        pci_config: [0; GIGAPAGE_MASK_WORDS],
         cpu_clock_hz: 0,
     };
     if dtb == 0 {
@@ -1640,7 +1709,26 @@ fn configure_mmio_from_dtb(dtb: u64) -> EarlyDiscovered {
     // The early-returning `scan_translated` walk is MMU-off-safe: it reads
     // only the matched node's own properties, like the walks above.
     out.pcie = platform::pcie_bringup(&fdt);
+    // Only a tree describing a generic host is walked whole.
+    if fdt.find_compatible(tairix_fdt::pci::ECAM_HOST).is_some() {
+        out.pci_config = pci_config_gigapages(&fdt);
+    }
     out
+}
+
+/// The gigapages every generic ECAM host's configuration region lies in,
+/// however many hosts the tree describes.
+fn pci_config_gigapages(fdt: &Fdt<'_>) -> [u64; GIGAPAGE_MASK_WORDS] {
+    let mut mask = [0; GIGAPAGE_MASK_WORDS];
+    tairix_fdt::pci::each_pci_host(fdt, |host| {
+        for (word, host) in mask
+            .iter_mut()
+            .zip(gigapage_mask_from_extents(&[host.ecam]))
+        {
+            *word |= host;
+        }
+    });
+    mask
 }
 
 /// What the post-MMU boot phase resolved from the firmware device tree.

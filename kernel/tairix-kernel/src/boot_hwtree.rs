@@ -42,6 +42,12 @@ impl CollectingHwNodeSink {
     pub fn nodes(&self) -> &[HwNode] {
         &self.nodes
     }
+
+    /// The nodes collected so far, for a later boot step to complete with
+    /// facts only the whole tree decides (a translated master's group).
+    pub fn nodes_mut(&mut self) -> &mut [HwNode] {
+        &mut self.nodes
+    }
 }
 
 impl Default for CollectingHwNodeSink {

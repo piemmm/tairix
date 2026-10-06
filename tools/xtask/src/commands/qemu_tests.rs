@@ -29,7 +29,7 @@ use std::time::Duration;
 use tairix_desktop_session::SizedRecord;
 use tairix_itest_harness::pie::PieArch;
 use tairix_qemu::screendump::Rgb;
-use tairix_qemu::{NamedKey, Outcome, ReservedSocket, Runner, Spec};
+use tairix_qemu::{DmaTranslation, NamedKey, Outcome, ReservedSocket, Runner, Spec};
 
 use super::image_apps::AppStoreFile;
 use super::parallel::{self, Job};
@@ -1329,12 +1329,135 @@ const _: () = {
     );
 };
 
-// A `static` (not a `const`): several enrolments may share one built binary
-// and `sidecar_path` disambiguates their planted images by each entry's
-// stable index in this table, found via `std::ptr::eq`. A `const` is inlined
-// at every use and its promoted array need not have a single address, so
-// pointer identity against a re-materialised `TESTS.iter()` is unreliable; a
-// `static` has one address, so the index lookup is sound.
+/// An enrolment [`TESTS`] runs twice, the second time with its input
+/// devices on the PCI host.
+const AUTOLOAD_INPUT_AARCH64: QemuTest = QemuTest {
+    package: "tairix-test-autoload-input-qemu-aarch64",
+    binary: "tairix-test-autoload-input-qemu-aarch64",
+    target: "aarch64-unknown-none",
+    cpus: 1,
+    timeout: Duration::from_secs(300),
+    ram_mib: None,
+    disk_sectors: None,
+    netstack_peer: NetPeerMode::None,
+    ramfb: true,
+    crypto: false,
+    fs_disk: FsDisk::AutoloadRootDisk,
+    rtc_base: None,
+    keyboard: None,
+    typed_keys: &[
+        TypedStep::text(
+            AUTOLOAD_INPUT_KEY_MARKER,
+            AUTOLOAD_INPUT_ARMED_OCCURRENCES,
+            UNLOCK_PASSPHRASE_LINE,
+        ),
+        TypedStep::text(AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
+        // AW4 terminal stage: type the shell command once the terminal
+        // gains focus (its spawn is the PASS gate's round-trip witness).
+        // Gated on the guest focus marker, not a raw count the files
+        // window satisfies before the terminal exists.
+        TypedStep::text(
+            AUTOLOAD_TERMINAL_FOCUSED_MARKER,
+            1,
+            AUTOLOAD_TERMINAL_COMMAND,
+        ),
+        // The pty Ctrl-C job-control step (`plans/PTY.md`): held behind
+        // the guest's sleep-spawn marker so the `Ctrl-C` lands against a
+        // live, parked foreground job. It interrupts the foreground
+        // `sleep` and types `true` — the recovered `true` load is the
+        // guest's pty job-control witness (the vertical's final PASS
+        // witness; no file-manager stage follows).
+        TypedStep::text(
+            AUTOLOAD_CTRL_C_ARM_MARKER,
+            1,
+            AUTOLOAD_TERMINAL_CTRL_C_RECOVERY,
+        ),
+    ],
+    screendumps: &[
+        ScreendumpPlan {
+            marker: AUTOLOAD_DESKTOP_REVEALED_MARKER,
+            occurrences: 1,
+            suffix: "desktop",
+            assert: assert_booted_desktop_screendump,
+        },
+        ScreendumpPlan {
+            marker: AUTOLOAD_FILES_ACTIVATED_MARKER,
+            occurrences: 1,
+            suffix: "window",
+            assert: assert_booted_files_window_screendump,
+        },
+    ],
+    pointer_script: Some(autoload_desktop_pointer_script),
+    bounded_pointer_script: false,
+    x86_64_cpu: None,
+    serial: &[],
+    expect: Expect::Pass,
+};
+
+/// The `SMMUv3` translation vertical, which [`TESTS`] runs once per stage.
+const DMA_TRANSLATION_AARCH64: QemuTest = QemuTest {
+    package: "tairix-test-dma-translation-qemu-aarch64",
+    binary: "tairix-test-dma-translation-qemu-aarch64",
+    target: "aarch64-unknown-none",
+    cpus: 1,
+    timeout: Duration::from_secs(60),
+    ram_mib: None,
+    disk_sectors: None,
+    netstack_peer: NetPeerMode::None,
+    ramfb: true,
+    crypto: false,
+    fs_disk: FsDisk::AutoloadRootDisk,
+    rtc_base: None,
+    keyboard: Some((AUTOLOAD_INPUT_KEY_MARKER, "a")),
+    typed_keys: &[],
+    screendumps: &[],
+    pointer_script: None,
+    bounded_pointer_script: false,
+    x86_64_cpu: None,
+    serial: &[],
+    expect: Expect::Pass,
+};
+
+/// The RISC-V IOMMU translation vertical, which [`TESTS`] runs once per
+/// stage.
+const DMA_TRANSLATION_RISCV64: QemuTest = QemuTest {
+    package: "tairix-test-dma-translation-qemu-riscv64",
+    binary: "tairix-test-dma-translation-qemu-riscv64",
+    ..AUTOLOAD_INPUT_RISCV64
+};
+
+/// An enrolment [`TESTS`] runs twice, the second time with its input
+/// devices on the PCI host.
+const AUTOLOAD_INPUT_RISCV64: QemuTest = QemuTest {
+    package: "tairix-test-autoload-input-qemu-riscv64",
+    binary: "tairix-test-autoload-input-qemu-riscv64",
+    target: "riscv64gc-unknown-none-elf",
+    cpus: 1,
+    timeout: Duration::from_secs(60),
+    ram_mib: None,
+    disk_sectors: None,
+    netstack_peer: NetPeerMode::None,
+    ramfb: false,
+    crypto: false,
+    fs_disk: FsDisk::AutoloadRootDisk,
+    rtc_base: None,
+    // One virtio-input node → one autoloaded driver instance → one
+    // `irq_bind`, so the injection gates on the marker's first appearance
+    // (`with_virtio_keyboard`); the injected key is the whole observable
+    // effect the `kind=key` witness proves.
+    keyboard: Some((AUTOLOAD_INPUT_KEY_MARKER, "a")),
+    typed_keys: &[],
+    screendumps: &[],
+    pointer_script: None,
+    bounded_pointer_script: false,
+    x86_64_cpu: None,
+    serial: &[],
+    expect: Expect::Pass,
+};
+
+// A `static`, not a `const`: enrolments sharing one binary are told apart
+// by their index here, found by pointer identity, which a `const`'s inlined
+// copies do not keep.
 static TESTS: &[QemuTest] = &[
     QemuTest {
         package: "tairix-test-memory-isolation",
@@ -8541,67 +8664,12 @@ static TESTS: &[QemuTest] = &[
     // round trip, on QEMU TCG. The file-manager stages (FM9/FM10/FM11) are
     // deliberately not driven here (host-tested in `lib/browse`); see the
     // sink doc in `src/main.rs` and `plans/OPEN-DEFECTS.md` D20.
+    AUTOLOAD_INPUT_AARCH64,
+    // The same run with the keyboard and mouse as PCI functions on the
+    // generic ECAM host, sharing one INTx line (`plans/IOMMU.md` IOM13).
     QemuTest {
-        package: "tairix-test-autoload-input-qemu-aarch64",
-        binary: "tairix-test-autoload-input-qemu-aarch64",
-        target: "aarch64-unknown-none",
-        cpus: 1,
-        timeout: Duration::from_secs(300),
-        ram_mib: None,
-        disk_sectors: None,
-        netstack_peer: NetPeerMode::None,
-        ramfb: true,
-        crypto: false,
-        fs_disk: FsDisk::AutoloadRootDisk,
-        rtc_base: None,
-        keyboard: None,
-        typed_keys: &[
-            TypedStep::text(
-                AUTOLOAD_INPUT_KEY_MARKER,
-                AUTOLOAD_INPUT_ARMED_OCCURRENCES,
-                UNLOCK_PASSPHRASE_LINE,
-            ),
-            TypedStep::text(AUTOLOAD_LOGIN_MARKER, 1, AUTOLOAD_LOGIN_DIALOGUE),
-            // AW4 terminal stage: type the shell command once the terminal
-            // gains focus (its spawn is the PASS gate's round-trip witness).
-            // Gated on the guest focus marker, not a raw count the files
-            // window satisfies before the terminal exists.
-            TypedStep::text(
-                AUTOLOAD_TERMINAL_FOCUSED_MARKER,
-                1,
-                AUTOLOAD_TERMINAL_COMMAND,
-            ),
-            // The pty Ctrl-C job-control step (`plans/PTY.md`): held behind
-            // the guest's sleep-spawn marker so the `Ctrl-C` lands against a
-            // live, parked foreground job. It interrupts the foreground
-            // `sleep` and types `true` — the recovered `true` load is the
-            // guest's pty job-control witness (the vertical's final PASS
-            // witness; no file-manager stage follows).
-            TypedStep::text(
-                AUTOLOAD_CTRL_C_ARM_MARKER,
-                1,
-                AUTOLOAD_TERMINAL_CTRL_C_RECOVERY,
-            ),
-        ],
-        screendumps: &[
-            ScreendumpPlan {
-                marker: AUTOLOAD_DESKTOP_REVEALED_MARKER,
-                occurrences: 1,
-                suffix: "desktop",
-                assert: assert_booted_desktop_screendump,
-            },
-            ScreendumpPlan {
-                marker: AUTOLOAD_FILES_ACTIVATED_MARKER,
-                occurrences: 1,
-                suffix: "window",
-                assert: assert_booted_files_window_screendump,
-            },
-        ],
-        pointer_script: Some(autoload_desktop_pointer_script),
-        bounded_pointer_script: false,
-        x86_64_cpu: None,
-        serial: &[],
-        expect: Expect::Pass,
+        binary: "tairix-test-autoload-input-pci-qemu-aarch64",
+        ..AUTOLOAD_INPUT_AARCH64
     },
     // `plans/NEW-TASKBAR.md`: the desktop **icon-bar** vertical. A
     // deliberately short, dedicated sibling of the autoload desktop vertical
@@ -9510,31 +9578,12 @@ static TESTS: &[QemuTest] = &[
     // boot-then-do-fixed-work verticals: boot + `/System` mount + autoload +
     // driver bring-up + the injected key complete in a few seconds on QEMU
     // TCG, with ample headroom.
+    AUTOLOAD_INPUT_RISCV64,
+    // The same run with the keyboard and a mouse as PCI functions on the
+    // generic ECAM host, sharing one INTx line (`plans/IOMMU.md` IOM13).
     QemuTest {
-        package: "tairix-test-autoload-input-qemu-riscv64",
-        binary: "tairix-test-autoload-input-qemu-riscv64",
-        target: "riscv64gc-unknown-none-elf",
-        cpus: 1,
-        timeout: Duration::from_secs(60),
-        ram_mib: None,
-        disk_sectors: None,
-        netstack_peer: NetPeerMode::None,
-        ramfb: false,
-        crypto: false,
-        fs_disk: FsDisk::AutoloadRootDisk,
-        rtc_base: None,
-        // One virtio-input node → one autoloaded driver instance → one
-        // `irq_bind`, so the injection gates on the marker's first appearance
-        // (`with_virtio_keyboard`); the injected key is the whole observable
-        // effect the `kind=key` witness proves.
-        keyboard: Some((AUTOLOAD_INPUT_KEY_MARKER, "a")),
-        typed_keys: &[],
-        screendumps: &[],
-        pointer_script: None,
-        bounded_pointer_script: false,
-        x86_64_cpu: None,
-        serial: &[],
-        expect: Expect::Pass,
+        binary: "tairix-test-autoload-input-pci-qemu-riscv64",
+        ..AUTOLOAD_INPUT_RISCV64
     },
     // `plans/ARCHSUPPORT.md` A4: the x86_64 driver-loading-by-discovery
     // autoload vertical — the virtio-**PCI** analogue of the aarch64 /
@@ -9650,6 +9699,87 @@ static TESTS: &[QemuTest] = &[
         x86_64_cpu: None,
         serial: &[],
         expect: Expect::Pass,
+    },
+    // `plans/IOMMU.md` MI2: the translation vertical's AMD binary, the same
+    // boot behind an `amd-iommu` with `dma-remap=on` (`dma_translation_gates`):
+    // the floor disk, the bridged keyboard and its remapped interrupt all
+    // through the AMD-Vi unit IVRS describes.
+    QemuTest {
+        package: "tairix-test-dma-translation-qemu-x86-64",
+        binary: "tairix-test-dma-translation-amd-qemu-x86-64",
+        target: X86_64_TARGET,
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        crypto: false,
+        fs_disk: FsDisk::AutoloadRootDisk,
+        rtc_base: None,
+        keyboard: Some((AUTOLOAD_INPUT_KEY_MARKER, "a")),
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        x86_64_cpu: None,
+        serial: &[],
+        expect: Expect::Pass,
+    },
+    // `plans/IOMMU.md` MI2: the fault vertical's AMD binary, the refused
+    // write recorded in the AMD-Vi unit's event log and raised through its
+    // own function's MSI.
+    QemuTest {
+        package: "tairix-test-dma-fault-qemu-x86-64",
+        binary: "tairix-test-dma-fault-amd-qemu-x86-64",
+        target: X86_64_TARGET,
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        ram_mib: None,
+        disk_sectors: Some(2048),
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        crypto: false,
+        fs_disk: FsDisk::None,
+        rtc_base: None,
+        keyboard: None,
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        x86_64_cpu: None,
+        serial: &[],
+        expect: Expect::Pass,
+    },
+    // `plans/IOMMU.md` IOM15: the production aarch64 boot behind an Arm
+    // SMMUv3 at stage 2 (`dma_translation_gates`), the keyboard and mouse
+    // virtio-pci functions `iommu_platform=on` on the ECAM host the unit
+    // fronts (`shared_line_input_gates`), so the keyboard driver reaches
+    // memory only through its domain. PASS on the injected key after the
+    // unit audited `translating` and the keyboard was granted bus mastering.
+    // A display world like every aarch64 autoload vertical, so the login
+    // renders to the framebuffer and the UART carries only the log. The
+    // 60-second budget matches the other boot-then-do-fixed-work verticals:
+    // boot, the `/System` mount, both drivers' autoload and bring-up, and the
+    // key complete in a few seconds on QEMU TCG.
+    DMA_TRANSLATION_AARCH64,
+    // The same run on `virt-9.1`, the newest machine whose unit offers
+    // stage 1 alone: one context descriptor per domain.
+    QemuTest {
+        binary: "tairix-test-dma-translation-stage1-qemu-aarch64",
+        ..DMA_TRANSLATION_AARCH64
+    },
+    // `plans/IOMMU.md` IOM16: the production riscv64 boot behind the `virt`
+    // board's RISC-V IOMMU (`iommu-sys`) at the second stage, the keyboard and
+    // mouse virtio-pci functions `iommu_platform=on` on the ECAM host it
+    // fronts, its faults raised on its first wired line through the PLIC.
+    // PASS on the injected key after the unit audited `translating` and the
+    // keyboard was granted bus mastering, within the sibling budget.
+    DMA_TRANSLATION_RISCV64,
+    // The same run with the unit's first stage alone, tagged by PSCID.
+    QemuTest {
+        binary: "tairix-test-dma-translation-stage1-qemu-riscv64",
+        ..DMA_TRANSLATION_RISCV64
     },
     // `plans/NETWORK.md` N4e-β: the aarch64 **two-process** live-boot
     // netstack vertical.
@@ -11083,16 +11213,7 @@ fn run_one(
     stores: &StoreSet,
 ) -> Result<(), String> {
     let kernel: PathBuf = target_dir.join(t.target).join("debug").join(t.binary);
-    // Select the per-arch QEMU `Spec`: the riscv64 enrolments boot the
-    // `virt` board through OpenSBI; everything else uses the x86_64
-    // `isa-debug-exit` convention.
-    let base = if t.target == RISCV64_TARGET {
-        Spec::for_riscv64_kernel(&kernel)
-    } else if t.target == AARCH64_TARGET {
-        Spec::for_aarch64_kernel(&kernel)
-    } else {
-        Spec::for_x86_64_kernel(&kernel)
-    };
+    let base = base_spec(t.target, &kernel);
     // One budget everywhere: the enrolment's own inactivity (no-progress)
     // ceiling, enforced identically on a developer machine and a CI runner.
     // There is no developer-only clamp. Because the runner's deadline counts
@@ -16169,27 +16290,97 @@ const MEMTEST_TAKEOVER_BINARIES: [&str; 3] = [
     "tairix-test-supervisor-memtest-takeover-qemu-aarch64",
 ];
 
-/// The verticals that run behind a DMA translation unit (`plans/IOMMU.md`
-/// MI0). [`finish_run`] recognises them to put one in front of every PCI
+/// The verticals that run behind a DMA translation unit, and which
+/// (`plans/IOMMU.md` MI0, MI2). [`finish_run`] puts it in front of every PCI
 /// device, so a run passes only on DMA that crossed the unit.
-const DMA_TRANSLATION_BINARIES: [&str; 2] = [
-    "tairix-test-dma-translation-qemu-x86-64",
-    "tairix-test-dma-fault-qemu-x86-64",
+const DMA_TRANSLATION_BINARIES: [(&str, DmaTranslation); 8] = [
+    (
+        "tairix-test-dma-translation-qemu-x86-64",
+        DmaTranslation::Vtd,
+    ),
+    ("tairix-test-dma-fault-qemu-x86-64", DmaTranslation::Vtd),
+    (
+        "tairix-test-dma-translation-amd-qemu-x86-64",
+        DmaTranslation::AmdVi,
+    ),
+    (
+        "tairix-test-dma-fault-amd-qemu-x86-64",
+        DmaTranslation::AmdVi,
+    ),
+    (
+        "tairix-test-dma-translation-qemu-aarch64",
+        DmaTranslation::Smmuv3Stage2,
+    ),
+    (
+        "tairix-test-dma-translation-stage1-qemu-aarch64",
+        DmaTranslation::Smmuv3Stage1,
+    ),
+    (
+        "tairix-test-dma-translation-qemu-riscv64",
+        DmaTranslation::RiscvStage2,
+    ),
+    (
+        "tairix-test-dma-translation-stage1-qemu-riscv64",
+        DmaTranslation::RiscvStage1,
+    ),
 ];
 
-/// The translated vertical whose input devices sit behind a PCIe-to-PCI
-/// bridge, so its keyboard's DMA reaches the unit only under the bridge's
+/// The translated verticals whose input devices sit behind a PCIe-to-PCI
+/// bridge, so their keyboard's DMA reaches the unit only under the bridge's
 /// alias (`plans/IOMMU.md` IOM8).
-const ALIASED_INPUT_BINARY: &str = "tairix-test-dma-translation-qemu-x86-64";
+const ALIASED_INPUT_BINARIES: [&str; 2] = [
+    "tairix-test-dma-translation-qemu-x86-64",
+    "tairix-test-dma-translation-amd-qemu-x86-64",
+];
 
-/// [`DMA_TRANSLATION_BINARIES`]' translation unit on `spec`, and nothing on
-/// any other run.
-fn dma_translation_gates(spec: Spec, binary: &str) -> Spec {
-    if !DMA_TRANSLATION_BINARIES.contains(&binary) {
+/// The verticals whose input devices are PCI functions on an FDT board's
+/// host bridge, sharing one INTx line (`plans/IOMMU.md` IOM13), the FDT
+/// translation verticals among them: their units front only that host.
+const SHARED_LINE_INPUT_BINARIES: [&str; 6] = [
+    "tairix-test-autoload-input-pci-qemu-aarch64",
+    "tairix-test-autoload-input-pci-qemu-riscv64",
+    "tairix-test-dma-translation-qemu-aarch64",
+    "tairix-test-dma-translation-stage1-qemu-aarch64",
+    "tairix-test-dma-translation-qemu-riscv64",
+    "tairix-test-dma-translation-stage1-qemu-riscv64",
+];
+
+/// Put `binary`'s input devices on the PCI host if it is one of
+/// [`SHARED_LINE_INPUT_BINARIES`]. A mouse beside the keyboard gives the line
+/// its second sharer, and a key waits for every driver to arm.
+fn shared_line_input_gates(spec: Spec, binary: &str) -> Spec {
+    if !SHARED_LINE_INPUT_BINARIES.contains(&binary) {
         return spec;
     }
-    let spec = spec.with_dma_translation();
-    if binary == ALIASED_INPUT_BINARY {
+    let spec = spec.with_shared_line_input().with_virtio_mouse();
+    let armed = armed_input_drivers(spec.devices.pointing);
+    spec.with_keyboard_ready_occurrences(armed)
+}
+
+/// The translation unit [`DMA_TRANSLATION_BINARIES`] gives `binary` on
+/// `spec`, and nothing on any other run.
+/// The QEMU spec `target`'s enrolments boot `kernel` with: the riscv64 `virt`
+/// board through OpenSBI, the aarch64 `virt` board, else the x86_64
+/// `isa-debug-exit` convention.
+fn base_spec(target: &str, kernel: &Path) -> Spec {
+    if target == RISCV64_TARGET {
+        Spec::for_riscv64_kernel(kernel)
+    } else if target == AARCH64_TARGET {
+        Spec::for_aarch64_kernel(kernel)
+    } else {
+        Spec::for_x86_64_kernel(kernel)
+    }
+}
+
+fn dma_translation_gates(spec: Spec, binary: &str) -> Spec {
+    let Some(&(_, unit)) = DMA_TRANSLATION_BINARIES
+        .iter()
+        .find(|(translated, _)| *translated == binary)
+    else {
+        return spec;
+    };
+    let spec = spec.with_dma_translation(unit);
+    if ALIASED_INPUT_BINARIES.contains(&binary) {
         spec.with_input_bridge()
     } else {
         spec
@@ -16439,6 +16630,7 @@ fn finish_run(t: &QemuTest, kernel: &Path, replica: usize, spec: Spec) -> Result
     if let Some((marker, key)) = t.keyboard {
         spec = spec.with_virtio_keyboard(marker, key);
     }
+    spec = shared_line_input_gates(spec, t.binary);
 
     // Attach a `virtio-keyboard-device` and type the scripted dialogue at
     // it, step by step — each step once its own readiness marker has
@@ -17486,22 +17678,57 @@ mod tests {
     /// and only those runs get one.
     #[test]
     fn dma_translation_binaries_are_enrolled_and_alone_translated() {
-        use super::{dma_translation_gates, DMA_TRANSLATION_BINARIES};
+        use super::{base_spec, dma_translation_gates, DMA_TRANSLATION_BINARIES};
         use tairix_qemu::{DmaTranslation, Spec};
 
-        for binary in DMA_TRANSLATION_BINARIES {
-            assert!(
-                TESTS.iter().any(|t| t.binary == binary),
-                "translated binary {binary} must be enrolled",
+        for (binary, unit) in DMA_TRANSLATION_BINARIES {
+            let test = TESTS
+                .iter()
+                .find(|t| t.binary == binary)
+                .unwrap_or_else(|| panic!("translated binary {binary} must be enrolled"));
+            let spec = base_spec(test.target, std::path::Path::new("/tmp/k"));
+            assert_eq!(
+                unit.arch(),
+                Some(spec.arch),
+                "{binary}: a unit its own board can attach"
             );
-            let gated = dma_translation_gates(Spec::for_x86_64_kernel("/tmp/k"), binary);
-            assert_eq!(gated.dma_translation, DmaTranslation::Present, "{binary}");
+            let gated = dma_translation_gates(spec, binary);
+            assert_eq!(gated.dma_translation, unit, "{binary}");
+            assert_ne!(unit, DmaTranslation::Absent, "{binary}");
         }
         let plain = dma_translation_gates(
             Spec::for_x86_64_kernel("/tmp/k"),
             "tairix-test-autoload-input-qemu-x86-64",
         );
         assert_eq!(plain.dma_translation, DmaTranslation::Absent);
+    }
+
+    /// Every binary `finish_run` puts on a shared input line is enrolled with
+    /// a keyboard and a mouse there, and only those runs are.
+    #[test]
+    fn shared_line_input_binaries_are_enrolled_and_alone_moved() {
+        use super::{shared_line_input_gates, SHARED_LINE_INPUT_BINARIES};
+        use tairix_qemu::{InputPlacement, Spec};
+
+        for binary in SHARED_LINE_INPUT_BINARIES {
+            assert!(
+                TESTS.iter().any(|t| t.binary == binary),
+                "shared-line binary {binary} must be enrolled",
+            );
+            let gated = shared_line_input_gates(
+                Spec::for_riscv64_kernel("/tmp/k").with_virtio_keyboard("armed", "a"),
+                binary,
+            );
+            assert_eq!(gated.devices.input, InputPlacement::SharedLine, "{binary}");
+            assert!(gated.devices.pointing.mouse, "{binary}: a second sharer");
+            let key = gated.input_keyboard.expect("keyboard");
+            assert_eq!(key.ready_occurrences, 2, "{binary}: both drivers arm first");
+        }
+        let plain = shared_line_input_gates(
+            Spec::for_riscv64_kernel("/tmp/k"),
+            "tairix-test-autoload-input-qemu-riscv64",
+        );
+        assert_eq!(plain.devices.input, InputPlacement::Board);
     }
 
     /// Every `memtest` takeover binary `finish_run` scores by reset is

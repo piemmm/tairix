@@ -13,7 +13,7 @@ use alloc::sync::Arc;
 
 use tairix_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
 use tairix_arch_x86_64::percpu;
-use tairix_arch_x86_64::{qemu_exit, serial, smp};
+use tairix_arch_x86_64::{qemu_exit, serial};
 use tairix_kernel_core::spawn_kthread;
 use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
 
@@ -137,10 +137,10 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
     // stay masked, so the spawn-time self-IPI `X86_64Arch::send_ipi`
     // writes to the LAPIC ICR is simply latched and never delivered —
     // dispatch is the cooperative `step` loop below.
-    let bsp_id = smp::bsp_lapic_id();
+    let bsp_id = tairix_arch_x86_64::apic::local_apic_id();
     // Single-CPU vertical (BSP, dense id 0): per-CPU bookkeeping is sized
     // to one slot (no baked-in `MAX_CPUS`).
-    let cpu_to_lapic: [Option<u8>; 1] = [Some(bsp_id)];
+    let cpu_to_lapic: [Option<u32>; 1] = [Some(bsp_id)];
     // The arch handle borrows its per-CPU bookkeeping from a caller-sized
     // `&'static` backing; `kernel_main` runs once, so
     // a function-local `static` is sound and needs no allocator.

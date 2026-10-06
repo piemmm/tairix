@@ -6,7 +6,10 @@ use alloc::boxed::Box;
 
 use tairix_abi::blkio::FaultDomainState;
 use tairix_inline::ArrayVec;
-use tairix_kernel_iommu_api::{Clock, Fault, FaultBudget, FaultLimits, FaultReason, FaultVerdict};
+use tairix_kernel_iommu_api::{
+    Clock, Fault, FaultBudget, FaultLimits, FaultReason, FaultRoute, FaultVerdict,
+    FAULT_QUEUE_RECORDS,
+};
 use tairix_kernel_irq::{IrqController, IrqTable, WaitOutcome};
 use tairix_kernel_sched_api::TaskId;
 use tairix_kernel_sec::ProcessId;
@@ -31,18 +34,23 @@ const _: () = assert!(
 
 /// What one unit's faults may cost.
 ///
-/// A storm sits above the 256 records a VT-d unit can hold (`CAP.NFR` is
-/// eight bits), so records an earlier owner's device left cannot storm a
-/// stream alone; the drain count bounds the work, and the fault interrupts,
-/// one storming unit can cause.
+/// A storm sits above the most records any family lets a unit hold, so the
+/// records one drain finds waiting — an earlier owner's, or a backlog the
+/// drain was late to — cannot storm a stream alone; the drain count bounds the
+/// work, and the fault interrupts, one storming unit can cause.
 pub const FAULT_LIMITS: FaultLimits = FaultLimits {
     window_ns: 1_000_000_000,
     stream_records: 4,
     unit_records: 32,
-    storm: 512,
+    storm: 2 * FAULT_QUEUE_RECORDS,
     drains: 1024,
     streams: 1024,
 };
+
+const _: () = assert!(
+    FAULT_LIMITS.storm > FAULT_QUEUE_RECORDS,
+    "a storm takes more than one queue's worth of records"
+);
 
 /// What serving the units' faults needs from the kernel.
 pub struct FaultEnv<'a> {
@@ -82,20 +90,43 @@ impl Translation {
     ) -> Result<(), &'static str> {
         let mut budget =
             FaultBudget::new(FAULT_LIMITS, env.clock.now_ns()).map_err(|_| "exhausted")?;
-        let msi = env.msi.allocate().map_err(|_| "no_vector")?;
+        // A unit whose node names a wired fault line raises its faults there;
+        // any other, as a message.
+        let (line, route, trigger) = if let Some(wired) = self.units[index].faults {
+            (
+                wired.line,
+                FaultRoute::Wired { place: wired.place },
+                Some(wired.trigger),
+            )
+        } else {
+            let msi = env.msi.allocate().map_err(|_| "no_vector")?;
+            let route = FaultRoute::Message {
+                address: msi.address,
+                data: msi.data,
+            };
+            (msi.line, route, None)
+        };
         let bound = env
             .table
-            .bind(msi.line, FAULT_OWNER)
+            .bind_exclusive(line, FAULT_OWNER)
             .map_err(|_| "unbound")?;
         let refuse = |reason| {
-            env.table.release_binding(bound.handle, FAULT_OWNER);
+            env.table
+                .release_binding(bound.handle, FAULT_OWNER, env.controller);
             reason
         };
+        // Only once the line is the kernel's alone, so no other owner's
+        // trigger is changed under it.
+        if let Some(trigger) = trigger {
+            env.controller
+                .set_trigger(line, trigger)
+                .map_err(|_| refuse("untriggerable"))?;
+        }
         // A dispatched task always parks, so the waiter needs no CPU halt.
-        let waiter = IrqParkWaiter::new(env.table, bound.handle, msi.line, env.controller, None);
+        let waiter = IrqParkWaiter::new(env.table, bound.handle, FAULT_OWNER, env.controller, None);
         self.units[index]
             .unit
-            .route_faults(msi.address, msi.data)
+            .route_faults(route)
             .map_err(|_| refuse("refused"))?;
         let (audit, clock) = (env.audit, env.clock);
         let body: KernelServiceBody = Box::new(move |_: &mut dyn YieldHandle| {
@@ -107,9 +138,9 @@ impl Translation {
     }
 
     /// Drain unit `index` each time its fault interrupt fires, and whenever a
-    /// drain says records remain; a window whose drains are spent is waited
-    /// out, an interrupt meanwhile only ending the wait early. Returns only
-    /// when the interrupt can no longer be waited on.
+    /// drain says records remain; a window whose drains are spent is slept
+    /// out with the line masked. Returns only when the interrupt can no
+    /// longer be waited on.
     fn serve(
         &self,
         index: usize,
@@ -120,9 +151,10 @@ impl Translation {
     ) {
         loop {
             if let Err(resume_ns) = budget.drain(clock.now_ns()) {
-                let left = resume_ns.saturating_sub(clock.now_ns());
-                if let Err(reason) = wait(waiter, left) {
-                    return unrouted(audit, self.units[index].node, reason);
+                // The line stays masked until the window turns: a level line
+                // the unit still asserts would fire straight back.
+                if crate::sleep::park_until(resume_ns).is_err() {
+                    return unrouted(audit, self.units[index].node, "unparkable");
                 }
                 continue;
             }
@@ -148,7 +180,9 @@ impl Translation {
             match charge.verdict {
                 FaultVerdict::Suppress => {}
                 FaultVerdict::Record => self.record(index, &fault, charge.suppressed, audit),
-                FaultVerdict::Storm => self.contain(index, &fault, charge.suppressed, audit),
+                FaultVerdict::Storm { recorded } => {
+                    self.contain(index, &fault, recorded, charge.suppressed, audit);
+                }
             }
         })
     }
@@ -170,8 +204,17 @@ impl Translation {
     }
 
     /// Silence `fault`'s stream so its device can keep neither its DMA nor
-    /// the fault path, and mark its node `Offline`.
-    fn contain(&self, index: usize, fault: &Fault, suppressed: u64, audit: &(dyn Sink + Sync)) {
+    /// the fault path, and mark its node `Offline`, recording the storm where
+    /// the budget `recorded` it, or where it could not be silenced
+    /// (`suppressed`, the faults it reports went unrecorded).
+    fn contain(
+        &self,
+        index: usize,
+        fault: &Fault,
+        recorded: bool,
+        suppressed: u64,
+        audit: &(dyn Sink + Sync),
+    ) {
         let outcome = match self.units[index].unit.silence(fault.stream) {
             Ok(()) => "silenced",
             Err(tairix_kernel_iommu_api::IommuError::Unconfirmed) => "unconfirmed",
@@ -181,6 +224,10 @@ impl Translation {
         let node = self.node_of(index, fault.stream);
         if let Some(node) = node {
             let _ = self.tree.set_health(node, FaultDomainState::Offline);
+        }
+        // A storm left uncontained is a security event whatever the share.
+        if !recorded && outcome == "silenced" {
+            return;
         }
         audit_fault(
             audit,
@@ -199,7 +246,7 @@ impl Translation {
 
 /// Wait for the fault interrupt, at most `timeout_ns`.
 fn wait(waiter: &IrqParkWaiter, timeout_ns: u64) -> Result<(), &'static str> {
-    match waiter.park_wait(FAULT_OWNER, timeout_ns) {
+    match waiter.park_wait(timeout_ns) {
         WaitOutcome::Ready | WaitOutcome::TimedOut => Ok(()),
         WaitOutcome::NotFound => Err("unbound"),
         WaitOutcome::Quarantined => Err("quarantined"),
@@ -227,6 +274,8 @@ fn audit_fault(
         FaultReason::Blocked => ("blocked", None),
         FaultReason::Unmapped => ("unmapped", None),
         FaultReason::Denied => ("denied", None),
+        FaultReason::Translated => ("translated", None),
+        FaultReason::Interrupt => ("interrupt", None),
         FaultReason::Malformed => ("malformed", None),
         FaultReason::Other(code) => ("other", Some(code)),
     };

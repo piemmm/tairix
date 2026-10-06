@@ -450,7 +450,8 @@ pub static NULL_MSI_ALLOC_FACILITY: NullMsiAllocFacility = NullMsiAllocFacility;
 /// One physically-contiguous block of a shared region's backing.
 ///
 /// A small region is a single chunk; a region larger than the frame
-/// allocator's single-block ceiling (8 MiB) is a *list* of chunks that
+/// allocator's single-block ceiling (`tairix_kernel_mem::MAX_ORDER`) is a
+/// *list* of chunks that
 /// [`SharedMemFacility::map_region`] maps into one contiguous virtual window,
 /// so the region size is bounded by available RAM rather than a fixed buddy
 /// order. The registry stores the list to free it at the last reference.
@@ -503,7 +504,7 @@ pub trait SharedMemFacility: Sync {
     /// back to [`Self::free_region`].
     ///
     /// A region that fits one buddy block is a single chunk (the common small
-    /// case — e.g. a USB request buffer); a region larger than the 8 MiB
+    /// case — e.g. a USB request buffer); a region larger than the
     /// single-block ceiling spans several chunks, which [`Self::map_region`]
     /// maps into one contiguous virtual window. The region size is therefore
     /// bounded by available RAM, not a fixed buddy order.

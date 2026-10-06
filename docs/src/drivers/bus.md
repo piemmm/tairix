@@ -903,8 +903,8 @@ function's four windows through the `CAP_MMIO_MAP`-gated `MmioMapper`,
 reads the notify multiplier, and assembles a `PciTransportWindows`
 (which lives in `lib/virtio`). It walks no bus: the function driven is the
 node bound, never the first of its kind the bus happens to hold. It does not name a concrete transport
-itself: the caller passes `build` — in production
-`PciTransport::new` — so `kernel/virtio` depends only on `lib/*` and
+itself: the caller passes `build` — in production `PciTransport::new`
+with the entry it routed — so `kernel/virtio` depends only on `lib/*` and
 never on the `drivers/bus/virtio` crate (`AGENTS.md` §17.4:
 `kernel/* → lib/*`, never a driver). Ring 0 thus names no concrete
 `drivers/bus/*` type and holds no ambient authority — the capability
@@ -952,14 +952,19 @@ constraint by the boot probe and never reach configuration space at all.
 
 ### Topology and isolation
 
-`PciTopology::topology(acs)`, implemented by every mechanism, walks every
-function once and returns a `tairix_pci::topology::Topology`: each
-function's identity, header, PCI Express port type and ACS registers, the
-bridge forwarding to each bus — proven to form a tree, or the walk is
-refused `DeviceFault` — and each function's requester-id aliases and
-isolation group (`docs/src/security/iommu.md`). With `AcsPolicy::Enable`
-it first turns on the isolating ACS controls each function offers and
-reads back what stayed on. The legacy capability list and the extended
+`PciTopology::topology(confinement, external)`, implemented by every
+mechanism, walks every function once — alternative-routing (ARI) functions
+past function 7 included — and returns a `tairix_pci::topology::Topology`:
+each function's identity, header, PCI Express port type, ACS registers and
+address translation, page request, PASID and SR-IOV state, whether it sits
+below an external-facing port (a hot-plug capable slot, or one the platform
+names through `external`), the bridge forwarding to each bus — proven to
+form a tree, or the walk is refused `DeviceFault` — and each function's
+requester-id aliases and isolation group (`docs/src/security/iommu.md`).
+A virtual function's requester id joins its physical function's group.
+With `Confinement::Confine` it first turns on the isolating ACS controls
+each function offers, turns off ATS, page requests, PASID and virtual
+functions, and reads back what stayed as it was. The legacy capability list and the extended
 list from offset `0x100` are each walked by one bounded iterator; the
 extended space is reached through ECAM and the BCM2711 window only, so
 mechanism #1 reports no extended capability. Every kernel PCI observer
@@ -979,10 +984,10 @@ minted, unmasking that entry, and enabling MSI-X on the function.
 `Pci::route_msix(bdf, entry, message, mapper)` does exactly that: it
 locates the function's MSI-X capability (decoded by the capability
 walk), bounds-checks `entry` against the table size, resolves the table
-BAR, maps the addressed 16-byte entry through the same
-`CAP_MMIO_MAP`-gated `MmioMapper`, writes the message address/data and
-clears the entry's per-vector mask, then sets the MSI-X Enable bit and
-clears the function mask in the capability's Message Control register.
+BAR, maps the addressed 16-byte entry through the given `MmioMapper`,
+masks the entry, writes the message address/data, unmasks it — an
+unmasked entry's message is never changed — then sets the MSI-X Enable bit
+and clears the function mask in the capability's Message Control register.
 A table that lives in an I/O-port BAR is refused (`Unsupported`); an
 entry index beyond the table or an entry that overruns its BAR fails
 closed (`OutOfRange`); a caller without `CAP_MMIO_MAP` is denied
@@ -995,7 +1000,9 @@ On x86, `tairix_arch_x86_64::irq::msi_message(vector, destination)`
 encodes the local-APIC message format (physical destination, fixed
 delivery, edge trigger; Intel SDM Vol 3A §11.11) — the `0xFEE`-prefixed
 address selecting the destination CPU and the data carrying the chosen
-external vector (`0x30..=0xFE`). A GIC or PLIC port would build a
+external vector (`0x30..=0xFE`); once interrupt remapping is on, the
+message names the function's remapping entry instead
+(`docs/src/security/iommu.md`). A GIC or PLIC port would build a
 different pair; the bus driver copies whichever it is given verbatim.
 
 As with the virtio-window hand-off, ring 0 reaches `route_msix` through
@@ -1004,8 +1011,17 @@ a frozen ABI seam rather than the concrete type: `Pci<C>` implements
 boot path can route a device's interrupt through a single `&dyn
 MsixBus` without naming a concrete `drivers/bus/*` type
 (`AGENTS.md` §8). A route that fails leaves the function undiscovered,
-rather than granting a line that never delivers. Legacy INTx routing is
-not implemented.
+rather than granting a line that never delivers.
+
+Where no controller takes messages — an FDT board's GICv2 or PLIC — the
+kernel grants a function its INTx line instead. The pin is swizzled to the
+root bus (`pin' = (pin − 1 + device) mod 4 + 1` at each bridge,
+`Topology::intx_at_root`), looked up in the host's `interrupt-map` under
+its mask, and decoded by the port's controller; the grant is an
+`HwResource::irq` with no MSI-X entry, so the driver's transport signals
+on the pin and acknowledges by reading its ISR status. A pin is raised
+only while an owner is bound to its line (`PciBus::set_intx`, and
+[Shared lines](../security/irq.md#shared-lines)).
 
 Routing turns memory decoding on, since the table lives in a BAR, and
 leaves bus mastering as it was: an MSI is an upstream memory write, so
@@ -1201,6 +1217,27 @@ crate-private (`AGENTS.md` §8). Neither constructor carries a
 backend, so the only `in`/`out` instructions live inside the architecture
 port that supplies it (`tairix_arch_x86_64::pio::x86_port_io()`).
 Construction performs no I/O.
+
+On aarch64 and riscv64 the kernel takes every operational
+`pci-host-ecam-generic` host the device tree describes
+(`kernel/tairix-kernel/src/pci_fdt.rs`, over `tairix_fdt::pci`), its
+functions' streams read from the host's `iommu-map` against the tree's
+translation topology (`kernel/tairix-kernel/src/iommu_fdt.rs`,
+[DMA translation](../security/iommu.md#topology-in-the-hardware-tree)): it maps
+the configuration region, then numbers the buses depth first and places
+every BAR and bridge window inside the windows the host's `ranges`
+forward and the port can reach — sized bottom-up, placed largest
+alignment first, decode enabled only for a space whose BARs all fit
+(`PciResources::assign`) — unless `linux,pci-probe-only` keeps firmware's.
+Every BAR, on every port, resolves only through the host's apertures and
+never over RAM or the registers of the devices the platform itself is made
+of (on x86_64: the local APICs and the message window, each IO-APIC, each
+translation unit, each ECAM region), so a device cannot aim a grant or a
+kernel write at either by what it reads back. A window the device tree
+describes over RAM or over its host's configuration region is not used. On
+riscv64 a host or translation unit whose registers lie above the 4 GiB every
+process root maps is refused (`plans/OPEN-DEFECTS.md` D717). Both paths
+then share one probe.
 
 Ring 0 keeps the result as its one owner of that segment's configuration
 space (`tairix_kernel::pci_host::PciHost`). Every kernel access goes

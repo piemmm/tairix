@@ -15,6 +15,7 @@ pub mod arch_wrapper;
 pub mod dispatch;
 pub mod ioapic_controller;
 pub mod msi;
+pub mod remapping;
 
 #[cfg(freestanding)]
 pub mod boot;
@@ -24,6 +25,8 @@ pub mod com1_rx;
 pub mod init_spawn;
 #[cfg(freestanding)]
 pub mod panic_ctx;
+#[cfg(freestanding)]
+pub mod registers;
 #[cfg(freestanding)]
 pub mod root_unlock;
 #[cfg(freestanding)]

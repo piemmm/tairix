@@ -42,9 +42,6 @@
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 use crate::interrupts::{InterruptStackFrame, SavedRegs};
 
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
-use crate::preempt::{LAPIC_BASE_VIRT, LAPIC_EOI_OFFSET};
-
 use core::sync::atomic::AtomicU32;
 
 use tairix_abi::MsiMessage;
@@ -220,14 +217,14 @@ pub fn global_routing() -> &'static Routing {
 /// and **edge** trigger (Intel SDM Vol 3A §11.11):
 ///
 /// * Address — the LAPIC message-address format: the fixed `0xFEE`
-///   prefix (here [`LAPIC_BASE_PHYS`](crate::preempt::LAPIC_BASE_PHYS))
+///   prefix (here [`LAPIC_BASE_PHYS`](crate::apic::LAPIC_BASE_PHYS))
 ///   with the destination APIC ID in bits 19..12 and the redirection-
 ///   hint / destination-mode bits clear.
 /// * Data — the low byte carries the vector; the delivery-mode,
 ///   level, and trigger-mode bits are all zero.
 #[must_use]
 pub fn msi_message(vector: u8, destination: u8) -> MsiMessage {
-    let address = crate::preempt::LAPIC_BASE_PHYS | (u64::from(destination) << 12);
+    let address = crate::apic::LAPIC_BASE_PHYS | (u64::from(destination) << 12);
     MsiMessage {
         address,
         data: u32::from(vector),
@@ -351,12 +348,7 @@ unsafe extern "C" fn tairix_arch_x86_64_external_irq_dispatch(regs: *mut SavedRe
         // path keeps the LAPIC out of stuck-in-service.
     }
 
-    // SAFETY: LAPIC EOI register at the architecturally-fixed offset.
-    // Writing `0` is the documented "end-of-interrupt" sequence.
-    unsafe {
-        let eoi = (LAPIC_BASE_VIRT + LAPIC_EOI_OFFSET as u64) as *mut u32;
-        core::ptr::write_volatile(eoi, 0);
-    }
+    crate::apic::local_eoi();
 
     // Honour a pending reschedule on return to ring 3: a device interrupt
     // that woke a higher-priority task latches need_resched in the bin

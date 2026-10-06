@@ -17,6 +17,11 @@ fn rid(bus: u8, device: u8, function: u8) -> u16 {
     requester_id(at(bus, device, function))
 }
 
+/// No bridge the platform describes as external-facing.
+fn trusted(_address: u64) -> bool {
+    false
+}
+
 fn endpoint(bus: u8, device: u8, function: u8) -> Function {
     Function {
         address: at(bus, device, function),
@@ -26,7 +31,12 @@ fn endpoint(bus: u8, device: u8, function: u8) -> Function {
         header: Header::Endpoint,
         multifunction: false,
         express: None,
+        external_facing: false,
         acs: None,
+        ats: None,
+        pri: None,
+        pasid: None,
+        sriov: None,
     }
 }
 
@@ -35,6 +45,7 @@ fn bridge(bus: u8, device: u8, secondary: u8, subordinate: u8) -> Function {
         header: Header::Bridge {
             secondary,
             subordinate,
+            ari: false,
         },
         class: 0x06_04_00,
         ..endpoint(bus, device, 0)
@@ -565,8 +576,8 @@ fn port_and_endpoint() -> Space {
 
 #[test]
 fn a_walk_turns_acs_on_where_offered_and_isolates_what_it_proves() {
-    let pci = Pci::new(port_and_endpoint());
-    let topology = pci.topology(AcsPolicy::Enable).unwrap();
+    let pci = Pci::new(port_and_endpoint(), None);
+    let topology = pci.topology(Confinement::Confine, &trusted).unwrap();
     let port = &topology.functions()[index(&topology, 0, 1, 0)];
     assert_eq!(port.express, Some(PortType::RootPort));
     assert_eq!(
@@ -574,6 +585,7 @@ fn a_walk_turns_acs_on_where_offered_and_isolates_what_it_proves() {
         Header::Bridge {
             secondary: 1,
             subordinate: 1,
+            ari: false,
         }
     );
     assert_eq!(port.acs, Some(ENFORCED), "read back after the write");
@@ -582,17 +594,17 @@ fn a_walk_turns_acs_on_where_offered_and_isolates_what_it_proves() {
 
 #[test]
 fn a_walk_that_leaves_acs_writes_nothing_and_groups_by_what_firmware_left() {
-    let pci = Pci::new(port_and_endpoint());
-    let topology = pci.topology(AcsPolicy::Leave).unwrap();
+    let pci = Pci::new(port_and_endpoint(), None);
+    let topology = pci.topology(Confinement::Leave, &trusted).unwrap();
     assert_eq!(group(&topology, 1, 0, 0), rid(0, 1, 0));
 }
 
 #[test]
 fn acs_is_written_once_through_its_control_half() {
     let space = port_and_endpoint();
-    let writes = Pci::new(space);
-    writes.topology(AcsPolicy::Enable).unwrap();
-    writes.topology(AcsPolicy::Enable).unwrap();
+    let writes = Pci::new(space, None);
+    writes.topology(Confinement::Confine, &trusted).unwrap();
+    writes.topology(Confinement::Confine, &trusted).unwrap();
     let pci_writes = writes_of(&writes);
     assert_eq!(
         pci_writes.len(),
@@ -618,7 +630,9 @@ fn writes_of(pci: &Pci<Space>) -> Vec<(ConfigAddress, u32)> {
 fn a_port_that_ignores_the_write_stays_grouped_with_its_device() {
     let mut space = port_and_endpoint();
     space.stuck.push((0, 1, 0));
-    let topology = Pci::new(space).topology(AcsPolicy::Enable).unwrap();
+    let topology = Pci::new(space, None)
+        .topology(Confinement::Confine, &trusted)
+        .unwrap();
     assert_eq!(
         topology.functions()[index(&topology, 0, 1, 0)].acs,
         Some(Acs {
@@ -633,7 +647,9 @@ fn a_port_that_ignores_the_write_stays_grouped_with_its_device() {
 fn a_mechanism_that_reaches_no_extended_space_finds_no_acs() {
     let mut space = port_and_endpoint();
     space.legacy_only = true;
-    let topology = Pci::new(space).topology(AcsPolicy::Enable).unwrap();
+    let topology = Pci::new(space, None)
+        .topology(Confinement::Confine, &trusted)
+        .unwrap();
     assert_eq!(topology.functions()[index(&topology, 0, 1, 0)].acs, None);
     assert_eq!(group(&topology, 1, 0, 0), rid(0, 1, 0));
 }
@@ -643,8 +659,8 @@ fn a_conventional_function_is_never_asked_for_acs() {
     let space = Space::new();
     space.function((0, 3, 0), 0x00);
     space.acs((0, 3, 0), Acs::ISOLATING, 0);
-    let pci = Pci::new(space);
-    let topology = pci.topology(AcsPolicy::Enable).unwrap();
+    let pci = Pci::new(space, None);
+    let topology = pci.topology(Confinement::Confine, &trusted).unwrap();
     assert_eq!(topology.functions()[0].express, None);
     assert_eq!(topology.functions()[0].acs, None);
     assert!(writes_of(&pci).is_empty());
@@ -659,7 +675,9 @@ fn an_extended_list_pointing_back_into_the_legacy_space_ends_the_walk() {
         .get_mut(&(0, 1, 0))
         .unwrap()
         .insert(EXTENDED_REGISTER, 0x0400_0001);
-    let topology = Pci::new(space).topology(AcsPolicy::Enable).unwrap();
+    let topology = Pci::new(space, None)
+        .topology(Confinement::Confine, &trusted)
+        .unwrap();
     assert_eq!(topology.functions()[index(&topology, 0, 1, 0)].acs, None);
 }
 
@@ -668,7 +686,9 @@ fn a_slot_holding_several_functions_marks_each_one() {
     let space = Space::new();
     space.function((0, 0x1f, 0), 0x80);
     space.function((0, 0x1f, 3), 0x00);
-    let topology = Pci::new(space).topology(AcsPolicy::Leave).unwrap();
+    let topology = Pci::new(space, None)
+        .topology(Confinement::Leave, &trusted)
+        .unwrap();
     assert!(topology
         .functions()
         .iter()
@@ -682,7 +702,9 @@ fn a_walk_over_bridges_that_form_no_tree_is_a_device_fault() {
     space.bridge((0, 1, 0), 1, 1);
     space.bridge((0, 2, 0), 1, 1);
     assert_eq!(
-        Pci::new(space).topology(AcsPolicy::Leave).unwrap_err(),
+        Pci::new(space, None)
+            .topology(Confinement::Leave, &trusted)
+            .unwrap_err(),
         DriverError::DeviceFault
     );
 }
@@ -706,9 +728,9 @@ fn a_walk_refused_its_hierarchy_still_quiesces_every_function_it_is_told_to() {
     space.stuck.push((0, 5, 0));
     // A bridge forwarding to a bus above its own.
     space.bridge((2, 0, 0), 1, 1);
-    let pci = Pci::new(space);
+    let pci = Pci::new(space, None);
     assert_eq!(
-        pci.topology(AcsPolicy::Leave).unwrap_err(),
+        pci.topology(Confinement::Leave, &trusted).unwrap_err(),
         DriverError::DeviceFault
     );
     assert_eq!(
@@ -731,4 +753,370 @@ fn a_walk_refused_its_hierarchy_still_quiesces_every_function_it_is_told_to() {
         [(0, 2), (0, 3), (0, 5)],
         "only a set bit is written"
     );
+}
+
+/// Where the fixtures put translation-service capabilities: a chain from
+/// the first extended dword, four dwords per entry.
+const SERVICES: u16 = EXTENDED_REGISTER;
+const SERVICE_STRIDE: u16 = 4;
+
+impl Space {
+    /// Chain extended capabilities `(id, [(dword offset, value)])` from the
+    /// first extended dword.
+    fn extended(&self, slot: Slot, capabilities: &[(u16, &[(u16, u32)])]) {
+        for (position, &(id, registers)) in capabilities.iter().enumerate() {
+            let header = SERVICES + SERVICE_STRIDE * u16::try_from(position).unwrap();
+            let next = if position + 1 == capabilities.len() {
+                0
+            } else {
+                u32::from(header + SERVICE_STRIDE) << 22
+            };
+            self.put(slot, &[(header, next | 1 << 16 | u32::from(id))]);
+            for &(offset, value) in registers {
+                self.put(slot, &[(header + offset, value)]);
+            }
+        }
+    }
+
+    fn value(&self, slot: Slot, register: u16) -> u32 {
+        self.functions.borrow()[&slot]
+            .get(&register)
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
+const ATS: u16 = 0x000F;
+const SRIOV: u16 = 0x0010;
+const PRI: u16 = 0x0013;
+const PASID: u16 = 0x001B;
+
+/// An endpoint at `01:00.0` below a root port, its ATS, PRI and PASID on and
+/// two virtual functions enabled, with status bits a written one would clear.
+fn endpoint_with_services() -> Space {
+    let space = port_and_endpoint();
+    space.extended(
+        (1, 0, 0),
+        &[
+            (ATS, &[(1, 1 << 31 | 0x20)]),
+            (PRI, &[(1, 1 << 16 | 1 << 0)]),
+            (PASID, &[(1, 0b111 << 16 | 20 << 8 | 0b110)]),
+            (SRIOV, &[(2, 1 << 16 | 0b1001), (4, 2), (5, 1 << 16 | 0x80)]),
+        ],
+    );
+    space
+}
+
+#[test]
+fn a_confining_walk_turns_translation_services_and_virtual_functions_off() {
+    let pci = Pci::new(endpoint_with_services(), None);
+    let topology = pci.topology(Confinement::Confine, &trusted).unwrap();
+    let function = &topology.functions()[index(&topology, 1, 0, 0)];
+    assert_eq!(function.ats, Some(Ats { enabled: false }));
+    assert_eq!(function.pri, Some(Pri { enabled: false }));
+    assert_eq!(
+        function.pasid,
+        Some(Pasid {
+            enabled: false,
+            width: 20
+        })
+    );
+    assert_eq!(
+        function.sriov,
+        Some(SrIov {
+            enabled: false,
+            count: 2,
+            offset: 0x80,
+            stride: 1
+        })
+    );
+    let space = pci.config_space();
+    let at = |position: u16, offset: u16| SERVICES + SERVICE_STRIDE * position + offset;
+    assert_eq!(
+        space.value((1, 0, 0), at(0, 1)),
+        0x20,
+        "ATS's capability half kept"
+    );
+    assert_eq!(space.value((1, 0, 0), at(2, 1)), 20 << 8 | 0b110);
+    for (position, offset) in [(1, 1), (3, 2)] {
+        let written = writes_of(&pci)
+            .into_iter()
+            .find(|(addr, _)| addr.bus == 1 && addr.register == at(position, offset))
+            .map(|(_, value)| value);
+        assert_eq!(
+            written.map(|value| value >> 16),
+            Some(0),
+            "a status bit a written one clears is written as zero"
+        );
+    }
+}
+
+#[test]
+fn a_walk_that_leaves_them_reports_them_on_and_writes_nothing_to_them() {
+    let pci = Pci::new(endpoint_with_services(), None);
+    let topology = pci.topology(Confinement::Leave, &trusted).unwrap();
+    let function = &topology.functions()[index(&topology, 1, 0, 0)];
+    assert_eq!(function.ats, Some(Ats { enabled: true }));
+    assert_eq!(function.pri, Some(Pri { enabled: true }));
+    assert!(function.pasid.is_some_and(|pasid| pasid.enabled));
+    assert!(function.sriov.is_some_and(|sriov| sriov.enabled));
+    assert!(writes_of(&pci).is_empty());
+}
+
+#[test]
+fn a_control_that_ignores_the_write_is_reported_still_on() {
+    let mut space = endpoint_with_services();
+    space.stuck.push((1, 0, 0));
+    let topology = Pci::new(space, None)
+        .topology(Confinement::Confine, &trusted)
+        .unwrap();
+    let function = &topology.functions()[index(&topology, 1, 0, 0)];
+    assert_eq!(function.ats, Some(Ats { enabled: true }));
+    assert!(function.sriov.is_some_and(|sriov| sriov.enabled));
+}
+
+#[test]
+fn a_capability_named_twice_is_confined_in_each_instance() {
+    let space = port_and_endpoint();
+    space.extended((1, 0, 0), &[(ATS, &[(1, 1 << 31)]), (ATS, &[(1, 1 << 31)])]);
+    let pci = Pci::new(space, None);
+    let topology = pci.topology(Confinement::Confine, &trusted).unwrap();
+    assert_eq!(
+        topology.functions()[index(&topology, 1, 0, 0)].ats,
+        Some(Ats { enabled: false })
+    );
+    let space = pci.config_space();
+    assert_eq!(space.value((1, 0, 0), SERVICES + 1) & 1 << 31, 0);
+    assert_eq!(
+        space.value((1, 0, 0), SERVICES + SERVICE_STRIDE + 1) & 1 << 31,
+        0
+    );
+}
+
+#[test]
+fn virtual_functions_number_from_their_offset_by_their_stride() {
+    let sriov = SrIov {
+        enabled: true,
+        count: 3,
+        offset: 0x80,
+        stride: 2,
+    };
+    let ids: Vec<u16> = sriov.requesters(0x0100).collect();
+    assert_eq!(ids, [0x0180, 0x0182, 0x0184]);
+    let disabled = SrIov {
+        enabled: false,
+        ..sriov
+    };
+    assert_eq!(disabled.requesters(0x0100).count(), 0);
+    let past = SrIov {
+        offset: 0xFFFE,
+        ..sriov
+    };
+    assert_eq!(
+        past.requesters(0x0001).collect::<Vec<_>>(),
+        [0xFFFF],
+        "an id past the space ends them"
+    );
+}
+
+#[test]
+fn a_virtual_function_carrying_a_walked_function_s_id_shares_its_group() {
+    let physical = |offset| Function {
+        sriov: Some(SrIov {
+            enabled: true,
+            count: 2,
+            offset,
+            stride: 1,
+        }),
+        ..express(endpoint(2, 0, 0), PortType::Endpoint)
+    };
+    let walked = |offset| {
+        Topology::new(vec![
+            root_port(1, 2, 2, true),
+            root_port(2, 3, 3, true),
+            physical(offset),
+            express(endpoint(3, 0, 0), PortType::Endpoint),
+        ])
+        .unwrap()
+    };
+    let colliding = walked(rid(3, 0, 0) - rid(2, 0, 0));
+    assert_eq!(group(&colliding, 3, 0, 0), group(&colliding, 2, 0, 0));
+    let apart = walked(0x10);
+    assert_ne!(group(&apart, 3, 0, 0), group(&apart, 2, 0, 0));
+}
+
+impl Space {
+    /// A PCI Express root port at `slot` forwarding to `secondary`, with ARI
+    /// forwarding on where `ari` says so and a hot-plug capable slot where
+    /// `hot_plug` does.
+    fn port(&self, slot: Slot, secondary: u8, ari: bool, hot_plug: bool) {
+        self.bridge(slot, secondary, secondary);
+        self.express(slot, 0x4);
+        let express = EXPRESS_OFFSET >> 2;
+        if hot_plug {
+            self.put(slot, &[(express, 1 << 24), (express + 0x14 / 4, 1 << 6)]);
+        }
+        if ari {
+            self.put(slot, &[(express + 0x28 / 4, 1 << 5)]);
+        }
+    }
+}
+
+#[test]
+fn an_ari_port_s_bus_is_scanned_at_every_function_number() {
+    let scanned = |ari: bool| {
+        let space = Space::new();
+        space.port((0, 1, 0), 1, ari, false);
+        space.function((1, 0, 0), 0x00);
+        space.function((1, 1, 1), 0x00);
+        Pci::new(space, None)
+            .topology(Confinement::Leave, &trusted)
+            .unwrap()
+    };
+    let ari = scanned(true);
+    assert!(
+        ari.index_of(at(1, 1, 1)).is_some(),
+        "function 9 of the device"
+    );
+    assert!(ari
+        .functions()
+        .iter()
+        .filter(|function| function.bus() == 1)
+        .all(|function| function.multifunction));
+    assert_eq!(
+        scanned(false).index_of(at(1, 1, 1)),
+        None,
+        "without ARI the port forwards device 0 alone"
+    );
+}
+
+#[test]
+fn an_ari_device_s_functions_group_as_one_device() {
+    let grouped = |ari: bool| {
+        let port = Function {
+            header: Header::Bridge {
+                secondary: 1,
+                subordinate: 1,
+                ari,
+            },
+            ..root_port(1, 1, 1, true)
+        };
+        let function = |device| Function {
+            multifunction: true,
+            ..express(endpoint(1, device, 0), PortType::Endpoint)
+        };
+        Topology::new(vec![port, function(0), function(1)]).unwrap()
+    };
+    let ari = grouped(true);
+    assert_eq!(group(&ari, 1, 1, 0), group(&ari, 1, 0, 0));
+    let slots = grouped(false);
+    assert_ne!(
+        group(&slots, 1, 1, 0),
+        group(&slots, 1, 0, 0),
+        "two slots without ARI are two devices"
+    );
+}
+
+#[test]
+fn a_hot_plug_slot_or_the_platform_marks_its_port_external_facing() {
+    let walk = |hot_plug: bool, platform: &dyn Fn(u64) -> bool| {
+        let space = Space::new();
+        space.port((0, 1, 0), 1, false, hot_plug);
+        space.function((1, 0, 0), 0x00);
+        Pci::new(space, None)
+            .topology(Confinement::Leave, platform)
+            .unwrap()
+    };
+    let port_of = |topology: &Topology| topology.functions()[index(topology, 0, 1, 0)];
+    assert!(port_of(&walk(true, &trusted)).external_facing);
+    let named = at(0, 1, 0);
+    assert!(port_of(&walk(false, &|address| address == named)).external_facing);
+    let inside = walk(false, &trusted);
+    assert!(!port_of(&inside).external_facing);
+    assert_eq!(inside.untrusted(index(&inside, 1, 0, 0)), None);
+}
+
+/// A root port over a switch whose downstream port leads to an endpoint at
+/// `03:00.0`, the root port and the downstream port external-facing with the
+/// ACS each is given.
+fn behind_two_external_ports(root: Acs, downstream: Acs) -> Topology {
+    let external = |function: Function, acs| Function {
+        external_facing: true,
+        acs: Some(acs),
+        ..function
+    };
+    Topology::new(vec![
+        external(root_port(1, 1, 3, false), root),
+        express(bridge(1, 0, 2, 3), PortType::UpstreamPort),
+        external(
+            express(bridge(2, 0, 3, 3), PortType::DownstreamPort),
+            downstream,
+        ),
+        express(endpoint(3, 0, 0), PortType::Endpoint),
+    ])
+    .unwrap()
+}
+
+#[test]
+fn a_function_below_external_ports_is_confinable_only_if_each_validates_sources() {
+    let no_source_check = Acs {
+        capable: Acs::ISOLATING & !Acs::SOURCE_VALIDATION,
+        enabled: Acs::ISOLATING & !Acs::SOURCE_VALIDATION,
+    };
+    let offered_off = Acs {
+        capable: Acs::ISOLATING,
+        enabled: 0,
+    };
+    let confinable = |root, downstream| {
+        let topology = behind_two_external_ports(root, downstream);
+        topology.untrusted(index(&topology, 3, 0, 0))
+    };
+    assert_eq!(
+        confinable(ENFORCED, ENFORCED),
+        Some(Untrusted { confinable: true })
+    );
+    for (root, downstream) in [
+        (ENFORCED, no_source_check),
+        (no_source_check, ENFORCED),
+        (ENFORCED, offered_off),
+    ] {
+        assert_eq!(
+            confinable(root, downstream),
+            Some(Untrusted { confinable: false }),
+            "a port that does not check requester ids lets a device present another's"
+        );
+    }
+    let topology = behind_two_external_ports(ENFORCED, ENFORCED);
+    assert_eq!(
+        topology.untrusted(index(&topology, 2, 0, 0)),
+        Some(Untrusted { confinable: true }),
+        "the switch itself sits below the external root port"
+    );
+    assert_eq!(topology.untrusted(index(&topology, 0, 1, 0)), None);
+}
+
+/// INTx is swizzled by each bridge on the way up, by the device it was
+/// raised on.
+#[test]
+fn an_intx_pin_is_swizzled_up_to_its_root_bus_slot() {
+    let space = port_and_endpoint();
+    space.function((1, 3, 0), 0x00);
+    let topology = Pci::new(space, None)
+        .topology(Confinement::Leave, &trusted)
+        .unwrap();
+    let at = |bus, device| index(&topology, bus, device, 0);
+    assert_eq!(topology.intx_at_root(at(1, 0), 1), Some((1, 1)));
+    assert_eq!(topology.intx_at_root(at(1, 0), 3), Some((1, 3)));
+    assert_eq!(
+        topology.intx_at_root(at(1, 3), 2),
+        Some((1, 1)),
+        "(2 - 1 + 3) % 4 + 1"
+    );
+    assert_eq!(
+        topology.intx_at_root(at(0, 1), 2),
+        Some((1, 2)),
+        "on the root bus already"
+    );
+    assert_eq!(topology.intx_at_root(at(1, 0), 0), None, "no pin");
+    assert_eq!(topology.intx_at_root(at(1, 0), 5), None);
 }

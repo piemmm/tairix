@@ -629,16 +629,9 @@ impl KernelArch for BinArch {
     }
 
     fn kernel_mmio(&self, base: u64, len: usize) -> Option<core::ptr::NonNull<u8>> {
-        // Device registers are reached through the direct map, over which the
-        // firmware's MTRRs make every MMIO hole uncached.
         #[cfg(all(freestanding, kernel_isa = "x86_64"))]
         {
-            let end = base.checked_add(u64::try_from(len).ok()?)?;
-            if base == 0 || end > tairix_arch_x86_64::paging::physmap_bytes() {
-                return None;
-            }
-            let virt = usize::try_from(tairix_arch_x86_64::paging::physmap_virt(base)).ok()?;
-            core::ptr::NonNull::new(virt as *mut u8)
+            crate::x86_64::registers::device_registers(base, u64::try_from(len).ok()?)
         }
         #[cfg(not(all(freestanding, kernel_isa = "x86_64")))]
         {
@@ -660,20 +653,32 @@ impl KernelArch for BinArch {
         }
     }
 
-    fn bus_mastering(
+    fn route_interrupts(
         &self,
-    ) -> Option<&'static (dyn tairix_kernel_core::iommu::BusMastering + 'static)> {
-        // The boot probe owns the PCI configuration space it enumerated.
+        remapper: Option<&'static tairix_kernel_core::iommu::Translation>,
+        cpus: u32,
+        log: &dyn tairix_log::Sink,
+    ) -> tairix_kernel_core::iommu::InterruptRouting {
         #[cfg(all(freestanding, kernel_isa = "x86_64"))]
         {
-            crate::x86_64::boot::pci_host().map(|host| {
-                host as &'static (dyn tairix_kernel_core::iommu::BusMastering + 'static)
-            })
+            crate::x86_64::remapping::route(remapper, cpus, log)
         }
         #[cfg(not(all(freestanding, kernel_isa = "x86_64")))]
         {
-            None
+            let _ = (remapper, cpus, log);
+            tairix_kernel_core::iommu::InterruptRouting::Native
         }
+    }
+
+    fn unit_function(&self) -> Option<&'static dyn tairix_kernel_iommu_api::UnitFunction> {
+        crate::pci_host::unit_function()
+    }
+
+    /// The boot probe owns the PCI configuration space it enumerated.
+    fn bus_mastering(
+        &self,
+    ) -> Option<&'static (dyn tairix_kernel_core::iommu::BusMastering + 'static)> {
+        crate::pci_host::bus_mastering()
     }
 
     fn table_coherence(
@@ -739,7 +744,7 @@ mod tests {
     /// exposes a `MAX_CPUS`; capacity is the caller's `N`).
     const TEST_CPUS: usize = 8;
 
-    fn arch_with_boot_cpu(boot_cpu: u32, lapic: u8) -> X86_64Arch {
+    fn arch_with_boot_cpu(boot_cpu: u32, lapic: u32) -> X86_64Arch {
         // Each construction leaks its own per-CPU backing so no two
         // handles share IPI counters under the parallel test runner; the leak is bounded (one per host test) and
         // the bin crate already has an allocator (allocator-having callers may provide leaked storage).
@@ -755,7 +760,7 @@ mod tests {
     /// in this module exercise the scheduler/calibration surface;
     /// the [`KernelArch::irq_routing`] surface is exercised through
     /// the `ioapic_controller` module's host tests.
-    fn bin_arch_with_unsupported_routing(boot_cpu: u32, lapic: u8) -> BinArch {
+    fn bin_arch_with_unsupported_routing(boot_cpu: u32, lapic: u32) -> BinArch {
         BinArch::new(
             arch_with_boot_cpu(boot_cpu, lapic),
             test_calibration(),

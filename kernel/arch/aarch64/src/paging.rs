@@ -100,12 +100,17 @@ pub mod attrs {
     /// ordinary (including unaligned) loads/stores, so the xHCI ring and
     /// context structures the driver reads/writes behave normally.
     pub const ATTR_IDX_NORMAL_NC: u64 = 2 << 2;
+    /// `MAIR_EL1` attribute index for Device-nGnRnE memory (index 3): a PCI
+    /// host's configuration region, whose writes are non-posted, so none
+    /// may be acknowledged before the function has it.
+    pub const ATTR_IDX_DEVICE_NONPOSTED: u64 = 3 << 2;
 }
 
 /// `MAIR_EL1` value pairing attribute index 0 = Normal write-back
-/// read/write-allocate, index 1 = Device-nGnRE, and index 2 = Normal
-/// Non-Cacheable (outer + inner non-cacheable, `0x44`) (ARM ARM D13.2.95).
-pub const MAIR_VALUE: u64 = 0xFF | (0x04 << 8) | (0x44 << 16);
+/// read/write-allocate, index 1 = Device-nGnRE, index 2 = Normal
+/// Non-Cacheable (outer + inner non-cacheable, `0x44`), and index 3 =
+/// Device-nGnRnE (`0x00`) (ARM ARM D13.2.95).
+pub const MAIR_VALUE: u64 = u64::from_le_bytes([0xFF, 0x04, 0x44, 0x00, 0, 0, 0, 0]);
 
 /// Virtual-address bits each translation regime covers: `2^39` for
 /// `TTBR0_EL1` (user) and the same for `TTBR1_EL1` (kernel).
@@ -313,12 +318,18 @@ pub const fn el0_dma_coherent_leaf_attrs() -> u64 {
 /// Device-nGnRE memory type from `MAIR_EL1`.
 #[must_use]
 pub const fn device_leaf_attrs(block: bool) -> u64 {
-    let base = attrs::VALID
-        | attrs::AF
-        | attrs::AP_RW_EL1
-        | attrs::ATTR_IDX_DEVICE
-        | attrs::PXN
-        | attrs::UXN;
+    kernel_device_leaf(block, attrs::ATTR_IDX_DEVICE)
+}
+
+/// [`device_leaf_attrs`] for a PCI host's configuration region: the
+/// Device-nGnRnE memory type.
+#[must_use]
+pub const fn config_leaf_attrs(block: bool) -> u64 {
+    kernel_device_leaf(block, attrs::ATTR_IDX_DEVICE_NONPOSTED)
+}
+
+const fn kernel_device_leaf(block: bool, attr_idx: u64) -> u64 {
+    let base = attrs::VALID | attrs::AF | attrs::AP_RW_EL1 | attr_idx | attrs::PXN | attrs::UXN;
     if block {
         base
     } else {
@@ -430,6 +441,22 @@ pub const fn gigapage_is_device(mask: &[u64; GIGAPAGE_MASK_WORDS], index: usize)
 fn configured_gigapage_is_device(index: usize) -> bool {
     index < ENTRIES_PER_TABLE
         && mask_word_bit(DEVICE_GIGAPAGES[index / 64].load(Ordering::Acquire), index)
+}
+
+/// Gigapages of device registers only the kernel reaches — a PCI host's
+/// configuration region — which [`install_boot_physmap`] maps
+/// Device-nGnRnE in the kernel regime at their direct-map address
+/// ([`physmap_virt`]). No process root carries them, so they need not lie
+/// below the user region the identity window shares its root with.
+static KERNEL_DEVICE_GIGAPAGES: [AtomicU64; GIGAPAGE_MASK_WORDS] =
+    [const { AtomicU64::new(0) }; GIGAPAGE_MASK_WORDS];
+
+/// Install the kernel-regime Device gigapage mask. Called once on a board's
+/// boot path, before [`install_boot_physmap`].
+pub fn configure_kernel_device_gigapages(mask: [u64; GIGAPAGE_MASK_WORDS]) {
+    for (slot, word) in KERNEL_DEVICE_GIGAPAGES.iter().zip(mask) {
+        slot.store(word, Ordering::Release);
+    }
 }
 
 /// Kernel-extent gigapage mask in effect before any board discovery runs:
@@ -723,8 +750,8 @@ pub fn physmap_gigapages() -> usize {
 ///
 /// `const`, so a fixed address names its direct-map spelling without a
 /// run-time load. It resolves only for a `phys` the map covers;
-/// [`physmap_covers`] is the check a caller with a discovered address makes
-/// first.
+/// [`physmap_covers`] (RAM) or [`kernel_device_covers`] (registers) is the
+/// check a caller with a discovered address makes first.
 #[must_use]
 pub const fn physmap_virt(phys: u64) -> u64 {
     PHYSMAP_VMA_BASE.wrapping_add(phys)
@@ -736,6 +763,23 @@ pub const fn physmap_virt(phys: u64) -> u64 {
 pub fn physmap_covers(phys: u64, len: u64) -> bool {
     mask_covers(&PHYSMAP_COVERED, MAX_PHYSMAP_GIB, phys, len)
 }
+
+/// The kernel-regime Device gigapages the live direct map carries, or
+/// all-zero before [`install_boot_physmap`] runs.
+static KERNEL_DEVICE_MAPPED: [AtomicU64; GIGAPAGE_MASK_WORDS] =
+    [const { AtomicU64::new(0) }; GIGAPAGE_MASK_WORDS];
+
+/// `true` when the live direct map carries every byte of `[phys, phys +
+/// len)` as kernel-regime Device memory, reached at [`physmap_virt`]. Fails
+/// closed on a wrapping or over-wide range.
+#[must_use]
+pub fn kernel_device_covers(phys: u64, len: u64) -> bool {
+    mask_covers(&KERNEL_DEVICE_MAPPED, MAX_PHYSMAP_GIB, phys, len)
+}
+
+/// One past the highest physical address the kernel regime can map device
+/// registers at.
+pub const KERNEL_DEVICE_REACH: u64 = (MAX_PHYSMAP_GIB as u64) << 30;
 
 /// `true` when every byte of `[phys, phys + len)` lies in an identity
 /// gigapage mapped Device ([`configure_device_gigapages`]): the only part of
@@ -775,7 +819,8 @@ fn mask_covers(
 
 /// Size the direct physical map from `covered` — the gigapage mask of the
 /// RAM the allocator may hand out — and install its leaves into the kernel
-/// root, set-once.
+/// root, set-once, with the configured kernel-regime Device gigapages
+/// ([`configure_kernel_device_gigapages`]) beside them.
 ///
 /// Called once from the boot path, before anything reaches a frame by
 /// pointer. It needs no frame source and draws no table: each covered
@@ -790,13 +835,23 @@ fn mask_covers(
 #[must_use]
 pub fn install_boot_physmap(covered: &[u64; GIGAPAGE_MASK_WORDS]) -> bool {
     let mut leaves = [0u64; GIGAPAGE_MASK_WORDS];
+    let mut devices = [0u64; GIGAPAGE_MASK_WORDS];
     let mut any = false;
     for gigapage in 0..MAX_PHYSMAP_GIB {
+        let bit = 1 << (gigapage % 64);
+        // Device wins a gigapage both name, as in the identity window.
+        if mask_word_bit(
+            KERNEL_DEVICE_GIGAPAGES[gigapage / 64].load(Ordering::Acquire),
+            gigapage,
+        ) {
+            devices[gigapage / 64] |= bit;
+            continue;
+        }
         let asked = mask_word_bit(covered[gigapage / 64], gigapage);
         if !asked || configured_gigapage_is_device(gigapage) {
             continue;
         }
-        leaves[gigapage / 64] |= 1 << (gigapage % 64);
+        leaves[gigapage / 64] |= bit;
         any = true;
     }
     // Reached before the claim, so a mask that covers nothing representable
@@ -812,14 +867,16 @@ pub fn install_boot_physmap(covered: &[u64; GIGAPAGE_MASK_WORDS]) -> bool {
     // is the only reference into these entries of the kernel root.
     let root = unsafe { &mut *kernel_root_table() };
     for gigapage in 0..MAX_PHYSMAP_GIB {
-        if mask_word_bit(leaves[gigapage / 64], gigapage) {
-            // Never executable: the kernel fetches from its identity
-            // window, so nothing is ever fetched through the map.
-            root[PHYSMAP_FIRST_SLOT + gigapage] = descriptor(
-                (gigapage as u64) << 30,
-                normal_leaf_attrs(true) | attrs::PXN,
-            );
-        }
+        // Never executable: the kernel fetches from its identity window, so
+        // nothing is ever fetched through the map.
+        let leaf = if mask_word_bit(leaves[gigapage / 64], gigapage) {
+            normal_leaf_attrs(true) | attrs::PXN
+        } else if mask_word_bit(devices[gigapage / 64], gigapage) {
+            config_leaf_attrs(true)
+        } else {
+            continue;
+        };
+        root[PHYSMAP_FIRST_SLOT + gigapage] = descriptor((gigapage as u64) << 30, leaf);
     }
     // The barrier goes *before* the coverage publication, not after: the
     // flag is what a reader takes as permission to dereference through the
@@ -827,6 +884,9 @@ pub fn install_boot_physmap(covered: &[u64; GIGAPAGE_MASK_WORDS]) -> bool {
     // sees the flag. Published last, with `Release`, the flag orders both.
     publish_table_update();
     for (word, published) in PHYSMAP_COVERED.iter().zip(leaves) {
+        word.store(published, Ordering::Release);
+    }
+    for (word, published) in KERNEL_DEVICE_MAPPED.iter().zip(devices) {
         word.store(published, Ordering::Release);
     }
     true
@@ -1111,9 +1171,9 @@ pub const fn icache_line_bytes(ctr_el0: u64) -> usize {
 }
 
 /// Derive the identity-map Device gigapage mask from the board's
-/// discovered MMIO bases and the kernel image's own extent.
+/// discovered MMIO extents and the kernel image's own extent.
 ///
-/// Each gigapage containing one of `device_bases` is mapped Device so
+/// Each gigapage one of `device_extents` overlaps is mapped Device so
 /// MMIO reads/writes are not cached, reordered, or speculated
 /// (Device-nGnRE is the only correct attribute for a
 /// register block). The gigapages overlapping `[kernel_start,
@@ -1123,24 +1183,31 @@ pub const fn icache_line_bytes(ctr_el0: u64) -> usize {
 /// kernel at `0x8_0000` shares gigapage 0 with nothing the kernel
 /// drives, while its UART/GIC live in gigapage 3 (`plans/PI.md` §1). On
 /// QEMU `virt` the kernel sits in gigapage 1 and the MMIO in gigapage
-/// 0, reproducing the historic layout. A base beyond the 512 GiB
-/// identity window is ignored (no representable slot).
+/// 0, reproducing the historic layout. Gigapages beyond the 512 GiB
+/// identity window are ignored (no representable slot).
 #[must_use]
 pub fn identity_device_mask(
-    device_bases: &[u64],
+    device_extents: &[(u64, u64)],
     kernel_start: u64,
     kernel_end: u64,
 ) -> [u64; GIGAPAGE_MASK_WORDS] {
-    let mut mask = [0u64; GIGAPAGE_MASK_WORDS];
-    for &base in device_bases {
-        let index = (base >> 30) as usize;
-        if index < ENTRIES_PER_TABLE {
-            mask[index / 64] |= 1 << (index % 64);
-        }
-    }
-    // The kernel image's gigapages stay Normal — executable — even if a
-    // discovered MMIO base lands in one (the conflict is unmappable at
-    // 1 GiB granularity; keeping the CPU running wins).
+    without_kernel(
+        gigapage_mask_from_extents(device_extents),
+        kernel_start,
+        kernel_end,
+    )
+}
+
+/// `mask` less the gigapages `[kernel_start, kernel_end)` lies in, which
+/// stay Normal — executable — even if a discovered MMIO base lands in one:
+/// the conflict is unmappable at 1 GiB granularity, and keeping the CPU
+/// running wins.
+#[must_use]
+fn without_kernel(
+    mut mask: [u64; GIGAPAGE_MASK_WORDS],
+    kernel_start: u64,
+    kernel_end: u64,
+) -> [u64; GIGAPAGE_MASK_WORDS] {
     let first = (kernel_start >> 30) as usize;
     let last_byte = if kernel_end > kernel_start {
         kernel_end - 1
@@ -2635,10 +2702,10 @@ fn page_flags_from_leaf(desc: u64) -> PageFlags {
         out = out | PageFlags::EXEC;
     }
     // The `MAIR` attribute index (bits [4:2]) selects the memory type:
-    // index 1 = Device-nGnRE, index 2 = Normal Non-Cacheable (a coherent
+    // indices 1 and 3 = Device, index 2 = Normal Non-Cacheable (a coherent
     // DMA buffer), index 0 = cacheable Normal (no attribute bit).
     let attr_idx = desc & (0b111 << 2);
-    if attr_idx == attrs::ATTR_IDX_DEVICE {
+    if attr_idx == attrs::ATTR_IDX_DEVICE || attr_idx == attrs::ATTR_IDX_DEVICE_NONPOSTED {
         out = out | PageFlags::DEVICE;
     } else if attr_idx == attrs::ATTR_IDX_NORMAL_NC {
         if desc & attrs::SW_WRITE_COMBINE != 0 {

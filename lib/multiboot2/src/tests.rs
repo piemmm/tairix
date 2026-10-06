@@ -383,7 +383,17 @@ fn memory_kind_raw_round_trips_canonical_codes() {
         Mb2MemoryKind::AcpiReclaimable,
         Mb2MemoryKind::AcpiNvs,
         Mb2MemoryKind::Defective,
+        Mb2MemoryKind::Other(7),
     ] {
         assert_eq!(Mb2MemoryKind::from_raw(k.to_raw()), k);
     }
+}
+
+/// A type the decoder does not name (persistent memory is 7) is kept as
+/// itself, never folded into the reservations that may hold registers.
+#[test]
+fn an_unnamed_memory_type_is_kept_rather_than_read_as_reserved() {
+    assert_eq!(Mb2MemoryKind::from_raw(7), Mb2MemoryKind::Other(7));
+    assert_eq!(Mb2MemoryKind::from_raw(12), Mb2MemoryKind::Other(12));
+    assert_eq!(Mb2MemoryKind::from_raw(2), Mb2MemoryKind::Reserved);
 }

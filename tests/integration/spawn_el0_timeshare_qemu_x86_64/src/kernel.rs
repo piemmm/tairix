@@ -17,7 +17,7 @@ use tairix_arch_x86_64::context_hal::ContextSwitchHal;
 use tairix_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
 use tairix_arch_x86_64::paging::{self, activate_user_root, KERNEL_VMA_BASE};
 use tairix_arch_x86_64::userentry::UserMode;
-use tairix_arch_x86_64::{qemu_exit, smp, syscall_entry};
+use tairix_arch_x86_64::{qemu_exit, syscall_entry};
 use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
 use tairix_kernel::{
     boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
@@ -323,10 +323,10 @@ fn run_timeshare() -> ! {
     // Build the live scheduler over the production arch handle. Interrupts stay
     // masked, so dispatch is the cooperative `step` loop below (the spawn-time
     // self-IPI to the LAPIC ICR is latched and never delivered).
-    let bsp_id = smp::bsp_lapic_id();
+    let bsp_id = tairix_arch_x86_64::apic::local_apic_id();
     // Single-CPU vertical (BSP, dense id 0): per-CPU bookkeeping is sized
     // to one slot (no baked-in `MAX_CPUS`).
-    let cpu_to_lapic: [Option<u8>; 1] = [Some(bsp_id)];
+    let cpu_to_lapic: [Option<u32>; 1] = [Some(bsp_id)];
     // The arch handle borrows its per-CPU bookkeeping from a caller-sized
     // `&'static` backing; `run` runs once, so a
     // function-local `static` is sound and needs no allocator.

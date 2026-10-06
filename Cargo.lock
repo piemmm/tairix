@@ -2468,6 +2468,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-itest-translation-witness"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-itest-finisher",
+ "tairix-itest-witness",
+ "tairix-kernel-core",
+ "tairix-kernel-iommu-api",
+ "tairix-log",
+ "tairix-virtio-input",
+]
+
+[[package]]
 name = "tairix-itest-witness"
 version = "0.0.0"
 dependencies = [
@@ -2523,7 +2536,10 @@ dependencies = [
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel-core",
+ "tairix-kernel-iommu-amdvi",
  "tairix-kernel-iommu-api",
+ "tairix-kernel-iommu-riscv",
+ "tairix-kernel-iommu-smmuv3",
  "tairix-kernel-iommu-vtd",
  "tairix-kernel-ipc",
  "tairix-kernel-irq",
@@ -2571,7 +2587,10 @@ dependencies = [
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel-core",
+ "tairix-kernel-iommu-amdvi",
  "tairix-kernel-iommu-api",
+ "tairix-kernel-iommu-riscv",
+ "tairix-kernel-iommu-smmuv3",
  "tairix-kernel-iommu-vtd",
  "tairix-kernel-ipc",
  "tairix-kernel-irq",
@@ -2602,13 +2621,52 @@ dependencies = [
 ]
 
 [[package]]
-name = "tairix-kernel-iommu-api"
+name = "tairix-kernel-iommu-amdvi"
 version = "0.0.0"
 dependencies = [
  "tairix-arch-api",
  "tairix-collections",
  "tairix-dma-barrier",
  "tairix-hash",
+ "tairix-kernel-iommu-api",
+ "tairix-sync",
+]
+
+[[package]]
+name = "tairix-kernel-iommu-api"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-arch-api",
+ "tairix-collections",
+ "tairix-dma-barrier",
+ "tairix-hash",
+ "tairix-inline",
+ "tairix-kernel-iommu-api",
+ "tairix-sync",
+]
+
+[[package]]
+name = "tairix-kernel-iommu-riscv"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-api",
+ "tairix-collections",
+ "tairix-dma-barrier",
+ "tairix-hash",
+ "tairix-kernel-iommu-api",
+ "tairix-sync",
+]
+
+[[package]]
+name = "tairix-kernel-iommu-smmuv3"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-api",
+ "tairix-collections",
+ "tairix-dma-barrier",
+ "tairix-hash",
+ "tairix-inline",
  "tairix-kernel-iommu-api",
  "tairix-sync",
 ]
@@ -2622,7 +2680,6 @@ dependencies = [
  "tairix-collections",
  "tairix-dma-barrier",
  "tairix-hash",
- "tairix-inline",
  "tairix-kernel-iommu-api",
  "tairix-sync",
 ]
@@ -2648,6 +2705,8 @@ name = "tairix-kernel-irq"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-collections",
+ "tairix-hash",
  "tairix-kernel-sec",
  "tairix-log",
  "tairix-sync",
@@ -4179,6 +4238,7 @@ dependencies = [
  "tairix-drv-bus-virtio",
  "tairix-drv-storage-virtio-blk",
  "tairix-itest-harness",
+ "tairix-itest-witness",
  "tairix-kernel",
  "tairix-kernel-core",
  "tairix-kernel-irq",
@@ -4191,13 +4251,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-dma-translation-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-aarch64",
+ "tairix-itest-harness",
+ "tairix-itest-translation-witness",
+ "tairix-kernel",
+ "tairix-log",
+]
+
+[[package]]
+name = "tairix-test-dma-translation-qemu-riscv64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-riscv64",
+ "tairix-itest-harness",
+ "tairix-itest-translation-witness",
+ "tairix-kernel",
+ "tairix-log",
+]
+
+[[package]]
 name = "tairix-test-dma-translation-qemu-x86-64"
 version = "0.0.0"
 dependencies = [
  "tairix-arch-x86_64",
  "tairix-itest-harness",
+ "tairix-itest-translation-witness",
  "tairix-kernel",
- "tairix-kernel-core",
  "tairix-log",
 ]
 

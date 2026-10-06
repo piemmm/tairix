@@ -816,7 +816,7 @@ mod tests {
         let waiter = TestWaiter::idle(&irq);
         // Release every binding owned by the device task before the
         // wait runs.
-        irq.release_for(OWNER);
+        irq.release_for(OWNER, &OkController);
         let host =
             KernelVirtioHost::new(pool, &caller, &sink, PoolId::fresh(), &irq, handle, &waiter);
         assert_eq!(host.notify_wait(0, 1_000), CompletionSignal::TimedOut);

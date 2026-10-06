@@ -32,18 +32,18 @@ layering), §18 (discovery and the floor), §19 (threat model), §24 and §26
 | IOM6 | Faults: drained in thread context from each unit's interrupt, stable audit events, a per-unit budget, a storm silences the stream and marks the node `Offline`. Host-proven against the register-level VT-d model, and a live QEMU vertical provokes one real fault delivered through the fault-event MSI, attributed to the device's node, canary untouched (§12). The storm stays host-proven — not live (§12) | done |
 | IOM7 | Default-deny from the first bus-master enable: units enabled before TAIRiX sets Bus Master Enable on any function; bus mastering follows ownership | done |
 | IOM8 | Isolation groups: requester-ID aliasing, ACS turned on and read on the upstream path and a switch's internal bus, multi-function devices without ACS, the extended-capability walk ACS lives in; the group is the unit of ownership | done |
-| IOM9 | PCI identity: every function a node carrying its segment:BDF, the ATS, PRI, PASID and SR-IOV capabilities decoded on IOM8's extended-capability walk, segment-aware ECAM. Includes discriminating `PciFunction::admit`'s `VIRTIO_F_ACCESS_PLATFORM` gate to virtio functions by vendor id, so a non-virtio translated master is published with its stream rather than refused — latent until non-virtio PCI discovery exists (`plans/OPEN-DEFECTS.md` D507) | planned |
-| IOM10 | ATS, PRI and PASID policy: ATS off at the device and refused at the unit; untrusted external-facing ports | planned |
-| IOM11 | x86_64 interrupt remapping: VT-d IR (IRTEs, remappable MSI and IO-APIC entries, source-id validation) and x2APIC under EIM | planned |
-| IOM12 | `kernel/iommu/amdvi`: AMD-Vi — IVRS discovery, the device table, command buffer, event log, its page tables and interrupt remapping tables | planned |
-| IOM13 | The generic PCIe ECAM host bridge on aarch64 and riscv64 `virt` (`pci-host-ecam-generic`) — the prerequisite for every translated vertical off x86 | planned |
-| IOM14 | FDT translation topology: `#iommu-cells`, `iommus`, `iommu-map` and `iommu-map-mask` in `lib/fdt` and the shared walk, naming one group for platform masters that share a stream id | planned |
-| IOM15 | `kernel/iommu/smmuv3`: Arm SMMUv3 — the stream table, stage 2 (stage 1 where stage 2 is absent), the command queue with `CMD_SYNC`, the event queue, `GERROR`, `GBPA` abort | planned |
-| IOM16 | `kernel/iommu/riscv`: the RISC-V IOMMU — the device directory, second-stage (first-stage where absent) tables, the command queue with `IOFENCE.C`, the fault queue | planned |
-| IOM17 | `kernel/iommu/virtio`: virtio-iommu — attach, map, unmap and probe over the request queue, faults on the event queue, bypass off; ACPI VIOT and FDT topology | planned |
+| IOM9 | PCI identity: every function a node carrying its segment:BDF, the ATS, PRI, PASID and SR-IOV capabilities decoded on IOM8's extended-capability walk, segment-aware ECAM, ARI functions found; `PciFunction::admit`'s `VIRTIO_F_ACCESS_PLATFORM` gate held to virtio functions | done |
+| IOM10 | ATS, PRI and PASID policy: ATS off at the device and refused at the unit; untrusted external-facing ports | done |
+| IOM11 | x86_64 interrupt remapping: VT-d IR (IRTEs, remappable MSI and IO-APIC entries, source-id validation) and x2APIC under EIM | done |
+| IOM12 | `kernel/iommu/amdvi`: AMD-Vi — IVRS discovery, the device table, command buffer, event log, its page tables and interrupt remapping tables | done |
+| IOM13 | The generic PCIe ECAM host bridge on aarch64 and riscv64 `virt` (`pci-host-ecam-generic`) — the prerequisite for every translated vertical off x86 | done |
+| IOM14 | FDT translation topology: `#iommu-cells`, `iommus`, `iommu-map` and `iommu-map-mask`, and the `memory-region` firmware windows, in `lib/fdt` and the shared walk, naming one group for platform masters that share a stream id; only usable nodes walked | done |
+| IOM15 | `kernel/iommu/smmuv3`: Arm SMMUv3 — the stream table, stage 2 (stage 1 where stage 2 is absent), the command queue with `CMD_SYNC`, the event queue, `GERROR`, `GBPA` abort | done |
+| IOM16 | `kernel/iommu/riscv`: the RISC-V IOMMU — the device directory, second-stage (first-stage where absent) tables, the command queue with `IOFENCE.C`, the fault queue | done |
+| IOM17 | `kernel/iommu/virtio`: virtio-iommu — attach, map, unmap and probe over the request queue, faults on the event queue, bypass off; ACPI VIOT and FDT topology, a probed virtio-MMIO slot's node carrying its slot's streams | planned |
 | IOM18 | MSI isolation off x86: the GICv3 ITS with its doorbell mapped per domain; the RISC-V IMSIC through the IOMMU's MSI page tables | planned |
 | IOM19 | Scatter-gather carves: IOVA-contiguous over scattered frames on translated nodes, lifting the 32 MiB carve bound; DMA into shared-memory objects | planned |
-| IOM20 | Throughput: invalidation batching with range-versus-domain selection, a deferred-free flush queue for streaming mappings, and per-descriptor wait status so a unit's queue lock is not held across its waits — measured | planned |
+| IOM20 | Throughput: invalidation batching with range-versus-domain selection, a deferred-free flush queue for streaming mappings, and per-descriptor wait status so a unit's queue lock is not held across its waits; no flush after an AMD-Vi map where the unit caches no not-present entry (`NpCache` clear), as VT-d skips one outside caching mode, an AMD-Vi attach that flushes the device rather than its whole new domain, and a per-table occupancy count in place of the 512-entry emptiness scan on unmap — measured | planned |
 | IOM21 | System Information: units, groups, per-node translation state and fault counters behind `CAP_SYSINFO_HW` | planned |
 
 Items are built in ledger order within a milestone. An item is complete —
@@ -87,9 +87,11 @@ These are settled. A change that contradicts one stops and asks (§15.7).
    family.
 
 3. **Discovery stays in the architecture port.** DMAR, IVRS and VIOT are ACPI
-   and are parsed in `kernel/arch/x86_64/`; `iommus` and `iommu-map` are FDT
-   and are read by the shared walk. What leaves the port is the normalised
-   tree (§1), never a table.
+   and are parsed in `kernel/arch/x86_64/`. A platform master's `iommus` is
+   FDT and is read by the shared walk; a PCI host's `iommu-map` and its
+   firmware windows name functions only enumeration finds, so the FDT PCI host
+   bring-up applies them once its bus is walked. What leaves the port is the
+   normalised tree (§1), never a table.
 
 4. **Default deny.** A unit is enabled with every stream blocked. A stream is
    attached to a domain only when its node's owner first carves DMA, and is
@@ -153,6 +155,23 @@ These are settled. A change that contradicts one stops and asks (§15.7).
     cap what one unit's faults may cost whatever the machine, and sit above
     what the family's architecture lets a unit hold (§24.4).
 
+14. **An external-facing port's subtree is untrusted.** A port is
+    external-facing where its Slot Capabilities say Hot-Plug Capable, or
+    the device tree marks it `external-facing`, and, once AML runs, where
+    `_DSD` says so. Below it no firmware window is kept, and a function is
+    published only if the port isolates with ACS Source Validation.
+
+15. **The kernel owns every ECAM host.** On aarch64 and riscv64 it
+    enumerates `pci-host-ecam-generic` itself, as on x86_64, through the one
+    shared probe and one PCI host per segment, so one owner holds each
+    function's configuration space everywhere.
+
+16. **Interrupt remapping is the whole machine's or no one's.** Every source
+    the boot set up gets an entry before remapping turns on; an IO-APIC no
+    unit names, or a unit that cannot remap, leaves every source in
+    compatibility format, as Linux does. x2APIC mode is entered only with
+    extended-mode remapping, or where firmware left it.
+
 ## 0a. The security position, stated honestly
 
 | Attack | Without a unit | With a unit (after MI0) | After MI1 |
@@ -211,6 +230,26 @@ other unit claims. Each RMRR becomes an `IommuReserved` per scoped endpoint on
 the unit that covers it. Each kernel-probed PCI function gains the
 `IommuStream` of the unit covering its source id. A malformed table is refused
 whole, never half-applied.
+
+**FDT (IOM14).** The walk every FDT port shares visits only usable nodes: a
+disabled, reserved or failed node and its subtree are spliced out, so a unit
+another agent owns is never taken over and the masters naming it are
+untranslated through it. A node with `#iommu-cells` is an `Iommu` node. A
+master's `iommus` decides its DMA once, in the walk: every entry naming a
+usable one-cell unit gives it the `IommuStream`s it names (consecutive ids
+coalesced) and its bus's DMA windows; entries naming only units that
+translate nothing (unusable, or whose specifiers carry no stream id) leave
+it an untranslated master; anything else — a list that does not frame, a
+provider that is no describable unit, DMA both through a unit and around
+one, more streams than a node holds — gives it no DMA authority at all. A
+kernel pass over the collected tree (`kernel/tairix-kernel/src/iommu_fdt.rs`)
+then joins platform masters sharing a stream into one group, keeps the
+identity windows their `memory-region`s' `iommu-addresses` ask for on every
+stream they master as, and refuses a group spanning units, sharing a stream
+with a host's map, or asking for a window its domain cannot keep. A host's
+`iommu-map` under its `iommu-map-mask` names each requester id's unit and
+stream; an id the map leaves out is untranslated, and a map that does not
+decode, or names no describable unit, leaves its segment undescribed.
 
 ## 2. IOM2 — `kernel/iommu/api`
 
@@ -277,7 +316,11 @@ Scalable mode (for units that lack legacy mode, and for PASID) is IOM10's.
 - **virtio.** Every virtio driver accepts `lib/virtio`'s one
   `TRANSPORT_FEATURES` wherever offered — `VIRTIO_F_ACCESS_PLATFORM`, since
   declining it asks the device to bypass the platform's translation, and
-  `VIRTIO_F_VERSION_1`.
+  `VIRTIO_F_VERSION_1`. Discovery reads a translated function's offer from its
+  common configuration through the kernel's own register mapping, never the
+  configuration-access capability, which QEMU aborts on behind the generic
+  ECAM host; a function answering all ones is not decoding and vouches for
+  nothing.
 - **Lifetime.** A domain is created at its node's owner's first carve and
   attached then; the owner's death (its process reclaimed, or devmgr unloading
   it) blocks its streams and destroys the domain with one confirmed sync, after
@@ -443,12 +486,14 @@ holds a group at a time.
 
 - **In the tree.** Each translated node carries its own `IommuStream`, an
   `IommuAlias` for each further stream the fabric tags its DMA with, and one
-  `IommuGroup` — `(unit, id)`, the id the least requester id among the
-  group's members. A group covers only itself and an alias only aliases
+  `IommuGroup` — `(unit, id)`, the id the least stream among the group's
+  members, unique on the unit however many segments and platform masters it
+  serves. A group covers only itself and an alias only aliases
   inside it, and neither covers a requester stream: a child for the same
   device keeps its parent's group, and no driver can turn an alias into a
   function it may master. Delegating a finer grouping to a bus driver that
-  enumerates a subtree of its own is IOM13's, with the first such driver.
+  enumerates a subtree of its own waits for the first such driver; the
+  kernel owns every ECAM host itself (decision 15).
 - **Aliases.** Every bridge between a function and its root bus that takes
   ownership of its requests tags them: one to conventional PCI with its
   secondary bus and function `00.0`, a conventional one or one from
@@ -480,9 +525,11 @@ holds a group at a time.
   own node's streams: the group's other members stay blocked, or in their
   firmware domains, so a function the owner was not handed cannot master
   into its domain and a firmware-mastered sibling never shares it.
-- **Unconfinable.** A function whose group spans units, or that is tagged
-  with more streams than a node can name, is published to no driver and
-  audited (`DmaTranslationBypass`, `reason=unconfinable`).
+- **Unconfinable.** A function whose group spans units, that is tagged
+  with more streams than a node can name, or that masters DMA as a stream a
+  function of another group, or a master off its segment, uses too, is
+  published to no driver and audited (`DmaTranslationBypass`,
+  `reason=unconfinable`).
 
 ## 7a. IOM9–IOM11 — identity, ATS, interrupt remapping
 
@@ -495,17 +542,66 @@ holds a group at a time.
 
 ## 8. IOM12–IOM18 — the other families
 
-- **AMD-Vi.** The unit is a PCI function whose register base IVRS names; the
-  device table is sized to the largest device id IVRS covers; the command
-  buffer's `COMPLETION_WAIT` is the sync; IVMD unity ranges are reserved
-  windows; IVRS special entries give the IO-APIC and HPET ids for remapping.
+- **AMD-Vi.** The unit is a PCI function whose register base IVRS names; its
+  faults are that function's own MSI, never remapped. The device table covers
+  all 65536 ids, each entry blocking until a domain is attached: a request
+  from an id past a shorter table is not one the format promises to refuse,
+  and QEMU walks past a table's end. The command buffer's `COMPLETION_WAIT`
+  is the sync, and commands wait for translation to be on, as QEMU runs none
+  before it; IVMD unity ranges are reserved windows, the exclusion range is
+  cleared at take-over, and an IVRS alias crossing groups leaves every
+  function arriving under it unconfined. The unit finds an interrupt's entry by requester id alone, so
+  each source has a table every id it covers points at; IVRS special entries
+  give the IO-APIC ids, an IO-APIC pin raises its entry by index, and a level
+  pin's remote IRR is cleared at re-arm, the remapped interrupt reaching its
+  CPU edge-triggered. QEMU's event records carry neither the access
+  direction nor the address.
+- **The generic PCI host (IOM13).** The kernel takes every enabled
+  `pci-host-ecam-generic` host a device tree describes as it takes x86_64's
+  (`kernel/tairix-kernel/src/pci_fdt.rs`): it numbers the buses and sets out
+  every BAR and bridge window inside the windows the port can reach, unless
+  `linux,pci-probe-only` keeps firmware's, and resolves every BAR on every
+  port through its host's apertures, never over RAM. Each function's INTx
+  reaches its controller through the host's `interrupt-map`; a line may be
+  shared, re-arming once every sharer is back, and a function's pin is
+  raised only while an owner is bound to it. `external-facing` ports are
+  untrusted.
 - **SMMUv3.** Stage 2 wherever `IDR0.S2P` is set, so no context descriptors
-  are needed; stage 1 with one context descriptor per stream otherwise.
-  `GBPA.ABORT` holds while the unit is disabled; `CMD_SYNC` is the sync; the
-  event queue is the fault source. On QEMU, `-global arm-smmuv3.stage=2`.
+  are needed; stage 1 with one context descriptor per domain otherwise. The
+  stream table is two-level where the unit has it. `GBPA.ABORT` holds while the
+  unit is disabled; an invalid entry blocks a stream and records it
+  (`C_BAD_STE`), a silenced stream aborts unrecorded. `CMD_SYNC` is the sync,
+  completed by message where `IDR0.MSI` is set and by the queue's consumption
+  otherwise; a command the unit rejects is replaced by a `CMD_SYNC` so the
+  queue consumes on. The event queue is the fault source, raised on the wired
+  line the node names (`combined`, else `eventq`), which `irq_bind`'s trigger
+  rule configures edge-triggered first, else by message: a wired line always
+  reaches the CPU, where a message needs a doorbell the platform's MSI
+  controller maps for the unit. A stage 2 walk starts at level 1 over up to
+  sixteen concatenated tables where the output is narrower than 44 bits,
+  which a level-0 start needs. A unit whose table and queue accesses do not
+  snoop the CPU's caches is refused. On QEMU, `virt-9.1,iommu=smmuv3` offers
+  stage 1 alone, and `virt` from 9.2 builds the unit nested, the family taking
+  stage 2.
 - **RISC-V IOMMU.** Second-stage (`iohgatp`, Sv39x4/Sv48x4/Sv57x4 with the
-  16 KiB root) wherever `g-stage` is present; `IOFENCE.C` is the sync; the
-  fault queue is the fault source.
+  16 KiB root, which the shared engine walks as one root spanning four pages)
+  wherever the unit walks one, first-stage (`iosatp`, tagged by PSCID, only
+  the half of its sign-extended space below the top bit) otherwise, each in
+  the shallowest mode wide enough for an identity window anywhere the unit
+  reaches. The directory is the deepest of three levels the unit takes, found
+  at take-over against an empty root with `ddtp` left off until the kernel
+  enables it. A valid context is invalidated and forgotten before any
+  replacement is written; a silenced device walks empty tables with `DTF`
+  set. `IOFENCE.C` storing a token is the sync, waiting on the devices'
+  earlier requests too; a rejected command is replaced by a fence. The fault
+  queue is the fault source, raised on the first wired line the node names
+  (every cause's `icvec` vector set to it), else by message, chosen as the
+  unit is taken over: `fctl` may not change once it translates or a queue
+  runs. Its performance counters are stopped, so no cause but the fault
+  queue's can raise the vector; a page fault is classed denied or unmapped by
+  the device's domain. On QEMU, `virt,iommu-sys=on`
+  is the second stage and `-global riscv-iommu-device.g-stage=false` the
+  first.
 - **virtio-iommu.** `bypass` is cleared so an unattached endpoint is
   blocked; `PROBE` reserved regions become reserved windows; the event queue
   carries faults.
@@ -547,6 +643,11 @@ whose updates are logarithmic rather than a sorted vector's linear moves.
 - **A user-space IOMMU driver.** See decision 1.
 - **Bypass for unattached streams.** A stream no domain owns is blocked.
 - **Per-image family selection.** Families are matched by discovery.
+- **Firmware layouts a domain cannot keep.** An `iommu-addresses` window
+  mapping memory elsewhere than at its own address, or keeping an I/O range
+  out of use without mapping it, is not one the domain model holds, so the
+  master asking for it is unconfined rather than handed a domain that
+  allocates over it.
 
 ## 11. Charter amendments this work requires
 
@@ -651,12 +752,74 @@ whose updates are logarithmic rather than a sorted vector's linear moves.
     translation fault fails the run. Group exclusion between two live
     drivers stays host-proven: which of two drivers carves first is a race,
     and a vertical that passes on whichever wins proves nothing.
+- **IOM13:** `lib/fdt` host decoding (windows, the swizzled INTx map,
+  external-facing ports); `lib/pci` resource assignment, wide BARs sharing
+  the low window where no wide window is reached; the shared-line table's
+  oneshot-all re-arm and its store-buffering pairing, by a host litmus test;
+  live, `tairix-test-autoload-input-pci-qemu-{aarch64,riscv64}` deliver keys
+  from a keyboard whose INTx line a mouse shares.
+- **IOM14:**
+  - **lib/fdt:** id maps in QEMU's shapes (a whole-bus map, a unit's own id
+    left out, an entry mapping nothing), masks, and every malformed map
+    refused whole; `memory-region` windows, identity or not, and unreadable
+    ones; usable-node iteration, a disabled memory node and a failed or
+    reserved CPU; the fuzz harness drives each reader.
+  - **Walk:** unit classing, streams named before the walk reaches the unit
+    and coalesced, untranslated masters, each refusal leaving no DMA
+    authority, and a spliced subtree shifting no id a DMA request, a bus
+    child's duty or a stream names.
+  - **Probe:** groups named by least stream, a stream two groups use (an
+    IVRS alias, a masked map) unconfining both, a stream contested off the
+    segment.
+  - **Topology:** host maps through usable, disabled and absent units;
+    platform groups joined transitively; a master sharing a host's stream or
+    spanning units refused; firmware windows kept on every stream, or the
+    group refused where the domain cannot keep them; each refusal audited.
+- **IOM15:**
+  - **Family:** a register-level model of the unit — stream table walk at
+    both stages, context descriptors, the command queue with its error
+    recovery, the event queue with its wrap and overflow — runs the shared
+    conformance suite at stage 2 with consumed syncs and at stage 1 with a
+    linear table and stored ones; bring-up aborting everything until the
+    tables are the kernel's, then blocking every stream; refused units; a
+    sync never completing confirming nothing; enrolled in miri.
+  - **Kernel:** a unit's fault line is the interrupt at the place its node
+    states, served wired once its controller takes the trigger, else
+    unrouted; `irq_bind` gives an edge line its trigger first or refuses it;
+    the GIC changes a line's configuration only while it is disabled.
+  - **Live:** `tairix-test-dma-translation-qemu-aarch64` and its stage-1
+    binary boot the production kernel behind an `arm-smmuv3`, the keyboard
+    and mouse virtio-pci functions `iommu_platform=on` on the ECAM host the
+    unit fronts, and pass only on a key delivered after the unit reported
+    `translating` with nothing stopped and the keyboard was granted bus
+    mastering; any other unit outcome, `faults_unrouted` among them, or a
+    translation fault fails the run.
+- **IOM16:**
+  - **Family:** a register-level model of the unit — the directory at one,
+    two and three levels in either context format, both stages' walks with
+    the second stage's wide root and the first stage's sign extension, the
+    command queue with its error recovery, the fault queue with its overflow
+    — runs the shared conformance suite at the second stage over three levels
+    and at the first over one; bring-up refusing everything until the
+    directory is the kernel's, then blocking every device; a valid context
+    replaced only through an invalid one; refused units; a fence never
+    completing confirming nothing; the mode chosen by the physical address
+    space; page faults classed by the domain; enrolled in miri. The engine's
+    wide root is host-tested in `kernel/iommu/api`.
+  - **Topology:** a unit's fault line is the first its node names, read from
+    QEMU's two-cell specifiers under a one-cell PLIC.
+  - **Live:** `tairix-test-dma-translation-qemu-riscv64` and its stage-1
+    binary boot the production kernel behind `iommu-sys` and pass only on
+    the key the translation witness the x86_64 and aarch64 verticals share
+    accepts.
 - **The storm stays host-proven, not live.** QEMU's virtio device calls
   `virtio_error` and breaks on the first refused DMA, and the storm threshold
-  sits above any VT-d fault ring, so a live storm would need ~512 device resets
+  is twice the deepest fault queue a family lets a unit hold, so a live storm
+  would need ~1024 device resets
   per one-second window — a load-dependent, flaky mechanism the charter forbids.
   The storm/silence/`Offline` path is proven against the register-level model
   (IOM4–IOM6 above); the live vertical proves the single MSI-delivered fault,
   which is MI0's exit criterion.
-- **miri** enrols `kernel/iommu/api` and every family crate with an `unsafe`
-  core.
+- **miri** enrols `kernel/iommu/api`, whose engine and table memory hold the
+  `unsafe` every family reaches, and every family crate, whose tests drive
+  that engine over the family's own table formats.

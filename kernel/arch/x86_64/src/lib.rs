@@ -164,6 +164,7 @@ pub mod hybrid;
 pub mod interrupts;
 pub mod irq;
 pub mod irqmask;
+pub mod ivrs;
 #[cfg(feature = "sched-arch")]
 pub mod kernel_arch;
 /// x86_64 implementation of the Arch HAL memory-tagging surface
@@ -175,6 +176,7 @@ pub mod kernel_arch;
 /// `tairix-arch-api` dependency this module's trait lives in.
 #[cfg(feature = "sched-arch")]
 pub mod memtag;
+pub mod msr;
 pub mod multiboot2;
 pub mod percpu;
 /// x86_64 implementation of the Arch HAL per-CPU storage surface

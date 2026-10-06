@@ -145,6 +145,12 @@ _ap_long_mode:
     movabsq $tairix_arch_x86_64_fpu_enable, %rax
     call    *%rax
 
+    // Put the local APIC in the mode the boot CPU chose before anything
+    // reaches it. A Rust routine, so the slot pointer is reloaded after.
+    movabsq $tairix_arch_x86_64_ap_apic_mode, %rax
+    call    *%rax
+    movq    $(0x8000 + AP_BOOT_SLOT_OFFSET), %rsi
+
     // Argument 1 = cpu_id (zero-extended from u32).
     movl    AP_BOOT_SLOT_CPU_ID(%rsi), %edi
 

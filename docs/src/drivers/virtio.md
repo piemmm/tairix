@@ -199,6 +199,15 @@ bounds-checked against the notification window on the fallible
 a pre-validated offset and fails closed (skips the write) for an
 unprogrammed queue.
 
+The transport is built signalling one way, fixed for its life: through
+the MSI-X table entry the kernel routed, which `queue_set` programs into
+every queue's `queue_msix_vector`, or, with no entry, on the function's
+INTx pin, which the device holds until `ack_interrupt` reads the ISR
+status (virtio 1.1 §4.1.4.5). A user-space driver builds it with
+`PciTransport::map`, from the windows and the entry its grants name
+(`virtio_pci_windows`), so the entry comes from the kernel that routed
+it, never from a constant the driver assumes.
+
 ## Modern MMIO transport (`MmioTransport`)
 
 `MmioTransport` (`lib/virtio/src/transport_mmio.rs`) is the

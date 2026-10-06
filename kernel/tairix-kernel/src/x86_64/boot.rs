@@ -51,7 +51,7 @@ use alloc::vec::Vec;
 use tairix_abi::SYSCALL_MAX_ARGS;
 use tairix_arch_api::fault;
 use tairix_arch_x86_64::acpi::{self, MadtEntry};
-use tairix_arch_x86_64::apic::{IoApic, Lapic, VolatileIoApicMmio, VolatileLapicMmio};
+use tairix_arch_x86_64::apic::{IoApic, Lapic, LocalApic, VolatileIoApicMmio};
 use tairix_arch_x86_64::apic_timer::{self, Calibration, PolledPit, Rdtsc};
 use tairix_arch_x86_64::bootinfo::BootData;
 use tairix_arch_x86_64::bootmemory;
@@ -59,7 +59,7 @@ use tairix_arch_x86_64::gdt::PerCpuGdt;
 use tairix_arch_x86_64::irq as arch_irq;
 use tairix_arch_x86_64::kernel_arch::{halt as arch_halt, X86_64Arch, X86_64ArchStorage};
 use tairix_arch_x86_64::paging;
-use tairix_arch_x86_64::{percpu, preempt, smp, syscall_entry};
+use tairix_arch_x86_64::{percpu, preempt, syscall_entry};
 use tairix_kernel_core::boot_audit_ring::{
     boot_audit_clock, BootAuditRing, BOOT_AUDIT_RING_CAPACITY,
 };
@@ -67,7 +67,7 @@ use tairix_kernel_core::{kernel_main, BootInfo, InitSpawn, IrqRouting};
 use tairix_kernel_irq::IrqController;
 use tairix_kernel_mem::{BootMemoryMap, MemoryRegion, PhysAddr, RegionKind};
 use tairix_kernel_sched_api::SchedulerConfig;
-use tairix_log::{Event, EventId, Field, FieldValue, Level, Sink, TeeSink};
+use tairix_log::{Event, EventId, Field, Level, Sink, TeeSink};
 
 use tairix_arch_x86_64::irqmask::RflagsIrqControl;
 use tairix_arch_x86_64::serial::SERIAL_SINK;
@@ -214,10 +214,9 @@ pub enum BootError {
     /// supports publishes at least one; the absence is a fatal
     /// discovery defect.
     NoIoApic,
-    /// The total IO-APIC pin count exceeded the reserved external-IRQ
-    /// vector range (`0x30..=0xFE`, 207 vectors). Real platforms ship
-    /// at most ~120 pins across all IO-APICs combined, so this is a
-    /// pathological case.
+    /// The IO-APICs together carry more pins than the external-IRQ vector
+    /// range (`0x30..=0xFE`, 207 vectors) holds: every pin claims its vector
+    /// at boot (`plans/OPEN-DEFECTS.md` D718).
     IrqVectorExhausted,
     /// `percpu::install_vector` rejected the external-IRQ IDT install.
     /// Surfaces a defect in the per-CPU bootstrap latch or an
@@ -230,6 +229,10 @@ pub enum BootError {
     IrqRoutingPublish,
     /// `IoApicController::program_pin` rejected the binding.
     IrqProgramPin,
+    /// The boot CPU's APIC id is past the eight bits xAPIC names, which
+    /// every per-CPU map and every compatibility-format interrupt keys a CPU
+    /// by.
+    BspApicIdUnsupported,
     /// [`fault::set_user_fault_resolver`] refused the production user-fault
     /// resolver (a resolver was already installed). The single-entry
     /// bring-up runs once per boot, so a second occupant is a boot-path
@@ -286,6 +289,7 @@ impl BootError {
             Self::IrqIdtInstall => "irq_idt_install_failed",
             Self::IrqRoutingPublish => "irq_routing_publish_failed",
             Self::IrqProgramPin => "irq_program_pin_failed",
+            Self::BspApicIdUnsupported => "bsp_apic_id_unsupported",
             Self::UserFaultResolverInstall => "user_fault_resolver_install_failed",
             Self::UserFaultTerminatorInstall => "user_fault_terminator_install_failed",
             Self::TscNotInvariant => "tsc_not_invariant",
@@ -487,11 +491,11 @@ fn log_init_failure(sink: &(dyn Sink + Sync), err: BootError) {
 /// of this bring-up.
 pub struct BspBringUp {
     /// The BSP's LAPIC id, verified present and enabled in the MADT.
-    pub bsp_lapic_id: u8,
+    pub bsp_lapic_id: u32,
     /// Dense-CpuId→LAPIC map with only the BSP populated — the one
     /// definition both the production arch handle and a chassis's handles
     /// are built from (single-CPU bring-up; an AP bring-up re-sizes it).
-    pub cpu_to_lapic: [Option<u8>; 1],
+    pub cpu_to_lapic: [Option<u32>; 1],
     /// LAPIC-timer/TSC calibration measured against the PIT; the unit input
     /// to [`BinArch`]'s `monotonic_ns`.
     pub calibration: Calibration,
@@ -606,10 +610,23 @@ pub fn bring_up_bsp(
         paging::gigapages_supported(),
     );
 
-    // 2. Software-enable the BSP LAPIC and read its ID.
-    let mut lapic = make_bsp_lapic();
+    // 2. Software-enable the BSP LAPIC and read its ID. An APIC firmware
+    //    left in x2APIC mode stays in it: leaving it means disabling the
+    //    APIC, and its MMIO window answers nothing.
+    if tairix_arch_x86_64::apic::in_x2apic() {
+        // SAFETY: ring 0, interrupts masked, before anything reaches the
+        // APIC and before any other CPU starts; the CPU is in x2APIC mode,
+        // so it has it.
+        unsafe { tairix_arch_x86_64::apic::enter_x2apic() };
+    }
+    let mut lapic = Lapic::new(LocalApic);
     lapic.software_enable(0xFF);
-    let bsp_lapic_id = smp::bsp_lapic_id();
+    // Every per-CPU map and every compatibility-format interrupt keys a CPU
+    // by the eight bits xAPIC names, 0xFF being the broadcast id.
+    let bsp_lapic_id = u8::try_from(lapic.id())
+        .ok()
+        .filter(|&id| id != u8::MAX)
+        .ok_or(BootError::BspApicIdUnsupported)?;
 
     // 3. Calibrate the LAPIC timer against the PIT. The same window
     //    samples RDTSC so the resulting `Calibration::tsc_per_second`
@@ -649,7 +666,7 @@ pub fn bring_up_bsp(
     //    machine the caller actually drives, no global `MAX_CPUS`
     //    ceiling baked into the arch crate). The per-CPU kernel-stack
     //    pool keeps its own `MAX_CPUS` secondary-bring-up bound.
-    let cpu_to_lapic: [Option<u8>; 1] = [Some(bsp_lapic_id)];
+    let cpu_to_lapic: [Option<u32>; 1] = [Some(u32::from(bsp_lapic_id))];
 
     // 6a. Validate the TSC before trusting `RDTSC` as the cross-CPU
     //     monotonic clock source. The contract is recorded on every
@@ -731,7 +748,7 @@ pub fn bring_up_bsp(
 
     // 9. Populate the LAPIC→CpuId mapping so the timer ISR can
     //    translate the LAPIC ID register reading to a dense CpuId.
-    preempt::set_cpu_id_for_lapic(bsp_lapic_id, 0);
+    preempt::set_cpu_id_for_lapic(u32::from(bsp_lapic_id), 0);
 
     // 10. Enable `syscall`/`sysret` on the BSP, with both ring-3 entry
     //     stacks — `syscall`'s and `TSS.RSP0`, which a ring-3 exception or
@@ -759,7 +776,7 @@ pub fn bring_up_bsp(
     //      out of scope here) will later unmask each line through the
     //      controller's `program_pin` re-publish path when a driver
     //      binds to the GSI.
-    let irq_routing = discover_and_program_io_apics(&madt, bsp_lapic_id)?;
+    let irq_routing = discover_and_program_io_apics(&madt, bsp_lapic_id, log_sink)?;
 
     // Discover the ACPI platform inventory (root, enabled CPUs, and the I/O
     // APICs) plus the enumerated virtio-PCI devices, which `try_boot`'s boot
@@ -783,10 +800,10 @@ pub fn bring_up_bsp(
     // (and the MCFG the ECAM branch reads) sit in the identity-mapped
     // 0..4 GiB window (`boot.s` SAFETY-INVARIANT 4), and the ECAM window is
     // re-validated against that window before it is mapped.
-    let tree = unsafe { seed_hardware_tree(madt_bytes, &rsdp, log_sink) };
+    let tree = unsafe { seed_hardware_tree(madt_bytes, &rsdp, &boot_data, log_sink) };
 
     Ok(BspBringUp {
-        bsp_lapic_id,
+        bsp_lapic_id: u32::from(bsp_lapic_id),
         cpu_to_lapic,
         calibration,
         memory_map,
@@ -1004,6 +1021,7 @@ fn try_boot(
 unsafe fn seed_hardware_tree(
     madt_bytes: &[u8],
     rsdp: &acpi::Rsdp,
+    firmware: &BootData<'_>,
     log: &'static (dyn Sink + Sync),
 ) -> Vec<tairix_abi::HwNode> {
     use tairix_arch_api::PlatformDiscovery;
@@ -1014,233 +1032,371 @@ unsafe fn seed_hardware_tree(
     let _ = AcpiDiscovery::new(madt_bytes).discover(&mut sink);
     // SAFETY: forwarded — the caller pins the firmware tables into the
     // identity-mapped window.
-    let dmar = unsafe { acpi::locate_dmar(rsdp) }.and_then(|bytes| {
-        let parsed = tairix_arch_x86_64::dmar::Dmar::parse(bytes).ok();
-        if parsed.is_none() {
-            log_dmar(log, Level::Error, "dmar table malformed; dma unconfined");
-        }
-        parsed
-    });
+    let table = unsafe { unit_table(rsdp, log) };
     // SAFETY: forwarded — the caller pins the firmware tables (and the MCFG
-    // the ECAM branch reads) into the identity-mapped window.
-    unsafe { seed_virtio_pci(rsdp, dmar.as_ref(), &mut sink, log) };
+    // they reference) into the identity-mapped window.
+    let platform = unsafe { platform_registers(madt_bytes, rsdp, &table, sink.nodes()) };
+    match platform.and_then(|platform| bar_apertures(firmware, platform)) {
+        // SAFETY: forwarded — the caller pins the firmware tables (and the
+        // MCFG the ECAM branch reads) into the identity-mapped window.
+        Some(apertures) => unsafe { seed_pci(rsdp, &table, &apertures, &mut sink, log) },
+        None => crate::pci_probe::log_discovery(
+            log,
+            Level::Error,
+            "pci apertures unrecorded; none probed",
+        ),
+    }
     sink.into_vec()
 }
 
-/// Stable id for the boot's DMA translation discovery: a unit the kernel
-/// cannot describe leaves the DMA of every device behind it unconfined.
-const KERNEL_BOOT_DMAR: EventId = EventId(4103);
-
-fn log_dmar(log: &dyn Sink, level: Level, message: &'static str) {
-    tairix_log::log(
-        log,
-        &Event {
-            level,
-            id: KERNEL_BOOT_DMAR,
-            message,
-            fields: &[],
-        },
-    );
+/// Where a firmware-assigned BAR may decode: anywhere the physical address
+/// space reaches but memory of any kind firmware describes — RAM, and RAM
+/// firmware keeps for itself — the kernel image, and the `platform`'s own
+/// registers, so no device aims the kernel's writes or a driver's mapping at
+/// memory or at the devices the kernel itself drives.
+fn bar_apertures(
+    data: &BootData<'_>,
+    mut forbidden: Vec<core::ops::Range<u64>>,
+) -> Option<tairix_pci::Apertures> {
+    let mut held = true;
+    firmware_regions(data, &mut |region| {
+        if let Some(memory) = region.memory() {
+            held &= forbidden.try_reserve(1).is_ok();
+            if held {
+                forbidden.push(memory);
+            }
+        }
+    })
+    .ok()?;
+    if !held {
+        return None;
+    }
+    let (kernel_start, kernel_end) = kernel_image_phys_bounds();
+    forbidden.try_reserve(1).ok()?;
+    forbidden.push(kernel_start.as_u64()..kernel_end.as_u64());
+    let mut windows = Vec::new();
+    windows.try_reserve_exact(1).ok()?;
+    windows.push(tairix_pci::Aperture::identity(
+        0..paging::PHYSICAL_ADDRESS_LIMIT,
+    ));
+    Some(tairix_pci::Apertures::new(windows, forbidden))
 }
 
-/// Enumerate the virtio-PCI bus and emit every virtio-net and virtio-input
-/// function (each with its resolved config windows + interrupt line) and
-/// every virtio-blk function (match-key-only) into `sink`.
+/// The registers of the devices the platform itself is made of: every local
+/// APIC and the message window, each device `platform` already holds (the
+/// IO-APICs), each translation unit, and each ECAM region. [`None`] when they
+/// cannot be held.
 ///
-/// Configuration space is reached through the modern memory-mapped ECAM
-/// (MMCONFIG) mechanism when the firmware advertises it (an `MCFG` table),
-/// falling back to the universal PCI **mechanism #1** (`0xCF8`/`0xCFC` port
-/// I/O) otherwise. This is hardware-capability detection, not a
+/// # Safety
+///
+/// `rsdp` and the MCFG it references must lie in the identity-mapped window.
+unsafe fn platform_registers(
+    madt_bytes: &[u8],
+    rsdp: &acpi::Rsdp,
+    table: &UnitTable<'_>,
+    platform: &[tairix_abi::HwNode],
+) -> Option<Vec<core::ops::Range<u64>>> {
+    let mut windows = Vec::new();
+    let mut held = true;
+    let mut keep = |window: core::ops::Range<u64>| {
+        held &= windows.try_reserve(1).is_ok();
+        if held {
+            windows.push(window);
+        }
+    };
+    keep(tairix_kernel_iommu_api::MESSAGE_WINDOW);
+    let page = |base: u64| base..base.saturating_add(tairix_kernel_mem::PAGE_SIZE as u64);
+    if let Ok(madt) = acpi::Madt::parse(madt_bytes) {
+        keep(page(u64::from(madt.lapic_address)));
+        for entry in madt.entries() {
+            if let MadtEntry::LocalApicAddressOverride { address } = entry {
+                keep(page(address));
+            }
+        }
+    }
+    platform
+        .iter()
+        .flat_map(tairix_kernel_core::iommu::register_windows)
+        .for_each(&mut keep);
+    match table {
+        UnitTable::Dmar(dmar) => dmar
+            .units()
+            .map(|unit| {
+                unit.register_base()..unit.register_base().saturating_add(unit.register_len())
+            })
+            .for_each(&mut keep),
+        UnitTable::Ivrs(ivrs) => ivrs
+            .units()
+            .map(|unit| {
+                let base = unit.register_base();
+                base..base.saturating_add(tairix_arch_x86_64::ivrs::UNIT_REGISTER_LEN)
+            })
+            .for_each(&mut keep),
+        UnitTable::None => {}
+    }
+    // SAFETY: forwarded — the caller pins the MCFG into the identity window.
+    if let Some(mcfg) =
+        unsafe { acpi::locate_mcfg(rsdp) }.and_then(|bytes| acpi::Mcfg::parse(bytes).ok())
+    {
+        for allocation in mcfg.allocations() {
+            let base = allocation.window_base();
+            keep(base..base.saturating_add(allocation.window_len()));
+        }
+    }
+    held.then_some(windows)
+}
+
+/// The translation units firmware describes, in the table it describes them
+/// in: a platform is Intel's or AMD's, so a DMAR wins over an IVRS.
+enum UnitTable<'a> {
+    Dmar(tairix_arch_x86_64::dmar::Dmar<'a>),
+    Ivrs(tairix_arch_x86_64::ivrs::Ivrs<'a>),
+    None,
+}
+
+/// The table describing the platform's translation units, if one parses; a
+/// malformed one is refused whole and logged, leaving every device's DMA
+/// unconfined.
+///
+/// # Safety
+///
+/// `rsdp` and every table it references must lie in the identity-mapped
+/// 0..4 GiB window, unmodified for the kernel's lifetime.
+unsafe fn unit_table(rsdp: &acpi::Rsdp, log: &dyn Sink) -> UnitTable<'static> {
+    // SAFETY: forwarded.
+    if let Some(bytes) = unsafe { acpi::locate_dmar(rsdp) } {
+        if let Ok(dmar) = tairix_arch_x86_64::dmar::Dmar::parse(bytes) {
+            return UnitTable::Dmar(dmar);
+        }
+        crate::pci_probe::log_discovery(log, Level::Error, "dmar table malformed; dma unconfined");
+        return UnitTable::None;
+    }
+    // SAFETY: forwarded.
+    match unsafe { acpi::locate_ivrs(rsdp) }.map(tairix_arch_x86_64::ivrs::Ivrs::parse) {
+        Some(Ok(ivrs)) => UnitTable::Ivrs(ivrs),
+        Some(Err(_)) => {
+            crate::pci_probe::log_discovery(
+                log,
+                Level::Error,
+                "ivrs table malformed; dma unconfined",
+            );
+            UnitTable::None
+        }
+        None => UnitTable::None,
+    }
+}
+
+/// Probe every PCI segment the firmware describes and keep each as the
+/// kernel's own: every virtio-blk function (match-key-only) and every
+/// virtio-net, sound and input function (each with its resolved
+/// configuration windows and interrupt line) is emitted into `sink`.
+///
+/// Configuration space is reached through ECAM (MMCONFIG) for every segment
+/// the firmware's `MCFG` describes, falling back to PCI **mechanism #1**
+/// (`0xCF8`/`0xCFC` port I/O), which reaches segment 0 only, where it
+/// describes none. This is hardware-capability detection, not a
 /// compatibility shim: a real UEFI/PCIe machine (and QEMU `q35`) exposes
-/// ECAM — the standard path with extended-config reach — while the legacy
-/// `pc`/i440fx machine (and any firmware without MCFG) has none, and
-/// mechanism #1 reaches the standard 256-byte configuration space every
-/// boot-critical virtio function's registers live in. Both are members of
-/// the `lib/pci` config-access family (`mechanism_ecam` / `mechanism_one`),
-/// and the same generic [`probe_virtio_pci`] runs over whichever the
-/// firmware provides, so there is one probe definition and no path is dead.
-///
-/// Split from [`seed_hardware_tree`] so the ACPI seed stays a pure
-/// byte-slice normalisation and the PCI walk is isolated.
+/// ECAM, while the legacy `pc`/i440fx machine has none. Every segment feeds
+/// the one shared probe ([`crate::pci_probe::probe`]), so there is one probe
+/// definition and no path is dead.
 ///
 /// # Safety
 ///
 /// `rsdp` and the MCFG it references must lie in the boot trampoline's
-/// 0..4 GiB identity-mapped window (the ECAM branch validates the window
-/// lies wholly within it before mapping).
-unsafe fn seed_virtio_pci(
+/// 0..4 GiB identity-mapped window (each ECAM region is validated to lie
+/// wholly within the direct map before it is mapped).
+unsafe fn seed_pci(
     rsdp: &acpi::Rsdp,
-    dmar: Option<&tairix_arch_x86_64::dmar::Dmar<'_>>,
+    table: &UnitTable<'_>,
+    apertures: &tairix_pci::Apertures,
     sink: &mut crate::boot_hwtree::CollectingHwNodeSink,
     log: &dyn Sink,
 ) {
-    // Prefer ECAM when the firmware advertises an MCFG; else the universal
-    // mechanism #1, which reaches segment 0 only. Whichever is chosen feeds
-    // the one generic probe, and is kept as the kernel's way to the segment.
     // SAFETY: forwarded — `rsdp` (and its MCFG) are identity-mapped per the
     // caller's contract.
-    match unsafe { ecam_bus(rsdp) } {
-        Some((pci, segment)) => own_pci(pci, segment, dmar, sink, log),
-        None => own_pci(
-            tairix_pci::mechanism_one(tairix_arch_x86_64::pio::x86_port_io()),
-            0,
-            dmar,
+    let segments = unsafe { pci_segments(rsdp, apertures, log) };
+    let routes = core::cell::RefCell::new(Vec::new());
+    let probe = |units: &mut dyn crate::pci_probe::UnitTopology| {
+        let mut publish =
+            |segment: crate::hwdiscovery::PciSegment,
+             bus: &dyn crate::pci_host::HostBus,
+             _topology: &tairix_pci::topology::Topology,
+             functions: &[tairix_abi::driver::bus::BusDevice],
+             dma: crate::hwdiscovery::DmaIdentity<'_>,
+             sink: &mut crate::boot_hwtree::CollectingHwNodeSink| {
+                let walk = crate::hwdiscovery::PciWalk {
+                    segment,
+                    functions,
+                    bus,
+                    registers: &crate::x86_64::registers::KernelRegisters,
+                    dma,
+                };
+                // The virtio-blk node is match-key-only: the in-kernel floor
+                // bring-up re-resolves its transport from configuration space and
+                // routes its own MSI-X. Whatever was collected is seeded
+                // regardless.
+                let _ = crate::hwdiscovery::observe_virtio_pci_block_devices(&walk, sink, log);
+                observe_interrupt_driven(bus, &walk, &routes, sink, log);
+            };
+        // The x86_64 port names no external-facing port of its own: ACPI
+        // describes them in AML, which the kernel does not run, so only a
+        // hot-plug capable slot marks one.
+        crate::pci_probe::probe(
+            segments,
+            units,
+            &|_segment, _address| false,
+            &mut publish,
             sink,
             log,
-        ),
-    }
-}
-
-/// The kernel's one owner of PCI configuration space, which the boot probe
-/// publishes.
-static PCI_HOST: tairix_sync::Once<crate::pci_host::PciHost> = tairix_sync::Once::new();
-
-/// The kernel's owner of PCI configuration space, once the boot probe has
-/// published it: every kernel access to a function's configuration space,
-/// and every change to its bus mastering, goes through it.
-#[must_use]
-pub fn pci_host() -> Option<&'static crate::pci_host::PciHost> {
-    PCI_HOST.get().ok().flatten()
-}
-
-/// Probe `pci`, then keep it as the kernel's owner of segment `segment`'s
-/// configuration space, with the functions the probe handed over.
-///
-/// The hierarchy is walked once, every observer reading the one walk. Where
-/// a unit covers the segment the walk turns ACS on first, so the isolation
-/// groups are as fine as the hardware allows. A segment that cannot be
-/// confined — its bus numbers form no tree, or its units cannot all be
-/// given nodes — publishes nothing, and a flat scan stops every function and
-/// bridge that could master past a unit; where only the tree is missing, the
-/// units still come up, blocking every stream.
-fn own_pci<B: crate::pci_host::HostBus + tairix_pci::topology::PciTopology + Send + 'static>(
-    pci: B,
-    segment: u16,
-    dmar: Option<&tairix_arch_x86_64::dmar::Dmar<'_>>,
-    sink: &mut crate::boot_hwtree::CollectingHwNodeSink,
-    log: &dyn Sink,
-) {
-    use tairix_pci::topology::AcsPolicy;
-
-    let covered = dmar.is_some_and(|dmar| dmar.units().any(|unit| unit.segment() == segment));
-    let acs = if covered {
-        AcsPolicy::Enable
-    } else {
-        AcsPolicy::Leave
+        )
     };
-    let probed = if let Ok(topology) = pci.topology(acs) {
-        probe_virtio_pci(&pci, &topology, segment, dmar, sink, log)
-    } else {
-        log_dmar(
-            log,
-            Level::Error,
-            "pci hierarchy unreadable; none published",
-        );
-        if let Some(dmar) = dmar {
-            let _ = emit_units(dmar, segment, None, sink, log);
+    let (owned, ioapics, remapping, x2apic_opt_out) = match table {
+        UnitTable::Dmar(dmar) => {
+            let mut units = DmarUnits {
+                dmar: Some(dmar),
+                nodes: tairix_arch_x86_64::acpi::UnitNodes::default(),
+                ioapics: Vec::new(),
+            };
+            let owned = probe(&mut units);
+            let flags = dmar.flags();
+            (
+                owned,
+                units.ioapics,
+                flags.interrupt_remapping(),
+                flags.x2apic_opt_out(),
+            )
         }
-        Err(Unconfined)
+        // AMD-Vi remaps interrupts wherever it translates, and IVRS asks the
+        // OS to keep away from nothing.
+        UnitTable::Ivrs(ivrs) => {
+            let mut units = IvrsUnits {
+                ivrs,
+                nodes: tairix_arch_x86_64::acpi::UnitNodes::default(),
+                ioapics: Vec::new(),
+            };
+            let owned = probe(&mut units);
+            (owned, units.ioapics, true, false)
+        }
+        UnitTable::None => {
+            let mut units = DmarUnits {
+                dmar: None,
+                nodes: tairix_arch_x86_64::acpi::UnitNodes::default(),
+                ioapics: Vec::new(),
+            };
+            (probe(&mut units), Vec::new(), false, false)
+        }
     };
-    let functions = probed.unwrap_or_else(|Unconfined| {
-        let stop = |function: &tairix_pci::topology::Function| {
-            crate::pci_probe::stopped_unresolved(function, covered)
-        };
-        log_quiesced(log, pci.quiesce(&stop));
-        Vec::new()
+    crate::x86_64::remapping::publish_boot_sources(crate::x86_64::remapping::BootSources {
+        ioapics,
+        routes: routes.into_inner(),
+        remapping,
+        x2apic_opt_out,
     });
-    let host = crate::pci_host::PciHost::new(Box::new(pci), functions);
-    if PCI_HOST.call_once_infallible(move || host).is_err() {
-        log_dmar(
-            log,
-            Level::Error,
-            "pci configuration space unowned; no function masters",
-        );
-    }
+    crate::pci_host::publish(owned, log);
 }
 
-/// Build a memory-mapped ECAM configuration-space bus from the firmware
-/// `MCFG`, with the segment group it reaches, or `None` when the firmware
-/// advertises no MMCONFIG region or its window does not lie wholly within
-/// the live identity map (fail closed — the caller then falls back to
-/// mechanism #1).
+/// Every segment the firmware's `MCFG` describes, each reached through its
+/// ECAM regions; with no usable MCFG, segment 0 through mechanism #1. A
+/// segment one of whose regions does not lie wholly within the direct map is
+/// left unprobed, logged: no window over it can be trusted to stay in bounds.
 ///
 /// # Safety
 ///
 /// `rsdp` must be a validated RSDP whose tables lie in the identity-mapped
-/// 0..4 GiB window (forwarded from [`seed_virtio_pci`]).
-unsafe fn ecam_bus(
+/// 0..4 GiB window (forwarded from [`seed_pci`]).
+unsafe fn pci_segments(
     rsdp: &acpi::Rsdp,
-) -> Option<(
-    impl tairix_abi::driver::virtio_pci::VirtioPciBus
-        + tairix_abi::driver::msix::MsixBus
-        + tairix_abi::driver::pci::PciBus
-        + tairix_pci::topology::PciTopology,
-    u16,
-)> {
-    use tairix_abi::RegisterWindow;
-
+    apertures: &tairix_pci::Apertures,
+    log: &dyn Sink,
+) -> Vec<crate::pci_probe::ProbeSegment> {
     // SAFETY: forwarded — `rsdp` is identity-mapped per the caller.
-    let mcfg_bytes = unsafe { acpi::locate_mcfg(rsdp) }?;
-    let ecam = acpi::mcfg_first_ecam(mcfg_bytes)?;
-    // The window must lie wholly inside the direct physical map, or a
-    // `RegisterWindow` over it would touch unmapped memory (fail closed).
-    let window_len = ecam.window_len();
-    let end = ecam.base.checked_add(window_len)?;
-    if ecam.base == 0 || end > paging::physmap_bytes() {
-        return None;
+    let mcfg = unsafe { acpi::locate_mcfg(rsdp) }.and_then(|bytes| {
+        let parsed = acpi::Mcfg::parse(bytes).ok();
+        if parsed.is_none() {
+            crate::pci_probe::log_discovery(
+                log,
+                Level::Error,
+                "mcfg table malformed; configuration space through mechanism one",
+            );
+        }
+        parsed
+    });
+    let mut segments = Vec::new();
+    if let Some(mcfg) = mcfg.filter(|mcfg| mcfg.allocations().next().is_some()) {
+        let mut numbers: Vec<u16> = Vec::new();
+        for allocation in mcfg.allocations() {
+            if !numbers.contains(&allocation.segment()) && numbers.try_reserve(1).is_ok() {
+                numbers.push(allocation.segment());
+            }
+        }
+        numbers.sort_unstable();
+        if segments.try_reserve_exact(numbers.len()).is_err() {
+            crate::pci_probe::log_discovery(
+                log,
+                Level::Error,
+                "pci segments unrecorded; none probed",
+            );
+            return segments;
+        }
+        for number in numbers {
+            match ecam_segment(&mcfg, number, apertures.clone()) {
+                Some(bus) => segments.push(crate::pci_probe::ProbeSegment {
+                    number,
+                    bus: Box::new(bus),
+                }),
+                None => crate::pci_probe::log_discovery(
+                    log,
+                    Level::Error,
+                    "pci segment configuration region unmappable; segment unprobed",
+                ),
+            }
+        }
+        return segments;
     }
-    let len = usize::try_from(window_len).ok()?;
-    let addr = usize::try_from(paging::physmap_virt(ecam.base)).ok()?;
-    let ptr = core::ptr::NonNull::new(addr as *mut u8)?;
-    // SAFETY: `ecam.base .. ecam.base + len` is the firmware-described ECAM
-    // configuration window (`mcfg_first_ecam`), proven above to lie wholly
-    // within the live direct physical map, so `ptr` is a valid,
-    // uniquely-owned pointer to `len` bytes for the kernel's lifetime.
-    // Config space is only ever accessed through the bounded
-    // `RegisterWindow` accessors this window backs: by the boot probe alone,
-    // then only under the kernel's PCI host lock (`own_pci`).
-    let window = unsafe { RegisterWindow::from_mapping(ecam.base, ptr, len) };
-    Some((tairix_pci::mechanism_ecam(window), ecam.segment))
+    if segments.try_reserve_exact(1).is_ok() {
+        segments.push(crate::pci_probe::ProbeSegment {
+            number: 0,
+            bus: Box::new(tairix_pci::mechanism_one(
+                tairix_arch_x86_64::pio::x86_port_io(),
+                apertures.clone(),
+            )),
+        });
+    }
+    segments
 }
 
-/// The MSI-X table entry each interrupt-driven virtio-PCI function's vector
-/// is routed into. Every virtqueue of the function shares it (the driver
-/// programs `queue_msix_vector`/`config_msix_vector` to select it), so one
-/// bound [`tairix_abi::IrqHandle`] covers the whole device — the same entry
-/// the in-kernel root-block bring-up uses.
-const MSIX_PROBE_ENTRY: u16 = 0;
+/// An ECAM bus over every region `mcfg` gives segment `number`, or [`None`]
+/// when one does not lie wholly within the live direct map (fail closed).
+fn ecam_segment(
+    mcfg: &acpi::Mcfg<'_>,
+    number: u16,
+    apertures: tairix_pci::Apertures,
+) -> Option<impl crate::pci_probe::SegmentBus + 'static> {
+    use tairix_abi::RegisterWindow;
 
-/// Bookkeeping virtual base of the throwaway MSI-X-routing register-window
-/// map. Its page-table writes land in an arch space that is never made live;
-/// the CPU reaches the MSI-X table through the identity [`DirectPhysMap`], so
-/// this base is pure bookkeeping and sits above the 32 MiB low identity the
-/// space maps.
-const MSI_PROBE_MMIO_VBASE: u64 = 0x6800_0000;
+    let mut regions = Vec::new();
+    for allocation in mcfg.allocations().filter(|a| a.segment() == number) {
+        let base = allocation.window_base();
+        let window_len = allocation.window_len();
+        let len = usize::try_from(window_len).ok()?;
+        let ptr = crate::x86_64::registers::device_registers(base, window_len)?;
+        // SAFETY: `base .. base + len` is a firmware-described ECAM region
+        // (`acpi::Mcfg`, which refuses any two of one segment overlapping),
+        // proven above to lie wholly within the live direct physical map, so
+        // `ptr` is valid for `len` bytes for the kernel's lifetime. Config
+        // space is reached only through the bounded `RegisterWindow`
+        // accessors this window backs: by the boot probe alone, then only
+        // under the kernel's PCI host lock.
+        let window = unsafe { RegisterWindow::from_mapping(base, ptr, len) };
+        regions.try_reserve(1).ok()?;
+        regions.push(tairix_pci::EcamRegion::new(window, allocation.buses()));
+    }
+    Some(tairix_pci::mechanism_ecam(regions, apertures))
+}
 
-/// Capacity, in pages, of the MSI-X-routing register-window map (each routed
-/// function maps its MSI-X table BAR through it).
-const MSI_PROBE_MMIO_PAGES: usize = 64;
-
-/// Kernel-trusted process id the boot MSI-routing capability context is
-/// derived against (it programs the device MSI-X table under `CAP_MMIO_MAP`).
-/// Distinct from the unlock service's id so the two audit streams never
-/// conflate.
-const MSI_PROBE_TASK: tairix_kernel_sec::ProcessId = tairix_kernel_sec::ProcessId(0x5b5);
-
-const _: () = assert!(
-    MSI_PROBE_TASK.0 < tairix_kernel_sched_api::FIRST_DRAWN_TASK_ID,
-    "a kernel service identity sits below the task-id draw"
-);
-
-/// Page-table frame pool the throwaway MSI-X-routing bookkeeping space draws
-/// its PML4 + intermediate tables from. Private to the probe so it never
-/// contends with the boot/init/unlock pools; the space is never made live
-/// (the MSI-X table is reached via the identity [`DirectPhysMap`]).
-static MSI_PROBE_PT_POOL: tairix_arch_x86_64::paging::PageTablePool =
-    tairix_arch_x86_64::paging::PageTablePool::new();
-
-/// The bus ranges and aliases the DMAR's scopes are resolved through, read
-/// from the probe's own walk rather than configuration space again.
+/// What a segment's walk says of the functions the DMAR's scopes name: the
+/// bus ranges and aliases they are resolved through, read from the probe's
+/// own walk rather than configuration space again.
 struct Fabric<'t>(&'t tairix_pci::topology::Topology);
 
 impl tairix_arch_x86_64::dmar::BridgeBuses for Fabric<'_> {
@@ -1251,6 +1407,7 @@ impl tairix_arch_x86_64::dmar::BridgeBuses for Fabric<'_> {
             tairix_pci::topology::Header::Bridge {
                 secondary,
                 subordinate,
+                ..
             } => Some((secondary, subordinate)),
             tairix_pci::topology::Header::Endpoint => None,
         }
@@ -1275,285 +1432,302 @@ impl tairix_arch_x86_64::dmar::DmaAliases for Fabric<'_> {
     }
 }
 
-/// A segment whose functions cannot be confined: none is published, and
-/// every one that could master past a unit is stopped.
-struct Unconfined;
-
-/// Record what the flat scan of an unconfined segment stopped, and what read
-/// back mastering still.
-fn log_quiesced(log: &dyn Sink, quiesced: tairix_abi::driver::pci::Quiesced) {
-    let count = |count: usize| FieldValue::UnsignedInt(count as u64);
-    tairix_log::log(
-        log,
-        &Event {
-            level: if quiesced.refused == 0 {
-                Level::Warn
-            } else {
-                Level::Error
-            },
-            id: KERNEL_BOOT_DMAR,
-            message: "pci functions and bridges stopped mastering over a flat scan",
-            fields: &[
-                Field {
-                    key: "stopped",
-                    value: count(quiesced.stopped),
-                },
-                Field {
-                    key: "refused",
-                    value: count(quiesced.refused),
-                },
-            ],
-        },
-    );
+impl tairix_arch_x86_64::dmar::Fabric for Fabric<'_> {
+    fn untrusted(&self, source: tairix_arch_x86_64::dmar::SourceId) -> bool {
+        self.0
+            .index_of(tairix_abi::driver::pci::config_address(source.raw()))
+            .is_some_and(|index| self.0.untrusted(index).is_some())
+    }
 }
 
-/// Emit a node for each of `dmar`'s units, keeping the firmware windows
-/// `fabric` resolves on `segment` — none without a fabric — and answer the
-/// table beside what was emitted.
-///
-/// # Errors
-///
-/// [`Unconfined`] when the nodes cannot be built, or a unit on `segment` was
-/// left without one: nothing would bring it up.
-fn emit_units<'d, 'a>(
-    dmar: &'d tairix_arch_x86_64::dmar::Dmar<'a>,
-    segment: u16,
-    fabric: Option<&Fabric<'_>>,
-    sink: &mut crate::boot_hwtree::CollectingHwNodeSink,
-    log: &dyn Sink,
-) -> Result<
-    (
-        &'d tairix_arch_x86_64::dmar::Dmar<'a>,
-        tairix_arch_x86_64::dmar::UnitNodes,
-    ),
-    Unconfined,
-> {
-    use tairix_arch_x86_64::dmar::{BridgeBuses, DmaAliases};
+impl tairix_arch_x86_64::ivrs::Walk for Fabric<'_> {
+    fn functions(&self, visit: &mut dyn FnMut(tairix_arch_x86_64::dmar::SourceId)) {
+        for function in self.0.functions() {
+            visit(tairix_arch_x86_64::dmar::SourceId::from_raw(
+                function.requester_id(),
+            ));
+        }
+    }
+}
 
-    let fabric = fabric.map(|fabric| -> (&dyn BridgeBuses, &dyn DmaAliases) { (fabric, fabric) });
-    let Ok(nodes) = tairix_arch_x86_64::dmar::emit_unit_nodes(
-        dmar,
-        crate::hwtree_node_ids::IOMMU_UNIT_NODE_BASE_ID,
-        tairix_kernel_iommu_vtd::COMPATIBLE,
-        segment,
-        fabric,
-        sink,
-    ) else {
-        log_dmar(
-            log,
-            Level::Error,
-            "dma translation units undiscovered; none published",
-        );
-        return Err(Unconfined);
-    };
+/// Log what an emission of unit nodes could not place.
+fn log_unit_nodes(log: &dyn Sink, nodes: tairix_arch_x86_64::acpi::UnitNodes) {
     if nodes.dropped != 0 {
-        log_dmar(
+        crate::pci_probe::log_discovery(
             log,
             Level::Warn,
             "firmware dma windows no unit's node can carry; those devices lose them",
         );
     }
-    if nodes.strand(dmar, segment) {
-        log_dmar(
+    if nodes.untrusted != 0 {
+        crate::pci_probe::log_discovery(
             log,
-            Level::Error,
-            "translation units past the tree's room; none published",
+            Level::Warn,
+            "firmware dma windows refused below external-facing ports",
         );
-        return Err(Unconfined);
     }
-    Ok((dmar, nodes))
 }
 
-/// Run every virtio-PCI observer over `topology`, the one walk of `pci`,
-/// emitting the virtio-blk (match-key-only), virtio-net, sound and input
-/// nodes into `sink`, and answer the functions whose configuration space the
-/// kernel now owns.
-///
-/// Before anything is routed or published, every function TAIRiX takes from
-/// firmware stops mastering DMA ([`crate::pci_probe::stop_mastering`]), and
-/// nothing here makes one a bus master again: its owner's attached domain, or
-/// its owner's first carve, does.
-///
-/// # Errors
-///
-/// [`Unconfined`] when the segment's units or its functions' DMA identities
-/// cannot be set out, or its functions cannot all be stopped, before
-/// anything is published.
-fn probe_virtio_pci<B: crate::pci_host::HostBus>(
-    pci: &B,
-    topology: &tairix_pci::topology::Topology,
-    segment: u16,
-    dmar: Option<&tairix_arch_x86_64::dmar::Dmar<'_>>,
-    sink: &mut crate::boot_hwtree::CollectingHwNodeSink,
-    log: &dyn Sink,
-) -> Result<Vec<crate::pci_host::Function>, Unconfined> {
-    use tairix_arch_x86_64::dmar::{unit_node, SourceId};
+/// Each segment's walk as a [`Fabric`], or [`None`] when they cannot be
+/// held.
+fn fabrics<'t>(
+    walks: &[(u16, &'t tairix_pci::topology::Topology)],
+) -> Option<Vec<(u16, Fabric<'t>)>> {
+    let mut fabrics = Vec::new();
+    fabrics.try_reserve_exact(walks.len()).ok()?;
+    fabrics.extend(walks.iter().map(|&(segment, walk)| (segment, Fabric(walk))));
+    Some(fabrics)
+}
 
-    // A function names its stream only once its unit's node is in the tree:
-    // a stream on a unit nothing brings up would claim a translation that
-    // never happens.
-    let fabric = Fabric(topology);
-    let first_unit = sink.nodes().len();
-    let translated = dmar
-        .map(|dmar| emit_units(dmar, segment, Some(&fabric), sink, log))
-        .transpose()?;
-    let unit = |requester: u16| {
-        translated.and_then(|(dmar, nodes)| {
-            unit_node(
-                dmar,
-                crate::hwtree_node_ids::IOMMU_UNIT_NODE_BASE_ID,
-                nodes,
-                segment,
-                SourceId::at(tairix_abi::driver::pci::config_address(requester)),
-                &fabric,
-            )
+/// The units an IVRS describes, as the shared probe reads them.
+struct IvrsUnits<'i, 'a> {
+    ivrs: &'i tairix_arch_x86_64::ivrs::Ivrs<'a>,
+    /// What [`crate::pci_probe::UnitTopology::emit`] placed.
+    nodes: tairix_arch_x86_64::acpi::UnitNodes,
+    /// The I/O APICs the placed units name.
+    ioapics: Vec<crate::x86_64::remapping::IoApicSource>,
+}
+
+impl crate::pci_probe::UnitTopology for IvrsUnits<'_, '_> {
+    fn covers(&self, segment: u16) -> bool {
+        self.ivrs.units().any(|unit| unit.segment() == segment)
+    }
+
+    fn emit(
+        &mut self,
+        walks: &[(u16, &tairix_pci::topology::Topology)],
+        sink: &mut dyn tairix_arch_api::HwNodeSink,
+        log: &dyn Sink,
+    ) -> Result<(), crate::pci_probe::Unconfined> {
+        let fabrics = fabrics(walks).ok_or(crate::pci_probe::Unconfined)?;
+        let walk = |segment: u16| {
+            fabrics
+                .iter()
+                .find(|(at, _)| *at == segment)
+                .map(|(_, fabric)| fabric as &dyn tairix_arch_x86_64::ivrs::Walk)
+        };
+        let nodes = tairix_arch_x86_64::ivrs::emit_unit_nodes(
+            self.ivrs,
+            crate::hwtree_node_ids::IOMMU_UNIT_NODE_BASE_ID,
+            tairix_kernel_iommu_amdvi::COMPATIBLE,
+            &walk,
+            sink,
+        )
+        .map_err(|_| crate::pci_probe::Unconfined)?;
+        log_unit_nodes(log, nodes);
+        let mut unrecorded = false;
+        tairix_arch_x86_64::ivrs::ioapic_sources(
+            self.ivrs,
+            crate::hwtree_node_ids::IOMMU_UNIT_NODE_BASE_ID,
+            nodes,
+            &mut |id, unit, requester| {
+                if self.ioapics.try_reserve(1).is_ok() {
+                    self.ioapics.push(crate::x86_64::remapping::IoApicSource {
+                        id,
+                        unit,
+                        requester,
+                    });
+                } else {
+                    unrecorded = true;
+                }
+            },
+        );
+        if unrecorded {
+            // A pin whose I/O APIC is unrecorded keeps the machine unremapped.
+            crate::pci_probe::log_discovery(
+                log,
+                Level::Error,
+                "io-apic remapping sources unrecorded",
+            );
+        }
+        self.nodes = nodes;
+        Ok(())
+    }
+
+    fn strands(&self, segment: u16) -> bool {
+        self.nodes
+            .strands(self.ivrs.units().map(|unit| unit.segment()), segment)
+    }
+
+    fn stream(
+        &self,
+        segment: u16,
+        _walk: &tairix_pci::topology::Topology,
+        requester: u16,
+    ) -> Option<(u32, u32)> {
+        let unit = tairix_arch_x86_64::ivrs::unit_node(
+            self.ivrs,
+            crate::hwtree_node_ids::IOMMU_UNIT_NODE_BASE_ID,
+            self.nodes,
+            segment,
+            requester,
+        )?;
+        // An AMD-Vi unit indexes its device table by requester id.
+        Some((unit, u32::from(requester)))
+    }
+
+    fn firmware_alias(&self, segment: u16, requester: u16) -> Option<u16> {
+        self.ivrs
+            .units()
+            .find(|unit| unit.segment() == segment && unit.covers(requester))?
+            .alias_of(requester)
+    }
+
+    /// An AMD-Vi unit serves one segment and no platform master.
+    fn contested(&self, _segment: u16, _unit: u32, _stream: u32) -> bool {
+        false
+    }
+}
+
+/// The units a DMAR describes, as the shared probe reads them.
+struct DmarUnits<'d, 'a> {
+    dmar: Option<&'d tairix_arch_x86_64::dmar::Dmar<'a>>,
+    /// What [`crate::pci_probe::UnitTopology::emit`] placed.
+    nodes: tairix_arch_x86_64::acpi::UnitNodes,
+    /// The I/O APICs the placed units' scopes name.
+    ioapics: Vec<crate::x86_64::remapping::IoApicSource>,
+}
+
+impl crate::pci_probe::UnitTopology for DmarUnits<'_, '_> {
+    /// A VT-d unit knows a function by its requester id and the walk's
+    /// aliases alone.
+    fn firmware_alias(&self, _segment: u16, _requester: u16) -> Option<u16> {
+        None
+    }
+
+    /// A VT-d unit serves one segment and no platform master.
+    fn contested(&self, _segment: u16, _unit: u32, _stream: u32) -> bool {
+        false
+    }
+
+    fn covers(&self, segment: u16) -> bool {
+        self.dmar
+            .is_some_and(|dmar| dmar.units().any(|unit| unit.segment() == segment))
+    }
+
+    fn emit(
+        &mut self,
+        walks: &[(u16, &tairix_pci::topology::Topology)],
+        sink: &mut dyn tairix_arch_api::HwNodeSink,
+        log: &dyn Sink,
+    ) -> Result<(), crate::pci_probe::Unconfined> {
+        let Some(dmar) = self.dmar else {
+            return Ok(());
+        };
+        let fabrics = fabrics(walks).ok_or(crate::pci_probe::Unconfined)?;
+        let fabric = |segment: u16| {
+            fabrics
+                .iter()
+                .find(|(at, _)| *at == segment)
+                .map(|(_, fabric)| fabric as &dyn tairix_arch_x86_64::dmar::Fabric)
+        };
+        let Ok(nodes) = tairix_arch_x86_64::dmar::emit_unit_nodes(
+            dmar,
+            crate::hwtree_node_ids::IOMMU_UNIT_NODE_BASE_ID,
+            tairix_kernel_iommu_vtd::COMPATIBLE,
+            &fabric,
+            sink,
+        ) else {
+            return Err(crate::pci_probe::Unconfined);
+        };
+        log_unit_nodes(log, nodes);
+        let mut unrecorded = false;
+        tairix_arch_x86_64::dmar::ioapic_sources(
+            dmar,
+            crate::hwtree_node_ids::IOMMU_UNIT_NODE_BASE_ID,
+            nodes,
+            &fabric,
+            &mut |id, unit, source| {
+                if self.ioapics.try_reserve(1).is_ok() {
+                    self.ioapics.push(crate::x86_64::remapping::IoApicSource {
+                        id,
+                        unit,
+                        requester: source.raw(),
+                    });
+                } else {
+                    unrecorded = true;
+                }
+            },
+        );
+        if unrecorded {
+            // A pin whose I/O APIC is unrecorded keeps the machine unremapped.
+            crate::pci_probe::log_discovery(
+                log,
+                Level::Error,
+                "io-apic remapping sources unrecorded",
+            );
+        }
+        self.nodes = nodes;
+        Ok(())
+    }
+
+    fn strands(&self, segment: u16) -> bool {
+        self.dmar.is_some_and(|dmar| {
+            self.nodes
+                .strands(dmar.units().map(|unit| unit.segment()), segment)
         })
-    };
-    let Ok(identities) = crate::pci_probe::SegmentDma::new(topology, &unit) else {
-        log_dmar(
-            log,
-            Level::Error,
-            "pci dma identities unrecorded; none published",
-        );
-        return Err(Unconfined);
-    };
-    // The windows the unit nodes just emitted keep for firmware.
-    let units = &sink.nodes()[first_unit..];
-    let keeps = |stream: tairix_abi::IommuStreams| {
-        units
-            .iter()
-            .filter(|node| node.id() == stream.unit())
-            .flat_map(|node| {
-                node.resources()
-                    .iter()
-                    .filter_map(|resource| resource.iommu_reserved().ok())
-            })
-            .any(|window| stream.contains(window.stream()))
-    };
-    if crate::pci_probe::stop_mastering(pci, topology, &identities, &keeps).is_err() {
-        log_dmar(
-            log,
-            Level::Error,
-            "pci functions left mastering; none published",
-        );
-        return Err(Unconfined);
     }
-    let dma = |address: u64| identities.of(address).cloned();
-    let mut functions = Vec::new();
-    if functions
-        .try_reserve_exact(topology.functions().len())
-        .is_err()
-    {
-        log_dmar(
-            log,
-            Level::Error,
-            "pci functions unrecorded; none published",
-        );
-        return Err(Unconfined);
-    }
-    functions.extend(
-        topology
-            .functions()
-            .iter()
-            .map(tairix_pci::topology::Function::bus_device),
-    );
 
-    let first = sink.nodes().len();
-    // The virtio-blk storage node is match-key-only (the in-kernel floor
-    // bring-up re-resolves its transport from PCI configuration space and
-    // routes its own MSI-X, so it needs no discovery-time grant) and carries
-    // no interrupt line, so it is emitted independent of whether the MSI-X
-    // routing context below builds. Whatever was collected is seeded
-    // regardless (fail closed).
-    let _ = crate::hwdiscovery::observe_virtio_pci_block_devices(pci, &functions, &dma, sink, log);
-    observe_interrupt_driven(pci, &functions, &dma, sink, log);
-    Ok(
-        crate::pci_probe::record_functions(topology, &identities, &sink.nodes()[first..])
-            .unwrap_or_else(|_| {
-                log_dmar(log, Level::Error, "pci functions unrecorded; none masters");
-                Vec::new()
-            }),
-    )
+    fn stream(
+        &self,
+        segment: u16,
+        walk: &tairix_pci::topology::Topology,
+        requester: u16,
+    ) -> Option<(u32, u32)> {
+        let unit = tairix_arch_x86_64::dmar::unit_node(
+            self.dmar?,
+            crate::hwtree_node_ids::IOMMU_UNIT_NODE_BASE_ID,
+            self.nodes,
+            segment,
+            tairix_arch_x86_64::dmar::SourceId::at(tairix_abi::driver::pci::config_address(
+                requester,
+            )),
+            &Fabric(walk),
+        )?;
+        // A VT-d unit knows every function by its requester id.
+        Some((unit, u32::from(requester)))
+    }
 }
 
-/// Discover the interrupt-driven virtio-PCI functions — virtio-net, sound
-/// and input — each with its MSI-X routed.
-///
-/// The enumerator acts as the x86_64 "bus driver" for them: it
-/// MSI-allocates a dedicated kernel vector, programs the function's MSI-X
-/// table entry 0 with that vector's doorbell, and grants the driver the
-/// routed MSI *line*, so a user-space driver only `irq_bind`s the line and
-/// never touches PCI configuration or the MSI-X BAR (the kernel owns
-/// interrupt routing). The table write goes through a throwaway
-/// `CAP_MMIO_MAP` register-window map over the direct physical map; if that
-/// context cannot be built the functions are left undiscovered rather than
-/// granted a line that never delivers (fail closed).
+/// Discover the interrupt-driven virtio-PCI functions `walk` found —
+/// virtio-net, sound and input — each with its MSI-X routed by `bus` in
+/// compatibility format to a vector of its own and recorded in `routes`, for
+/// remapping to take over once the units are up. The function cannot master
+/// yet, so nothing it raises is live before then.
 fn observe_interrupt_driven(
-    pci: &dyn crate::pci_host::HostBus,
-    functions: &[tairix_abi::driver::bus::BusDevice],
-    dma: crate::hwdiscovery::DmaIdentity<'_>,
+    bus: &dyn crate::pci_host::HostBus,
+    walk: &crate::hwdiscovery::PciWalk<'_>,
+    routes: &core::cell::RefCell<Vec<crate::x86_64::remapping::PendingRoute>>,
     sink: &mut crate::boot_hwtree::CollectingHwNodeSink,
     log: &dyn Sink,
 ) {
-    use tairix_arch_x86_64::paging::AddressSpace as ArchAddressSpace;
-    use tairix_kernel_mem::{AddressSpace, DirectPhysMap, MmioMap, VirtAddr};
-    use tairix_kernel_sec::captable::TaskCapabilities;
-    use tairix_kernel_sec::identity::UserId;
-    use tairix_kernel_virtio::KernelMmioMapper;
-
-    // SAFETY: the boot paging code installed this direct map in every
-    // translation root it builds and never tears it down.
-    let Some(phys) =
-        (unsafe { DirectPhysMap::new(paging::PHYSMAP_VMA_BASE, paging::physmap_bytes()) })
-    else {
-        return;
-    };
-    let Some(mmio_space) = ArchAddressSpace::new_bookkeeping_identity_32mib(&MSI_PROBE_PT_POOL)
-    else {
-        return;
-    };
-    let Ok(mut mmio) = MmioMap::new(
-        AddressSpace::new(mmio_space),
-        VirtAddr::new(MSI_PROBE_MMIO_VBASE),
-        MSI_PROBE_MMIO_PAGES,
-        &phys,
-    ) else {
-        return;
-    };
-    // The boot MSI-routing capability context: `CAP_MMIO_MAP` only (the MSI-X
-    // table write is the sole privileged act), owner uid 0, audited onto the
-    // boot log. Both the grant and the ceiling are the same single-cap set, so
-    // the derived effective set is exactly `{CAP_MMIO_MAP}` and nothing else.
-    let mut probe_caps = tairix_caps::CapabilitySet::empty();
-    probe_caps.insert(tairix_abi::CapabilityId::MMIO_MAP);
-    let route_caps =
-        TaskCapabilities::derive(MSI_PROBE_TASK, UserId(0), probe_caps, probe_caps, log);
-    let mapper = KernelMmioMapper::new(&mut mmio, &route_caps, log);
-
-    // A function whose vector could not be allocated or whose MSI-X could not
-    // be programmed is left undiscovered (fail closed): a granted line that
+    // A function that cannot be given a vector, a record or a programmed
+    // MSI-X entry is left undiscovered (fail closed): a granted line that
     // never delivers would strand its driver parked forever.
-    let route_irq = |bdf: u64| -> Option<u32> {
-        let (vector, message) = crate::x86_64::msi::kernel_message().ok()?;
-        pci.route_msix(bdf, MSIX_PROBE_ENTRY, message, &mapper)
-            .ok()?;
-        Some(vector.line)
+    let route_irq = |bdf: u64| -> Option<tairix_abi::HwResource> {
+        let node = walk.segment.node_id(bdf)?;
+        let mut routes = routes.try_borrow_mut().ok()?;
+        routes.try_reserve(1).ok()?;
+        let vector = crate::x86_64::msi::allocate().ok()?;
+        let message = crate::x86_64::msi::compatibility_message(vector)?;
+        bus.route_msix(
+            bdf,
+            crate::x86_64::msi::MSIX_ENTRY,
+            message,
+            &crate::x86_64::registers::KernelRegisters,
+        )
+        .ok()?;
+        routes.push(crate::x86_64::remapping::PendingRoute { node, vector });
+        Some(tairix_abi::HwResource::message_irq(
+            u64::from(vector.line),
+            crate::x86_64::msi::MSIX_ENTRY,
+        ))
     };
-
     // An enumeration error leaves that class undiscovered; whatever was
-    // collected is seeded regardless. A sound card is discovered by the same
-    // walk as a NIC, so one signed driver bundle binds on either bus; an
-    // input function autoloads the user-space `virtio_kbd` driver, the
-    // PCI-bus sibling of the device-tree input probe.
-    let _ = crate::hwdiscovery::observe_virtio_pci_network_devices(
-        pci, functions, &route_irq, dma, sink, log,
-    );
-    let _ = crate::hwdiscovery::observe_virtio_pci_audio_devices(
-        pci, functions, &route_irq, dma, sink, log,
-    );
-    let _ = crate::hwdiscovery::observe_virtio_pci_input_devices(
-        pci, functions, &route_irq, dma, sink, log,
-    );
+    // collected is seeded regardless.
+    let _ = crate::hwdiscovery::observe_virtio_pci_network_devices(walk, &route_irq, sink, log);
+    let _ = crate::hwdiscovery::observe_virtio_pci_audio_devices(walk, &route_irq, sink, log);
+    let _ = crate::hwdiscovery::observe_virtio_pci_input_devices(walk, &route_irq, sink, log);
 }
 
 /// Enable the No-Execute-Enable bit in `IA32_EFER` on the current CPU.
@@ -1564,42 +1738,12 @@ fn observe_interrupt_driven(
 /// `percpu::init`). Performs a `rdmsr`/`wrmsr` read-modify-write that only
 /// sets [`EFER_NXE`], preserving every other `IA32_EFER` bit.
 unsafe fn enable_nxe() {
-    let lo: u32;
-    let hi: u32;
-    // SAFETY: `rdmsr` of `IA32_EFER` is well-defined in ring 0; it has no
-    // memory effects and clobbers only the named registers.
-    unsafe {
-        core::arch::asm!(
-            "rdmsr",
-            in("ecx") IA32_EFER,
-            out("eax") lo,
-            out("edx") hi,
-            options(nostack, preserves_flags),
-        );
-    }
-    let efer = ((u64::from(hi) << 32) | u64::from(lo)) | EFER_NXE;
-    // SAFETY: writing `IA32_EFER` back with only bit 11 newly set is the
-    // documented enable sequence; `SCE`/`LME`/`LMA` are preserved. `wrmsr`
-    // takes the 64-bit value as the `EDX:EAX` pair, so the masked low word
-    // and the shifted high word are the encoding, not a narrowing.
-    unsafe {
-        core::arch::asm!(
-            "wrmsr",
-            in("ecx") IA32_EFER,
-            in("eax") (efer & 0xffff_ffff) as u32,
-            in("edx") (efer >> 32) as u32,
-            options(nostack, preserves_flags),
-        );
-    }
-}
+    use tairix_arch_x86_64::msr;
 
-fn make_bsp_lapic() -> Lapic<VolatileLapicMmio> {
-    // SAFETY: `LAPIC_BASE_VIRT` is the architectural LAPIC base reached
-    // through the direct physical map, which every root carries. The
-    // constructor only stores the pointer; no MMIO read or write happens
-    // here.
-    let mmio = unsafe { VolatileLapicMmio::new(preempt::LAPIC_BASE_VIRT as *mut u32) };
-    Lapic::new(mmio)
+    // SAFETY: `IA32_EFER` is implemented on every long-mode CPU and the
+    // caller runs in ring 0; writing it back with only `NXE` newly set is the
+    // documented enable sequence, preserving `SCE`/`LME`/`LMA`.
+    unsafe { msr::write(IA32_EFER, msr::read(IA32_EFER) | EFER_NXE) }
 }
 
 /// Widen the direct physical map to `[0, gib GiB)`, reserving the page
@@ -1643,27 +1787,9 @@ fn install_direct_physical_map(map: &mut BootMemoryMap, gib: usize) -> Result<()
 /// sum is the honest installed figure a PC firmware map can state).
 fn build_memory_map(data: &BootData<'_>) -> Result<(BootMemoryMap, u64), BootError> {
     let mut map = BootMemoryMap::new();
-
-    match data {
-        BootData::Multiboot2(mb2) => {
-            if let Some(uefi) = mb2.efi_memory_map() {
-                for desc in bootmemory::iter_from_uefi(&uefi) {
-                    push_descriptor(&mut map, desc);
-                }
-            } else if let Some(bios) = mb2.memory_map() {
-                for desc in bootmemory::iter_from_multiboot2(&bios) {
-                    push_descriptor(&mut map, desc);
-                }
-            } else {
-                return Err(BootError::NoMemoryMap);
-            }
-        }
-        BootData::Pvh { memmap, .. } => {
-            for desc in bootmemory::iter_from_pvh(memmap) {
-                push_descriptor(&mut map, desc);
-            }
-        }
-    }
+    firmware_regions(data, &mut |region| {
+        push_descriptor(&mut map, region.descriptor());
+    })?;
 
     // The installed-RAM total: usable firmware bytes before the
     // kernel-image carve below (the carve drops the range from the map, so
@@ -1717,6 +1843,28 @@ extern "C" {
     static __kernel_phys_end: u8;
 }
 
+/// Visit every region of the memory map firmware gave: the UEFI map where the
+/// loader passed one, else the BIOS one, or the PVH one.
+fn firmware_regions(
+    data: &BootData<'_>,
+    visit: &mut dyn FnMut(bootmemory::FirmwareRegion),
+) -> Result<(), BootError> {
+    use bootmemory::FirmwareRegion;
+    match data {
+        BootData::Multiboot2(mb2) => {
+            if let Some(uefi) = mb2.efi_memory_map() {
+                uefi.entries().map(FirmwareRegion::Uefi).for_each(visit);
+            } else if let Some(bios) = mb2.memory_map() {
+                bios.entries().map(FirmwareRegion::Bios).for_each(visit);
+            } else {
+                return Err(BootError::NoMemoryMap);
+            }
+        }
+        BootData::Pvh { memmap, .. } => memmap.entries().map(FirmwareRegion::Pvh).for_each(visit),
+    }
+    Ok(())
+}
+
 fn push_descriptor(map: &mut BootMemoryMap, desc: bootmemory::MemoryRegionDescriptor) {
     // Translate the arch-port mirror enum into the kernel/mem
     // canonical enum. `bootmemory`'s host-side round-trip test pins
@@ -1735,17 +1883,98 @@ fn push_descriptor(map: &mut BootMemoryMap, desc: bootmemory::MemoryRegionDescri
 
 /// The direct-map address of the IO-APIC register block at physical
 /// `phys`, or [`None`] when the block lies outside the live direct
-/// physical map (fail closed — the caller skips an IO-APIC it could not
-/// reach rather than dereferencing an address nothing maps).
+/// physical map: the caller skips an IO-APIC it could not reach.
 fn io_apic_mmio_virt(phys: u32) -> Option<usize> {
-    // The block is an index/data register pair at offsets 0x00 and 0x10
-    // (Intel 82093AA §3.1), so one 32-byte window covers it.
-    const WINDOW_BYTES: u64 = 0x20;
-    let phys = u64::from(phys);
-    if phys.checked_add(WINDOW_BYTES)? > paging::physmap_bytes() {
-        return None;
+    crate::x86_64::registers::device_registers(
+        u64::from(phys),
+        tairix_arch_x86_64::apic::IOAPIC_WINDOW_BYTES,
+    )
+    .map(|registers| registers.as_ptr() as usize)
+}
+
+/// Every IO-APIC the MADT advertises that the direct map reaches and whose
+/// global system interrupts no other holds, each pin wired as the MADT's
+/// overrides say.
+fn discover_io_apics(
+    madt: &acpi::Madt<'_>,
+    log: &dyn Sink,
+) -> Result<Vec<crate::x86_64::ioapic_controller::IoApicBlock<VolatileIoApicMmio>>, BootError> {
+    use crate::x86_64::ioapic_controller::{gsis_free, IoApicBlock};
+    use tairix_arch_x86_64::apic::PinWiring;
+
+    let mut overrides: Vec<(u32, u16)> = Vec::new();
+    for entry in madt.entries() {
+        if let MadtEntry::InterruptSourceOverride { gsi, flags, .. } = entry {
+            overrides
+                .try_reserve(1)
+                .map_err(|_| BootError::IrqProgramPin)?;
+            overrides.push((gsi, flags));
+        }
     }
-    usize::try_from(paging::physmap_virt(phys)).ok()
+    let wiring = |gsi: u32| {
+        let flags = overrides
+            .iter()
+            .find(|(at, _)| *at == gsi)
+            .map(|&(_, flags)| flags);
+        PinWiring::of(gsi, flags)
+    };
+
+    let mut blocks: Vec<IoApicBlock<VolatileIoApicMmio>> = Vec::new();
+    for entry in madt.entries() {
+        let MadtEntry::IoApic {
+            id,
+            address,
+            gsi_base,
+        } = entry
+        else {
+            continue;
+        };
+        // A block the direct map does not reach is an unusable block: skip it
+        // rather than dereference an address nothing maps. If that leaves
+        // none, the caller fails closed below.
+        let Some(mmio_virt) = io_apic_mmio_virt(address) else {
+            continue;
+        };
+        // SAFETY: the IO-APIC register block MADT publishes sits at a
+        // firmware-fixed physical frame, proven above to lie wholly within
+        // the live direct physical map, so the pointer is valid for the
+        // block for the kernel's lifetime; the controller serialises every
+        // access to it.
+        let mmio = unsafe { VolatileIoApicMmio::new(mmio_virt as *mut u32) };
+        let mut ioapic = IoApic::new(mmio);
+        let pin_count = (u32::from(ioapic.max_redirection_entry()) + 1)
+            .min(tairix_arch_x86_64::apic::IOAPIC_ADDRESSABLE_PINS);
+        // Two blocks claiming one GSI would leave it reaching either: refuse
+        // the later block, as Linux does.
+        if !gsis_free(
+            &blocks,
+            gsi_base,
+            pin_count,
+            crate::x86_64::msi::MSI_LINE_BASE,
+        ) {
+            crate::pci_probe::log_discovery(
+                log,
+                Level::Error,
+                "io-apic global system interrupts conflict; block unused",
+            );
+            continue;
+        }
+        let mut pins = Vec::new();
+        pins.try_reserve_exact(pin_count as usize)
+            .and_then(|()| blocks.try_reserve(1))
+            .map_err(|_| BootError::IrqProgramPin)?;
+        pins.extend((gsi_base..gsi_base + pin_count).map(wiring));
+        blocks.push(IoApicBlock {
+            id,
+            gsi_base,
+            ioapic,
+            wiring: pins,
+        });
+    }
+    if blocks.is_empty() {
+        return Err(BootError::NoIoApic);
+    }
+    Ok(blocks)
 }
 
 /// Discover every IO-APIC the MADT advertises, build a production
@@ -1771,72 +2000,25 @@ fn io_apic_mmio_virt(phys: u32) -> Option<usize> {
 fn discover_and_program_io_apics(
     madt: &acpi::Madt<'_>,
     bsp_lapic_id: u8,
+    log: &dyn Sink,
 ) -> Result<IrqRouting, BootError> {
-    // Step 1. Discover every IO-APIC entry. Each entry carries the
-    // identification, the physical MMIO base address, and the GSI
-    // base the chip owns. We do not yet read `max_redirection_entry`
-    // — that requires a live `IoApic<M>` instance, which we build
-    // below.
-    struct Discovered {
-        gsi_base: u32,
-        /// The block's direct-map address, derived once here so step 3
-        /// reuses the very pointer this pass validated.
-        mmio_virt: usize,
-        pin_count: u32,
-    }
-    let mut discovered: Vec<Discovered> = Vec::new();
-    for entry in madt.entries() {
-        if let MadtEntry::IoApic {
-            address, gsi_base, ..
-        } = entry
-        {
-            // A block the direct map does not reach is an unusable block:
-            // skip it rather than dereference an address nothing maps. If
-            // that leaves none, the caller fails closed below.
-            let Some(mmio_virt) = io_apic_mmio_virt(address) else {
-                continue;
-            };
-            // SAFETY: the IO-APIC register block MADT publishes sits at a
-            // firmware-fixed physical frame, proven above to lie wholly
-            // within the live direct physical map, so the pointer is valid
-            // for the block. The constructor only stores it; no MMIO
-            // access happens here.
-            let mmio = unsafe { VolatileIoApicMmio::new(mmio_virt as *mut u32) };
-            let mut ioapic = IoApic::new(mmio);
-            let pin_count = u32::from(ioapic.max_redirection_entry()) + 1;
-            discovered.push(Discovered {
-                gsi_base,
-                mmio_virt,
-                pin_count,
-            });
-        }
-    }
-    if discovered.is_empty() {
-        return Err(BootError::NoIoApic);
-    }
+    let blocks = discover_io_apics(madt, log)?;
 
-    // Step 2. Pre-validate the total pin count against the reserved
-    // vector range so we fail-closed before any IDT mutation.
-    let total_pins: u32 = discovered.iter().map(|d| d.pin_count).sum();
-    if total_pins as usize > arch_irq::EXTERNAL_VECTOR_COUNT {
+    // Pre-validate the total pin count against the reserved vector range so
+    // we fail closed before any IDT mutation.
+    let mut ranges: Vec<(u32, u32)> = Vec::new();
+    ranges
+        .try_reserve_exact(blocks.len())
+        .map_err(|_| BootError::IrqProgramPin)?;
+    ranges.extend(blocks.iter().map(|block| (block.gsi_base, block.pins())));
+    let total_pins: usize = blocks.iter().map(|block| block.wiring.len()).sum();
+    if total_pins > arch_irq::EXTERNAL_VECTOR_COUNT {
         return Err(BootError::IrqVectorExhausted);
     }
 
-    // Step 3. Construct the controller. Each block needs a fresh
-    // `IoApic<M>` instance (the discovery instance above is dropped);
-    // the controller takes ownership and serialises every subsequent
-    // MMIO access through an internal `SpinLock`.
-    let blocks: Vec<(u32, IoApic<VolatileIoApicMmio>, u32)> = discovered
-        .iter()
-        .map(|d| {
-            // SAFETY: same as the discovery pass — the very pointer it
-            // validated against the direct map.
-            let mmio = unsafe { VolatileIoApicMmio::new(d.mmio_virt as *mut u32) };
-            (d.gsi_base, IoApic::new(mmio), d.pin_count)
-        })
-        .collect();
+    let controller = IoApicController::<_>::new(blocks).ok_or(BootError::IrqProgramPin)?;
     let controller_static: &'static IoApicController<VolatileIoApicMmio> =
-        Box::leak(Box::new(IoApicController::new(blocks)));
+        Box::leak(Box::new(controller));
     // Publish the typed controller into the bin-crate's `PUBLISHED_TYPED`
     // slot so in-kernel observers (e.g. the
     // `tests/integration/irq_qemu_x86_64` QEMU integration test) can
@@ -1846,17 +2028,13 @@ fn discover_and_program_io_apics(
     // the `IrqRouting` carries.
     crate::x86_64::ioapic_controller::publish_typed(controller_static);
 
-    // Step 4. For every pin: allocate the next vector from the
-    // reserved range, install the per-CPU IDT entry, publish the
-    // `(gsi, vector)` pair into the arch crate's routing table,
-    // and program the IO-APIC redirection entry `masked = true`
-    // so no line fires until a driver explicitly unmasks it.
+    // Every pin gets a vector of its own and is left masked: no line fires
+    // until a driver binds it.
     let routing = arch_irq::global_routing();
     let mut next_vector: u8 = arch_irq::EXTERNAL_VECTOR_FIRST;
     let mut max_gsi: u32 = 0;
-    for d in &discovered {
-        for pin_offset in 0..d.pin_count {
-            let gsi = d.gsi_base + pin_offset;
+    for &(gsi_base, pin_count) in &ranges {
+        for gsi in gsi_base..gsi_base + pin_count {
             if next_vector > arch_irq::EXTERNAL_VECTOR_LAST {
                 return Err(BootError::IrqVectorExhausted);
             }
@@ -1907,7 +2085,7 @@ fn discover_and_program_io_apics(
         crate::x86_64::com1_rx::set_com1_console_gsi(com1_gsi);
     }
 
-    // Step 5. Pre-install every free external vector above the IO-APIC pins
+    // Pre-install every free external vector above the IO-APIC pins
     // as a dedicated MSI vector (IDT entry + `vector → MSI line` routing, no
     // IO-APIC redirection entry — an MSI is an edge message straight to the
     // local APIC, never a pin). A device that delivers MSI/MSI-X (the
@@ -1921,7 +2099,7 @@ fn discover_and_program_io_apics(
     if max_gsi >= crate::x86_64::msi::MSI_LINE_BASE {
         return Err(BootError::IrqVectorExhausted);
     }
-    let msi_top = crate::x86_64::msi::install_msi_lines(next_vector)
+    let msi_top = crate::x86_64::msi::install_msi_lines(next_vector, u32::from(bsp_lapic_id))
         .map_err(|_| BootError::IrqRoutingPublish)?;
 
     // The composite controller is the single line→controller fan-out the
@@ -1963,18 +2141,21 @@ fn resolve_com1_gsi(madt: &acpi::Madt<'_>) -> u32 {
 }
 
 fn verify_bsp_present(madt: &acpi::Madt<'_>, bsp_lapic_id: u8) -> Result<(), BootError> {
-    for entry in madt.entries() {
-        if let acpi::MadtEntry::LocalApic { apic_id, flags, .. } = entry {
-            // ACPI 6.5 Table 5.40 bit 0 = Processor Enabled.
-            if flags & 1 == 0 {
-                continue;
-            }
-            if apic_id == bsp_lapic_id {
-                return Ok(());
-            }
+    let named = madt.entries().any(|entry| match entry {
+        // ACPI 6.5 Table 5.40 bit 0 = Processor Enabled.
+        acpi::MadtEntry::LocalApic { apic_id, flags, .. } => {
+            flags & 1 != 0 && apic_id == bsp_lapic_id
         }
+        acpi::MadtEntry::LocalX2Apic {
+            x2apic_id, flags, ..
+        } => flags & 1 != 0 && x2apic_id == u32::from(bsp_lapic_id),
+        _ => false,
+    });
+    if named {
+        Ok(())
+    } else {
+        Err(BootError::BspLapicMissing)
     }
-    Err(BootError::BspLapicMissing)
 }
 
 // --- Compile-time invariants ---------------------------------------

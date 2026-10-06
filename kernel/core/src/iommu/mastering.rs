@@ -70,6 +70,10 @@ pub trait BusMastering: Sync {
     /// Stop every function behind the unit at node `unit` that masters DMA
     /// though `keeps` answers that firmware keeps no window for its stream.
     fn quiesce(&self, unit: u32, keeps: &dyn Fn(u32) -> bool) -> Quiesced;
+
+    /// Let the function `node` describes raise its wired interrupt, or stop
+    /// it. Nothing happens where the port owns no such function.
+    fn set_wired_interrupt(&self, node: u32, raise: bool);
 }
 
 /// The kernel's bus-mastering authority: the port owning configuration space,
@@ -106,6 +110,11 @@ impl Mastering {
     #[must_use]
     pub fn quiesce(&self, unit: u32, keeps: &dyn Fn(u32) -> bool) -> Quiesced {
         self.port.quiesce(unit, keeps)
+    }
+
+    /// [`BusMastering::set_wired_interrupt`].
+    pub fn set_wired_interrupt(&self, node: u32, raise: bool) {
+        self.port.set_wired_interrupt(node, raise);
     }
 }
 
@@ -191,6 +200,8 @@ mod tests {
                 refused: 0,
             }
         }
+
+        fn set_wired_interrupt(&self, _node: u32, _raise: bool) {}
     }
 
     fn port(answer: Option<MasterChange>) -> &'static Port {

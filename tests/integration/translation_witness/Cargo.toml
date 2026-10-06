@@ -1,0 +1,24 @@
+[package]
+name = "tairix-itest-translation-witness"
+description = "The witness every DMA-translation QEMU vertical judges its run by (plans/IOMMU.md): the unit translating at the stage the run asks for with nothing stopped or refused, interrupts remapped where the board remaps them, the keyboard granted bus mastering through its domain, and then a key. no_std and arch-neutral so each port's test kernel links it, and host-unit-tested so the judgement is proven once."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-itest-finisher = { path = "../finisher", version = "=0.0.0" }
+tairix-itest-witness = { path = "../witness", version = "=0.0.0" }
+tairix-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+tairix-kernel-iommu-api = { path = "../../../kernel/iommu/api", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-virtio-input = { path = "../../../lib/virtio_input", version = "=0.0.0" }

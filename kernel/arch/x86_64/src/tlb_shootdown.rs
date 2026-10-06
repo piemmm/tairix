@@ -124,22 +124,18 @@ fn target_map(targets: impl Iterator<Item = u8>, own: u8) -> ([u8; TARGET_BYTES]
     (map, owed)
 }
 
-/// Call `f` with every LAPIC id set in `map`.
+/// Every LAPIC id set in `map`, ascending.
 #[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
-fn for_each_target(map: &[u8; TARGET_BYTES], mut f: impl FnMut(u8)) {
-    let mut base: u8 = 0;
-    for bits in map {
-        if *bits != 0 {
-            for shift in 0..8u8 {
-                if bits & (1u8 << shift) != 0 {
-                    f(base | shift);
-                }
-            }
-        }
-        // The map's 32 bytes cover the 8-bit id space exactly, so the last
-        // step is the one that wraps and no id is built from it.
-        base = base.wrapping_add(8);
-    }
+fn ids_in(map: &[u8; TARGET_BYTES]) -> impl Iterator<Item = u8> + '_ {
+    // The map's 32 bytes cover the 8-bit id space exactly, one byte per
+    // eight ids.
+    map.iter()
+        .zip((0..=u8::MAX).step_by(8))
+        .flat_map(|(&bits, base)| {
+            (0..8u8)
+                .filter(move |shift| bits & (1 << shift) != 0)
+                .map(move |shift| base | shift)
+        })
 }
 
 /// Global, lock-serialised shootdown descriptor.
@@ -201,6 +197,14 @@ where
     run(vaddr, pages, targets, false);
 }
 
+/// The calling CPU's APIC id as the target bitmap keys it. Every CPU the
+/// kernel brings up has an id xAPIC can name; were one past it, it would
+/// name the broadcast id, which no CPU has, and so be asked nothing.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+fn own_slot_id() -> u8 {
+    u8::try_from(crate::apic::local_apic_id()).unwrap_or(crate::apic::XAPIC_BROADCAST)
+}
+
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 fn run<I>(vaddr: u64, pages: usize, targets: I, flush_self: bool)
 where
@@ -212,7 +216,7 @@ where
 
     // Built before the descriptor is touched, so the lock is held for the
     // round-trip alone.
-    let (map, owed) = target_map(targets, crate::preempt::local_lapic_id());
+    let (map, owed) = target_map(targets, own_slot_id());
     if owed == 0 {
         if flush_self {
             invlpg_range(vaddr, pages);
@@ -245,19 +249,14 @@ where
         slot.store(bits, Ordering::Release);
     }
 
-    // SAFETY: the LAPIC register block is reachable through the direct
-    // physical map under every root. Each CPU accesses its own per-CPU
-    // LAPIC at that address, so concurrent senders touch independent
-    // registers; the global lock above already serialises shootdowns on
-    // this CPU.
-    let mmio =
-        unsafe { crate::apic::VolatileLapicMmio::new(crate::preempt::LAPIC_BASE_VIRT as *mut u32) };
-    let mut lapic = crate::apic::Lapic::new(mmio);
+    let mut lapic = crate::apic::Lapic::new(crate::apic::LocalApic);
     // Raised from the local copy, never from the published bitmap the targets
     // are concurrently clearing, so the set asked is exactly the set counted.
-    for_each_target(&map, |id| {
-        lapic.send_ipi(id, crate::apic::DeliveryMode::Fixed, TLB_SHOOTDOWN_VECTOR);
-    });
+    lapic.send_ipis(
+        ids_in(&map).map(u32::from),
+        crate::apic::DeliveryMode::Fixed,
+        TLB_SHOOTDOWN_VECTOR,
+    );
 
     // Invalidate locally while the targets are flushing in parallel.
     if flush_self {
@@ -292,7 +291,7 @@ pub fn serve_pending() {
         return;
     }
 
-    let (byte, bit) = target_slot(crate::preempt::local_lapic_id());
+    let (byte, bit) = target_slot(own_slot_id());
     // The claim. `AcqRel` so the range read below cannot be hoisted above it,
     // and so it synchronises-with the initiator's `Release` publish of this
     // byte.
@@ -374,15 +373,7 @@ unsafe extern "C" fn tairix_arch_x86_64_tlb_shootdown_dispatch(_regs: *mut Saved
 
     // Unconditional, unlike the acknowledge above: the in-service bit is set
     // for this vector whether or not this CPU still owed one.
-    // SAFETY: `LAPIC_EOI_OFFSET` is the architecturally-fixed EOI
-    // register; writing `0` is the documented end-of-interrupt sequence
-    // (Intel SDM Vol 3A §11.8.5). The register block is reachable through
-    // the direct physical map under every root.
-    unsafe {
-        let eoi =
-            (crate::preempt::LAPIC_BASE_VIRT + crate::preempt::LAPIC_EOI_OFFSET as u64) as *mut u32;
-        core::ptr::write_volatile(eoi, 0);
-    }
+    crate::apic::local_eoi();
 }
 
 // Emit the ISR stub the IDT vector points at (gated to the freestanding
@@ -428,7 +419,7 @@ pub unsafe fn init_local_tlb_shootdown(cpu_index: usize) -> Result<(), crate::pe
 #[cfg(test)]
 mod tests {
     use super::{
-        flushes_whole_tlb, for_each_target, target_map, target_slot, SINGLE_PAGE_FLUSH_CEILING,
+        flushes_whole_tlb, ids_in, target_map, target_slot, SINGLE_PAGE_FLUSH_CEILING,
         TARGET_BYTES, TLB_SHOOTDOWN_VECTOR,
     };
 
@@ -454,7 +445,9 @@ mod tests {
         let (byte, bit) = target_slot(1);
         assert_eq!(map[byte] & bit, 0);
         let mut asked = [false; 256];
-        for_each_target(&map, |id| asked[id as usize] = true);
+        for id in ids_in(&map) {
+            asked[id as usize] = true;
+        }
         assert!(asked[0] && asked[2] && !asked[1]);
     }
 
@@ -464,9 +457,7 @@ mod tests {
         // waiting for an acknowledge no CPU owes it.
         let (map, owed) = target_map([7u8, 7, 7, 200, 200].into_iter(), 0);
         assert_eq!(owed, 2);
-        let mut asked = 0;
-        for_each_target(&map, |_| asked += 1);
-        assert_eq!(asked, 2, "one IPI per distinct target");
+        assert_eq!(ids_in(&map).count(), 2, "one IPI per distinct target");
     }
 
     #[test]
@@ -483,7 +474,9 @@ mod tests {
         let (map, owed) = target_map(ids.into_iter(), 1);
         assert_eq!(owed, ids.len());
         let mut yielded = [0usize; 256];
-        for_each_target(&map, |id| yielded[id as usize] += 1);
+        for id in ids_in(&map) {
+            yielded[id as usize] += 1;
+        }
         for id in ids {
             assert_eq!(yielded[id as usize], 1, "id {id} not yielded once");
         }

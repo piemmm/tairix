@@ -184,23 +184,34 @@ pub trait VirtioPciBus: Bus {
     ///   — propagated from the capability-list walk.
     fn notify_off_multiplier(&self, bdf: u64) -> Result<u32, DriverError>;
 
-    /// The device features function `bdf` offers, read through its
-    /// configuration-access capability ([`VIRTIO_PCI_CFG_PCI`], virtio 1.2
-    /// §4.1.4.9), so nothing is mapped and the function is not made a bus
-    /// master to answer.
+    /// The device features function `bdf` offers, read from its common
+    /// configuration through a window `mapper` maps. The function must
+    /// already decode its memory; it is not made a bus master to answer.
+    ///
+    /// The configuration-access capability ([`VIRTIO_PCI_CFG_PCI`]) would
+    /// need no mapping, but QEMU aborts on it behind any host whose BARs sit
+    /// outside an address space of their own, as the generic ECAM host's do.
     ///
     /// # Errors
     ///
-    /// * [`DriverError::NotFound`] — no common or configuration-access
-    ///   capability.
+    /// * As [`map_virtio_window`](Self::map_virtio_window).
     /// * [`DriverError::OutOfRange`] — a common configuration too short to
-    ///   hold the feature registers, or a capability placed where its fields
-    ///   cannot be reached.
-    /// * [`DriverError::Unsupported`] — a bus that cannot read them, which
-    ///   by default every bus is: one that cannot answer vouches for nothing.
-    fn offered_features(&self, bdf: u64) -> Result<u64, DriverError> {
-        let _ = bdf;
-        Err(DriverError::Unsupported)
+    ///   hold the feature registers.
+    /// * [`DriverError::DeviceFault`] — the function answered all ones, as
+    ///   one that is not decoding does: it vouches for nothing.
+    fn offered_features(&self, bdf: u64, mapper: &dyn MmioMapper) -> Result<u64, DriverError> {
+        let window = self.map_virtio_window(bdf, VIRTIO_PCI_CFG_COMMON, mapper)?;
+        let half = |select: u32| {
+            window
+                .write_u32(common::DEVICE_FEATURE_SELECT, select)
+                .and_then(|()| window.read_u32(common::DEVICE_FEATURE))
+                .map_err(|_| DriverError::OutOfRange)
+        };
+        let (low, high) = (half(0)?, half(1)?);
+        if low == u32::MAX && high == u32::MAX {
+            return Err(DriverError::DeviceFault);
+        }
+        Ok((u64::from(high) << 32) | u64::from(low))
     }
 }
 
@@ -257,6 +268,10 @@ pub struct VirtioPciWindows {
     /// `notify_off_multiplier` from the notification capability
     /// (virtio 1.1 §4.1.4.4).
     pub notify_off_multiplier: u32,
+    /// The MSI-X table entry the kernel routed the function's interrupt
+    /// through; [`None`] where it signals on its INTx line instead, which
+    /// it holds until the driver reads the ISR status (virtio 1.1 §4.1.4.5).
+    pub msix_entry: Option<u16>,
 }
 
 /// Resolve the four modern virtio-PCI configuration windows from a
@@ -266,9 +281,9 @@ pub struct VirtioPciWindows {
 /// MMIO windows (built with [`virtio_pci_window_resource`]) plus a DMA
 /// constraint and an interrupt line. This inspects the grant set, matches
 /// the four windows by their `cfg_type` tag, and returns their
-/// CPU-physical `(base, len)` pairs and the notification multiplier — the
-/// exact inputs a PCI virtio transport is constructed from. Grants of any
-/// other kind (DMA, IRQ) are ignored.
+/// CPU-physical `(base, len)` pairs, the notification multiplier and the
+/// MSI-X entry a message-raised interrupt names — the exact inputs a PCI
+/// virtio transport is constructed from. Other grants are ignored.
 ///
 /// It is the multi-window sibling of
 /// [`sole_register_window`](crate::driver::sole_register_window): a driver
@@ -284,8 +299,9 @@ pub struct VirtioPciWindows {
 ///   virtio-PCI window — the signal that this is not a PCI delivery, so a
 ///   dual-bus driver falls back to the single-window MMIO path.
 /// * [`DriverError::Unsupported`] if it carries *some* but not all four
-///   distinct windows, or two windows sharing a role — a malformed
-///   delivery a driver refuses rather than half-provisioning.
+///   distinct windows, two windows sharing a role, or two message-raised
+///   interrupts — a malformed delivery a driver refuses rather than
+///   half-provisioning.
 /// * [`DriverError::OutOfRange`] for a zero-length window or a length past
 ///   `usize` on the target.
 ///
@@ -303,8 +319,14 @@ where
     let mut device: Option<(u64, usize)> = None;
     let mut notify_off_multiplier: u32 = 0;
     let mut tagged = 0usize;
+    let mut msix_entry: Option<u16> = None;
 
     for resource in resources {
+        if let Some(entry) = resource.message_entry() {
+            if msix_entry.replace(entry).is_some() {
+                return Err(DriverError::Unsupported);
+            }
+        }
         if resource.kind() != Some(HwResourceKind::Mmio) {
             continue;
         }
@@ -351,6 +373,7 @@ where
         isr,
         device,
         notify_off_multiplier,
+        msix_entry,
     })
 }
 
@@ -361,16 +384,13 @@ mod tests {
     use crate::driver::mmio::MmioMapError;
     use core::ptr::NonNull;
 
-    /// 4-byte-aligned (by element type) backing store so a window's
-    /// base satisfies `RegisterWindow::from_mapping`'s ≥ 4-byte
-    /// alignment contract; 16 × `u32` is 64 bytes.
-    static mut BACKING: [u32; 16] = [0u32; 16];
-
-    /// Mapper that hands out a window over the shared static backing
-    /// store, recording the last `(phys, len)` it was asked for.
+    /// Mapper that hands out a window over its own backing store, 4-byte
+    /// aligned by its element type, recording the last `(phys, len)` it was
+    /// asked for.
     struct FakeMapper {
         last: core::cell::Cell<Option<(u64, usize)>>,
         grant: bool,
+        backing: core::cell::UnsafeCell<[u32; 16]>,
     }
 
     impl MmioMapper for FakeMapper {
@@ -379,12 +399,20 @@ mod tests {
                 return Err(MmioMapError::CapabilityMissing);
             }
             self.last.set(Some((phys_base, len)));
-            // SAFETY: single-threaded test; the static lives for the
-            // whole process and the returned window only performs
-            // volatile accesses within `len <= 64` bytes.
-            let base = NonNull::new(core::ptr::addr_of_mut!(BACKING).cast::<u8>())
-                .expect("static is non-null");
+            let base = NonNull::new(self.backing.get().cast::<u8>()).expect("non-null backing");
+            // SAFETY: the backing lives as long as the mapper, which outlives
+            // every window a test mints from it; the window performs only
+            // volatile accesses within its `len <= 64` bytes, and nothing
+            // else references the backing while one is live.
             Ok(unsafe { RegisterWindow::from_mapping(phys_base, base, len.min(64)) })
+        }
+    }
+
+    fn mapper(grant: bool) -> FakeMapper {
+        FakeMapper {
+            last: core::cell::Cell::new(None),
+            grant,
+            backing: core::cell::UnsafeCell::new([0; 16]),
         }
     }
 
@@ -433,10 +461,7 @@ mod tests {
     #[test]
     fn trait_object_provisions_each_cfg_type() {
         let bus: &dyn VirtioPciBus = &FakeBus;
-        let mapper = FakeMapper {
-            last: core::cell::Cell::new(None),
-            grant: true,
-        };
+        let mapper = mapper(true);
         let common = bus
             .map_virtio_window(0x0800, VIRTIO_PCI_CFG_COMMON, &mapper)
             .expect("common window");
@@ -448,10 +473,7 @@ mod tests {
     #[test]
     fn unknown_cfg_type_is_not_found() {
         let bus: &dyn VirtioPciBus = &FakeBus;
-        let mapper = FakeMapper {
-            last: core::cell::Cell::new(None),
-            grant: true,
-        };
+        let mapper = mapper(true);
         assert!(matches!(
             bus.map_virtio_window(0x0800, VIRTIO_PCI_CFG_PCI, &mapper),
             Err(DriverError::NotFound)
@@ -461,14 +483,73 @@ mod tests {
     #[test]
     fn missing_capability_propagates_as_permission_denied() {
         let bus: &dyn VirtioPciBus = &FakeBus;
-        let mapper = FakeMapper {
-            last: core::cell::Cell::new(None),
-            grant: false,
-        };
+        let mapper = mapper(false);
         assert!(matches!(
             bus.map_virtio_window(0x0800, VIRTIO_PCI_CFG_COMMON, &mapper),
             Err(DriverError::PermissionDenied)
         ));
+    }
+
+    /// The features are read from the common configuration's feature
+    /// window, both halves selected in turn: the backing store answers every
+    /// select alike, so the low half's word is the high half's too.
+    #[test]
+    fn offered_features_are_read_from_the_common_configuration() {
+        let bus: &dyn VirtioPciBus = &FakeBus;
+        let mapper = mapper(true);
+        // SAFETY: no window over the backing is live.
+        unsafe { (*mapper.backing.get())[common::DEVICE_FEATURE / 4] = 0x0000_0001 };
+        assert_eq!(bus.offered_features(0x0800, &mapper), Ok(0x1_0000_0001));
+        assert_eq!(mapper.last.get(), Some((0xC000_0001, 0x38)));
+        // SAFETY: as above.
+        let select = unsafe { (*mapper.backing.get())[common::DEVICE_FEATURE_SELECT / 4] };
+        assert_eq!(select, 1, "the high half was selected last");
+    }
+
+    /// A function that is not decoding answers all ones, which would claim
+    /// every feature: it vouches for nothing.
+    #[test]
+    fn offered_features_refuse_a_function_answering_all_ones() {
+        let bus: &dyn VirtioPciBus = &FakeBus;
+        let mapper = mapper(true);
+        // SAFETY: no window over the backing is live.
+        unsafe { (*mapper.backing.get())[common::DEVICE_FEATURE / 4] = u32::MAX };
+        assert_eq!(
+            bus.offered_features(0x0800, &mapper),
+            Err(DriverError::DeviceFault)
+        );
+        assert_eq!(
+            bus.offered_features(0x0800, &self::mapper(false)),
+            Err(DriverError::PermissionDenied)
+        );
+    }
+
+    /// A common configuration too short to hold the feature registers is
+    /// refused rather than read past.
+    #[test]
+    fn offered_features_refuse_a_common_configuration_too_short() {
+        struct Short;
+        impl Bus for Short {
+            fn enumerate(&self, _out: &mut [BusDevice]) -> Result<usize, DriverError> {
+                Ok(0)
+            }
+        }
+        impl VirtioPciBus for Short {
+            fn virtio_window_region(
+                &self,
+                _bdf: u64,
+                _cfg_type: u8,
+            ) -> Result<(u64, usize), DriverError> {
+                Ok((0xC000_0000, common::DEVICE_FEATURE))
+            }
+            fn notify_off_multiplier(&self, _bdf: u64) -> Result<u32, DriverError> {
+                Ok(4)
+            }
+        }
+        assert_eq!(
+            Short.offered_features(0x0800, &mapper(true)),
+            Err(DriverError::OutOfRange)
+        );
     }
 
     #[test]
@@ -529,8 +610,20 @@ mod tests {
                 isr: (0xC000_2000, 0x4),
                 device: (0xC000_4000, 0x8),
                 notify_off_multiplier: 4,
+                msix_entry: None,
             }
         );
+    }
+
+    #[test]
+    fn resolver_names_the_entry_a_message_interrupt_was_routed_through() {
+        let mut grants = pci_grant_set();
+        grants[0] = HwResource::message_irq(4100, 2);
+        let windows = virtio_pci_windows(grants.iter()).expect("resolve");
+        assert_eq!(windows.msix_entry, Some(2));
+        let twice = [grants[0], HwResource::message_irq(4101, 0)];
+        let twice = grants.iter().skip(1).chain(&twice);
+        assert_eq!(virtio_pci_windows(twice), Err(DriverError::Unsupported));
     }
 
     #[test]

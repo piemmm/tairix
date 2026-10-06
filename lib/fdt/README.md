@@ -8,10 +8,20 @@ timer interrupts) stay in each port.
 ## API
 
 - `Fdt::new` validates a borrowed blob; its readers walk the tree without
-  copying: `nodes`, `find_compatible`, `node_by_phandle`, `property`, the
-  memory regions, the CPUs, `timebase_frequency`, `chosen_rng_seed`,
+  copying: `nodes`, `operational_nodes` and `nodes_in_use` (the nodes whose
+  `status`, and their ancestors', lets them be used), `find_compatible`,
+  `node_by_phandle`, `property`, the enabled memory regions, the CPUs that
+  may be started, `timebase_frequency`, `chosen_rng_seed`,
   `boot_cpu_compatible`. The node and property iterators end at the first
   malformed token.
+- `phandle_args` walks a phandle-and-specifier list (`dmas`, `iommus`), each
+  entry framed by its provider's cell count.
+- `IdMap` reads an id map (`iommu-map` or `msi-map`, with its mask), refused
+  whole when it does not decode; `pci` gives each generic host its
+  `iommu_map`.
+- `iommu` marks a translation unit (`iommu_cells`), reads a one-cell
+  specifier's stream id, and the `iommu-addresses` windows a master's
+  `memory-region` regions ask its translation to keep.
 - `supply` resolves a consumer's `<name>-supply` regulator and decodes the
   two GPIO-switched shapes: a `regulator-gpio` selecting voltage `states`
   (`gpio_selected_regulator`) and a `regulator-fixed` with an enable line

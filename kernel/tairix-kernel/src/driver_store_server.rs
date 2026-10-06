@@ -575,6 +575,7 @@ pub fn serve_system_store(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::NullSink;
 
     use core::cell::RefCell;
 
@@ -591,11 +592,6 @@ mod tests {
 
     use crate::system_files::SystemFileService;
     use crate::test_support::MockRootFs;
-
-    struct NullSink;
-    impl Sink for NullSink {
-        fn write_event(&self, _event: &tairix_log::Event<'_>) {}
-    }
 
     /// Deterministic driver-signing seed for the test trust anchor; a
     /// distinct key models an untrusted signer.

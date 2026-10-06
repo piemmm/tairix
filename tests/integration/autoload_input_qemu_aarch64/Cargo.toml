@@ -21,6 +21,12 @@ path = "src/lib.rs"
 name = "tairix-test-autoload-input-qemu-aarch64"
 path = "src/main.rs"
 
+# The same vertical with its input devices as PCI functions sharing one INTx
+# line (src/pci.rs).
+[[bin]]
+name = "tairix-test-autoload-input-pci-qemu-aarch64"
+path = "src/pci.rs"
+
 # Freestanding "boot the production aarch64 kernel pipeline with a planted
 # encrypted-root virtio-blk disk carrying a signed virtio-input keyboard driver
 # bundle, and prove the in-kernel unlock kthread's post-mount autoload spawns

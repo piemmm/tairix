@@ -9,7 +9,9 @@
 use alloc::vec::Vec;
 
 use crate::domain::Domain;
-use crate::{Access, Fault, IommuUnit, IO_PAGE_SIZE};
+use crate::{
+    Access, Fault, InterruptRemapping, InterruptSource, InterruptTarget, IommuUnit, IO_PAGE_SIZE,
+};
 
 /// What the modelled hardware would do with one access.
 pub trait TranslationProbe {
@@ -17,6 +19,11 @@ pub trait TranslationProbe {
     /// address it reaches, or [`None`] when the unit refuses it and records
     /// the fault.
     fn access(&self, stream: u32, iova: u64, write: bool) -> Option<u64>;
+
+    /// Issue `stream`'s access to `address` as a device with ATS would,
+    /// marked already translated: the physical address it reaches, or
+    /// [`None`] when the unit refuses it and records the fault.
+    fn translated(&self, stream: u32, address: u64, write: bool) -> Option<u64>;
 }
 
 /// What the suite may use: two streams the unit covers and has blocked, and
@@ -37,12 +44,97 @@ pub fn run_all(unit: &dyn IommuUnit, probe: &dyn TranslationProbe, fixture: &Fix
     a_block_ends_every_translation_at_once(unit, probe, fixture);
     a_refused_access_is_reported_against_its_stream(unit, probe, fixture);
     two_streams_reach_only_their_own_domains(unit, probe, fixture);
+    a_stream_attached_again_to_its_domain_stays_and_elsewhere_is_busy(unit, probe, fixture);
     a_destroyed_domain_reaches_nothing(unit, probe, fixture);
     a_silenced_stream_reaches_nothing_and_raises_nothing(unit, probe, fixture);
+    a_translated_request_is_refused_and_reported(unit, probe, fixture);
     drain(unit);
 }
 
 const IOVA: u64 = 0x4000_0000;
+
+/// Attaching a stream to the domain it is attached to changes nothing;
+/// attaching it to another is refused, and leaves it where it was.
+fn a_stream_attached_again_to_its_domain_stays_and_elsewhere_is_busy(
+    unit: &dyn IommuUnit,
+    probe: &dyn TranslationProbe,
+    fixture: &Fixture,
+) {
+    let [stream, _] = fixture.streams;
+    let held = unit.create_domain().expect("create a domain");
+    let other = unit.create_domain().expect("create a second domain");
+    unit.map(
+        held,
+        IOVA,
+        fixture.pages[0],
+        IO_PAGE_SIZE,
+        Access::READ_WRITE,
+    )
+    .expect("map");
+    unit.attach(stream, held).expect("attach");
+    unit.attach(stream, held)
+        .expect("attaching a stream to its own domain again");
+    assert_eq!(
+        unit.attach(stream, other),
+        Err(crate::IommuError::StreamBusy),
+        "a stream attached elsewhere"
+    );
+    assert_eq!(
+        probe.access(stream, IOVA, true),
+        Some(fixture.pages[0]),
+        "the stream left its domain"
+    );
+    unit.block(stream).expect("block");
+    assert_eq!(
+        unit.destroy_domain(held),
+        Ok(()),
+        "a second attach is not a second hold"
+    );
+    unit.destroy_domain(other).expect("destroy");
+    drain(unit);
+}
+
+/// A device presenting an address as already translated reaches nothing,
+/// even one its domain maps, and the refusal names its stream: no device is
+/// trusted to cache translations.
+fn a_translated_request_is_refused_and_reported(
+    unit: &dyn IommuUnit,
+    probe: &dyn TranslationProbe,
+    fixture: &Fixture,
+) {
+    let [stream, _] = fixture.streams;
+    let domain = unit.create_domain().expect("create a domain");
+    unit.map(
+        domain,
+        IOVA,
+        fixture.pages[0],
+        IO_PAGE_SIZE,
+        Access::READ_WRITE,
+    )
+    .expect("map");
+    unit.attach(stream, domain).expect("attach");
+    for address in [fixture.pages[0], IOVA] {
+        assert_eq!(
+            probe.translated(stream, address, true),
+            None,
+            "a translated request reached memory"
+        );
+    }
+    let faults = drain(unit);
+    assert!(
+        faults
+            .iter()
+            .any(|fault| fault.stream == stream && fault.reason == crate::FaultReason::Translated),
+        "the refusal was not reported as a translated request"
+    );
+    assert!(
+        probe.access(stream, IOVA, true).is_some(),
+        "untranslated still reaches"
+    );
+    unit.block(stream).expect("block");
+    unit.destroy_domain(domain).expect("destroy");
+    drain(unit);
+}
 
 /// Drain until the unit says nothing remains. With no access arriving, each
 /// call that answers `true` has taken a record, so no check needs more calls
@@ -267,4 +359,180 @@ fn a_destroyed_domain_reaches_nothing(
         "a destroyed domain's mapping was still reachable"
     );
     drain(unit);
+}
+
+/// What the modelled hardware would do with one interrupt message.
+pub trait InterruptProbe {
+    /// Raise the MSI `address`/`data` as requester id `source` would: the
+    /// interrupt the unit delivers, or [`None`] when it refuses it and
+    /// records the fault.
+    fn interrupt(&self, source: u16, address: u64, data: u32) -> Option<InterruptTarget>;
+}
+
+/// A compatibility-format MSI to APIC id 0: what a device that ignores
+/// remapping writes.
+const COMPATIBILITY: (u64, u32) = (0xFEE0_0000, 0x41);
+
+/// Run every interrupt remapping check against a unit translating nothing
+/// yet, its remapping not prepared, with `sources` two requester ids on bus
+/// `sources[0] >> 8`, `sources[1]` on another bus, leaving remapping off.
+/// Each panics naming what the unit got wrong.
+pub fn run_interrupts(unit: &dyn IommuUnit, probe: &dyn InterruptProbe, sources: [u16; 2]) {
+    let remapping = unit
+        .interrupt_remapping()
+        .expect("a unit under the interrupt suite remaps");
+    let [own, other] = sources;
+    assert!(
+        probe
+            .interrupt(own, COMPATIBILITY.0, COMPATIBILITY.1)
+            .is_some(),
+        "compatibility interrupts pass until remapping is on"
+    );
+    remapping.prepare_remapping(false, 1).expect("prepare");
+    assert!(
+        remapping.prepare_remapping(false, 1).is_err(),
+        "a table is prepared once"
+    );
+    let target = InterruptTarget {
+        vector: 0x51,
+        destination: 3,
+        level: false,
+    };
+    let entry = remapping
+        .remap_interrupt(InterruptSource::Requester(own), target)
+        .expect("remap");
+    assert!(
+        probe
+            .interrupt(own, COMPATIBILITY.0, COMPATIBILITY.1)
+            .is_some(),
+        "nothing is refused before remapping is enabled"
+    );
+    remapping.enable_remapping().expect("enable");
+    drain(unit);
+    assert_eq!(
+        probe.interrupt(own, entry.address, entry.data),
+        Some(target),
+        "an entry delivers its target to its source"
+    );
+    assert_eq!(
+        probe.interrupt(other, entry.address, entry.data),
+        None,
+        "another source raised an entry it was not given"
+    );
+    assert_eq!(
+        probe.interrupt(own, COMPATIBILITY.0, COMPATIBILITY.1),
+        None,
+        "a compatibility-format interrupt passed with remapping on"
+    );
+    let refused = drain(unit);
+    assert!(
+        refused
+            .iter()
+            .filter(|fault| fault.reason == crate::FaultReason::Interrupt)
+            .count()
+            >= 2,
+        "refused interrupts were not reported: {refused:?}"
+    );
+    a_bridge_s_buses_raise_its_entry_and_no_others(unit, remapping, probe, sources);
+    a_released_entry_raises_nothing_even_where_cached(unit, remapping, probe, own, entry);
+    an_entry_names_the_trigger_mode_and_destination_it_was_given(remapping, probe, own);
+    remapping.disable_remapping().expect("disable");
+    assert!(
+        probe
+            .interrupt(own, COMPATIBILITY.0, COMPATIBILITY.1)
+            .is_some(),
+        "compatibility interrupts pass once remapping is off again"
+    );
+    drain(unit);
+}
+
+fn a_bridge_s_buses_raise_its_entry_and_no_others(
+    unit: &dyn IommuUnit,
+    remapping: &dyn InterruptRemapping,
+    probe: &dyn InterruptProbe,
+    [own, other]: [u16; 2],
+) {
+    let bus = own.to_be_bytes()[0];
+    let target = InterruptTarget {
+        vector: 0x52,
+        destination: 1,
+        level: false,
+    };
+    let entry = remapping
+        .remap_interrupt(
+            InterruptSource::Buses {
+                first: bus,
+                last: bus,
+            },
+            target,
+        )
+        .expect("remap a bridge's buses");
+    assert_eq!(
+        probe.interrupt(own, entry.address, entry.data),
+        Some(target)
+    );
+    let neighbour = own ^ 0x0001;
+    assert_eq!(
+        probe.interrupt(neighbour, entry.address, entry.data),
+        Some(target),
+        "any function on the bridge's bus raises it"
+    );
+    assert_eq!(
+        probe.interrupt(other, entry.address, entry.data),
+        None,
+        "a function on another bus raised it"
+    );
+    remapping.release_interrupt(entry.entry).expect("release");
+    drain(unit);
+}
+
+fn a_released_entry_raises_nothing_even_where_cached(
+    unit: &dyn IommuUnit,
+    remapping: &dyn InterruptRemapping,
+    probe: &dyn InterruptProbe,
+    own: u16,
+    entry: crate::Remapped,
+) {
+    // Warm whatever cache the unit keeps of the entry.
+    assert!(probe.interrupt(own, entry.address, entry.data).is_some());
+    remapping.release_interrupt(entry.entry).expect("release");
+    assert_eq!(
+        probe.interrupt(own, entry.address, entry.data),
+        None,
+        "a released entry still delivered"
+    );
+    assert!(
+        remapping.release_interrupt(entry.entry).is_err(),
+        "an entry released twice"
+    );
+    drain(unit);
+}
+
+fn an_entry_names_the_trigger_mode_and_destination_it_was_given(
+    remapping: &dyn InterruptRemapping,
+    probe: &dyn InterruptProbe,
+    own: u16,
+) {
+    let level = InterruptTarget {
+        vector: 0x60,
+        destination: 0xFF,
+        level: true,
+    };
+    let entry = remapping
+        .remap_interrupt(InterruptSource::Requester(own), level)
+        .expect("remap");
+    assert_eq!(probe.interrupt(own, entry.address, entry.data), Some(level));
+    assert!(
+        remapping
+            .remap_interrupt(
+                InterruptSource::Requester(own),
+                InterruptTarget {
+                    destination: 0x100,
+                    ..level
+                },
+            )
+            .is_err(),
+        "an 8-bit table took a destination past 255"
+    );
+    remapping.release_interrupt(entry.entry).expect("release");
 }

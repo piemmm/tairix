@@ -28,6 +28,16 @@
 //! bus's DMA windows, and each `dmas` entry of a consumer becomes a
 //! [`DmaRequestLine`] naming the controller's endpoint (`plans/SOUND.md`
 //! SND5).
+//!
+//! So is the generic IOMMU binding (`plans/IOMMU.md` IOM14): a node with
+//! `#iommu-cells` is a translation unit, and a master's `iommus` names the
+//! streams it masters DMA through, which also makes it a DMA master carrying
+//! its bus's windows. A master whose translation the tree cannot describe is
+//! given no DMA authority at all, never an untranslated one.
+//!
+//! Only nodes a consumer may use are walked ([`Fdt::operational_nodes`]): a
+//! disabled, reserved or failed node, and everything below it, is spliced out
+//! with the nodes the matcher could never bind.
 
 use tairix_abi::driver::dmaengine::{
     DmaControllerDuty, DmaRequestLine, DMA_CONTROLLER_ENDPOINTS, DMA_REQUEST_NAME_MAX,
@@ -35,16 +45,23 @@ use tairix_abi::driver::dmaengine::{
 };
 use tairix_abi::driver::net::MAC_ADDRESS_LEN;
 use tairix_abi::hwtree::BUS_CHILD_ENDPOINTS;
-use tairix_abi::{HwDeviceClass, HwMatchKey, HwNode, HwResource, HW_NODE_ROOT, HW_NODE_ROOT_ID};
+use tairix_abi::{
+    HwDeviceClass, HwMatchKey, HwNode, HwResource, IommuStreams, HW_NODE_MAX_RESOURCES,
+    HW_NODE_ROOT, HW_NODE_ROOT_ID,
+};
+use tairix_fdt::iommu::{iommu_cells, stream_id};
 use tairix_fdt::{
-    bus_level, dma_reach, name_stem, phandle_ref, read_cells, reg_entry_count, translated_reg,
-    BusLevel, Fdt, Node, NodeIter, MAX_WALK_DEPTH,
+    bus_level, dma_reach, name_stem, phandle_args, phandle_ref, read_cells, reg_entry_count,
+    translated_reg, BusLevel, Fdt, Node, OperationalNodes, MAX_WALK_DEPTH,
 };
 
 use crate::platform::{DiscoveryError, HwNodeSink, PlatformDiscovery};
 
 /// Bytes in one device-tree cell.
 const CELL_BYTES: usize = 4;
+
+/// The id the walk gives the first node it emits after the root.
+const FIRST_EMITTED_ID: u32 = HW_NODE_ROOT_ID + 1;
 
 /// The per-port half of the device-tree walk.
 pub trait FdtPlatform {
@@ -63,6 +80,13 @@ pub trait FdtPlatform {
     /// A `None` drops that specifier and leaves the rest of the list; the
     /// walk never guesses a line.
     fn interrupt_line(&self, specifier: &[u8]) -> Option<u32>;
+
+    /// Whether the line `specifier` names is raised by edges, which its grant
+    /// then says so the controller latches a pulse while the line is masked.
+    /// A controller whose specifiers name no trigger signals by level.
+    fn edge_triggered(&self, _specifier: &[u8]) -> bool {
+        false
+    }
 
     /// The phandle of the controller [`Self::interrupt_line`] decodes
     /// specifiers for, read from the tree once.
@@ -134,7 +158,7 @@ impl<P: FdtPlatform> PlatformDiscovery for FdtDiscovery<'_, P> {
             HW_NODE_ROOT,
             HwDeviceClass::Root,
         ))?;
-        let mut next_id: u32 = 1;
+        let mut next_id = FIRST_EMITTED_ID;
         // The shared per-depth bus state plus this walk's own per-depth
         // facts: the hardware-tree id of the nearest *emitted* ancestor,
         // which is the parent a child at depth + 1 names, and the
@@ -150,7 +174,7 @@ impl<P: FdtPlatform> PlatformDiscovery for FdtDiscovery<'_, P> {
         // The interrupt parent the children of the node at each depth inherit.
         let mut interrupt_parents = [None; MAX_WALK_DEPTH];
 
-        let mut nodes = self.fdt.nodes();
+        let mut nodes = self.fdt.operational_nodes();
         while let Some(node) = nodes.next() {
             // Cloned before anything else so the look-ahead below starts
             // exactly where this node's subtree does.
@@ -269,15 +293,21 @@ impl<P: FdtPlatform> FdtDiscovery<'_, P> {
             let _ = hw.push_resource(HwResource::link_address(octets));
         }
 
+        let mut streams = StreamRanges::new();
+        let translation = match master_translation(&self.fdt, node, &mut streams) {
+            MasterTranslation::Translated if !streams.push_onto(&mut hw) => {
+                MasterTranslation::Refused
+            }
+            translation => translation,
+        };
+        let mut masters = translation.names_a_master();
         if class == HwDeviceClass::Dma {
             let channels = self.platform.dma_channel_mask(node, depth, levels);
-            if let Ok(duty) =
-                DmaControllerDuty::new(DMA_CONTROLLER_ENDPOINTS.endpoint(id), channels)
-            {
-                if hw.push_resource(HwResource::dma_controller(&duty)).is_ok() {
-                    push_dma_windows(depth, levels, &mut hw);
-                }
-            }
+            masters = DmaControllerDuty::new(DMA_CONTROLLER_ENDPOINTS.endpoint(id), channels)
+                .is_ok_and(|duty| hw.push_resource(HwResource::dma_controller(&duty)).is_ok());
+        }
+        if masters && translation != MasterTranslation::Refused {
+            push_dma_windows(depth, levels, &mut hw);
         }
         push_dma_requests(&self.fdt, node, &mut hw);
 
@@ -345,14 +375,6 @@ pub fn push_dma_windows(depth: usize, levels: &[BusLevel<'_>], hw: &mut HwNode) 
     }
 }
 
-/// A DMA controller a `dmas` entry names: the id the walk gives it and its
-/// `#dma-cells`.
-#[derive(Copy, Clone)]
-struct DmaControllerRef {
-    id: u32,
-    cells: u32,
-}
-
 /// Push one [`DmaRequestLine`] per `dmas` entry, each naming the endpoint of
 /// the controller its phandle resolves to and paired with the `dma-names`
 /// string in the same position.
@@ -365,57 +387,36 @@ fn push_dma_requests(fdt: &Fdt<'_>, node: &Node<'_>, hw: &mut HwNode) {
     let Some(dmas) = node.property("dmas") else {
         return;
     };
-    let value = dmas.value();
     let mut names = node.property("dma-names").map(|p| p.iter_strings());
     // A node's entries usually all name one controller, so the last
     // resolution is kept rather than replayed.
-    let mut resolved: Option<(u32, DmaControllerRef)> = None;
-    let mut off = 0;
-    for index in 0..=u8::MAX {
-        if off >= value.len() {
-            return;
+    let mut last: Option<(u32, (u32, u32))> = None;
+    let controller = |phandle: u32| {
+        if let Some((_, controller)) = last.filter(|&(known, _)| known == phandle) {
+            return Some(controller);
         }
-        let Some(phandle) = be_cell(value, off).and_then(phandle_ref) else {
+        let controller = dma_controller(fdt, phandle)?;
+        last = Some((phandle, controller));
+        Some(controller)
+    };
+    for (index, entry) in (0..=u8::MAX).zip(phandle_args(dmas.value(), controller)) {
+        let Ok((id, specifier)) = entry else {
             return;
         };
-        let controller = match resolved {
-            Some((known, controller)) if known == phandle => controller,
-            _ => {
-                let Some(controller) = resolve_dma_controller(fdt, phandle) else {
-                    return;
-                };
-                resolved = Some((phandle, controller));
-                controller
-            }
-        };
-        let start = off + CELL_BYTES;
-        let Some(end) = usize::try_from(controller.cells)
-            .ok()
-            .and_then(|cells| cells.checked_mul(CELL_BYTES))
-            .and_then(|len| start.checked_add(len))
-        else {
-            return;
-        };
-        let Some(specifier_bytes) = value.get(start..end) else {
-            return;
-        };
-        off = end;
         let name = names
             .as_mut()
             .and_then(Iterator::next)
             .filter(|name| name.len() <= DMA_REQUEST_NAME_MAX)
             .unwrap_or_default();
-        if specifier_bytes.len() > DMA_SPECIFIER_MAX_CELLS * CELL_BYTES {
+        if specifier.len() > DMA_SPECIFIER_MAX_CELLS {
             continue;
         }
-        let mut specifier = [0u32; DMA_SPECIFIER_MAX_CELLS];
-        let (cells, _) = specifier_bytes.as_chunks::<CELL_BYTES>();
-        for (slot, cell) in specifier.iter_mut().zip(cells) {
-            *slot = u32::from_be_bytes(*cell);
+        let mut cells = [0u32; DMA_SPECIFIER_MAX_CELLS];
+        for (slot, cell) in cells.iter_mut().zip(specifier.cells()) {
+            *slot = cell;
         }
-        let cells = cells.len();
-        let endpoint = DMA_CONTROLLER_ENDPOINTS.endpoint(controller.id);
-        let Ok(line) = DmaRequestLine::new(endpoint, index, &specifier[..cells], name) else {
+        let endpoint = DMA_CONTROLLER_ENDPOINTS.endpoint(id);
+        let Ok(line) = DmaRequestLine::new(endpoint, index, &cells[..specifier.len()], name) else {
             continue;
         };
         if hw.push_resource(HwResource::dma_request(&line)).is_err() {
@@ -424,55 +425,263 @@ fn push_dma_requests(fdt: &Fdt<'_>, node: &Node<'_>, hw: &mut HwNode) {
     }
 }
 
-/// The id the walk gives the DMA controller whose phandle is `phandle`, and
-/// its `#dma-cells`, found by replaying the walk's own emission rule — so a
-/// consumer met before its controller names the id the controller will get.
-///
-/// One pass over the tree per controller a node names; a controller the walk
-/// does not emit has no id, and a node with no `#dma-cells` is no controller.
-fn resolve_dma_controller(fdt: &Fdt<'_>, phandle: u32) -> Option<DmaControllerRef> {
-    let mut id = HW_NODE_ROOT_ID;
-    for node in fdt.nodes() {
-        let node = node.ok()?;
+/// The id the walk gives the DMA controller `phandle` names, and its
+/// `#dma-cells`. A controller the walk does not emit has no id, and a node
+/// with no `#dma-cells` is no controller.
+fn dma_controller(fdt: &Fdt<'_>, phandle: u32) -> Option<(u32, u32)> {
+    let Provider::Emitted(id, node) = provider(fdt, phandle)? else {
+        return None;
+    };
+    let cells = node.property("#dma-cells")?;
+    if cells.value().len() != CELL_BYTES {
+        return None;
+    }
+    Some((id, cells.read_be_u32(0).ok()?))
+}
+
+/// What a master's `iommus` says of its DMA.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum MasterTranslation {
+    /// It names no unit.
+    Unnamed,
+    /// It masters DMA through units, as the streams gathered beside it.
+    Translated,
+    /// It names only units translating nothing it can be named by: ones a
+    /// consumer may not use, or whose specifiers carry no stream id.
+    Untranslated,
+    /// The tree cannot describe its DMA: a list that does not frame, a
+    /// provider that is no unit the walk describes, DMA reaching memory both
+    /// through a unit and around one, or more streams than a node carries.
+    Refused,
+}
+
+impl MasterTranslation {
+    /// Whether the statement makes the node a DMA master.
+    fn names_a_master(self) -> bool {
+        matches!(self, Self::Translated | Self::Untranslated)
+    }
+}
+
+/// Through what the DMA an `iommus` entry names passes.
+#[derive(Copy, Clone)]
+enum Through {
+    /// The unit with this id, which knows the master by a stream id.
+    Unit(u32),
+    /// A unit translating nothing the entry names.
+    Nothing,
+}
+
+/// The streams one master names, consecutive ids on one unit coalesced into
+/// a range: no more than a node can carry.
+struct StreamRanges {
+    ranges: [Option<IommuStreams>; HW_NODE_MAX_RESOURCES],
+    held: usize,
+}
+
+impl StreamRanges {
+    const fn new() -> Self {
+        Self {
+            ranges: [None; HW_NODE_MAX_RESOURCES],
+            held: 0,
+        }
+    }
+
+    /// Add stream `id` on `unit`; `false` when a node could carry no further
+    /// range.
+    fn add(&mut self, unit: u32, id: u32) -> bool {
+        let last = self.held.checked_sub(1).and_then(|at| self.ranges[at]);
+        if let Some(last) = last.filter(|last| {
+            last.unit() == unit && last.first().checked_add(last.count()) == Some(id)
+        }) {
+            if let Ok(grown) = IommuStreams::new(unit, last.first(), last.count() + 1) {
+                self.ranges[self.held - 1] = Some(grown);
+                return true;
+            }
+        }
+        let (Some(slot), Ok(range)) = (
+            self.ranges.get_mut(self.held),
+            IommuStreams::new(unit, id, 1),
+        ) else {
+            return false;
+        };
+        *slot = Some(range);
+        self.held += 1;
+        true
+    }
+
+    /// Push every range onto `hw`, or none when they do not all fit: a
+    /// master is never published with part of its identity.
+    fn push_onto(&self, hw: &mut HwNode) -> bool {
+        if HW_NODE_MAX_RESOURCES - hw.resources().len() < self.held {
+            return false;
+        }
+        self.ranges[..self.held]
+            .iter()
+            .flatten()
+            .all(|&range| hw.push_resource(HwResource::iommu_stream(range)).is_ok())
+    }
+}
+
+/// Read `node`'s `iommus`, gathering into `streams` the streams it names.
+fn master_translation(
+    fdt: &Fdt<'_>,
+    node: &Node<'_>,
+    streams: &mut StreamRanges,
+) -> MasterTranslation {
+    let Some(iommus) = node.property("iommus") else {
+        return MasterTranslation::Unnamed;
+    };
+    // A master's entries usually all name one unit.
+    let mut last: Option<(u32, (Through, u32))> = None;
+    let unit = |phandle: u32| {
+        if let Some((_, unit)) = last.filter(|&(known, _)| known == phandle) {
+            return Some(unit);
+        }
+        let unit = translation_unit(fdt, phandle)?;
+        last = Some((phandle, unit));
+        Some(unit)
+    };
+    let mut bypassed = false;
+    for entry in phandle_args(iommus.value(), unit) {
+        match entry {
+            Ok((Through::Unit(unit), specifier)) => {
+                let Some(id) = stream_id(&specifier) else {
+                    return MasterTranslation::Refused;
+                };
+                if !streams.add(unit, id) {
+                    return MasterTranslation::Refused;
+                }
+            }
+            Ok((Through::Nothing, _)) => bypassed = true,
+            Err(_) => return MasterTranslation::Refused,
+        }
+    }
+    match (streams.held, bypassed) {
+        (0, false) => MasterTranslation::Unnamed,
+        (0, true) => MasterTranslation::Untranslated,
+        (_, false) => MasterTranslation::Translated,
+        (_, true) => MasterTranslation::Refused,
+    }
+}
+
+/// What a master's DMA passes through at the unit `phandle` names, and how
+/// many cells that unit's specifiers take. A unit a consumer may not use
+/// translates nothing; neither does one whose specifiers carry no stream id,
+/// the only form every family reads. A provider without `#iommu-cells`, or
+/// one the walk cannot describe, frames no entry.
+fn translation_unit(fdt: &Fdt<'_>, phandle: u32) -> Option<(Through, u32)> {
+    match provider(fdt, phandle)? {
+        Provider::Emitted(id, unit) => {
+            let cells = iommu_cells(&unit)?;
+            Some((
+                if cells == 1 {
+                    Through::Unit(id)
+                } else {
+                    Through::Nothing
+                },
+                cells,
+            ))
+        }
+        Provider::Unusable(unit) => Some((Through::Nothing, iommu_cells(&unit)?)),
+        Provider::Undescribed(_) => None,
+    }
+}
+
+/// What a phandle names, as the walk numbers the tree.
+#[derive(Copy, Clone)]
+pub enum Provider<'a> {
+    /// A node the walk emits, and the id it gives it.
+    Emitted(u32, Node<'a>),
+    /// A node no consumer may use: it, or an ancestor, is disabled, reserved
+    /// or failed.
+    Unusable(Node<'a>),
+    /// A usable node the walk does not emit, as it carries nothing the
+    /// matcher could bind.
+    Undescribed(Node<'a>),
+}
+
+/// The node `phandle` names and how the walk treats it, found by replaying
+/// the walk's own numbering, so a consumer met before its provider names the
+/// id the provider will get. [`None`] where no node carries the phandle or
+/// the tree is malformed before it.
+#[must_use]
+pub fn provider<'a>(fdt: &Fdt<'a>, phandle: u32) -> Option<Provider<'a>> {
+    let mut id = FIRST_EMITTED_ID;
+    for node in fdt.nodes_in_use() {
+        let (node, usable) = node.ok()?;
         let depth = node.depth() as usize;
-        if depth >= MAX_WALK_DEPTH {
+        // The walk refuses a tree only for a usable node too deep to track;
+        // it never enters a subtree no consumer may use.
+        if usable && depth >= MAX_WALK_DEPTH {
             return None;
         }
-        if depth == 0 {
-            continue;
+        let emitted = usable && depth > 0 && is_emitted(&node);
+        if node.phandle() == Some(phandle) {
+            return Some(match (usable, emitted) {
+                (_, true) => Provider::Emitted(id, node),
+                (false, _) => Provider::Unusable(node),
+                (true, false) => Provider::Undescribed(node),
+            });
         }
-        let emitted = is_emitted(&node);
         if emitted {
             id = id.checked_add(1)?;
-        }
-        if node.phandle() == Some(phandle) {
-            let cells = node.property("#dma-cells")?;
-            if !emitted || cells.value().len() != CELL_BYTES {
-                return None;
-            }
-            return Some(DmaControllerRef {
-                id,
-                cells: cells.read_be_u32(0).ok()?,
-            });
         }
     }
     None
 }
 
-/// The big-endian cell at byte `off` of `value`.
-fn be_cell(value: &[u8], off: usize) -> Option<u32> {
-    let bytes = value.get(off..off.checked_add(CELL_BYTES)?)?;
-    Some(u32::from_be_bytes(bytes.try_into().ok()?))
+/// Every node the walk emits with the id it gives it, in emission order: the
+/// walk's own numbering, which a pass reading the tree after the walk names
+/// nodes by.
+#[must_use]
+pub fn emitted<'a>(fdt: &Fdt<'a>) -> Emitted<'a> {
+    Emitted {
+        nodes: fdt.operational_nodes(),
+        next_id: Some(FIRST_EMITTED_ID),
+    }
 }
+
+/// Iterator over the nodes the walk emits, produced by [`emitted`]. It ends
+/// where the walk would refuse the tree.
+#[derive(Clone)]
+pub struct Emitted<'a> {
+    nodes: OperationalNodes<'a>,
+    next_id: Option<u32>,
+}
+
+impl<'a> Iterator for Emitted<'a> {
+    type Item = (u32, Node<'a>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            let id = self.next_id?;
+            let Some(Ok(node)) = self.nodes.next() else {
+                self.next_id = None;
+                return None;
+            };
+            let depth = node.depth() as usize;
+            if depth >= MAX_WALK_DEPTH {
+                self.next_id = None;
+                return None;
+            }
+            if depth > 0 && is_emitted(&node) {
+                self.next_id = id.checked_add(1);
+                return Some((id, node));
+            }
+        }
+    }
+}
+
+impl core::iter::FusedIterator for Emitted<'_> {}
 
 /// Whether the walk emits a hardware-tree node for this device-tree node.
 ///
 /// A node with no representable match key and no memory `device_type` is one
 /// the matcher could never bind, so it is spliced out. The single definition
 /// of that rule: [`FdtDiscovery::build_node`] applies it, and the bus-child
-/// look-ahead and [`resolve_dma_controller`] replay it to predict the ids the
-/// walk assigns — a second spelling would let them disagree and pair a chip or
-/// a DMA consumer with another node's endpoint.
+/// look-ahead, [`provider`] and [`emitted`] replay it to predict the ids the
+/// walk assigns — a second spelling would let them disagree and pair a chip, a
+/// DMA consumer or a translated master with another node's id.
 fn is_emitted(node: &Node<'_>) -> bool {
     if classify(node) == HwDeviceClass::Memory {
         return true;
@@ -531,7 +740,7 @@ fn bus_child_address(node: &Node<'_>) -> Option<u64> {
 /// leaves the rest unbound, rather than handing a chip driver authority no
 /// bus driver was told to serve.
 fn push_bus_child_duties(
-    subtree: NodeIter<'_>,
+    subtree: OperationalNodes<'_>,
     bus_depth: usize,
     bus_id: u32,
     hw: &mut HwNode,
@@ -611,10 +820,13 @@ fn push_irq_resources<P: FdtPlatform>(platform: &P, node: &Node<'_>, hw: &mut Hw
     }
     for (position, specifier) in (0u32..).zip(value.chunks_exact(specifier_len)) {
         if let Some(line) = platform.interrupt_line(specifier) {
-            if hw
-                .push_resource(HwResource::irq_at(u64::from(line), position))
-                .is_err()
-            {
+            let line = u64::from(line);
+            let irq = if platform.edge_triggered(specifier) {
+                HwResource::edge_irq_at(line, position)
+            } else {
+                HwResource::irq_at(line, position)
+            };
+            if hw.push_resource(irq).is_err() {
                 return;
             }
         }
@@ -650,8 +862,9 @@ fn local_mac_address(node: &Node<'_>) -> Option<[u8; MAC_ADDRESS_LEN]> {
 
 /// Derive the device class from the node's own data, most authoritative
 /// source first: `device_type` (the spec keeps it for `memory` and `cpu`),
-/// the `#dma-cells` a DMA controller's binding requires, the
-/// `interrupt-controller` marker property, then the spec-recommended
+/// the `#iommu-cells` a translation unit's binding requires, the
+/// `#dma-cells` a DMA controller's, the `interrupt-controller` marker
+/// property, then the spec-recommended
 /// generic node-name stem. Anything else is honestly
 /// [`HwDeviceClass::Other`] — the class is advisory; binding is by match
 /// key.
@@ -662,6 +875,9 @@ fn classify(node: &Node<'_>) -> HwDeviceClass {
             Some(b"cpu") => return HwDeviceClass::Cpu,
             _ => {}
         }
+    }
+    if node.property("#iommu-cells").is_some() {
+        return HwDeviceClass::Iommu;
     }
     if node.property("#dma-cells").is_some() {
         return HwDeviceClass::Dma;
@@ -701,7 +917,9 @@ mod tests {
         DmaControllerDuty, DmaRequestLine, DMA_CONTROLLER_ENDPOINTS,
     };
     use tairix_abi::hwtree::BUS_CHILD_ENDPOINTS;
-    use tairix_abi::{HwDeviceClass, HwNode, HwResource, HwResourceKind, HW_NODE_MAX_RESOURCES};
+    use tairix_abi::{
+        HwDeviceClass, HwNode, HwResource, HwResourceKind, IommuStreams, HW_NODE_MAX_RESOURCES,
+    };
     use tairix_fdt::fixture::DtbBuilder;
     use tairix_fdt::{BusLevel, Fdt, Node};
 
@@ -1587,5 +1805,381 @@ mod tests {
         let fdt = Fdt::new(&blob).expect("valid fdt");
         let root: Node<'_> = fdt.nodes().next().expect("a node").expect("well formed");
         assert_eq!(super::bus_child_address(&root), Some(0x68));
+    }
+
+    const SMMU: u32 = 0x40;
+    const WIDE_UNIT: u32 = 0x41;
+    const OFF_UNIT: u32 = 0x42;
+    const NOT_A_UNIT: u32 = 0x43;
+
+    /// Masters of every shape ahead of the units they name: one taking
+    /// one-cell specifiers, one taking two, a disabled one, and a node that
+    /// is no unit at all.
+    fn iommu_tree() -> Vec<u8> {
+        let cells =
+            |values: &[u32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_be_bytes()).collect() };
+        let master = |b: &mut DtbBuilder, name: &str, compatible: &str, iommus: &[u32]| {
+            b.begin_node(name);
+            b.prop_str("compatible", compatible);
+            b.prop("iommus", &cells(iommus));
+            b.end_node();
+        };
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 1);
+        b.prop_u32("#size-cells", 1);
+        master(
+            &mut b,
+            "display@1000",
+            "test,display",
+            &[SMMU, 0x100, SMMU, 0x101, SMMU, 0x105],
+        );
+        b.begin_node("dma@2000");
+        b.prop_str("compatible", "test,translated-dma");
+        b.prop_u32("#dma-cells", 1);
+        b.prop("iommus", &cells(&[SMMU, 0x200]));
+        b.end_node();
+        master(
+            &mut b,
+            "codec@3000",
+            "test,bypassing",
+            &[WIDE_UNIT, 1, 0xF, OFF_UNIT, 7],
+        );
+        master(
+            &mut b,
+            "mixed@4000",
+            "test,mixed",
+            &[SMMU, 0x300, OFF_UNIT, 8],
+        );
+        master(&mut b, "dangling@5000", "test,dangling", &[0x99, 1]);
+        master(&mut b, "short@6000", "test,short", &[WIDE_UNIT, 1]);
+        master(&mut b, "odd@7000", "test,not-a-unit", &[NOT_A_UNIT, 1]);
+        b.begin_node("dma@8000");
+        b.prop_str("compatible", "test,refused-dma");
+        b.prop_u32("#dma-cells", 1);
+        b.prop("iommus", &cells(&[0x99, 1]));
+        b.end_node();
+        let many: Vec<u32> = (0..=u32::try_from(HW_NODE_MAX_RESOURCES).expect("small"))
+            .flat_map(|i| [SMMU, i * 2])
+            .collect();
+        master(&mut b, "many@9000", "test,many", &many);
+        b.begin_node("smmu@a000");
+        b.prop_str("compatible", "arm,smmu-v3");
+        b.prop("reg", &cells(&[0xA000, 0x2_0000]));
+        b.prop_u32("#iommu-cells", 1);
+        b.prop_u32("phandle", SMMU);
+        b.end_node();
+        b.begin_node("iommu@b000");
+        b.prop_str("compatible", "arm,mmu-500");
+        b.prop_u32("#iommu-cells", 2);
+        b.prop_u32("phandle", WIDE_UNIT);
+        b.end_node();
+        b.begin_node("iommu@c000");
+        b.prop_str("compatible", "arm,smmu-v3");
+        b.prop_str("status", "disabled");
+        b.prop_u32("#iommu-cells", 1);
+        b.prop_u32("phandle", OFF_UNIT);
+        b.end_node();
+        b.begin_node("gpio@d000");
+        b.prop_str("compatible", "test,gpio");
+        b.prop_u32("phandle", NOT_A_UNIT);
+        b.end_node();
+        b.end_node();
+        b.build()
+    }
+
+    fn streams(node: &HwNode) -> Vec<IommuStreams> {
+        node.resources()
+            .iter()
+            .filter_map(|r| r.iommu_streams().ok())
+            .collect()
+    }
+
+    fn dma_windows(node: &HwNode) -> usize {
+        node.resources()
+            .iter()
+            .filter(|r| r.kind() == Some(HwResourceKind::Dma))
+            .count()
+    }
+
+    #[test]
+    fn a_unit_is_classed_by_its_specifier_width_and_a_disabled_one_is_not_emitted() {
+        let nodes = discover(&iommu_tree());
+        let smmu = by_key(&nodes, b"arm,smmu-v3");
+        assert_eq!(smmu.class(), Some(HwDeviceClass::Iommu));
+        assert_eq!(
+            smmu.resources()[0],
+            HwResource::mmio(0xA000, 0x2_0000),
+            "its register window"
+        );
+        assert_eq!(
+            by_key(&nodes, b"arm,mmu-500").class(),
+            Some(HwDeviceClass::Iommu)
+        );
+        let smmus = nodes
+            .iter()
+            .filter(|n| {
+                n.match_keys()
+                    .iter()
+                    .any(|k| k.compatible_bytes() == b"arm,smmu-v3")
+            })
+            .count();
+        assert_eq!(smmus, 1, "the disabled unit is spliced out");
+    }
+
+    #[test]
+    fn a_master_carries_its_streams_on_the_unit_it_names_and_masters_dma() {
+        let nodes = discover(&iommu_tree());
+        let unit = by_key(&nodes, b"arm,smmu-v3").id();
+        let display = by_key(&nodes, b"test,display");
+        assert!(
+            display.id() < unit,
+            "named before the walk reaches the unit"
+        );
+        assert_eq!(
+            streams(display),
+            std::vec![
+                IommuStreams::new(unit, 0x100, 2).expect("valid"),
+                IommuStreams::new(unit, 0x105, 1).expect("valid"),
+            ],
+            "consecutive ids on one unit are one range"
+        );
+        assert_eq!(
+            dma_windows(display),
+            1,
+            "a master behind a unit masters DMA"
+        );
+        let dma = by_key(&nodes, b"test,translated-dma");
+        assert_eq!(
+            streams(dma),
+            std::vec![IommuStreams::new(unit, 0x200, 1).expect("valid")]
+        );
+        assert_eq!(dma_windows(dma), 1);
+    }
+
+    #[test]
+    fn a_master_naming_only_units_that_translate_nothing_masters_untranslated() {
+        let nodes = discover(&iommu_tree());
+        let codec = by_key(&nodes, b"test,bypassing");
+        assert!(streams(codec).is_empty());
+        assert_eq!(dma_windows(codec), 1);
+    }
+
+    #[test]
+    fn a_master_whose_translation_cannot_be_described_gets_no_dma_authority() {
+        let nodes = discover(&iommu_tree());
+        for refused in [
+            &b"test,mixed"[..],
+            b"test,dangling",
+            b"test,short",
+            b"test,not-a-unit",
+            b"test,many",
+        ] {
+            let node = by_key(&nodes, refused);
+            assert!(streams(node).is_empty(), "{refused:?}");
+            assert_eq!(dma_windows(node), 0, "{refused:?}");
+        }
+        // A controller keeps its duty, so its consumers can still find it,
+        // but may carve nothing.
+        let controller = by_key(&nodes, b"test,refused-dma");
+        assert!(controller
+            .resources()
+            .iter()
+            .any(|r| r.dma_controller_duty().is_ok()));
+        assert_eq!(dma_windows(controller), 0);
+    }
+
+    #[test]
+    fn a_spliced_subtree_shifts_no_id_a_request_a_duty_or_a_stream_names() {
+        let cells =
+            |values: &[u32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_be_bytes()).collect() };
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 1);
+        b.prop_u32("#size-cells", 1);
+        b.begin_node("i2s@1000");
+        b.prop_str("compatible", "test,consumer");
+        b.prop("dmas", &cells(&[7, 3]));
+        b.prop("iommus", &cells(&[SMMU, 0x10]));
+        b.end_node();
+        b.begin_node("bus@2000");
+        b.prop_str("compatible", "simple-bus");
+        b.prop_str("status", "disabled");
+        b.begin_node("uart@0");
+        b.prop_str("compatible", "arm,pl011");
+        b.end_node();
+        b.end_node();
+        b.begin_node("i2c@3000");
+        b.prop_str("compatible", "test,i2c");
+        b.prop_u32("#address-cells", 1);
+        b.prop_u32("#size-cells", 0);
+        b.begin_node("rtc@68");
+        b.prop_str("compatible", "test,disabled-rtc");
+        b.prop_str("status", "disabled");
+        b.prop("reg", &0x68u32.to_be_bytes());
+        b.end_node();
+        b.begin_node("codec@1a");
+        b.prop_str("compatible", "test,codec");
+        b.prop("reg", &0x1Au32.to_be_bytes());
+        b.end_node();
+        b.end_node();
+        b.begin_node("dma@4000");
+        b.prop_str("compatible", "test,controller");
+        b.prop_u32("#dma-cells", 1);
+        b.prop_u32("phandle", 7);
+        b.end_node();
+        b.begin_node("smmu@5000");
+        b.prop_str("compatible", "arm,smmu-v3");
+        b.prop_u32("#iommu-cells", 1);
+        b.prop_u32("phandle", SMMU);
+        b.end_node();
+        b.end_node();
+        let blob = b.build();
+        let nodes = discover(&blob);
+        assert!(
+            nodes.iter().all(|n| n.match_keys().iter().all(|k| {
+                k.compatible_bytes() != b"arm,pl011" && k.compatible_bytes() != b"test,disabled-rtc"
+            })),
+            "nothing below a disabled node, and no disabled node, is emitted"
+        );
+        let controller = by_key(&nodes, b"test,controller");
+        let consumer = by_key(&nodes, b"test,consumer");
+        assert_eq!(
+            requests(consumer),
+            std::vec![DmaRequestLine::new(
+                DMA_CONTROLLER_ENDPOINTS.endpoint(controller.id()),
+                0,
+                &[3],
+                b""
+            )
+            .expect("valid")]
+        );
+        let unit = by_key(&nodes, b"arm,smmu-v3").id();
+        assert_eq!(
+            streams(consumer),
+            std::vec![IommuStreams::new(unit, 0x10, 1).expect("valid")]
+        );
+        let codec = by_key(&nodes, b"test,codec");
+        assert_eq!(
+            duties(by_key(&nodes, b"test,i2c")),
+            std::vec![(BUS_CHILD_ENDPOINTS.endpoint(codec.id()), 0x1A)]
+        );
+        assert_eq!(
+            endpoints(codec),
+            std::vec![BUS_CHILD_ENDPOINTS.endpoint(codec.id())]
+        );
+        // The numbering a later pass reads the tree by is the walk's own.
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        let numbered: Vec<u32> = super::emitted(&fdt).map(|(id, _)| id).collect();
+        let walked: Vec<u32> = nodes.iter().skip(1).map(HwNode::id).collect();
+        assert_eq!(numbered, walked);
+    }
+
+    #[test]
+    fn a_provider_is_named_by_how_the_walk_treats_it() {
+        let blob = iommu_tree();
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        let nodes = discover(&blob);
+        let smmu = by_key(&nodes, b"arm,smmu-v3").id();
+        assert!(
+            matches!(super::provider(&fdt, SMMU), Some(super::Provider::Emitted(id, _)) if id == smmu)
+        );
+        assert!(matches!(
+            super::provider(&fdt, OFF_UNIT),
+            Some(super::Provider::Unusable(_))
+        ));
+        assert!(super::provider(&fdt, 0x99).is_none());
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        b.begin_node("bare");
+        b.prop_u32("phandle", 3);
+        b.end_node();
+        b.end_node();
+        let bare = b.build();
+        let fdt = Fdt::new(&bare).expect("valid fdt");
+        assert!(matches!(
+            super::provider(&fdt, 3),
+            Some(super::Provider::Undescribed(_))
+        ));
+    }
+
+    /// A disabled subtree deeper than the walk tracks is one it never
+    /// enters, so a provider after it is still found.
+    #[test]
+    fn a_provider_after_a_deep_disabled_subtree_is_found() {
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        b.begin_node("off");
+        b.prop_str("status", "disabled");
+        for level in 0..super::MAX_WALK_DEPTH {
+            b.begin_node(if level % 2 == 0 { "a" } else { "b" });
+        }
+        for _ in 0..super::MAX_WALK_DEPTH {
+            b.end_node();
+        }
+        b.end_node();
+        b.begin_node("unit");
+        b.prop_str("compatible", "arm,smmu-v3");
+        b.prop_u32("phandle", 7);
+        b.end_node();
+        b.end_node();
+        let blob = b.build();
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        assert!(matches!(
+            super::provider(&fdt, 7),
+            Some(super::Provider::Emitted(..))
+        ));
+    }
+
+    /// [`BarePlatform`], reading a specifier's second cell as its trigger:
+    /// non-zero for an edge.
+    struct TriggeredPlatform;
+
+    impl FdtPlatform for TriggeredPlatform {
+        const INTERRUPT_CELLS: usize = 2;
+
+        fn from_tree(_fdt: &Fdt<'_>) -> Self {
+            Self
+        }
+
+        fn interrupt_line(&self, specifier: &[u8]) -> Option<u32> {
+            Some(u32::from_be_bytes(specifier.get(..4)?.try_into().ok()?))
+        }
+
+        fn edge_triggered(&self, specifier: &[u8]) -> bool {
+            specifier.get(4..8).is_some_and(|cell| cell != [0; 4])
+        }
+
+        fn root_interrupt_controller(&self) -> Option<u32> {
+            Some(ROOT_INTC)
+        }
+    }
+
+    #[test]
+    fn a_line_its_specifier_raises_by_edges_is_granted_as_one() {
+        let cells =
+            |values: &[u32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_be_bytes()).collect() };
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        b.prop_u32("interrupt-parent", ROOT_INTC);
+        b.begin_node("intc");
+        b.prop_str("compatible", "test,root-intc");
+        b.prop("interrupt-controller", &[]);
+        b.prop_u32("#interrupt-cells", 2);
+        b.prop_u32("phandle", ROOT_INTC);
+        b.end_node();
+        b.begin_node("smmu");
+        b.prop_str("compatible", "test,pulsing");
+        b.prop("interrupts", &cells(&[74, 1, 75, 0]));
+        b.end_node();
+        b.end_node();
+        let nodes = discover_on::<TriggeredPlatform>(&b.build());
+        let irqs: Vec<(u64, bool, Option<u32>)> = by_key(&nodes, b"test,pulsing")
+            .resources()
+            .iter()
+            .filter(|r| r.kind() == Some(HwResourceKind::Irq))
+            .map(|r| (r.base(), r.is_edge_triggered(), r.interrupt_position()))
+            .collect();
+        assert_eq!(irqs, std::vec![(74, true, Some(0)), (75, false, Some(1))]);
     }
 }

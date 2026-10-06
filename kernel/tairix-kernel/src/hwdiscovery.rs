@@ -18,11 +18,13 @@
 //! the block probe differs (a different resource shape) and stays separate.
 
 use tairix_abi::driver::bus::{Bus, BusDevice};
+use tairix_abi::driver::pci::PciAddress;
 use tairix_abi::driver::virtio_mmio::VirtioMmioBus;
 use tairix_abi::driver::virtio_pci::{
     virtio_pci_window_resource, VirtioPciBus, VIRTIO_PCI_CFG_COMMON, VIRTIO_PCI_CFG_DEVICE,
     VIRTIO_PCI_CFG_ISR, VIRTIO_PCI_CFG_NOTIFY, VIRTIO_PCI_VENDOR_ID,
 };
+use tairix_abi::driver::MmioMapper;
 use tairix_abi::hwtree::HwResource;
 use tairix_abi::{DriverError, HwDeviceClass, HwMatchKey, HwNode, HW_NODE_ROOT_ID};
 use tairix_arch_api::{DiscoveryError, HwNodeSink};
@@ -35,10 +37,8 @@ use tairix_virtio_input::VIRTIO_INPUT_DEVICE_ID;
 use tairix_virtio_net::VIRTIO_NET_DEVICE_ID;
 
 use crate::hwtree_node_ids::{
-    VIRTIO_AUDIO_PROBE_NODE_BASE_ID, VIRTIO_BLOCK_PROBE_NODE_BASE_ID,
+    pci_function_node_id, VIRTIO_AUDIO_PROBE_NODE_BASE_ID, VIRTIO_BLOCK_PROBE_NODE_BASE_ID,
     VIRTIO_INPUT_PROBE_NODE_BASE_ID, VIRTIO_NET_PROBE_NODE_BASE_ID,
-    VIRTIO_PCI_AUDIO_PROBE_NODE_BASE_ID, VIRTIO_PCI_BLOCK_PROBE_NODE_BASE_ID,
-    VIRTIO_PCI_INPUT_PROBE_NODE_BASE_ID, VIRTIO_PCI_NET_PROBE_NODE_BASE_ID,
 };
 use crate::pci_probe::FunctionDma;
 
@@ -123,36 +123,76 @@ pub fn observe_virtio_mmio_block_devices(
 /// configuration address, or [`None`] where no unit translates it.
 pub type DmaIdentity<'a> = &'a dyn Fn(u64) -> Option<FunctionDma>;
 
-/// One discovered PCI function: its configuration address and how a unit
+/// The PCI segment an observer walks: its number, and its position among the
+/// segments the kernel owns, which numbers its functions' nodes.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct PciSegment {
+    /// The segment's number.
+    pub number: u16,
+    /// Its position among the segments the kernel owns.
+    pub ordinal: u32,
+}
+
+impl PciSegment {
+    /// The node of the function at configuration `address`, or [`None`] past
+    /// the id space.
+    #[must_use]
+    pub fn node_id(self, address: u64) -> Option<u32> {
+        pci_function_node_id(self.ordinal, tairix_abi::driver::pci::requester_id(address))
+    }
+}
+
+/// One walk of a segment, as every class observer sees it.
+#[derive(Copy, Clone)]
+pub struct PciWalk<'a> {
+    /// The segment walked.
+    pub segment: PciSegment,
+    /// Its functions, from one enumeration of [`Self::bus`].
+    pub functions: &'a [BusDevice],
+    /// Its configuration space.
+    pub bus: &'a dyn VirtioPciBus,
+    /// The kernel's own reach of the registers its functions decode.
+    pub registers: &'a dyn MmioMapper,
+    /// How a unit knows each function's DMA.
+    pub dma: DmaIdentity<'a>,
+}
+
+/// One discovered PCI function: where the machine names it and how a unit
 /// knows its DMA, where one does.
 struct PciFunction {
-    address: u64,
+    address: PciAddress,
     dma: Option<FunctionDma>,
 }
 
 impl PciFunction {
-    /// The function at `address`, or [`None`] for one behind a unit that it
-    /// cannot be confined by: one whose isolation group spans units, or a
+    /// The function `device`, or [`None`] for one behind a unit that it
+    /// cannot be confined by: one whose isolation group spans units, one below
+    /// an external-facing port that does not validate requester ids, or a
     /// virtio function declining `VIRTIO_F_ACCESS_PLATFORM`, which reaches
     /// memory by physical address past the unit. No driver may be handed it.
     /// Decided before anything routes an interrupt to it or makes it a bus
     /// master; the refusal is audited.
-    fn admit(
-        bus: &dyn VirtioPciBus,
-        dma: DmaIdentity<'_>,
-        address: u64,
-        log: &dyn Sink,
-    ) -> Option<Self> {
-        let Some(translated) = dma(address) else {
+    fn admit(walk: &PciWalk<'_>, device: &BusDevice, log: &dyn Sink) -> Option<Self> {
+        let address = PciAddress::at(walk.segment.number, device.address);
+        let Some(translated) = (walk.dma)(device.address) else {
             return Some(Self { address, dma: None });
         };
         if translated.group.is_none() {
-            log_bypass(log, address, &translated, "unconfinable");
+            let reason = if translated.untrusted {
+                "untrusted"
+            } else {
+                "unconfinable"
+            };
+            log_bypass(log, address, &translated, reason);
             return None;
         }
-        let honoured = bus
-            .offered_features(address)
-            .is_ok_and(|offered| offered & tairix_virtio::VIRTIO_F_ACCESS_PLATFORM != 0);
+        // Only virtio defines a way for a device to decline the platform's
+        // translation; every other function's requests reach the unit.
+        let honoured = device.vendor != u32::from(VIRTIO_PCI_VENDOR_ID)
+            || walk
+                .bus
+                .offered_features(device.address, walk.registers)
+                .is_ok_and(|offered| offered & tairix_virtio::VIRTIO_F_ACCESS_PLATFORM != 0);
         if honoured {
             return Some(Self {
                 address,
@@ -163,14 +203,12 @@ impl PciFunction {
         None
     }
 
-    /// Record the function's requester id on `node`, and how its unit knows
-    /// its DMA. `false` when the node cannot hold all of it: a translated
-    /// device is never published as an untranslated one, nor with part of its
-    /// identity.
+    /// Record the function's segment and requester id on `node`, and how its
+    /// unit knows its DMA. `false` when the node cannot hold all of it: a
+    /// translated device is never published as an untranslated one, nor with
+    /// part of its identity.
     fn describe(self, node: &mut HwNode) -> bool {
-        node.set_address(u32::from(tairix_abi::driver::pci::requester_id(
-            self.address,
-        )));
+        node.set_address(self.address.node_address());
         let Some(dma) = self.dma else {
             return true;
         };
@@ -190,7 +228,7 @@ impl PciFunction {
     }
 }
 
-fn log_bypass(log: &dyn Sink, address: u64, dma: &FunctionDma, reason: &'static str) {
+fn log_bypass(log: &dyn Sink, address: PciAddress, dma: &FunctionDma, reason: &'static str) {
     let event = tairix_kernel_core::AuditEvent::DmaTranslationBypass;
     tairix_log::log(
         log,
@@ -201,9 +239,7 @@ fn log_bypass(log: &dyn Sink, address: u64, dma: &FunctionDma, reason: &'static 
             fields: &[
                 Field {
                     key: "address",
-                    value: FieldValue::UnsignedInt(u64::from(
-                        tairix_abi::driver::pci::requester_id(address),
-                    )),
+                    value: FieldValue::UnsignedInt(u64::from(address.node_address())),
                 },
                 Field {
                     key: "unit",
@@ -257,34 +293,33 @@ fn emit_virtio_block_node(
     Ok(())
 }
 
-/// Emit each modern virtio-blk function among `functions` (one walk of
-/// `bus`) as a match-key-only [`HwDeviceClass::Storage`] node: the in-kernel
-/// floor bring-up re-resolves its transport from configuration space, so the
-/// node carries its bind key, its requester id as its address and, behind a
-/// translation unit, how the unit knows its DMA — no grant. Keyed by the
-/// virtio type, so one bundle binds on either bus.
+/// Emit each modern virtio-blk function `walk` found as a match-key-only
+/// [`HwDeviceClass::Storage`] node: the in-kernel floor bring-up re-resolves
+/// its transport from configuration space, so the node carries its bind key,
+/// its segment and requester id as its address and, behind a translation
+/// unit, how the unit knows its DMA — no grant. Keyed by the virtio type, so
+/// one bundle binds on either bus.
 ///
 /// # Errors
 ///
 /// [`DriverError::BufferTooSmall`] for a full sink.
 pub fn observe_virtio_pci_block_devices(
-    bus: &dyn VirtioPciBus,
-    functions: &[BusDevice],
-    dma: DmaIdentity<'_>,
+    walk: &PciWalk<'_>,
     sink: &mut dyn HwNodeSink,
     log: &dyn Sink,
 ) -> Result<(), DriverError> {
     let want_device_id = virtio_pci_modern_device_id(VIRTIO_BLK_DEVICE_ID);
-    let mut next_id = VIRTIO_PCI_BLOCK_PROBE_NODE_BASE_ID;
-    for device in functions {
+    for device in walk.functions {
         if device.vendor != u32::from(VIRTIO_PCI_VENDOR_ID) || device.device != want_device_id {
             continue;
         }
-        let Some(function) = PciFunction::admit(bus, dma, device.address, log) else {
+        let Some(id) = walk.segment.node_id(device.address) else {
             continue;
         };
-        emit_virtio_block_node(sink, next_id, Some(function))?;
-        next_id = next_id.wrapping_add(1);
+        let Some(function) = PciFunction::admit(walk, device, log) else {
+            continue;
+        };
+        emit_virtio_block_node(sink, id, Some(function))?;
     }
     Ok(())
 }
@@ -559,8 +594,8 @@ fn observe_virtio_mmio_interrupt_devices(
     Ok(())
 }
 
-/// Emit each modern virtio-net function among `functions` (one walk of
-/// `bus`) as a [`HwDeviceClass::Network`] node carrying its configuration
+/// Emit each modern virtio-net function `walk` found as a
+/// [`HwDeviceClass::Network`] node carrying its configuration
 /// windows, its routed interrupt line and, behind a unit, its DMA identity;
 /// one any of them cannot be resolved for is left undiscovered.
 ///
@@ -568,23 +603,20 @@ fn observe_virtio_mmio_interrupt_devices(
 ///
 /// [`DriverError::BufferTooSmall`] for a full sink.
 pub fn observe_virtio_pci_network_devices(
-    bus: &dyn VirtioPciBus,
-    functions: &[BusDevice],
-    dev_irq: &dyn Fn(u64) -> Option<u32>,
-    dma: DmaIdentity<'_>,
+    walk: &PciWalk<'_>,
+    dev_irq: &dyn Fn(u64) -> Option<HwResource>,
     sink: &mut dyn HwNodeSink,
     log: &dyn Sink,
 ) -> Result<(), DriverError> {
     let kind = VirtioPciKind {
         virtio_type: VIRTIO_NET_DEVICE_ID,
         class: HwDeviceClass::Network,
-        first_id: VIRTIO_PCI_NET_PROBE_NODE_BASE_ID,
     };
-    observe_virtio_pci_devices(bus, functions, dev_irq, dma, sink, log, kind)
+    observe_virtio_pci_devices(walk, dev_irq, sink, log, kind)
 }
 
-/// Emit each modern virtio-input function among `functions` (one walk of
-/// `bus`) as a [`HwDeviceClass::Input`] node carrying its configuration
+/// Emit each modern virtio-input function `walk` found as a
+/// [`HwDeviceClass::Input`] node carrying its configuration
 /// windows, its routed interrupt line and, behind a unit, its DMA identity;
 /// one any of them cannot be resolved for is left undiscovered.
 ///
@@ -592,23 +624,20 @@ pub fn observe_virtio_pci_network_devices(
 ///
 /// [`DriverError::BufferTooSmall`] for a full sink.
 pub fn observe_virtio_pci_input_devices(
-    bus: &dyn VirtioPciBus,
-    functions: &[BusDevice],
-    dev_irq: &dyn Fn(u64) -> Option<u32>,
-    dma: DmaIdentity<'_>,
+    walk: &PciWalk<'_>,
+    dev_irq: &dyn Fn(u64) -> Option<HwResource>,
     sink: &mut dyn HwNodeSink,
     log: &dyn Sink,
 ) -> Result<(), DriverError> {
     let kind = VirtioPciKind {
         virtio_type: VIRTIO_INPUT_DEVICE_ID,
         class: HwDeviceClass::Input,
-        first_id: VIRTIO_PCI_INPUT_PROBE_NODE_BASE_ID,
     };
-    observe_virtio_pci_devices(bus, functions, dev_irq, dma, sink, log, kind)
+    observe_virtio_pci_devices(walk, dev_irq, sink, log, kind)
 }
 
-/// Emit each modern virtio-sound function among `functions` (one walk of
-/// `bus`) as a [`HwDeviceClass::Audio`] node carrying its configuration
+/// Emit each modern virtio-sound function `walk` found as a
+/// [`HwDeviceClass::Audio`] node carrying its configuration
 /// windows, its routed interrupt line and, behind a unit, its DMA identity;
 /// one any of them cannot be resolved for is left undiscovered
 /// (`plans/SOUND.md` SND4).
@@ -617,55 +646,45 @@ pub fn observe_virtio_pci_input_devices(
 ///
 /// [`DriverError::BufferTooSmall`] for a full sink.
 pub fn observe_virtio_pci_audio_devices(
-    bus: &dyn VirtioPciBus,
-    functions: &[BusDevice],
-    dev_irq: &dyn Fn(u64) -> Option<u32>,
-    dma: DmaIdentity<'_>,
+    walk: &PciWalk<'_>,
+    dev_irq: &dyn Fn(u64) -> Option<HwResource>,
     sink: &mut dyn HwNodeSink,
     log: &dyn Sink,
 ) -> Result<(), DriverError> {
     let kind = VirtioPciKind {
         virtio_type: VIRTIO_SND_DEVICE_ID,
         class: HwDeviceClass::Audio,
-        first_id: VIRTIO_PCI_AUDIO_PROBE_NODE_BASE_ID,
     };
-    observe_virtio_pci_devices(bus, functions, dev_irq, dma, sink, log, kind)
+    observe_virtio_pci_devices(walk, dev_irq, sink, log, kind)
 }
 
-/// Which virtio functions a PCI class probe emits, and as which nodes.
+/// Which virtio functions a PCI class probe emits, and as which class of
+/// node.
 #[derive(Clone, Copy)]
 struct VirtioPciKind {
     virtio_type: u32,
     class: HwDeviceClass,
-    /// The first node id the probe numbers its nodes from.
-    first_id: u32,
 }
 
 /// The shared core of the interrupt-driven virtio-PCI class probes: each
-/// modern virtio function of `kind` among `functions` becomes a node keyed by
+/// modern virtio function of `kind` `walk` found becomes a node keyed by
 /// its virtio type, carrying its four configuration windows (the notify
 /// window with its multiplier), an unconstrained DMA reach, the interrupt
-/// line `dev_irq` routed for it and, behind a translation unit, how the unit
+/// grant `dev_irq` routed for it and, behind a translation unit, how the unit
 /// knows its DMA. A user-space driver cannot reach configuration space, so the
 /// kernel resolves the windows; a function whose windows or line cannot be
 /// resolved, or whose node cannot hold all of it, is left undiscovered.
 fn observe_virtio_pci_devices(
-    bus: &dyn VirtioPciBus,
-    functions: &[BusDevice],
-    dev_irq: &dyn Fn(u64) -> Option<u32>,
-    dma: DmaIdentity<'_>,
+    walk: &PciWalk<'_>,
+    dev_irq: &dyn Fn(u64) -> Option<HwResource>,
     sink: &mut dyn HwNodeSink,
     log: &dyn Sink,
     kind: VirtioPciKind,
 ) -> Result<(), DriverError> {
-    let VirtioPciKind {
-        virtio_type,
-        class,
-        first_id,
-    } = kind;
+    let VirtioPciKind { virtio_type, class } = kind;
+    let bus = walk.bus;
     let want_device_id = virtio_pci_modern_device_id(virtio_type);
-    let mut next_id = first_id;
-    for device in functions {
+    for device in walk.functions {
         if device.vendor != u32::from(VIRTIO_PCI_VENDOR_ID) {
             continue;
         }
@@ -683,14 +702,18 @@ fn observe_virtio_pci_devices(
         ) else {
             continue;
         };
-        let Some(function) = PciFunction::admit(bus, dma, bdf, log) else {
+        let Some(id) = walk.segment.node_id(bdf) else {
             continue;
         };
-        let Some(line) = dev_irq(bdf) else {
+        let Some(function) = PciFunction::admit(walk, device, log) else {
             continue;
         };
-        let mut node = HwNode::new(next_id, HW_NODE_ROOT_ID, class);
-        next_id = next_id.wrapping_add(1);
+        let Some(interrupt) =
+            dev_irq(bdf).filter(|r| r.kind() == Some(tairix_abi::HwResourceKind::Irq))
+        else {
+            continue;
+        };
+        let mut node = HwNode::new(id, HW_NODE_ROOT_ID, class);
         let window = |role, (base, len): (u64, usize), multiplier| {
             virtio_pci_window_resource(role, base, len as u64, multiplier)
         };
@@ -701,7 +724,7 @@ fn observe_virtio_pci_devices(
                 window(VIRTIO_PCI_CFG_ISR, isr, 0),
                 window(VIRTIO_PCI_CFG_DEVICE, devcfg, 0),
                 HwResource::dma(0, 0),
-                HwResource::irq(u64::from(line), 1),
+                interrupt,
             ]
             .into_iter()
             .all(|resource| node.push_resource(resource).is_ok())
@@ -752,9 +775,11 @@ fn log_virtio_pci_function(log: &dyn Sink, want_device_id: u32, device: &BusDevi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tairix_abi::driver::virtio_pci::common;
     use tairix_abi::{HwDeviceClass, HwMatchKey, HwNode, HwResource};
 
     use crate::discovery_test_bus::FakeBus;
+    use crate::test_support::NullSink;
 
     /// A deterministic interrupt line the interrupt-probe tests hand the
     /// `slot_irq` closure for every slot, so the emitted node carries a
@@ -762,10 +787,6 @@ mod tests {
     /// in-range GICv2 SPI; the value is the test's own and never a board
     /// constant the production path uses.
     const TEST_INPUT_INTID: u32 = 34;
-
-    /// A discarding [`Sink`] for the discovery diagnostic in the probe tests
-    /// (they assert on the emitted nodes, not the audit stream).
-    struct DiscardLog;
 
     /// Records the id of every event it is handed.
     #[derive(Default)]
@@ -775,10 +796,6 @@ mod tests {
         fn write_event(&self, event: &Event<'_>) {
             self.0.borrow_mut().push(event.id);
         }
-    }
-
-    impl Sink for DiscardLog {
-        fn write_event(&self, _event: &Event<'_>) {}
     }
 
     /// Collects every node a discovery probe emits, so the tests can assert
@@ -804,13 +821,8 @@ mod tests {
         // the discovery the input-driver autoload binds against.
         let bus = FakeBus::with(&[VIRTIO_INPUT_DEVICE_ID]);
         let mut sink = CollectingSink::default();
-        observe_virtio_mmio_input_devices(
-            &bus,
-            &|_| Some(TEST_INPUT_INTID),
-            &mut sink,
-            &DiscardLog,
-        )
-        .expect("enumerate");
+        observe_virtio_mmio_input_devices(&bus, &|_| Some(TEST_INPUT_INTID), &mut sink, &NullSink)
+            .expect("enumerate");
         assert_eq!(sink.nodes.len(), 1);
         let node = &sink.nodes[0];
         assert_eq!(node.class(), Some(HwDeviceClass::Input));
@@ -839,13 +851,8 @@ mod tests {
         // devices, so the input probe emits nothing.
         let bus = FakeBus::with(&[VIRTIO_BLK_DEVICE_ID, 1]);
         let mut sink = CollectingSink::default();
-        observe_virtio_mmio_input_devices(
-            &bus,
-            &|_| Some(TEST_INPUT_INTID),
-            &mut sink,
-            &DiscardLog,
-        )
-        .expect("enumerate");
+        observe_virtio_mmio_input_devices(&bus, &|_| Some(TEST_INPUT_INTID), &mut sink, &NullSink)
+            .expect("enumerate");
         assert!(sink.nodes.is_empty());
     }
 
@@ -856,13 +863,8 @@ mod tests {
         // base, so it can never collide with a block probe child.
         let bus = FakeBus::with(&[VIRTIO_BLK_DEVICE_ID, VIRTIO_INPUT_DEVICE_ID]);
         let mut sink = CollectingSink::default();
-        observe_virtio_mmio_input_devices(
-            &bus,
-            &|_| Some(TEST_INPUT_INTID),
-            &mut sink,
-            &DiscardLog,
-        )
-        .expect("enumerate");
+        observe_virtio_mmio_input_devices(&bus, &|_| Some(TEST_INPUT_INTID), &mut sink, &NullSink)
+            .expect("enumerate");
         assert_eq!(sink.nodes.len(), 1);
         let node = &sink.nodes[0];
         assert_eq!(node.class(), Some(HwDeviceClass::Input));
@@ -885,13 +887,8 @@ mod tests {
         // discovered window, so a keyboard and a pointer are never merged.
         let bus = FakeBus::with(&[VIRTIO_INPUT_DEVICE_ID, VIRTIO_INPUT_DEVICE_ID]);
         let mut sink = CollectingSink::default();
-        observe_virtio_mmio_input_devices(
-            &bus,
-            &|_| Some(TEST_INPUT_INTID),
-            &mut sink,
-            &DiscardLog,
-        )
-        .expect("enumerate");
+        observe_virtio_mmio_input_devices(&bus, &|_| Some(TEST_INPUT_INTID), &mut sink, &NullSink)
+            .expect("enumerate");
         assert_eq!(sink.nodes.len(), 2);
         assert_eq!(sink.nodes[0].id(), VIRTIO_INPUT_PROBE_NODE_BASE_ID);
         assert_eq!(sink.nodes[1].id(), VIRTIO_INPUT_PROBE_NODE_BASE_ID + 1);
@@ -938,7 +935,7 @@ mod tests {
             &kbd_bus,
             &|_| Some(TEST_INPUT_INTID),
             &mut kbd,
-            &DiscardLog,
+            &NullSink,
         )
         .expect("enumerate");
         assert_eq!(kbd.nodes.len(), 1);
@@ -963,7 +960,7 @@ mod tests {
             &bus,
             &|_| Some(TEST_INPUT_INTID),
             &mut sink,
-            &DiscardLog,
+            &NullSink,
         )
         .expect("enumerate");
         assert_eq!(sink.nodes.len(), 1);
@@ -996,13 +993,8 @@ mod tests {
         // that nothing can match and the machine has no audio device.
         let bus = FakeBus::with(&[VIRTIO_SND_DEVICE_ID]);
         let mut sink = CollectingSink::default();
-        observe_virtio_mmio_audio_devices(
-            &bus,
-            &|_| Some(TEST_INPUT_INTID),
-            &mut sink,
-            &DiscardLog,
-        )
-        .expect("enumerate");
+        observe_virtio_mmio_audio_devices(&bus, &|_| Some(TEST_INPUT_INTID), &mut sink, &NullSink)
+            .expect("enumerate");
         assert_eq!(sink.nodes.len(), 1);
         let node = &sink.nodes[0];
         assert_eq!(node.class(), Some(HwDeviceClass::Audio));
@@ -1030,13 +1022,8 @@ mod tests {
             tairix_virtio_net::VIRTIO_NET_DEVICE_ID,
         ]);
         let mut sink = CollectingSink::default();
-        observe_virtio_mmio_audio_devices(
-            &bus,
-            &|_| Some(TEST_INPUT_INTID),
-            &mut sink,
-            &DiscardLog,
-        )
-        .expect("enumerate");
+        observe_virtio_mmio_audio_devices(&bus, &|_| Some(TEST_INPUT_INTID), &mut sink, &NullSink)
+            .expect("enumerate");
         assert!(sink.nodes.is_empty(), "only a sound card is a sound card");
     }
 
@@ -1051,7 +1038,7 @@ mod tests {
             &bus,
             &|_| Some(TEST_INPUT_INTID),
             &mut sink,
-            &DiscardLog,
+            &NullSink,
         )
         .expect("enumerate");
         assert!(sink.nodes.is_empty());
@@ -1070,7 +1057,7 @@ mod tests {
                 &bus,
                 &|_| Some(TEST_INPUT_INTID),
                 &mut sink,
-                &DiscardLog
+                &NullSink
             ),
             Err(DriverError::BufferTooSmall)
         );
@@ -1084,7 +1071,7 @@ mod tests {
         // on.
         let bus = FakeBus::with(&[VIRTIO_INPUT_DEVICE_ID]);
         let mut sink = CollectingSink::default();
-        observe_virtio_mmio_input_devices(&bus, &|_| None, &mut sink, &DiscardLog)
+        observe_virtio_mmio_input_devices(&bus, &|_| None, &mut sink, &NullSink)
             .expect("enumerate");
         assert!(sink.nodes.is_empty());
     }
@@ -1168,8 +1155,37 @@ mod tests {
             Ok(TEST_NOTIFY_MULTIPLIER)
         }
 
-        fn offered_features(&self, _bdf: u64) -> Result<u64, DriverError> {
+        fn offered_features(
+            &self,
+            _bdf: u64,
+            _registers: &dyn MmioMapper,
+        ) -> Result<u64, DriverError> {
             Ok(self.offered)
+        }
+    }
+
+    /// Reaches no registers: the fake answers its features itself.
+    struct NoRegisters;
+
+    impl MmioMapper for NoRegisters {
+        fn map_window(
+            &self,
+            _phys_base: u64,
+            _len: usize,
+        ) -> Result<tairix_abi::RegisterWindow, tairix_abi::MmioMapError> {
+            Err(tairix_abi::MmioMapError::InvalidRegion)
+        }
+    }
+
+    /// One walk of `bus` on `segment`, its units knowing its functions'
+    /// DMA as `dma` says.
+    fn walk_of<'a>(bus: &'a FakePciBus, segment: PciSegment, dma: DmaIdentity<'a>) -> PciWalk<'a> {
+        PciWalk {
+            segment,
+            functions: &bus.functions,
+            bus,
+            registers: &NoRegisters,
+            dma,
         }
     }
 
@@ -1181,11 +1197,26 @@ mod tests {
             stream: tairix_abi::IommuStreams::new(0x800A_0000, id, 1).unwrap(),
             aliases: crate::pci_probe::Aliases::new(),
             group: Some(tairix_abi::IommuGroup::new(0x800A_0000, id)),
+            untrusted: false,
+            interrupts: tairix_kernel_core::iommu::InterruptSource::Requester(
+                tairix_abi::driver::pci::requester_id(address),
+            ),
         }
     }
 
     /// The modern virtio-net PCI device id (`0x1040 + 1`).
     const VIRTIO_NET_PCI_DEVICE_ID: u16 = 0x1041;
+
+    /// The first segment the kernel owns.
+    const SEGMENT: PciSegment = PciSegment {
+        number: 0,
+        ordinal: 0,
+    };
+
+    /// The node a function at configuration `address` on [`SEGMENT`] gets.
+    fn node_of(address: u64) -> u32 {
+        SEGMENT.node_id(address).unwrap()
+    }
 
     #[test]
     fn a_virtio_net_pci_function_is_discovered_with_role_tagged_windows() {
@@ -1198,18 +1229,16 @@ mod tests {
         let bus = FakePciBus::with(&[(VIRTIO_NET_PCI_DEVICE_ID, 0x0000_0800)]);
         let mut sink = CollectingSink::default();
         observe_virtio_pci_network_devices(
-            &bus,
-            &bus.functions,
-            &|_| Some(TEST_PCI_INTID),
-            &|_| None,
+            &walk_of(&bus, SEGMENT, &|_| None),
+            &|_| Some(HwResource::message_irq(u64::from(TEST_PCI_INTID), 0)),
             &mut sink,
-            &DiscardLog,
+            &NullSink,
         )
         .expect("enumerate");
         assert_eq!(sink.nodes.len(), 1);
         let node = &sink.nodes[0];
         assert_eq!(node.class(), Some(HwDeviceClass::Network));
-        assert_eq!(node.id(), VIRTIO_PCI_NET_PROBE_NODE_BASE_ID);
+        assert_eq!(node.id(), node_of(0x0000_0800));
         // The bind key is the virtio *type*, identical to the MMIO probe's,
         // so one signed bundle binds on both buses.
         assert_eq!(
@@ -1245,13 +1274,14 @@ mod tests {
                     0,
                 ),
                 HwResource::dma(0, 0),
-                HwResource::irq(u64::from(TEST_PCI_INTID), 1),
+                HwResource::message_irq(u64::from(TEST_PCI_INTID), 0),
             ]
         );
         // The emitted windows round-trip through the driver-side resolver.
         let windows =
             tairix_abi::driver::virtio_pci::virtio_pci_windows(node.resources()).expect("resolve");
         assert_eq!(windows.notify_off_multiplier, TEST_NOTIFY_MULTIPLIER);
+        assert_eq!(windows.msix_entry, Some(0));
         assert_eq!(
             windows.common,
             (base + (u64::from(VIRTIO_PCI_CFG_COMMON) << 8), 0x38)
@@ -1265,12 +1295,10 @@ mod tests {
         let bus = FakePciBus::with(&[(0x1042, 0x0000_0800), (0x1050, 0x0000_0900)]);
         let mut sink = CollectingSink::default();
         observe_virtio_pci_network_devices(
-            &bus,
-            &bus.functions,
-            &|_| Some(TEST_PCI_INTID),
-            &|_| None,
+            &walk_of(&bus, SEGMENT, &|_| None),
+            &|_| Some(HwResource::message_irq(u64::from(TEST_PCI_INTID), 0)),
             &mut sink,
-            &DiscardLog,
+            &NullSink,
         )
         .expect("enumerate");
         assert!(sink.nodes.is_empty());
@@ -1278,25 +1306,23 @@ mod tests {
 
     #[test]
     fn two_virtio_net_pci_functions_get_distinct_ids() {
-        // Two virtio-net functions each become a distinct node from the PCI
-        // network base, so a machine with two NICs never merges them.
+        // Two virtio-net functions each become a distinct node, so a machine
+        // with two NICs never merges them.
         let bus = FakePciBus::with(&[
             (VIRTIO_NET_PCI_DEVICE_ID, 0x0000_0800),
             (VIRTIO_NET_PCI_DEVICE_ID, 0x0000_1000),
         ]);
         let mut sink = CollectingSink::default();
         observe_virtio_pci_network_devices(
-            &bus,
-            &bus.functions,
-            &|_| Some(TEST_PCI_INTID),
-            &|_| None,
+            &walk_of(&bus, SEGMENT, &|_| None),
+            &|_| Some(HwResource::message_irq(u64::from(TEST_PCI_INTID), 0)),
             &mut sink,
-            &DiscardLog,
+            &NullSink,
         )
         .expect("enumerate");
         assert_eq!(sink.nodes.len(), 2);
-        assert_eq!(sink.nodes[0].id(), VIRTIO_PCI_NET_PROBE_NODE_BASE_ID);
-        assert_eq!(sink.nodes[1].id(), VIRTIO_PCI_NET_PROBE_NODE_BASE_ID + 1);
+        assert_eq!(sink.nodes[0].id(), node_of(0x0000_0800));
+        assert_eq!(sink.nodes[1].id(), node_of(0x0000_1000));
     }
 
     #[test]
@@ -1307,12 +1333,10 @@ mod tests {
         let bus = FakePciBus::with(&[(VIRTIO_NET_PCI_DEVICE_ID, 0x0000_0800)]);
         let mut sink = CollectingSink::default();
         observe_virtio_pci_network_devices(
-            &bus,
-            &bus.functions,
-            &|_| None,
+            &walk_of(&bus, SEGMENT, &|_| None),
             &|_| None,
             &mut sink,
-            &DiscardLog,
+            &NullSink,
         )
         .expect("enumerate");
         assert!(sink.nodes.is_empty());
@@ -1333,12 +1357,12 @@ mod tests {
         // resource grants, unlike the user-space PCI network node.
         let bus = FakePciBus::with(&[(VIRTIO_BLK_PCI_DEVICE_ID, 0x0000_0800)]);
         let mut sink = CollectingSink::default();
-        observe_virtio_pci_block_devices(&bus, &bus.functions, &|_| None, &mut sink, &DiscardLog)
+        observe_virtio_pci_block_devices(&walk_of(&bus, SEGMENT, &|_| None), &mut sink, &NullSink)
             .expect("enumerate");
         assert_eq!(sink.nodes.len(), 1);
         let node = &sink.nodes[0];
         assert_eq!(node.class(), Some(HwDeviceClass::Storage));
-        assert_eq!(node.id(), VIRTIO_PCI_BLOCK_PROBE_NODE_BASE_ID);
+        assert_eq!(node.id(), node_of(0x0000_0800));
         assert_eq!(
             node.match_keys(),
             &[HwMatchKey::virtio(VIRTIO_BLK_DEVICE_ID)]
@@ -1351,10 +1375,11 @@ mod tests {
         // parent sentinel, so the autoload walk treats it as a device.
         assert_eq!(node.parent(), HW_NODE_ROOT_ID);
         assert!(!node.is_root());
-        // Its region is disjoint from the PCI network base, so a machine
-        // with a NIC and a disk never aliases the two node ids.
-        assert_ne!(node.id(), VIRTIO_PCI_NET_PROBE_NODE_BASE_ID);
-        assert_eq!(node.address(), 0x0008, "the function's requester id");
+        assert_eq!(
+            node.address(),
+            0x0008,
+            "the function's segment and requester id"
+        );
     }
 
     #[test]
@@ -1366,15 +1391,17 @@ mod tests {
             (VIRTIO_NET_PCI_DEVICE_ID, 0x0002_0900),
         ]);
         let mut sink = CollectingSink::default();
-        observe_virtio_pci_block_devices(&bus, &bus.functions, &translated, &mut sink, &DiscardLog)
-            .expect("enumerate");
-        observe_virtio_pci_network_devices(
-            &bus,
-            &bus.functions,
-            &|_| Some(TEST_PCI_INTID),
-            &translated,
+        observe_virtio_pci_block_devices(
+            &walk_of(&bus, SEGMENT, &translated),
             &mut sink,
-            &DiscardLog,
+            &NullSink,
+        )
+        .expect("enumerate");
+        observe_virtio_pci_network_devices(
+            &walk_of(&bus, SEGMENT, &translated),
+            &|_| Some(HwResource::message_irq(u64::from(TEST_PCI_INTID), 0)),
+            &mut sink,
+            &NullSink,
         )
         .expect("enumerate");
         assert_eq!(sink.nodes.len(), 2);
@@ -1407,16 +1434,14 @@ mod tests {
         let log = IdLog::default();
         let routed = core::cell::Cell::new(0);
         let mut sink = CollectingSink::default();
-        observe_virtio_pci_block_devices(&bus, &bus.functions, &translated, &mut sink, &log)
+        observe_virtio_pci_block_devices(&walk_of(&bus, SEGMENT, &translated), &mut sink, &log)
             .expect("enumerate");
         observe_virtio_pci_network_devices(
-            &bus,
-            &bus.functions,
+            &walk_of(&bus, SEGMENT, &translated),
             &|_| {
                 routed.set(routed.get() + 1);
-                Some(TEST_PCI_INTID)
+                Some(HwResource::message_irq(u64::from(TEST_PCI_INTID), 0))
             },
-            &translated,
             &mut sink,
             &log,
         )
@@ -1432,14 +1457,194 @@ mod tests {
 
         let mut untranslated = CollectingSink::default();
         observe_virtio_pci_block_devices(
-            &bus,
-            &bus.functions,
-            &|_| None,
+            &walk_of(&bus, SEGMENT, &|_| None),
             &mut untranslated,
-            &DiscardLog,
+            &NullSink,
         )
         .expect("enumerate");
         assert_eq!(untranslated.nodes.len(), 1);
+    }
+
+    /// Only virtio lets a device decline the platform's translation, so a
+    /// translated function of any other vendor is admitted with its stream
+    /// whatever its "features" read as.
+    #[test]
+    fn a_non_virtio_function_behind_a_unit_is_admitted_with_its_stream() {
+        let mut bus = FakePciBus::with(&[]);
+        bus.offered = 0;
+        let device = |vendor| BusDevice {
+            vendor,
+            device: 0x10D3,
+            class: 0x0200,
+            reserved0: 0,
+            address: 0x0000_1800,
+        };
+        let translated = |address: u64| Some(translated_dma(address));
+        let walk = walk_of(&bus, SEGMENT, &translated);
+        let admitted = PciFunction::admit(&walk, &device(0x8086), &NullSink)
+            .expect("a translated non-virtio function");
+        assert_eq!(admitted.dma, Some(translated_dma(0x0000_1800)));
+        assert!(
+            PciFunction::admit(&walk, &device(u32::from(VIRTIO_PCI_VENDOR_ID)), &NullSink)
+                .is_none(),
+            "a virtio function that declines the unit is still refused"
+        );
+    }
+
+    /// A virtio function whose common configuration is a register file the
+    /// test holds: the trait's own read reaches it through the walk's
+    /// registers, as the kernel's does.
+    struct CommonConfig {
+        function: BusDevice,
+        registers: core::cell::UnsafeCell<[u32; 16]>,
+    }
+
+    impl Bus for CommonConfig {
+        fn enumerate(&self, out: &mut [BusDevice]) -> Result<usize, DriverError> {
+            let slot = out.first_mut().ok_or(DriverError::BufferTooSmall)?;
+            *slot = self.function;
+            Ok(1)
+        }
+    }
+
+    impl VirtioPciBus for CommonConfig {
+        fn virtio_window_region(&self, _bdf: u64, cfg: u8) -> Result<(u64, usize), DriverError> {
+            if cfg == VIRTIO_PCI_CFG_COMMON {
+                Ok((0xC000_0000, 0x38))
+            } else {
+                Err(DriverError::NotFound)
+            }
+        }
+
+        fn notify_off_multiplier(&self, _bdf: u64) -> Result<u32, DriverError> {
+            Ok(TEST_NOTIFY_MULTIPLIER)
+        }
+    }
+
+    impl MmioMapper for CommonConfig {
+        fn map_window(
+            &self,
+            phys_base: u64,
+            len: usize,
+        ) -> Result<tairix_abi::RegisterWindow, tairix_abi::MmioMapError> {
+            let base = core::ptr::NonNull::new(self.registers.get().cast::<u8>())
+                .ok_or(tairix_abi::MmioMapError::InvalidRegion)?;
+            // SAFETY: the register file outlives every window a test mints
+            // from it, the window touches at most its 64 bytes, and nothing
+            // else references it while one is live.
+            Ok(unsafe { tairix_abi::RegisterWindow::from_mapping(phys_base, base, len.min(64)) })
+        }
+    }
+
+    /// A translated virtio function is judged on the features its common
+    /// configuration shows through the kernel's own register reach: admitted
+    /// when they honour the unit, refused when they do not, and refused when
+    /// the read answers all ones, as a function not decoding does.
+    #[test]
+    fn a_translated_virtio_function_is_judged_through_the_kernel_s_registers() {
+        let translated = |address: u64| Some(translated_dma(address));
+        let function = BusDevice {
+            vendor: u32::from(VIRTIO_PCI_VENDOR_ID),
+            device: 0x1052,
+            class: 0x0980,
+            reserved0: 0,
+            address: 0x0000_1800,
+        };
+        // The register file answers both halves alike, so a word with bit 1
+        // set offers bit 33, `VIRTIO_F_ACCESS_PLATFORM`.
+        for (word, admitted) in [(0x2, true), (0x1, false), (u32::MAX, false)] {
+            let bus = CommonConfig {
+                function,
+                registers: core::cell::UnsafeCell::new([0; 16]),
+            };
+            // SAFETY: no window over the register file is live yet.
+            unsafe { (*bus.registers.get())[common::DEVICE_FEATURE / 4] = word };
+            let walk = PciWalk {
+                segment: SEGMENT,
+                functions: core::slice::from_ref(&function),
+                bus: &bus,
+                registers: &bus,
+                dma: &translated,
+            };
+            assert_eq!(
+                PciFunction::admit(&walk, &function, &NullSink).is_some(),
+                admitted,
+                "{word:#x}"
+            );
+        }
+    }
+
+    /// Records the `reason` field of every event that carries one.
+    #[derive(Default)]
+    struct ReasonLog(core::cell::RefCell<alloc::vec::Vec<&'static str>>);
+
+    impl Sink for ReasonLog {
+        fn write_event(&self, event: &Event<'_>) {
+            for field in event.fields {
+                if let (true, FieldValue::Str(reason)) = (field.key == "reason", &field.value) {
+                    let known = ["untrusted", "unconfinable", "bypasses_unit"];
+                    if let Some(reason) = known.iter().find(|known| *known == reason) {
+                        self.0.borrow_mut().push(reason);
+                    }
+                }
+            }
+        }
+    }
+
+    /// A function behind an external-facing port that does not validate
+    /// requester ids is refused, and the record says why.
+    #[test]
+    fn an_untrusted_function_its_port_cannot_confine_is_refused_as_untrusted() {
+        let bus = FakePciBus::with(&[(VIRTIO_BLK_PCI_DEVICE_ID, 0x0000_0800)]);
+        let unconfinable = |untrusted| {
+            move |address: u64| {
+                Some(FunctionDma {
+                    group: None,
+                    untrusted,
+                    ..translated_dma(address)
+                })
+            }
+        };
+        let log = ReasonLog::default();
+        let mut sink = CollectingSink::default();
+        observe_virtio_pci_block_devices(
+            &walk_of(&bus, SEGMENT, &unconfinable(true)),
+            &mut sink,
+            &log,
+        )
+        .expect("enumerate");
+        observe_virtio_pci_block_devices(
+            &walk_of(&bus, SEGMENT, &unconfinable(false)),
+            &mut sink,
+            &log,
+        )
+        .expect("enumerate");
+        assert!(sink.nodes.is_empty());
+        assert_eq!(*log.0.borrow(), ["untrusted", "unconfinable"]);
+    }
+
+    #[test]
+    fn a_function_on_another_segment_names_it_and_takes_that_segment_s_node() {
+        let segment = PciSegment {
+            number: 3,
+            ordinal: 1,
+        };
+        let bus = FakePciBus::with(&[(VIRTIO_BLK_PCI_DEVICE_ID, 0x0000_0800)]);
+        let mut sink = CollectingSink::default();
+        observe_virtio_pci_block_devices(&walk_of(&bus, segment, &|_| None), &mut sink, &NullSink)
+            .expect("enumerate");
+        let node = &sink.nodes[0];
+        assert_eq!(node.address(), 0x0003_0008);
+        assert_eq!(
+            PciAddress::from_node_address(node.address()),
+            PciAddress::new(3, 0x0008)
+        );
+        assert_eq!(node.id(), segment.node_id(0x0000_0800).unwrap());
+        assert_ne!(
+            node.id(),
+            node_of(0x0000_0800),
+            "one requester id on two segments is two nodes"
+        );
     }
 
     #[test]
@@ -1451,7 +1656,7 @@ mod tests {
             (0x1050, 0x0000_0900),
         ]);
         let mut sink = CollectingSink::default();
-        observe_virtio_pci_block_devices(&bus, &bus.functions, &|_| None, &mut sink, &DiscardLog)
+        observe_virtio_pci_block_devices(&walk_of(&bus, SEGMENT, &|_| None), &mut sink, &NullSink)
             .expect("enumerate");
         assert!(sink.nodes.is_empty());
     }
@@ -1474,27 +1679,26 @@ mod tests {
             offered: tairix_virtio::TRANSPORT_FEATURES,
         };
         let mut sink = CollectingSink::default();
-        observe_virtio_pci_block_devices(&bus, &bus.functions, &|_| None, &mut sink, &DiscardLog)
+        observe_virtio_pci_block_devices(&walk_of(&bus, SEGMENT, &|_| None), &mut sink, &NullSink)
             .expect("enumerate");
         assert!(sink.nodes.is_empty());
     }
 
     #[test]
     fn two_virtio_blk_pci_functions_get_distinct_ids() {
-        // Two virtio-blk functions each become a distinct node from the PCI
-        // block base, so a machine with two disks never merges them (the
-        // root selection then fails closed on the ambiguity, but discovery
-        // must still surface both).
+        // Two virtio-blk functions each become a distinct node, so a machine
+        // with two disks never merges them (the root selection then fails
+        // closed on the ambiguity, but discovery must still surface both).
         let bus = FakePciBus::with(&[
             (VIRTIO_BLK_PCI_DEVICE_ID, 0x0000_0800),
             (VIRTIO_BLK_PCI_DEVICE_ID, 0x0000_1000),
         ]);
         let mut sink = CollectingSink::default();
-        observe_virtio_pci_block_devices(&bus, &bus.functions, &|_| None, &mut sink, &DiscardLog)
+        observe_virtio_pci_block_devices(&walk_of(&bus, SEGMENT, &|_| None), &mut sink, &NullSink)
             .expect("enumerate");
         assert_eq!(sink.nodes.len(), 2);
-        assert_eq!(sink.nodes[0].id(), VIRTIO_PCI_BLOCK_PROBE_NODE_BASE_ID);
-        assert_eq!(sink.nodes[1].id(), VIRTIO_PCI_BLOCK_PROBE_NODE_BASE_ID + 1);
+        assert_eq!(sink.nodes[0].id(), node_of(0x0000_0800));
+        assert_eq!(sink.nodes[1].id(), node_of(0x0000_1000));
     }
 
     // --- virtio-PCI input probe ------------------------------------------
@@ -1515,18 +1719,16 @@ mod tests {
         let bus = FakePciBus::with(&[(VIRTIO_INPUT_PCI_DEVICE_ID, 0x0000_0800)]);
         let mut sink = CollectingSink::default();
         observe_virtio_pci_input_devices(
-            &bus,
-            &bus.functions,
-            &|_| Some(TEST_PCI_INTID),
-            &|_| None,
+            &walk_of(&bus, SEGMENT, &|_| None),
+            &|_| Some(HwResource::message_irq(u64::from(TEST_PCI_INTID), 0)),
             &mut sink,
-            &DiscardLog,
+            &NullSink,
         )
         .expect("enumerate");
         assert_eq!(sink.nodes.len(), 1);
         let node = &sink.nodes[0];
         assert_eq!(node.class(), Some(HwDeviceClass::Input));
-        assert_eq!(node.id(), VIRTIO_PCI_INPUT_PROBE_NODE_BASE_ID);
+        assert_eq!(node.id(), node_of(0x0000_0800));
         assert_eq!(
             node.match_keys(),
             &[HwMatchKey::virtio(VIRTIO_INPUT_DEVICE_ID)]
@@ -1560,7 +1762,7 @@ mod tests {
                     0,
                 ),
                 HwResource::dma(0, 0),
-                HwResource::irq(u64::from(TEST_PCI_INTID), 1),
+                HwResource::message_irq(u64::from(TEST_PCI_INTID), 0),
             ]
         );
         // The emitted windows round-trip through the driver-side resolver,
@@ -1568,6 +1770,7 @@ mod tests {
         let windows =
             tairix_abi::driver::virtio_pci::virtio_pci_windows(node.resources()).expect("resolve");
         assert_eq!(windows.notify_off_multiplier, TEST_NOTIFY_MULTIPLIER);
+        assert_eq!(windows.msix_entry, Some(0));
         assert_eq!(
             windows.common,
             (base + (u64::from(VIRTIO_PCI_CFG_COMMON) << 8), 0x38)
@@ -1584,12 +1787,10 @@ mod tests {
         ]);
         let mut sink = CollectingSink::default();
         observe_virtio_pci_input_devices(
-            &bus,
-            &bus.functions,
-            &|_| Some(TEST_PCI_INTID),
-            &|_| None,
+            &walk_of(&bus, SEGMENT, &|_| None),
+            &|_| Some(HwResource::message_irq(u64::from(TEST_PCI_INTID), 0)),
             &mut sink,
-            &DiscardLog,
+            &NullSink,
         )
         .expect("enumerate");
         assert!(sink.nodes.is_empty());
@@ -1597,30 +1798,23 @@ mod tests {
 
     #[test]
     fn two_virtio_input_pci_functions_get_distinct_ids() {
-        // A keyboard and a mouse function each become a distinct node from
-        // the PCI input base, so the two are never merged (one driver
-        // instance is spawned per node).
+        // A keyboard and a mouse function each become a distinct node, so
+        // the two are never merged (one driver instance is spawned per node).
         let bus = FakePciBus::with(&[
             (VIRTIO_INPUT_PCI_DEVICE_ID, 0x0000_0800),
             (VIRTIO_INPUT_PCI_DEVICE_ID, 0x0000_1000),
         ]);
         let mut sink = CollectingSink::default();
         observe_virtio_pci_input_devices(
-            &bus,
-            &bus.functions,
-            &|_| Some(TEST_PCI_INTID),
-            &|_| None,
+            &walk_of(&bus, SEGMENT, &|_| None),
+            &|_| Some(HwResource::message_irq(u64::from(TEST_PCI_INTID), 0)),
             &mut sink,
-            &DiscardLog,
+            &NullSink,
         )
         .expect("enumerate");
         assert_eq!(sink.nodes.len(), 2);
-        assert_eq!(sink.nodes[0].id(), VIRTIO_PCI_INPUT_PROBE_NODE_BASE_ID);
-        assert_eq!(sink.nodes[1].id(), VIRTIO_PCI_INPUT_PROBE_NODE_BASE_ID + 1);
-        // The input region is disjoint from the PCI network and block bases,
-        // so a machine with a NIC, a disk, and a keyboard never aliases them.
-        assert_ne!(sink.nodes[0].id(), VIRTIO_PCI_NET_PROBE_NODE_BASE_ID);
-        assert_ne!(sink.nodes[0].id(), VIRTIO_PCI_BLOCK_PROBE_NODE_BASE_ID);
+        assert_eq!(sink.nodes[0].id(), node_of(0x0000_0800));
+        assert_eq!(sink.nodes[1].id(), node_of(0x0000_1000));
     }
 
     #[test]
@@ -1631,12 +1825,10 @@ mod tests {
         let bus = FakePciBus::with(&[(VIRTIO_INPUT_PCI_DEVICE_ID, 0x0000_0800)]);
         let mut sink = CollectingSink::default();
         observe_virtio_pci_input_devices(
-            &bus,
-            &bus.functions,
-            &|_| None,
+            &walk_of(&bus, SEGMENT, &|_| None),
             &|_| None,
             &mut sink,
-            &DiscardLog,
+            &NullSink,
         )
         .expect("enumerate");
         assert!(sink.nodes.is_empty());

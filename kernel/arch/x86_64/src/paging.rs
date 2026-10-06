@@ -250,6 +250,9 @@ pub const KERNEL_VMA_BASE: u64 = 0xFFFF_FFFF_8000_0000;
 /// page's — physical address without the flag and attribute bits.
 const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
+/// One past the highest physical address an entry can name.
+pub const PHYSICAL_ADDRESS_LIMIT: u64 = (ADDR_MASK | 0xFFF) + 1;
+
 /// Page-table entry flags actually used here.
 pub mod flags {
     /// Entry is present.

@@ -392,17 +392,11 @@ impl<B: Block> DriverStoreService<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::NullSink;
     use tairix_abi::blkio::kernel_block_device;
     use tairix_abi::driver::block::HealthSnapshot;
     use tairix_kernel_core::fs::blkmeter::MeteredBlock;
-    use tairix_log::Event;
 
-    /// A sink that discards every event: these tests assert sharing, not the
-    /// audit trail.
-    struct NullSink;
-    impl tairix_log::Sink for NullSink {
-        fn write_event(&self, _event: &Event<'_>) {}
-    }
     static SINK: NullSink = NullSink;
 
     /// A minimal in-memory [`Block`] over a fixed byte store, with a

@@ -8,6 +8,7 @@ use tairix_collections::HashMap;
 use tairix_hash::BuildFastHash;
 
 use crate::iova::{IovaError, IovaSpace};
+use crate::pagetable::output_limit;
 use crate::{Access, DomainId, IommuError, IommuUnit, IO_PAGE_SIZE};
 
 /// The highest block order a mapping may take: every IOVA space holds it.
@@ -31,6 +32,16 @@ pub struct Domain<'u> {
     torn_down: bool,
 }
 
+/// Memory a domain keeps mapped at its own address — a window firmware
+/// reserved for its streams — for the access firmware allows there.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IdentityWindow {
+    /// The addresses.
+    pub range: Range<u64>,
+    /// What the domain's streams may do there.
+    pub access: Access,
+}
+
 #[derive(Copy, Clone)]
 struct Mapping {
     order: u32,
@@ -39,46 +50,50 @@ struct Mapping {
 }
 
 impl<'u> Domain<'u> {
-    /// A new domain on `unit`, keeping every range in `identity` mapped at
+    /// A new domain on `unit`, keeping every window in `identity` mapped at
     /// its own address (firmware reserved windows its streams still need).
-    /// Windows that overlap or touch are mapped as one, since firmware may
-    /// name a window twice.
+    /// Windows of one access that overlap or touch are mapped as one, since
+    /// firmware may name a window twice.
     ///
     /// # Errors
     ///
     /// The unit's refusal to create the domain or map a window, and
-    /// [`IommuError::OutOfRange`] for a window outside the unit's reach.
-    pub fn new(unit: &'u dyn IommuUnit, identity: &[Range<u64>]) -> Result<Self, IommuError> {
+    /// [`IommuError::OutOfRange`] for a window outside the unit's reach, or
+    /// two of different access that overlap.
+    pub fn new(unit: &'u dyn IommuUnit, identity: &[IdentityWindow]) -> Result<Self, IommuError> {
         let profile = unit.profile();
-        let input_end = if profile.input_bits >= 64 {
+        let input_end = if profile.reach.input_bits >= 64 {
             !(IO_PAGE_SIZE - 1)
         } else {
-            1u64 << profile.input_bits
+            1u64 << profile.reach.input_bits
         };
-        let output_limit = if profile.output_bits >= 64 {
-            u64::MAX
-        } else {
-            1u64 << profile.output_bits
-        };
+        let output_limit = output_limit(profile.reach);
         if identity
             .iter()
-            .any(|window| window.end > input_end || window.end > output_limit)
+            .any(|window| window.range.end > input_end || window.range.end > output_limit)
         {
             return Err(IommuError::OutOfRange);
         }
+        let mut windows = Vec::new();
         let mut holes = Vec::new();
-        holes
-            .try_reserve(identity.len() + profile.reserved.len())
+        windows
+            .try_reserve(identity.len())
+            .and_then(|()| holes.try_reserve(identity.len() + profile.reserved.len()))
             .map_err(|_| IommuError::Exhausted)?;
-        holes.extend(identity.iter().filter(|w| w.start < w.end).cloned());
+        windows.extend(
+            identity
+                .iter()
+                .filter(|window| window.range.start < window.range.end)
+                .cloned(),
+        );
+        coalesce_windows(&mut windows)?;
+        holes.extend(windows.iter().map(|window| window.range.clone()));
         coalesce(&mut holes);
-        let windows = holes.len();
         holes.extend_from_slice(profile.reserved);
         let iova = IovaSpace::new(IO_PAGE_SIZE..input_end, &holes).map_err(|err| match err {
             IovaError::Exhausted => IommuError::Exhausted,
             _ => IommuError::OutOfRange,
         })?;
-        let identity = &holes[..windows];
         let id = unit.create_domain()?;
         let domain = Self {
             unit,
@@ -89,13 +104,14 @@ impl<'u> Domain<'u> {
             streams: Vec::new(),
             torn_down: false,
         };
-        for window in identity {
+        for window in &windows {
+            let IdentityWindow { range, access } = window;
             unit.map(
                 id,
-                window.start,
-                window.start,
-                window.end - window.start,
-                Access::READ_WRITE,
+                range.start,
+                range.start,
+                range.end - range.start,
+                *access,
             )?;
         }
         Ok(domain)
@@ -124,14 +140,20 @@ impl<'u> Domain<'u> {
     /// # Errors
     ///
     /// The unit's refusal, or [`IommuError::Exhausted`] when the domain cannot
-    /// record the stream.
+    /// record the stream. An [`IommuError::Unconfirmed`] attach leaves the
+    /// stream recorded, since the unit may walk the tables for it still: the
+    /// teardown blocks it like any other.
     pub fn attach(&mut self, stream: u32) -> Result<(), IommuError> {
         self.streams
             .try_reserve(1)
             .map_err(|_| IommuError::Exhausted)?;
-        self.unit.attach(stream, self.id)?;
-        self.streams.push(stream);
-        Ok(())
+        let attached = self.unit.attach(stream, self.id);
+        if matches!(attached, Ok(()) | Err(IommuError::Unconfirmed))
+            && !self.streams.contains(&stream)
+        {
+            self.streams.push(stream);
+        }
+        attached
     }
 
     /// Map the naturally aligned block of `IO_PAGE_SIZE << order` bytes at
@@ -240,6 +262,35 @@ impl Drop for Domain<'_> {
     fn drop(&mut self) {
         let _ = self.teardown();
     }
+}
+
+/// Sort `windows` and merge each run of one access that overlaps or touches,
+/// in place.
+///
+/// # Errors
+///
+/// [`IommuError::OutOfRange`] where two of different access overlap: no one
+/// access is right for the bytes they share.
+fn coalesce_windows(windows: &mut Vec<IdentityWindow>) -> Result<(), IommuError> {
+    windows.sort_unstable_by_key(|window| window.range.start);
+    let mut kept = 0_usize;
+    for index in 0..windows.len() {
+        let window = windows[index].clone();
+        match kept.checked_sub(1).map(|last| &mut windows[last]) {
+            Some(last) if window.range.start < last.range.end && window.access != last.access => {
+                return Err(IommuError::OutOfRange);
+            }
+            Some(last) if window.range.start <= last.range.end && window.access == last.access => {
+                last.range.end = last.range.end.max(window.range.end);
+            }
+            _ => {
+                windows[kept] = window;
+                kept += 1;
+            }
+        }
+    }
+    windows.truncate(kept);
+    Ok(())
 }
 
 /// Sort `windows` and merge each run that overlaps or touches, in place.

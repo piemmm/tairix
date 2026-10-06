@@ -164,6 +164,12 @@ impl FdtPlatform for Aarch64Fdt {
         gic_intid_from_cells(kind, number)
     }
 
+    /// The GIC binding's flags cell: a rising or falling edge in its low two
+    /// bits, a level in the next two.
+    fn edge_triggered(&self, specifier: &[u8]) -> bool {
+        read_cells(specifier, 8, 1).is_some_and(|flags| flags & 0b11 != 0)
+    }
+
     fn augment(&self, node: &Node<'_>, depth: usize, levels: &[BusLevel<'_>], hw: &mut HwNode) {
         let Some(compatible) = node.property("compatible") else {
             return;
@@ -622,6 +628,43 @@ mod tests {
             .resources()
             .iter()
             .all(|r| r.kind() != Some(HwResourceKind::Irq)));
+    }
+
+    #[test]
+    fn a_spi_the_tree_says_is_edge_triggered_is_granted_as_one() {
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 2);
+        b.prop_u32("#size-cells", 2);
+        b.prop_u32("interrupt-parent", 1);
+        b.begin_node("intc@8000000");
+        b.prop_str("compatible", "arm,cortex-a15-gic");
+        b.prop("interrupt-controller", &[]);
+        b.prop_u32("#interrupt-cells", 3);
+        let mut reg = Vec::new();
+        for cell in [0u32, 0x800_0000, 0, 0x1_0000, 0, 0x801_0000, 0, 0x1_0000] {
+            reg.extend_from_slice(&cell.to_be_bytes());
+        }
+        b.prop("reg", &reg);
+        b.prop_u32("phandle", 1);
+        b.end_node();
+        b.begin_node("smmuv3@9050000");
+        b.prop_str("compatible", "arm,smmu-v3");
+        let mut interrupts = Vec::new();
+        for cell in [0u32, 74, 1, 0, 75, 4] {
+            interrupts.extend_from_slice(&cell.to_be_bytes());
+        }
+        b.prop("interrupts", &interrupts);
+        b.end_node();
+        b.end_node();
+        let nodes = discover_all(&b.build());
+        let lines: Vec<(u64, bool)> = by_key(&nodes, b"arm,smmu-v3")
+            .resources()
+            .iter()
+            .filter(|r| r.kind() == Some(HwResourceKind::Irq))
+            .map(|r| (r.base(), r.is_edge_triggered()))
+            .collect();
+        assert_eq!(lines, [(74 + 32, true), (75 + 32, false)]);
     }
 
     /// A Pi-4-shaped nested tree: devices under a `simple-bus` `/soc`

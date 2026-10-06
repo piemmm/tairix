@@ -4,7 +4,7 @@
 //! local-APIC doorbell, carrying the target vector in its data word. Unlike
 //! a legacy `INTx` line it is **not** wired to an IO-APIC pin, so it has no
 //! redirection entry to mask and no level to re-assert: a single edge is
-//! delivered once, and the ready-flag consume in
+//! delivered once, and the waiter taking the fire in
 //! [`tairix_kernel_irq::IrqTable::try_wait_step`] is the whole re-arm
 //! interlock.
 //!
@@ -29,19 +29,20 @@
 //!   [`tairix_kernel_irq::IrqTable::fire`] and the `irq_wait`/completion re-arm
 //!   path drive: a real GSI masks/unmasks the [`IoApicController`] redirection
 //!   entry; an MSI line is an edge source with **no** hardware line to mask, so
-//!   its mask/re-arm are honest no-ops (the ready-flag consume is the
+//!   its mask/re-arm are honest no-ops (the waiter taking the fire is the
 //!   interlock, and the runaway-interrupt safety net in
 //!   [`tairix_kernel_irq::IrqTable`] still contains a storming vector). This is
 //!   published as the routing controller so the kernel core and the device-IRQ
 //!   dispatch both reach it.
-//! * The allocator (`install_msi_lines` + `allocate`) — claims a
-//!   dedicated [`MsiVector`] `(vector, line)` pair for a device that will
+//! * The allocator (`install_msi_lines` + `allocate`, over the published
+//!   [`MsiPool`]) — claims a dedicated [`MsiVector`] for a device that will
 //!   deliver MSI/MSI-X. The free external vectors above the IO-APIC pins are
 //!   pre-installed in the IDT and pre-published in the arch routing table as
 //!   MSI lines at boot (`install_msi_lines`), so a runtime allocation is a
-//!   lock-free bitmap claim that never mutates the IDT — the vector is ready
-//!   to deliver the instant a device is programmed with it.
+//!   lock-free bitmap claim that never mutates the IDT, and the vector
+//!   delivers the instant a device is programmed with it.
 
+use core::sync::atomic::{AtomicU64, Ordering};
 use tairix_arch_x86_64::apic::IoApicMmio;
 use tairix_kernel_irq::{IrqController, MaskError};
 
@@ -55,13 +56,14 @@ use crate::x86_64::ioapic_controller::IoApicController;
 /// if the discovered IO-APIC GSI ceiling ever reaches this base.
 pub const MSI_LINE_BASE: u32 = 4096;
 
-/// Maximum number of concurrently-allocated MSI vectors.
-///
-/// Backed by a single [`core::sync::atomic::AtomicU64`] bitmap, so 64 is the
-/// natural width. Ample for a PC: the boot floor needs one (the virtio-blk
-/// root), and every other MSI device is a user-space driver that allocates
-/// through the same facility.
-pub const MAX_MSI_VECTORS: u32 = 64;
+/// The most MSI vectors there can be: x86's whole vector space. The pool
+/// holds every external vector the IO-APIC pins left free.
+pub const MAX_MSI_VECTORS: u32 = 256;
+
+/// The MSI-X table entry each interrupt-driven PCI function's vector is
+/// routed into: every virtqueue of a virtio function shares it, so one bound
+/// line covers the whole device.
+pub const MSIX_ENTRY: u16 = 0;
 
 /// The MSI line a vector index names.
 #[must_use]
@@ -88,7 +90,7 @@ pub fn msi_index_of_line(line: u32) -> Option<u32> {
 /// dispatch masks through in [`tairix_kernel_irq::IrqTable::fire`]. It adds no
 /// policy of its own: a GSI delegates to the range-checked, fence-ordered
 /// [`IoApicController`]; an MSI line has no hardware line to mask (the edge
-/// message is delivered once and consumed via the ready flag), so its
+/// message is delivered once and its fire taken by the waiter), so its
 /// mask/re-arm are no-ops that always succeed.
 ///
 /// Generic over the IO-APIC MMIO backend so the host tests exercise the
@@ -117,7 +119,7 @@ impl<M: IoApicMmio + Send + 'static> IrqController for CompositeIrqController<M>
         match msi_index_of_line(line) {
             // An MSI is an edge source with no hardware line to mask before a
             // waiter observes the wake: the message is delivered once, the
-            // ready flag records it, and `try_wait_step` consumes it. There
+            // line's fire count records it, and `try_wait_step` takes it. There
             // is nothing to mask, so this succeeds without touching hardware.
             Some(_) => Ok(()),
             None => self.ioapic.mask(line),
@@ -173,7 +175,8 @@ pub fn published_composite(
     }
 }
 
-/// A dedicated `(vector, line)` MSI allocation.
+/// A dedicated `(vector, line)` MSI allocation, and the CPU whose interrupt
+/// table holds the vector.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct MsiVector {
     /// The IDT vector the device's MSI message must carry in its data word.
@@ -181,6 +184,9 @@ pub struct MsiVector {
     /// The virtual interrupt line the driver binds in the
     /// [`tairix_kernel_irq::IrqTable`].
     pub line: u32,
+    /// The APIC id of the CPU the vector is installed on: the only one a
+    /// message may name.
+    pub destination: u32,
 }
 
 /// Failure modes of `allocate`.
@@ -194,28 +200,85 @@ pub enum MsiAllocError {
     Uninitialised,
 }
 
+/// The MSI vectors one boot installed, the CPU whose interrupt table holds
+/// them, and which of them drivers have claimed: set-only, as a driver holds
+/// its vector for life.
+pub struct MsiPool {
+    first: u8,
+    count: u32,
+    destination: u32,
+    /// Bit `i` of word `i / 64`: slot `i` is claimed.
+    claimed: [AtomicU64; MAX_MSI_VECTORS.div_ceil(64) as usize],
+}
+
+impl MsiPool {
+    /// `count` vectors from `first`, at most [`MAX_MSI_VECTORS`], installed
+    /// on the CPU whose APIC id is `destination`.
+    #[must_use]
+    pub const fn new(first: u8, count: u32, destination: u32) -> Self {
+        Self {
+            first,
+            count: if count > MAX_MSI_VECTORS {
+                MAX_MSI_VECTORS
+            } else {
+                count
+            },
+            destination,
+            claimed: [const { AtomicU64::new(0) }; MAX_MSI_VECTORS.div_ceil(64) as usize],
+        }
+    }
+
+    /// Claim the lowest free vector.
+    ///
+    /// # Errors
+    ///
+    /// [`MsiAllocError::Exhausted`] when every vector is claimed.
+    pub fn allocate(&self) -> Result<MsiVector, MsiAllocError> {
+        for (first, claimed) in (0..self.count).step_by(64).zip(&self.claimed) {
+            let usable = (self.count - first).min(64);
+            let mask = u64::MAX >> (64 - usable);
+            let mut current = claimed.load(Ordering::Acquire);
+            loop {
+                let free = !current & mask;
+                if free == 0 {
+                    break;
+                }
+                let bit = free.trailing_zeros();
+                let slot = first + bit;
+                let vector = u8::try_from(u32::from(self.first) + slot)
+                    .map_err(|_| MsiAllocError::Exhausted)?;
+                match claimed.compare_exchange_weak(
+                    current,
+                    current | (1 << bit),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => {
+                        return Ok(MsiVector {
+                            vector,
+                            line: msi_line_for_index(slot),
+                            destination: self.destination,
+                        });
+                    }
+                    Err(seen) => current = seen,
+                }
+            }
+        }
+        Err(MsiAllocError::Exhausted)
+    }
+}
+
 #[cfg(all(freestanding, kernel_isa = "x86_64"))]
 mod alloc_impl {
-    use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-
     use tairix_arch_x86_64::irq as arch_irq;
     use tairix_arch_x86_64::percpu;
+    use tairix_sync::Once;
 
-    use super::{msi_line_for_index, MsiAllocError, MsiVector, MAX_MSI_VECTORS};
+    use super::{msi_line_for_index, MsiAllocError, MsiPool, MsiVector, MAX_MSI_VECTORS};
 
-    /// First IDT vector reserved for MSI delivery (the first free external
-    /// vector above the IO-APIC pins), recorded by [`install_msi_lines`].
-    /// `0` means "not installed yet".
-    static FIRST_MSI_VECTOR: AtomicU32 = AtomicU32::new(0);
-
-    /// Number of usable MSI vectors installed (`min(free vectors,
-    /// MAX_MSI_VECTORS)`). `0` before install, or on a boot with no free
-    /// vectors left after the IO-APIC pins.
-    static MSI_VECTOR_COUNT: AtomicU32 = AtomicU32::new(0);
-
-    /// Set-only allocation bitmap: bit `i` means MSI slot `i` is claimed. A
-    /// driver holds its vector for life, so no free path is needed.
-    static MSI_ALLOCATED: AtomicU64 = AtomicU64::new(0);
+    /// The boot's vectors, published once [`install_msi_lines`] installed
+    /// them.
+    static POOL: Once<MsiPool> = Once::new();
 
     /// Pre-install every free external vector above the IO-APIC pins as a
     /// dedicated MSI vector: install its per-CPU IDT entry (so a delivered
@@ -225,26 +288,16 @@ mod alloc_impl {
     ///
     /// Returns the highest MSI line installed (`MSI_LINE_BASE + count - 1`),
     /// or `MSI_LINE_BASE - 1` when no vector was free (so the caller's
-    /// `IrqRouting.max_line` still covers only the real GSIs). Idempotent per
-    /// boot: a second call is refused via the set-once vector base.
+    /// `IrqRouting.max_line` still covers only the real GSIs). Once per boot:
+    /// a second call is refused.
     ///
-    /// `first_vector` is the first vector the IO-APIC-pin pass left unused;
-    /// `install_idt` installs one IDT entry (BSP, vector 0-arg is the CPU id
-    /// 0) and is the boot pipeline's `percpu::install_vector` bound to the
-    /// external ISR stub. Failing to install a vector stops the pass at that
-    /// point (the vectors installed so far remain usable), so a partial IDT
-    /// is never published as a larger count.
-    pub fn install_msi_lines(first_vector: u8) -> Result<u32, MsiAllocError> {
-        // Set-once: reject a second install rather than re-point the base.
-        if FIRST_MSI_VECTOR
-            .compare_exchange(
-                0,
-                u32::from(first_vector),
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_err()
-        {
+    /// `first_vector` is the first vector the IO-APIC-pin pass left unused,
+    /// and `destination` the APIC id of the boot CPU, whose interrupt table
+    /// alone holds the vectors. Failing to install a vector stops the pass at
+    /// that point (the vectors installed so far remain usable), so a partial
+    /// IDT is never published as a larger count.
+    pub fn install_msi_lines(first_vector: u8, destination: u32) -> Result<u32, MsiAllocError> {
+        if !matches!(POOL.get(), Ok(None)) {
             return Err(MsiAllocError::Uninitialised);
         }
         let routing = arch_irq::global_routing();
@@ -272,7 +325,8 @@ mod alloc_impl {
             };
             vector = next;
         }
-        MSI_VECTOR_COUNT.store(count, Ordering::Release);
+        POOL.call_once_infallible(|| MsiPool::new(first_vector, count, destination))
+            .map_err(|_| MsiAllocError::Uninitialised)?;
         // The inclusive top of the line space actually installed. With no
         // free vector the range is empty and the top is `MSI_LINE_BASE - 1`,
         // so a caller taking `max(max_gsi, top)` leaves `max_line` unchanged.
@@ -281,31 +335,9 @@ mod alloc_impl {
 
     /// Claim the lowest free MSI vector.
     pub fn allocate() -> Result<MsiVector, MsiAllocError> {
-        let base = FIRST_MSI_VECTOR.load(Ordering::Acquire);
-        let count = MSI_VECTOR_COUNT.load(Ordering::Acquire);
-        if base == 0 || count == 0 {
-            return Err(MsiAllocError::Uninitialised);
-        }
-        loop {
-            let current = MSI_ALLOCATED.load(Ordering::Acquire);
-            let Some(slot) = (0..count).find(|s| current & (1u64 << s) == 0) else {
-                return Err(MsiAllocError::Exhausted);
-            };
-            let updated = current | (1u64 << slot);
-            if MSI_ALLOCATED
-                .compare_exchange(current, updated, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                // `base + slot` fits in `u8`: `base` is an external vector
-                // (<= 0xFE) and `slot < count <= MAX_MSI_VECTORS`, bounded by
-                // the `vector <= EXTERNAL_VECTOR_LAST` install loop above.
-                #[allow(clippy::cast_possible_truncation)]
-                let vector = (base + slot) as u8;
-                return Ok(MsiVector {
-                    vector,
-                    line: msi_line_for_index(slot),
-                });
-            }
+        match POOL.get() {
+            Ok(Some(pool)) => pool.allocate(),
+            _ => Err(MsiAllocError::Uninitialised),
         }
     }
 }
@@ -313,35 +345,34 @@ mod alloc_impl {
 #[cfg(all(freestanding, kernel_isa = "x86_64"))]
 pub use alloc_impl::{allocate, install_msi_lines};
 
-/// A dedicated vector, and the message that raises it on the boot CPU, which
-/// takes every MSI the kernel routes.
-///
-/// # Errors
-///
-/// As [`allocate`].
+/// The compatibility-format message raising `vector` at the CPU it is
+/// installed on, or [`None`] where that CPU's APIC id is past the eight bits
+/// the format names: what a source no remapping unit sees writes.
 #[cfg(all(freestanding, kernel_isa = "x86_64"))]
-pub fn kernel_message() -> Result<(MsiVector, tairix_abi::driver::msix::MsiMessage), MsiAllocError>
-{
-    let vector = allocate()?;
-    let message = tairix_arch_x86_64::irq::msi_message(
+#[must_use]
+pub fn compatibility_message(vector: MsiVector) -> Option<tairix_abi::driver::msix::MsiMessage> {
+    let destination = u8::try_from(vector.destination).ok()?;
+    Some(tairix_arch_x86_64::irq::msi_message(
         vector.vector,
-        tairix_arch_x86_64::smp::bsp_lapic_id(),
-    );
-    Ok((vector, message))
+        destination,
+    ))
 }
 
-/// The MSI producer for interrupts the kernel takes itself: never handed to a
-/// process, so the vector space stays the kernel's.
+/// The MSI producer for interrupts the kernel takes itself — a translation
+/// unit's fault event, which the unit raises itself and remapping does not
+/// translate: never handed to a process, so the vector space stays the
+/// kernel's.
 #[cfg(all(freestanding, kernel_isa = "x86_64"))]
 pub struct KernelMsi;
 
 #[cfg(all(freestanding, kernel_isa = "x86_64"))]
 impl tairix_kernel_core::MsiAllocFacility for KernelMsi {
     fn allocate(&self) -> Result<tairix_abi::MsiAllocation, tairix_abi::Errno> {
-        let (vector, message) = kernel_message().map_err(|err| match err {
+        let vector = allocate().map_err(|err| match err {
             MsiAllocError::Exhausted => tairix_abi::Errno::OutOfRange,
             MsiAllocError::Uninitialised => tairix_abi::Errno::NotImplemented,
         })?;
+        let message = compatibility_message(vector).ok_or(tairix_abi::Errno::NotImplemented)?;
         Ok(tairix_abi::MsiAllocation::new(
             message.address,
             message.data,
@@ -357,6 +388,24 @@ pub static KERNEL_MSI: KernelMsi = KernelMsi;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every vector names the CPU its interrupt table holds it on, never the
+    /// caller's, and the pool hands each out once, past one word of slots.
+    #[test]
+    fn every_vector_names_the_cpu_holding_it_and_is_handed_out_once() {
+        let pool = MsiPool::new(0x40, 70, 3);
+        for slot in 0..70u8 {
+            let vector = pool.allocate().expect("a free vector");
+            assert_eq!(vector.vector, 0x40 + slot);
+            assert_eq!(vector.destination, 3);
+            assert_eq!(vector.line, msi_line_for_index(u32::from(slot)));
+        }
+        assert_eq!(pool.allocate(), Err(MsiAllocError::Exhausted));
+        assert_eq!(
+            MsiPool::new(0xF0, 0, 0).allocate(),
+            Err(MsiAllocError::Exhausted)
+        );
+    }
 
     #[test]
     fn msi_lines_and_gsis_never_alias() {

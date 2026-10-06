@@ -59,22 +59,13 @@ impl PerCpu for PerCpuStorage {
     fn read_self_base(&self) -> usize {
         #[cfg(all(target_arch = "x86_64", target_os = "none"))]
         {
-            let lo: u32;
-            let hi: u32;
-            // SAFETY: `rdmsr` reads the MSR named in `ecx` into `edx:eax`.
-            // `IA32_GS_BASE` is unconditionally present in long mode, the
-            // read is side-effect-free, and it touches no memory. It is
-            // privileged but the kernel runs at CPL 0.
-            unsafe {
-                core::arch::asm!(
-                    "rdmsr",
-                    in("ecx") IA32_GS_BASE,
-                    out("eax") lo,
-                    out("edx") hi,
-                    options(nomem, nostack, preserves_flags),
-                );
-            }
-            ((hi as usize) << 32) | (lo as usize)
+            // SAFETY: `IA32_GS_BASE` is unconditionally present in long mode
+            // and reading it is side-effect-free; the kernel runs at CPL 0.
+            let base = unsafe { crate::msr::read(IA32_GS_BASE) };
+            // A pointer is 64 bits wide on x86_64, so the base converts whole.
+            #[allow(clippy::cast_possible_truncation)]
+            let base = base as usize;
+            base
         }
         #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
         {
@@ -85,26 +76,12 @@ impl PerCpu for PerCpuStorage {
     unsafe fn write_self_base(&self, base: usize) {
         #[cfg(all(target_arch = "x86_64", target_os = "none"))]
         {
-            // `wrmsr` takes the 64-bit base as two 32-bit halves in
-            // `edx:eax` (Intel SDM Vol 2B §4.3); the masks split it exactly.
-            let base = base as u64;
-            let lo = (base & 0xFFFF_FFFF) as u32;
-            let hi = ((base >> 32) & 0xFFFF_FFFF) as u32;
-            // SAFETY: `wrmsr` writes `edx:eax` to the MSR named in `ecx`.
-            // `IA32_GS_BASE` accepts any canonical 64-bit base; the trait's
-            // safety contract requires the caller to run this on the CPU
-            // whose word is being set and to pass the value the kernel's
-            // per-CPU resolution expects. The instruction touches no
-            // memory and is privileged (CPL 0, which the kernel holds).
-            unsafe {
-                core::arch::asm!(
-                    "wrmsr",
-                    in("ecx") IA32_GS_BASE,
-                    in("eax") lo,
-                    in("edx") hi,
-                    options(nomem, nostack, preserves_flags),
-                );
-            }
+            // SAFETY: `IA32_GS_BASE` accepts any canonical 64-bit base; the
+            // trait's safety contract requires the caller to run this on the
+            // CPU whose word is being set and to pass the value the kernel's
+            // per-CPU resolution expects. The write is privileged (CPL 0,
+            // which the kernel holds).
+            unsafe { crate::msr::write(IA32_GS_BASE, base as u64) }
         }
         #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
         {

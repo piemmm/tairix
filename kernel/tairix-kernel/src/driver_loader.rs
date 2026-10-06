@@ -148,17 +148,10 @@ impl<'s> KernelDriverLoader<'s> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::NullSink;
 
     use crate::driver_catalog::IN_KERNEL_DRIVERS;
     use tairix_abi::CapabilityId;
-    use tairix_drvhost::{Event, Sink};
-
-    /// No-op audit sink: the admission tests assert the load *result*,
-    /// not the audit stream.
-    struct NullSink;
-    impl Sink for NullSink {
-        fn write_event(&self, _event: &Event<'_>) {}
-    }
 
     fn caps(ids: &[CapabilityId]) -> CapabilitySet {
         let mut set = CapabilitySet::empty();

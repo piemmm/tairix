@@ -190,6 +190,17 @@ pub mod hwtree_node_ids;
 #[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64", kernel_isa = "riscv64"))]
 pub mod pci_host;
 
+// The generic ECAM hosts a device tree describes, taken as the kernel's own
+// (`plans/IOMMU.md` IOM13). Host-tested.
+#[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64", kernel_isa = "riscv64"))]
+pub mod pci_fdt;
+
+// The DMA translation topology a device tree describes: platform masters'
+// groups and firmware windows, and how PCI hosts reach units
+// (`plans/IOMMU.md` IOM14). Host-tested.
+#[cfg(any(kernel_isa = "x86_64", kernel_isa = "aarch64", kernel_isa = "riscv64"))]
+pub mod iommu_fdt;
+
 // What a kernel PCI probe makes of one segment: each function's DMA identity
 // behind a unit, the functions it stops mastering, and the PCI host's record
 // (`plans/IOMMU.md` IOM7, IOM8). Host-tested.

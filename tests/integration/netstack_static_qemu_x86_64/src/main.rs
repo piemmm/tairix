@@ -42,7 +42,7 @@
 //!    function's MSI-X table entry 0.
 //! 2. **Autoloads** the signed virtio-net bundle from the mounted `/System`
 //!    store into its own user-space process; the driver brings the device up
-//!    over `PciTransport` (`enable_msix(0)`), claims its reserved
+//!    over `PciTransport` (the MSI-X entry its grant names), claims its reserved
 //!    device-channel endpoint, and publishes a `netchan` hardware-tree node.
 //! 3. The long-running user-space **`devmgr`** observes the `netchan` node,
 //!    calls **`netstack`** `BindDriver` (recording the NIC's bus location),

@@ -91,12 +91,12 @@ mod program {
     use tairix_abi::driver::input::{InputEvent, InputEventKind};
     use tairix_abi::driver::sole_register_window;
     use tairix_abi::driver::virtio::VirtioHost;
-    use tairix_abi::driver::virtio_pci::{virtio_pci_windows, VirtioPciWindows};
+    use tairix_abi::driver::virtio_pci::virtio_pci_windows;
     use tairix_abi::input::PointerInput;
     use tairix_abi::{CapabilityId, DriverError, MmioMapper};
     use tairix_caps::CapabilitySet;
     use tairix_drvrt::{RtDriverHost, RtGrantSyscalls};
-    use tairix_virtio::{MmioTransport, PciTransport, PciTransportWindows, Transport};
+    use tairix_virtio::{MmioTransport, PciTransport, Transport};
     use tairix_virtio_input::{Report, VirtioInput, VirtioKeyboardConsole};
 
     /// Exit code when the rt-backed driver host could not be built from the
@@ -109,16 +109,6 @@ mod program {
     /// virtio-PCI config windows) this driver needs — an unbound,
     /// mis-provisioned, or malformed node. A reserved, fail-closed value.
     const EXIT_NO_RESOURCES: i32 = 81;
-
-    /// MSI-X table entry the kernel PCI probe routes this device's single
-    /// interrupt to, and the entry the driver selects for the config change
-    /// and every virtqueue. The driver parks on one bound handle, so one
-    /// shared MSI-X vector — entry `0` — carries every device notification;
-    /// the kernel programs that entry's table slot at spawn and the driver
-    /// only echoes the entry number into the device's vector registers
-    /// (writing its own mapped common window, no PCI config access).
-    /// Ignored on the single-aperture MMIO bus, which has no MSI-X.
-    const MSIX_ENTRY: u16 = 0;
 
     /// Exit code when the device bring-up failed (the register window could
     /// not be mapped, the window is not a virtio-MMIO device, the device
@@ -187,7 +177,7 @@ mod program {
         // window — the driver never reads PCI configuration space.
         match virtio_pci_windows(host.resources()) {
             Ok(windows) => {
-                let Some(transport) = build_pci_transport(&host, &windows) else {
+                let Ok(transport) = PciTransport::map(&windows, &host) else {
                     return EXIT_BRINGUP_FAILED;
                 };
                 run(&host, transport)
@@ -209,38 +199,6 @@ mod program {
             // mis-provisioned node. Fail closed rather than half-bind.
             Err(_) => EXIT_NO_RESOURCES,
         }
-    }
-
-    /// Build the modern virtio-PCI [`PciTransport`] from the four
-    /// kernel-resolved config windows, mapping each through the host's
-    /// capability-gated MMIO facility and selecting the kernel-routed MSI-X
-    /// entry before the transport programs the device's virtqueues.
-    ///
-    /// Returns [`None`] on any window map failure (a refused or malformed
-    /// grant) or a malformed common-configuration window — fail closed, never
-    /// a half-built transport.
-    fn build_pci_transport(
-        mapper: &dyn MmioMapper,
-        windows: &VirtioPciWindows,
-    ) -> Option<PciTransport> {
-        let common = mapper.map_window(windows.common.0, windows.common.1).ok()?;
-        let notify = mapper.map_window(windows.notify.0, windows.notify.1).ok()?;
-        let isr = mapper.map_window(windows.isr.0, windows.isr.1).ok()?;
-        let device = mapper.map_window(windows.device.0, windows.device.1).ok()?;
-        let mut transport = PciTransport::new(PciTransportWindows {
-            common,
-            notify,
-            isr,
-            device,
-            notify_off_multiplier: windows.notify_off_multiplier,
-        })
-        .ok()?;
-        // Select the MSI-X entry the kernel routed this device's interrupt to,
-        // before `VirtioInput::open_armed` drives the virtqueue programming
-        // that reads it back. Writes only the driver's own mapped common
-        // window.
-        transport.enable_msix(MSIX_ENTRY);
-        Some(transport)
     }
 
     /// Bring the virtio-input device online over whatever transport backs it

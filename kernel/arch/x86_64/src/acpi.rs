@@ -45,6 +45,58 @@ pub enum AcpiError {
     UnsupportedRevision,
 }
 
+/// What emitting a table's translation units placed in the hardware tree.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct UnitNodes {
+    /// Units given a node, in table order: a unit past them has no node, so
+    /// nothing brings it up and nothing behind it can be confined.
+    pub emitted: usize,
+    /// Reserved windows no unit's node carries — past its room, or on a
+    /// segment no walk reaches: those functions lose their firmware DMA
+    /// rather than bypass translation.
+    pub dropped: usize,
+    /// Reserved windows refused because the function they name sits below an
+    /// external-facing port.
+    pub untrusted: usize,
+}
+
+/// The hardware-tree id of the unit at `index` among a table's units, ids
+/// numbered from `first_id`.
+pub(crate) fn unit_node_id(first_id: u32, index: usize) -> Option<u32> {
+    first_id.checked_add(u32::try_from(index).ok()?)
+}
+
+/// The little-endian fields of a firmware structure. Callers bound the
+/// offset first; the indexing still checks it, so a violation is a logic
+/// bug the tests catch, never a read past the structure.
+pub(crate) fn read_u16(bytes: &[u8], offset: usize) -> u16 {
+    u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
+}
+
+/// As [`read_u16`], four bytes.
+pub(crate) fn read_u32(bytes: &[u8], offset: usize) -> u32 {
+    let mut raw = [0u8; 4];
+    raw.copy_from_slice(&bytes[offset..offset + 4]);
+    u32::from_le_bytes(raw)
+}
+
+/// As [`read_u16`], eight bytes.
+pub(crate) fn read_u64(bytes: &[u8], offset: usize) -> u64 {
+    let mut raw = [0u8; 8];
+    raw.copy_from_slice(&bytes[offset..offset + 8]);
+    u64::from_le_bytes(raw)
+}
+
+impl UnitNodes {
+    /// Whether a unit on `segment`, among units on `segments` in table
+    /// order, was left without a node, so nothing on the segment behind it
+    /// can be confined.
+    #[must_use]
+    pub fn strands(&self, segments: impl Iterator<Item = u16>, segment: u16) -> bool {
+        segments.skip(self.emitted).any(|at| at == segment)
+    }
+}
+
 /// Sum every byte of `bytes` and return whether the low 8 bits are zero,
 /// the ACPI checksum convention for both the RSDP and SDT headers.
 fn checksum_zero(bytes: &[u8]) -> bool {
@@ -326,6 +378,16 @@ pub enum MadtEntry {
         /// 64-bit MMIO address of the LAPIC window.
         address: u64,
     },
+    /// Type 9 — Processor Local x2APIC: a processor named by its 32-bit
+    /// x2APIC id, as firmware describes one whose id xAPIC cannot hold.
+    LocalX2Apic {
+        /// x2APIC id.
+        x2apic_id: u32,
+        /// Per-entry flags. Bit 0 == "enabled".
+        flags: u32,
+        /// ACPI processor UID.
+        processor_uid: u32,
+    },
     /// Any entry type not parsed by this module. Carries the raw type.
     Other(u8),
 }
@@ -384,6 +446,11 @@ fn decode_entry(ty: u8, body: &[u8]) -> MadtEntry {
                 body[4], body[5], body[6], body[7], body[8], body[9], body[10], body[11],
             ]),
         },
+        (9, 16) => MadtEntry::LocalX2Apic {
+            x2apic_id: u32::from_le_bytes([body[4], body[5], body[6], body[7]]),
+            flags: u32::from_le_bytes([body[8], body[9], body[10], body[11]]),
+            processor_uid: u32::from_le_bytes([body[12], body[13], body[14], body[15]]),
+        },
         _ => MadtEntry::Other(ty),
     }
 }
@@ -416,32 +483,49 @@ pub const ACPI_SDT_HEADER_LEN: usize = SDT_HEADER_LEN;
 /// configuration-space description table (ECAM).
 pub const MCFG_SIGNATURE: [u8; 4] = *b"MCFG";
 
-/// One ECAM configuration-space allocation from the MCFG: the physical
-/// base of a segment group's memory-mapped configuration window and the
-/// bus-number range it covers (PCI Firmware Specification §4.1.2).
+/// One ECAM configuration-space allocation from the MCFG: a segment group's
+/// configuration region for one bus range (PCI Firmware Specification
+/// §4.1.2).
 ///
 /// A function's configuration space lives at
-/// `base + (bus << 20) + (device << 15) + (function << 12)`, so the
-/// window for `[start_bus, end_bus]` spans
-/// `(end_bus - start_bus + 1) << 20` bytes.
+/// `base + (bus << 20) + (device << 15) + (function << 12)`: `base` is where
+/// bus 0's block would be, whatever bus the allocation starts at, so the
+/// region itself starts at [`Self::window_base`]. Only a validated MCFG
+/// yields one, so its region always ends within the address space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EcamAllocation {
-    /// Physical base of this segment group's ECAM window.
-    pub base: u64,
-    /// PCI segment group number.
-    pub segment: u16,
-    /// First bus number the window covers.
-    pub start_bus: u8,
-    /// Last bus number the window covers (inclusive).
-    pub end_bus: u8,
+    /// Physical address bus 0's block would have.
+    base: u64,
+    segment: u16,
+    start_bus: u8,
+    /// Inclusive.
+    end_bus: u8,
 }
 
 impl EcamAllocation {
-    /// Byte length of this allocation's ECAM window: one 1 MiB region per
-    /// bus in `[start_bus, end_bus]` (256 functions × 4 KiB each).
+    /// The PCI segment group the region serves.
+    #[must_use]
+    pub fn segment(&self) -> u16 {
+        self.segment
+    }
+
+    /// Physical base of the region: the first bus's block.
+    #[must_use]
+    pub fn window_base(&self) -> u64 {
+        self.base + (u64::from(self.start_bus) << 20)
+    }
+
+    /// Byte length of the region: one 1 MiB block per bus in
+    /// `[start_bus, end_bus]` (256 functions × 4 KiB each).
     #[must_use]
     pub fn window_len(&self) -> u64 {
         (u64::from(self.end_bus - self.start_bus) + 1) << 20
+    }
+
+    /// The buses the region covers.
+    #[must_use]
+    pub fn buses(&self) -> core::ops::RangeInclusive<u8> {
+        self.start_bus..=self.end_bus
     }
 }
 
@@ -453,47 +537,77 @@ const MCFG_ALLOCATION_LEN: usize = 16;
 /// SDT header plus 8 reserved bytes.
 const MCFG_ALLOCATIONS_OFFSET: usize = SDT_HEADER_LEN + 8;
 
-/// Parse the **first** ECAM allocation from an MCFG byte slice.
-///
-/// The MCFG (PCI Firmware Specification §4.1.2) is an SDT header, 8
-/// reserved bytes, then one or more 16-byte configuration-space
-/// allocation structures. The first covers segment group 0 on every
-/// platform TAIRiX targets, which is the bus the PCI probe enumerates, so
-/// its base is the ECAM window the kernel maps.
-///
-/// This is a **pure** parser (no MMIO), host-tested, so the byte
-/// validation is exercised off-target: the on-target (bare-metal)
-/// `locate_mcfg` supplies the slice.
-///
-/// # Errors
-///
-/// Returns `None` (fail closed) if the signature is not [`MCFG_SIGNATURE`],
-/// the declared length is short, or the table carries no allocation.
-#[must_use]
-pub fn mcfg_first_ecam(bytes: &[u8]) -> Option<EcamAllocation> {
-    let header = SdtHeader::validate(bytes, &MCFG_SIGNATURE).ok()?;
-    let len = header.length as usize;
-    // The declared length must reach at least one whole allocation past
-    // the reserved area, and must not exceed the slice we were handed.
-    if len < MCFG_ALLOCATIONS_OFFSET + MCFG_ALLOCATION_LEN || len > bytes.len() {
-        return None;
+/// A validated MCFG: every allocation is well formed and no two of one
+/// segment cover a bus twice, so each function has exactly one region.
+#[derive(Debug, Clone, Copy)]
+pub struct Mcfg<'a> {
+    allocations: &'a [u8],
+}
+
+impl<'a> Mcfg<'a> {
+    /// Validate the MCFG in `bytes`.
+    ///
+    /// This is a **pure** parser (no MMIO), host-tested, so the byte
+    /// validation is exercised off-target.
+    ///
+    /// # Errors
+    ///
+    /// [`AcpiError`] for a bad signature, checksum or length, a length that is
+    /// not whole allocations, a region whose end bus precedes its start or
+    /// whose end overflows the address space, or two regions of one segment
+    /// covering one bus.
+    pub fn parse(bytes: &'a [u8]) -> Result<Self, AcpiError> {
+        let header = SdtHeader::validate(bytes, &MCFG_SIGNATURE)?;
+        let len = header.length as usize;
+        if len < MCFG_ALLOCATIONS_OFFSET
+            || !(len - MCFG_ALLOCATIONS_OFFSET).is_multiple_of(MCFG_ALLOCATION_LEN)
+        {
+            return Err(AcpiError::BadLength);
+        }
+        let mcfg = Self {
+            allocations: &bytes[MCFG_ALLOCATIONS_OFFSET..len],
+        };
+        for (index, allocation) in mcfg.allocations().enumerate() {
+            // Checked here, so the accessors an allocation is read through
+            // never can overflow.
+            let ends = allocation.end_bus >= allocation.start_bus
+                && allocation
+                    .base
+                    .checked_add(u64::from(allocation.start_bus) << 20)
+                    .and_then(|first| {
+                        first.checked_add(
+                            (u64::from(allocation.end_bus - allocation.start_bus) + 1) << 20,
+                        )
+                    })
+                    .is_some();
+            if !ends {
+                return Err(AcpiError::BadLength);
+            }
+            let overlaps = mcfg.allocations().skip(index + 1).any(|other| {
+                other.segment == allocation.segment
+                    && other.start_bus <= allocation.end_bus
+                    && allocation.start_bus <= other.end_bus
+            });
+            if overlaps {
+                return Err(AcpiError::BadLength);
+            }
+        }
+        Ok(mcfg)
     }
-    let a = &bytes[MCFG_ALLOCATIONS_OFFSET..MCFG_ALLOCATIONS_OFFSET + MCFG_ALLOCATION_LEN];
-    let base = u64::from_le_bytes([a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]]);
-    let segment = u16::from_le_bytes([a[8], a[9]]);
-    let start_bus = a[10];
-    let end_bus = a[11];
-    // A window whose end precedes its start is malformed; refuse it rather
-    // than compute a wrapping length.
-    if end_bus < start_bus {
-        return None;
+
+    /// Every allocation, in table order.
+    pub fn allocations(&self) -> impl Iterator<Item = EcamAllocation> + 'a {
+        self.allocations
+            .as_chunks::<MCFG_ALLOCATION_LEN>()
+            .0
+            .iter()
+            .map(|a| EcamAllocation {
+                base: u64::from_le_bytes([a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]]),
+                segment: u16::from_le_bytes([a[8], a[9]]),
+                start_bus: a[10],
+                end_bus: a[11],
+            })
     }
-    Some(EcamAllocation {
-        base,
-        segment,
-        start_bus,
-        end_bus,
-    })
 }
 
 /// Locate the MADT by walking the firmware (X|R)SDT pointed at by
@@ -527,8 +641,8 @@ pub unsafe fn locate_madt(rsdp: &Rsdp) -> Option<&'static [u8]> {
 /// firmware (X|R)SDT pointed at by `rsdp`.
 ///
 /// Returns the MCFG bytes as a `'static` slice if found; the caller
-/// hands them to [`mcfg_first_ecam`] to recover the ECAM base. The x86_64
-/// PCI probe needs this to build a configuration-space bus.
+/// hands them to [`Mcfg::parse`] to recover the ECAM regions. The x86_64
+/// PCI probe needs this to build its configuration-space buses.
 ///
 /// # Safety
 ///
@@ -562,6 +676,23 @@ pub unsafe fn locate_dmar(rsdp: &Rsdp) -> Option<&'static [u8]> {
     // SAFETY: forwarded — caller's contract pins the tables into the
     // identity-mapped window.
     unsafe { locate_sdt(rsdp, crate::dmar::DMAR_SIGNATURE) }
+}
+
+/// Locate the IVRS (the AMD-Vi I/O virtualization report) by walking the
+/// firmware (X|R)SDT pointed at by `rsdp`; the caller hands the bytes to
+/// [`crate::ivrs::Ivrs::parse`].
+///
+/// # Safety
+///
+/// Identical to [`locate_madt`].
+///
+/// Returns `None` on a platform with no AMD-Vi units (or with them hidden).
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[must_use]
+pub unsafe fn locate_ivrs(rsdp: &Rsdp) -> Option<&'static [u8]> {
+    // SAFETY: forwarded — caller's contract pins the tables into the
+    // identity-mapped window.
+    unsafe { locate_sdt(rsdp, crate::ivrs::IVRS_SIGNATURE) }
 }
 
 /// Walk the firmware (X|R)SDT pointed at by `rsdp` for the first table
@@ -905,6 +1036,28 @@ pub(crate) mod tests {
         assert_eq!(madt.entries().next(), Some(MadtEntry::Other(99)));
     }
 
+    /// A Processor Local x2APIC entry carries its 32-bit id, flags and UID.
+    #[test]
+    fn a_local_x2apic_entry_names_its_32_bit_id() {
+        let mut entry = vec![9u8, 16, 0, 0];
+        entry.extend_from_slice(&0x0001_0203u32.to_le_bytes());
+        entry.extend_from_slice(&1u32.to_le_bytes());
+        entry.extend_from_slice(&7u32.to_le_bytes());
+        assert_eq!(
+            decode_entry(9, &entry),
+            MadtEntry::LocalX2Apic {
+                x2apic_id: 0x0001_0203,
+                flags: 1,
+                processor_uid: 7,
+            }
+        );
+        assert_eq!(
+            decode_entry(9, &entry[..12]),
+            MadtEntry::Other(9),
+            "a short entry"
+        );
+    }
+
     #[test]
     fn madt_rejects_signature_mismatch() {
         let mut bytes = build_madt(0, 0, &[]);
@@ -969,42 +1122,103 @@ pub(crate) mod tests {
         buf
     }
 
+    /// Append one allocation to `mcfg` and fix its length and checksum.
+    fn with_allocation(mut mcfg: Vec<u8>, base: u64, segment: u16, start: u8, end: u8) -> Vec<u8> {
+        let mut allocation = [0u8; MCFG_ALLOCATION_LEN];
+        allocation[..8].copy_from_slice(&base.to_le_bytes());
+        allocation[8..10].copy_from_slice(&segment.to_le_bytes());
+        allocation[10] = start;
+        allocation[11] = end;
+        mcfg.extend_from_slice(&allocation);
+        let total = u32::try_from(mcfg.len()).unwrap();
+        mcfg[4..8].copy_from_slice(&total.to_le_bytes());
+        mcfg[9] = 0;
+        let s = mcfg.iter().fold(0u8, |acc, b| acc.wrapping_add(*b));
+        mcfg[9] = 0u8.wrapping_sub(s);
+        mcfg
+    }
+
     #[test]
-    fn mcfg_first_ecam_decodes_the_allocation() {
+    fn an_mcfg_decodes_every_allocation() {
         // The QEMU q35 ECAM base, one segment, all 256 buses.
         let bytes = build_mcfg(0xB000_0000, 0, 0, 0xFF);
-        let ecam = mcfg_first_ecam(&bytes).expect("ecam allocation");
+        let mcfg = Mcfg::parse(&bytes).expect("a valid MCFG");
+        let ecam: Vec<_> = mcfg.allocations().collect();
         assert_eq!(
             ecam,
-            EcamAllocation {
+            [EcamAllocation {
                 base: 0xB000_0000,
                 segment: 0,
                 start_bus: 0,
                 end_bus: 0xFF,
-            }
+            }]
         );
-        // 256 buses × 1 MiB.
-        assert_eq!(ecam.window_len(), 256 << 20);
+        assert_eq!(ecam[0].window_len(), 256 << 20);
+        assert_eq!(ecam[0].window_base(), 0xB000_0000);
+        let two = with_allocation(bytes, 0xC000_0000, 1, 0, 0x3F);
+        let segments: Vec<_> = Mcfg::parse(&two)
+            .unwrap()
+            .allocations()
+            .map(|a| a.segment)
+            .collect();
+        assert_eq!(segments, [0, 1]);
+    }
+
+    /// The MCFG names where bus 0's block would be: a region starting at
+    /// bus 0x80 begins 0x80 MiB past it.
+    #[test]
+    fn a_region_starting_above_bus_zero_is_mapped_from_its_first_bus() {
+        let bytes = build_mcfg(0xE000_0000, 2, 0x80, 0x8F);
+        let ecam = Mcfg::parse(&bytes).unwrap().allocations().next().unwrap();
+        assert_eq!(ecam.window_base(), 0xE000_0000 + (0x80 << 20));
+        assert_eq!(ecam.window_len(), 16 << 20);
+        assert_eq!(ecam.buses(), 0x80..=0x8F);
     }
 
     #[test]
-    fn mcfg_first_ecam_window_len_for_a_single_bus() {
-        let bytes = build_mcfg(0xC000_0000, 0, 0, 0);
-        let ecam = mcfg_first_ecam(&bytes).expect("ecam allocation");
-        assert_eq!(ecam.window_len(), 1 << 20);
+    fn one_segment_may_be_split_across_disjoint_regions() {
+        let bytes = with_allocation(
+            build_mcfg(0xE000_0000, 0, 0, 0x7F),
+            0xF000_0000,
+            0,
+            0x80,
+            0xFF,
+        );
+        assert_eq!(Mcfg::parse(&bytes).unwrap().allocations().count(), 2);
     }
 
     #[test]
-    fn mcfg_first_ecam_rejects_a_bad_signature() {
+    fn an_mcfg_covering_one_bus_twice_is_refused() {
+        let bytes = with_allocation(
+            build_mcfg(0xE000_0000, 0, 0, 0x80),
+            0xF000_0000,
+            0,
+            0x80,
+            0xFF,
+        );
+        assert_eq!(Mcfg::parse(&bytes).err(), Some(AcpiError::BadLength));
+        let apart = with_allocation(
+            build_mcfg(0xE000_0000, 0, 0, 0x80),
+            0xF000_0000,
+            1,
+            0x80,
+            0xFF,
+        );
+        assert!(
+            Mcfg::parse(&apart).is_ok(),
+            "another segment's buses are its own"
+        );
+    }
+
+    #[test]
+    fn an_mcfg_with_a_bad_signature_is_refused() {
         let mut bytes = build_mcfg(0xB000_0000, 0, 0, 0xFF);
         bytes[0] = b'X';
-        assert_eq!(mcfg_first_ecam(&bytes), None);
+        assert!(Mcfg::parse(&bytes).is_err());
     }
 
     #[test]
-    fn mcfg_first_ecam_rejects_a_table_with_no_allocation() {
-        // A well-formed MCFG header + reserved area but zero allocations
-        // (length stops at the reserved area) carries no ECAM window.
+    fn an_mcfg_with_no_allocation_names_no_region() {
         let total = MCFG_ALLOCATIONS_OFFSET;
         let mut buf = vec![0u8; total];
         buf[..4].copy_from_slice(&MCFG_SIGNATURE);
@@ -1012,12 +1226,28 @@ pub(crate) mod tests {
         buf[8] = 1;
         let s = buf.iter().fold(0u8, |acc, b| acc.wrapping_add(*b));
         buf[9] = 0u8.wrapping_sub(s);
-        assert_eq!(mcfg_first_ecam(&buf), None);
+        assert_eq!(Mcfg::parse(&buf).unwrap().allocations().count(), 0);
     }
 
     #[test]
-    fn mcfg_first_ecam_rejects_an_inverted_bus_range() {
-        let bytes = build_mcfg(0xB000_0000, 0, 0x10, 0x00);
-        assert_eq!(mcfg_first_ecam(&bytes), None);
+    fn an_mcfg_whose_length_is_not_whole_allocations_is_refused() {
+        let mut bytes = build_mcfg(0xB000_0000, 0, 0, 0xFF);
+        bytes.push(0);
+        let total = u32::try_from(bytes.len()).unwrap();
+        bytes[4..8].copy_from_slice(&total.to_le_bytes());
+        bytes[9] = 0;
+        let s = bytes.iter().fold(0u8, |acc, b| acc.wrapping_add(*b));
+        bytes[9] = 0u8.wrapping_sub(s);
+        assert_eq!(Mcfg::parse(&bytes).err(), Some(AcpiError::BadLength));
+    }
+
+    #[test]
+    fn an_mcfg_with_an_inverted_or_overflowing_region_is_refused() {
+        assert!(Mcfg::parse(&build_mcfg(0xB000_0000, 0, 0x10, 0x00)).is_err());
+        assert!(Mcfg::parse(&build_mcfg(u64::MAX - (1 << 20), 0, 0, 0xFF)).is_err());
+        assert!(
+            Mcfg::parse(&build_mcfg(0xFFFF_FFFF_FFF0_0000, 0, 1, 1)).is_err(),
+            "refused, not a boot panic, where the first bus's block lies past the end"
+        );
     }
 }

@@ -372,7 +372,7 @@ fn virtio_blk_unlock<'a>(
         published_irq_table().ok_or("root-unlock: no published IRQ table")?;
     let controller = plic_controller().ok_or("root-unlock: no PLIC controller")?;
     let bind = table
-        .bind(source, UNLOCK_TASK)
+        .bind_exclusive(source, UNLOCK_TASK)
         .map_err(|_| "root-unlock: bind device source")?;
     let handle: IrqHandle = bind.handle;
     // Arm the source for the first completion (enable it in the S-mode context
@@ -399,7 +399,7 @@ fn virtio_blk_unlock<'a>(
         alloc::boxed::Box::leak(alloc::boxed::Box::new(IrqParkWaiter::new(
             table,
             handle,
-            source,
+            UNLOCK_TASK,
             controller_dyn,
             Some(wfi_fallback_park),
         )));

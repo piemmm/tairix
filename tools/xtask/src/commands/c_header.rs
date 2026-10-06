@@ -653,6 +653,16 @@ fn generate_hwtree() -> String {
     );
     let _ = writeln!(
         out,
+        "#define TAIRIX_HW_RES_FLAG_IRQ_MESSAGE {}u",
+        tairix_abi::hwtree::IRQ_MESSAGE
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_HW_RES_FLAG_IRQ_EDGE {}u",
+        tairix_abi::hwtree::IRQ_EDGE
+    );
+    let _ = writeln!(
+        out,
         "#define TAIRIX_HW_NODE_HEADER_LEN {HW_NODE_HEADER_LEN}u"
     );
     let _ = writeln!(out, "#define TAIRIX_HW_NODE_WIRE_LEN {}u", HwNode::WIRE_LEN);
@@ -767,6 +777,7 @@ fn resource_kind_name(kind: HwResourceKind) -> &'static str {
 fn property_name(key: HwProperty) -> &'static str {
     match key {
         HwProperty::UsbInterface => "USB_INTERFACE",
+        HwProperty::FaultInterrupt => "FAULT_INTERRUPT",
     }
 }
 
@@ -4085,6 +4096,15 @@ mod tests {
             )),
             "resource kind macro: {h}"
         );
+        for (name, flag) in [
+            ("IRQ_MESSAGE", tairix_abi::hwtree::IRQ_MESSAGE),
+            ("IRQ_EDGE", tairix_abi::hwtree::IRQ_EDGE),
+        ] {
+            assert!(
+                h.contains(&format!("#define TAIRIX_HW_RES_FLAG_{name} {flag}u")),
+                "{name}: {h}"
+            );
+        }
         assert!(h.contains("typedef struct tairix_hw_node {"), "node struct");
         // The flat record structs mirror their #[repr(C)] layout exactly,
         // so their wire size equals their in-memory size.

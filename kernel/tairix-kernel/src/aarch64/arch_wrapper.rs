@@ -157,6 +157,30 @@ impl KernelArch for Aarch64BinArch {
         ContextSwitchHal::new()
     }
 
+    /// The kernel owns the configuration space of every generic ECAM host
+    /// the boot probe took.
+    fn bus_mastering(
+        &self,
+    ) -> Option<&'static (dyn tairix_kernel_core::iommu::BusMastering + 'static)> {
+        crate::pci_host::bus_mastering()
+    }
+
+    fn unit_function(&self) -> Option<&'static dyn tairix_kernel_iommu_api::UnitFunction> {
+        crate::pci_host::unit_function()
+    }
+
+    fn kernel_mmio(&self, base: u64, len: usize) -> Option<core::ptr::NonNull<u8>> {
+        #[cfg(all(freestanding, kernel_isa = "aarch64"))]
+        {
+            crate::aarch64::boot::device_registers(base, len)
+        }
+        #[cfg(not(all(freestanding, kernel_isa = "aarch64")))]
+        {
+            let _ = (base, len);
+            None
+        }
+    }
+
     fn halt(&self) -> ! {
         halt_current_cpu()
     }

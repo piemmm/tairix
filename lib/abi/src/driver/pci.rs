@@ -27,12 +27,18 @@ use crate::HwNode;
 /// Byte offset of a function's command/status dword in its configuration
 /// header (PCI Local Bus 3.0 §6.2.2).
 pub const COMMAND_OFFSET: u16 = 0x04;
+/// The command register's I/O Space Enable bit: the function decodes its I/O
+/// BARs.
+pub const IO_SPACE_ENABLE: u32 = 1 << 0;
 /// The command register's Memory Space Enable bit: the function decodes its
 /// memory BARs.
 pub const MEMORY_SPACE_ENABLE: u32 = 1 << 1;
 /// The command register's Bus Master Enable bit: the function may issue
 /// upstream memory requests, its DMA and the writes that deliver its MSIs.
 pub const BUS_MASTER_ENABLE: u32 = 1 << 2;
+/// The command register's Interrupt Disable bit: the function may not assert
+/// its INTx pin.
+pub const INTERRUPT_DISABLE: u32 = 1 << 10;
 
 /// Devices one PCI bus holds.
 pub const PCI_DEVICES: u8 = 32;
@@ -70,6 +76,64 @@ pub fn requester_id(address: u64) -> u16 {
 #[must_use]
 pub fn config_address(id: u16) -> u64 {
     u64::from(id) << 8
+}
+
+/// A PCI function as the machine names it: its segment and its requester id.
+/// A requester id alone is unique only within one segment.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct PciAddress {
+    segment: u16,
+    requester: u16,
+}
+
+impl PciAddress {
+    /// The function with requester id `requester` on segment `segment`.
+    #[must_use]
+    pub const fn new(segment: u16, requester: u16) -> Self {
+        Self { segment, requester }
+    }
+
+    /// The function at configuration `address` on segment `segment`.
+    #[must_use]
+    pub fn at(segment: u16, address: u64) -> Self {
+        Self::new(segment, requester_id(address))
+    }
+
+    /// The function a hardware-tree node's address names: the segment in the
+    /// high half, the requester id in the low.
+    #[must_use]
+    pub const fn from_node_address(address: u32) -> Self {
+        let [requester_low, requester_high, segment_low, segment_high] = address.to_le_bytes();
+        Self::new(
+            u16::from_le_bytes([segment_low, segment_high]),
+            u16::from_le_bytes([requester_low, requester_high]),
+        )
+    }
+
+    /// The segment.
+    #[must_use]
+    pub const fn segment(self) -> u16 {
+        self.segment
+    }
+
+    /// The requester id its own transactions carry.
+    #[must_use]
+    pub const fn requester_id(self) -> u16 {
+        self.requester
+    }
+
+    /// Its configuration address within its segment.
+    #[must_use]
+    pub fn config_address(self) -> u64 {
+        config_address(self.requester)
+    }
+
+    /// As a hardware-tree node's address carries it
+    /// ([`HwNode::set_address`](crate::HwNode::set_address)).
+    #[must_use]
+    pub const fn node_address(self) -> u32 {
+        ((self.segment as u32) << 16) | self.requester as u32
+    }
 }
 
 /// What telling functions found mastering DMA to stop came to.
@@ -154,6 +218,17 @@ pub trait PciBus: Bus {
     /// * [`DriverError::DeviceFault`] if the configuration write cannot
     ///   be completed by the bus transport.
     fn set_bus_master(&self, bdf: u64, master: bool) -> Result<(), DriverError>;
+
+    /// Let function `bdf` assert its INTx pin, or stop it (Interrupt
+    /// Disable, PCI Local Bus 3.0 §6.2.2), every other command bit as it
+    /// was. Only the owner of its configuration space calls this: a pin is
+    /// raised only while an owner is bound to its line.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::DeviceFault`] if the configuration write cannot
+    ///   be completed by the bus transport.
+    fn set_intx(&self, bdf: u64, raise: bool) -> Result<(), DriverError>;
 
     /// Assign a memory base to the BAR at `bar_index` on function
     /// `bdf` if it is currently **unassigned**, placing it inside the
@@ -305,6 +380,24 @@ mod tests {
     }
 
     #[test]
+    fn a_pci_address_names_its_segment_beside_its_requester_id() {
+        let address = PciAddress::at(0x0003, (0x12 << 16) | (0x1F << 11) | (0x7 << 8));
+        assert_eq!(address.segment(), 3);
+        assert_eq!(address.requester_id(), 0x12FF);
+        assert_eq!(address.node_address(), 0x0003_12FF);
+        assert_eq!(PciAddress::from_node_address(0x0003_12FF), address);
+        assert_eq!(address.config_address(), config_address(0x12FF));
+        assert_ne!(
+            PciAddress::new(0, 0x12FF),
+            PciAddress::new(1, 0x12FF),
+            "one requester id on two segments is two functions"
+        );
+        for raw in [0, 0xFFFF, 0x0001_0000, u32::MAX] {
+            assert_eq!(PciAddress::from_node_address(raw).node_address(), raw);
+        }
+    }
+
+    #[test]
     fn a_function_address_packs_and_unpacks_within_pci_s_limits() {
         assert_eq!(
             function_address(0x12, 0x1F, 7),
@@ -398,6 +491,10 @@ mod tests {
 
         fn set_bus_master(&self, _bdf: u64, master: bool) -> Result<(), DriverError> {
             self.mastering.set(master);
+            Ok(())
+        }
+
+        fn set_intx(&self, _bdf: u64, _raise: bool) -> Result<(), DriverError> {
             Ok(())
         }
 

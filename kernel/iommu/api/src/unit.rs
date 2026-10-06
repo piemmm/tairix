@@ -4,6 +4,7 @@
 use core::ops::Range;
 
 use crate::fault::Fault;
+use crate::interrupt::InterruptRemapping;
 
 /// How a device may use a mapping.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -59,13 +60,56 @@ pub enum IommuError {
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub struct DomainId(pub u32);
 
-/// What a unit reports it can do.
+impl DomainId {
+    /// The id as a sixteen-bit domain field holds it: a VT-d or AMD-Vi
+    /// domain id, an Arm VMID or ASID.
+    ///
+    /// # Errors
+    ///
+    /// [`IommuError::OutOfRange`] for one wider.
+    pub fn sixteen_bits(self) -> Result<u16, IommuError> {
+        u16::try_from(self.0).map_err(|_| IommuError::OutOfRange)
+    }
+}
+
+/// The translation stage a unit's domains are walked at.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct UnitProfile {
+pub enum Stage {
+    /// The stage a process's address space would use, its translations
+    /// tagged by address space.
+    First,
+    /// The stage a hypervisor would own, its translations tagged by virtual
+    /// machine: what a unit translating at one stage alone usually offers.
+    Second,
+}
+
+impl Stage {
+    /// The stage as the audit trail spells it.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::First => "first",
+            Self::Second => "second",
+        }
+    }
+}
+
+/// What a unit's domains translate between.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Reach {
     /// Bits of IOVA its domains translate.
     pub input_bits: u32,
     /// Bits of physical address its tables can name.
     pub output_bits: u32,
+}
+
+/// What a unit reports it can do.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct UnitProfile {
+    /// The stage its domains are walked at.
+    pub stage: Stage,
+    /// The addresses its domains translate between.
+    pub reach: Reach,
     /// IOVA windows no domain may map, because the fabric claims them before
     /// translation (the x86 interrupt window).
     pub reserved: &'static [Range<u64>],
@@ -176,13 +220,13 @@ pub trait IommuUnit: Sync {
     /// reused.
     fn sync(&self, domain: DomainId) -> Result<(), IommuError>;
 
-    /// Raise the unit's fault interrupt as the message-signalled interrupt
-    /// `address`/`data`, and unmask it.
+    /// Raise the unit's fault interrupt by `route`, and unmask it.
     ///
     /// # Errors
     ///
-    /// The unit's refusal.
-    fn route_faults(&self, address: u64, data: u32) -> Result<(), IommuError>;
+    /// [`IommuError::OutOfRange`] for a route the unit has no means to raise
+    /// by, or the unit's refusal.
+    fn route_faults(&self, route: FaultRoute) -> Result<(), IommuError>;
 
     /// Hand the fault records the unit holds to `sink`, oldest first, clearing
     /// each, and answer whether any remain. A call may stop short, so a
@@ -190,6 +234,30 @@ pub trait IommuUnit: Sync {
     /// caller drains again rather than wait for the fault interrupt, which a
     /// unit need not raise for records it already holds.
     fn drain_faults(&self, sink: &mut dyn FnMut(Fault)) -> bool;
+
+    /// The unit's interrupt remapping, where it has it.
+    fn interrupt_remapping(&self) -> Option<&dyn InterruptRemapping> {
+        None
+    }
+}
+
+/// How a unit raises its fault interrupt.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum FaultRoute {
+    /// As the message-signalled interrupt `address`/`data`.
+    Message {
+        /// The message's address.
+        address: u64,
+        /// The message's data.
+        data: u32,
+    },
+    /// On the wired line its node names for its faults, the interrupt at
+    /// `place` among the node's: a unit that chooses which of its lines
+    /// raises a cause raises its faults there.
+    Wired {
+        /// The line's place among its node's interrupts.
+        place: u32,
+    },
 }
 
 /// Writes table memory back for a unit whose walker does not snoop the CPU's
@@ -198,6 +266,19 @@ pub trait TableCoherence: Sync {
     /// Write the `len` bytes at physical `phys` back to memory, complete
     /// before this returns.
     fn write_back(&self, phys: u64, len: usize);
+}
+
+/// The PCI function a unit is, for a family whose fault interrupt is that
+/// function's MSI (an AMD-Vi unit's).
+pub trait UnitFunction: Sync {
+    /// Raise the MSI of the function at node address `address` — `(segment
+    /// << 16) | requester id` — as `message_address`/`data`. A unit's own
+    /// interrupt needs no bus mastering, so none is granted.
+    ///
+    /// # Errors
+    ///
+    /// [`IommuError::Hardware`] where the function cannot be programmed.
+    fn route_msi(&self, address: u32, message_address: u64, data: u32) -> Result<(), IommuError>;
 }
 
 /// A monotonic clock a family bounds its waits against.

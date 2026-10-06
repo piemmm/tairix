@@ -42,6 +42,31 @@ const CMOS_RTC_PORT_COUNT: u64 = 2;
 /// online-capable) is not brought up.
 const LAPIC_FLAG_ENABLED: u32 = 1 << 0;
 
+/// An id a Local APIC or Local x2APIC entry carries as a placeholder for no
+/// processor.
+const NO_XAPIC: u8 = 0xFF;
+const NO_X2APIC: u32 = 0xFFFF_FFFF;
+
+/// Whether `entry` names a processor to bring up, once each: firmware lists
+/// one whose id fits xAPIC in a Local APIC entry, and may repeat it as a Local
+/// x2APIC one, which then names it only with an id xAPIC cannot hold (ACPI
+/// 6.5 §5.2.12.12).
+fn names_processor(entry: &MadtEntry, xapic_listed: bool) -> bool {
+    match *entry {
+        MadtEntry::LocalApic { apic_id, flags, .. } => {
+            flags & LAPIC_FLAG_ENABLED != 0 && apic_id != NO_XAPIC
+        }
+        MadtEntry::LocalX2Apic {
+            x2apic_id, flags, ..
+        } => {
+            flags & LAPIC_FLAG_ENABLED != 0
+                && x2apic_id != NO_X2APIC
+                && !(xapic_listed && x2apic_id < u32::from(NO_XAPIC))
+        }
+        _ => false,
+    }
+}
+
 /// Builds the hardware tree from a located ACPI MADT.
 pub struct AcpiDiscovery<'a> {
     madt: &'a [u8],
@@ -67,10 +92,15 @@ impl PlatformDiscovery for AcpiDiscovery<'_> {
         ))?;
         let madt = Madt::parse(self.madt).map_err(|_| DiscoveryError::MalformedSource)?;
 
+        let xapic_listed = madt.entries().any(|entry| {
+            matches!(entry, MadtEntry::LocalApic { .. }) && names_processor(&entry, false)
+        });
         let mut next_id: u32 = 1;
         for entry in madt.entries() {
             match entry {
-                MadtEntry::LocalApic { flags, .. } if flags & LAPIC_FLAG_ENABLED != 0 => {
+                MadtEntry::LocalApic { .. } | MadtEntry::LocalX2Apic { .. }
+                    if names_processor(&entry, xapic_listed) =>
+                {
                     sink.emit(HwNode::new(next_id, HW_NODE_ROOT_ID, HwDeviceClass::Cpu))?;
                     next_id += 1;
                 }
@@ -123,6 +153,30 @@ mod tests {
         entries.extend_from_slice(&lapic);
         entries.extend_from_slice(&ioapic);
         build_madt(0xFEE0_0000, 0x1, &entries)
+    }
+
+    /// A processor firmware lists twice — once by its xAPIC id, once by the
+    /// same id as an x2APIC one — and placeholder entries for no processor
+    /// are one node and none.
+    #[test]
+    fn each_processor_is_one_node_however_firmware_lists_it() {
+        let lapic = |id: u8| [0u8, 8, id, id, 1, 0, 0, 0];
+        let x2apic = |id: u32| {
+            let mut entry = [9u8, 16, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0];
+            entry[4..8].copy_from_slice(&id.to_le_bytes());
+            entry[12..16].copy_from_slice(&id.to_le_bytes());
+            entry
+        };
+        let mut entries = Vec::new();
+        entries.extend_from_slice(&lapic(0));
+        entries.extend_from_slice(&lapic(0xFF));
+        entries.extend_from_slice(&x2apic(0));
+        entries.extend_from_slice(&x2apic(0xFFFF_FFFF));
+        entries.extend_from_slice(&x2apic(0x100));
+        let madt = build_madt(0xFEE0_0000, 0x1, &entries);
+        let mut sink = CountingSink::default();
+        AcpiDiscovery::new(&madt).discover(&mut sink).unwrap();
+        assert_eq!(sink.cpus, 2, "xAPIC id 0, and x2APIC id 0x100");
     }
 
     #[test]
@@ -182,6 +236,25 @@ mod tests {
         disco.discover(&mut sink).expect("discovery succeeds");
         assert_eq!(sink.cpus, 0, "a disabled processor is not a CPU node");
         assert_eq!(sink.total, 2, "root and the legacy CMOS clock");
+    }
+
+    /// A processor firmware names by its x2APIC id is a CPU like any other;
+    /// a disabled one is not.
+    #[test]
+    fn an_x2apic_processor_is_a_cpu() {
+        let mut entries = Vec::new();
+        for (id, flags) in [(0x100u32, 1u32), (0x101, 0)] {
+            entries.extend_from_slice(&[9u8, 16, 0, 0]);
+            entries.extend_from_slice(&id.to_le_bytes());
+            entries.extend_from_slice(&flags.to_le_bytes());
+            entries.extend_from_slice(&id.to_le_bytes());
+        }
+        let madt = build_madt(0xFEE0_0000, 0x0, &entries);
+        let mut sink = CountingSink::default();
+        AcpiDiscovery::new(&madt)
+            .discover(&mut sink)
+            .expect("discovery succeeds");
+        assert_eq!(sink.cpus, 1);
     }
 
     #[test]

@@ -8,12 +8,13 @@ extern crate std;
 
 use std::collections::BTreeMap;
 
-use tairix_kernel_iommu_api::conformance::TranslationProbe;
+use tairix_kernel_iommu_api::conformance::{InterruptProbe, TranslationProbe};
 use tairix_kernel_iommu_api::hostmem::HostFrames;
-use tairix_kernel_iommu_api::IommuError;
+use tairix_kernel_iommu_api::{InterruptTarget, IommuError};
 use tairix_sync::SpinLock;
 
-use crate::regs::{self, Registers};
+use crate::regs;
+use tairix_kernel_iommu_api::Registers;
 
 const ADDRESS: u64 = 0x000F_FFFF_FFFF_F000;
 const PAGE: u64 = 0x1000;
@@ -54,6 +55,11 @@ pub(crate) fn ecap(coherent: bool) -> u64 {
     u64::from(coherent) | (1 << 1) | (((IOTLB_OFFSET / 16) as u64) << 8)
 }
 
+/// Interrupt remapping, in an extended capability register.
+pub(crate) const ECAP_IR: u64 = 1 << 3;
+/// Extended interrupt mode: 32-bit x2APIC destinations.
+pub(crate) const ECAP_EIM: u64 = 1 << 4;
+
 /// Ways the model can be told to misbehave.
 #[derive(Copy, Clone, Default)]
 pub(crate) struct Quirks {
@@ -61,6 +67,8 @@ pub(crate) struct Quirks {
     pub reject_next_iotlb: bool,
     /// Never write an invalidation wait's status.
     pub ignore_waits: bool,
+    /// Lose every context-cache invalidation, keeping what was cached.
+    pub lose_context_invalidations: bool,
 }
 
 #[derive(Copy, Clone)]
@@ -86,10 +94,19 @@ struct State {
     /// The record the next fault is written to: the specification's internal
     /// fault recording index.
     fault_index: usize,
+    /// `GCMD` writes that changed more than one command at once, which the
+    /// architecture leaves undefined and the model ignores.
+    gcmd_overloaded: usize,
     /// FSTS.FRI: latched when a fault sets PPF, and only then.
     fault_first: usize,
     /// Descriptors processed, by type.
     processed: BTreeMap<u64, usize>,
+    /// The remapping table address latched by the last table-pointer
+    /// command.
+    irta: Option<u64>,
+    /// Cached remapping entries, by index, until an interrupt entry cache
+    /// invalidation removes them.
+    iec: BTreeMap<u16, [u64; 2]>,
 }
 
 pub(crate) struct Model<'f> {
@@ -114,10 +131,18 @@ impl<'f> Model<'f> {
                 contexts: BTreeMap::new(),
                 iotlb: BTreeMap::new(),
                 fault_index: 0,
+                gcmd_overloaded: 0,
                 fault_first: 0,
                 processed: BTreeMap::new(),
+                irta: None,
+                iec: BTreeMap::new(),
             }),
         }
+    }
+
+    /// `GCMD` writes that changed more than one command at once.
+    pub(crate) fn gcmd_overloaded(&self) -> usize {
+        self.state.lock().gcmd_overloaded
     }
 
     pub(crate) fn quirk(&self, quirks: Quirks) {
@@ -128,7 +153,12 @@ impl<'f> Model<'f> {
     /// own, queued invalidation on, protected memory enabled.
     pub(crate) fn firmware_left_running(&self) {
         let mut state = self.state.lock();
-        state.gsts = regs::GSTS_TES | regs::GSTS_RTPS | regs::GSTS_QIES;
+        state.gsts = regs::GSTS_TES
+            | regs::GSTS_RTPS
+            | regs::GSTS_QIES
+            | regs::GSTS_IRES
+            | regs::GSTS_IRTPS
+            | regs::GSTS_CFIS;
         state.root = Some(0xDEAD_0000);
         state
             .regs
@@ -302,6 +332,7 @@ impl<'f> Model<'f> {
             let granularity = (low >> 4) & 0b11;
             let domain = ((low >> 16) & 0xFFFF) as u16;
             match kind {
+                0x1 if state.quirks.lose_context_invalidations => {}
                 0x1 => {
                     let source = ((low >> 32) & 0xFFFF) as u16;
                     match granularity {
@@ -323,6 +354,18 @@ impl<'f> Model<'f> {
                     match granularity {
                         0b01 => state.iotlb.clear(),
                         _ => state.iotlb.retain(|&(d, _), _| d != domain),
+                    }
+                }
+                0x4 => {
+                    if low & (1 << 4) == 0 {
+                        state.iec.clear();
+                    } else {
+                        let index = ((low >> 32) & 0xFFFF) as u16;
+                        let mask = (low >> 27) & 0x1F;
+                        let first = index & !((1u16 << mask) - 1);
+                        state
+                            .iec
+                            .retain(|&at, _| at < first || u64::from(at - first) >= 1 << mask);
                     }
                 }
                 0x5 => {
@@ -352,14 +395,37 @@ impl<'f> Model<'f> {
         match offset {
             regs::GCMD => {
                 let value = regs::low32(value);
+                let toggled = [
+                    (regs::GCMD_TE, regs::GSTS_TES),
+                    (regs::GCMD_QIE, regs::GSTS_QIES),
+                    (regs::GCMD_IRE, regs::GSTS_IRES),
+                    (regs::GCMD_CFI, regs::GSTS_CFIS),
+                ]
+                .iter()
+                .filter(|&&(command, status)| (value & command != 0) != (state.gsts & status != 0))
+                .count();
+                let latched = [regs::GCMD_SRTP, regs::GCMD_SIRTP]
+                    .iter()
+                    .filter(|&&command| value & command != 0)
+                    .count();
+                if toggled + latched > 1 {
+                    state.gcmd_overloaded += 1;
+                    return;
+                }
                 if value & regs::GCMD_SRTP != 0 {
                     state.root =
                         Some(state.regs.get(&regs::RTADDR).copied().unwrap_or(0) & ADDRESS);
                     state.gsts |= regs::GSTS_RTPS;
                 }
+                if value & regs::GCMD_SIRTP != 0 {
+                    state.irta = state.regs.get(&regs::IRTA).copied();
+                    state.gsts |= regs::GSTS_IRTPS;
+                }
                 for (command, status) in [
                     (regs::GCMD_TE, regs::GSTS_TES),
                     (regs::GCMD_QIE, regs::GSTS_QIES),
+                    (regs::GCMD_IRE, regs::GSTS_IRES),
+                    (regs::GCMD_CFI, regs::GSTS_CFIS),
                 ] {
                     if value & command != 0 {
                         if status == regs::GSTS_QIES && state.gsts & status == 0 {
@@ -467,7 +533,125 @@ impl Registers for &Model<'_> {
     }
 }
 
+impl Model<'_> {
+    /// Record an interrupt request's fault: its source and the entry it
+    /// named, in the fault information field.
+    fn record_interrupt_fault(&self, state: &mut State, source: u16, entry: u64, reason: u64) {
+        self.record_fault(state, source, 0, true, reason);
+        let last = (state.fault_index + self.fault_records() - 1) % self.fault_records();
+        if Self::recorded(state, last) {
+            state.regs.insert(FAULT_OFFSET + last * 16, entry << 48);
+        }
+    }
+
+    /// The remapping entry at `index` of the latched table, cached once read.
+    fn irte(&self, state: &mut State, irta: u64, index: u16) -> Option<[u64; 2]> {
+        if let Some(&cached) = state.iec.get(&index) {
+            return Some(cached);
+        }
+        let at = (irta & ADDRESS) + u64::from(index) * 16;
+        let entry = [self.frames.word(at)?, self.frames.word(at + 8)?];
+        state.iec.insert(index, entry);
+        Some(entry)
+    }
+}
+
+/// An interrupt request as Intel VT-d rev. 4.1 §5.1 decodes it: with remapping off,
+/// every request is a compatibility one; with it on, a compatibility request
+/// is blocked (reason 0x25) unless CFI allows it, and a remappable one names
+/// an entry that must be in the table (0x21), present (0x22), and admit the
+/// request's source (0x26).
+impl InterruptProbe for Model<'_> {
+    fn interrupt(&self, source: u16, address: u64, data: u32) -> Option<InterruptTarget> {
+        let mut state = self.state.lock();
+        let compatibility = InterruptTarget {
+            vector: data.to_le_bytes()[0],
+            destination: u32::try_from((address >> 12) & 0xFF).unwrap_or(0),
+            level: false,
+        };
+        if state.gsts & regs::GSTS_IRES == 0 {
+            return Some(compatibility);
+        }
+        if address & (1 << 4) == 0 {
+            if state.gsts & regs::GSTS_CFIS != 0 {
+                return Some(compatibility);
+            }
+            self.record_interrupt_fault(&mut state, source, 0, 0x25);
+            return None;
+        }
+        let handle = ((address >> 5) & 0x7FFF) | (((address >> 2) & 1) << 15);
+        let index = if address & (1 << 3) != 0 {
+            handle + u64::from(data & 0xFFFF)
+        } else {
+            handle
+        };
+        let irta = state.irta.unwrap_or(0);
+        let size = 1u64 << ((irta & 0xF) + 1);
+        let Ok(slot) = u16::try_from(index).map_err(|_| ()).and_then(|slot| {
+            if index < size {
+                Ok(slot)
+            } else {
+                Err(())
+            }
+        }) else {
+            self.record_interrupt_fault(&mut state, source, index, 0x21);
+            return None;
+        };
+        let Some([low, high]) = self.irte(&mut state, irta, slot) else {
+            self.record_interrupt_fault(&mut state, source, index, 0x23);
+            return None;
+        };
+        if low & 1 == 0 {
+            self.record_interrupt_fault(&mut state, source, index, 0x22);
+            return None;
+        }
+        let sid = (high & 0xFFFF) as u16;
+        let admitted = match (high >> 18) & 0b11 {
+            0b00 => true,
+            0b01 => source == sid,
+            0b10 => {
+                let [first, last] = sid.to_be_bytes();
+                (first..=last).contains(&source.to_be_bytes()[0])
+            }
+            _ => false,
+        };
+        if !admitted {
+            self.record_interrupt_fault(&mut state, source, index, 0x26);
+            return None;
+        }
+        let destination = if irta & regs::IRTA_EIME != 0 {
+            (low >> 32) as u32
+        } else {
+            ((low >> 40) & 0xFF) as u32
+        };
+        Some(InterruptTarget {
+            vector: ((low >> 16) & 0xFF) as u8,
+            destination,
+            level: low & (1 << 4) != 0,
+        })
+    }
+}
+
 impl TranslationProbe for Model<'_> {
+    /// A translated request against a context entry of the untranslated-only
+    /// type is blocked, reason 0xD (rev. 4.1 §7.1.3); a stream with no
+    /// context faults as an untranslated request would.
+    fn translated(&self, stream: u32, address: u64, write: bool) -> Option<u64> {
+        let mut state = self.state.lock();
+        if state.gsts & regs::GSTS_TES == 0 {
+            return Some(address);
+        }
+        let source = u16::try_from(stream).ok()?;
+        let page = address & !(PAGE - 1);
+        match self.walk_context(&state, source) {
+            Ok(Some(context)) if context.silent => {}
+            Ok(Some(_)) => self.record_fault(&mut state, source, page, write, 0xD),
+            Ok(None) => self.record_fault(&mut state, source, page, write, 2),
+            Err(reason) => self.record_fault(&mut state, source, page, write, reason),
+        }
+        None
+    }
+
     fn access(&self, stream: u32, iova: u64, write: bool) -> Option<u64> {
         let mut state = self.state.lock();
         if state.gsts & regs::GSTS_TES == 0 {

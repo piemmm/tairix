@@ -22,15 +22,14 @@ pub enum IrqError {
     /// architecture port (e.g. the maximum IO-APIC redirection
     /// entry index on x86_64). Maps to [`Errno::OutOfRange`].
     LineOutOfRange,
-    /// A binding for `line` already exists. The contract in
-    /// `docs/src/security/irq.md` is one binding per
-    /// `(task, line)`; the table additionally refuses two bindings
-    /// for the same `line` regardless of task, because hardware
-    /// interrupts are not shareable in `abi-v1` (PCI MSI/MSI-X
-    /// allocates a dedicated GSI per queue). Maps to
+    /// The task already binds `line`: one binding per `(task, line)`,
+    /// though several tasks may share a line. Maps to
     /// [`Errno::OutOfRange`] — the closest stable variant meaning
     /// "the operation was inapplicable to the current state".
     LineAlreadyBound,
+    /// The binding could not be recorded for want of memory. Maps to
+    /// [`Errno::OutOfMemory`].
+    Exhausted,
     /// The controller-side mask write failed. The arch port
     /// reported the line was not programmable through its
     /// controller interface (e.g. an architecture without an
@@ -45,6 +44,7 @@ impl IrqError {
     pub const fn to_errno(self) -> Errno {
         match self {
             Self::LineOutOfRange | Self::LineAlreadyBound => Errno::OutOfRange,
+            Self::Exhausted => Errno::OutOfMemory,
             Self::ArchUnsupported => Errno::NotImplemented,
         }
     }

@@ -12,6 +12,8 @@
 //! (the consumer builds the slices from the identity-mapped window) and
 //! every structural defect is a typed error — fail closed, no panic.
 
+use crate::acpi::{read_u32, read_u64};
+
 /// `hvm_start_info.magic`: `"xEn3"` little-endian.
 ///
 /// `boot.s` loads this value into the trampoline's protocol register so
@@ -222,28 +224,6 @@ impl Iterator for PvhMemoryEntryIter<'_> {
         self.remaining -= 1;
         Some(entry)
     }
-}
-
-/// Read a little-endian `u32` at `off`. Callers guarantee bounds; the
-/// slice indexing still bounds-checks (a violation is a logic bug the
-/// tests catch, never memory unsafety).
-fn read_u32(bytes: &[u8], off: usize) -> u32 {
-    u32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]])
-}
-
-/// Read a little-endian `u64` at `off`; same bounds contract as
-/// [`read_u32`].
-fn read_u64(bytes: &[u8], off: usize) -> u64 {
-    u64::from_le_bytes([
-        bytes[off],
-        bytes[off + 1],
-        bytes[off + 2],
-        bytes[off + 3],
-        bytes[off + 4],
-        bytes[off + 5],
-        bytes[off + 6],
-        bytes[off + 7],
-    ])
 }
 
 #[cfg(test)]

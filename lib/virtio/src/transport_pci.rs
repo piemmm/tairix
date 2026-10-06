@@ -7,14 +7,15 @@
 //! byte, and a *device-specific configuration* area. The bus driver
 //! resolves each capability to a `(BAR, offset, length)` triple,
 //! asks the kernel MMIO-map facility for a
-//! [`RegisterWindow`](tairix_abi::RegisterWindow) over it, and hands
-//! the four windows to [`PciTransport::new`].
+//! [`RegisterWindow`] over it, and hands
+//! the four windows to [`PciTransport::new`]; a driver holding the
+//! kernel's grants maps them with [`PciTransport::map`].
 //!
 //! This type therefore performs **no** pointer arithmetic and holds
 //! **no** ambient authority: it can only touch registers the kernel
 //! chose to map for the owning driver task. Every
 //! register access goes through the bounds-checked accessors on
-//! [`RegisterWindow`](tairix_abi::RegisterWindow).
+//! [`RegisterWindow`].
 //!
 //! # No panics on the production path
 //!
@@ -31,6 +32,9 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
+use tairix_abi::driver::virtio_pci::VirtioPciWindows;
+use tairix_abi::{DriverError, MmioMapError, MmioMapper, RegisterWindow};
+
 use crate::transport::{await_reset, le_halves, u64_from_le_halves, write_u64_halves};
 use crate::{PciTransportWindows, Status, Transport, VirtioError};
 
@@ -46,16 +50,17 @@ pub struct PciTransport {
     /// recorded by [`Transport::queue_set`] and consumed by
     /// [`Transport::notify`]. `None` until the queue is programmed.
     notify_offsets: Vec<Option<u32>>,
-    /// MSI-X table entry programmed into every queue's
-    /// `queue_msix_vector` by [`Transport::queue_set`].
-    /// [`VIRTIO_MSI_NO_VECTOR`] (the default) leaves queue interrupts
-    /// suppressed; [`PciTransport::enable_msix`] selects a real entry.
-    msix_vector: u16,
+    /// The MSI-X table entry every queue signals through, programmed into
+    /// its `queue_msix_vector` by [`Transport::queue_set`]; [`None`] where
+    /// the function signals on its INTx line.
+    msix_entry: Option<u16>,
 }
 
 impl PciTransport {
     /// Build a transport from a device's four kernel-mapped register
-    /// windows.
+    /// windows, its queues signalling through the MSI-X table entry
+    /// `msix_entry` the kernel routed or, where that is [`None`], the
+    /// function's INTx line.
     ///
     /// Reads `num_queues` from the common-configuration window so the
     /// per-queue bookkeeping is sized to the device.
@@ -65,9 +70,14 @@ impl PciTransport {
     /// * [`VirtioError::DeviceFault`] if the common-configuration
     ///   window is shorter than [`common::CFG_LEN`] (a malformed
     ///   capability), so every subsequent constant-offset access on
-    ///   the infallible [`Transport`] methods is in bounds.
-    pub fn new(windows: PciTransportWindows) -> Result<Self, VirtioError> {
-        if windows.common.len() < common::CFG_LEN {
+    ///   the infallible [`Transport`] methods is in bounds; if the ISR
+    ///   window holds no status byte to acknowledge an interrupt by; or if
+    ///   `msix_entry` is [`VIRTIO_MSI_NO_VECTOR`], which names no entry.
+    pub fn new(windows: PciTransportWindows, msix_entry: Option<u16>) -> Result<Self, VirtioError> {
+        if windows.common.len() < common::CFG_LEN
+            || windows.isr.is_empty()
+            || msix_entry == Some(VIRTIO_MSI_NO_VECTOR)
+        {
             return Err(VirtioError::DeviceFault);
         }
         let num_queues = windows
@@ -79,26 +89,30 @@ impl PciTransport {
             num_queues,
             selected_queue: 0,
             notify_offsets: vec![None; num_queues as usize],
-            msix_vector: VIRTIO_MSI_NO_VECTOR,
+            msix_entry,
         })
     }
 
-    /// Select the MSI-X table entry the device signals on queue
-    /// completion.
+    /// Map the four windows a driver's grants name through `mapper` and
+    /// build the transport over them, signalling as the grants say.
     ///
-    /// Must be called **before** the queue is programmed (i.e. before
-    /// [`Transport::queue_set`] runs, which the driver drives from
-    /// `VirtioBlk::open`): [`Transport::queue_set`] copies this entry
-    /// into the selected queue's `queue_msix_vector` register and
-    /// validates the device accepted it. The matching PCI MSI-X table
-    /// entry must already have been routed by the kernel
-    /// ([`route_msix`](tairix_abi::driver::msix::MsixBus::route_msix)).
+    /// # Errors
     ///
-    /// Config-change interrupts are intentionally left disabled
-    /// (`msix_config` stays [`VIRTIO_MSI_NO_VECTOR`]): a block device's
-    /// configuration is static for the lifetime of this transport.
-    pub fn enable_msix(&mut self, entry: u16) {
-        self.msix_vector = entry;
+    /// The mapper's refusal of a window, or [`Self::new`]'s error.
+    pub fn map(windows: &VirtioPciWindows, mapper: &dyn MmioMapper) -> Result<Self, DriverError> {
+        let window = |(base, len): (u64, usize)| -> Result<RegisterWindow, DriverError> {
+            mapper
+                .map_window(base, len)
+                .map_err(MmioMapError::as_driver_error)
+        };
+        let reached = PciTransportWindows {
+            common: window(windows.common)?,
+            notify: window(windows.notify)?,
+            isr: window(windows.isr)?,
+            device: window(windows.device)?,
+            notify_off_multiplier: windows.notify_off_multiplier,
+        };
+        Self::new(reached, windows.msix_entry).map_err(VirtioError::as_driver_error)
     }
 
     /// Borrow the underlying windows (host-side test access; not part
@@ -222,17 +236,17 @@ impl Transport for PciTransport {
         // that cannot honour the request reflects `VIRTIO_MSI_NO_VECTOR`
         // back on read (virtio 1.1 §4.1.4.3); fail closed so the driver
         // never parks on an interrupt the device will not raise.
-        if self.msix_vector != VIRTIO_MSI_NO_VECTOR {
+        if let Some(entry) = self.msix_entry {
             self.windows
                 .common
-                .write_u16(common::QUEUE_MSIX_VECTOR, self.msix_vector)
+                .write_u16(common::QUEUE_MSIX_VECTOR, entry)
                 .map_err(|_| VirtioError::DeviceFault)?;
             let echoed = self
                 .windows
                 .common
                 .read_u16(common::QUEUE_MSIX_VECTOR)
                 .map_err(|_| VirtioError::DeviceFault)?;
-            if echoed != self.msix_vector {
+            if echoed != entry {
                 return Err(VirtioError::DeviceFault);
             }
         }
@@ -277,6 +291,14 @@ impl Transport for PciTransport {
     fn write_config(&mut self, offset: usize, data: &[u8]) {
         for (i, &b) in data.iter().enumerate() {
             let _ = self.windows.device.write_u8(offset + i, b);
+        }
+    }
+
+    fn ack_interrupt(&mut self) {
+        // Reading the ISR status clears it, which lowers the INTx line
+        // (virtio 1.1 §4.1.4.5); a message leaves nothing raised.
+        if self.msix_entry.is_none() {
+            let _ = self.windows.isr.read_u8(0);
         }
     }
 }
@@ -363,7 +385,46 @@ mod tests {
         }
 
         fn transport(&self) -> PciTransport {
-            PciTransport::new(self.windows()).expect("valid windows")
+            PciTransport::new(self.windows(), None).expect("valid windows")
+        }
+    }
+
+    /// Mapper over a [`FakeDevice`], handing out its region at each
+    /// window's synthetic physical base.
+    struct FakeMapper<'d> {
+        dev: &'d FakeDevice,
+        refuse: Option<u64>,
+    }
+
+    impl tairix_abi::MmioMapper for FakeMapper<'_> {
+        fn map_window(
+            &self,
+            phys: u64,
+            len: usize,
+        ) -> Result<RegisterWindow, tairix_abi::MmioMapError> {
+            if self.refuse == Some(phys) {
+                return Err(tairix_abi::MmioMapError::CapabilityMissing);
+            }
+            let region = match phys {
+                0xC000_0000 => &self.dev.common,
+                0xC001_0000 => &self.dev.notify,
+                0xC002_0000 => &self.dev.device,
+                0xC003_0000 => &self.dev.isr,
+                _ => return Err(tairix_abi::MmioMapError::InvalidRegion),
+            };
+            assert_eq!(len, region.len, "the grant's length is mapped");
+            Ok(region.window(phys))
+        }
+    }
+
+    fn granted(dev: &FakeDevice, msix_entry: Option<u16>) -> VirtioPciWindows {
+        VirtioPciWindows {
+            common: (0xC000_0000, dev.common.len),
+            notify: (0xC001_0000, dev.notify.len),
+            isr: (0xC003_0000, dev.isr.len),
+            device: (0xC002_0000, dev.device.len),
+            notify_off_multiplier: dev.notify_off_multiplier,
+            msix_entry,
         }
     }
 
@@ -378,9 +439,66 @@ mod tests {
             notify_off_multiplier: 0,
         };
         assert!(matches!(
-            PciTransport::new(windows),
+            PciTransport::new(windows, None),
             Err(VirtioError::DeviceFault)
         ));
+    }
+
+    #[test]
+    fn new_rejects_an_entry_naming_no_vector_and_an_empty_isr_window() {
+        let dev = FakeDevice::new(8, 8, 4);
+        assert!(matches!(
+            PciTransport::new(dev.windows(), Some(VIRTIO_MSI_NO_VECTOR)),
+            Err(VirtioError::DeviceFault)
+        ));
+        let windows = PciTransportWindows {
+            isr: Region::new(0).window(0),
+            ..dev.windows()
+        };
+        assert!(matches!(
+            PciTransport::new(windows, None),
+            Err(VirtioError::DeviceFault)
+        ));
+    }
+
+    #[test]
+    fn map_builds_over_the_granted_windows_and_signals_as_granted() {
+        let dev = FakeDevice::new(64, 8, 4);
+        let c = dev.dev_common();
+        c.write_u16(common::NUM_QUEUES, 1).unwrap();
+        c.write_u16(common::QUEUE_SIZE, 8).unwrap();
+        c.write_u16(common::QUEUE_MSIX_VECTOR, VIRTIO_MSI_NO_VECTOR)
+            .unwrap();
+        let mapper = FakeMapper {
+            dev: &dev,
+            refuse: None,
+        };
+        let mut wired = PciTransport::map(&granted(&dev, None), &mapper).expect("map");
+        wired.queue_select(0).unwrap();
+        wired.queue_set(8, 1, 2, 3).unwrap();
+        assert_eq!(
+            c.read_u16(common::QUEUE_MSIX_VECTOR).unwrap(),
+            VIRTIO_MSI_NO_VECTOR,
+            "an INTx function programs no vector"
+        );
+        wired.ack_interrupt();
+        let mut message = PciTransport::map(&granted(&dev, Some(3)), &mapper).expect("map");
+        message.queue_select(0).unwrap();
+        message.queue_set(8, 1, 2, 3).unwrap();
+        assert_eq!(c.read_u16(common::QUEUE_MSIX_VECTOR).unwrap(), 3);
+    }
+
+    #[test]
+    fn map_refuses_a_window_the_mapper_refuses() {
+        let dev = FakeDevice::new(64, 8, 4);
+        let mapper = FakeMapper {
+            dev: &dev,
+            refuse: Some(0xC003_0000),
+        };
+        assert_eq!(
+            PciTransport::map(&granted(&dev, None), &mapper).err(),
+            Some(DriverError::PermissionDenied)
+        );
     }
 
     #[test]
@@ -460,8 +578,8 @@ mod tests {
     }
 
     #[test]
-    fn queue_set_skips_msix_vector_by_default() {
-        // Without `enable_msix`, the transport leaves `queue_msix_vector`
+    fn queue_set_skips_msix_vector_over_intx() {
+        // Without an MSI-X entry the transport leaves `queue_msix_vector`
         // at the device's reset default (`VIRTIO_MSI_NO_VECTOR`).
         let dev = FakeDevice::new(64, 8, 4);
         let c = dev.dev_common();
@@ -479,15 +597,14 @@ mod tests {
     }
 
     #[test]
-    fn queue_set_programs_enabled_msix_vector() {
-        // `enable_msix(entry)` programs the queue's `queue_msix_vector`
-        // and validates the device echoed the entry back.
+    fn queue_set_programs_the_msix_entry() {
+        // The entry is programmed into the queue's `queue_msix_vector`
+        // and the device's echo validated.
         let dev = FakeDevice::new(64, 8, 4);
         let c = dev.dev_common();
         c.write_u16(common::NUM_QUEUES, 1).unwrap();
         c.write_u16(common::QUEUE_SIZE, 8).unwrap();
-        let mut t = dev.transport();
-        t.enable_msix(0);
+        let mut t = PciTransport::new(dev.windows(), Some(0)).expect("valid windows");
         t.queue_select(0).unwrap();
         t.queue_set(8, 1, 2, 3).unwrap();
         assert_eq!(c.read_u16(common::QUEUE_MSIX_VECTOR).unwrap(), 0);

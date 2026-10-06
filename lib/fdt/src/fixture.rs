@@ -593,3 +593,85 @@ pub fn virt_like_arm(base: u64, size: u64, psci_method: &str, timer_ppi: u32) ->
     b.end_node();
     b.build()
 }
+
+/// QEMU aarch64 `virt`'s generic PCI host: high ECAM in segment 2, its I/O,
+/// 32-bit and 64-bit windows, a GIC parent taking two address and three
+/// interrupt cells, and the swizzled INTx map; with a root port at `00:01.0`
+/// marked external-facing where `external`.
+#[must_use]
+pub fn ecam_host_arm(external: bool) -> Vec<u8> {
+    let cells =
+        |values: &[u32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_be_bytes()).collect() };
+    let mut b = DtbBuilder::new();
+    b.begin_node("");
+    b.prop_u32("#address-cells", 2);
+    b.prop_u32("#size-cells", 2);
+    b.begin_node("intc@8000000");
+    b.prop_u32("phandle", 0x8002);
+    b.prop_u32("#address-cells", 2);
+    b.prop_u32("#interrupt-cells", 3);
+    b.end_node();
+    b.begin_node("pcie@10000000");
+    b.prop_str("compatible", "pci-host-ecam-generic");
+    b.prop_str("device_type", "pci");
+    b.prop_u32("#address-cells", 3);
+    b.prop_u32("#size-cells", 2);
+    b.prop_u32("#interrupt-cells", 1);
+    b.prop("reg", &cells(&[0x40, 0x1000_0000, 0, 0x1000_0000]));
+    b.prop("bus-range", &cells(&[0, 0xFF]));
+    b.prop_u32("linux,pci-domain", 2);
+    b.prop(
+        "ranges",
+        &cells(&[
+            0x0100_0000,
+            0,
+            0,
+            0,
+            0x3EFF_0000,
+            0,
+            0x1_0000,
+            0x0200_0000,
+            0,
+            0x1000_0000,
+            0,
+            0x1000_0000,
+            0,
+            0x2EFF_0000,
+            0x0300_0000,
+            0x80,
+            0,
+            0x80,
+            0,
+            0x80,
+            0,
+        ]),
+    );
+    b.prop("interrupt-map-mask", &cells(&[0x1800, 0, 0, 7]));
+    let mut map = Vec::new();
+    for slot in 0..4u32 {
+        for pin in 0..4u32 {
+            map.extend_from_slice(&[
+                slot << 11,
+                0,
+                0,
+                pin + 1,
+                0x8002,
+                0,
+                0,
+                0,
+                3 + (slot + pin) % 4,
+                4,
+            ]);
+        }
+    }
+    b.prop("interrupt-map", &cells(&map));
+    if external {
+        b.begin_node("pcie@1,0");
+        b.prop("reg", &cells(&[0x0800, 0, 0, 0, 0]));
+        b.prop("external-facing", &[]);
+        b.end_node();
+    }
+    b.end_node();
+    b.end_node();
+    b.build()
+}

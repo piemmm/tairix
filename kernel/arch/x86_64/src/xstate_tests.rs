@@ -39,12 +39,6 @@ fn the_park_mask_leaves_the_framed_sse_state_out() {
 }
 
 #[test]
-fn a_mask_splits_into_the_edx_eax_pair() {
-    assert_eq!(halves(0x0000_0002_0000_00E7), (0xE7, 2));
-    assert_eq!(halves(X87 | SSE | AVX), (7, 0));
-}
-
-#[test]
 fn an_area_is_the_header_and_the_image_rounded_to_its_alignment() {
     assert_eq!(
         Config::new(Flavour::Fxsave, X87 | SSE, 0).area_bytes(),

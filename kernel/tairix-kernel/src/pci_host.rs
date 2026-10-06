@@ -19,7 +19,9 @@ use tairix_abi::driver::msix::MsixBus;
 use tairix_abi::driver::pci::{PciBus, BUS_MASTER_ENABLE, COMMAND_OFFSET};
 use tairix_abi::driver::virtio_pci::VirtioPciBus;
 use tairix_abi::IommuStreams;
-use tairix_kernel_core::iommu::{BusMastering, MasterChange, MasterTarget, Quiesced};
+use tairix_kernel_core::iommu::{
+    BusMastering, InterruptSource, MasterChange, MasterTarget, Quiesced,
+};
 use tairix_sync::SpinLock;
 
 /// The seams the kernel drives a PCI bus through: enumeration and virtio
@@ -38,6 +40,9 @@ pub struct Function {
     pub node: Option<u32>,
     /// The stream a translation unit knows it by as its own, if one does.
     pub stream: Option<IommuStreams>,
+    /// The requester ids its interrupts reach that unit as, if one
+    /// translates it.
+    pub interrupts: Option<InterruptSource>,
 }
 
 impl Function {
@@ -56,41 +61,221 @@ impl Function {
     }
 }
 
+/// A bridge on a segment the kernel owns: it forwards its buses' DMA
+/// upstream only once a function on one of them is granted mastering.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Bridge {
+    /// Its configuration address.
+    pub address: u64,
+    /// The bus directly below it.
+    pub secondary: u8,
+    /// The last bus below it.
+    pub subordinate: u8,
+}
+
+impl Bridge {
+    /// Whether DMA from a function at configuration `address` passes it.
+    const fn forwards(&self, address: u64) -> bool {
+        let (bus, _, _) = tairix_abi::driver::pci::function_of(address);
+        self.secondary <= bus && bus <= self.subordinate
+    }
+}
+
+/// A function the kernel published a node for.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Published {
+    /// Its segment.
+    pub segment: u16,
+    /// Its configuration address on the segment.
+    pub address: u64,
+    /// The stream a translation unit knows it by, if one does.
+    pub stream: Option<IommuStreams>,
+    /// The requester ids its interrupts reach that unit as, if they are
+    /// known.
+    pub interrupts: Option<InterruptSource>,
+}
+
+/// One segment the kernel owns: its bus, the functions on it the kernel
+/// handed over, or stopped and kept, and its bridges.
+pub struct HostSegment {
+    number: u16,
+    bus: Box<dyn HostBus + Send>,
+    functions: Vec<Function>,
+    bridges: Vec<Bridge>,
+}
+
+impl HostSegment {
+    /// Segment `number`, reached through `bus`.
+    #[must_use]
+    pub fn new(
+        number: u16,
+        bus: Box<dyn HostBus + Send>,
+        functions: Vec<Function>,
+        bridges: Vec<Bridge>,
+    ) -> Self {
+        Self {
+            number,
+            bus,
+            functions,
+            bridges,
+        }
+    }
+}
+
+/// The kernel's one owner of PCI configuration space, which the port's boot
+/// probe publishes.
+static PUBLISHED: tairix_sync::Once<PciHost> = tairix_sync::Once::new();
+
+/// Publish the segments the boot probe owns as the kernel's PCI host, once;
+/// a host that cannot be held is logged, and then no function masters.
+pub fn publish(segments: Vec<HostSegment>, log: &dyn tairix_log::Sink) {
+    let owned = PciHost::new(segments)
+        .is_some_and(|host| PUBLISHED.call_once_infallible(move || host).is_ok());
+    if !owned {
+        crate::pci_probe::log_discovery(
+            log,
+            tairix_log::Level::Error,
+            "pci configuration space unowned; no function masters",
+        );
+    }
+}
+
+/// The kernel's owner of PCI configuration space, once published: every
+/// kernel access to a function's configuration space, and every change to
+/// its bus mastering, goes through it.
+#[must_use]
+pub fn published() -> Option<&'static PciHost> {
+    PUBLISHED.get().ok().flatten()
+}
+
+/// The published host, through which the translation facility stops and
+/// grants a function's bus mastering: every port's.
+#[must_use]
+pub fn bus_mastering() -> Option<&'static (dyn tairix_kernel_core::iommu::BusMastering + 'static)> {
+    published().map(|host| host as &'static (dyn tairix_kernel_core::iommu::BusMastering + 'static))
+}
+
+/// The published host, through which a unit that is a PCI function raises
+/// its own MSI: every port's.
+#[must_use]
+pub fn unit_function() -> Option<&'static dyn tairix_kernel_iommu_api::UnitFunction> {
+    published().map(|host| host as &'static dyn tairix_kernel_iommu_api::UnitFunction)
+}
+
 /// The kernel's one owner of PCI configuration space.
 pub struct PciHost {
-    state: SpinLock<HostState>,
-    functions: Vec<Function>,
+    /// Ascending by segment number.
+    segments: Vec<Segment>,
     /// The next ownership epoch handed out; every function's record starts
     /// below it.
     epochs: AtomicU64,
 }
 
-/// What every access to the bus is serialised over.
+struct Segment {
+    number: u16,
+    state: SpinLock<HostState>,
+    functions: Vec<Function>,
+    bridges: Vec<Bridge>,
+}
+
+/// What every access to one segment's bus is serialised over.
 struct HostState {
     bus: Box<dyn HostBus + Send>,
-    /// For each of the host's functions, the epoch of the latest owner that
-    /// changed its bus mastering.
+    /// For each of the segment's functions, the epoch of the latest owner
+    /// that changed its bus mastering.
     changed_by: Vec<u64>,
 }
 
 impl PciHost {
-    /// The owner of `bus`'s configuration space; `functions` are the ones it
-    /// handed over, or stopped and kept.
+    /// The owner of every segment in `segments`, a segment named twice
+    /// keeping its first bus; [`None`] where its records cannot be had.
     #[must_use]
-    pub fn new(bus: Box<dyn HostBus + Send>, functions: Vec<Function>) -> Self {
-        let changed_by = alloc::vec![0; functions.len()];
-        Self {
-            state: SpinLock::new(HostState { bus, changed_by }),
-            functions,
-            epochs: AtomicU64::new(1),
+    pub fn new(mut segments: Vec<HostSegment>) -> Option<Self> {
+        segments.sort_by_key(|segment| segment.number);
+        segments.dedup_by_key(|segment| segment.number);
+        let mut owned = Vec::new();
+        owned.try_reserve_exact(segments.len()).ok()?;
+        for segment in segments {
+            let mut changed_by = Vec::new();
+            changed_by.try_reserve_exact(segment.functions.len()).ok()?;
+            changed_by.resize(segment.functions.len(), 0);
+            owned.push(Segment {
+                number: segment.number,
+                state: SpinLock::new(HostState {
+                    changed_by,
+                    bus: segment.bus,
+                }),
+                functions: segment.functions,
+                bridges: segment.bridges,
+            });
         }
+        Some(Self {
+            segments: owned,
+            epochs: AtomicU64::new(1),
+        })
     }
 
-    /// Run `f` over the bus, alone: mechanism #1 reaches every function
-    /// through one machine-wide pair of ports, and a command register is
-    /// changed by a read and a write, so no two accesses may interleave.
-    pub fn with<R>(&self, f: impl FnOnce(&dyn HostBus) -> R) -> R {
-        f(&*self.state.lock().bus)
+    /// The function the probe published as `node`, as the probe recorded it:
+    /// never from the node's own address, which any publisher may set.
+    #[must_use]
+    pub fn published(&self, node: u32) -> Option<Published> {
+        self.segments.iter().find_map(|segment| {
+            segment
+                .functions
+                .iter()
+                .find(|function| function.node == Some(node))
+                .map(|function| Published {
+                    segment: segment.number,
+                    address: function.address,
+                    stream: function.stream,
+                    interrupts: function.interrupts,
+                })
+        })
+    }
+
+    /// Run `f` over segment `segment`'s bus, alone: mechanism #1 reaches
+    /// every function through one machine-wide pair of ports, and a command
+    /// register is changed by a read and a write, so no two accesses may
+    /// interleave. [`None`] for a segment the host does not own.
+    pub fn with<R>(&self, segment: u16, f: impl FnOnce(&dyn HostBus) -> R) -> Option<R> {
+        let at = self
+            .segments
+            .binary_search_by_key(&segment, |owned| owned.number)
+            .ok()?;
+        Some(f(&*self.segments[at].state.lock().bus))
+    }
+}
+
+impl tairix_kernel_iommu_api::UnitFunction for PciHost {
+    fn route_msi(
+        &self,
+        address: u32,
+        message_address: u64,
+        data: u32,
+    ) -> Result<(), tairix_kernel_iommu_api::IommuError> {
+        let function = tairix_abi::driver::pci::PciAddress::from_node_address(address);
+        let bdf = function.config_address();
+        let message = tairix_abi::driver::msix::MsiMessage {
+            address: message_address,
+            data,
+        };
+        self.with(function.segment(), |bus| {
+            PciBus::route_msi(bus, bdf, message)
+        })
+        .and_then(Result::ok)
+        .ok_or(tairix_kernel_iommu_api::IommuError::Hardware)
+    }
+}
+
+/// Let every bridge above the function at `address` forward its DMA. One
+/// that refuses leaves the function's DMA stopped short of memory, which is
+/// the side a failure belongs on; a bridge is never closed again by a
+/// revocation, the function's own bit being what stops it.
+fn open_bridges(bus: &dyn HostBus, bridges: &[Bridge], address: u64) {
+    for bridge in bridges.iter().filter(|bridge| bridge.forwards(address)) {
+        if mastering(bus, bridge.address) == Some(false) {
+            let _ = bus.set_bus_master(bridge.address, true);
+        }
     }
 }
 
@@ -115,49 +300,67 @@ impl BusMastering for PciHost {
         epoch: u64,
         report: &mut dyn FnMut(MasterChange),
     ) {
-        let mut state = self.state.lock();
-        let HostState { bus, changed_by } = &mut *state;
-        let mut change = None;
-        for (function, latest) in self.functions.iter().zip(changed_by.iter_mut()) {
-            if !function.named_by(target) || epoch < *latest {
-                continue;
+        // A function lies on one segment, so reporting under that segment's
+        // lock keeps each function's records in the order its changes landed.
+        for segment in &self.segments {
+            let mut state = segment.state.lock();
+            let HostState { bus, changed_by } = &mut *state;
+            let mut change = None;
+            for (function, latest) in segment.functions.iter().zip(changed_by.iter_mut()) {
+                if !function.named_by(target) || epoch < *latest {
+                    continue;
+                }
+                let Some(was) = mastering(&**bus, function.address) else {
+                    continue;
+                };
+                *latest = epoch;
+                if master && !was {
+                    open_bridges(&**bus, &segment.bridges, function.address);
+                }
+                let changed = was != master && bus.set_bus_master(function.address, master).is_ok();
+                let refused = mastering(&**bus, function.address) != Some(master);
+                let seen: &mut MasterChange = change.get_or_insert_default();
+                seen.changed |= changed;
+                seen.refused |= refused;
             }
-            let Some(was) = mastering(&**bus, function.address) else {
-                continue;
-            };
-            *latest = epoch;
-            let changed = was != master && bus.set_bus_master(function.address, master).is_ok();
-            let refused = mastering(&**bus, function.address) != Some(master);
-            let seen: &mut MasterChange = change.get_or_insert_default();
-            seen.changed |= changed;
-            seen.refused |= refused;
-        }
-        if let Some(change) = change {
-            report(change);
+            if let Some(change) = change {
+                report(change);
+            }
         }
     }
 
     fn quiesce(&self, unit: u32, keeps: &dyn Fn(u32) -> bool) -> Quiesced {
-        let state = self.state.lock();
         let mut quiesced = Quiesced::default();
-        for function in &self.functions {
-            if !function
-                .stream
-                .is_some_and(|stream| stream.unit() == unit && !keeps(stream.first()))
-            {
-                continue;
-            }
-            if mastering(&*state.bus, function.address) != Some(true) {
-                continue;
-            }
-            let _ = state.bus.set_bus_master(function.address, false);
-            if mastering(&*state.bus, function.address) == Some(false) {
-                quiesced.stopped += 1;
-            } else {
-                quiesced.refused += 1;
+        for segment in &self.segments {
+            let state = segment.state.lock();
+            for function in &segment.functions {
+                if !function
+                    .stream
+                    .is_some_and(|stream| stream.unit() == unit && !keeps(stream.first()))
+                {
+                    continue;
+                }
+                if mastering(&*state.bus, function.address) != Some(true) {
+                    continue;
+                }
+                let _ = state.bus.set_bus_master(function.address, false);
+                if mastering(&*state.bus, function.address) == Some(false) {
+                    quiesced.stopped += 1;
+                } else {
+                    quiesced.refused += 1;
+                }
             }
         }
         quiesced
+    }
+
+    fn set_wired_interrupt(&self, node: u32, raise: bool) {
+        for segment in &self.segments {
+            let state = segment.state.lock();
+            for function in segment.functions.iter().filter(|f| f.node == Some(node)) {
+                let _ = state.bus.set_intx(function.address, raise);
+            }
+        }
     }
 }
 
@@ -191,10 +394,6 @@ mod tests {
         fn notify_off_multiplier(&self, _bdf: u64) -> Result<u32, DriverError> {
             Err(DriverError::Unsupported)
         }
-
-        fn offered_features(&self, _bdf: u64) -> Result<u64, DriverError> {
-            Err(DriverError::Unsupported)
-        }
     }
 
     impl MsixBus for CommandBus {
@@ -210,6 +409,18 @@ mod tests {
     }
 
     impl PciBus for CommandBus {
+        fn route_msi(
+            &self,
+            bdf: u64,
+            _message: tairix_abi::driver::msix::MsiMessage,
+        ) -> Result<(), DriverError> {
+            if self.commands.lock().iter().any(|(at, _)| *at == bdf) {
+                Ok(())
+            } else {
+                Err(DriverError::NotFound)
+            }
+        }
+
         fn map_bar_window(
             &self,
             _bdf: u64,
@@ -236,6 +447,10 @@ mod tests {
                     };
                 }
             }
+            Ok(())
+        }
+
+        fn set_intx(&self, _bdf: u64, _raise: bool) -> Result<(), DriverError> {
             Ok(())
         }
 
@@ -294,24 +509,40 @@ mod tests {
                 address: DEVICE,
                 node: Some(7),
                 stream: Some(stream(0x18, 1)),
+                interrupts: None,
             },
             Function {
                 address: QUIET,
                 node: None,
                 stream: Some(stream(0x1F, 1)),
+                interrupts: None,
             },
             Function {
                 address: STUCK,
                 node: Some(9),
                 stream: None,
+                interrupts: None,
             },
         ];
-        PciHost::new(Box::new(bus), functions)
+        PciHost::new(vec![HostSegment::new(
+            0,
+            Box::new(bus),
+            functions,
+            Vec::new(),
+        )])
+        .unwrap()
     }
 
     fn command(host: &PciHost, address: u64) -> u32 {
-        host.with(|bus| bus.read_config(address, COMMAND_OFFSET))
+        host.with(0, |bus| bus.read_config(address, COMMAND_OFFSET))
             .unwrap()
+            .unwrap()
+    }
+
+    fn locked(host: &PciHost) -> bool {
+        host.segments
+            .iter()
+            .any(|segment| segment.state.is_locked())
     }
 
     const APPLIED: MasterChange = MasterChange {
@@ -328,7 +559,7 @@ mod tests {
     ) -> Option<MasterChange> {
         let mut reported = None;
         host.set_mastering(target, master, epoch, &mut |change| {
-            assert!(host.state.is_locked(), "reported before another change");
+            assert!(locked(host), "reported before another change");
             assert!(reported.replace(change).is_none(), "reported once");
         });
         reported
@@ -372,6 +603,156 @@ mod tests {
         assert_eq!(command(&host, DEVICE), BUS_MASTER_ENABLE);
         assert_eq!(change(&host, node, false, OWNER + 1), Some(APPLIED));
         assert_eq!(command(&host, DEVICE), 0);
+    }
+
+    /// A unit's own function is given its fault interrupt's message and no
+    /// bus mastering; one the host cannot reach is refused.
+    #[test]
+    fn a_unit_s_function_raises_its_msi_without_mastering() {
+        use tairix_kernel_iommu_api::UnitFunction;
+
+        let host = rig(0, &[]);
+        let unit = u32::from(tairix_abi::driver::pci::requester_id(QUIET));
+        host.route_msi(unit, 0xFEE0_0000, 0x41).unwrap();
+        assert_eq!(command(&host, QUIET), 0);
+        assert_eq!(
+            host.route_msi(1 << 16 | unit, 0xFEE0_0000, 0x41),
+            Err(tairix_kernel_iommu_api::IommuError::Hardware),
+            "a segment the host does not own"
+        );
+        assert_eq!(
+            host.route_msi(0x00FF, 0xFEE0_0000, 0x41),
+            Err(tairix_kernel_iommu_api::IommuError::Hardware),
+            "a function that does not answer"
+        );
+    }
+
+    /// A node's function is found on its own segment as the probe recorded
+    /// it; a function published as no node is never found.
+    #[test]
+    fn a_published_function_is_found_by_its_node_as_the_probe_recorded_it() {
+        let bus = || CommandBus {
+            commands: SpinLock::new(Vec::new()),
+            stuck: Vec::new(),
+        };
+        let behind = InterruptSource::Buses { first: 2, last: 3 };
+        let host = PciHost::new(vec![
+            HostSegment::new(
+                4,
+                Box::new(bus()),
+                vec![Function {
+                    address: DEVICE,
+                    node: Some(7),
+                    stream: Some(stream(0x18, 1)),
+                    interrupts: Some(behind),
+                }],
+                Vec::new(),
+            ),
+            HostSegment::new(
+                0,
+                Box::new(bus()),
+                vec![
+                    Function {
+                        address: QUIET,
+                        node: None,
+                        stream: Some(stream(0x1F, 1)),
+                        interrupts: None,
+                    },
+                    Function {
+                        address: STUCK,
+                        node: Some(9),
+                        stream: None,
+                        interrupts: None,
+                    },
+                ],
+                Vec::new(),
+            ),
+        ])
+        .unwrap();
+        assert_eq!(
+            host.published(7),
+            Some(Published {
+                segment: 4,
+                address: DEVICE,
+                stream: Some(stream(0x18, 1)),
+                interrupts: Some(behind),
+            })
+        );
+        assert_eq!(
+            host.published(9),
+            Some(Published {
+                segment: 0,
+                address: STUCK,
+                stream: None,
+                interrupts: None,
+            })
+        );
+        assert_eq!(host.published(8), None);
+    }
+
+    #[test]
+    fn a_grant_opens_the_bridges_above_its_function_and_no_others() {
+        // BEHIND (18:00.0) lies below ROOT_PORT (00:01.0, buses 0x10 to 0x1F)
+        // and SWITCH (10:00.0, bus 0x18); ASIDE (00:02.0) forwards others.
+        const ROOT_PORT: u64 = 0x0000_0800;
+        const SWITCH: u64 = 0x0010_0000;
+        const ASIDE: u64 = 0x0000_1000;
+        const BEHIND: u64 = 0x0018_0000;
+        let bridge = |address, secondary, subordinate| Bridge {
+            address,
+            secondary,
+            subordinate,
+        };
+        let bus = CommandBus {
+            commands: SpinLock::new(vec![
+                (ROOT_PORT, 0x0002),
+                (SWITCH, 0x0002),
+                (ASIDE, 0x0002),
+                (BEHIND, 0x0002),
+            ]),
+            stuck: Vec::new(),
+        };
+        let host = PciHost::new(vec![HostSegment::new(
+            0,
+            Box::new(bus),
+            vec![Function {
+                address: BEHIND,
+                node: Some(7),
+                stream: Some(stream(0x1800, 1)),
+                interrupts: None,
+            }],
+            vec![
+                bridge(ROOT_PORT, 0x10, 0x1F),
+                bridge(SWITCH, 0x18, 0x18),
+                bridge(ASIDE, 0x20, 0x2F),
+            ],
+        )])
+        .unwrap();
+        for bridge in [ROOT_PORT, SWITCH, ASIDE] {
+            assert_eq!(command(&host, bridge), 0x0002, "nothing granted yet");
+        }
+        assert_eq!(
+            change(&host, MasterTarget::Node(7), true, OWNER),
+            Some(APPLIED)
+        );
+        assert_eq!(command(&host, BEHIND), 0x0006);
+        assert_eq!(command(&host, ROOT_PORT), 0x0006);
+        assert_eq!(command(&host, SWITCH), 0x0006);
+        assert_eq!(
+            command(&host, ASIDE),
+            0x0002,
+            "forwards for no function granted"
+        );
+        assert_eq!(
+            change(&host, MasterTarget::Node(7), false, OWNER + 1),
+            Some(APPLIED)
+        );
+        assert_eq!(command(&host, BEHIND), 0x0002);
+        assert_eq!(
+            command(&host, SWITCH),
+            0x0006,
+            "a revocation stops the function, not its bridges"
+        );
     }
 
     #[test]
@@ -464,14 +845,18 @@ mod tests {
             commands: SpinLock::new(vec![(STUCK, BUS_MASTER_ENABLE)]),
             stuck: vec![STUCK],
         };
-        let host = PciHost::new(
+        let host = PciHost::new(vec![HostSegment::new(
+            0,
             Box::new(bus),
             vec![Function {
                 address: STUCK,
                 node: None,
                 stream: Some(stream(0x20, 1)),
+                interrupts: None,
             }],
-        );
+            Vec::new(),
+        )])
+        .unwrap();
         assert_eq!(
             host.quiesce(UNIT, &|_| false),
             Quiesced {
@@ -484,11 +869,47 @@ mod tests {
     #[test]
     fn the_bus_is_reached_alone() {
         let host = rig(0, &[]);
-        let reached = host.with(|bus| {
-            assert!(host.state.is_locked(), "held across the whole access");
+        let reached = host.with(0, |bus| {
+            assert!(locked(&host), "held across the whole access");
             bus.read_config(DEVICE, COMMAND_OFFSET)
         });
-        assert_eq!(reached, Ok(0));
-        assert!(!host.state.is_locked());
+        assert_eq!(reached, Some(Ok(0)));
+        assert!(!locked(&host));
+        assert!(
+            host.with(1, |_| ()).is_none(),
+            "a segment the host does not own is reached by nothing"
+        );
+    }
+
+    /// One requester id on two segments is two functions: a change names the
+    /// node's own, and each segment is reached through its own bus.
+    #[test]
+    fn functions_on_two_segments_are_told_apart() {
+        let bus = |command| CommandBus {
+            commands: SpinLock::new(vec![(DEVICE, command)]),
+            stuck: vec![],
+        };
+        let function = |node| Function {
+            address: DEVICE,
+            node: Some(node),
+            stream: None,
+            interrupts: None,
+        };
+        let host = PciHost::new(vec![
+            HostSegment::new(1, Box::new(bus(0)), vec![function(11)], Vec::new()),
+            HostSegment::new(0, Box::new(bus(0)), vec![function(10)], Vec::new()),
+        ])
+        .unwrap();
+        assert_eq!(
+            change(&host, MasterTarget::Node(11), true, OWNER),
+            Some(APPLIED)
+        );
+        let on = |segment| {
+            host.with(segment, |bus| bus.read_config(DEVICE, COMMAND_OFFSET))
+                .unwrap()
+                .unwrap()
+                & BUS_MASTER_ENABLE
+        };
+        assert_eq!((on(0), on(1)), (0, BUS_MASTER_ENABLE));
     }
 }

@@ -13,6 +13,16 @@
 
 use tairix_log::{Event, FieldValue};
 
+/// The value `event` carries under `key`: the first field so named.
+#[must_use]
+pub fn field<'e>(event: &'e Event<'_>, key: &str) -> Option<&'e FieldValue<'e>> {
+    event
+        .fields
+        .iter()
+        .find(|field| field.key == key)
+        .map(|field| &field.value)
+}
+
 /// The text `event` carries under `key`: the first such field holding a
 /// string, or `None`.
 #[must_use]
@@ -41,9 +51,31 @@ mod tests {
 
     use std::format;
 
-    use super::{field_str, names_bundle};
+    use super::{field, field_str, names_bundle};
     use tairix_abi::{SYSTEM_APPLICATION_STORE, SYSTEM_SERVICE_STORE};
     use tairix_log::{Event, EventId, Field, FieldValue, Level};
+
+    #[test]
+    fn a_value_reads_as_the_first_field_under_its_key() {
+        let fields = [
+            Field {
+                key: "stopped",
+                value: FieldValue::UnsignedInt(2),
+            },
+            Field {
+                key: "stopped",
+                value: FieldValue::Str("later"),
+            },
+        ];
+        let event = Event {
+            level: Level::Info,
+            id: EventId(1),
+            message: "",
+            fields: &fields,
+        };
+        assert_eq!(field(&event, "stopped"), Some(&FieldValue::UnsignedInt(2)));
+        assert_eq!(field(&event, "absent"), None);
+    }
 
     #[test]
     fn a_field_reads_as_the_first_text_under_its_key() {

@@ -115,15 +115,21 @@ pub fn plic_device_source(fdt: &Fdt<'_>, slot_base: u64) -> Option<u32> {
             continue;
         }
         let source = node.property("interrupts")?.read_be_u32(0).ok()?;
-        return match ndev {
-            Some(ndev) => plic_source_in_range(source, ndev).then_some(source),
-            // No PLIC source count discovered: accept any non-sentinel
-            // source and defer the upper-bound check to the controller's
-            // own arm-time range guard.
-            None => (source != PLIC_SOURCE_NONE).then_some(source),
-        };
+        return plic_line(source, ndev);
     }
     None
+}
+
+/// The line PLIC source `source` raises on a controller of `ndev` sources:
+/// [`None`] for the reserved sentinel, or a source past the count. With no
+/// count discovered any other source is taken, the controller's own
+/// arm-time guard bounding it.
+#[must_use]
+pub fn plic_line(source: u32, ndev: Option<u32>) -> Option<u32> {
+    match ndev {
+        Some(ndev) => plic_source_in_range(source, ndev).then_some(source),
+        None => (source != PLIC_SOURCE_NONE).then_some(source),
+    }
 }
 
 #[cfg(test)]

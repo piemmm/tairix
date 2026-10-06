@@ -66,7 +66,7 @@ mod kernel {
 
     use tairix_arch_api::{CpuMask, CrossCpuTlbShootdown, SecondaryBringup};
     use tairix_arch_x86_64::acpi::{self, MadtEntry};
-    use tairix_arch_x86_64::apic::{Lapic, VolatileLapicMmio};
+    use tairix_arch_x86_64::apic::{Lapic, LocalApic};
     use tairix_arch_x86_64::bootinfo::BootData;
     use tairix_arch_x86_64::irqmask::PortIrqControl;
     use tairix_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
@@ -122,14 +122,6 @@ mod kernel {
     /// Software-enable mask written to the LAPIC spurious-interrupt
     /// register (all-ones spurious vector, APIC software-enable bit set).
     const LAPIC_SWENABLE: u8 = 0xFF;
-
-    fn make_lapic() -> Lapic<VolatileLapicMmio> {
-        // SAFETY: the LAPIC MMIO base is 0xFEE00000 on every Intel-
-        // architecture system QEMU emulates, identity-mapped by `boot.s`
-        // (SAFETY-INVARIANT 4 — 0..4 GiB identity map).
-        let mmio = unsafe { VolatileLapicMmio::new(0xFEE0_0000 as *mut u32) };
-        Lapic::new(mmio)
-    }
 
     /// Enabled application processors discovered from the MADT (BSP
     /// excluded). `AP_TRAMPOLINE_LEN` is an over-provisioned upper bound.
@@ -195,7 +187,7 @@ mod kernel {
             }
         }
 
-        let mut lapic = make_lapic();
+        let mut lapic = Lapic::new(LocalApic);
         lapic.software_enable(LAPIC_SWENABLE);
 
         // SAFETY: per-CPU IDT installed, shootdown vector points at the
@@ -335,9 +327,9 @@ mod kernel {
         // shootdown can be in flight while a spinner has no way to answer.
         tairix_sync::spinwait::install_service(tlb_shootdown::serve_pending);
 
-        let mut lapic = make_lapic();
+        let mut lapic = Lapic::new(LocalApic);
         lapic.software_enable(LAPIC_SWENABLE);
-        let bsp_id = smp::bsp_lapic_id();
+        let bsp_id = u8::try_from(lapic.id()).expect("the boot CPU has an xAPIC id");
         BSP_LAPIC_ID.store(u32::from(bsp_id), Ordering::Relaxed);
         let _ = writeln!(
             com1,
@@ -363,17 +355,17 @@ mod kernel {
         // Publish the LAPIC-id -> dense-CpuId map so `current_cpu` (read
         // by `shootdown_page`) resolves on both CPUs, then build the arch
         // handle with the same two-CPU map.
-        preempt::set_cpu_id_for_lapic(bsp_id, 0);
-        preempt::set_cpu_id_for_lapic(ap_id, 1);
-        let mut cpu_to_lapic: [Option<u8>; CPUS] = [None; CPUS];
-        cpu_to_lapic[0] = Some(bsp_id);
-        cpu_to_lapic[1] = Some(ap_id);
+        preempt::set_cpu_id_for_lapic(u32::from(bsp_id), 0);
+        preempt::set_cpu_id_for_lapic(u32::from(ap_id), 1);
+        let mut cpu_to_lapic: [Option<u32>; CPUS] = [None; CPUS];
+        cpu_to_lapic[0] = Some(u32::from(bsp_id));
+        cpu_to_lapic[1] = Some(u32::from(ap_id));
         // The arch handle borrows its per-CPU bookkeeping from a
         // caller-sized `&'static` backing; `kernel_main`
         // runs once, so a function-local `static` is sound and needs no
         // allocator. `shootdown_page` walks exactly this two-CPU map.
         static ARCH_STORAGE: X86_64ArchStorage<CPUS> = X86_64ArchStorage::new();
-        let arch = match X86_64Arch::new(&ARCH_STORAGE, 0, bsp_id, &cpu_to_lapic) {
+        let arch = match X86_64Arch::new(&ARCH_STORAGE, 0, u32::from(bsp_id), &cpu_to_lapic) {
             Ok(a) => a,
             Err(_) => qemu_exit::exit_failure(),
         };

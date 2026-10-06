@@ -64,49 +64,40 @@ pub const BOOT_DISPLAY_NODE_ID: u32 = region(2);
 /// per enumerated network slot, so distinct NICs stay distinct.
 pub const VIRTIO_NET_PROBE_NODE_BASE_ID: u32 = region(3);
 
-/// First synthetic id for a probed virtio-**PCI** network child node
-/// ([`crate::hwdiscovery::observe_virtio_pci_network_devices`]). One id
-/// per enumerated virtio-net PCI function; a distinct region from the
-/// MMIO network base so a machine that probed both buses (it will not,
-/// but the map is disjoint by construction regardless) keeps every NIC
-/// node id unambiguous.
-pub const VIRTIO_PCI_NET_PROBE_NODE_BASE_ID: u32 = region(4);
-
-/// First synthetic id for a probed virtio-**PCI** block child node
-/// ([`crate::hwdiscovery::observe_virtio_pci_block_devices`]). One id per
-/// enumerated virtio-blk PCI function; a distinct region from the MMIO
-/// block base so a port that probes the PCI storage bus (x86_64) keeps
-/// every disk node id unambiguous and never aliases an MMIO-probed disk.
-pub const VIRTIO_PCI_BLOCK_PROBE_NODE_BASE_ID: u32 = region(5);
-
-/// First synthetic id for a probed virtio-**PCI** input child node
-/// ([`crate::hwdiscovery::observe_virtio_pci_input_devices`]). One id per
-/// enumerated virtio-input PCI function; a distinct region from the MMIO
-/// input base so a port that probes the PCI bus for input (x86_64) keeps
-/// every input node id unambiguous and never aliases an MMIO-probed device.
-pub const VIRTIO_PCI_INPUT_PROBE_NODE_BASE_ID: u32 = region(6);
-
 /// The id of the synthetic virtual-bus node ([`crate::virtual_bus`]), the
 /// always-present parent a composed block device hangs from. A single node
 /// (there is one virtual bus per machine), so it needs only the one id at its
 /// region base.
-pub const VIRTUAL_BUS_NODE_ID: u32 = region(7);
+pub const VIRTUAL_BUS_NODE_ID: u32 = region(4);
 
 /// First synthetic id for a probed virtio-MMIO **audio** child node
 /// ([`crate::hwdiscovery::observe_virtio_mmio_audio_devices`]). One id per
 /// enumerated sound slot, so distinct cards stay distinct.
-pub const VIRTIO_AUDIO_PROBE_NODE_BASE_ID: u32 = region(8);
-
-/// First synthetic id for a probed virtio-**PCI** audio child node
-/// ([`crate::hwdiscovery::observe_virtio_pci_audio_devices`]). A distinct
-/// region from the MMIO audio base, so a port that probes the PCI bus for
-/// sound keeps every card's node id unambiguous.
-pub const VIRTIO_PCI_AUDIO_PROBE_NODE_BASE_ID: u32 = region(9);
+pub const VIRTIO_AUDIO_PROBE_NODE_BASE_ID: u32 = region(5);
 
 /// First id of a DMA translation unit discovery reports (on x86_64,
 /// `tairix_arch_x86_64::dmar::emit_unit_nodes`): one per unit, in firmware
 /// order.
-pub const IOMMU_UNIT_NODE_BASE_ID: u32 = region(10);
+pub const IOMMU_UNIT_NODE_BASE_ID: u32 = region(6);
+
+/// The first region of the PCI function nodes: every segment the kernel owns
+/// takes the region at its position among them, and each function's node
+/// sits at its requester id within it, so a function has one id whatever its
+/// class and however many segments there are.
+pub const PCI_FUNCTION_NODE_BASE_ID: u32 = region(7);
+
+/// The node id of the function with requester id `requester` on the
+/// `ordinal`-th segment the kernel owns, or [`None`] past the id space.
+#[must_use]
+pub const fn pci_function_node_id(ordinal: u32, requester: u16) -> Option<u32> {
+    let Some(span) = ordinal.checked_mul(HW_NODE_PROBE_REGION_STRIDE) else {
+        return None;
+    };
+    let Some(base) = PCI_FUNCTION_NODE_BASE_ID.checked_add(span) else {
+        return None;
+    };
+    base.checked_add(requester as u32)
+}
 
 // A probe walk emits at most one id per slot it enumerates — `MAX_SLOTS` on
 // a virtio-MMIO bus, every function of the segment on PCI — so the highest id
@@ -132,18 +123,15 @@ mod tests {
     use super::*;
 
     /// Every reserved base, in region order, for the disjointness sweep.
-    const BASES: [u32; 11] = [
+    const BASES: [u32; 8] = [
         VIRTIO_BLOCK_PROBE_NODE_BASE_ID,
         VIRTIO_INPUT_PROBE_NODE_BASE_ID,
         BOOT_DISPLAY_NODE_ID,
         VIRTIO_NET_PROBE_NODE_BASE_ID,
-        VIRTIO_PCI_NET_PROBE_NODE_BASE_ID,
-        VIRTIO_PCI_BLOCK_PROBE_NODE_BASE_ID,
-        VIRTIO_PCI_INPUT_PROBE_NODE_BASE_ID,
         VIRTUAL_BUS_NODE_ID,
         VIRTIO_AUDIO_PROBE_NODE_BASE_ID,
-        VIRTIO_PCI_AUDIO_PROBE_NODE_BASE_ID,
         IOMMU_UNIT_NODE_BASE_ID,
+        PCI_FUNCTION_NODE_BASE_ID,
     ];
 
     #[test]
@@ -176,5 +164,22 @@ mod tests {
         // maximal walk mints is below the next region's base.
         let last = VIRTIO_BLOCK_PROBE_NODE_BASE_ID as usize + (MAX_SLOTS - 1);
         assert!(last < VIRTIO_INPUT_PROBE_NODE_BASE_ID as usize);
+    }
+
+    #[test]
+    fn each_segment_s_functions_fill_a_region_of_their_own() {
+        assert_eq!(pci_function_node_id(0, 0), Some(PCI_FUNCTION_NODE_BASE_ID));
+        assert_eq!(
+            pci_function_node_id(0, u16::MAX),
+            Some(PCI_FUNCTION_NODE_BASE_ID + u32::from(u16::MAX))
+        );
+        assert_eq!(
+            pci_function_node_id(1, 0),
+            Some(PCI_FUNCTION_NODE_BASE_ID + HW_NODE_PROBE_REGION_STRIDE),
+            "the next segment starts where the last one's functions end"
+        );
+        let last = (u32::MAX - PCI_FUNCTION_NODE_BASE_ID) / HW_NODE_PROBE_REGION_STRIDE;
+        assert!(pci_function_node_id(last, u16::MAX).is_some());
+        assert_eq!(pci_function_node_id(last + 1, 0), None);
     }
 }

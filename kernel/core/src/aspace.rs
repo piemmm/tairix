@@ -154,10 +154,10 @@ pub struct LoadedDriver {
     pub generation: u64,
     /// DMA memory the driver holds carved, in bytes.
     pub dma_bytes: u64,
-    /// A translation unit confines the node's DMA: the driver's carves map
-    /// into its node's domain, and its end revokes that domain rather than
-    /// quarantining them.
-    pub translated: bool,
+    /// How the node's DMA reaches memory: through a unit, whose domain the
+    /// driver's carves map into and its end revokes rather than quarantines;
+    /// around every unit; or nowhere, stranded behind one translating nothing.
+    pub dma: crate::iommu::DmaPath,
     /// The epoch its node's function was handed to it at, as a bus master, at
     /// its first carve; [`None`] while it has not been.
     pub mastered: Option<u64>,
@@ -1531,8 +1531,8 @@ impl AddressSpaceRegistry {
     }
 
     /// Record that the autoloaded driver `task` was loaded for the discovered
-    /// hardware-tree node `node_id`, giving it the next admission generation;
-    /// `translated` when a translation unit confines the node's DMA.
+    /// hardware-tree node `node_id`, giving it the next admission generation,
+    /// with how the node's DMA reaches memory.
     ///
     /// Called by the privileged driver-spawn path before any other state of
     /// the child is installed, so a refusal leaves nothing to undo. The
@@ -1554,7 +1554,7 @@ impl AddressSpaceRegistry {
         &mut self,
         task: ProcessId,
         node_id: u32,
-        translated: bool,
+        dma: crate::iommu::DmaPath,
     ) -> Result<(), Errno> {
         if self.node_drivers.contains_key(&node_id) {
             return Err(Errno::Busy);
@@ -1571,7 +1571,7 @@ impl AddressSpaceRegistry {
                 node: node_id,
                 generation,
                 dma_bytes: 0,
-                translated,
+                dma,
                 mastered: None,
             },
         );
@@ -1890,6 +1890,33 @@ impl AddressSpaceRegistry {
     pub fn holds_irq_line(&self, task: ProcessId, line: u32) -> bool {
         self.live_grants(task).any(|grant| {
             grant.kind() == Some(HwResourceKind::Irq) && grant.spans(u64::from(line), 1)
+        })
+    }
+
+    /// How `task`'s grant signals `line`: by edges where a wired grant naming
+    /// it says so, else by level, as a message-raised line has no wire to
+    /// configure.
+    #[must_use]
+    pub fn irq_trigger(&self, task: ProcessId, line: u32) -> tairix_kernel_irq::Trigger {
+        let edge = self
+            .live_grants(task)
+            .any(|grant| grant.is_edge_triggered() && grant.spans(u64::from(line), 1));
+        if edge {
+            tairix_kernel_irq::Trigger::Edge
+        } else {
+            tairix_kernel_irq::Trigger::Level
+        }
+    }
+
+    /// The node whose wired-interrupt grant to `task` names `line`: the
+    /// device that raises it by holding a pin, not by a message.
+    #[must_use]
+    pub fn wired_irq_origin(&self, task: ProcessId, line: u32) -> Option<u32> {
+        let entry = self.grants.get(&task)?;
+        entry.by_handle.values().find_map(|grant| {
+            let held = grant.live()?;
+            let wired = held.kind() == Some(HwResourceKind::Irq) && !held.is_message();
+            (wired && held.spans(u64::from(line), 1)).then_some(grant.origin)?
         })
     }
 
@@ -3431,15 +3458,15 @@ mod tests {
     #[test]
     fn a_node_has_at_most_one_live_driver() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.admit_driver(ProcessId(2), 9, false)
+        reg.admit_driver(ProcessId(2), 9, crate::iommu::DmaPath::Untranslated)
             .expect("a free node");
         assert_eq!(
-            reg.admit_driver(ProcessId(3), 9, false),
+            reg.admit_driver(ProcessId(3), 9, crate::iommu::DmaPath::Untranslated),
             Err(Errno::Busy),
             "a second instance would share the device"
         );
         assert_eq!(
-            reg.admit_driver(ProcessId(2), 10, false),
+            reg.admit_driver(ProcessId(2), 10, crate::iommu::DmaPath::Untranslated),
             Err(Errno::AlreadyExists),
             "a driver is loaded for one node"
         );
@@ -3451,20 +3478,21 @@ mod tests {
 
         assert!(reg.withdraw(ProcessId(2)));
         assert_eq!(reg.stale_task_entry(ProcessId(2)), None);
-        reg.admit_driver(ProcessId(3), 9, false)
+        reg.admit_driver(ProcessId(3), 9, crate::iommu::DmaPath::Untranslated)
             .expect("the node is free once its driver is down");
         let first = reg.loaded_driver(ProcessId(3)).expect("recorded");
         assert_eq!(first.node, 9);
-        assert!(!first.translated);
-        reg.admit_driver(ProcessId(4), 10, true)
+        assert_eq!(first.dma, crate::iommu::DmaPath::Untranslated);
+        reg.admit_driver(ProcessId(4), 10, crate::iommu::DmaPath::Translated)
             .expect("another node");
         let second = reg.loaded_driver(ProcessId(4)).expect("recorded");
         assert!(
             second.generation > first.generation,
             "every later load is admitted above every earlier one"
         );
-        assert!(
-            second.translated,
+        assert_eq!(
+            second.dma,
+            crate::iommu::DmaPath::Translated,
             "the load records how its node reaches memory"
         );
     }
@@ -3477,7 +3505,7 @@ mod tests {
             None,
             "no driver, no function"
         );
-        reg.admit_driver(ProcessId(2), 9, false)
+        reg.admit_driver(ProcessId(2), 9, crate::iommu::DmaPath::Untranslated)
             .expect("a free node");
         assert_eq!(reg.first_hand_over(ProcessId(2), || 4), Some(4));
         assert_eq!(
@@ -3490,7 +3518,7 @@ mod tests {
         );
 
         assert!(reg.withdraw(ProcessId(2)));
-        reg.admit_driver(ProcessId(3), 9, false)
+        reg.admit_driver(ProcessId(3), 9, crate::iommu::DmaPath::Untranslated)
             .expect("the node is free once its driver is down");
         assert_eq!(
             reg.first_hand_over(ProcessId(3), || 5),
@@ -3505,14 +3533,17 @@ mod tests {
         reg.claim_for_kernel(9).expect("a free node");
         reg.claim_for_kernel(9)
             .expect("claiming again changes nothing");
-        assert_eq!(reg.admit_driver(ProcessId(2), 9, false), Err(Errno::Busy));
+        assert_eq!(
+            reg.admit_driver(ProcessId(2), 9, crate::iommu::DmaPath::Untranslated),
+            Err(Errno::Busy)
+        );
         reg.release_node(ProcessId::KERNEL);
         assert_eq!(
-            reg.admit_driver(ProcessId(2), 9, false),
+            reg.admit_driver(ProcessId(2), 9, crate::iommu::DmaPath::Untranslated),
             Err(Errno::Busy),
             "the kernel never lets it go"
         );
-        reg.admit_driver(ProcessId(3), 10, false)
+        reg.admit_driver(ProcessId(3), 10, crate::iommu::DmaPath::Untranslated)
             .expect("another node");
         assert_eq!(
             reg.claim_for_kernel(10),
@@ -3524,7 +3555,7 @@ mod tests {
     #[test]
     fn a_released_node_takes_a_successor_before_its_driver_is_withdrawn() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.admit_driver(ProcessId(2), 9, false)
+        reg.admit_driver(ProcessId(2), 9, crate::iommu::DmaPath::Untranslated)
             .expect("a free node");
         reg.release_node(ProcessId(2));
         assert_eq!(
@@ -3532,7 +3563,7 @@ mod tests {
             Some(9),
             "the load record outlives the claim, for the teardown to read"
         );
-        reg.admit_driver(ProcessId(3), 9, false)
+        reg.admit_driver(ProcessId(3), 9, crate::iommu::DmaPath::Untranslated)
             .expect("the node is free once its driver's last thread is down");
 
         // The earlier driver's teardown finishing must not free the node its
@@ -3540,13 +3571,13 @@ mod tests {
         reg.release_node(ProcessId(2));
         assert!(reg.withdraw(ProcessId(2)));
         assert_eq!(
-            reg.admit_driver(ProcessId(4), 9, false),
+            reg.admit_driver(ProcessId(4), 9, crate::iommu::DmaPath::Untranslated),
             Err(Errno::Busy),
             "the successor still holds the node"
         );
         assert_eq!(reg.stale_task_entry(ProcessId(2)), None);
         assert!(reg.withdraw(ProcessId(3)));
-        reg.admit_driver(ProcessId(4), 9, false)
+        reg.admit_driver(ProcessId(4), 9, crate::iommu::DmaPath::Untranslated)
             .expect("free again once the successor is down");
     }
 
@@ -4187,6 +4218,20 @@ mod tests {
             None,
             "nor delegated"
         );
+    }
+
+    #[test]
+    fn a_wired_line_names_the_node_that_granted_it() {
+        let mut reg = AddressSpaceRegistry::new();
+        reg.mint_node_grant(ProcessId(5), HwResource::irq(9, 1), 7);
+        reg.mint_node_grant(ProcessId(5), HwResource::message_irq(4100, 0), 8);
+        reg.mint_grant(ProcessId(5), HwResource::irq(11, 1));
+        assert_eq!(reg.wired_irq_origin(ProcessId(5), 9), Some(7));
+        assert_eq!(reg.wired_irq_origin(ProcessId(5), 4100), None, "a message");
+        assert_eq!(reg.wired_irq_origin(ProcessId(5), 11), None, "no node's");
+        assert_eq!(reg.wired_irq_origin(ProcessId(6), 9), None, "another task");
+        assert_eq!(reg.revoke_node_grants(&[7]), 1);
+        assert_eq!(reg.wired_irq_origin(ProcessId(5), 9), None, "revoked");
     }
 
     #[test]

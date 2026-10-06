@@ -14,8 +14,8 @@
 //! * feeding any byte stream to [`tairix_fdt::Fdt::new`] and draining every
 //!   public reader ([`tairix_fdt::Fdt::first_memory_region`],
 //!   `timebase_frequency`, `each_cpu`, `property`, `property_u64`, the node
-//!   and property iterators, the phandle and compatible lookups and the
-//!   supply decoders) never panics and never reads out of bounds — the
+//!   and property iterators, the phandle and compatible lookups, the
+//!   supply decoders and the PCI host decoder) never panics and never reads out of bounds — the
 //!   reader either returns a well-formed view or an [`tairix_fdt::FdtError`]
 //!   (fail closed), and an iterator that has yielded an error yields nothing
 //!   more. The run aborting *is* the failure.
@@ -28,8 +28,12 @@
 //! [`SMOKE_ITERATIONS`] sweep; `cargo xtask fuzz` exports
 //! `TAIRIX_FUZZ_BUDGET_SECS` to extend the PRNG loop to a wall-clock budget.
 
-use tairix_fdt::fixture::{arm_with_cpus, virt_like, DtbBuilder};
-use tairix_fdt::{gpio_enabled_regulator, gpio_selected_regulator, supply, Fdt};
+use tairix_fdt::fixture::{arm_with_cpus, ecam_host_arm, virt_like, DtbBuilder};
+use tairix_fdt::iommu::{each_iommu_address, iommu_cells, stream_id};
+use tairix_fdt::pci::each_pci_host;
+use tairix_fdt::{
+    gpio_enabled_regulator, gpio_selected_regulator, phandle_args, supply, Fdt, IdMap, Node,
+};
 use tairix_fuzzseed::Prng;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
@@ -62,6 +66,7 @@ fn templates() -> Vec<Vec<u8>> {
             &[(0x0, Some(1024)), (0x1, None), (0x100, Some(512))],
         ),
         arm_with_cpus(0x8000_0000, 0x1000_0000, &[]),
+        ecam_host_arm(true),
         {
             // A deeply nested tree with assorted property shapes, to drive the
             // node/property iterators and the cell decoders.
@@ -113,7 +118,92 @@ fn templates() -> Vec<Vec<u8>> {
             b.end_node();
             b.build()
         },
+        translation_topology(),
     ]
+}
+
+/// A translation topology: a unit, masters naming it through `iommus`, one
+/// keeping a firmware window, a host mapping its requester ids under a mask,
+/// and a disabled subtree.
+fn translation_topology() -> Vec<u8> {
+    let cells =
+        |values: &[u32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_be_bytes()).collect() };
+    let mut b = DtbBuilder::new();
+    b.begin_node("");
+    b.prop_u32("#address-cells", 2);
+    b.prop_u32("#size-cells", 2);
+    b.begin_node("reserved-memory");
+    b.prop_u32("#address-cells", 2);
+    b.prop_u32("#size-cells", 2);
+    b.prop("ranges", &[]);
+    b.begin_node("framebuffer@80000000");
+    b.prop("reg", &cells(&[0, 0x8000_0000, 0, 0x80_0000]));
+    b.prop(
+        "iommu-addresses",
+        &cells(&[5, 0, 0x8000_0000, 0, 0x80_0000]),
+    );
+    b.prop_u32("phandle", 6);
+    b.end_node();
+    b.end_node();
+    b.begin_node("smmuv3@9050000");
+    b.prop_str("compatible", "arm,smmu-v3");
+    b.prop("reg", &cells(&[0, 0x905_0000, 0, 0x2_0000]));
+    b.prop_u32("#iommu-cells", 1);
+    b.prop_u32("phandle", 4);
+    b.end_node();
+    b.begin_node("display@9100000");
+    b.prop_str("compatible", "test,display");
+    b.prop("iommus", &cells(&[4, 0x100, 4, 0x101]));
+    b.prop_u32("memory-region", 6);
+    b.prop_u32("phandle", 5);
+    b.end_node();
+    b.begin_node("bus@0");
+    b.prop_str("status", "disabled");
+    b.begin_node("dma@0");
+    b.prop_u32("#dma-cells", 1);
+    b.prop("iommus", &cells(&[4, 0x200]));
+    b.end_node();
+    b.end_node();
+    b.begin_node("pcie@10000000");
+    b.prop_str("compatible", "pci-host-ecam-generic");
+    b.prop_u32("#address-cells", 3);
+    b.prop_u32("#size-cells", 2);
+    b.prop("reg", &cells(&[0, 0x1000_0000, 0, 0x1000_0000]));
+    b.prop(
+        "ranges",
+        &cells(&[0x0200_0000, 0, 0x2000_0000, 0, 0x2000_0000, 0, 0x1000_0000]),
+    );
+    b.prop("iommu-map", &cells(&[0, 4, 0, 0, 0, 4, 0x1000, 0x1_0000]));
+    b.prop_u32("iommu-map-mask", 0xFFF8);
+    b.end_node();
+    b.end_node();
+    b.build()
+}
+
+/// Drive every translation-topology reader over `node`.
+fn exercise_iommu_readers(fdt: &Fdt<'_>, node: &Node<'_>) {
+    let _ = iommu_cells(node);
+    if let Ok(Some(map)) = IdMap::of(node, "iommu-map", "iommu-map-mask") {
+        for entry in map.entries() {
+            let _ = entry.targets();
+            let _ = map.map(entry.id_base);
+        }
+        let _ = map.map(u32::MAX);
+    }
+    if let Some(iommus) = node.property("iommus") {
+        let width = |phandle| Some(((), iommu_cells(&fdt.node_by_phandle(phandle)?)?));
+        for entry in phandle_args(iommus.value(), width) {
+            let Ok(((), specifier)) = entry else { break };
+            let _ = stream_id(&specifier);
+            let _ = specifier.cells().count();
+        }
+    }
+    let mut windows = 0u64;
+    let _ = each_iommu_address(fdt, node, &mut |window| {
+        windows = windows.wrapping_add(window.len);
+        let _ = window.is_identity();
+    });
+    let _ = windows;
 }
 
 /// Parse `bytes` and drain every public reader: must never panic, whatever the
@@ -145,6 +235,32 @@ fn exercise_never_panics(bytes: &[u8]) {
 
     let _ = fdt.find_compatible("virtio,mmio");
     let _ = fdt.find_compatible(b"brcm,bcm2711-emmc2");
+
+    each_pci_host(&fdt, |host| {
+        let _ = host.windows().count();
+        let _ = host.external_facing(&fdt, 0x0800);
+        if let Ok(Some(map)) = host.iommu_map() {
+            let _ = map.map(0x10);
+        }
+        for slot in [0, 1, 31] {
+            for pin in 0..=5 {
+                let _ = host.intx(&fdt, slot, pin);
+            }
+        }
+    });
+
+    let mut operational = fdt.operational_nodes();
+    for node in operational.by_ref() {
+        let Ok(node) = node else {
+            assert!(
+                operational.next().is_none(),
+                "the operational walk ends at its error"
+            );
+            break;
+        };
+        let _ = node.is_operational();
+        exercise_iommu_readers(&fdt, &node);
+    }
 
     // Walk the whole tree, touching every node and property accessor, so a
     // corrupted token, name, or property length is forced through the

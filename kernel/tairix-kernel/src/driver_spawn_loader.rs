@@ -351,6 +351,7 @@ impl DriverLoader for SpawnDriverLoader<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::NullSink;
 
     /// A tree holding exactly one node.
     struct OnlyNode(u32);
@@ -564,18 +565,11 @@ mod tests {
 
     use alloc::boxed::Box;
 
-    use tairix_drvhost::Event;
     use tairix_kernel_core::KernelStack;
     use tairix_kernel_mem::{
         BootMemoryMap, FrameAllocator, MemoryRegion, PhysAddr, PhysMap, RegionKind,
         UserAddressSpace, PAGE_SIZE,
     };
-
-    /// No-op audit sink for the unused [`InitSpawnCtx::audit`] accessor.
-    struct NullSink;
-    impl Sink for NullSink {
-        fn write_event(&self, _event: &Event<'_>) {}
-    }
 
     /// One recorded [`InitSpawnCtx::spawn_driver_process`] call: the
     /// driver-store path, the payload bytes, whether the forwarded

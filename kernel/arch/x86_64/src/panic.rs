@@ -72,7 +72,7 @@ pub fn report_unclaimed_fault(fault: &KernelFault) -> ! {
 /// initial APIC id under its own key — read through `CPUID` rather than the
 /// local APIC, which a report taken before the APIC is mapped would fault on.
 fn processor() -> Processor {
-    let apic = u8::try_from(core::arch::x86_64::__cpuid(1).ebx >> 24).unwrap_or(u8::MAX);
+    let apic = core::arch::x86_64::__cpuid(1).ebx >> 24;
     match crate::preempt::cpu_id_for_lapic(apic) {
         u32::MAX => Processor::Hardware {
             key: "apic_id",

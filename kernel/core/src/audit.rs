@@ -48,7 +48,7 @@
 //! | 4091 | Warn | `DMA_QUARANTINED` | audit | A driver ended holding DMA memory its device may still master; it passed to its node's quarantine, not the allocator. The `node`, `generation` and `bytes` fields name the node, the dead driver's admission generation, and what it held. |
 //! | 4092 | Info | `DMA_QUARANTINE_RELEASED` | audit | Quarantined DMA memory returned to the allocator, scrubbed. `cause` is `reset` (a later driver for the `node` declared its device reset; recorded even when nothing was freed) or `removed` (a surprise removal retired the node; recorded only when something was freed); `bytes` is what was freed. |
 //! | 4093 | Info | `HW_NODE_GRANTS_REVOKED` | audit | A removed hardware-tree `node`'s authority was revoked from every task holding it: `grants` revoked across `holders` tasks, whose bindings of its interrupt lines, windows onto its registers and mappings of its shared regions were torn down. `killed` counts holders whose access could not be torn down and which were killed instead; the record is Warn when it is non-zero. |
-//! | 4094 | Info/Warn | `DMA_TRANSLATION_UNIT` | audit | A translation unit discovery reported was brought up, or left its devices unconfined. `node` is the unit's node and `outcome` is `translating` (with `stopped` and `refused`, the functions behind it found mastering DMA at take-over with no firmware window that were stopped and that would not stop), the refusal (`unmatched`, `no_registers`, `exhausted`, `unconfirmed`, `hardware`, `refused`), or `faults_unrouted` with a `reason` when its fault interrupt could not be served. |
+//! | 4094 | Info/Warn/Error | `DMA_TRANSLATION_UNIT` | audit | A translation unit discovery reported was brought up, or translates nothing and strands its devices, which master no DMA. `node` is the unit's node and `outcome` is `translating` or the refusal (`unmatched`, `no_registers`, `exhausted`, `unconfirmed`, `hardware`, `refused`), either with `stopped` and `refused`: the functions behind it found mastering DMA that were stopped and that would not stop (at take-over those with no firmware window; stranded, all). `faults_unrouted` carries a `reason` when its fault interrupt could not be served. |
 //! | 4095 | Error | `DMA_TRANSLATION_UNCONFIRMED` | audit | A unit could not confirm that a translation ended — a driver's domain, a removed node's, or one carve's — so what it reached is kept for good. Carries `node` and `generation`. |
 //! | 4147 | Info/Warn | `DMA_BUS_MASTER` | audit | The kernel turned a function's bus mastering on as its DMA owner began or off as it ended: `node`, `generation`, `master` (`on`/`off`), and `outcome` (`applied`, or `refused` where a function still reports otherwise). |
 //! | 4148 | Warn | `DMA_GROUP_REFUSED` | audit | A driver's first carve was refused: another node's live owner holds the isolation group its device shares. `node`, `generation`, `group`, and the `holder` node. |
@@ -552,15 +552,16 @@ pub enum AuditEvent {
     /// Carries the fault's fields and `outcome`.
     DmaTranslationStorm,
     /// Boot brought a DMA translation unit discovery reported up, or left it
-    /// untranslated.
+    /// translating nothing.
     ///
-    /// `node` is the unit's node and `outcome` is `translating`, or why its
-    /// devices reach memory unconfined: `unmatched`, `no_registers`, or the
-    /// family's refusal; `faults_unrouted`, with a `reason`, when its fault
-    /// interrupt could not be served. A `translating` record carries
-    /// `stopped` and `refused`: the functions behind the unit found mastering
-    /// DMA as it took over, though firmware keeps no window for them, that
-    /// were stopped and that would not stop.
+    /// `node` is the unit's node and `outcome` is `translating`, or why it
+    /// translates nothing — `unmatched`, `no_registers`, or the family's
+    /// refusal — which strands its devices: each function behind it is told
+    /// to stop, and none masters DMA; `faults_unrouted`, with a `reason`,
+    /// when its fault interrupt could not be served. Every record but
+    /// `faults_unrouted` carries `stopped` and `refused`: the functions behind
+    /// the unit found mastering DMA that were stopped and that would not stop
+    /// — as it took over, those firmware keeps no window for; stranded, all.
     DmaTranslationUnit,
     /// A translation unit could not confirm that a translation ended, so the
     /// device may still reach what it mapped: that memory is kept for good,
@@ -582,6 +583,16 @@ pub enum AuditEvent {
     /// Carries the refused owner's `node` and `generation`, the `group`, and
     /// the `holder` node.
     DmaGroupRefused,
+    /// The port routed the interrupt sources it set up at boot.
+    ///
+    /// `outcome` is `remapped`, where every source raises only the entry the
+    /// kernel wrote for it; `unremapped`, where no unit translates or one
+    /// cannot remap, so a device can forge any interrupt; `refused` or
+    /// `stranded`, where remapping could not be turned on, `stranded` naming
+    /// a unit that also could not turn it back off and so refuses its
+    /// devices' interrupts; or `unrouted`, where remapping is on but the
+    /// `unrouted` sources could be given no entry and were left unrouted.
+    InterruptRemapping,
     /// A driver's port access was refused because it reaches ports the kernel
     /// keeps for itself (PCI configuration mechanism #1), whatever its grant.
     ///
@@ -802,6 +813,7 @@ impl AuditEvent {
             Self::DmaBusMaster => 4147,
             Self::DmaGroupRefused => 4148,
             Self::PortIoRefused => 4158,
+            Self::InterruptRemapping => 4159,
             Self::FsNodeMutated => 4100,
             Self::FsMutationDenied => 4101,
             Self::SystemConfigApplied => 4110,
@@ -886,6 +898,7 @@ impl AuditEvent {
             Self::DmaBusMaster => "bus mastering changed",
             Self::DmaGroupRefused => "dma carve refused: isolation group held",
             Self::PortIoRefused => "port access refused: kernel-owned port",
+            Self::InterruptRemapping => "interrupt sources routed",
             Self::FsNodeMutated => "filesystem node mutated",
             Self::FsMutationDenied => "filesystem mutation denied",
             Self::SystemConfigApplied => "system configuration applied",
@@ -990,6 +1003,7 @@ mod tests {
         AuditEvent::DmaBusMaster,
         AuditEvent::DmaGroupRefused,
         AuditEvent::PortIoRefused,
+        AuditEvent::InterruptRemapping,
         AuditEvent::FsNodeMutated,
         AuditEvent::FsMutationDenied,
         AuditEvent::SystemConfigApplied,
@@ -1011,7 +1025,7 @@ mod tests {
         // A guard on the list itself: the count is the one thing neither
         // exhaustive match can enforce, so it is asserted rather than
         // assumed.
-        assert_eq!(ALL.len(), 75, "a new event belongs in `ALL`");
+        assert_eq!(ALL.len(), 76, "a new event belongs in `ALL`");
     }
 
     #[test]

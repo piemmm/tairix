@@ -52,7 +52,7 @@ use crate::random::{BootReserve, RandomReserve};
 use crate::rlimit::{
     default_dir_watches, default_file_lock_records, default_pinned_limit_bytes, LimitSet,
 };
-use crate::spawn::InitSpawnCtx;
+use crate::spawn::{InitSpawn, InitSpawnCtx};
 use crate::syscalls::{KernelDispatchHook, KernelSpawnCtx, SpawnCredential};
 
 /// PID 1's process name.
@@ -165,6 +165,9 @@ pub enum InitError {
     /// or `kernel_main` was re-entered): reported and halted, never silently
     /// recovered.
     DispatcherAlreadyInstalled(AlreadyInstalledError),
+    /// The translation units the hardware tree names could not be taken
+    /// over or recorded, so no device could be confined.
+    DmaTranslation,
 }
 
 impl InitError {
@@ -182,6 +185,7 @@ impl InitError {
             | InitError::CpuStateZeroCpus
             | InitError::CpuStateAllocationFailed
             | InitError::CpuStateAlreadyInstalled => Phase::Sched,
+            InitError::DmaTranslation => Phase::Irq,
             InitError::DispatcherAlreadyInstalled(_) => Phase::Syscall,
         }
     }
@@ -204,6 +208,7 @@ impl InitError {
             InitError::CpuStateAllocationFailed => "sched_cpu_state_allocation_failed",
             InitError::CpuStateAlreadyInstalled => "sched_cpu_state_already_installed",
             InitError::DispatcherAlreadyInstalled(_) => "syscall_dispatcher_already_installed",
+            InitError::DmaTranslation => "dma_translation_unbuilt",
         }
     }
 }
@@ -404,6 +409,7 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
             state.arch.as_ref(),
             process_wait,
             &state.irq,
+            state.irq_controller,
             build_shared_mem_facility(state.arch.as_ref(), state.frame_allocator),
             A::cross_cpu_tlb_shootdown(state.arch.as_ref()),
         );
@@ -414,10 +420,25 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
         .with_mastering(state.mastering)
         .with_watches(&state.fswatch);
         let ctx: &'static (dyn InitSpawnCtx + Sync) = Box::leak(Box::new(spawner));
-        init.spawn_init(ctx);
+        start_init(init, ctx, audit_sink);
     }
 
     arch_for_halt.halt();
+}
+
+/// Enter PID 1 through `init`, which diverges into it; a return means PID 1
+/// could not be started, recorded so the halt that follows is not silent.
+fn start_init(init: &dyn InitSpawn, ctx: &'static (dyn InitSpawnCtx + Sync), audit: &dyn Sink) {
+    init.spawn_init(ctx);
+    emit(
+        audit,
+        Level::Error,
+        AuditEvent::ProcessSpawnFailed,
+        &[Field {
+            key: "cause",
+            value: tairix_log::FieldValue::Str("init_unstarted"),
+        }],
+    );
 }
 
 /// The boot-leaked [`crate::WaitQueueArch`] adapter (Design D P-2).
@@ -1089,6 +1110,9 @@ pub struct KernelInitSpawner<'a, A: KernelArch> {
     /// driver the device manager unloads. PID-1 admission and the
     /// driver-spawn path do not consult it.
     irq: &'a IrqTable,
+    /// What a torn-down driver's shared lines are re-armed through for the
+    /// sharers it leaves.
+    irq_controller: &'a (dyn IrqController + Sync),
     /// The shared-memory facility
     /// [`terminate_driver_process`](InitSpawnCtx::terminate_driver_process)
     /// frees a torn-down driver's shared-memory regions through (the same
@@ -1138,6 +1162,7 @@ impl<'a, A: KernelArch> KernelInitSpawner<'a, A> {
         arch: &'a A,
         process_wait: &'static (dyn ProcessWait + 'static),
         irq: &'a IrqTable,
+        irq_controller: &'a (dyn IrqController + Sync),
         shared_mem_facility: &'static (dyn crate::devres::SharedMemFacility + 'static),
         tlb_shootdown: Option<&'static (dyn tairix_arch_api::CrossCpuTlbShootdown + Sync)>,
     ) -> Self {
@@ -1151,6 +1176,7 @@ impl<'a, A: KernelArch> KernelInitSpawner<'a, A> {
             arch,
             process_wait,
             irq,
+            irq_controller,
             shared_mem_facility,
             tlb_shootdown,
             dma_translation: None,
@@ -2036,10 +2062,15 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // is the whole reclamation; idempotent.
         crate::waitset::release_owned_by(handle);
 
-        // Release every IRQ line the driver bound (`docs/src/security/irq.md`):
-        // the kernel unmasks no lines on teardown; a later driver that wants
-        // the same line re-issues `irq_bind`.
-        let _ = self.irq.release_for(sec_id);
+        // Release every IRQ line the driver bound (`docs/src/security/irq.md`);
+        // a later driver that wants one re-issues `irq_bind`.
+        let _ = crate::revoke::release_interrupts(
+            self.irq,
+            self.irq_controller,
+            self.aspaces,
+            self.mastering,
+            sec_id,
+        );
 
         // Withdraw the address-space-registry entry last of the driver's
         // resources: its grants, streams, limits and matched-node record, so
@@ -2274,8 +2305,16 @@ fn run_phases<A: KernelArch>(
     let mastering = arch
         .bus_mastering()
         .map(|port| crate::iommu::Mastering::new(port, audit_sink));
-    let dma_translation =
-        build_dma_translation(&arch, frame_allocator, hw_tree, audit_sink, mastering);
+    let dma_translation = build_dma_translation(
+        &arch,
+        frame_allocator,
+        memory_map,
+        hw_tree,
+        audit_sink,
+        mastering,
+    )?;
+    let routing = arch.route_interrupts(dma_translation, scheduler_config.cpus, log_sink);
+    audit_interrupt_routing(audit_sink, routing);
 
     // Assemble `KernelState` and lift it to `'static` so the
     // `Phase::Syscall` step can publish a `&'static dyn DispatchHook`
@@ -2835,30 +2874,49 @@ fn build_dma_quarantine<A: KernelArch>(
 /// through each its family brings up, auditing every unit's outcome. [`None`]
 /// when `tree` names no unit. Whatever becomes of a unit, its registers stay
 /// guarded from every process, so the facility stands even when no unit
-/// translates.
+/// translates. A unit whose registers overlap `memory`'s usable RAM is
+/// refused: the kernel would be writing frames it hands out.
+///
+/// # Errors
+///
+/// [`InitError::DmaTranslation`] when the tree cannot be read or the units
+/// cannot be recorded: reading that as "no unit" would leave every device
+/// untranslated and every unit's registers mappable.
 fn build_dma_translation<A: KernelArch + 'static>(
     arch: &Arc<A>,
     frames: &'static FrameAllocator,
+    memory: &'static tairix_kernel_mem::BootMemoryMap,
     tree: &'static (dyn crate::hwtree::HwTreeSource + 'static),
     audit: &'static (dyn Sink + Sync),
     mastering: Option<crate::iommu::Mastering>,
-) -> Option<&'static crate::iommu::Translation> {
-    let snapshot = tree.snapshot().ok()?;
+) -> Result<Option<&'static crate::iommu::Translation>, InitError> {
+    let unbuilt = |_| InitError::DmaTranslation;
+    let snapshot = match tree.snapshot() {
+        Ok(snapshot) => snapshot,
+        // No store is wired, so nothing was discovered to translate for.
+        Err(tairix_abi::Errno::NotImplemented) => return Ok(None),
+        Err(_) => return Err(InitError::DmaTranslation),
+    };
     let mut nodes = alloc::vec::Vec::new();
     let mut guarded = alloc::vec::Vec::new();
-    for node in tairix_abi::hwtree::snapshot_nodes(&snapshot)?
+    for node in tairix_abi::hwtree::snapshot_nodes(&snapshot)
+        .ok_or(InitError::DmaTranslation)?
         .filter(|node| node.class() == Some(tairix_abi::hwtree::HwDeviceClass::Iommu))
     {
-        nodes.try_reserve(1).ok()?;
-        guarded.try_reserve(node.resources().len()).ok()?;
+        nodes.try_reserve(1).map_err(unbuilt)?;
+        guarded
+            .try_reserve(node.resources().len())
+            .map_err(unbuilt)?;
         guarded.extend(crate::iommu::register_windows(&node));
         nodes.push(node);
     }
     if nodes.is_empty() {
-        return None;
+        return Ok(None);
     }
     let mut taken = alloc::vec::Vec::new();
-    taken.try_reserve(nodes.len()).ok()?;
+    taken.try_reserve(nodes.len()).map_err(unbuilt)?;
+    let mut refused = alloc::vec::Vec::new();
+    refused.try_reserve(nodes.len()).map_err(unbuilt)?;
     match arch.direct_phys_map() {
         Some(physmap) => {
             let tables: &'static tairix_kernel_mem::FrameTableSource = Box::leak(Box::new(
@@ -2866,35 +2924,61 @@ fn build_dma_translation<A: KernelArch + 'static>(
             ));
             let clock: &'static ArchClock<A> = Box::leak(Box::new(ArchClock(Arc::clone(arch))));
             let env = crate::iommu::UnitEnv {
-                mmio: &|base, len| arch.kernel_mmio(base, len),
+                mmio: &|base, len| {
+                    let end = base.checked_add(u64::try_from(len).ok()?)?;
+                    if overlaps_usable(memory, base..end) {
+                        return None;
+                    }
+                    arch.kernel_mmio(base, len)
+                },
                 frames: tables,
                 coherence: arch.table_coherence(),
                 clock,
+                function: arch.unit_function(),
             };
             for node in &nodes {
                 match crate::iommu::take_over(node, &env) {
                     Ok(unit) => taken.push(unit),
-                    Err(refusal) => {
-                        audit_translation_unit(audit, node.id(), refusal_outcome(refusal));
-                    }
+                    Err(refusal) => refused.push((node.id(), refusal)),
                 }
             }
         }
-        None => {
-            for node in &nodes {
-                audit_translation_unit(audit, node.id(), "no_registers");
+        None => refused.extend(
+            nodes
+                .iter()
+                .map(|node| (node.id(), crate::iommu::Refusal::NoRegisters)),
+        ),
+    }
+    let translation = crate::iommu::Translation::start(
+        taken,
+        &refused,
+        guarded,
+        tree,
+        audit,
+        mastering,
+        &mut |node, outcome| match outcome {
+            crate::iommu::UnitOutcome::Translating(quiesced, stage) => {
+                audit_unit_translating(audit, node, quiesced, stage);
             }
-        }
-    }
-    let (translation, outcomes) =
-        crate::iommu::Translation::start(taken, guarded, tree, audit, mastering);
-    for (node, outcome) in outcomes {
-        match outcome {
-            Ok(quiesced) => audit_unit_translating(audit, node, quiesced),
-            Err(err) => audit_translation_unit(audit, node, unit_refusal(err)),
-        }
-    }
-    Some(Box::leak(Box::new(translation)))
+            crate::iommu::UnitOutcome::Stranded(refusal, quiesced) => {
+                audit_unit_stranded(audit, node, refusal_outcome(refusal), quiesced);
+            }
+        },
+    );
+    let translation: &'static crate::iommu::Translation = Box::leak(Box::new(translation));
+    Ok(Some(translation))
+}
+
+/// Whether any byte of `window` lies in a region `memory` hands out as RAM.
+fn overlaps_usable(
+    memory: &tairix_kernel_mem::BootMemoryMap,
+    window: core::ops::Range<u64>,
+) -> bool {
+    memory.regions().iter().any(|region| {
+        region.kind == tairix_kernel_mem::RegionKind::Usable
+            && region.start.as_u64() < window.end
+            && region.end().is_none_or(|end| window.start < end.as_u64())
+    })
 }
 
 /// Admit the kernel's standing service tasks once the boot state is live: the
@@ -2955,6 +3039,33 @@ impl<A: KernelArch> tairix_kernel_iommu_api::Clock for ArchClock<A> {
     }
 }
 
+fn audit_interrupt_routing(audit: &(dyn Sink + Sync), routing: crate::iommu::InterruptRouting) {
+    let level = match routing {
+        crate::iommu::InterruptRouting::Native => return,
+        crate::iommu::InterruptRouting::Remapped => Level::Info,
+        _ => Level::Warn,
+    };
+    let unrouted = match routing {
+        crate::iommu::InterruptRouting::Unrouted(count) => count,
+        _ => 0,
+    };
+    emit(
+        audit,
+        level,
+        AuditEvent::InterruptRemapping,
+        &[
+            Field {
+                key: "outcome",
+                value: tairix_log::FieldValue::Str(routing.outcome()),
+            },
+            Field {
+                key: "unrouted",
+                value: tairix_log::FieldValue::UnsignedInt(u64::from(unrouted)),
+            },
+        ],
+    );
+}
+
 fn refusal_outcome(refusal: crate::iommu::Refusal) -> &'static str {
     match refusal {
         crate::iommu::Refusal::Unmatched => "unmatched",
@@ -2972,10 +3083,22 @@ fn unit_refusal(err: tairix_kernel_iommu_api::IommuError) -> &'static str {
     }
 }
 
-fn audit_translation_unit(audit: &(dyn Sink + Sync), node: u32, outcome: &'static str) {
+/// The unit at `node` translates nothing, for `outcome`, and what telling
+/// every function behind it to stop came to.
+fn audit_unit_stranded(
+    audit: &(dyn Sink + Sync),
+    node: u32,
+    outcome: &'static str,
+    quiesced: crate::iommu::Quiesced,
+) {
+    let count = |count: usize| tairix_log::FieldValue::UnsignedInt(count as u64);
     emit(
         audit,
-        Level::Warn,
+        if quiesced.refused == 0 {
+            Level::Warn
+        } else {
+            Level::Error
+        },
         AuditEvent::DmaTranslationUnit,
         &[
             Field {
@@ -2986,6 +3109,14 @@ fn audit_translation_unit(audit: &(dyn Sink + Sync), node: u32, outcome: &'stati
                 key: "outcome",
                 value: tairix_log::FieldValue::Str(outcome),
             },
+            Field {
+                key: "stopped",
+                value: count(quiesced.stopped),
+            },
+            Field {
+                key: "refused",
+                value: count(quiesced.refused),
+            },
         ],
     );
 }
@@ -2993,7 +3124,12 @@ fn audit_translation_unit(audit: &(dyn Sink + Sync), node: u32, outcome: &'stati
 /// The unit at `node` translates; the functions behind it found mastering
 /// DMA as it took over, though firmware keeps no window for them, were
 /// stopped or would not stop.
-fn audit_unit_translating(audit: &(dyn Sink + Sync), node: u32, quiesced: crate::iommu::Quiesced) {
+fn audit_unit_translating(
+    audit: &(dyn Sink + Sync),
+    node: u32,
+    quiesced: crate::iommu::Quiesced,
+    stage: tairix_kernel_iommu_api::Stage,
+) {
     let count = |count: usize| tairix_log::FieldValue::UnsignedInt(count as u64);
     emit(
         audit,
@@ -3011,6 +3147,10 @@ fn audit_unit_translating(audit: &(dyn Sink + Sync), node: u32, quiesced: crate:
             Field {
                 key: "outcome",
                 value: tairix_log::FieldValue::Str("translating"),
+            },
+            Field {
+                key: "stage",
+                value: tairix_log::FieldValue::Str(stage.name()),
             },
             Field {
                 key: "stopped",
@@ -3337,6 +3477,7 @@ mod tests {
             state.arch.as_ref(),
             process_wait,
             &state.irq,
+            state.irq_controller,
             &crate::devres::NULL_SHARED_MEM_FACILITY,
             None,
         );
@@ -3354,6 +3495,39 @@ mod tests {
         assert!(second.is_some());
         assert_ne!(first, second);
         assert_eq!(state.scheduler.live_task_count(), before + 2);
+    }
+
+    /// A PID 1 seam that returns started nothing, and says so before the
+    /// halt that follows.
+    #[test]
+    fn an_init_seam_that_returns_is_recorded_as_a_failed_spawn() {
+        struct Returns;
+        impl InitSpawn for Returns {
+            fn spawn_init(&self, _ctx: &'static (dyn InitSpawnCtx + Sync)) {}
+        }
+        let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let boot = bootinfo_with(log_sink, audit_sink, make_memory_map());
+        let (state, process_wait) = run_phases(boot, log_sink, audit_sink).expect("phases succeed");
+        let ctx: &'static (dyn InitSpawnCtx + Sync) = Box::leak(Box::new(KernelInitSpawner::new(
+            state.frame_allocator,
+            audit_sink,
+            &state.scheduler,
+            &state.caps,
+            &state.peer_watch,
+            &state.aspaces,
+            state.arch.as_ref(),
+            process_wait,
+            &state.irq,
+            state.irq_controller,
+            &crate::devres::NULL_SHARED_MEM_FACILITY,
+            None,
+        )));
+        audit_sink.clear();
+        start_init(&Returns, ctx, audit_sink);
+        assert!(audit_sink.snapshot().iter().any(|event| {
+            event.id == AuditEvent::ProcessSpawnFailed.id() && event.level == Level::Error
+        }));
     }
 
     #[test]
@@ -3612,6 +3786,7 @@ mod tests {
             state.arch.as_ref(),
             process_wait,
             &state.irq,
+            state.irq_controller,
             &crate::devres::NULL_SHARED_MEM_FACILITY,
             None,
         );
@@ -3667,6 +3842,7 @@ mod tests {
             state.arch.as_ref(),
             process_wait,
             &state.irq,
+            state.irq_controller,
             &crate::devres::NULL_SHARED_MEM_FACILITY,
             None,
         );
@@ -3744,6 +3920,7 @@ mod tests {
             state.arch.as_ref(),
             process_wait,
             &state.irq,
+            state.irq_controller,
             &crate::devres::NULL_SHARED_MEM_FACILITY,
             None,
         );
@@ -3807,6 +3984,7 @@ mod tests {
             state.arch.as_ref(),
             process_wait,
             &state.irq,
+            state.irq_controller,
             &crate::devres::NULL_SHARED_MEM_FACILITY,
             None,
         );
@@ -3853,6 +4031,7 @@ mod tests {
             state.arch.as_ref(),
             process_wait,
             &state.irq,
+            state.irq_controller,
             &crate::devres::NULL_SHARED_MEM_FACILITY,
             None,
         );
@@ -3925,6 +4104,7 @@ mod tests {
             state.arch.as_ref(),
             process_wait,
             &state.irq,
+            state.irq_controller,
             &crate::devres::NULL_SHARED_MEM_FACILITY,
             None,
         );
@@ -4251,5 +4431,92 @@ mod tests {
         assert_eq!(syscall_started, 1);
         assert_eq!(syscall_ready, 0);
         assert_eq!(ipc_started, 0);
+    }
+
+    /// A tree that exists but cannot be read.
+    struct Unreadable;
+
+    impl crate::hwtree::HwNodeLiveness for Unreadable {
+        fn is_live(&self, _node_id: u32) -> bool {
+            false
+        }
+    }
+
+    impl crate::hwtree::HwTreeSource for Unreadable {
+        fn generation(&self) -> Result<u64, tairix_abi::Errno> {
+            Err(tairix_abi::Errno::Busy)
+        }
+        fn snapshot(&self) -> Result<alloc::vec::Vec<u8>, tairix_abi::Errno> {
+            Err(tairix_abi::Errno::Busy)
+        }
+        fn publish(&self, _: u32, _: tairix_abi::HwNode) -> Result<u32, tairix_abi::Errno> {
+            Err(tairix_abi::Errno::Busy)
+        }
+        fn remove(&self, _: u32, _: u32) -> Result<alloc::vec::Vec<u32>, tairix_abi::Errno> {
+            Err(tairix_abi::Errno::Busy)
+        }
+        fn node_endpoints(
+            &self,
+            _: u32,
+            _: u32,
+        ) -> Result<alloc::vec::Vec<u64>, tairix_abi::Errno> {
+            Err(tairix_abi::Errno::Busy)
+        }
+        fn set_health(
+            &self,
+            _: u32,
+            _: tairix_abi::blkio::FaultDomainState,
+        ) -> Result<(), tairix_abi::Errno> {
+            Err(tairix_abi::Errno::Busy)
+        }
+        fn node(&self, _: u32) -> Result<Option<tairix_abi::HwNode>, tairix_abi::Errno> {
+            Err(tairix_abi::Errno::Busy)
+        }
+    }
+
+    /// A tree that cannot be read fails the boot, since translating nothing
+    /// would leave every device it names untranslated; one no store backs
+    /// names nothing to translate.
+    #[test]
+    fn an_unreadable_tree_fails_the_boot_and_an_absent_one_translates_nothing() {
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let memory: &'static BootMemoryMap = Box::leak(Box::new(make_memory_map()));
+        let frames: &'static FrameAllocator =
+            Box::leak(Box::new(FrameAllocator::new(memory).unwrap()));
+        let audit: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let unreadable: &'static Unreadable = &Unreadable;
+        assert!(matches!(
+            build_dma_translation(&arch, frames, memory, unreadable, audit, None),
+            Err(InitError::DmaTranslation)
+        ));
+        assert_eq!(InitError::DmaTranslation.cause(), "dma_translation_unbuilt");
+        let absent: &'static crate::hwtree::NullHwTreeSource = &crate::hwtree::NullHwTreeSource;
+        assert!(matches!(
+            build_dma_translation(&arch, frames, memory, absent, audit, None),
+            Ok(None)
+        ));
+    }
+
+    /// A register window over RAM the allocator hands out is never taken as
+    /// a unit's, while one over firmware-reserved space may be.
+    #[test]
+    fn only_a_window_over_usable_ram_is_refused() {
+        let mut memory = BootMemoryMap::new();
+        memory.push(MemoryRegion {
+            start: PhysAddr::new(0x8000_0000),
+            length: 0x4000_0000,
+            kind: RegionKind::Usable,
+        });
+        memory.push(MemoryRegion {
+            start: PhysAddr::new(0xFED0_0000),
+            length: 0x10_0000,
+            kind: RegionKind::Reserved,
+        });
+        assert!(overlaps_usable(&memory, 0x8000_1000..0x8000_2000));
+        assert!(overlaps_usable(&memory, 0x7FFF_F000..0x8000_1000));
+        assert!(overlaps_usable(&memory, 0xBFFF_F000..0xC000_1000));
+        assert!(!overlaps_usable(&memory, 0xC000_0000..0xC000_1000));
+        assert!(!overlaps_usable(&memory, 0x7FFF_F000..0x8000_0000));
+        assert!(!overlaps_usable(&memory, 0xFED0_0000..0xFED0_1000));
     }
 }

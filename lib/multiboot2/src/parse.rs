@@ -308,8 +308,11 @@ pub enum Mb2MemoryKind {
     AcpiNvs,
     /// `type == 5` — bad memory.
     Defective,
-    /// Anything else — reserved.
+    /// `type == 2` — reserved, which may hold device registers.
     Reserved,
+    /// Any other type, kept as given: persistent or otherwise special
+    /// memory the specification adds, never device registers.
+    Other(u32),
 }
 
 impl Mb2MemoryKind {
@@ -318,17 +321,16 @@ impl Mb2MemoryKind {
     pub fn from_raw(v: u32) -> Self {
         match v {
             1 => Self::Available,
+            2 => Self::Reserved,
             3 => Self::AcpiReclaimable,
             4 => Self::AcpiNvs,
             5 => Self::Defective,
-            _ => Self::Reserved,
+            other => Self::Other(other),
         }
     }
 
-    /// The canonical raw Multiboot2 `type` field for this kind. Inverse of
-    /// [`Mb2MemoryKind::from_raw`] for the canonical encodings (the builder
-    /// emits these values; [`Mb2MemoryKind::Reserved`] uses `2`, the
-    /// spec's generic "reserved" code).
+    /// The raw Multiboot2 `type` field for this kind, the inverse of
+    /// [`Mb2MemoryKind::from_raw`].
     #[must_use]
     pub fn to_raw(self) -> u32 {
         match self {
@@ -337,6 +339,7 @@ impl Mb2MemoryKind {
             Self::AcpiReclaimable => 3,
             Self::AcpiNvs => 4,
             Self::Defective => 5,
+            Self::Other(raw) => raw,
         }
     }
 }

@@ -41,8 +41,7 @@ use tairix_arch_aarch64::fdt::gic_device_intid;
 use tairix_arch_aarch64::firmware::find_mailbox;
 use tairix_arch_aarch64::kernel_arch::{busy_delay_us, clean_invalidate_dcache_range};
 use tairix_arch_aarch64::paging::{
-    configured_identity_gigapages, identity_device_covers, AddressSpace as ArchAddressSpace,
-    PageTablePool,
+    configured_identity_gigapages, AddressSpace as ArchAddressSpace, PageTablePool,
 };
 use tairix_arch_aarch64::platform::EMMC2_COMPATIBLE;
 use tairix_arch_aarch64::sd_supply::{find_sd_supplies, FirmwareSdSupply, SdSupplies};
@@ -281,7 +280,7 @@ impl CompletionWait for Emmc2Completion {
         // The engine re-reads `INTERRUPT` on a fire, so a spurious wake is
         // harmless; every non-fire outcome (timeout, released binding,
         // aborted wait) fails the transfer closed.
-        match self.waiter.park_wait(UNLOCK_TASK, EMMC2_SILENCE_BUDGET_NS) {
+        match self.waiter.park_wait(EMMC2_SILENCE_BUDGET_NS) {
             WaitOutcome::Ready => CompletionSignal::Fired,
             WaitOutcome::TimedOut
             | WaitOutcome::NotFound
@@ -652,7 +651,7 @@ fn virtio_blk_unlock<'a>(
     let table: &'static IrqTable =
         published_irq_table().ok_or("root-unlock: no published IRQ table")?;
     let bind = table
-        .bind(intid, UNLOCK_TASK)
+        .bind_exclusive(intid, UNLOCK_TASK)
         .map_err(|_| "root-unlock: bind device SPI")?;
     let handle: IrqHandle = bind.handle;
     // SAFETY: the GIC distributor + CPU interface are up (the kernel-core
@@ -682,7 +681,7 @@ fn virtio_blk_unlock<'a>(
         alloc::boxed::Box::leak(alloc::boxed::Box::new(IrqParkWaiter::new(
             table,
             handle,
-            intid,
+            UNLOCK_TASK,
             &COMPOSITE_IRQ_CONTROLLER,
             Some(wfi_fallback_park),
         )));
@@ -764,7 +763,7 @@ fn emmc2_unlock<'a>(
     let table: &'static IrqTable =
         published_irq_table().ok_or("root-unlock: no published IRQ table")?;
     let bind = table
-        .bind(intid, UNLOCK_TASK)
+        .bind_exclusive(intid, UNLOCK_TASK)
         .map_err(|_| "root-unlock: bind emmc2 SPI")?;
     let handle: IrqHandle = bind.handle;
     // SAFETY: the GIC distributor + CPU interface are up (the kernel-core
@@ -781,7 +780,7 @@ fn emmc2_unlock<'a>(
         waiter: IrqParkWaiter::new(
             table,
             handle,
-            intid,
+            UNLOCK_TASK,
             &COMPOSITE_IRQ_CONTROLLER,
             Some(wfi_fallback_park),
         ),
@@ -1299,26 +1298,18 @@ impl<P: PageTable, S: Sink + Sync + ?Sized> DmaHost for Emmc2DmaHost<'_, P, S> {
     fn device_quiesced(&self) {}
 }
 
-/// The physical map register windows are reached through: the boot identity
-/// window's Device gigapages, where the board's discovered MMIO lives.
+/// The physical map register windows are reached through: the kernel's
+/// Device gigapages, where the board's discovered MMIO lives.
 ///
-/// The identity window is sparse — a Device leaf for each gigapage the
-/// board's MMIO occupies and Normal leaves only for what the kernel addresses
-/// physically — so it is no general physical map. RAM is reached through the
-/// kernel's direct map instead; a window that is not wholly inside a Device
-/// gigapage fails closed rather than faulting on an invalid slot or aliasing
-/// memory the direct map holds cacheable.
+/// Those are sparse, so this is no general physical map. RAM is reached
+/// through the kernel's direct map instead; a window that is not wholly
+/// inside a Device gigapage fails closed rather than faulting on an invalid
+/// slot or aliasing memory the direct map holds cacheable.
 struct DeviceWindows;
 
 impl PhysMap for DeviceWindows {
     fn translate(&self, phys: PhysAddr, len: usize) -> Option<core::ptr::NonNull<u8>> {
-        let start = phys.as_u64();
-        if !identity_device_covers(start, u64::try_from(len).ok()?) {
-            return None;
-        }
-        core::ptr::NonNull::new(core::ptr::with_exposed_provenance_mut(
-            usize::try_from(start).ok()?,
-        ))
+        crate::aarch64::boot::device_registers(phys.as_u64(), len)
     }
 
     /// Device memory is never cached, so there is no alias to clean.

@@ -383,7 +383,7 @@ pub trait Delay {
 pub fn init_sipi_sipi<M: LapicMmio, D: Delay>(
     lapic: &mut Lapic<M>,
     delay: &mut D,
-    target_apic_id: u8,
+    target_apic_id: u32,
     vector: u8,
 ) {
     lapic.send_init_deassert(target_apic_id);
@@ -396,25 +396,6 @@ pub fn init_sipi_sipi<M: LapicMmio, D: Delay>(
 }
 
 // --- Bare-metal helpers --------------------------------------------
-
-/// Read the BSP's own LAPIC ID from the LAPIC ID register. The BSP must
-/// have software-enabled its LAPIC and the MMIO frame must be
-/// identity-mapped (boot.s does both).
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
-#[must_use]
-pub fn bsp_lapic_id() -> u8 {
-    // SAFETY: the LAPIC ID register is architectural on every Intel/AMD
-    // CPU since the original Pentium; on QEMU it is the emulated default.
-    // The register block is reachable through the direct physical map
-    // under every root. A 32-bit volatile read has no side effects.
-    let id = unsafe {
-        core::ptr::read_volatile(
-            (crate::preempt::LAPIC_BASE_VIRT + crate::preempt::LAPIC_ID_OFFSET as u64)
-                as *const u32,
-        )
-    };
-    ((id >> 24) & 0xFF) as u8
-}
 
 // --- Linker-symbol bridge -------------------------------------------
 
@@ -705,17 +686,17 @@ impl Delay for PitDelay {
     }
 }
 
-/// Build an ephemeral [`Lapic`] over this CPU's LAPIC register block,
-/// reached through the direct physical map. The boot CPU must have
-/// software-enabled its LAPIC first.
+/// Run by each AP's trampoline before its entry, while nothing has reached
+/// its local APIC: put the APIC in the mode the boot CPU chose.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-fn bringup_lapic() -> Lapic<crate::apic::VolatileLapicMmio> {
-    // SAFETY: `LAPIC_BASE_VIRT` is the architectural LAPIC MMIO base on
-    // every Intel-architecture system QEMU emulates, reached through the
-    // direct physical map, which every root carries.
-    let mmio =
-        unsafe { crate::apic::VolatileLapicMmio::new(crate::preempt::LAPIC_BASE_VIRT as *mut u32) };
-    Lapic::new(mmio)
+#[no_mangle]
+extern "C" fn tairix_arch_x86_64_ap_apic_mode() {
+    if crate::apic::x2apic() {
+        // SAFETY: an AP starts at ring 0 with interrupts masked, before
+        // anything reaches its local APIC; the boot CPU chose x2APIC mode
+        // only where the CPU has it, as every CPU of one machine does.
+        unsafe { crate::apic::enter_x2apic() };
+    }
 }
 
 /// Start the application processor whose LAPIC id is `target_apic_id`
@@ -741,7 +722,7 @@ fn bringup_lapic() -> Lapic<crate::apic::VolatileLapicMmio> {
 /// must name a real, parked AP distinct from the caller, and `cpu` must be
 /// the dense id the rest of the kernel uses for it.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-pub unsafe fn start_secondary(target_apic_id: u8, cpu: CpuId) -> Result<(), StartCpuError> {
+pub unsafe fn start_secondary(target_apic_id: u32, cpu: CpuId) -> Result<(), StartCpuError> {
     // Range-check before any hardware action: the boot CPU (0) is
     // already running, and a dense id beyond the stack pool has no
     // reserved stack.
@@ -784,7 +765,7 @@ pub unsafe fn start_secondary(target_apic_id: u8, cpu: CpuId) -> Result<(), Star
     // Every slot byte must be visible to the AP before the SIPI.
     core::sync::atomic::fence(Ordering::Release);
 
-    let mut lapic = bringup_lapic();
+    let mut lapic = Lapic::new(crate::apic::LocalApic);
     let mut delay = PitDelay {
         pit: crate::apic_timer::PolledPit,
     };
@@ -815,7 +796,7 @@ mod tests {
 
     /// Host-side `LapicMmio` mock recording every write in order.
     struct RecordingLapic {
-        writes: Vec<(usize, u32)>,
+        writes: Vec<(u16, u32)>,
     }
     impl RecordingLapic {
         fn new() -> Self {
@@ -823,10 +804,10 @@ mod tests {
         }
     }
     impl LapicMmio for RecordingLapic {
-        fn read(&self, _off: usize) -> u32 {
+        fn read(&self, _off: u16) -> u32 {
             0
         }
-        fn write(&mut self, off: usize, value: u32) {
+        fn write(&mut self, off: u16, value: u32) {
             self.writes.push((off, value));
         }
     }

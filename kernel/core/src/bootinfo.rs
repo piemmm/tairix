@@ -517,6 +517,28 @@ pub trait KernelArch: SchedulerArch {
         None
     }
 
+    /// Route every interrupt source the port set up at boot: through the
+    /// translation units' remapping where `remapper` can take every one, for
+    /// a machine of `cpus` CPUs, else in the platform's compatibility format;
+    /// a source left unrouted is named to `log`.
+    ///
+    /// Called once, after the units translate and before any interrupt is
+    /// taken or any driver admitted, so no source is live while it changes.
+    ///
+    /// # Default
+    ///
+    /// [`crate::iommu::InterruptRouting::Native`]: a port with no sources a
+    /// unit remaps.
+    fn route_interrupts(
+        &self,
+        remapper: Option<&'static crate::iommu::Translation>,
+        cpus: u32,
+        log: &dyn Sink,
+    ) -> crate::iommu::InterruptRouting {
+        let _ = (remapper, cpus, log);
+        crate::iommu::InterruptRouting::Native
+    }
+
     /// The port's ownership of PCI configuration space, through which the
     /// kernel turns each function's bus mastering on and off as its owner
     /// begins and ends (`plans/IOMMU.md` IOM7).
@@ -528,6 +550,18 @@ pub trait KernelArch: SchedulerArch {
     /// function over.
     #[must_use]
     fn bus_mastering(&self) -> Option<&'static (dyn crate::iommu::BusMastering + 'static)> {
+        None
+    }
+
+    /// The PCI functions translation units are, through which a unit that
+    /// is itself a PCI function raises its fault interrupt.
+    ///
+    /// # Default
+    ///
+    /// [`None`]: a port owning no function's configuration space serves no
+    /// such unit's faults.
+    #[must_use]
+    fn unit_function(&self) -> Option<&'static dyn tairix_kernel_iommu_api::UnitFunction> {
         None
     }
 

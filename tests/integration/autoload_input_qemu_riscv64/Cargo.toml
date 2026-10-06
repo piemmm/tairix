@@ -31,6 +31,12 @@ workspace = true
 name = "tairix-test-autoload-input-qemu-riscv64"
 path = "src/main.rs"
 
+# The same vertical with its input devices as PCI functions sharing one INTx
+# line (src/pci.rs).
+[[bin]]
+name = "tairix-test-autoload-input-pci-qemu-riscv64"
+path = "src/pci.rs"
+
 [target.'cfg(all(target_arch = "riscv64", target_os = "none"))'.dependencies]
 tairix-arch-riscv64 = { path = "../../../kernel/arch/riscv64", version = "=0.0.0" }
 # The production riscv64 boot pipeline (with the unlock/autoload seam) lives in

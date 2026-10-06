@@ -8,67 +8,76 @@
 //! naturally-aligned access at the computed offset
 //! ([`ConfigAddress::ecam_offset`]).
 //!
-//! This is the path the Raspberry Pi 4 (BCM2711) root complex — and
-//! every other `PCIe` host bridge that has no I/O-port space — uses to
-//! reach its devices (the VL805 USB host controller, for the Pi).
-//! The driver never synthesises a pointer: the configuration region
-//! is reached through a kernel-mapped [`RegisterWindow`] obtained
-//! from the MMIO-map facility after a
-//! [`CapabilityId::MMIO_MAP`](tairix_abi::CapabilityId::MMIO_MAP)
-//! check, exactly like a device's BAR window. The
-//! caller passes that window to [`crate::mechanism_ecam`]; the
-//! window's bounds checking turns any access beyond the mapped region
-//! into the PCI "no device" sentinel, so a walk past the mapped buses
-//! fails closed rather than reading out of bounds.
+//! A segment's ECAM region covers the buses firmware assigned it, from its
+//! first; the region is reached through a kernel-mapped [`RegisterWindow`]
+//! the caller passes to [`crate::mechanism_ecam`] with that bus range. A bus
+//! outside the range, or an offset past the window, reads as the PCI "no
+//! device" sentinel and writes nothing, so a walk fails closed rather than
+//! reaching past the mapping.
+
+use alloc::vec::Vec;
+use core::ops::RangeInclusive;
 
 use tairix_abi::RegisterWindow;
 
 use crate::config::{ConfigAddress, ConfigSpace};
 
-/// A [`ConfigSpace`] backed by a memory-mapped ECAM region.
-///
-/// Holds the kernel-mapped [`RegisterWindow`] over the host bridge's
-/// configuration region. The window's base is the physical base of
-/// `(bus 0, device 0, function 0, register 0)`; every access is the
-/// flat [`ConfigAddress::ecam_offset`] within it.
-pub struct EcamConfigSpace {
+/// One configuration region of a segment: the buses it covers, mapped from
+/// the first one's block.
+pub struct EcamRegion {
     window: RegisterWindow,
+    buses: RangeInclusive<u8>,
+}
+
+impl EcamRegion {
+    /// The region of `buses`, whose first bus's block starts `window`.
+    #[must_use]
+    pub const fn new(window: RegisterWindow, buses: RangeInclusive<u8>) -> Self {
+        Self { window, buses }
+    }
+}
+
+/// A [`ConfigSpace`] backed by a segment's memory-mapped ECAM regions.
+pub struct EcamConfigSpace {
+    regions: Vec<EcamRegion>,
 }
 
 impl EcamConfigSpace {
-    /// Construct an [`EcamConfigSpace`] over the configuration-region
-    /// `window`.
-    ///
-    /// The window must cover the configuration region the caller
-    /// intends to enumerate; accesses beyond its length are reported
-    /// as "no device" (all-ones) rather than reaching past the
-    /// mapping.
+    /// The segment `regions` cover; a bus no region covers is no bus of the
+    /// segment's.
     #[must_use]
-    pub const fn new(window: RegisterWindow) -> Self {
-        Self { window }
+    pub const fn new(regions: Vec<EcamRegion>) -> Self {
+        Self { regions }
+    }
+
+    /// The region `addr` lies in, and where in its window.
+    fn locate(&self, addr: ConfigAddress) -> Option<(&RegisterWindow, usize)> {
+        let region = self
+            .regions
+            .iter()
+            .find(|region| region.buses.contains(&addr.bus))?;
+        let offset = ConfigAddress {
+            bus: addr.bus - region.buses.start(),
+            ..addr
+        }
+        .ecam_offset()?;
+        Some((&region.window, offset))
     }
 }
 
 impl ConfigSpace for EcamConfigSpace {
     fn read32(&self, addr: ConfigAddress) -> u32 {
-        // Out-of-range fields (a malformed `ConfigAddress`) and any
-        // offset beyond the mapped region both resolve to the PCI
-        // Local Bus 3.0 §6.1 "no function present" sentinel, so the
-        // enumeration walk treats them as an empty slot and fails
-        // closed.
-        let Some(offset) = addr.ecam_offset() else {
-            return 0xFFFF_FFFF;
-        };
-        self.window.read_u32(offset).unwrap_or(0xFFFF_FFFF)
+        // An address outside every region reads as the PCI Local Bus 3.0 §6.1
+        // "no function present" sentinel.
+        self.locate(addr)
+            .and_then(|(window, offset)| window.read_u32(offset).ok())
+            .unwrap_or(0xFFFF_FFFF)
     }
 
     fn write32(&self, addr: ConfigAddress, value: u32) {
-        // A malformed address or an offset beyond the mapped region is
-        // dropped: there is no register there to write.
-        let Some(offset) = addr.ecam_offset() else {
-            return;
-        };
-        let _ = self.window.write_u32(offset, value);
+        if let Some((window, offset)) = self.locate(addr) {
+            let _ = window.write_u32(offset, value);
+        }
     }
 }
 
@@ -109,14 +118,14 @@ mod tests {
         };
         let off = addr.ecam_offset().expect("in range");
         backing[off / 4] = 0x2930_8086;
-        let cs = EcamConfigSpace::new(window);
+        let cs = EcamConfigSpace::new(vec![EcamRegion::new(window, 0..=0)]);
         assert_eq!(cs.read32(addr), 0x2930_8086);
     }
 
     #[test]
     fn write_then_read_round_trips() {
         let (_backing, window) = ecam_region(0x10_0000 / 4);
-        let cs = EcamConfigSpace::new(window);
+        let cs = EcamConfigSpace::new(vec![EcamRegion::new(window, 0..=0)]);
         let addr = ConfigAddress {
             bus: 0,
             device: 5,
@@ -131,7 +140,7 @@ mod tests {
     fn access_beyond_window_reads_no_device_sentinel() {
         // A region covering only bus 0; bus 1 lies past its end.
         let (_backing, window) = ecam_region(0x10_0000 / 4);
-        let cs = EcamConfigSpace::new(window);
+        let cs = EcamConfigSpace::new(vec![EcamRegion::new(window, 0..=0)]);
         let bus1 = ConfigAddress {
             bus: 1,
             device: 0,
@@ -144,10 +153,63 @@ mod tests {
         assert_eq!(cs.read32(bus1), 0xFFFF_FFFF);
     }
 
+    /// A segment whose buses start above 0 is mapped from its first bus, so
+    /// that bus's block opens the window and a bus below it is not one of
+    /// the region's.
+    #[test]
+    fn a_region_starting_above_bus_zero_is_reached_from_its_first_bus() {
+        let (mut backing, window) = ecam_region(2 * 0x10_0000 / 4);
+        backing[0] = 0x1111_8086;
+        backing[0x10_0000 / 4] = 0x2222_8086;
+        let cs = EcamConfigSpace::new(vec![EcamRegion::new(window, 0x80..=0x81)]);
+        let at = |bus| ConfigAddress {
+            bus,
+            device: 0,
+            function: 0,
+            register: 0,
+        };
+        assert_eq!(cs.read32(at(0x80)), 0x1111_8086);
+        assert_eq!(cs.read32(at(0x81)), 0x2222_8086);
+        assert_eq!(
+            cs.read32(at(0x00)),
+            0xFFFF_FFFF,
+            "bus 0 is not this region's"
+        );
+        assert_eq!(cs.read32(at(0x7F)), 0xFFFF_FFFF);
+        assert_eq!(cs.read32(at(0x82)), 0xFFFF_FFFF);
+        cs.write32(at(0x00), 0);
+        assert_eq!(
+            backing[0], 0x1111_8086,
+            "a write to another bus lands nowhere"
+        );
+    }
+
+    /// A segment split across two regions reaches each bus through its own.
+    #[test]
+    fn a_segment_split_across_regions_reaches_each_bus_through_its_own() {
+        let (mut low, low_window) = ecam_region(0x10_0000 / 4);
+        let (mut high, high_window) = ecam_region(0x10_0000 / 4);
+        low[0] = 0x1111_8086;
+        high[0] = 0x2222_8086;
+        let cs = EcamConfigSpace::new(vec![
+            EcamRegion::new(low_window, 0x00..=0x00),
+            EcamRegion::new(high_window, 0x40..=0x40),
+        ]);
+        let at = |bus| ConfigAddress {
+            bus,
+            device: 0,
+            function: 0,
+            register: 0,
+        };
+        assert_eq!(cs.read32(at(0x00)), 0x1111_8086);
+        assert_eq!(cs.read32(at(0x40)), 0x2222_8086);
+        assert_eq!(cs.read32(at(0x20)), 0xFFFF_FFFF, "between the regions");
+    }
+
     #[test]
     fn out_of_range_address_reads_no_device_sentinel() {
         let (_backing, window) = ecam_region(0x10_0000 / 4);
-        let cs = EcamConfigSpace::new(window);
+        let cs = EcamConfigSpace::new(vec![EcamRegion::new(window, 0..=0)]);
         let bad = ConfigAddress {
             bus: 0,
             device: 99,

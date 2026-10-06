@@ -1,6 +1,6 @@
 [package]
 name = "tairix-test-dma-fault-qemu-x86-64"
-description = "QEMU integration test (plans/IOMMU.md MI0/IOM6): boot the production x86_64 tairix-kernel pipeline on q35 behind an intel-iommu with a misbehaving in-kernel virtio-blk-PCI driver. The driver carves its rings through its node's translation domain (so a valid read confirms translation), then posts one request whose device-writable descriptor points at an unmapped device address; the VT-d unit refuses the write, records the fault, and raises its fault-event MSI, which the kernel's per-unit fault service drains into AuditEvent::DmaTranslationFault against the device's node and stream. A canary page the driver owns stays zero, proving the refused write landed nowhere — the live MSI-delivered fault path the host register model cannot exercise. PASS via QEMU isa-debug-exit once, after AuditEvent::DmaTranslationUnit outcome=translating, a write DmaTranslationFault attributed to a node arrives and the driver reports its canary clean."
+description = "QEMU integration test (plans/IOMMU.md MI0, MI2, IOM6): boot the production x86_64 pipeline on q35 behind an intel-iommu, or in the AMD binary an amd-iommu, with a misbehaving in-kernel virtio-blk-pci driver that points a device write at an unmapped address. PASS via isa-debug-exit once, after the unit audited translating, a node-attributed DmaTranslationFault arrives, the driver reports its canary page untouched, and its function stops mastering."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -20,6 +20,10 @@ workspace = true
 name = "tairix-test-dma-fault-qemu-x86-64"
 path = "src/main.rs"
 
+[[bin]]
+name = "tairix-test-dma-fault-amd-qemu-x86-64"
+path = "src/amd.rs"
+
 [target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
 tairix-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
 tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
@@ -35,6 +39,7 @@ tairix-pci = { path = "../../../lib/pci", version = "=0.0.0" }
 tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+tairix-itest-witness = { path = "../witness", version = "=0.0.0" }
 
 [build-dependencies]
 tairix-itest-harness = { path = "../harness", version = "=0.0.0" }

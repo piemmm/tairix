@@ -696,17 +696,15 @@ improvement, not test scaffolding):
   `virtio_kbd` delivering an injected keypress, PASS on
   `AuditEvent::InputDelivered kind=key`) and `netstack_autoload_qemu_x86_64`
   (the two-process netstack path, PASS on the three log witnesses + the peer
-  echo verdict). The live exercise surfaced + fixed the one gap: **the x86_64
-  enumerator now routes each interrupt-driven virtio-PCI function's MSI-X**
-  (`boot_x86_64::probe_virtio_pci` MSI-allocates a kernel vector, programs the
-  function's MSI-X table entry 0 via `MsixBus::route_msix` through a
-  `CAP_MMIO_MAP` `KernelMmioMapper`, and grants the driver the routed MSI line
-  instead of the legacy INTx GSI — the user-space driver only `enable_msix(0)`
-  + `irq_bind`s the line, never touching PCI config or the MSI-X BAR, so the
-  kernel owns interrupt routing like Linux). To make `msi::allocate` available
-  at probe time, `seed_hardware_tree` was reordered to run after
-  `discover_and_program_io_apics` (`install_msi_lines`);
-  `root_unlock_admission_qemu_x86_64` re-confirmed no regression. The QEMU
+  echo verdict). **The x86_64 enumerator routes each interrupt-driven
+  virtio-PCI function's MSI-X:** `boot_x86_64::observe_interrupt_driven`
+  allocates a kernel vector, programs the function's MSI-X table entry 0 through
+  `MsixBus::route_msix`, which interrupt remapping takes over, and grants the
+  driver the routed MSI line, naming the entry, instead of the INTx GSI. The
+  driver signals through that entry and `irq_bind`s the line, never touching
+  PCI configuration or the MSI-X BAR, so the kernel owns interrupt routing.
+  `seed_hardware_tree` runs after `discover_and_program_io_apics`
+  (`install_msi_lines`), so `msi::allocate` is available at probe time. The QEMU
   harness (`tools/qemu/src/x86_64.rs`) gained `virtio-keyboard-pci` /
   `virtio-mouse-pci` attachment (the PCI form of the aarch64
   `virtio-keyboard-device`). Foundations that were in place: the synthetic node-id bases the probes emit
@@ -839,11 +837,11 @@ improvement, not test scaffolding):
   buses). `hwdiscovery::observe_virtio_pci_network_devices` is the ECAM
   analogue of the MMIO probe (node-id `region(4)`); `boot_x86_64::seed_hardware_tree`
   builds the `tairix_pci::mechanism_ecam` bus over the identity-mapped ECAM
-  window (`acpi::locate_mcfg`+`mcfg_first_ecam`, over one signature-parameterised
+  windows (`acpi::locate_mcfg`+`Mcfg::parse`, over one signature-parameterised
   (X|R)SDT walk shared with `locate_madt`) and runs it, resolving each
   function's IRQ from its PCI Interrupt-Line register. The `virtio_net_driver`
-  process is grant-shape-keyed (four role-tagged windows ⇒ `PciTransport` +
-  `enable_msix`, one window ⇒ `MmioTransport`) over one shared generic serve
+  process is grant-shape-keyed (four role-tagged windows ⇒ `PciTransport::map`,
+  one window ⇒ `MmioTransport`) over one shared generic serve
   path. **Third x86_64 foundation landed: the virtio-input-PCI probe + the
   `virtio_kbd` driver's PCI path** (the input sibling of the net foundation,
   host-gate-green): `hwdiscovery::observe_virtio_pci_input_devices` (over the
@@ -851,10 +849,10 @@ improvement, not test scaffolding):
   each modern virtio-input PCI function as an `Input` node keyed by the shared
   `HwMatchKey::virtio(VIRTIO_INPUT_DEVICE_ID)` carrying the four role-tagged
   windows + `dma(0,0)` + the discovered PCI Interrupt-Line GSI;
-  `boot_x86_64::probe_virtio_pci` runs it beside the net + block probes over
+  `boot_x86_64::seed_pci` runs it beside the net + block probes over
   either config-access mechanism; and `drivers/input/virtio_kbd` gained the
-  same grant-shape-keyed transport (`virtio_pci_windows` ⇒ `PciTransport` +
-  `enable_msix`, else `sole_register_window` ⇒ `MmioTransport`) over one
+  same grant-shape-keyed transport (`virtio_pci_windows` ⇒ `PciTransport::map`,
+  else `sole_register_window` ⇒ `MmioTransport`) over one
   generic `run<T: Transport>` bring-up/pump, so one signed input bundle binds
   on both buses. Both verticals (`autoload_input_qemu_x86_64` and the
   two-process `netstack_autoload_qemu_x86_64`) now live-exercise these

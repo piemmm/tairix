@@ -11,7 +11,7 @@
 use alloc::vec::Vec;
 
 use tairix_abi::driver::bus::BusDevice;
-use tairix_abi::driver::pci::{function_of, requester_id, Quiesced};
+use tairix_abi::driver::pci::{config_address, function_of, requester_id, Quiesced};
 use tairix_abi::DriverError;
 
 /// Buses one PCI segment holds: every value of a bus number.
@@ -34,6 +34,10 @@ pub enum Header {
         secondary: u8,
         /// The last bus below the bridge.
         subordinate: u8,
+        /// The port forwards to every function number of the one device
+        /// below it, so the whole secondary bus is that device's (ARI
+        /// Forwarding Enable, PCI Express Base 5.0 §7.5.3.16).
+        ari: bool,
     },
 }
 
@@ -120,13 +124,72 @@ impl Acs {
     }
 }
 
-/// Whether a walk turns on the isolating ACS controls each function offers.
+/// A function's Address Translation Services capability (PCI Express Base 5.0
+/// §10.5.1): with it on, the function asks the unit for translations and
+/// presents the addresses it cached as already translated.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum AcsPolicy {
-    /// Turn them on, then read back what the hardware kept: what a segment
-    /// behind a translation unit wants, so its groups are as fine as the
-    /// hardware allows.
-    Enable,
+pub struct Ats {
+    /// Translation requests are on.
+    pub enabled: bool,
+}
+
+/// A function's Page Request Interface (PCI Express Base 5.0 §10.5.2): with it
+/// on, the function asks for pages to be made present.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Pri {
+    /// Page requests are on.
+    pub enabled: bool,
+}
+
+/// A function's PASID capability (PCI Express Base 5.0 §7.8.8): with it on, the
+/// function tags its requests with a process address space id.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Pasid {
+    /// Tagged requests are on.
+    pub enabled: bool,
+    /// Bits of PASID the function can carry.
+    pub width: u8,
+}
+
+/// A physical function's SR-IOV capability (PCI Express Base 5.0 §9.3.3): its
+/// virtual functions answer no configuration scan of their own, yet master
+/// DMA under requester ids of their own.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SrIov {
+    /// The virtual functions exist: VF Enable is on.
+    pub enabled: bool,
+    /// How many there are (`NumVFs`).
+    pub count: u16,
+    /// The first one's requester id, less the physical function's.
+    pub offset: u16,
+    /// The distance between consecutive ones' requester ids.
+    pub stride: u16,
+}
+
+impl SrIov {
+    /// The requester ids the virtual functions of the physical function
+    /// `physical` master DMA under; none while they are disabled. An id past
+    /// the 16-bit space is never one a function carries, so a capability that
+    /// numbers one ends there.
+    pub fn requesters(self, physical: u16) -> impl Iterator<Item = u16> {
+        let first = u32::from(physical) + u32::from(self.offset);
+        let count = if self.enabled { self.count } else { 0 };
+        (0..u32::from(count))
+            .map(move |n| first + n * u32::from(self.stride))
+            .map_while(|id| u16::try_from(id).ok())
+    }
+}
+
+/// What a walk does to the controls deciding what each function's DMA can
+/// reach and be told apart from.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Confinement {
+    /// What a segment behind a translation unit wants: every isolating ACS
+    /// control turned on, so its groups are as fine as the hardware allows,
+    /// and every function's address translation services and virtual
+    /// functions turned off, since no owner is handed either; each read back
+    /// for what the hardware kept.
+    Confine,
     /// Read them as firmware left them.
     Leave,
 }
@@ -149,8 +212,20 @@ pub struct Function {
     /// Its PCI Express device or port type; [`None`] for a conventional PCI
     /// function.
     pub express: Option<PortType>,
+    /// A bridge below which nothing is trusted: hardware can arrive there
+    /// after boot (its slot is hot-plug capable), or the platform describes
+    /// it as external-facing.
+    pub external_facing: bool,
     /// Its ACS registers, where it has the capability.
     pub acs: Option<Acs>,
+    /// Its address translation services, where it has the capability.
+    pub ats: Option<Ats>,
+    /// Its page request interface, where it has the capability.
+    pub pri: Option<Pri>,
+    /// Its PASID capability, where it has one.
+    pub pasid: Option<Pasid>,
+    /// Its SR-IOV capability, where it is a physical function.
+    pub sriov: Option<SrIov>,
 }
 
 impl Function {
@@ -199,6 +274,7 @@ impl Function {
             Header::Bridge {
                 secondary,
                 subordinate,
+                ..
             } if secondary != 0 => Some((secondary, subordinate)),
             _ => None,
         }
@@ -228,6 +304,14 @@ impl Function {
             | None => false,
         }
     }
+}
+
+/// A function below an external-facing port ([`Topology::untrusted`]).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Untrusted {
+    /// Every external-facing port above it validates requester ids and
+    /// isolates: its DMA can be confined to its own streams.
+    pub confinable: bool,
 }
 
 /// A requester id the fabric tags a function's DMA with besides its own.
@@ -314,6 +398,24 @@ impl Topology {
             .ok()
     }
 
+    /// The slot on the root bus, and the pin, that INTx pin `pin` (1 for
+    /// INTA) of the function at `index` reaches the host as: each bridge on
+    /// the way swizzles it by the device it was raised on (PCI-to-PCI Bridge
+    /// Architecture 1.2 §9.1). [`None`] for a pin outside INTA to INTD.
+    #[must_use]
+    pub fn intx_at_root(&self, index: usize, pin: u8) -> Option<(u8, u8)> {
+        if !(1..=4).contains(&pin) {
+            return None;
+        }
+        let (mut bus, mut device, _) = function_of(self.functions.get(index)?.address);
+        let mut pin = pin;
+        while let Some(bridge) = self.above(bus) {
+            pin = (pin - 1 + device) % 4 + 1;
+            (bus, device, _) = function_of(self.functions.get(bridge)?.address);
+        }
+        Some((device, pin))
+    }
+
     /// The requester ids the bridges above the function at `index` tag its
     /// DMA with, nearest first. A bridge to conventional PCI tags it with its
     /// secondary bus and function `00.0`; a conventional bridge, or one from
@@ -343,6 +445,34 @@ impl Topology {
         self.groups[index]
     }
 
+    /// Whether the function at `index` sits below an external-facing port,
+    /// and if so whether every such port above it validates the requester id
+    /// of what it forwards up and isolates it ([`Acs::isolates`]), so a
+    /// device there can be told apart from every other: [`None`] for a
+    /// trusted function.
+    ///
+    /// # Panics
+    ///
+    /// Never for an `index` below `self.functions().len()`.
+    #[must_use]
+    pub fn untrusted(&self, index: usize) -> Option<Untrusted> {
+        let mut found = None;
+        let mut bus = self.functions[index].bus();
+        while let Some(bridge) = self.above(bus) {
+            let port = &self.functions[bridge];
+            if port.external_facing {
+                let validates = port.acs.is_some_and(|acs| {
+                    acs.capable & acs.enabled & Acs::SOURCE_VALIDATION != 0 && acs.isolates()
+                });
+                found = Some(Untrusted {
+                    confinable: validates && found.is_none_or(|below: Untrusted| below.confinable),
+                });
+            }
+            bus = port.bus();
+        }
+        found
+    }
+
     /// The bridge forwarding to `bus`, if it is not a root bus.
     fn above(&self, bus: u8) -> Option<usize> {
         self.parents[usize::from(bus)]
@@ -355,13 +485,20 @@ impl Topology {
     /// siblings that lack it too. Then, beyond Linux, it joins every function
     /// below an open bus above it ([`Self::open_buses`]): a port that does not
     /// redirect its requests up lets them reach its siblings' windows, which
-    /// grouping by the path alone would miss.
+    /// grouping by the path alone would miss. A physical function joins every
+    /// function one of its virtual functions' requester ids names: the unit
+    /// cannot tell their DMA apart.
     fn isolation_groups(&self) -> Result<Vec<u16>, TopologyError> {
         let count = self.functions.len();
         let mut sets: Vec<usize> = Vec::new();
         sets.try_reserve_exact(count)
             .map_err(|_| TopologyError::Exhausted)?;
         sets.extend(0..count);
+        let mut slot_joined: Vec<bool> = Vec::new();
+        slot_joined
+            .try_reserve_exact(count)
+            .map_err(|_| TopologyError::Exhausted)?;
+        slot_joined.resize(count, false);
         let reach = self.reach()?;
         for index in 0..count {
             let on = reach[usize::from(self.functions[index].bus())];
@@ -371,7 +508,8 @@ impl Topology {
                 .unwrap_or(start);
             union(&mut sets, index, root);
             let device = &self.functions[root];
-            if device.multifunction && !device.isolates() {
+            if device.multifunction && !device.isolates() && !slot_joined[root] {
+                slot_joined[root] = true;
                 for sibling in self.slot(root) {
                     if !self.functions[sibling].isolates() {
                         union(&mut sets, root, sibling);
@@ -380,6 +518,13 @@ impl Topology {
             }
             if let Some(bridge) = on.open {
                 union(&mut sets, index, bridge);
+            }
+            if let Some(sriov) = self.functions[index].sriov {
+                for requester in sriov.requesters(self.functions[index].requester_id()) {
+                    if let Some(named) = self.index_of(config_address(requester)) {
+                        union(&mut sets, index, named);
+                    }
+                }
             }
         }
         let mut least: Vec<u16> = Vec::new();
@@ -458,14 +603,24 @@ impl Topology {
         })
     }
 
-    /// The indices of the other functions in the slot of the one at `index`.
+    /// The indices of the other functions in the device of the one at
+    /// `index`: its slot, or its whole bus where the port above forwards
+    /// every function number to one device.
     fn slot(&self, index: usize) -> impl Iterator<Item = usize> + '_ {
-        let slot = self.functions[index].address >> 11;
+        let function = &self.functions[index];
+        let ari = self.above(function.bus()).is_some_and(|bridge| {
+            matches!(
+                self.functions[bridge].header,
+                Header::Bridge { ari: true, .. }
+            )
+        });
+        let shift = if ari { 16 } else { 11 };
+        let slot = function.address >> shift;
         let first = self
             .functions
-            .partition_point(|function| function.address >> 11 < slot);
+            .partition_point(|function| function.address >> shift < slot);
         (first..self.functions.len())
-            .take_while(move |&other| self.functions[other].address >> 11 == slot)
+            .take_while(move |&other| self.functions[other].address >> shift == slot)
             .filter(move |&other| other != index)
     }
 }
@@ -489,13 +644,9 @@ struct Reach {
 /// The requester id `bridge` tags the DMA it forwards up with, if any.
 fn alias_of(bridge: &Function) -> Option<u16> {
     match (bridge.express, bridge.header) {
-        (
-            Some(PortType::PcieToPci),
-            Header::Bridge {
-                secondary,
-                subordinate: _,
-            },
-        ) => Some(u16::from(secondary) << 8),
+        (Some(PortType::PcieToPci), Header::Bridge { secondary, .. }) => {
+            Some(u16::from(secondary) << 8)
+        }
         (Some(PortType::PciToPcie) | None, _) => Some(bridge.requester_id()),
         (Some(_), _) => None,
     }
@@ -581,14 +732,19 @@ fn union(sets: &mut [usize], a: usize, b: usize) {
 
 /// A configuration-space owner's view of its whole hierarchy.
 pub trait PciTopology {
-    /// Walk every function once, turning on the isolating ACS controls each
-    /// offers where `acs` says so, and describe the hierarchy they form.
+    /// Walk every function once, applying `confinement` to each, and describe
+    /// the hierarchy they form. `external` names the bridges, by
+    /// configuration address, the platform describes as external-facing.
     ///
     /// # Errors
     ///
     /// [`DriverError::NoSpace`] when the walk cannot be held, and
     /// [`DriverError::DeviceFault`] for functions that form no hierarchy.
-    fn topology(&self, acs: AcsPolicy) -> Result<Topology, DriverError>;
+    fn topology(
+        &self,
+        confinement: Confinement,
+        external: &dyn Fn(u64) -> bool,
+    ) -> Result<Topology, DriverError>;
 
     /// Stop every function `stopped` names from mastering DMA, walking the
     /// bus flat: it needs no hierarchy and holds nothing, so it reaches every

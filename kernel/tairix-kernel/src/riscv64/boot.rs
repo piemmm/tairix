@@ -64,6 +64,7 @@
 
 use alloc::sync::Arc;
 
+use tairix_arch_api::fdtwalk::FdtPlatform;
 use tairix_arch_api::{CpuId, SchedulerArch, BOOT_CPU};
 use tairix_arch_riscv64::context_hal::ContextSwitchHal;
 use tairix_arch_riscv64::fdt::Fdt;
@@ -206,6 +207,22 @@ impl KernelArch for RiscvBinArch {
 
     fn context_switch(&self) -> Self::Cs {
         ContextSwitchHal::new()
+    }
+
+    /// The kernel owns the configuration space of every generic ECAM host
+    /// the boot probe took.
+    fn bus_mastering(
+        &self,
+    ) -> Option<&'static (dyn tairix_kernel_core::iommu::BusMastering + 'static)> {
+        crate::pci_host::bus_mastering()
+    }
+
+    fn unit_function(&self) -> Option<&'static dyn tairix_kernel_iommu_api::UnitFunction> {
+        crate::pci_host::unit_function()
+    }
+
+    fn kernel_mmio(&self, base: u64, len: usize) -> Option<core::ptr::NonNull<u8>> {
+        device_registers(base, len)
     }
 
     fn halt(&self) -> ! {
@@ -1386,7 +1403,61 @@ fn seed_hardware_tree(
         );
     }
 
+    // Every generic ECAM host the tree describes becomes the kernel's own.
+    if let Ok(fdt) = Fdt::new(dtb_bytes) {
+        let port = PciPort {
+            plic: <tairix_arch_riscv64::platform::Riscv64Fdt as FdtPlatform>::from_tree(&fdt),
+        };
+        crate::pci_fdt::seed(&fdt, &port, &mut sink, log_sink);
+    }
     sink.into_vec()
+}
+
+/// One past the highest physical address the identity window every root the
+/// kernel runs under maps: a register the kernel drives from a syscall must
+/// lie below it, not merely below the boot root's wider identity map.
+fn register_reach() -> u64 {
+    (crate::riscv64::spawn_producer::identity_gigapages() as u64) << 30
+}
+
+/// A kernel mapping of the device registers at `[base, base + len)`: the
+/// identity map's, whose memory type the platform's attributes decide. A
+/// window reaching past [`register_reach`] fails closed.
+pub(crate) fn device_registers(base: u64, len: usize) -> Option<core::ptr::NonNull<u8>> {
+    let end = base.checked_add(u64::try_from(len).ok()?)?;
+    if len == 0 || end > register_reach() {
+        return None;
+    }
+    core::ptr::NonNull::new(core::ptr::with_exposed_provenance_mut(
+        usize::try_from(base).ok()?,
+    ))
+}
+
+/// How a generic ECAM host reaches this port: its configuration region
+/// through the identity map, its INTx on the PLIC, decoded as the platform
+/// walk decodes every other device's.
+struct PciPort {
+    plic: tairix_arch_riscv64::platform::Riscv64Fdt,
+}
+
+impl crate::pci_fdt::FdtPort for PciPort {
+    fn registers(&self, base: u64, len: usize) -> Option<core::ptr::NonNull<u8>> {
+        device_registers(base, len)
+    }
+
+    fn reach(&self) -> u64 {
+        register_reach()
+    }
+
+    fn interrupt(&self, _fdt: &Fdt<'_>, spec: &tairix_fdt::pci::InterruptSpec) -> Option<u32> {
+        if self.plic.root_interrupt_controller() != Some(spec.parent) {
+            return None;
+        }
+        match spec.cells() {
+            &[source] => self.plic.line_of(source),
+            _ => None,
+        }
+    }
 }
 
 /// Round `value` up to the next multiple of `align` (a power of two).

@@ -1334,7 +1334,13 @@ optional `clock-frequency` counter-rate override, PI Stage P4).
 
 Hardware-tree emission is **generic** (PLAN.md Stage 4.HW): the walk
 emits a node for every device the tree describes, with no per-device
-list to grow. Every node carrying a `compatible` property becomes a
+list to grow, and only for those that may be used: a node whose `status`
+is disabled, reserved or failed is spliced out with its whole subtree, so
+no driver binds a device the secure world or another agent owns (a
+`disabled` CPU is quiescent, not absent, and is still started). A node
+with `#iommu-cells` is a translation unit, and a master's `iommus` its
+streams ([DMA translation](../security/iommu.md#topology-in-the-hardware-tree));
+the kernel drives an `arm,smmu-v3` unit itself (`kernel/iommu/smmuv3`). Every node carrying a `compatible` property becomes a
 hardware-tree node whose match keys are that property's strings in
 devicetree (most-specific-first) order — the keys `devmgr` resolves
 driver bind tables against (`AGENTS.md` §18.3); `/memory` nodes
@@ -1344,7 +1350,9 @@ through every ancestor bus's `ranges` into a CPU-physical address, and
 emitted as a capability-gated MMIO resource — an entry an ancestor
 cannot translate is dropped, never emitted untranslated. Each
 `interrupts` specifier (the three-cell GIC form both supported boards
-use) becomes a capability-gated (`CAP_IRQ_BIND`) IRQ resource — but only
+use) becomes a capability-gated (`CAP_IRQ_BIND`) IRQ resource, marked
+edge-triggered where the specifier's flags say so, so the line is
+configured that way before it is bound — but only
 on a node whose effective `interrupt-parent` is the GIC, which the port
 identifies by the phandle of the controller `gic::find_gic` locates. A
 node wired to a second-level controller keeps none of its specifiers: on
@@ -1417,6 +1425,22 @@ The walker is host-tested against the shared DTB fixtures (the `virt`-
 and Pi-shaped trees, a nested `ranges`-translating bus, the PCIe bridge
 with its `dma-ranges` and outbound `ranges`, fail-closed cases) and
 exercised by the port's `passes_arch_hal_conformance_suite`.
+
+
+### The generic PCI host
+
+The kernel takes the `virt` board's `pci-host-ecam-generic` host as it
+takes x86_64's ([Constructing the real-hardware
+bus](../drivers/bus.md#constructing-the-real-hardware-bus)). Its
+configuration region is mapped Device in the kernel regime alone, at its
+direct-map address: QEMU puts it at 256 GiB, above the 64 GiB where user
+space begins, so the identity window that shares each process root could
+not hold it. The kernel regime's direct map reaches 447 GiB, so the 64-bit
+window QEMU places at 512 GiB is out of reach and every BAR goes in the
+32-bit window. Each function's INTx reaches a GIC SPI through the host's
+`interrupt-map`.
+`tairix-test-autoload-input-pci-qemu-aarch64` runs the whole desktop
+vertical with its keyboard and mouse sharing one line.
 
 ## VideoCore mailbox service (user space, P10 D3)
 

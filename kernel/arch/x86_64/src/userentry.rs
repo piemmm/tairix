@@ -129,25 +129,12 @@ const IA32_FS_BASE: u32 = 0xC000_0100;
 /// accesses.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub unsafe fn set_user_thread_pointer(tls_base: u64) {
-    // `wrmsr` takes the 64-bit value as two 32-bit halves in `edx:eax`
-    // (Intel SDM Vol 2B §4.3); the masks split it exactly.
-    let lo = (tls_base & 0xFFFF_FFFF) as u32;
-    let hi = ((tls_base >> 32) & 0xFFFF_FFFF) as u32;
-    // SAFETY: `wrmsr` writes `edx:eax` to the MSR named in `ecx`.
-    // `IA32_FS_BASE` is unconditionally present in long mode and accepts any
-    // canonical base; the instruction touches no memory and is privileged
-    // (CPL 0, which this function's contract requires). A non-canonical value
-    // would `#GP` here rather than corrupt anything, and only a value the
-    // calling thread chose for itself can reach this.
-    unsafe {
-        core::arch::asm!(
-            "wrmsr",
-            in("ecx") IA32_FS_BASE,
-            in("eax") lo,
-            in("edx") hi,
-            options(nomem, nostack, preserves_flags),
-        );
-    }
+    // SAFETY: `IA32_FS_BASE` is unconditionally present in long mode and
+    // accepts any canonical base; the write is privileged (CPL 0, which this
+    // function's contract requires). A non-canonical value would `#GP` here
+    // rather than corrupt anything, and only a value the calling thread chose
+    // for itself can reach this.
+    unsafe { crate::msr::write(IA32_FS_BASE, tls_base) }
 }
 
 /// Host substitute: there is no `IA32_FS_BASE` to program off the bare-metal
@@ -197,7 +184,7 @@ unsafe fn enter_ring3(entry: u64, sp: u64, arg0: u64) -> ! {
         "each header is zeroed in eight stores"
     );
 
-    let cpu = crate::preempt::cpu_id_for_lapic(crate::preempt::local_lapic_id());
+    let cpu = crate::preempt::cpu_id_for_lapic(crate::apic::local_apic_id());
     let tls = usize::try_from(cpu)
         .ok()
         .and_then(crate::syscall_entry::syscall_tls_ptr);
@@ -213,7 +200,7 @@ unsafe fn enter_ring3(entry: u64, sp: u64, arg0: u64) -> ! {
         (*tls).xstate_owner = 0;
         (*tls).kernel_rsp0
     };
-    let (xcr0_lo, xcr0_hi) = crate::xstate::halves(config.xcr0());
+    let (xcr0_lo, xcr0_hi) = crate::msr::halves(config.xcr0());
     let fxsave = u64::from(config.flavour() == Flavour::Fxsave);
     let scrub = u64::from(config.scrubs_x87_pointers());
     // SAFETY: the sanctioned assembly carve-out (no Rust spelling for

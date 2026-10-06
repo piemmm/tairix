@@ -64,16 +64,12 @@ use tairix_arch_x86_64::serial::SERIAL_SINK;
 
 use crate::x86_64::serial_sink::COM1_CONSOLE;
 
-/// The MSI-X table entry the device's vector is programmed into. Every
-/// virtqueue shares it, so one bound [`IrqHandle`] covers the whole device.
-const MSIX_ENTRY: u16 = 0;
-
 /// Per-device DMA window capacity, in pages, the virtio-blk driver allocates
 /// its request/data buffers from (transient per-request DMA).
 const POOL_PAGES: usize = 64;
 
-/// Capacity, in pages, of the MMIO register-window map (the four virtio
-/// configuration windows plus the MSI-X BAR).
+/// Capacity, in pages, of the MMIO register-window map: the four virtio
+/// configuration windows.
 const MMIO_CAP_PAGES: usize = 64;
 
 /// Bookkeeping virtual base of the MMIO register-window map. The map's
@@ -344,14 +340,31 @@ fn run_unlock(
 }
 
 /// The domain the floor disk at `node` carves through, when a unit
-/// translates it: the kernel's own, which no driver can take.
-fn floor_translator(ctx: &dyn InitSpawnCtx, node: &HwNode) -> Option<DmaTranslator> {
-    let translation = ctx.dma_translation()?;
-    translation.translates(node.id()).then_some(DmaTranslator {
-        node: node.id(),
-        generation: tairix_kernel_core::iommu::KERNEL_OWNER,
-        domains: translation,
-    })
+/// translates it: the kernel's own, which no driver can take; [`None`] for a
+/// disk no unit stands in front of.
+///
+/// # Errors
+///
+/// A disk behind a unit that translates nothing: nothing would confine its
+/// DMA.
+fn floor_translator(
+    ctx: &dyn InitSpawnCtx,
+    node: &HwNode,
+) -> Result<Option<DmaTranslator>, &'static str> {
+    let Some(translation) = ctx.dma_translation() else {
+        return Ok(None);
+    };
+    match translation.dma_path(node.id()) {
+        tairix_kernel_core::iommu::DmaPath::Translated => Ok(Some(DmaTranslator {
+            node: node.id(),
+            generation: tairix_kernel_core::iommu::KERNEL_OWNER,
+            domains: translation,
+        })),
+        tairix_kernel_core::iommu::DmaPath::Untranslated => Ok(None),
+        tairix_kernel_core::iommu::DmaPath::Stranded { .. } => {
+            Err("root-unlock: floor disk behind a unit that translates nothing")
+        }
+    }
 }
 
 /// Bring the virtio-blk-PCI root device up over the production MSI-X
@@ -375,7 +388,7 @@ fn virtio_blk_unlock<'a>(
     // The kernel's one owner of the configuration space the boot probe
     // enumerated: the floor disk is reached through it, never through a bus
     // of its own.
-    let host = crate::x86_64::boot::pci_host().ok_or("root-unlock: no PCI host")?;
+    let host = crate::pci_host::published().ok_or("root-unlock: no PCI host")?;
 
     // The device backing is boot-leaked to `'static`: the brought-up disk is
     // shared for the life of the system by two independent preemptive tasks
@@ -403,49 +416,39 @@ fn virtio_blk_unlock<'a>(
         .map_err(|_| "root-unlock: mmio map")?,
     ));
 
-    // The function driven is the one the bound node was published for, by
-    // the requester id the probe recorded, so its DMA maps into that node's
-    // domain and no other disk's.
-    let requester =
-        u16::try_from(node.address()).map_err(|_| "root-unlock: floor node names no function")?;
-    let bdf = tairix_abi::driver::pci::config_address(requester);
+    // The function driven is the one the probe recorded for the bound node,
+    // so its DMA maps into that node's domain and no other disk's.
+    let function = host
+        .published(node.id())
+        .ok_or("root-unlock: floor node unrecorded")?;
+    let (segment, bdf) = (function.segment, function.address);
 
     // Provision the four virtio configuration windows into a `PciTransport`
     // through the `CAP_MMIO_MAP`-gated kernel mapper.
-    let mut transport = {
+    let transport = {
         let mapper = KernelMmioMapper::new(&mut *mmio, caller, audit);
-        host.with(|bus| provision_virtio_pci(bus, bdf, &mapper, PciTransport::new))
-            .map_err(|_| "root-unlock: virtio-PCI provisioning")?
-            .transport
+        host.with(segment, |bus| {
+            provision_virtio_pci(bus, bdf, &mapper, |windows| {
+                PciTransport::new(windows, Some(crate::x86_64::msi::MSIX_ENTRY))
+            })
+        })
+        .ok_or("root-unlock: floor node's segment unowned")?
+        .map_err(|_| "root-unlock: virtio-PCI provisioning")?
+        .transport
     };
 
-    // Allocate a **dedicated** MSI vector + virtual interrupt line for the
-    // device's MSI-X message. An MSI-X completion is an edge message straight
-    // to the local APIC — it does not use the function's INTx pin (the
-    // interrupt-line register is a legacy INTx hint, meaningless once MSI-X
-    // is enabled). Reusing an IO-APIC pin's vector for the MSI, and driving
-    // that pin's level controller for the edge source, was the D7 hang; the
-    // dedicated MSI line binds an edge source with no pin to mask, exactly as
-    // the aarch64 port's MSI vectors do.
+    // A vector of the device's own, raised by an edge message with no pin to
+    // mask: reusing an IO-APIC pin's vector for it was the D7 hang.
     let table: &'static IrqTable =
         published_irq_table().ok_or("root-unlock: no published IRQ table")?;
     let composite =
         crate::x86_64::msi::published_composite().ok_or("root-unlock: no interrupt controller")?;
-    let (msi_vector, msi) =
-        crate::x86_64::msi::kernel_message().map_err(|_| "root-unlock: no free MSI vector")?;
+    let msi_vector = crate::x86_64::remapping::route_function(host, &function)
+        .map_err(|_| "root-unlock: route MSI-X")?;
     let bind = table
-        .bind(msi_vector.line, UNLOCK_TASK)
+        .bind_exclusive(msi_vector.line, UNLOCK_TASK)
         .map_err(|_| "root-unlock: bind device source")?;
     let handle: IrqHandle = bind.handle;
-
-    // Route the MSI message into the device's MSI-X table entry, then enable
-    // MSI-X on the transport so every queue signals through it.
-    {
-        let mapper = KernelMmioMapper::new(&mut *mmio, caller, audit);
-        host.with(|bus| bus.route_msix(bdf, MSIX_ENTRY, msi, &mapper))
-            .map_err(|_| "root-unlock: route MSI-X")?;
-    }
-    transport.enable_msix(MSIX_ENTRY);
 
     // Mint the per-driver DMA host the driver allocates through, over the
     // kernel's live frame allocator and the identity physical map, driven by
@@ -466,7 +469,7 @@ fn virtio_blk_unlock<'a>(
     // A translated floor masters once its domain is attached at the first
     // carve; an untranslated one is handed its device here, before the
     // driver can program it.
-    let pool = if let Some(translator) = floor_translator(env.ctx, node) {
+    let pool = if let Some(translator) = floor_translator(env.ctx, node)? {
         pool.translated(translator)
     } else {
         if let Some(mastering) = env.ctx.bus_mastering() {
@@ -487,7 +490,7 @@ fn virtio_blk_unlock<'a>(
     let waiter: &'static IrqParkWaiter = Box::leak(Box::new(IrqParkWaiter::new(
         table,
         handle,
-        msi_vector.line,
+        UNLOCK_TASK,
         controller_dyn,
         Some(hlt_fallback_park),
     )));

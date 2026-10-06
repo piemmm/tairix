@@ -35,6 +35,10 @@ extern crate alloc;
 pub mod fixture;
 
 pub mod bus;
+pub mod idmap;
+pub mod iommu;
+pub mod pci;
+pub mod specifier;
 pub mod supply;
 
 pub use bus::{
@@ -42,6 +46,8 @@ pub use bus::{
     outbound_mmio_window, reg_entry_count, scan_translated, translate, translated_reg, BusLevel,
     DmaRange, DmaRanges, DmaReach, DmaWindow, MAX_DMA_WINDOWS, MAX_WALK_DEPTH,
 };
+pub use idmap::{IdMap, IdMapEntry};
+pub use specifier::{phandle_args, PhandleArgs, PhandleArgsIter};
 pub use supply::{
     gpio_enabled_regulator, gpio_selected_regulator, supply, GpioEnabledRegulator, GpioLine,
     GpioSelectedRegulator,
@@ -85,6 +91,8 @@ pub enum FdtError {
     /// The structure block was malformed (truncated token, unterminated
     /// name, unknown token, or unbalanced node nesting).
     Malformed,
+    /// A property does not decode as its binding lays it out.
+    BadProperty,
 }
 
 /// A read-only view over a flattened device tree blob.
@@ -211,8 +219,10 @@ impl<'a> Fdt<'a> {
     }
 
     /// Enumerate every RAM range the tree declares, invoking
-    /// `f(base, size)` once per `(address, size)` pair of every top-level
-    /// `/memory` node's `reg` property, in tree order.
+    /// `f(base, size)` once per `(address, size)` pair of every enabled
+    /// top-level `/memory` node's `reg` property, in tree order. A memory
+    /// node whose `status` disables it describes RAM the kernel may not use
+    /// (another agent's, or the secure world's), so it contributes nothing.
     ///
     /// The pairs are decoded with the root `#address-cells` /
     /// `#size-cells` (defaulting to the Devicetree-spec values until the
@@ -239,9 +249,7 @@ impl<'a> Fdt<'a> {
         let mut addr_cells = DEFAULT_ADDRESS_CELLS;
         let mut size_cells = DEFAULT_SIZE_CELLS;
 
-        // Per-depth "is this a `/memory` node" flags, restored on
-        // `FDT_END_NODE`.
-        let mut is_memory = [false; MAX_DEPTH];
+        let mut memory: Option<OpenMemory<'_>> = None;
         let mut depth: usize = 0;
 
         while pos < struct_end {
@@ -255,14 +263,26 @@ impl<'a> Fdt<'a> {
                     if depth >= MAX_DEPTH {
                         return Err(FdtError::Malformed);
                     }
-                    // A `/memory` node lives directly under root (depth 1
-                    // after this push); its unit name is `memory` or
-                    // `memory@<addr>`.
-                    is_memory[depth] = depth == 1 && name_is_memory(name);
+                    // A `/memory` node lives directly under root; its unit
+                    // name is `memory` or `memory@<addr>`.
+                    if depth == 1 && name_is_memory(name) {
+                        memory = Some(OpenMemory::default());
+                    }
                     depth += 1;
                 }
                 FDT_END_NODE => {
                     depth = depth.checked_sub(1).ok_or(FdtError::Malformed)?;
+                    if depth == 1 {
+                        if let Some(OpenMemory {
+                            reg: Some(reg),
+                            status,
+                        }) = memory.take()
+                        {
+                            if status_enabled(status) {
+                                each_reg_pair(reg, addr_cells, size_cells, &mut f);
+                            }
+                        }
+                    }
                 }
                 FDT_PROP => {
                     let (prop_name, value) = self.read_prop(&mut pos, struct_end)?;
@@ -278,8 +298,12 @@ impl<'a> Fdt<'a> {
                             }
                         }
                     }
-                    if prop_name == b"reg" && depth >= 1 && is_memory[depth - 1] {
-                        each_reg_pair(value, addr_cells, size_cells, &mut f);
+                    if let (2, Some(open)) = (depth, memory.as_mut()) {
+                        match prop_name {
+                            b"reg" => open.reg = Some(value),
+                            b"status" => open.status = Some(value),
+                            _ => {}
+                        }
                     }
                 }
                 _ => return Err(FdtError::Malformed),
@@ -299,7 +323,9 @@ impl<'a> Fdt<'a> {
     }
 
     /// Enumerate every `/cpus/cpu@*` node in tree order, invoking
-    /// `f(cpu)` once per CPU node with that node's decoded [`CpuNode`].
+    /// `f(cpu)` once per CPU that may be started with that node's decoded
+    /// [`CpuNode`]: a `"disabled"` CPU is quiescent and listed, a failed or
+    /// reserved one is not.
     ///
     /// A CPU node with no readable `reg` is skipped (it cannot be
     /// matched to a logical CPU).
@@ -324,6 +350,7 @@ impl<'a> Fdt<'a> {
         let mut capacity: Option<u64> = None;
         let mut spin_table = false;
         let mut release_addr: Option<u64> = None;
+        let mut status: Option<&[u8]> = None;
 
         while pos < struct_end {
             let token = be_u32(self.blob, pos).ok_or(FdtError::Malformed)?;
@@ -346,12 +373,13 @@ impl<'a> Fdt<'a> {
                         capacity = None;
                         spin_table = false;
                         release_addr = None;
+                        status = None;
                     }
                     depth += 1;
                 }
                 FDT_END_NODE => {
                     depth = depth.checked_sub(1).ok_or(FdtError::Malformed)?;
-                    if is_cpu[depth] {
+                    if is_cpu[depth] && cpu_startable(status) {
                         if let Some(mpidr) = reg {
                             f(CpuNode {
                                 reg: mpidr,
@@ -382,6 +410,8 @@ impl<'a> Fdt<'a> {
                             spin_table = str_prop_is(value, b"spin-table");
                         } else if prop_name == b"cpu-release-addr" {
                             release_addr = read_int_cells(value);
+                        } else if prop_name == b"status" {
+                            status = Some(value);
                         }
                     }
                 }
@@ -597,6 +627,27 @@ impl<'a> Fdt<'a> {
         }
     }
 
+    /// Iterate every node in document order, each paired with whether a
+    /// consumer may use it: it is operational ([`Node::is_operational`]) and
+    /// so is every ancestor, as a disabled bus's devices are no more usable
+    /// than the bus.
+    #[must_use]
+    pub fn nodes_in_use(&self) -> NodesInUse<'a> {
+        NodesInUse {
+            nodes: self.nodes(),
+            unusable_below: None,
+        }
+    }
+
+    /// Iterate, in document order, every node a consumer may use
+    /// ([`Self::nodes_in_use`]).
+    #[must_use]
+    pub fn operational_nodes(&self) -> OperationalNodes<'a> {
+        OperationalNodes {
+            nodes: self.nodes_in_use(),
+        }
+    }
+
     /// The first node, in document order, whose `compatible` lists `target`.
     ///
     /// `None` when no node does or the walk meets a malformed token first.
@@ -802,6 +853,13 @@ impl<'a> Node<'a> {
         self.depth
     }
 
+    /// Where the node's properties begin in the structure block: what tells
+    /// one node from another.
+    #[must_use]
+    pub fn offset(&self) -> usize {
+        self.props_pos
+    }
+
     /// Iterate this node's immediate properties (not those of children).
     #[must_use]
     pub fn properties(&self) -> PropIter<'a> {
@@ -846,17 +904,106 @@ impl<'a> Node<'a> {
         phandle_ref(property.read_be_u32(0).ok()?)
     }
 
-    /// Whether the node is operational: its `status` is absent, `"okay"`, or
-    /// the legacy `"ok"` (Devicetree Spec v0.4 §2.3.4). `"disabled"`,
-    /// `"reserved"`, `"fail"`, and a malformed value are not.
+    /// Whether the node's `status` is absent, `"okay"`, or the legacy `"ok"`
+    /// (Devicetree Spec v0.4 §2.3.4). `"disabled"`, `"reserved"`, `"fail"`,
+    /// and a malformed value are not.
     #[must_use]
     pub fn is_enabled(&self) -> bool {
-        match self.property("status") {
-            None => true,
-            Some(status) => matches!(status.iter_strings().next(), Some(b"okay" | b"ok")),
+        status_enabled(self.property("status").map(|status| status.value()))
+    }
+
+    /// Whether a consumer may use the node: it is enabled, or it is a CPU
+    /// whose `status` is `"disabled"`, which the CPU binding makes quiescent
+    /// rather than absent (Devicetree Spec v0.4 §3.8.1).
+    #[must_use]
+    pub fn is_operational(&self) -> bool {
+        let status = self.property("status").map(|status| status.value());
+        let cpu = self
+            .property("device_type")
+            .and_then(|device_type| device_type.iter_strings().next())
+            == Some(b"cpu");
+        if cpu {
+            cpu_startable(status)
+        } else {
+            status_enabled(status)
         }
     }
 }
+
+/// A `/memory` node being read: its ranges are known to be usable only once
+/// the whole node is, as properties come in any order.
+#[derive(Default)]
+struct OpenMemory<'a> {
+    reg: Option<&'a [u8]>,
+    status: Option<&'a [u8]>,
+}
+
+/// Whether a `status` value, or its absence, leaves a node enabled.
+fn status_enabled(status: Option<&[u8]>) -> bool {
+    status.is_none_or(|value| matches!((StringList { rem: value }).next(), Some(b"okay" | b"ok")))
+}
+
+/// Whether a CPU with this `status` may be started: an enabled one, or a
+/// `"disabled"` one, which is quiescent until its enable method starts it. A
+/// failed CPU is broken or absent and a reserved one is another agent's.
+fn cpu_startable(status: Option<&[u8]>) -> bool {
+    status_enabled(status)
+        || status.and_then(|value| (StringList { rem: value }).next()) == Some(b"disabled")
+}
+
+/// Iterator over every node of an [`Fdt`] in document order, each paired with
+/// whether a consumer may use it, produced by [`Fdt::nodes_in_use`].
+#[derive(Clone)]
+pub struct NodesInUse<'a> {
+    nodes: NodeIter<'a>,
+    /// The depth of the unusable node whose subtree is being passed over.
+    unusable_below: Option<u32>,
+}
+
+impl<'a> Iterator for NodesInUse<'a> {
+    type Item = Result<(Node<'a>, bool), FdtError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let node = match self.nodes.next()? {
+            Ok(node) => node,
+            Err(err) => return Some(Err(err)),
+        };
+        if self
+            .unusable_below
+            .is_some_and(|depth| node.depth() > depth)
+        {
+            return Some(Ok((node, false)));
+        }
+        let usable = node.is_operational();
+        self.unusable_below = (!usable).then_some(node.depth());
+        Some(Ok((node, usable)))
+    }
+}
+
+impl core::iter::FusedIterator for NodesInUse<'_> {}
+
+/// Iterator over the nodes of an [`Fdt`] a consumer may use, in document
+/// order, produced by [`Fdt::operational_nodes`].
+#[derive(Clone)]
+pub struct OperationalNodes<'a> {
+    nodes: NodesInUse<'a>,
+}
+
+impl<'a> Iterator for OperationalNodes<'a> {
+    type Item = Result<Node<'a>, FdtError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            match self.nodes.next()? {
+                Ok((node, true)) => return Some(Ok(node)),
+                Ok((_, false)) => {}
+                Err(err) => return Some(Err(err)),
+            }
+        }
+    }
+}
+
+impl core::iter::FusedIterator for OperationalNodes<'_> {}
 
 /// A cell read as a phandle reference: `0` and `0xFFFF_FFFF` name no node
 /// (Devicetree Spec v0.4 §2.3.3), so both are refused.
@@ -1068,7 +1215,7 @@ fn each_reg_pair<F: FnMut(u64, u64)>(value: &[u8], addr_cells: u32, size_cells: 
 }
 
 /// Read an integer property whose value is one `u32` cell or two (`u64`).
-fn read_int_cells(value: &[u8]) -> Option<u64> {
+pub(crate) fn read_int_cells(value: &[u8]) -> Option<u64> {
     match value.len() {
         4 => be_u32(value, 0).map(u64::from),
         8 => read_cells(value, 0, 2),
@@ -1291,6 +1438,149 @@ mod tests {
         );
         // The single-window reader still reports the first pair.
         assert_eq!(fdt.first_memory_region(), Some((0x0000_0000, 0x3B40_0000)));
+    }
+
+    #[test]
+    fn a_disabled_memory_node_contributes_no_ram_wherever_its_status_sits() {
+        // QEMU `virt,secure=on` shape: memory only the secure world may use.
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 1);
+        b.prop_u32("#size-cells", 1);
+        b.begin_node("memory@40000000");
+        b.prop("reg", &[0x40, 0, 0, 0, 0x10, 0, 0, 0]);
+        b.end_node();
+        b.begin_node("memory@e000000");
+        b.prop("reg", &[0x0E, 0, 0, 0, 0x01, 0, 0, 0]);
+        b.prop_str("status", "disabled");
+        b.end_node();
+        b.begin_node("memory@f000000");
+        b.prop_str("status", "reserved");
+        b.prop("reg", &[0x0F, 0, 0, 0, 0x01, 0, 0, 0]);
+        b.end_node();
+        b.begin_node("memory@80000000");
+        b.prop_str("status", "okay");
+        b.prop("reg", &[0x80, 0, 0, 0, 0x10, 0, 0, 0]);
+        b.end_node();
+        b.end_node();
+        let blob = b.build();
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        assert_eq!(
+            all_regions(&fdt),
+            alloc::vec![(0x4000_0000, 0x1000_0000), (0x8000_0000, 0x1000_0000)]
+        );
+    }
+
+    #[test]
+    fn operational_nodes_skip_each_unusable_node_with_its_subtree() {
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        b.begin_node("cpus");
+        b.begin_node("cpu@0");
+        b.prop_str("device_type", "cpu");
+        b.end_node();
+        b.begin_node("cpu@1");
+        b.prop_str("device_type", "cpu");
+        b.prop_str("status", "disabled");
+        b.end_node();
+        b.begin_node("cpu@2");
+        b.prop_str("device_type", "cpu");
+        b.prop_str("status", "fail");
+        b.end_node();
+        b.end_node();
+        b.begin_node("bus@0");
+        b.prop_str("status", "disabled");
+        b.begin_node("uart@0");
+        b.prop_str("status", "okay");
+        b.begin_node("port");
+        b.end_node();
+        b.end_node();
+        b.end_node();
+        b.begin_node("firmware@0");
+        b.prop_str("status", "reserved");
+        b.end_node();
+        b.begin_node("uart@1");
+        b.prop_str("status", "ok");
+        b.end_node();
+        b.begin_node("serial@2");
+        b.prop_str("status", "disabled");
+        b.end_node();
+        b.end_node();
+        let blob = b.build();
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        let names: Vec<&[u8]> = fdt
+            .operational_nodes()
+            .map(|node| node.expect("well-formed").name())
+            .collect();
+        assert_eq!(
+            names,
+            [&b""[..], b"cpus", b"cpu@0", b"cpu@1", b"uart@1"],
+            "a quiescent cpu stays, a failed one, a disabled bus's whole subtree, a reserved and a disabled device go"
+        );
+        let unusable: Vec<&[u8]> = fdt
+            .nodes_in_use()
+            .map(|node| node.expect("well-formed"))
+            .filter(|(_, usable)| !usable)
+            .map(|(node, _)| node.name())
+            .collect();
+        assert_eq!(
+            unusable,
+            [
+                &b"cpu@2"[..],
+                b"bus@0",
+                b"uart@0",
+                b"port",
+                b"firmware@0",
+                b"serial@2"
+            ],
+            "every node is reported, the unusable ones as such"
+        );
+    }
+
+    #[test]
+    fn each_cpu_lists_a_quiescent_cpu_and_no_failed_or_reserved_one() {
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        b.begin_node("cpus");
+        b.prop_u32("#address-cells", 1);
+        b.prop_u32("#size-cells", 0);
+        for (reg, status) in [
+            (0, None),
+            (1, Some("disabled")),
+            (2, Some("fail")),
+            (3, Some("reserved")),
+            (4, Some("okay")),
+        ] {
+            b.begin_node(&alloc::format!("cpu@{reg}"));
+            b.prop_str("device_type", "cpu");
+            b.prop_u32("reg", reg);
+            if let Some(status) = status {
+                b.prop_str("status", status);
+            }
+            b.end_node();
+        }
+        b.end_node();
+        b.end_node();
+        let blob = b.build();
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        let mut started = Vec::new();
+        fdt.each_cpu(|cpu| started.push(cpu.reg))
+            .expect("well-formed");
+        assert_eq!(started, [0, 1, 4]);
+    }
+
+    #[test]
+    fn operational_nodes_end_at_a_malformed_token() {
+        let mut blob = virt_like(0x4000_0000, 0x1000_0000, 10_000_000);
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        let whole = fdt.operational_nodes().count();
+        let struct_off = u32::from_be_bytes(blob[8..12].try_into().expect("header")) as usize;
+        blob[struct_off..struct_off + 4].copy_from_slice(&0x77u32.to_be_bytes());
+        let fdt = Fdt::new(&blob).expect("header still valid");
+        let walked: Vec<_> = fdt.operational_nodes().collect();
+        assert!(whole > 1);
+        assert_eq!(walked.len(), 1);
+        assert!(walked[0].is_err());
     }
 
     #[test]

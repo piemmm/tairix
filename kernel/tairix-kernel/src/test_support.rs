@@ -1,6 +1,9 @@
 //! Shared host-test fixtures for the boot-path filesystem readers and the
 //! mounted-volume paths above them.
 //!
+//! [`NullSink`] discards every audit event, for a test that asserts on what
+//! the code did rather than what it logged.
+//!
 //! [`RamBlock`] is the `Vec`-backed 512-byte-block device every host test
 //! that needs a real on-disk image formats over — the runtime volume
 //! attach/detach scenarios and the write-back flusher alike — so there is one
@@ -29,6 +32,13 @@ use tairix_abi::driver::filesystem::{
 };
 use tairix_abi::driver::DriverError;
 use tairix_sync::SpinLock;
+
+/// An audit sink that discards every event.
+pub(crate) struct NullSink;
+
+impl tairix_log::Sink for NullSink {
+    fn write_event(&self, _event: &tairix_log::Event<'_>) {}
+}
 
 /// Block size every [`RamBlock`] fixture serves.
 pub const BLOCK_SIZE: usize = 512;

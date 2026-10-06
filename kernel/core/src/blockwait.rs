@@ -80,10 +80,10 @@ pub struct IrqParkWaiter {
     table: &'static IrqTable,
     /// The kernel-held handle minted when the line was bound.
     handle: IrqHandle,
-    /// The controller line, re-armed before every park (the dispatch
-    /// path's `fire` masks it on each completion — mask-before-wake).
-    line: u32,
-    /// The controller the line is re-armed through.
+    /// The process the binding belongs to.
+    owner: ProcessId,
+    /// The controller the line is re-armed through before every park (the
+    /// dispatch path's `fire` masks it on each completion).
     controller: &'static (dyn IrqController + Sync),
     /// The port's bounded CPU-park for non-parkable contexts.
     fallback_park: Option<FallbackPark>,
@@ -92,22 +92,22 @@ pub struct IrqParkWaiter {
 impl IrqParkWaiter {
     /// Build the waiter for a bound device line.
     ///
-    /// `table`/`handle` name the binding, `line` is the controller line to
-    /// re-arm before each park, and `fallback_park` is the port's bounded
-    /// CPU-park for contexts that cannot be scheduler-parked, or [`None`]
-    /// for a waiter only a dispatched task drives.
+    /// `table`/`handle` name `owner`'s binding, and `fallback_park` is the
+    /// port's bounded CPU-park for contexts that cannot be
+    /// scheduler-parked, or [`None`] for a waiter only a dispatched task
+    /// drives.
     #[must_use]
     pub fn new(
         table: &'static IrqTable,
         handle: IrqHandle,
-        line: u32,
+        owner: ProcessId,
         controller: &'static (dyn IrqController + Sync),
         fallback_park: Option<FallbackPark>,
     ) -> Self {
         Self {
             table,
             handle,
-            line,
+            owner,
             controller,
             fallback_park,
         }
@@ -131,8 +131,8 @@ impl IrqParkWaiter {
     /// the request's completion is the only other thing that could end the
     /// wait.
     #[must_use]
-    pub fn park_wait(&self, owner: ProcessId, timeout_ns: u64) -> WaitOutcome {
-        block_until_ready(self.table, self.handle, owner, timeout_ns, self)
+    pub fn park_wait(&self, timeout_ns: u64) -> WaitOutcome {
+        block_until_ready(self.table, self.handle, self.owner, timeout_ns, self)
     }
 }
 
@@ -148,7 +148,7 @@ impl IrqWaiter for IrqParkWaiter {
         // Re-arm the line before any wait: the dispatch path's `fire`
         // masked it on the previous completion (mask-before-wake). A
         // refusal is harmless — the wait is then bounded by its deadline.
-        let _ = self.controller.rearm(self.line);
+        let _ = self.table.rearm(self.handle, self.owner, self.controller);
         let Some(hook) = wait_arch() else {
             return self.fall_back();
         };
@@ -253,7 +253,7 @@ mod tests {
         let table: &'static IrqTable =
             alloc::boxed::Box::leak(alloc::boxed::Box::new(IrqTable::new(31)));
         let out = table.bind(LINE, OWNER).expect("binds");
-        let waiter = IrqParkWaiter::new(table, out.handle, LINE, &CONTROLLER, Some(fallback));
+        let waiter = IrqParkWaiter::new(table, out.handle, OWNER, &CONTROLLER, Some(fallback));
         (table, out.handle, waiter)
     }
 
@@ -261,7 +261,7 @@ mod tests {
     fn a_pre_fired_line_is_consumed_without_any_park() {
         let (table, handle, waiter) = bound_waiter(no_park);
         table.fire(LINE, &OkController).expect("fires");
-        assert_eq!(waiter.park_wait(OWNER, 1_000_000), WaitOutcome::Ready);
+        assert_eq!(waiter.park_wait(1_000_000), WaitOutcome::Ready);
         // The fire was consumed: the flag is clear for the next wait.
         assert!(!table.ready_for(handle), "ready flag must be consumed");
     }
@@ -272,14 +272,14 @@ mod tests {
         // 250 ns budget, 100 ns per fallback tick: the deadline is reached
         // after a bounded number of parks — the fail-closed outcome a dead
         // controller must produce.
-        assert_eq!(waiter.park_wait(OWNER, 250), WaitOutcome::TimedOut);
+        assert_eq!(waiter.park_wait(250), WaitOutcome::TimedOut);
     }
 
     #[test]
     fn a_fire_during_the_wait_wakes_and_consumes() {
         // The consuming re-poll runs after each fallback park.
         let (table, handle, waiter) = bound_waiter(firing_fallback);
-        assert_eq!(waiter.park_wait(OWNER, u64::MAX), WaitOutcome::Ready);
+        assert_eq!(waiter.park_wait(u64::MAX), WaitOutcome::Ready);
         assert!(!table.ready_for(handle), "ready flag must be consumed");
     }
 
@@ -289,9 +289,9 @@ mod tests {
         let table: &'static IrqTable =
             alloc::boxed::Box::leak(alloc::boxed::Box::new(IrqTable::new(31)));
         let out = table.bind(LINE, OWNER).expect("binds");
-        let waiter = IrqParkWaiter::new(table, out.handle, LINE, &CONTROLLER, None);
+        let waiter = IrqParkWaiter::new(table, out.handle, OWNER, &CONTROLLER, None);
         assert_eq!(
-            waiter.park_wait(OWNER, u64::MAX),
+            waiter.park_wait(u64::MAX),
             WaitOutcome::Aborted(IrqWaitAbort::Unparkable),
             "never a spin"
         );
@@ -300,7 +300,7 @@ mod tests {
     #[test]
     fn a_released_binding_fails_closed_as_not_found() {
         let (table, _handle, waiter) = bound_waiter(no_park);
-        table.release_for(OWNER);
-        assert_eq!(waiter.park_wait(OWNER, 1_000), WaitOutcome::NotFound);
+        table.release_for(OWNER, &CONTROLLER);
+        assert_eq!(waiter.park_wait(1_000), WaitOutcome::NotFound);
     }
 }

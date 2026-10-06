@@ -10,11 +10,12 @@
 //! Specification, rev. 4.1, chapter 8.
 
 use tairix_abi::{
-    HwDeviceClass, HwMatchKey, HwNode, HwResource, IommuReservedWindow, HW_NODE_ROOT_ID,
+    HwDeviceClass, HwMatchKey, HwNode, HwResource, IommuReservedWindow, ReservedAccess,
+    HW_NODE_ROOT_ID,
 };
 use tairix_arch_api::{DiscoveryError, HwNodeSink};
 
-use crate::acpi::{AcpiError, SdtHeader};
+use crate::acpi::{read_u64, unit_node_id, AcpiError, SdtHeader, UnitNodes};
 
 /// 4-byte ASCII signature of the DMA Remapping Reporting table.
 pub const DMAR_SIGNATURE: [u8; 4] = *b"DMAR";
@@ -67,6 +68,12 @@ impl SourceId {
     #[must_use]
     pub const fn raw(self) -> u16 {
         self.0
+    }
+
+    /// The requester id `raw`.
+    #[must_use]
+    pub const fn from_raw(raw: u16) -> Self {
+        Self(raw)
     }
 
     /// The bus the function sits on.
@@ -559,50 +566,32 @@ pub trait DmaAliases {
     fn aliases(&self, source: SourceId, visit: &mut dyn FnMut(SourceId));
 }
 
-/// What [`emit_unit_nodes`] placed in the tree.
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub struct UnitNodes {
-    /// Units given a node, in table order: a unit past them has no node, so
-    /// nothing brings it up and nothing behind it can be confined.
-    pub emitted: usize,
-    /// Reserved windows no unit's node carries — past its room, or on a
-    /// segment `bridges` does not reach: those functions lose their firmware
-    /// DMA rather than bypass translation.
-    pub dropped: usize,
-}
-
-impl UnitNodes {
-    /// Whether a unit of `dmar` on `segment` was left without a node, so
-    /// nothing on the segment behind it can be confined.
-    #[must_use]
-    pub fn strand(&self, dmar: &Dmar<'_>, segment: u16) -> bool {
-        dmar.units()
-            .skip(self.emitted)
-            .any(|unit| unit.segment() == segment)
-    }
+/// What a segment's walk says of the functions a table's scopes name.
+pub trait Fabric: BridgeBuses + DmaAliases {
+    /// Whether `source` sits below an external-facing port, where nothing is
+    /// trusted: firmware keeps no window for it.
+    fn untrusted(&self, source: SourceId) -> bool;
 }
 
 /// Emit one [`HwDeviceClass::Iommu`] node per unit, numbered from `first_id`
 /// in table order and keyed `compatible`, carrying its register window and
 /// each firmware reserved window of a function it translates — kept for the
 /// function's own stream and for every alias of it, since firmware's DMA
-/// arrives under whichever the fabric tags it with. `fabric` — its bridges'
-/// buses and the aliases its DMA arrives under — describes `segment`, so a
-/// window on another segment is never resolved through it. With no fabric, a
-/// hierarchy that formed no tree, no window is kept: every unit comes up
-/// blocking every stream. A full sink ends the emission: the units before it
-/// keep their nodes.
+/// arrives under whichever the fabric tags it with, and never for a function
+/// below an external-facing port. `fabric` answers each segment's walk; a
+/// segment it has none for, a hierarchy that formed no tree, keeps no window,
+/// so its units come up blocking every stream. A full sink ends the emission:
+/// the units before it keep their nodes.
 ///
 /// # Errors
 ///
 /// [`DiscoveryError::MalformedSource`] for a unit numbering past `u32` or a
 /// compatible string no match key can hold.
-pub fn emit_unit_nodes(
+pub fn emit_unit_nodes<'w>(
     dmar: &Dmar<'_>,
     first_id: u32,
     compatible: &[u8],
-    segment: u16,
-    fabric: Option<(&dyn BridgeBuses, &dyn DmaAliases)>,
+    fabric: &dyn Fn(u16) -> Option<&'w dyn Fabric>,
     sink: &mut dyn HwNodeSink,
 ) -> Result<UnitNodes, DiscoveryError> {
     let key = HwMatchKey::compatible(compatible).map_err(|_| DiscoveryError::MalformedSource)?;
@@ -616,9 +605,10 @@ pub fn emit_unit_nodes(
         emitted: 0,
         dropped: dmar
             .reserved_regions()
-            .filter(|region| fabric.is_none() || region.segment() != segment)
+            .filter(|region| fabric(region.segment()).is_none())
             .map(|region| endpoints(&region))
             .sum(),
+        untrusted: 0,
     };
     for (index, unit) in dmar.units().enumerate() {
         let id = unit_node_id(first_id, index).ok_or(DiscoveryError::MalformedSource)?;
@@ -628,13 +618,13 @@ pub fn emit_unit_nodes(
                 node.push_resource(HwResource::mmio(unit.register_base(), unit.register_len()))
             })
             .map_err(|_| DiscoveryError::MalformedSource)?;
-        if let Some(fabric) = fabric {
+        if let Some(fabric) = fabric(unit.segment()) {
             keep_windows(
                 dmar,
-                (index, segment),
+                (index, unit.segment()),
                 fabric,
                 &mut node,
-                &mut placed.dropped,
+                &mut placed,
             );
         }
         if sink.emit(node).is_err() {
@@ -647,41 +637,51 @@ pub fn emit_unit_nodes(
 
 /// Keep on `node` each firmware reserved window on `segment` of a function
 /// unit `index` translates, for its own stream and every alias of it,
-/// counting in `dropped` each the node has no room for.
+/// counting in `placed` each the node has no room for, and each refused for
+/// a function below an external-facing port.
 fn keep_windows(
     dmar: &Dmar<'_>,
     (index, segment): (usize, u16),
-    (bridges, aliases): (&dyn BridgeBuses, &dyn DmaAliases),
+    fabric: &dyn Fabric,
     node: &mut HwNode,
-    dropped: &mut usize,
+    placed: &mut UnitNodes,
 ) {
     for region in dmar
         .reserved_regions()
         .filter(|region| region.segment() == segment)
     {
         for scope in region.scopes().filter(|s| s.kind() == ScopeKind::Endpoint) {
-            let Some(source) = scope.resolve(bridges) else {
+            let Some(source) = scope.resolve(fabric) else {
                 continue;
             };
-            if dmar.unit_for(region.segment(), source, bridges) != Some(index) {
+            if dmar.unit_for(region.segment(), source, fabric) != Some(index) {
+                continue;
+            }
+            if fabric.untrusted(source) {
+                placed.untrusted += 1;
                 continue;
             }
             let mut keep = |stream: SourceId| {
-                let Ok(window) =
-                    IommuReservedWindow::new(u32::from(stream.raw()), region.base(), region.len())
-                        .map(HwResource::iommu_reserved_window)
-                else {
-                    *dropped += 1;
+                // A reserved-memory region names no access: the device reads
+                // and writes it.
+                let Ok(window) = IommuReservedWindow::new(
+                    u32::from(stream.raw()),
+                    region.base(),
+                    region.len(),
+                    ReservedAccess::ReadWrite,
+                )
+                .map(HwResource::iommu_reserved_window) else {
+                    placed.dropped += 1;
                     return;
                 };
                 // Firmware may name one window for a function twice, and
                 // functions behind one bridge share its alias.
                 if !node.resources().contains(&window) && node.push_resource(window).is_err() {
-                    *dropped += 1;
+                    placed.dropped += 1;
                 }
             };
             keep(source);
-            aliases.aliases(source, &mut keep);
+            fabric.aliases(source, &mut keep);
         }
     }
 }
@@ -704,14 +704,43 @@ pub fn unit_node(
     unit_node_id(first_id, index)
 }
 
-fn unit_node_id(first_id: u32, index: usize) -> Option<u32> {
-    first_id.checked_add(u32::try_from(index).ok()?)
+/// Visit each I/O APIC the scope of a unit with a node names: its APIC id,
+/// that unit's node, and the requester id its interrupt messages carry,
+/// resolved through `fabric`'s walk of the unit's segment where the path
+/// crosses a bridge.
+pub fn ioapic_sources<'w>(
+    dmar: &Dmar<'_>,
+    first_id: u32,
+    nodes: UnitNodes,
+    fabric: &dyn Fn(u16) -> Option<&'w dyn Fabric>,
+    visit: &mut dyn FnMut(u8, u32, SourceId),
+) {
+    for (index, unit) in dmar.units().enumerate().take(nodes.emitted) {
+        let Some(node) = unit_node_id(first_id, index) else {
+            continue;
+        };
+        let bridges: &dyn BridgeBuses = match fabric(unit.segment()) {
+            Some(walk) => walk,
+            None => &NoBridges,
+        };
+        for scope in unit
+            .scopes()
+            .filter(|scope| scope.kind() == ScopeKind::IoApic)
+        {
+            if let Some(source) = scope.resolve(bridges) {
+                visit(scope.enumeration_id(), node, source);
+            }
+        }
+    }
 }
 
-fn read_u64(bytes: &[u8], offset: usize) -> u64 {
-    let mut raw = [0u8; 8];
-    raw.copy_from_slice(&bytes[offset..offset + 8]);
-    u64::from_le_bytes(raw)
+/// A segment no walk reached: a path ending on its start bus still resolves.
+struct NoBridges;
+
+impl BridgeBuses for NoBridges {
+    fn bus_range(&self, _bridge: SourceId) -> Option<(u8, u8)> {
+        None
+    }
 }
 
 #[cfg(test)]

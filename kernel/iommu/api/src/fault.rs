@@ -2,6 +2,7 @@
 
 use tairix_collections::HashMap;
 use tairix_hash::BuildFastHash;
+use tairix_inline::ArrayVec;
 
 use crate::IommuError;
 
@@ -14,6 +15,13 @@ pub enum FaultReason {
     Unmapped,
     /// The mapping does not allow the access.
     Denied,
+    /// The device presented an address as already translated (PCIe ATS),
+    /// which the unit refuses: no device is trusted to cache translations.
+    Translated,
+    /// The unit refused an interrupt request: from a source its entry does
+    /// not admit, naming no entry, or in a format remapping blocks. The
+    /// fault's `iova` is the entry it named.
+    Interrupt,
     /// The unit found its own configuration for the stream malformed.
     Malformed,
     /// A reason code the family could not classify.
@@ -25,7 +33,9 @@ pub enum FaultReason {
 pub struct Fault {
     /// The stream id the access carried.
     pub stream: u32,
-    /// The page the access fell in.
+    /// The page the access fell in; for [`FaultReason::Interrupt`], the
+    /// remapping entry the request named, or the page of its message address
+    /// from a unit that records no entry.
     pub iova: u64,
     /// Whether the access was a write.
     pub write: bool,
@@ -41,9 +51,14 @@ pub enum FaultVerdict {
     /// Count it, but record nothing: its stream or its unit has used this
     /// window's share.
     Suppress,
-    /// The stream crossed the storm threshold in this window: silence it.
-    /// Only the fault that crosses it answers this.
-    Storm,
+    /// The stream crossed the storm threshold in this window: silence it,
+    /// and record the storm where the unit's share has room — else count
+    /// it, as a suppressed record is. Only the fault that crosses the
+    /// threshold answers this.
+    Storm {
+        /// Whether the storm is recorded.
+        recorded: bool,
+    },
 }
 
 /// One charged fault's verdict.
@@ -54,6 +69,39 @@ pub struct Charge {
     /// Faults the unit suppressed since it last recorded one, to report
     /// beside this one; zero for a suppressed fault.
     pub suppressed: u64,
+}
+
+/// The most fault records any family lets a unit hold before they are
+/// drained: each family sizes its queue to at most this, so a containment
+/// bound set above it cannot be reached by records one drain finds waiting.
+pub const FAULT_QUEUE_RECORDS: u32 = 512;
+
+/// Faults a family takes per hold of its lock.
+pub const FAULT_BATCH: usize = 32;
+
+/// The faults a family takes under its lock in one go.
+pub type FaultBatch = ArrayVec<Fault, FAULT_BATCH>;
+
+/// Drain up to `records` faults: `take` fills a batch under the family's lock
+/// and answers whether more remain, and each batch reaches `sink` with the
+/// lock released, since what the sink does about a fault may be to call back
+/// in. Answers whether more remain once `records` are taken.
+pub fn drain_in_batches(
+    records: usize,
+    mut take: impl FnMut(&mut FaultBatch) -> bool,
+    sink: &mut dyn FnMut(Fault),
+) -> bool {
+    for _ in 0..records.div_ceil(FAULT_BATCH) {
+        let mut batch = FaultBatch::new();
+        let more = take(&mut batch);
+        for fault in batch {
+            sink(fault);
+        }
+        if !more {
+            return false;
+        }
+    }
+    true
 }
 
 /// What one unit's faults may cost per window.
@@ -139,11 +187,21 @@ impl FaultBudget {
     pub fn charge(&mut self, stream: u32, now_ns: u64) -> Charge {
         self.roll(now_ns);
         let seen = self.seen(stream);
+        let unit_share = self.recorded < self.limits.unit_records;
         if seen == Some(self.limits.storm) {
-            return self.report(FaultVerdict::Storm);
+            // Containment is never budgeted; its record, like any, is.
+            if unit_share {
+                self.recorded += 1;
+                return self.report(FaultVerdict::Storm { recorded: true });
+            }
+            self.suppressed = self.suppressed.saturating_add(1);
+            return Charge {
+                verdict: FaultVerdict::Storm { recorded: false },
+                suppressed: 0,
+            };
         }
         let stream_share = seen.is_none_or(|seen| seen <= self.limits.stream_records);
-        if stream_share && self.recorded < self.limits.unit_records {
+        if stream_share && unit_share {
             self.recorded += 1;
             return self.report(FaultVerdict::Record);
         }
@@ -217,7 +275,7 @@ mod tests {
         assert_eq!(
             budget.charge(7, 4),
             Charge {
-                verdict: FaultVerdict::Storm,
+                verdict: FaultVerdict::Storm { recorded: true },
                 suppressed: 2
             },
             "the storm carries what went unrecorded"
@@ -260,6 +318,34 @@ mod tests {
             assert_eq!(verdict(&mut budget, 2, now), FaultVerdict::Record);
         }
         assert_eq!(budget.tracked(), 1, "the table holds its room, no more");
+    }
+
+    /// Every storm is contained, but its record takes the unit's share like
+    /// any other: storms from many streams flood the log no more than their
+    /// faults could.
+    #[test]
+    fn a_storm_past_the_unit_s_share_is_contained_but_not_recorded() {
+        let limits = FaultLimits {
+            unit_records: 1,
+            ..LIMITS
+        };
+        let mut budget = FaultBudget::new(limits, 0).unwrap();
+        assert_eq!(verdict(&mut budget, 9, 0), FaultVerdict::Record);
+        for stream in 0..3 {
+            for now in 0..4 {
+                assert_eq!(verdict(&mut budget, stream, now), FaultVerdict::Suppress);
+            }
+            assert_eq!(
+                verdict(&mut budget, stream, 4),
+                FaultVerdict::Storm { recorded: false },
+                "stream {stream}"
+            );
+        }
+        assert_eq!(
+            budget.charge(9, 1_000).suppressed,
+            15,
+            "the next record says what went unrecorded, storms included"
+        );
     }
 
     /// What a stormed stream's device had queued is only counted, and the

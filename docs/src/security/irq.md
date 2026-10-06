@@ -65,6 +65,14 @@ rejected with `Errno::NotFound`. Splitting the gate into separate
 the policy any tighter — the binding step is the security-relevant
 authority.
 
+`irq_bind` gives the line the trigger its node's grant states before the
+line is first unmasked, since a pulse arriving at a line sensed by level
+while it is masked is lost: a device tree marks an edge-triggered line, and
+the GIC's configuration for it is set to edge. A line the controller cannot
+sense as stated — one an earlier binder left enabled with the other
+configuration, or a controller with no such setting — is refused with
+`NotSupported`.
+
 The dispatcher emits a `SyscallInvoked` audit record on every
 successful `irq_bind` (the spec row sets `audit: true`); `irq_wait`
 is **not** audited on success, otherwise a busy driver would drown
@@ -82,14 +90,20 @@ sequence in this order:
    from re-firing while the driver is still draining its completion
    queue, and it must happen on the same CPU that took the trap so
    the controller-side state is consistent.
-2. **Mark the line ready** in the kernel-side IRQ table entry
-   associated with `handle`.
-3. **Wake at most one** waiter on the per-handle wait queue. The
-   driver is expected to bind one task per line; the kernel must not
-   broadcast.
+2. **Advance the line's fire count** in the kernel-side IRQ table, so
+   every binding of the line has a fire to take.
+3. **Wake the line's waiters.** A line one device raises has one; a
+   shared line — a wired PCI INTx pin — wakes every sharer, each of
+   which checks its own device.
 4. The woken task observes `Ok(())` returned from `irq_wait`. After
-   draining its queues the driver re-issues `irq_wait`, which clears
-   the ready flag and re-arms the line at the controller.
+   draining its queues the driver re-issues `irq_wait`, and once every
+   binding of the line has taken the fire and come back the kernel
+   re-arms the line at the controller. On x86_64 a
+   level-triggered IO-APIC pin has its remote IRR cleared first,
+   through the IO-APIC's EOI register (or, before version 0x20, by
+   passing the pin through edge triggering): an interrupt an AMD-Vi
+   unit remaps reaches its CPU edge-triggered, so no end of interrupt
+   returns to the pin, which would otherwise never raise another.
 
 If `timeout_ns` elapses before step 2 occurs the kernel resumes the
 waiter with `Err(Errno::TimedOut)`. The handle stays bound and the
@@ -104,6 +118,9 @@ error in the IRQ subsystem (`lib/abi/src/error.rs`).
 | `PermissionDenied`  | `irq_bind` `line` is named by no live grant of the caller       | `SyscallHandlerRejected`   |
 | `OutOfRange`        | `line` exceeds the platform's allowable range                   | `SyscallBadArguments`      |
 | `OutOfRange`        | `irq_bind` `line` argument carries non-zero upper 32 bits       | `SyscallBadArguments`      |
+| `OutOfRange`        | the caller already binds `line`                                 | `SyscallHandlerRejected`   |
+| `OutOfMemory`       | the binding could not be recorded                               | `SyscallHandlerRejected`   |
+| `NotSupported`      | the controller cannot sense `line` with the trigger its grant states | `SyscallHandlerRejected`   |
 | `NotFound`          | `irq_wait` `handle` was not minted for the calling task, or was released when its device's node was removed | `SyscallHandlerRejected`   |
 | `TimedOut`          | `irq_wait` timeout expired before the line fired                | none (per the audit policy)|
 | `NotImplemented`    | called from a WASM userland or before the IRQ subsystem is wired up | none                     |
@@ -170,12 +187,29 @@ line is ever quarantined), so early-boot interrupts behave exactly as
 before — fail-open on the *net*, never on security (the line is still masked
 and delivered normally).
 
+## Shared lines
+
+Several owners may bind one line, at most once each. A level-triggered
+line one sharer's device still holds re-asserts as soon as it is
+unmasked, so the kernel leaves it masked from a fire until every sharer
+has taken that fire and come back to wait, and only then re-arms it — the
+semantics of a Linux oneshot shared interrupt.
+
+A sharer that ends with its device still raising the line would leave
+it storming once re-armed for the others, so the kernel controls the
+source itself, as VFIO does for its user-space drivers: a PCI function
+granted a wired line is held quiet (its command register's Interrupt
+Disable) from take-over until an owner binds the line, and silenced
+again before that owner's bindings are released at its end or its
+node's removal. Only then does the release re-arm a line the departed
+sharer was holding masked.
+
 ## Observability (the IRQ table through the System Information API)
 
 The bound IRQ table is readable, like every other piece of live system
 state, only through the System Information API — never a `/proc`-style
 file (`AGENTS.md` §16.6). The `IRQ_LIST` query returns one `IrqRecord`
-per bound line — the line id, the kernel-attested owning driver task,
+per binding — the line id, the kernel-attested owning driver task,
 the monotonic interrupt count since boot (the classic
 `/proc/interrupts` per-line total), and the `IRQ_FLAG_QUARANTINED`
 flag — paged by an `IrqListRequest`. It is gated on `CAP_SYSINFO_HW`
@@ -208,15 +242,9 @@ re-bound), and a quarantined line reports the same disable the
 
 * **IRQ raising / masking by user space.** Neither syscall grants the
   ability to assert or mask a line. Both remain kernel-only.
-* **Sharing a line between drivers.** `abi-v1` mints at most one
-  binding per `(task, line)` pair. Shared-IRQ devices (PCI legacy
-  pin-based interrupts) are out of scope; the virtio family uses
-  MSI/MSI-X or PCIe message-signalled interrupts, which assign one
-  GSI per queue and do not share.
 * **Re-binding after task exit.** `Scheduler::exit` releases every
-  binding the exiting task held; the kernel unmasks no lines on
-  task exit (a freshly created task that wants the same line must
-  re-issue `irq_bind`).
+  binding the exiting task held; a freshly created task that wants
+  the same line re-issues `irq_bind`.
 
 ## Kernel-side implementation (Stage 4.D Item 2-tail)
 
@@ -248,14 +276,11 @@ implements:
 ### Invariants
 
 1. **Mask-before-wake.** `IrqTable::fire(line, controller)` calls
-   `controller.mask(line)` *before* it sets the per-entry `ready`
-   flag. The Rust source orders the two operations in that
-   sequence; the unit test
+   `controller.mask(line)` *before* it advances the line's fire
+   count. The unit test
    `kernel/irq::table::tests::mask_is_observed_before_wake`
-   installs a probe controller whose `mask` impl reads the table's
-   own `ready` flag through a borrow and asserts it is still
-   `false` while `mask` is in flight. A regression that reorders
-   the writes fails the test deterministically.
+   installs a probe controller whose `mask` asserts the binding is
+   not yet ready while the mask is in flight.
 2. **Forgery defence in the table.** `IrqTable::try_wait_step`
    re-verifies the `(handle, caller)` mapping before any state
    transition. The syscall handler does not need to re-check,
@@ -350,7 +375,7 @@ Three implementations exist:
   `CompletionSignal::TimedOut`. A virtio device signals completion
   on a single MSI / MMIO line, not per-queue, so the wait key is the
   handle, not `queue_index`; the driver re-scans every used ring on
-  wake-up. Because the wake-up is the ready flag that `fire` sets
+  wake-up. Because the wake-up is the fire count `fire` advances
   *after* masking, the mask-before-wake invariant is observed before
   the driver returns from `notify_wait` — exercised by
   `kernel_host::tests::notify_wait_observes_mask_before_wake`.
@@ -402,7 +427,7 @@ phase:
 
 | Architecture | Production controller                                                                                  | Status today |
 | ------------ | ------------------------------------------------------------------------------------------------------ | ------------ |
-| `x86_64`     | `kernel/tairix-kernel::ioapic_controller::IoApicController` — IO-APIC redirection-entry mask via `IoApic::set_redirection_entry`; trap source from the `0x30..=0xFE` per-vector ISR thunks (`kernel/arch/x86_64/src/external_irq.s`) and Rust dispatcher (`kernel/arch/x86_64::irq`). | **Wired and QEMU-validated** (Stage 4.D Item 2-tail.2 + QEMU validation). `BinArch::irq_routing` returns the controller; `try_boot` walks MADT's IO-APIC entries, installs one IDT vector per pin, and programs every redirection entry `masked = true`. The `tests/integration/irq_qemu_x86_64` integration crate drives a live PIT-channel-0 one-shot through GSI 2 and asserts both `WaitStep::Ready` and the post-fire mask bit. |
+| `x86_64`     | `kernel/tairix-kernel::ioapic_controller::IoApicController` — IO-APIC redirection-entry mask through the half of the entry holding it (`IoApic::write_redirection_low`), each pin wired as the MADT's interrupt source overrides say and rewritten whole, in an order that never leaves it unmasked half-written (`IoApic::write_redirection_entry`), when interrupt remapping takes it over (`IoApicController::remap_pin`); trap source from the `0x30..=0xFE` per-vector ISR thunks (`kernel/arch/x86_64/src/external_irq.s`) and Rust dispatcher (`kernel/arch/x86_64::irq`). | **Wired and QEMU-validated** (Stage 4.D Item 2-tail.2 + QEMU validation). `BinArch::irq_routing` returns the controller; `try_boot` walks MADT's IO-APIC entries, installs one IDT vector per pin, and programs every redirection entry `masked = true`. The `tests/integration/irq_qemu_x86_64` integration crate drives a live PIT-channel-0 one-shot through GSI 2 and asserts both `WaitStep::Ready` and the post-fire mask bit. |
 | `aarch64`    | `kernel/tairix-kernel::aarch64::gic_irq::GicIrqController` — the downstream `IrqController` bridge over the arch port's `kernel/arch/aarch64::gic::GicController`, whose HAL `mask` clears the distributor `ICENABLER` enable bit + SeqCst-fences; the EL1 IRQ vector (`kernel/arch/aarch64::exceptions`) acknowledges via `IAR`, forwards a non-timer INTID to the set-once `set_device_irq_dispatch` hook, and bridges to `IrqTable::fire`. | **Wired into the boot path and QEMU-validated** (P11 Chunk B-2 INCREMENT (1)). `Aarch64BinArch::irq_routing` returns the GICv2-backed routing and `install_irq_dispatch` publishes the `IrqTable` into the EL1 vector seam, so the kernel/core `irq` phase builds the table against the real controller. Device SPIs are discovered from the device tree (`kernel/arch/aarch64::fdt::gic_device_intid` decodes a node's `interrupts` triple → INTID, no board constant) and a parked **kthread** is woken through `KthreadIrqWaiter`; proven end-to-end by `tests/integration/irq_kthread_qemu_aarch64` (RTC SPI → parked kthread → `WaitOutcome::Ready` + post-fire masked bit) alongside the delivery-path vertical `tests/integration/irq_qemu_aarch64`. The boot path does not yet *bind/route* a device SPI — that arrives with INCREMENT (2)'s root-unlock kthread; the arch port owns no `kernel/irq` dependency — the bridge lives downstream (`AGENTS.md` §17.2). |
 | `riscv64`    | `tests/integration/riscv64_boot::PlicIrqController` — the downstream `IrqController` bridge over the arch port's `kernel/arch/riscv64::plic::PlicController`, whose inherent `mask` writes the source's PLIC priority register to zero; S-mode trap vector (`kernel/arch/riscv64::trap`) claims/completes via the PLIC and bridges to `IrqTable::fire`. | **Implemented and host-tested**, not yet armed in the boot path (Stage 4.D Item 4 — riscv64 external-IRQ controller). The PLIC register driver, the `scause` decode, the one-shot dispatch slot, and the `PlicIrqController` bridge (incl. mask-before-wake through `IrqTable`) are unit-tested; the boot pipeline does not call `trap::init_traps` until the virtio-mmio verticals wire it. The arch port owns no `kernel/irq` dependency — the bridge lives downstream (`AGENTS.md` §17.2). |
 | `wasm32`     | No hardware-interrupt concept                                                                          | Permanently `UnsupportedController` (per the contract above). |
@@ -471,8 +496,8 @@ The x86_64 trap path threads an external IRQ end-to-end through:
    IO-APIC redirection entry with the cached `(vector, dest)`
    and `masked = true`, then issues a `core::sync::atomic::fence`
    with `Ordering::SeqCst`. The fence pairs with the SeqCst
-   load `IrqTable::try_wait_step` performs on `ready`,
-   guaranteeing every CPU that observes `ready = true` also
+   load `IrqTable::try_wait_step` performs on the line's fire
+   count, guaranteeing every CPU that observes the fire also
    observes the masked redirection entry. The host test
    `ioapic_controller_mask_before_wake_ordering` in
    `kernel/tairix-kernel::ioapic_controller` drives this exact
@@ -552,8 +577,8 @@ rather than reusing an IO-APIC pin:
    line→controller fan-out published as `IrqRouting.controller`: a real
    GSI masks/unmasks the `IoApicController` redirection entry; an MSI line
    is an edge source with **no** hardware line to mask, so its
-   `mask`/`rearm` are honest no-ops — the `IrqTable` ready-flag consume is
-   the whole re-arm interlock, and the runaway-interrupt safety net still
+   `mask`/`rearm` are honest no-ops — taking the fire from the `IrqTable`
+   is the whole re-arm interlock, and the runaway-interrupt safety net still
    contains a storming vector. The bootstrap virtio-blk-PCI root
    (`root_unlock::virtio_blk_unlock`) routes its MSI-X through a dedicated
    vector and binds the MSI line, never a shared IO-APIC pin.
@@ -649,8 +674,8 @@ the QEMU vertical is the first consumer.
    source's distributor enable bit (`ICENABLER`) and issues a
    `core::sync::atomic::fence` with `Ordering::SeqCst`. The downstream
    `GicBridge::mask` forwards here. The fence pairs with the SeqCst
-   load `IrqTable::try_wait_step` performs on `ready`, so every CPU
-   that observes `ready = true` also observes the masked line.
+   load `IrqTable::try_wait_step` performs on the line's fire count, so
+   every CPU that observes the fire also observes the masked line.
 3. **EL1 IRQ vector.** `kernel/arch/aarch64::exceptions` installs the
    EL1 vector table (`VBAR_EL1`) and, on an IRQ, acknowledges the GIC
    (`IAR`). The timer PPI dispatches to the scheduler-tick path; **any

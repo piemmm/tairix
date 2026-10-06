@@ -140,6 +140,51 @@ impl PageTableFrames for FrameTableSource {
         // dropped (never a panic).
         let _ = self.frames.free(Frame::containing(PhysAddr::new(phys)));
     }
+
+    fn alloc_block(&self, order: u32) -> Option<u64> {
+        let frame = self
+            .frames
+            .alloc_order(MemoryClass::PageTable, order)
+            .ok()?;
+        let phys = frame.start().as_u64();
+        let Some(base) = self.block_at(phys, order) else {
+            let _ = self.frames.free_order(frame, order);
+            return None;
+        };
+        let len = block_len(order)?;
+        // SAFETY: `frame` was just handed out by the allocator, so nothing
+        // else names it, and `block_at` proved all `len` bytes lie in the
+        // direct map; a hardware reader must see zeroes before it is linked.
+        unsafe { core::ptr::write_bytes(base.cast::<u8>(), 0, len) };
+        Some(phys)
+    }
+
+    fn block_at(&self, phys: u64, order: u32) -> Option<*mut u64> {
+        let len = block_len(order)?;
+        if !phys.is_multiple_of(u64::try_from(len).ok()?) {
+            return None;
+        }
+        let ptr = self.phys.translate(PhysAddr::new(phys), len)?;
+        // The block's own alignment, checked above, is at least a page's,
+        // which makes the `u8`→`u64` widening the lint flags sound.
+        #[allow(clippy::cast_ptr_alignment)]
+        Some(ptr.as_ptr().cast::<u64>())
+    }
+
+    fn free_block(&self, phys: u64, order: u32) {
+        // Like a table frame, a block held descriptors, never user data, and
+        // is zeroed by the next `alloc_block`; the allocator refuses a double
+        // free, and there is no recovery beyond declining.
+        let _ = self
+            .frames
+            .free_order(Frame::containing(PhysAddr::new(phys)), order);
+    }
+}
+
+/// Bytes a block of `2^order` frames spans, or [`None`] past the address
+/// space.
+fn block_len(order: u32) -> Option<usize> {
+    PAGE_SIZE.checked_shl(order).filter(|&len| len != 0)
 }
 
 #[cfg(all(test, not(loom)))]
@@ -217,6 +262,36 @@ mod tests {
         let b = source.alloc_table().expect("second");
         assert_ne!(a_phys, b.phys, "frames are physically distinct");
         assert_eq!(b.entries[0], 0, "the second frame is independent");
+    }
+
+    /// A block is contiguous, aligned to its own size, zeroed even when the
+    /// frames it reuses held data, and returns whole to the allocator.
+    #[test]
+    fn a_block_is_contiguous_aligned_zeroed_and_freed_whole() {
+        let (source, frames) = fresh_source!();
+        let before = frames.free_frames();
+        let phys = source.alloc_block(2).expect("four frames");
+        assert_eq!(phys % (4 * PAGE_SIZE as u64), 0, "aligned to its size");
+        assert_eq!(frames.free_frames(), before - 4);
+        let base = source.block_at(phys, 2).expect("mapped");
+        let words = 4 * PAGE_SIZE / 8;
+        // SAFETY: the block is this test's alone, `words` u64s long.
+        let block = unsafe { core::slice::from_raw_parts_mut(base, words) };
+        assert!(block.iter().all(|&w| w == 0));
+        block.fill(0x5A5A);
+        source.free_block(phys, 2);
+        assert_eq!(frames.free_frames(), before);
+        let again = source.alloc_block(2).expect("the freed block");
+        let base = source.block_at(again, 2).expect("mapped");
+        // SAFETY: as above.
+        let block = unsafe { core::slice::from_raw_parts(base, words) };
+        assert!(block.iter().all(|&w| w == 0), "a reused block is zeroed");
+        assert_eq!(
+            source.block_at(again + PAGE_SIZE as u64, 2),
+            None,
+            "an address its order does not align names no block"
+        );
+        assert_eq!(source.alloc_block(8), None, "more than RAM holds");
     }
 
     #[test]

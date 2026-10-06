@@ -18,7 +18,7 @@
 //!
 //! The architecture-neutral IRQ table (`kernel/irq`) requires a
 //! controller's `mask` to complete (and be globally observable)
-//! *before* a wait handle's `ready` flag flips
+//! *before* a fire it reports reaches a waiter
 //! (`docs/src/security/irq.md`). [`PlicController::mask`] honours the
 //! contract by writing the masked source's **priority register to
 //! zero** — a single 32-bit MMIO write, after which a source can never
@@ -319,8 +319,8 @@ impl<M: PlicMmio> PlicController<M> {
     }
 
     /// Mask `source` by dropping its priority to zero, then emit a
-    /// `SeqCst` fence so every CPU that later observes a wait handle's
-    /// `ready` flag also observes the masked priority
+    /// `SeqCst` fence so every CPU that later observes the line's fire
+    /// also observes the masked priority
     /// (`docs/src/security/irq.md`). Symmetric counterpart of
     /// [`Self::unmask`].
     ///
@@ -342,7 +342,7 @@ impl<M: PlicMmio> PlicController<M> {
         // completion queue.
         self.plic.set_source_priority(source, MASKED_PRIORITY);
         // SeqCst fence pairs with the SeqCst load the IRQ table performs
-        // on `ready`: every CPU that observes `ready = true` also
+        // on the line's fire count: every CPU that observes the fire also
         // observes the masked priority (`docs/src/security/irq.md`).
         fence(Ordering::SeqCst);
         Ok(())

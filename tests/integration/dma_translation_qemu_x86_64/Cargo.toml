@@ -1,6 +1,6 @@
 [package]
 name = "tairix-test-dma-translation-qemu-x86-64"
-description = "QEMU integration test (plans/IOMMU.md MI0): boot the production x86_64 tairix-kernel pipeline on the q35 machine behind an intel-iommu, every virtio-pci function reaching memory through it (iommu_platform=on), with the whole-disk autoload-root image and a virtio-keyboard-pci device behind a PCIe-to-PCI bridge, and prove every DMA in the boot is confined: the kernel takes the VT-d unit the ACPI DMAR describes over, the in-kernel floor disk reads the /System driver store through the kernel's own domain, and the autoloaded user-space virtio-input driver's DMA, which the unit sees under the bridge's alias, reaches its buffers only through its node's domain. PASS via QEMU isa-debug-exit once AuditEvent::InputDelivered with kind=key follows AuditEvent::DmaTranslationUnit with outcome=translating; any other unit outcome, a translation fault, or a key delivered before translation started, fails the run."
+description = "QEMU integration test (plans/IOMMU.md MI0, MI2): boot the production x86_64 pipeline on q35 behind an intel-iommu, or in the AMD binary an amd-iommu, every virtio-pci function iommu_platform=on and the keyboard behind a PCIe-to-PCI bridge. PASS via isa-debug-exit once a key is delivered after the unit audited translating, interrupts remapped and the keyboard granted bus mastering; any other unit outcome, a translation fault, or a key first fails the run."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -20,11 +20,14 @@ workspace = true
 name = "tairix-test-dma-translation-qemu-x86-64"
 path = "src/main.rs"
 
+[[bin]]
+name = "tairix-test-dma-translation-amd-qemu-x86-64"
+path = "src/amd.rs"
+
 [target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
 tairix-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
+tairix-itest-translation-witness = { path = "../translation_witness", version = "=0.0.0" }
 tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
-# The audit vocabulary the witness keys on.
-tairix-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 
 [build-dependencies]

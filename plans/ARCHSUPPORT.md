@@ -196,9 +196,9 @@ session over it. What it guarantees:
   (`console_uart::drain_fifo_into_console`) used by the x86_64 16550 and the
   aarch64 PL011; only the per-UART FIFO read, latch clear and brake are
   injected.
-- PCI discovery (`boot_x86_64::seed_virtio_pci`) prefers ECAM when the firmware
-  advertises an MCFG (`q35`, real UEFI/PCIe) and otherwise uses mechanism #1
-  (CF8/CFC), over one `probe_virtio_pci`.
+- PCI discovery (`boot_x86_64::seed_pci`) probes every segment the firmware's
+  MCFG describes through ECAM (`q35`, real UEFI/PCIe), and otherwise segment 0
+  through mechanism #1 (CF8/CFC), over the one shared `pci_probe::probe`.
 - Live verticals: `root_unlock_admission_qemu_x86_64` (interactive passphrase →
   `/System` mount → encrypted-root unlock → users database installed, over the
   virtio-blk-PCI MSI-X completion path), `spawn_session_qemu_x86_64` (the

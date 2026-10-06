@@ -18,7 +18,7 @@
 //! count bounds it, read once before the walk, so a device is never bound to
 //! a line the controller cannot raise.
 
-use crate::fdt::{plic_ndev, plic_phandle, plic_source_in_range, Fdt, PLIC_SOURCE_NONE};
+use crate::fdt::{plic_line, plic_ndev, plic_phandle, Fdt};
 use tairix_arch_api::fdtwalk::FdtPlatform;
 use tairix_fdt::read_cells;
 
@@ -55,11 +55,16 @@ impl FdtPlatform for Riscv64Fdt {
     /// falls to the controller's own arm-time range guard, which is where
     /// the boot path's `plic_device_source` leaves it as well.
     fn interrupt_line(&self, specifier: &[u8]) -> Option<u32> {
-        let source = u32::try_from(read_cells(specifier, 0, 1)?).ok()?;
-        match self.ndev {
-            Some(ndev) => plic_source_in_range(source, ndev).then_some(source),
-            None => (source != PLIC_SOURCE_NONE).then_some(source),
-        }
+        self.line_of(u32::try_from(read_cells(specifier, 0, 1)?).ok()?)
+    }
+}
+
+impl Riscv64Fdt {
+    /// The line PLIC source `source` raises: [`None`] for the reserved
+    /// sentinel, or for a source past the controller's discovered count.
+    #[must_use]
+    pub fn line_of(&self, source: u32) -> Option<u32> {
+        plic_line(source, self.ndev)
     }
 }
 
@@ -78,6 +83,29 @@ mod tests {
 
     /// The `virt_like` fixture's PLIC source for its one virtio-mmio slot.
     const SLOT_PLIC_IRQ: u32 = 1;
+
+    /// A PLIC source decodes to its line only inside the controller's
+    /// count, and never as the reserved sentinel: the one rule every
+    /// consumer of the specifier, PCI INTx included, reads it by.
+    #[test]
+    fn a_source_names_a_line_only_inside_the_controller_s_count() {
+        use super::Riscv64Fdt;
+        use tairix_arch_api::fdtwalk::FdtPlatform;
+        let ndev = 96;
+        let blob = crate::fdt::tests::virt_like_with_virtio(
+            0x8000_0000,
+            0x1000_0000,
+            10_000_000,
+            ndev,
+            &[(0x1000_1000, 1)],
+        );
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        let plic = Riscv64Fdt::from_tree(&fdt);
+        assert_eq!(plic.line_of(0), None);
+        assert_eq!(plic.line_of(1), Some(1));
+        assert_eq!(plic.line_of(ndev), Some(ndev));
+        assert_eq!(plic.line_of(ndev + 1), None);
+    }
 
     #[test]
     fn passes_platform_discovery_conformance() {

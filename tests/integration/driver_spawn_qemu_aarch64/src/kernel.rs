@@ -567,6 +567,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         sys.arch,
         &NULL_PROCESS_WAIT,
         sys.irq_table,
+        &IRQ_CONTROLLER,
         &NULL_SHARED_MEM_FACILITY,
         KernelArch::cross_cpu_tlb_shootdown(sys.arch),
     );

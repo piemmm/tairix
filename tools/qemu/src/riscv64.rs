@@ -47,7 +47,9 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::process::Command;
 
-use crate::{net_device_arg, netdev_arg, rtc_base_args, Outcome, SessionKind, Spec};
+use crate::{
+    net_device_arg, netdev_arg, rtc_base_args, DmaTranslation, Outcome, SessionKind, Spec,
+};
 
 /// Default guest RAM size in mebibytes for a riscv64 QEMU integration
 /// test.
@@ -65,9 +67,23 @@ pub const QEMU_BINARY: &str = "qemu-system-riscv64";
 
 /// QEMU machine model the runner targets. The generic `virt` board is
 /// the only riscv64 platform TAIRiX' QEMU tests run on — it carries the
-/// `SiFive` Test device, eight virtio-mmio transports, and a `PCIe` host
-/// bridge the Stage 4.D drivers exercise.
+/// `SiFive` Test device, eight virtio-mmio transports, and the `PCIe` host
+/// bridge the kernel takes.
 pub const MACHINE: &str = "virt";
+
+/// The `-M` value and the `-global`s a run behind `translation` boots with.
+#[must_use]
+pub fn machine(translation: DmaTranslation) -> (&'static str, &'static [&'static str]) {
+    match translation {
+        DmaTranslation::RiscvStage2 => ("virt,iommu-sys=on", &[]),
+        DmaTranslation::RiscvStage1 => ("virt,iommu-sys=on", &["riscv-iommu-device.g-stage=false"]),
+        DmaTranslation::Absent
+        | DmaTranslation::Vtd
+        | DmaTranslation::AmdVi
+        | DmaTranslation::Smmuv3Stage1
+        | DmaTranslation::Smmuv3Stage2 => (MACHINE, &[]),
+    }
+}
 
 /// CPU model the runner targets: the generic RV64 core with
 /// **software-managed** page-table Accessed/Dirty bits
@@ -145,8 +161,13 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
     // without the implicit stdio muxing `-nographic` would impose — the
     // same rationale documented on the x86_64 builder.
     let mut argv: Vec<OsString> = Vec::with_capacity(18 + spec.extra_args.len() * 2);
+    let (machine, globals) = machine(spec.dma_translation);
     argv.push("-M".into());
-    argv.push(MACHINE.into());
+    argv.push(machine.into());
+    for global in globals {
+        argv.push("-global".into());
+        argv.push((*global).into());
+    }
     // Pin the CPU to `rv64` with **software-managed** page-table A/D bits
     // (`svade=true,svadu=false`). RISC-V leaves A/D update
     // implementation-defined: QEMU's default `virt` CPU updates them in
@@ -246,7 +267,11 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
         }
     }
 
-    argv.extend(crate::input_device_args(spec, "-device"));
+    if spec.devices.input == crate::InputPlacement::SharedLine {
+        argv.extend(crate::shared_line_input_args(spec));
+    } else {
+        argv.extend(crate::input_device_args(spec, "-device"));
+    }
     // Attach a virtio sound device behind QEMU's `wav` backend, which writes
     // what the emulated card received to a host file the vertical then checks
     // sample for sample.
@@ -355,6 +380,35 @@ mod tests {
             .position(|a| a == "-rtc")
             .expect("argv pins the clock chip");
         assert_eq!(argv[pos + 1], "base=2027-03-05T12:00:00");
+    }
+
+    #[test]
+    fn argv_attaches_the_iommu_at_the_stage_the_spec_asks_for() {
+        for (translation, globals) in [
+            (
+                DmaTranslation::RiscvStage2,
+                &["virtio-mmio.force-legacy=false"][..],
+            ),
+            (
+                DmaTranslation::RiscvStage1,
+                &[
+                    "riscv-iommu-device.g-stage=false",
+                    "virtio-mmio.force-legacy=false",
+                ][..],
+            ),
+        ] {
+            let spec = fixture_spec(1).with_dma_translation(translation);
+            let argv = render(&build_argv(&spec, Path::new("/k")));
+            let m = argv.iter().position(|a| a == "-M").expect("argv names -M");
+            assert_eq!(argv[m + 1], "virt,iommu-sys=on");
+            let set: Vec<&str> = argv
+                .windows(2)
+                .filter(|pair| pair[0] == "-global")
+                .map(|pair| pair[1].as_str())
+                .collect();
+            assert_eq!(set, globals, "{translation:?}");
+        }
+        assert_eq!(machine(DmaTranslation::Absent), (MACHINE, &[][..]));
     }
 
     #[test]
@@ -624,5 +678,24 @@ mod tests {
         assert!(argv.iter().any(|a| a.contains("filter-dump")
             && a.contains("netdev=net1")
             && a.contains("/tmp/cap1.pcap")));
+    }
+    #[test]
+    fn argv_puts_shared_line_input_on_the_host() {
+        let mut spec = fixture_spec(1);
+        spec.input_keyboard = Some(crate::KeyInjection {
+            ready_marker: "ready".into(),
+            key: "a".into(),
+            ready_occurrences: 2,
+        });
+        spec.devices.pointing.mouse = true;
+        spec.devices.input = crate::InputPlacement::SharedLine;
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
+        assert!(argv
+            .iter()
+            .any(|a| a == "virtio-keyboard-pci,disable-legacy=on,addr=0x1"));
+        assert!(argv
+            .iter()
+            .any(|a| a == "virtio-mouse-pci,disable-legacy=on,addr=0x5"));
+        assert!(!argv.iter().any(|a| a.starts_with("virtio-keyboard-device")));
     }
 }

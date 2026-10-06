@@ -1,0 +1,761 @@
+//! Bus numbers and BAR addresses for a host whose firmware set none.
+//!
+//! Buses are numbered depth first. Every BAR and bridge window is sized
+//! bottom up, a bridge window the sum of what lies below it, and placed top
+//! down, largest alignment first and naturally aligned, inside the host's
+//! windows: the order Linux's `pci_assign_unassigned_bus_resources` follows.
+//! A function any of whose BARs of a space found no room is left decoding
+//! nothing of that space, so no BAR still at zero claims an address.
+
+use alloc::vec::Vec;
+use core::ops::{Range, RangeInclusive};
+
+use tairix_abi::driver::pci::{
+    BUS_MASTER_ENABLE, IO_SPACE_ENABLE, MEMORY_SPACE_ENABLE, PCI_DEVICES, PCI_FUNCTIONS,
+};
+use tairix_abi::DriverError;
+
+use crate::config::{
+    BarDescriptor, BarKind, ConfigAddress, ConfigSpace, BRIDGE_BAR_SLOTS, BUS_NUMBERS,
+    COMMAND_STATUS, DEVICE_BAR_SLOTS, HEADER_BRIDGE, HEADER_DEVICE, HEADER_TYPE, MULTIFUNCTION,
+};
+use crate::enumerate::Pci;
+
+/// Bridge memory windows are kept in 1 MiB units.
+const MEMORY_GRANULE: u64 = 1 << 20;
+/// Bridge I/O windows in 4 KiB units.
+const IO_GRANULE: u64 = 1 << 12;
+/// The lowest I/O port a BAR is given: below it lie the legacy ISA ports.
+const IO_FLOOR: u64 = 0x1000;
+/// Memory a bridge's non-prefetchable window can name: its register holds
+/// 32 bits.
+const MEMORY_REACH: u64 = 1 << 32;
+
+const IO_BASE_LIMIT: u8 = 7;
+const MEMORY_BASE_LIMIT: u8 = 8;
+const PREFETCH_BASE_LIMIT: u8 = 9;
+const PREFETCH_BASE_UPPER: u8 = 10;
+const PREFETCH_LIMIT_UPPER: u8 = 11;
+const IO_UPPER: u8 = 12;
+
+/// A disabled memory window: its base above its limit.
+const MEMORY_WINDOW_OFF: u32 = 0x0000_FFF0;
+/// A disabled I/O window.
+const IO_WINDOW_OFF: u32 = 0x0000_00F0;
+
+/// What a host forwards, in PCI addresses: at most one window of each space.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Windows {
+    /// I/O ports.
+    pub io: Option<Range<u64>>,
+    /// Memory below the 4 GiB line.
+    pub memory: Option<Range<u64>>,
+    /// Memory above it, where 64-bit BARs go.
+    pub wide: Option<Range<u64>>,
+}
+
+/// What an assignment did.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct Assigned {
+    /// The last bus it numbered.
+    pub last_bus: u8,
+    /// BARs and bridge windows that found no room, each left decoding
+    /// nothing.
+    pub unplaced: usize,
+}
+
+/// A host's resources, set out where its firmware set none.
+pub trait PciResources {
+    /// Number every bus below `buses.start()` within `buses`, and place every
+    /// BAR and bridge window inside `windows`, each function decoding a space
+    /// only where everything it holds there was placed. Each bridge's bus
+    /// mastering is turned off, so it forwards its subtree's DMA once the
+    /// kernel grants a function below it mastering, never before; an
+    /// endpoint's is left as found.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::NoSpace`] when the hierarchy cannot be held.
+    fn assign(&self, buses: RangeInclusive<u8>, windows: &Windows)
+        -> Result<Assigned, DriverError>;
+}
+
+/// `value` rounded up to `align`, a power of two.
+pub(crate) fn align_up(value: u64, align: u64) -> Option<u64> {
+    let mask = align.checked_sub(1)?;
+    Some(value.checked_add(mask)? & !mask)
+}
+
+/// The space a request is placed in, as its parent sees it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Space {
+    Io,
+    /// Memory below the 4 GiB line.
+    Memory,
+    /// A 64-bit prefetchable BAR or bridge window: the host's wide window at
+    /// the root, a bridge's prefetchable window below.
+    Wide,
+}
+
+/// One BAR or bridge window to place.
+#[derive(Copy, Clone, Debug)]
+struct Request {
+    space: Space,
+    size: u64,
+    align: u64,
+    /// Which BAR of which function, or which window of which bridge.
+    owner: usize,
+    item: Item,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Item {
+    Bar(usize),
+    Window(Space),
+}
+
+/// One function found by the walk.
+struct Node {
+    addr: ConfigAddress,
+    /// Whether it sits on the root bus, where a 64-bit BAR may take the
+    /// host's wide window whether or not it prefetches.
+    root: bool,
+    bars: Vec<BarDescriptor>,
+    /// Where each BAR was placed.
+    placed: Vec<Option<u64>>,
+    bridge: Option<Bridge>,
+}
+
+/// How many address bits a bridge window decodes: an I/O window 16 or 32, a
+/// prefetchable one 32 or 64.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Width {
+    Narrow,
+    Wide,
+}
+
+struct Bridge {
+    /// The functions on its secondary bus, as found.
+    children: Vec<usize>,
+    /// Its secondary bus; [`None`] where no bus was left for it.
+    secondary: Option<u8>,
+    /// Its bus-numbers register's latency timer, kept as found.
+    latency: u32,
+    /// Its I/O window, where it has one.
+    io: Option<Width>,
+    /// Its prefetchable window, where it has one.
+    prefetch: Option<Width>,
+    /// What its children ask of it, by the window that holds each.
+    below: Vec<Request>,
+    /// Each window's span, once placed.
+    windows: [Option<Range<u64>>; 3],
+}
+
+impl Bridge {
+    /// The window of this bridge that holds `request`: a bridge without a
+    /// prefetchable window takes such BARs in its memory one.
+    fn window_for(&self, request: &Request) -> Option<Space> {
+        match request.space {
+            Space::Io => self.io.map(|_| Space::Io),
+            Space::Wide if self.prefetch.is_some() => Some(Space::Wide),
+            Space::Memory | Space::Wide => Some(Space::Memory),
+        }
+    }
+}
+
+const fn window_slot(space: Space) -> usize {
+    match space {
+        Space::Io => 0,
+        Space::Memory => 1,
+        Space::Wide => 2,
+    }
+}
+
+struct Assignment<'p, C: ConfigSpace> {
+    pci: &'p Pci<C>,
+    nodes: Vec<Node>,
+    unplaced: usize,
+}
+
+/// One bus being walked: how far the scan of its slots has reached, what it
+/// found, and the bridge forwarding to it.
+struct BusWalk {
+    bus: u8,
+    device: u8,
+    function: u8,
+    found: Vec<usize>,
+    /// The node of the bridge whose secondary bus this is; [`None`] for the
+    /// root bus.
+    bridge: Option<usize>,
+}
+
+impl BusWalk {
+    const fn new(bus: u8, bridge: Option<usize>) -> Self {
+        Self {
+            bus,
+            device: 0,
+            function: 0,
+            found: Vec::new(),
+            bridge,
+        }
+    }
+
+    /// The next function present on the bus, with its header type; a
+    /// device's other functions are scanned only where function 0 says it
+    /// has them.
+    fn next<C: ConfigSpace>(
+        &mut self,
+        assignment: &Assignment<'_, C>,
+    ) -> Option<(ConfigAddress, u8)> {
+        while self.device < PCI_DEVICES {
+            let addr = ConfigAddress {
+                bus: self.bus,
+                device: self.device,
+                function: self.function,
+                register: 0,
+            };
+            let present = assignment.read(addr, 0) & 0xFFFF != 0xFFFF;
+            let header = if present {
+                assignment.read(addr, HEADER_TYPE).to_le_bytes()[2]
+            } else {
+                0
+            };
+            let single = self.function == 0 && (!present || header & MULTIFUNCTION == 0);
+            if single || self.function + 1 >= PCI_FUNCTIONS {
+                self.device += 1;
+                self.function = 0;
+            } else {
+                self.function += 1;
+            }
+            if present {
+                return Some((addr, header));
+            }
+        }
+        None
+    }
+}
+
+impl<C: ConfigSpace> PciResources for Pci<C> {
+    fn assign(
+        &self,
+        buses: RangeInclusive<u8>,
+        windows: &Windows,
+    ) -> Result<Assigned, DriverError> {
+        let mut assignment = Assignment {
+            pci: self,
+            nodes: Vec::new(),
+            unplaced: 0,
+        };
+        let (roots, last) = assignment.walk(&buses)?;
+        let requests = assignment.requests_of(&roots)?;
+        // With no wide window a wide request goes in the memory one, placed
+        // with that window's own requests so the two never overlap.
+        let holder = |request: &Request| match request.space {
+            Space::Wide if windows.wide.is_none() => Space::Memory,
+            space => space,
+        };
+        for (space, window) in [
+            (Space::Io, windows.io.clone()),
+            (Space::Memory, windows.memory.clone()),
+            (Space::Wide, windows.wide.clone()),
+        ] {
+            let floor = if space == Space::Io { IO_FLOOR } else { 0 };
+            let mut ours = Vec::new();
+            ours.try_reserve_exact(requests.iter().filter(|r| holder(r) == space).count())
+                .map_err(|_| DriverError::NoSpace)?;
+            ours.extend(requests.iter().copied().filter(|r| holder(r) == space));
+            assignment.place(ours, window, floor)?;
+        }
+        assignment.program();
+        Ok(Assigned {
+            last_bus: last,
+            unplaced: assignment.unplaced,
+        })
+    }
+}
+
+impl<C: ConfigSpace> Assignment<'_, C> {
+    fn config(&self) -> &C {
+        self.pci.config_space()
+    }
+
+    fn read(&self, addr: ConfigAddress, register: u8) -> u32 {
+        self.config().read32(ConfigAddress {
+            register: u16::from(register),
+            ..addr
+        })
+    }
+
+    fn write(&self, addr: ConfigAddress, register: u8, value: u32) {
+        self.config().write32(
+            ConfigAddress {
+                register: u16::from(register),
+                ..addr
+            },
+            value,
+        );
+    }
+
+    /// Every function below the root bus `buses.start()`, each bridge's buses
+    /// numbered depth first within `buses`: the root bus's functions, by
+    /// index, and the last bus numbered. The walk keeps its own stack, so how
+    /// deep a hierarchy runs costs the kernel's stack nothing.
+    fn walk(&mut self, buses: &RangeInclusive<u8>) -> Result<(Vec<usize>, u8), DriverError> {
+        let no_space = |_| DriverError::NoSpace;
+        let limit = *buses.end();
+        let mut last = *buses.start();
+        let mut stack = Vec::new();
+        stack.try_reserve(1).map_err(no_space)?;
+        stack.push(BusWalk::new(last, None));
+        while let Some(walk) = stack.last_mut() {
+            let Some((addr, header)) = walk.next(self) else {
+                let done = stack.pop().ok_or(DriverError::DeviceFault)?;
+                match done.bridge {
+                    Some(bridge) => self.close_bus(bridge, done.found, last),
+                    None => return Ok((done.found, last)),
+                }
+                continue;
+            };
+            let root = walk.bridge.is_none();
+            let Some(index) = self.visit(addr, header & !MULTIFUNCTION, root, &mut last, limit)?
+            else {
+                continue;
+            };
+            walk.found.try_reserve(1).map_err(no_space)?;
+            walk.found.push(index);
+            let secondary = self.nodes[index]
+                .bridge
+                .as_ref()
+                .and_then(|bridge| bridge.secondary);
+            if let Some(secondary) = secondary {
+                stack.try_reserve(1).map_err(no_space)?;
+                stack.push(BusWalk::new(secondary, Some(index)));
+            }
+        }
+        Err(DriverError::DeviceFault)
+    }
+
+    /// Record the function at `addr`, sizing its BARs; a bridge also gets its
+    /// buses. A `CardBus` bridge, or any other layout, is left alone.
+    fn visit(
+        &mut self,
+        addr: ConfigAddress,
+        layout: u8,
+        root: bool,
+        last: &mut u8,
+        limit: u8,
+    ) -> Result<Option<usize>, DriverError> {
+        let slots = match layout {
+            HEADER_DEVICE => DEVICE_BAR_SLOTS,
+            HEADER_BRIDGE => BRIDGE_BAR_SLOTS,
+            _ => return Ok(None),
+        };
+        let bars = self.pci.bars_of(addr, slots)?;
+        let mut placed = Vec::new();
+        placed
+            .try_reserve_exact(bars.len())
+            .map_err(|_| DriverError::NoSpace)?;
+        placed.resize(bars.len(), None);
+        let bridge = (layout == HEADER_BRIDGE).then(|| self.number_bridge(addr, last, limit));
+        self.nodes
+            .try_reserve(1)
+            .map_err(|_| DriverError::NoSpace)?;
+        self.nodes.push(Node {
+            addr,
+            root,
+            bars,
+            placed,
+            bridge,
+        });
+        Ok(Some(self.nodes.len() - 1))
+    }
+
+    /// Give the bridge at `addr` its secondary bus, forwarding every bus up
+    /// to `limit` until its subtree has been walked, its windows closed until
+    /// placed; one no bus is left for forwards nothing.
+    fn number_bridge(&mut self, addr: ConfigAddress, last: &mut u8, limit: u8) -> Bridge {
+        let width = |register| {
+            if self.read(addr, register) & 0xF == 1 {
+                Width::Wide
+            } else {
+                Width::Narrow
+            }
+        };
+        let io = self
+            .window_writable(addr, IO_BASE_LIMIT, 0xE0F0)
+            .then(|| width(IO_BASE_LIMIT));
+        let prefetch = self
+            .window_writable(addr, PREFETCH_BASE_LIMIT, 0xFFE0_FFF0)
+            .then(|| width(PREFETCH_BASE_LIMIT));
+        self.close_windows(addr, prefetch == Some(Width::Wide));
+        let latency = self.read(addr, BUS_NUMBERS) & 0xFF00_0000;
+        let secondary = last.checked_add(1).filter(|&next| next <= limit);
+        match secondary {
+            Some(secondary) => {
+                *last = secondary;
+                self.write_buses(addr, latency, secondary, limit);
+            }
+            None => self.write(addr, BUS_NUMBERS, latency),
+        }
+        Bridge {
+            children: Vec::new(),
+            secondary,
+            latency,
+            io,
+            prefetch,
+            below: Vec::new(),
+            windows: [None, None, None],
+        }
+    }
+
+    /// The walk below the bridge at node `bridge` is done: `children` are its
+    /// secondary bus's functions, and it forwards no further than `last`.
+    fn close_bus(&mut self, bridge: usize, children: Vec<usize>, last: u8) {
+        let Some(node) = self.nodes.get_mut(bridge) else {
+            return;
+        };
+        let addr = node.addr;
+        let Some(numbered) = node.bridge.as_mut() else {
+            return;
+        };
+        numbered.children = children;
+        if let Some(secondary) = numbered.secondary {
+            let latency = numbered.latency;
+            self.write_buses(addr, latency, secondary, last);
+        }
+    }
+
+    fn write_buses(&self, addr: ConfigAddress, latency: u32, secondary: u8, subordinate: u8) {
+        self.write(
+            addr,
+            BUS_NUMBERS,
+            latency
+                | u32::from(addr.bus)
+                | (u32::from(secondary) << 8)
+                | (u32::from(subordinate) << 16),
+        );
+    }
+
+    /// Whether the base/limit register at `register` takes a window: one
+    /// reading zero is tried with `probe`, and put back.
+    fn window_writable(&self, addr: ConfigAddress, register: u8, probe: u32) -> bool {
+        let held = self.read(addr, register);
+        if held & 0xFFFF != 0 {
+            return true;
+        }
+        // The I/O register's upper half is the RW1C secondary status.
+        let mask = if register == IO_BASE_LIMIT {
+            0xFFFF
+        } else {
+            u32::MAX
+        };
+        self.write(addr, register, probe & mask);
+        let taken = self.read(addr, register) & mask & probe != 0;
+        self.write(addr, register, held & mask);
+        taken
+    }
+
+    fn close_windows(&self, addr: ConfigAddress, prefetch_wide: bool) {
+        self.write(addr, IO_BASE_LIMIT, IO_WINDOW_OFF);
+        self.write(addr, IO_UPPER, 0);
+        self.write(addr, MEMORY_BASE_LIMIT, MEMORY_WINDOW_OFF);
+        self.write(addr, PREFETCH_BASE_LIMIT, MEMORY_WINDOW_OFF);
+        if prefetch_wide {
+            self.write(addr, PREFETCH_BASE_UPPER, 0);
+            self.write(addr, PREFETCH_LIMIT_UPPER, 0);
+        }
+    }
+
+    /// What the root bus's functions `roots` ask of the host: each function's
+    /// BARs, and each bridge's windows, sized from what lies below it, which
+    /// the bridge keeps. Every function below a bridge was found after it, so
+    /// one pass from the last node back meets each child before its bridge.
+    fn requests_of(&mut self, roots: &[usize]) -> Result<Vec<Request>, DriverError> {
+        let no_space = |_| DriverError::NoSpace;
+        let mut asked: Vec<Vec<Request>> = Vec::new();
+        asked
+            .try_reserve_exact(self.nodes.len())
+            .map_err(no_space)?;
+        asked.resize_with(self.nodes.len(), Vec::new);
+        for owner in (0..self.nodes.len()).rev() {
+            let node = &self.nodes[owner];
+            let mut requests = Vec::new();
+            requests
+                .try_reserve_exact(node.bars.len() + 3)
+                .map_err(no_space)?;
+            requests.extend(node.bars.iter().enumerate().map(|(index, bar)| Request {
+                space: match bar.kind {
+                    BarKind::Io => Space::Io,
+                    BarKind::Memory64 if node.root || bar.prefetchable => Space::Wide,
+                    BarKind::Memory64 | BarKind::Memory32 => Space::Memory,
+                },
+                size: bar.size,
+                align: bar.size,
+                owner,
+                item: Item::Bar(index),
+            }));
+            if let Some(bridge) = self.nodes[owner].bridge.as_mut() {
+                let held = bridge
+                    .children
+                    .iter()
+                    .map(|&child| asked[child].len())
+                    .sum();
+                let mut below = Vec::new();
+                below.try_reserve_exact(held).map_err(no_space)?;
+                for &child in &bridge.children {
+                    below.append(&mut asked[child]);
+                }
+                for space in [Space::Io, Space::Memory, Space::Wide] {
+                    let granule = if space == Space::Io {
+                        IO_GRANULE
+                    } else {
+                        MEMORY_GRANULE
+                    };
+                    let held = below.iter().filter(|r| bridge.window_for(r) == Some(space));
+                    match span_of(held, granule)? {
+                        Span::Empty => {}
+                        Span::Of { size, align } => requests.push(Request {
+                            space,
+                            size,
+                            align,
+                            owner,
+                            item: Item::Window(space),
+                        }),
+                        // Too large to name: the window finds no room.
+                        Span::Overflowed => self.unplaced += 1,
+                    }
+                }
+                // Its children's I/O, behind a bridge that forwards none.
+                self.unplaced += below
+                    .iter()
+                    .filter(|r| bridge.window_for(r).is_none())
+                    .count();
+                bridge.below = below;
+            }
+            asked[owner] = requests;
+        }
+        let mut requests = Vec::new();
+        requests
+            .try_reserve_exact(roots.iter().map(|&root| asked[root].len()).sum())
+            .map_err(no_space)?;
+        for &root in roots {
+            requests.append(&mut asked[root]);
+        }
+        Ok(requests)
+    }
+
+    /// Place `requests` inside `window` from `floor` up, largest alignment
+    /// first, and each bridge window placed, its own members inside it in
+    /// turn. The windows still to fill are kept in a list of their own, so
+    /// how deep a hierarchy runs costs the kernel's stack nothing.
+    fn place(
+        &mut self,
+        requests: Vec<Request>,
+        window: Option<Range<u64>>,
+        floor: u64,
+    ) -> Result<(), DriverError> {
+        let no_space = |_| DriverError::NoSpace;
+        let mut work = Vec::new();
+        work.try_reserve(1).map_err(no_space)?;
+        work.push((requests, window, floor));
+        while let Some((mut ordered, window, floor)) = work.pop() {
+            ordered.sort_by_key(|request| core::cmp::Reverse(request.align));
+            let Some(window) = window else {
+                self.unplaced += ordered.len();
+                continue;
+            };
+            let mut cursor = window.start.max(floor);
+            for request in ordered {
+                let span = align_up(cursor, request.align)
+                    .and_then(|base| Some(base..base.checked_add(request.size)?))
+                    .filter(|span| span.end <= window.end && span.end <= self.reach(&request));
+                let Some(span) = span else {
+                    self.unplaced += 1;
+                    continue;
+                };
+                cursor = span.end;
+                let node = self
+                    .nodes
+                    .get_mut(request.owner)
+                    .ok_or(DriverError::DeviceFault)?;
+                match request.item {
+                    Item::Bar(index) => {
+                        *node.placed.get_mut(index).ok_or(DriverError::DeviceFault)? =
+                            Some(span.start);
+                    }
+                    Item::Window(space) => {
+                        let bridge = node.bridge.as_mut().ok_or(DriverError::DeviceFault)?;
+                        bridge.windows[window_slot(space)] = Some(span.clone());
+                        let inside = |r: &&Request| bridge.window_for(r) == Some(space);
+                        let mut members = Vec::new();
+                        members
+                            .try_reserve_exact(bridge.below.iter().filter(inside).count())
+                            .map_err(no_space)?;
+                        members.extend(bridge.below.iter().filter(inside).copied());
+                        work.try_reserve(1).map_err(no_space)?;
+                        work.push((members, Some(span), 0));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The highest address `request`'s register can name.
+    fn reach(&self, request: &Request) -> u64 {
+        let node = &self.nodes[request.owner];
+        let bridge = node.bridge.as_ref();
+        let wide =
+            |window: fn(&Bridge) -> Option<Width>| bridge.and_then(window) == Some(Width::Wide);
+        match request.item {
+            Item::Bar(index) if node.bars[index].kind == BarKind::Memory64 => u64::MAX,
+            Item::Window(Space::Wide) if wide(|b| b.prefetch) => u64::MAX,
+            Item::Window(Space::Io) if !wide(|b| b.io) => 1 << 16,
+            Item::Bar(_) | Item::Window(_) => MEMORY_REACH,
+        }
+    }
+
+    /// Write every placement and set each function's decoding of a space it
+    /// holds BARs in to whether all of them were placed, clearing whatever
+    /// firmware left on otherwise; a space it holds none in is left as found.
+    /// A bridge decodes for the windows placed, unless a BAR of its own in
+    /// that space found no room, and masters nothing until a grant opens it.
+    fn program(&self) {
+        for node in &self.nodes {
+            let (mut on, mut off) = (0, 0);
+            for (space_bits, kinds) in [
+                (IO_SPACE_ENABLE, &[BarKind::Io][..]),
+                (
+                    MEMORY_SPACE_ENABLE,
+                    &[BarKind::Memory32, BarKind::Memory64][..],
+                ),
+            ] {
+                let ours = || {
+                    node.bars
+                        .iter()
+                        .zip(&node.placed)
+                        .filter(|(bar, _)| kinds.contains(&bar.kind))
+                };
+                if ours().next().is_none() {
+                    continue;
+                }
+                if ours().all(|(_, placed)| placed.is_some()) {
+                    on |= space_bits;
+                } else {
+                    off |= space_bits;
+                }
+            }
+            for (bar, placed) in node.bars.iter().zip(&node.placed) {
+                if let Some(base) = placed {
+                    self.pci.write_bar(node.addr, bar, *base);
+                }
+            }
+            if let Some(bridge) = &node.bridge {
+                on |= self.open_windows(node.addr, bridge);
+                off |= BUS_MASTER_ENABLE;
+            }
+            let command = self.read(node.addr, COMMAND_STATUS) & 0xFFFF;
+            let decoding = (command | on) & !off;
+            if decoding != command {
+                self.write(node.addr, COMMAND_STATUS, decoding);
+            }
+        }
+    }
+
+    /// Program the bridge's placed windows, answering the decoding they
+    /// need.
+    fn open_windows(&self, addr: ConfigAddress, bridge: &Bridge) -> u32 {
+        let mut decode = 0;
+        if let Some(io) = &bridge.windows[window_slot(Space::Io)] {
+            let (base, limit) = (io.start, io.end - 1);
+            // The upper halves first, closed, so the window never spans more
+            // than it will.
+            self.write(addr, IO_UPPER, 0x0000_FFFF);
+            self.write(
+                addr,
+                IO_BASE_LIMIT,
+                low32(((limit >> 8) & 0xF0) << 8 | ((base >> 8) & 0xF0)),
+            );
+            self.write(addr, IO_UPPER, low32((limit & 0xFFFF_0000) | (base >> 16)));
+            decode |= IO_SPACE_ENABLE;
+        }
+        if let Some(memory) = &bridge.windows[window_slot(Space::Memory)] {
+            self.write(addr, MEMORY_BASE_LIMIT, base_limit(memory));
+            decode |= MEMORY_SPACE_ENABLE;
+        }
+        if let Some(prefetch) = &bridge.windows[window_slot(Space::Wide)] {
+            let wide = bridge.prefetch == Some(Width::Wide);
+            if wide {
+                self.write(addr, PREFETCH_LIMIT_UPPER, 0);
+            }
+            self.write(addr, PREFETCH_BASE_LIMIT, base_limit(prefetch));
+            if wide {
+                self.write(addr, PREFETCH_BASE_UPPER, high32(prefetch.start));
+                self.write(addr, PREFETCH_LIMIT_UPPER, high32(prefetch.end - 1));
+            }
+            decode |= MEMORY_SPACE_ENABLE;
+        }
+        decode
+    }
+}
+
+/// What a bridge window must span to hold its requests.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Span {
+    /// Nothing to hold.
+    Empty,
+    /// Each request naturally aligned, largest first, the whole rounded to
+    /// the window's granule.
+    Of { size: u64, align: u64 },
+    /// More than an address can name.
+    Overflowed,
+}
+
+/// The span a window of `granule` needs to hold `requests`.
+///
+/// # Errors
+///
+/// [`DriverError::NoSpace`] when their sizes cannot be held to sort.
+fn span_of<'r>(
+    requests: impl Iterator<Item = &'r Request> + Clone,
+    granule: u64,
+) -> Result<Span, DriverError> {
+    let mut sizes = Vec::new();
+    sizes
+        .try_reserve_exact(requests.clone().count())
+        .map_err(|_| DriverError::NoSpace)?;
+    sizes.extend(requests.map(|r| (r.align, r.size)));
+    let Some(largest) = sizes.iter().map(|&(align, _)| align).max() else {
+        return Ok(Span::Empty);
+    };
+    sizes.sort_by_key(|&(align, _)| core::cmp::Reverse(align));
+    let span = sizes
+        .iter()
+        .try_fold(0u64, |offset, &(align, size)| {
+            align_up(offset, align)?.checked_add(size)
+        })
+        .and_then(|end| align_up(end, granule));
+    Ok(span.map_or(Span::Overflowed, |size| Span::Of {
+        size,
+        align: largest.max(granule),
+    }))
+}
+
+/// A memory base/limit register naming `span`.
+fn base_limit(span: &Range<u64>) -> u32 {
+    let limit = span.end - 1;
+    low32(((span.start >> 16) & 0xFFF0) | (limit & 0xFFF0_0000))
+}
+
+fn low32(value: u64) -> u32 {
+    let [b0, b1, b2, b3, ..] = value.to_le_bytes();
+    u32::from_le_bytes([b0, b1, b2, b3])
+}
+
+fn high32(value: u64) -> u32 {
+    low32(value >> 32)
+}
+
+#[cfg(test)]
+#[path = "assign_tests.rs"]
+mod tests;

@@ -12,37 +12,69 @@ use alloc::vec::Vec;
 
 use tairix_abi::driver::bus::BusDevice;
 use tairix_abi::driver::pci::{
-    Quiesced, BUS_MASTER_ENABLE, COMMAND_OFFSET, MEMORY_SPACE_ENABLE, PCI_DEVICES, PCI_FUNCTIONS,
+    Quiesced, BUS_MASTER_ENABLE, COMMAND_OFFSET, INTERRUPT_DISABLE, IO_SPACE_ENABLE,
+    MEMORY_SPACE_ENABLE, PCI_DEVICES, PCI_FUNCTIONS,
 };
-use tairix_abi::driver::virtio_pci::{
-    common, VIRTIO_PCI_CFG_COMMON, VIRTIO_PCI_CFG_NOTIFY, VIRTIO_PCI_CFG_PCI,
-};
+use tairix_abi::driver::virtio_pci::VIRTIO_PCI_CFG_NOTIFY;
 use tairix_abi::hwtree::HW_NODE_ROOT;
 use tairix_abi::{
     DriverError, HwDeviceClass, HwMatchKey, HwNode, MmioMapError, MmioMapper, MsiMessage,
     RegisterWindow, WindowError,
 };
 
+use crate::aperture::Apertures;
 use crate::config::{
-    BarDescriptor, BarKind, Capability, ConfigAddress, ConfigSpace, CAP_ID_VENDOR,
-    EXTENDED_REGISTER,
+    BarDescriptor, BarKind, Capability, ConfigAddress, ConfigSpace, BUS_NUMBERS, CAP_ID_VENDOR,
+    COMMAND_STATUS, DEVICE_BAR_SLOTS, EXTENDED_REGISTER, FIRST_BAR, HEADER_BRIDGE, HEADER_CARDBUS,
+    HEADER_DEVICE, HEADER_TYPE, MULTIFUNCTION,
 };
-use crate::topology::{Acs, AcsPolicy, Function, Header, PciTopology, PortType, Topology};
-
-/// Header layouts of a PCI-to-PCI and a `CardBus` bridge (PCI Local Bus 3.0
-/// §6.1, PCI-to-PCI Bridge 1.2 §3.2).
-const HEADER_BRIDGE: u8 = 1;
-const HEADER_CARDBUS: u8 = 2;
+use crate::topology::{
+    Acs, Ats, Confinement, Function, Header, Pasid, PciTopology, PortType, Pri, SrIov, Topology,
+    BUSES,
+};
 
 /// The PCI Express capability's id (PCI Express Base 5.0 §7.5.3).
 const CAP_ID_EXPRESS: u8 = 0x10;
 
-/// The ACS extended capability's id (PCI Express Base 5.0 §7.7.8).
-const EXT_CAP_ID_ACS: u16 = 0x000D;
+/// Byte offsets within the PCI Express capability (PCI Express Base 5.0
+/// §7.5.3): the Slot Capabilities register and the Device Control 2 register.
+const EXPRESS_SLOT_CAPABILITIES: u8 = 0x14;
+const EXPRESS_DEVICE_CONTROL_2: u8 = 0x28;
+/// The PCI Express Capabilities register's Slot Implemented bit, in the
+/// capability's header dword.
+const EXPRESS_SLOT_IMPLEMENTED: u32 = 1 << 24;
+const SLOT_HOT_PLUG_CAPABLE: u32 = 1 << 6;
+const DEVICE_CONTROL_2_ARI_FORWARDING: u32 = 1 << 5;
 
-/// Maximum number of BAR slots a type-0 PCI function exposes
-/// (PCI Local Bus 3.0 §6.1).
-const MAX_BARS: usize = 6;
+/// Extended capability ids (PCI Express Base 5.0 §7.6, §9.3.3, §10.5).
+const EXT_CAP_ID_ACS: u16 = 0x000D;
+const EXT_CAP_ID_ATS: u16 = 0x000F;
+const EXT_CAP_ID_SRIOV: u16 = 0x0010;
+const EXT_CAP_ID_PRI: u16 = 0x0013;
+const EXT_CAP_ID_PASID: u16 = 0x001B;
+
+/// The enable bits of the translation services, each in the dword one past
+/// its capability's header: ATS Control and PASID Control in the high half
+/// beside a read-only capability half, PRI Control in the low half beside a
+/// status half whose bits clear when written as ones.
+const ATS_ENABLE: u32 = 1 << 31;
+const PASID_ENABLE: u32 = 1 << 16;
+const PASID_CONTROLS: u32 = 0b111 << 16;
+const PRI_ENABLE: u32 = 1 << 0;
+
+/// The high half of a control dword whose other half is a status register
+/// whose bits a written one clears: written as zero.
+const CLEARS_ON_WRITE: u32 = 0xFFFF_0000;
+
+/// SR-IOV registers, as dword offsets from the capability's header: Control
+/// beside its status half, then `NumVFs`, then First VF Offset beside VF
+/// Stride.
+const SRIOV_CONTROL: u16 = 2;
+const SRIOV_NUM_VFS: u16 = 4;
+const SRIOV_OFFSET_STRIDE: u16 = 5;
+const SRIOV_VF_ENABLE: u32 = 1 << 0;
+/// VF Enable and VF Memory Space Enable.
+const SRIOV_VFS_ON: u32 = SRIOV_VF_ENABLE | (1 << 3);
 
 /// Vendor-ID sentinel returned by the host bridge when no function
 /// is present at a given `(bus, device, function)`.
@@ -62,6 +94,24 @@ const CAP_LIST_HARD_LIMIT: usize = 64;
 /// MSI-X table entry size in bytes (PCI Local Bus 3.0 §6.8.2.9):
 /// message address (8) + message data (4) + vector control (4).
 const MSIX_ENTRY_LEN: usize = 16;
+
+/// An MSI-X entry's vector control word with the entry masked.
+const MSIX_VECTOR_MASKED: u32 = 1;
+
+/// The writes that reprogram an MSI-X table entry (address low, address
+/// high, data, vector control) with `message`, in order: masked first, since
+/// changing an unmasked entry's address or data is undefined (PCI Local Bus
+/// 3.0 §6.8.2.9), and unmasked last.
+pub(crate) const fn msix_entry_writes(message: MsiMessage) -> [(usize, u32); 5] {
+    let [b0, b1, b2, b3, b4, b5, b6, b7] = message.address.to_le_bytes();
+    [
+        (12, MSIX_VECTOR_MASKED),
+        (0, u32::from_le_bytes([b0, b1, b2, b3])),
+        (4, u32::from_le_bytes([b4, b5, b6, b7])),
+        (8, message.data),
+        (12, 0),
+    ]
+}
 
 /// MSI-X Message Control "MSI-X Enable" bit. The Message Control
 /// register occupies the high 16 bits of the capability header dword,
@@ -126,16 +176,20 @@ const MSI_CTRL_MME_MASK: u32 = (MSI_MC_MME_MASK as u32) << MSI_CTRL_SHIFT;
 /// — outside callers reach the enumeration through `dyn Bus`.
 pub struct Pci<C: ConfigSpace> {
     config: C,
+    /// Where memory BARs may decode, for a host the kernel owns; [`None`]
+    /// for a bus driver's, whose BAR windows the kernel checks against its
+    /// grants instead.
+    apertures: Option<Apertures>,
 }
 
 impl<C: ConfigSpace> Pci<C> {
-    /// Construct a new [`Pci`] wired to `config`.
-    pub const fn new(config: C) -> Self {
-        Self { config }
+    /// Construct a new [`Pci`] wired to `config`, its memory BARs resolved
+    /// through `apertures` where it has them.
+    pub const fn new(config: C, apertures: Option<Apertures>) -> Self {
+        Self { config, apertures }
     }
 
-    /// The backend, for a test to inspect what was written.
-    #[cfg(test)]
+    /// The backend.
     pub(crate) const fn config_space(&self) -> &C {
         &self.config
     }
@@ -163,11 +217,21 @@ impl<C: ConfigSpace> Pci<C> {
     }
 
     /// Visit every responding function on every bus, in address order, with
-    /// its configuration address, its identity dword and whether its slot is
-    /// multi-function. Bounded by PCI's own numbering, so it terminates
-    /// without a timeout.
+    /// its configuration address, its identity dword and whether its device
+    /// holds more than one function. Bounded by PCI's own numbering, so it
+    /// terminates without a timeout.
+    ///
+    /// Below a port that forwards every function number to the one device
+    /// below it (ARI), each of the bus's 256 function numbers is that
+    /// device's, whatever its function 0 says: a scan trusting the
+    /// multi-function bit there would miss functions that master DMA.
     pub(crate) fn each_function(&self, mut visit: impl FnMut(ConfigAddress, u64, u32, bool)) {
+        let mut ari = [false; BUSES];
         for bus in 0u8..=255 {
+            if ari[usize::from(bus)] {
+                self.each_ari_function(bus, &mut ari, &mut visit);
+                continue;
+            }
             for device in 0..PCI_DEVICES {
                 let multifunction = self.is_multifunction(bus, device);
                 let functions = if multifunction { PCI_FUNCTIONS } else { 1 };
@@ -178,16 +242,98 @@ impl<C: ConfigSpace> Pci<C> {
                         function,
                         register: 0,
                     };
-                    let id = self.config.read32(addr);
-                    if low_u16(id) == VENDOR_INVALID {
-                        continue;
-                    }
-                    if let Some(address) = addr.pack_bdf() {
-                        visit(addr, address, id, multifunction);
-                    }
+                    self.visit_present(addr, multifunction, &mut ari, &mut visit);
                 }
             }
         }
+    }
+
+    /// Visit every function of the one device on `bus`, which an ARI port
+    /// forwards every function number to.
+    fn each_ari_function(
+        &self,
+        bus: u8,
+        ari: &mut [bool; BUSES],
+        visit: &mut impl FnMut(ConfigAddress, u64, u32, bool),
+    ) {
+        let at = |number: u8| ConfigAddress {
+            bus,
+            device: number >> 3,
+            function: number & (PCI_FUNCTIONS - 1),
+            register: 0,
+        };
+        let present = |number: u8| low_u16(self.config.read32(at(number))) != VENDOR_INVALID;
+        let multifunction = (0..=u8::MAX)
+            .filter(|&number| present(number))
+            .nth(1)
+            .is_some();
+        for number in 0..=u8::MAX {
+            self.visit_present(at(number), multifunction, ari, visit);
+        }
+    }
+
+    /// Visit the function at `addr` if one answers there, noting the bus an
+    /// ARI port forwards to.
+    fn visit_present(
+        &self,
+        addr: ConfigAddress,
+        multifunction: bool,
+        ari: &mut [bool; BUSES],
+        visit: &mut impl FnMut(ConfigAddress, u64, u32, bool),
+    ) {
+        let id = self.config.read32(addr);
+        if low_u16(id) == VENDOR_INVALID {
+            return;
+        }
+        if let Some(secondary) = self.ari_secondary(addr) {
+            ari[usize::from(secondary)] = true;
+        }
+        if let Some(address) = addr.pack_bdf() {
+            visit(addr, address, id, multifunction);
+        }
+    }
+
+    /// The secondary bus of the bridge at `addr`, when it forwards every
+    /// function number to the device below it.
+    fn ari_secondary(&self, addr: ConfigAddress) -> Option<u8> {
+        let Header::Bridge {
+            secondary,
+            ari: true,
+            ..
+        } = self.header(addr)
+        else {
+            return None;
+        };
+        (secondary != 0).then_some(secondary)
+    }
+
+    /// What the header at `addr` says the function is.
+    fn header(&self, addr: ConfigAddress) -> Header {
+        match low_u8(self.config.read32(addr_with_reg(addr, HEADER_TYPE)) >> 16) & 0x7F {
+            HEADER_BRIDGE | HEADER_CARDBUS => {
+                let [_, secondary, subordinate, _] = self
+                    .config
+                    .read32(addr_with_reg(addr, BUS_NUMBERS))
+                    .to_le_bytes();
+                let ari = self.express(addr).is_some_and(|(offset, _)| {
+                    let control = addr_with_byte_offset(addr, offset + EXPRESS_DEVICE_CONTROL_2);
+                    self.config.read32(control) & DEVICE_CONTROL_2_ARI_FORWARDING != 0
+                });
+                Header::Bridge {
+                    secondary,
+                    subordinate,
+                    ari,
+                }
+            }
+            _ => Header::Endpoint,
+        }
+    }
+
+    /// The PCI Express capability of the function at `addr`: its byte offset
+    /// and header dword.
+    fn express(&self, addr: ConfigAddress) -> Option<(u8, u32)> {
+        self.legacy_capabilities(addr)?
+            .find(|&(_, header)| low_u8(header) == CAP_ID_EXPRESS)
     }
 
     /// The [`BusDevice`] record of the function at `addr` (configuration
@@ -208,7 +354,7 @@ impl<C: ConfigSpace> Pci<C> {
         &self,
         addr: ConfigAddress,
     ) -> Option<LegacyCapabilities<'_, C>> {
-        let status = low_u16(self.config.read32(addr_with_reg(addr, 1)) >> 16);
+        let status = low_u16(self.config.read32(addr_with_reg(addr, COMMAND_STATUS)) >> 16);
         if status & STATUS_CAP_LIST == 0 {
             return None;
         }
@@ -223,56 +369,96 @@ impl<C: ConfigSpace> Pci<C> {
     }
 
     /// The function at `addr` (configuration `address`, identity dword
-    /// `id`) as a topology walk records it, its isolating ACS controls turned
-    /// on first where `acs` says so.
+    /// `id`) as a topology walk records it, after `confinement` is applied.
+    /// `external` says whether the platform describes it as an
+    /// external-facing port.
     fn read_function(
         &self,
         addr: ConfigAddress,
         address: u64,
         id: u32,
         multifunction: bool,
-        acs: AcsPolicy,
+        confinement: Confinement,
+        external: bool,
     ) -> Function {
-        let header = match low_u8(self.config.read32(addr_with_reg(addr, 3)) >> 16) & 0x7F {
-            HEADER_BRIDGE | HEADER_CARDBUS => {
-                let [_, secondary, subordinate, _] =
-                    self.config.read32(addr_with_reg(addr, 6)).to_le_bytes();
-                Header::Bridge {
-                    secondary,
-                    subordinate,
-                }
-            }
-            _ => Header::Endpoint,
-        };
-        let express = self
-            .legacy_capabilities(addr)
-            .and_then(|mut list| list.find(|&(_, header)| low_u8(header) == CAP_ID_EXPRESS))
-            .map(|(_, header)| PortType::from_field(low_u8(header >> 20) & 0xF));
-        Function {
+        let header = self.header(addr);
+        let express = self.express(addr);
+        let hot_plug = express.is_some_and(|(offset, header)| {
+            header & EXPRESS_SLOT_IMPLEMENTED != 0
+                && self.config.read32(addr_with_byte_offset(
+                    addr,
+                    offset + EXPRESS_SLOT_CAPABILITIES,
+                )) & SLOT_HOT_PLUG_CAPABLE
+                    != 0
+        });
+        let mut function = Function {
             address,
             vendor: low_u16(id),
             device: low_u16(id >> 16),
             class: self.read_class_24(addr),
             header,
             multifunction,
-            express,
-            // Only a PCI Express function has extended space to hold it.
-            acs: express.and_then(|_| self.acs(addr, acs)),
+            express: express.map(|(_, header)| PortType::from_field(low_u8(header >> 20) & 0xF)),
+            external_facing: matches!(header, Header::Bridge { .. }) && (hot_plug || external),
+            acs: None,
+            ats: None,
+            pri: None,
+            pasid: None,
+            sriov: None,
+        };
+        // Only a PCI Express function has extended space to hold them. A list
+        // naming one capability twice has each instance confined, and reports
+        // whichever the hardware left on.
+        if function.express.is_some() {
+            for (header, dword) in self.extended_capabilities(addr) {
+                let registers = ConfigAddress {
+                    register: header + 1,
+                    ..addr
+                };
+                match low_u16(dword) {
+                    EXT_CAP_ID_ACS => function.acs = Some(self.acs(registers, confinement)),
+                    EXT_CAP_ID_ATS => {
+                        let left = self.turn_off(registers, ATS_ENABLE, 0, confinement);
+                        function.ats = Some(Ats {
+                            enabled: left & ATS_ENABLE != 0
+                                || function.ats.is_some_and(|ats| ats.enabled),
+                        });
+                    }
+                    EXT_CAP_ID_PRI => {
+                        let left =
+                            self.turn_off(registers, PRI_ENABLE, CLEARS_ON_WRITE, confinement);
+                        function.pri = Some(Pri {
+                            enabled: left & PRI_ENABLE != 0
+                                || function.pri.is_some_and(|pri| pri.enabled),
+                        });
+                    }
+                    EXT_CAP_ID_PASID => {
+                        let left = self.turn_off(registers, PASID_CONTROLS, 0, confinement);
+                        function.pasid = Some(Pasid {
+                            enabled: left & PASID_ENABLE != 0
+                                || function.pasid.is_some_and(|pasid| pasid.enabled),
+                            width: low_u8(left >> 8) & 0x1F,
+                        });
+                    }
+                    EXT_CAP_ID_SRIOV => {
+                        let sriov = self.sriov(addr, header, confinement);
+                        function.sriov = match function.sriov {
+                            Some(earlier) if earlier.enabled && !sriov.enabled => Some(earlier),
+                            _ => Some(sriov),
+                        };
+                    }
+                    _ => {}
+                }
+            }
         }
+        function
     }
 
-    /// The ACS registers of the `PCIe` function at `addr`, if it has the
-    /// capability, after turning on each isolating control it offers where
-    /// `policy` says so. The Capability half of the dword is read-only, so
-    /// writing it back unchanged leaves it as it was.
-    fn acs(&self, addr: ConfigAddress, policy: AcsPolicy) -> Option<Acs> {
-        let (header, _) = self
-            .extended_capabilities(addr)
-            .find(|&(_, header)| low_u16(header) == EXT_CAP_ID_ACS)?;
-        let registers = ConfigAddress {
-            register: header + 1,
-            ..addr
-        };
+    /// The ACS registers at `registers`, after turning on each isolating
+    /// control they offer where `confinement` says so. The Capability half of
+    /// the dword is read-only, so writing it back unchanged leaves it as it
+    /// was.
+    fn acs(&self, registers: ConfigAddress, confinement: Confinement) -> Acs {
         let read = || {
             let dword = self.config.read32(registers);
             Acs {
@@ -282,14 +468,55 @@ impl<C: ConfigSpace> Pci<C> {
         };
         let found = read();
         let wanted = found.enabled | (found.capable & Acs::ISOLATING);
-        if policy == AcsPolicy::Leave || wanted == found.enabled {
-            return Some(found);
+        if confinement == Confinement::Leave || wanted == found.enabled {
+            return found;
         }
         self.config.write32(
             registers,
             u32::from(wanted) << 16 | u32::from(found.capable),
         );
-        Some(read())
+        read()
+    }
+
+    /// Clear the `enable` bits of the control dword at `registers` where
+    /// `confinement` says so, writing the bits in `clear_on_write` as zero,
+    /// and answer the dword the hardware is left with.
+    fn turn_off(
+        &self,
+        registers: ConfigAddress,
+        enable: u32,
+        clear_on_write: u32,
+        confinement: Confinement,
+    ) -> u32 {
+        let dword = self.config.read32(registers);
+        if dword & enable == 0 || confinement == Confinement::Leave {
+            return dword;
+        }
+        self.config
+            .write32(registers, dword & !enable & !clear_on_write);
+        self.config.read32(registers)
+    }
+
+    /// The SR-IOV capability whose header is at dword `header`, its virtual
+    /// functions turned off first where `confinement` says so.
+    fn sriov(&self, addr: ConfigAddress, header: u16, confinement: Confinement) -> SrIov {
+        let at = |offset: u16| ConfigAddress {
+            register: header + offset,
+            ..addr
+        };
+        let control = self.turn_off(
+            at(SRIOV_CONTROL),
+            SRIOV_VFS_ON,
+            CLEARS_ON_WRITE,
+            confinement,
+        );
+        let offset_stride = self.config.read32(at(SRIOV_OFFSET_STRIDE));
+        SrIov {
+            enabled: control & SRIOV_VF_ENABLE != 0,
+            count: low_u16(self.config.read32(at(SRIOV_NUM_VFS))),
+            offset: low_u16(offset_stride),
+            stride: low_u16(offset_stride >> 16),
+        }
     }
 
     /// The extended capability list of the `PCIe` function at `addr`: empty
@@ -348,86 +575,123 @@ impl<C: ConfigSpace> Pci<C> {
         }
     }
 
-    /// Decode every BAR slot of a *type-0* function into `out`.
-    ///
-    /// Type-1 (PCI-to-PCI bridge) and type-2 (`CardBus`) headers are
-    /// recognised but produce no BAR records: only the surface the first
-    /// drivers need is decoded.
+    /// Every BAR among the first `slots` of the function at `addr`, sized
+    /// with its decoding off.
     ///
     /// # Errors
     ///
-    /// * [`DriverError::BufferTooSmall`] if `out` cannot hold every
-    ///   used BAR slot.
-    /// * [`DriverError::Unsupported`] if the function has a non-type-0
-    ///   header.
-    pub fn bars(&self, bdf: u64, out: &mut [BarDescriptor]) -> Result<usize, DriverError> {
-        let addr = unpack_bdf(bdf, 0);
-        let header_type_byte = low_u8(self.config.read32(addr_with_reg(addr, 3)) >> 16);
-        if header_type_byte & 0x7F != 0 {
+    /// [`DriverError::NoSpace`] when they cannot be held.
+    pub(crate) fn bars_of(
+        &self,
+        addr: ConfigAddress,
+        slots: u8,
+    ) -> Result<Vec<BarDescriptor>, DriverError> {
+        let mut bars = Vec::new();
+        bars.try_reserve_exact(usize::from(slots))
+            .map_err(|_| DriverError::NoSpace)?;
+        self.with_decode_off(addr, || {
+            let mut slot = 0;
+            while slot < slots {
+                match self.size_slot(addr, slot, slots) {
+                    Some((bar, span)) => {
+                        bars.push(bar);
+                        slot += span;
+                    }
+                    None => slot += 1,
+                }
+            }
+        });
+        Ok(bars)
+    }
+
+    /// Refuse a function whose header is not type 0, which alone carries six
+    /// BARs.
+    fn type_zero(&self, addr: ConfigAddress) -> Result<(), DriverError> {
+        let header_type_byte = low_u8(self.config.read32(addr_with_reg(addr, HEADER_TYPE)) >> 16);
+        if header_type_byte & 0x7F != HEADER_DEVICE {
             return Err(DriverError::Unsupported);
         }
-        let mut count = 0usize;
-        let mut overflow = false;
-        let mut index: u8 = 0;
-        while index < 6 {
-            let bar_reg = 4 + index; // BAR0 lives at dword 4.
-            let lo = self.config.read32(addr_with_reg(addr, bar_reg));
-            if lo == 0 {
-                index += 1;
-                continue;
-            }
-            let is_io = lo & 0x1 != 0;
-            let (kind, base, slot_advance, prefetchable) = if is_io {
-                let base = u64::from(lo & 0xFFFF_FFFC);
-                (BarKind::Io, base, 1u8, false)
-            } else {
-                let bits_21 = (lo >> 1) & 0x3;
-                let pref = (lo >> 3) & 0x1 != 0;
-                if bits_21 == 0x2 {
-                    // 64-bit BAR — pair with the next slot.
-                    let high = self.config.read32(addr_with_reg(addr, bar_reg + 1));
-                    let base = (u64::from(high) << 32) | u64::from(lo & 0xFFFF_FFF0);
-                    (BarKind::Memory64, base, 2u8, pref)
-                } else {
-                    let base = u64::from(lo & 0xFFFF_FFF0);
-                    (BarKind::Memory32, base, 1u8, pref)
-                }
-            };
-            // Size probe: write FFFFFFFF, read back, restore.
-            self.config
-                .write32(addr_with_reg(addr, bar_reg), 0xFFFF_FFFF);
-            let probe = self.config.read32(addr_with_reg(addr, bar_reg));
-            self.config.write32(addr_with_reg(addr, bar_reg), lo);
-            let mask = if is_io {
-                probe & 0xFFFF_FFFC
-            } else {
-                probe & 0xFFFF_FFF0
-            };
-            let size = if mask == 0 {
-                0
-            } else {
-                (!u64::from(mask) + 1) & 0xFFFF_FFFF
-            };
+        Ok(())
+    }
+
+    /// Run `f` with the function at `addr` decoding neither memory nor I/O,
+    /// so a BAR written all ones while it is sized claims no address.
+    pub(crate) fn with_decode_off<T>(&self, addr: ConfigAddress, f: impl FnOnce() -> T) -> T {
+        let command_addr = addr_with_byte_offset(addr, COMMAND_REGISTER);
+        let command = self.config.read32(command_addr) & COMMAND_BITS;
+        let decoding = command & (MEMORY_SPACE_ENABLE | IO_SPACE_ENABLE);
+        if decoding != 0 {
+            self.config.write32(command_addr, command & !decoding);
+        }
+        let result = f();
+        if decoding != 0 {
+            self.config.write32(command_addr, command);
+        }
+        result
+    }
+
+    /// The BAR at slot `slot` of the function at `addr`, whose header carries
+    /// `slots`, and the slots it spans, sized by writing all ones and
+    /// restoring what it held; [`None`] for a slot no BAR implements, or a
+    /// 64-bit BAR whose upper half would fall past the header's last. The
+    /// function must not be decoding.
+    pub(crate) fn size_slot(
+        &self,
+        addr: ConfigAddress,
+        slot: u8,
+        slots: u8,
+    ) -> Option<(BarDescriptor, u8)> {
+        let reg = FIRST_BAR + slot;
+        let low = self.config.read32(addr_with_reg(addr, reg));
+        let probe = |reg: u8, held: u32| {
+            self.config.write32(addr_with_reg(addr, reg), u32::MAX);
+            let mask = self.config.read32(addr_with_reg(addr, reg));
+            self.config.write32(addr_with_reg(addr, reg), held);
+            mask
+        };
+        if low & 0x1 != 0 {
+            // An I/O BAR may decode only sixteen bits, its upper ones
+            // reading zero: its size is its lowest writable bit.
+            let mask = probe(reg, low) & 0xFFFF_FFFC;
+            let size = u64::from(mask & mask.wrapping_neg());
             let descriptor = BarDescriptor {
-                index,
-                kind,
-                base,
+                index: slot,
+                kind: BarKind::Io,
+                base: u64::from(low & 0xFFFF_FFFC),
                 size,
-                prefetchable,
+                prefetchable: false,
             };
-            if count < out.len() {
-                out[count] = descriptor;
-            } else {
-                overflow = true;
-            }
-            count += 1;
-            index += slot_advance;
+            return (size != 0).then_some((descriptor, 1));
         }
-        if overflow {
-            Err(DriverError::BufferTooSmall)
+        let wide = (low >> 1) & 0x3 == 0x2;
+        if wide && slot + 1 >= slots {
+            return None;
+        }
+        let high = if wide {
+            self.config.read32(addr_with_reg(addr, reg + 1))
         } else {
-            Ok(count)
+            0
+        };
+        let mask_low = probe(reg, low) & 0xFFFF_FFF0;
+        // A 32-bit BAR decodes nothing above the 4 GiB line.
+        let mask_high = if wide { probe(reg + 1, high) } else { u32::MAX };
+        let mask = (u64::from(mask_high) << 32) | u64::from(mask_low);
+        let size = mask & mask.wrapping_neg();
+        if mask_low == 0 && (!wide || mask_high == 0) {
+            return None;
         }
+        let descriptor = BarDescriptor {
+            index: slot,
+            kind: if wide {
+                BarKind::Memory64
+            } else {
+                BarKind::Memory32
+            },
+            base: (u64::from(high) << 32) | u64::from(low & 0xFFFF_FFF0),
+            size,
+            prefetchable: low & 0x8 != 0,
+        };
+        Some((descriptor, if wide { 2 } else { 1 }))
     }
 
     /// Resolve the memory BAR at `bar_index` on function `bdf` and ask
@@ -495,6 +759,13 @@ impl<C: ConfigSpace> Pci<C> {
     /// reason as [`enable_memory_space`](Self::enable_memory_space).
     pub fn set_bus_master(&self, bdf: u64, master: bool) {
         self.update_command(bdf, BUS_MASTER_ENABLE, master);
+    }
+
+    /// Let function `bdf` assert its INTx pin, or stop it, leaving every
+    /// other command bit as it was. Infallible for the same reason as
+    /// [`enable_memory_space`](Self::enable_memory_space).
+    pub fn set_intx(&self, bdf: u64, raise: bool) {
+        self.update_command(bdf, INTERRUPT_DISABLE, !raise);
     }
 
     /// A command write a device acts on even when nothing changes — a
@@ -575,96 +846,53 @@ impl<C: ConfigSpace> Pci<C> {
         window_base: u64,
         window_size: u64,
     ) -> Result<u64, DriverError> {
-        if usize::from(bar_index) >= MAX_BARS {
+        if bar_index >= DEVICE_BAR_SLOTS {
             return Err(DriverError::NotFound);
         }
         let addr = unpack_bdf(bdf, 0);
-        let header_type_byte = low_u8(self.config.read32(addr_with_reg(addr, 3)) >> 16);
-        if header_type_byte & 0x7F != 0 {
-            return Err(DriverError::Unsupported);
-        }
-        let bar_reg = 4 + bar_index; // BAR0 lives at dword 4.
-        let lo = self.config.read32(addr_with_reg(addr, bar_reg));
+        self.type_zero(addr)?;
+        let bar = self
+            .with_decode_off(addr, || self.size_slot(addr, bar_index, DEVICE_BAR_SLOTS))
+            .map(|(bar, _)| bar)
+            .ok_or(DriverError::NotFound)?;
         // An I/O-port BAR is reached through port I/O, never a mapped
         // memory window; refuse to assign it a memory base.
-        if lo & 0x1 != 0 {
+        if bar.kind == BarKind::Io {
             return Err(DriverError::Unsupported);
         }
-        let is_64 = (lo >> 1) & 0x3 == 0x2;
-        let high = if is_64 {
-            self.config.read32(addr_with_reg(addr, bar_reg + 1))
-        } else {
-            0
-        };
-        let current = (u64::from(high) << 32) | u64::from(lo & 0xFFFF_FFF0);
-
-        // Size probe: write all-ones to the address bits, read the
-        // writable mask back, restore the original value(s).
-        self.config
-            .write32(addr_with_reg(addr, bar_reg), 0xFFFF_FFFF);
-        let probe_lo = self.config.read32(addr_with_reg(addr, bar_reg));
-        let probe_high = if is_64 {
-            self.config
-                .write32(addr_with_reg(addr, bar_reg + 1), 0xFFFF_FFFF);
-            let p = self.config.read32(addr_with_reg(addr, bar_reg + 1));
-            self.config.write32(addr_with_reg(addr, bar_reg + 1), high);
-            p
-        } else {
-            0
-        };
-        self.config.write32(addr_with_reg(addr, bar_reg), lo);
-
-        let mask = (u64::from(probe_high) << 32) | u64::from(probe_lo & 0xFFFF_FFF0);
-        if mask == 0 {
-            // No memory BAR implemented at this slot.
-            return Err(DriverError::NotFound);
-        }
-        // Size is the span of the cleared low (writable) address bits.
-        // For a 32-bit BAR only the low dword is writable, so confine
-        // the complement to 32 bits before deriving the size.
-        let size = if is_64 {
-            (!mask).wrapping_add(1)
-        } else {
-            ((!mask) & 0xFFFF_FFFF).wrapping_add(1)
-        };
-        if size == 0 {
-            return Err(DriverError::NotFound);
-        }
-
         // A BAR firmware already based is left exactly as found.
-        if current != 0 {
-            return Ok(current);
+        if bar.base != 0 {
+            return Ok(bar.base);
         }
-
-        // Place the BAR at the lowest size-aligned address in the
-        // window; refuse fail-closed if it does not fit.
-        let align_mask = size - 1;
-        let aligned = window_base
-            .checked_add(align_mask)
-            .map(|v| v & !align_mask)
-            .ok_or(DriverError::OutOfRange)?;
-        let end = aligned.checked_add(size).ok_or(DriverError::OutOfRange)?;
         let window_end = window_base
             .checked_add(window_size)
             .ok_or(DriverError::OutOfRange)?;
-        if aligned < window_base || end > window_end {
+        let aligned =
+            crate::assign::align_up(window_base, bar.size).ok_or(DriverError::OutOfRange)?;
+        let end = aligned
+            .checked_add(bar.size)
+            .ok_or(DriverError::OutOfRange)?;
+        if end > window_end || (bar.kind == BarKind::Memory32 && end > 1 << 32) {
             return Err(DriverError::OutOfRange);
         }
-        // A 32-bit BAR can only decode a 32-bit address.
-        if !is_64 && end > 0x1_0000_0000 {
-            return Err(DriverError::OutOfRange);
-        }
-
-        // Preserve the BAR's low control bits (memory type + prefetch);
-        // write the size-aligned base over the address bits.
-        let control = lo & 0xF;
-        let new_lo = (low_dword(aligned) & 0xFFFF_FFF0) | control;
-        self.config.write32(addr_with_reg(addr, bar_reg), new_lo);
-        if is_64 {
-            self.config
-                .write32(addr_with_reg(addr, bar_reg + 1), high_dword(aligned));
-        }
+        self.write_bar(addr, &bar, aligned);
         Ok(aligned)
+    }
+
+    /// Point `bar` of the function at `addr` at `base`, keeping its type
+    /// bits.
+    pub(crate) fn write_bar(&self, addr: ConfigAddress, bar: &BarDescriptor, base: u64) {
+        let reg = FIRST_BAR + bar.index;
+        let control = self.config.read32(addr_with_reg(addr, reg)) & 0xF;
+        let mask = if bar.kind == BarKind::Io { 0x3 } else { 0xF };
+        self.config.write32(
+            addr_with_reg(addr, reg),
+            (low_dword(base) & !mask) | (control & mask),
+        );
+        if bar.kind == BarKind::Memory64 {
+            self.config
+                .write32(addr_with_reg(addr, reg + 1), high_dword(base));
+        }
     }
 
     /// Resolve the virtio-1.x configuration structure of kind `cfg_type`
@@ -748,41 +976,6 @@ impl<C: ConfigSpace> Pci<C> {
             .ok_or(DriverError::NotFound)
     }
 
-    /// The device features the function offers, read through its virtio
-    /// configuration-access capability: each half is selected and read
-    /// through the capability's data window, so no BAR is mapped and bus
-    /// mastering stays as it was.
-    ///
-    /// # Errors
-    ///
-    /// As [`tairix_abi::driver::virtio_pci::VirtioPciBus::offered_features`],
-    /// and the capability walk's own.
-    pub fn virtio_offered_features(&self, bdf: u64) -> Result<u64, DriverError> {
-        let (bar, base, length) = self.find_virtio_region(bdf, VIRTIO_PCI_CFG_COMMON)?;
-        let feature_end = u32::try_from(common::DEVICE_FEATURE + 4).unwrap_or(u32::MAX);
-        if length < feature_end {
-            return Err(DriverError::OutOfRange);
-        }
-        let window = AccessWindow::find(self, bdf)?;
-        let at = |register: usize| {
-            u32::try_from(register)
-                .ok()
-                .and_then(|register| base.checked_add(register))
-                .ok_or(DriverError::OutOfRange)
-        };
-        let (select, feature) = (
-            at(common::DEVICE_FEATURE_SELECT)?,
-            at(common::DEVICE_FEATURE)?,
-        );
-        let half = |word: u32| {
-            window.write(self, bar, select, word);
-            window.read(self, bar, feature)
-        };
-        let low = half(0);
-        let high = half(1);
-        Ok((u64::from(high) << 32) | u64::from(low))
-    }
-
     /// Program MSI-X table `entry` of function `bdf` with `message`,
     /// unmask the entry, and enable MSI-X on the function.
     ///
@@ -851,24 +1044,11 @@ impl<C: ConfigSpace> Pci<C> {
         let window = mapper
             .map_window(phys, MSIX_ENTRY_LEN)
             .map_err(MmioMapError::as_driver_error)?;
-        // MSI-X table entry layout (PCI Local Bus 3.0 §6.8.2.9):
-        // message address low / high, message data, vector control.
-        // Program address + data first, then clear the entry's mask
-        // bit (vector control bit 0) by writing zero.
-        let addr_lo = (message.address & 0xFFFF_FFFF) as u32;
-        let addr_hi = (message.address >> 32) as u32;
-        window
-            .write_u32(0, addr_lo)
-            .map_err(WindowError::as_driver_error)?;
-        window
-            .write_u32(4, addr_hi)
-            .map_err(WindowError::as_driver_error)?;
-        window
-            .write_u32(8, message.data)
-            .map_err(WindowError::as_driver_error)?;
-        window
-            .write_u32(12, 0)
-            .map_err(WindowError::as_driver_error)?;
+        for (offset, value) in msix_entry_writes(message) {
+            window
+                .write_u32(offset, value)
+                .map_err(WindowError::as_driver_error)?;
+        }
         // Enable MSI-X function-wide and clear the function mask so the
         // freshly-unmasked entry can deliver. The Message Control
         // register lives in the high 16 bits of the capability header
@@ -910,6 +1090,13 @@ impl<C: ConfigSpace> Pci<C> {
     pub fn route_msi(&self, bdf: u64, message: MsiMessage) -> Result<(), DriverError> {
         let (cap_offset, addr64, per_vector_masking) = self.find_msi(bdf)?;
         let base = unpack_bdf(bdf, 0);
+        if addr64 || message.address >> 32 == 0 {
+            // Off while the message changes: a function raising it between
+            // the address and the data writes would send half of each.
+            let header_addr = addr_with_byte_offset(base, cap_offset);
+            let header = self.config.read32(header_addr);
+            self.config.write32(header_addr, header & !MSI_CTRL_ENABLE);
+        }
         // Message Address (low). Bits 1:0 are reserved and must be written
         // zero (the doorbell is at least dword-aligned, §6.8.1.1).
         self.config.write32(
@@ -999,24 +1186,6 @@ impl<C: ConfigSpace> Pci<C> {
             .ok_or(DriverError::NotFound)
     }
 
-    /// The configuration-space offset of function `bdf`'s virtio capability
-    /// of `cfg_type`.
-    fn find_virtio_cap(&self, bdf: u64, cfg_type: u8) -> Result<u8, DriverError> {
-        let mut caps = [Capability::Other { offset: 0, id: 0 }; CAP_LIST_HARD_LIMIT];
-        let n = self.capabilities(bdf, &mut caps)?;
-        caps[..n]
-            .iter()
-            .find_map(|c| match *c {
-                Capability::Virtio {
-                    offset,
-                    cfg_type: ct,
-                    ..
-                } if ct == cfg_type => Some(offset),
-                _ => None,
-            })
-            .ok_or(DriverError::NotFound)
-    }
-
     /// Locate the virtio config region of `cfg_type`, returning its
     /// `(bar_index, bar_offset, length)`.
     fn find_virtio_region(&self, bdf: u64, cfg_type: u8) -> Result<(u8, u32, u32), DriverError> {
@@ -1044,20 +1213,41 @@ impl<C: ConfigSpace> Pci<C> {
     }
 
     /// Resolve a single BAR descriptor by index.
+    /// The BAR at slot `bar_index` of `bdf`, a memory BAR's base the CPU
+    /// physical address it decodes at where the host has apertures.
+    ///
+    /// A function chooses what its BAR reads back, so the apertures are
+    /// checked on every resolution: a memory BAR outside them, or over
+    /// memory, is refused.
     fn resolve_bar(&self, bdf: u64, bar_index: u8) -> Result<BarDescriptor, DriverError> {
-        let mut descriptors = [BarDescriptor {
-            index: 0,
-            kind: BarKind::Memory32,
-            base: 0,
-            size: 0,
-            prefetchable: false,
-        }; MAX_BARS];
-        let n = self.bars(bdf, &mut descriptors)?;
-        descriptors[..n]
-            .iter()
-            .copied()
-            .find(|b| b.index == bar_index)
-            .ok_or(DriverError::NotFound)
+        let addr = unpack_bdf(bdf, 0);
+        self.type_zero(addr)?;
+        // A slot holding a 64-bit BAR's upper half begins no BAR.
+        let mut slot = 0u8;
+        while slot < bar_index {
+            let low = self.config.read32(addr_with_reg(addr, FIRST_BAR + slot));
+            slot += if low & 0x1 == 0 && (low >> 1) & 0x3 == 0x2 {
+                2
+            } else {
+                1
+            };
+        }
+        if slot != bar_index || slot >= DEVICE_BAR_SLOTS {
+            return Err(DriverError::NotFound);
+        }
+        let (mut bar, _) = self
+            .with_decode_off(addr, || self.size_slot(addr, slot, DEVICE_BAR_SLOTS))
+            .ok_or(DriverError::NotFound)?;
+        if bar.kind == BarKind::Io {
+            return Ok(bar);
+        }
+        if let Some(apertures) = &self.apertures {
+            bar.base = apertures
+                .cpu_range(bar.base, bar.size)
+                .ok_or(DriverError::PermissionDenied)?
+                .start;
+        }
+        Ok(bar)
     }
 
     fn is_multifunction(&self, bus: u8, device: u8) -> bool {
@@ -1078,7 +1268,7 @@ impl<C: ConfigSpace> Pci<C> {
             return false;
         }
         let header_type = low_u8(self.config.read32(addr) >> 16);
-        header_type & 0x80 != 0
+        header_type & MULTIFUNCTION != 0
     }
 
     fn read_class(&self, base_addr: ConfigAddress) -> u16 {
@@ -1144,12 +1334,23 @@ impl<C: ConfigSpace> Pci<C> {
 }
 
 impl<C: ConfigSpace> PciTopology for Pci<C> {
-    fn topology(&self, acs: AcsPolicy) -> Result<Topology, DriverError> {
+    fn topology(
+        &self,
+        confinement: Confinement,
+        external: &dyn Fn(u64) -> bool,
+    ) -> Result<Topology, DriverError> {
         let mut functions = Vec::new();
         let mut exhausted = false;
         self.each_function(|addr, address, id, multifunction| {
             if functions.try_reserve(1).is_ok() {
-                functions.push(self.read_function(addr, address, id, multifunction, acs));
+                functions.push(self.read_function(
+                    addr,
+                    address,
+                    id,
+                    multifunction,
+                    confinement,
+                    external(address),
+                ));
             } else {
                 exhausted = true;
             }
@@ -1165,7 +1366,8 @@ impl<C: ConfigSpace> PciTopology for Pci<C> {
             |address: u64| self.read_config(address, COMMAND_OFFSET) & BUS_MASTER_ENABLE != 0;
         let mut quiesced = Quiesced::default();
         self.each_function(|addr, address, id, multifunction| {
-            let function = self.read_function(addr, address, id, multifunction, AcsPolicy::Leave);
+            let function =
+                self.read_function(addr, address, id, multifunction, Confinement::Leave, false);
             if !stopped(&function) || !masters(address) {
                 return;
             }
@@ -1368,50 +1570,6 @@ fn decode_msix<C: ConfigSpace>(
 /// A function's virtio configuration-access capability: its `bar`, `offset`
 /// and `length` fields aim a four-byte data window at a BAR region, which a
 /// configuration access then reads or writes (virtio 1.2 §4.1.4.9).
-struct AccessWindow {
-    bar: ConfigAddress,
-    offset: ConfigAddress,
-    length: ConfigAddress,
-    data: ConfigAddress,
-}
-
-impl AccessWindow {
-    fn find<C: ConfigSpace>(pci: &Pci<C>, bdf: u64) -> Result<Self, DriverError> {
-        let cap = pci.find_virtio_cap(bdf, VIRTIO_PCI_CFG_PCI)?;
-        let function = unpack_bdf(bdf, 0);
-        let field = |delta: u8| {
-            cap.checked_add(delta)
-                .map(|offset| addr_with_byte_offset(function, offset))
-                .ok_or(DriverError::OutOfRange)
-        };
-        Ok(Self {
-            bar: field(4)?,
-            offset: field(8)?,
-            length: field(12)?,
-            data: field(16)?,
-        })
-    }
-
-    /// Aim the window at the four bytes at `offset` of BAR `bar`.
-    fn aim<C: ConfigSpace>(&self, pci: &Pci<C>, bar: u8, offset: u32) {
-        // The `bar` byte shares its dword with the read-only `id`.
-        let kept = pci.config.read32(self.bar) & !0xFF;
-        pci.config.write32(self.bar, kept | u32::from(bar));
-        pci.config.write32(self.length, 4);
-        pci.config.write32(self.offset, offset);
-    }
-
-    fn read<C: ConfigSpace>(&self, pci: &Pci<C>, bar: u8, offset: u32) -> u32 {
-        self.aim(pci, bar, offset);
-        pci.config.read32(self.data)
-    }
-
-    fn write<C: ConfigSpace>(&self, pci: &Pci<C>, bar: u8, offset: u32, value: u32) {
-        self.aim(pci, bar, offset);
-        pci.config.write32(self.data, value);
-    }
-}
-
 fn decode_virtio<C: ConfigSpace>(
     this: &Pci<C>,
     base: ConfigAddress,

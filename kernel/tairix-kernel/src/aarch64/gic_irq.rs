@@ -58,7 +58,7 @@ use tairix_arch_aarch64::gic::{GicController, GicMmio};
 use tairix_arch_aarch64::irqmask::{DaifIrqControl, DaifState};
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 use tairix_kernel_core::IrqRouting;
-use tairix_kernel_irq::{IrqController, IrqTable, MaskError};
+use tairix_kernel_irq::{IrqController, IrqTable, MaskError, Trigger};
 #[cfg(all(freestanding, kernel_isa = "aarch64"))]
 use tairix_sync::once::Once;
 use tairix_sync::once::OnceCell;
@@ -211,6 +211,12 @@ impl<M: GicMmio + Send + Sync> IrqController for GicIrqController<M> {
             Ok(()) => Ok(()),
             Err(IrqControlError::OutOfRange) => Err(MaskError::OutOfRange),
         }
+    }
+
+    fn set_trigger(&self, line: u32, trigger: Trigger) -> Result<(), MaskError> {
+        self.inner
+            .set_trigger(line, trigger == Trigger::Edge)
+            .map_err(|_| MaskError::Unsupported)
     }
 }
 
@@ -422,6 +428,15 @@ impl IrqController for CompositeIrqController {
                 Ok(())
             }
             None => GIC_IRQ_CONTROLLER.rearm(line),
+        }
+    }
+
+    /// A vector is raised by a message its controller latches, so it has no
+    /// trigger to configure.
+    fn set_trigger(&self, line: u32, trigger: Trigger) -> Result<(), MaskError> {
+        match msi_vector_of_line(line) {
+            Some(_) => Ok(()),
+            None => GIC_IRQ_CONTROLLER.set_trigger(line, trigger),
         }
     }
 }

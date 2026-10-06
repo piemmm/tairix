@@ -4,12 +4,13 @@
 //! See the crate-level docs for the design rationale; this module
 //! is the implementation.
 
-use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use tairix_abi::sysinfo::{IrqRecord, IRQ_FLAG_QUARANTINED};
 use tairix_abi::IrqHandle;
+use tairix_collections::HashMap;
+use tairix_hash::BuildFastHash;
 use tairix_kernel_sec::ProcessId;
 use tairix_sync::{OnceCell, RwLock};
 
@@ -39,13 +40,13 @@ pub struct IrqEntry {
 /// Controller-mask seam.
 ///
 /// The production [`IrqTable::fire`] path calls
-/// [`Self::mask`] before it sets the per-line ready flag — the
+/// [`Self::mask`] before it advances the line's fire count — the
 /// load-bearing safety property of the user-space IRQ contract
 /// (`docs/src/security/irq.md`). Architecture ports without a
 /// programmable controller return [`MaskError::Unsupported`].
 pub trait IrqController {
     /// Mask `line` at the controller. Must complete before
-    /// [`IrqTable::fire`] sets the per-entry ready flag.
+    /// [`IrqTable::fire`] advances the line's fire count.
     ///
     /// # Errors
     ///
@@ -83,6 +84,31 @@ pub trait IrqController {
         let _ = line;
         Ok(())
     }
+
+    /// Make `line` signal by `trigger` before it is first unmasked. The
+    /// default is a controller whose lines all signal by level.
+    ///
+    /// # Errors
+    ///
+    /// * [`MaskError::Unsupported`] for a trigger the controller cannot give
+    ///   the line now.
+    /// * [`MaskError::OutOfRange`] if `line` exceeds the controller's range.
+    fn set_trigger(&self, line: u32, trigger: Trigger) -> Result<(), MaskError> {
+        let _ = line;
+        match trigger {
+            Trigger::Level => Ok(()),
+            Trigger::Edge => Err(MaskError::Unsupported),
+        }
+    }
+}
+
+/// How a wired line signals its device's interrupt.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Trigger {
+    /// Asserted until the device is serviced.
+    Level,
+    /// By a pulse, which the controller must latch while the line is masked.
+    Edge,
 }
 
 /// Outcome of one [`IrqTable::try_wait_step`] poll.
@@ -99,8 +125,8 @@ pub trait IrqController {
 ///   polls (e.g. the task exited and `release_for` ran).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum WaitStep {
-    /// The line has fired since the last poll; the ready flag has
-    /// been consumed. The waiter must observe `Ok(())`.
+    /// The line has fired since the binding last took a fire, which it
+    /// has now taken. The waiter must observe `Ok(())`.
     Ready,
     /// No fire yet; the deadline has not yet been reached. The
     /// waiter should yield and retry.
@@ -136,7 +162,7 @@ pub struct BindOutcome {
 /// Outcome of [`IrqTable::fire`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum FireOutcome {
-    /// The line had a binding; the ready flag was set.
+    /// The line had a binding; its fire count advanced.
     /// Mask-before-wake was honoured.
     Marked,
     /// The line has no binding (a stray interrupt from a line no
@@ -145,7 +171,7 @@ pub enum FireOutcome {
     Stray,
     /// The line fired past its rate budget within the accounting window and
     /// has been **quarantined**: the mask write happened (so it stays
-    /// contained) but the ready flag was deliberately **not** set — a
+    /// contained) but no waiter is told of the fire — a
     /// quarantined line delivers no further wakes until it is rebound. This
     /// is the runaway-interrupt safety net: a device (or user-space driver)
     /// that re-asserts a line as fast as the kernel can mask/wake it would
@@ -206,7 +232,7 @@ pub struct ObserverAlreadyInstalled;
 ///
 /// [`IrqTable::fire`] calls [`Self::on_irq`] at its entry for **every**
 /// interrupt arrival — bound *and* stray — before the controller mask and the
-/// ready-flag store. The kernel installs one implementation whose only job is
+/// fire count's advance. The kernel installs one implementation whose only job is
 /// to feed the interrupt-arrival *timing* into the kernel entropy pool
 /// (`lib/rng`), turning the physically-unpredictable inter-arrival intervals
 /// of real devices into an independent entropy input.
@@ -273,63 +299,41 @@ pub(crate) const STORM_FIRE_BUDGET: u32 = 100_000;
 
 /// Kernel IRQ table.
 ///
-/// One per running kernel. Interior synchronisation through a
-/// writer-preference [`RwLock`] mirroring the `CapTable`
-/// lock-ordering policy (no global mutable
-/// static; the table is owned by `KernelState`, which itself lives
-/// for the lifetime of the running kernel).
+/// One per running kernel, owned by `KernelState`. Bindings live behind a
+/// writer-preference [`RwLock`]; everything [`IrqTable::fire`] touches is a
+/// per-line atomic, so the interrupt path never takes the lock.
+///
+/// A line may be shared — a wired PCI INTx pin raised by several functions —
+/// so each binding is woken by every fire of its line. The line stays masked
+/// from a fire until every sharer has taken it and come back to wait: a
+/// level-triggered line one sharer's device still holds re-asserts as soon as
+/// it is unmasked, so unmasking early would wake the others for nothing until
+/// that sharer serviced its device.
 pub struct IrqTable {
     inner: RwLock<Inner>,
     max_line: u32,
     /// Set-once, lock-free-read hook notified on every [`IrqTable::fire`]
-    /// (see [`IrqDispatchObserver`]). Read through [`OnceCell::get`] (an
-    /// `Acquire` load, no lock) so the interrupt-context `fire` path stays
-    /// wait-free; empty until the kernel installs the entropy observer at
-    /// boot, and a no-op when empty.
+    /// (see [`IrqDispatchObserver`]); a no-op while empty.
     observer: OnceCell<&'static dyn IrqDispatchObserver>,
-    /// Set-once, lock-free-read monotonic clock the runaway-interrupt
-    /// safety net reads from the interrupt-context [`IrqTable::fire`] path
-    /// (see [`MonotonicClock`]). Empty until the kernel installs it at
-    /// boot; while empty, rate accounting is inert (no line is
-    /// quarantined), so early-boot fires and host tests are unaffected.
+    /// Set-once, lock-free-read clock the runaway-interrupt safety net reads
+    /// (see [`MonotonicClock`]); while empty no line is quarantined.
     clock: OnceCell<&'static dyn MonotonicClock>,
     /// Per-line start of the current fire-accounting window (arch monotonic
-    /// ns), paired with [`Self::storm_fire_count`]. Lock-free like
-    /// [`Self::ready`] so [`IrqTable::fire`] never blocks. Indexed by line.
+    /// ns), paired with [`Self::storm_fire_count`].
     storm_window_start_ns: Vec<AtomicU64>,
-    /// Per-line count of fires observed in the current window. When it
-    /// exceeds [`STORM_FIRE_BUDGET`] the line is quarantined. Indexed by
-    /// line.
+    /// Per-line count of fires in the current window; past
+    /// [`STORM_FIRE_BUDGET`] the line is quarantined.
     storm_fire_count: Vec<AtomicU32>,
-    /// Per-line sticky "this line was quarantined" flag. Once set,
-    /// [`IrqTable::fire`] stops delivering wakes for the line (it stays
-    /// masked) and [`IrqTable::try_wait_step`] reports
-    /// [`WaitStep::Quarantined`]; only a fresh [`IrqTable::bind`] clears
-    /// it. Indexed by line.
+    /// Per-line sticky quarantine: [`IrqTable::fire`] stops delivering and
+    /// nothing re-arms the line until its last binding goes.
     quarantined: Vec<AtomicBool>,
-    /// Per-line monotonic count of interrupts delivered since boot — the
-    /// `/proc/interrupts`-style per-line total the System Information IRQ
-    /// query reports. Bumped once per [`IrqTable::fire`] with a single
-    /// `Relaxed` add on the same lock-free interrupt-context path as the
-    /// rate accounting, so counting adds no measurable cost and never
-    /// blocks. It counts *every* edge the line takes — including strays and
-    /// storm fires — so the figure is an honest interrupt tally, and it is
-    /// never reset (a re-`bind` keeps the line's lifetime total). Indexed by
-    /// line.
-    fire_total: Vec<AtomicU64>,
-    /// Per-line "fired since last consume" flags, kept **outside**
-    /// [`Inner`]'s [`RwLock`] so [`IrqTable::fire`] — which runs in
-    /// interrupt context — can record a wake-up with a single atomic
-    /// store and **never** blocks on the lock. A task parked in
-    /// [`IrqTable::try_wait_step`] (which holds only a *read* guard)
-    /// can therefore be woken by the same-CPU completion ISR without
-    /// the ISR spinning on a lock the parked task holds (no hacks; this is the interrupt-reentrancy-safe design).
-    /// Indexed by line; length is `max_line + 1`.
-    ready: Vec<AtomicBool>,
-    /// Per-line "a binding exists" flags, maintained under the same
-    /// `Inner` write lock as [`Inner::entries`] but readable lock-free
-    /// by [`IrqTable::fire`] so a stray edge on an unbound line is
-    /// reported as [`FireOutcome::Stray`] without taking the lock.
+    /// Per-line count of every edge the line has taken since boot, strays
+    /// and storm fires included, never reset. It is also the sequence a
+    /// binding is woken by: one is ready while the count has moved past the
+    /// last value it took.
+    fires: Vec<AtomicU64>,
+    /// Per-line "it has a binding" flags, written under the `Inner` write
+    /// lock and read lock-free by [`IrqTable::fire`].
     bound: Vec<AtomicBool>,
 }
 
@@ -353,14 +357,55 @@ struct Inner {
     /// Monotonically incrementing source of fresh [`IrqHandle`]
     /// values. Starts at 1 because [`IrqHandle::INVALID`] is 0.
     next_handle: u64,
-    /// `line → IrqEntry`. The line is the primary key because a
-    /// hardware interrupt arrives addressed by line, not by
-    /// handle.
-    entries: BTreeMap<u32, IrqEntry>,
-    /// Secondary index `handle.raw() → line` so
-    /// [`IrqTable::try_wait_step`] is O(log n) on the handle
-    /// lookup without scanning every entry.
-    by_handle: BTreeMap<u64, u32>,
+    /// Each line's bindings, by line: a hardware interrupt arrives addressed
+    /// by line, not by handle.
+    lines: Vec<Line>,
+    /// `handle → line`, so a handle's binding is found without a scan.
+    by_handle: HashMap<u64, u32, BuildFastHash>,
+}
+
+/// One line's bindings, in bind order.
+#[derive(Debug, Default)]
+struct Line {
+    sharers: Vec<Binding>,
+    /// Bound by a kernel service, which no other binding may join: a sharer
+    /// that never came back to wait would hold the line masked, and the
+    /// service's own wait has no deadline to notice.
+    exclusive: bool,
+}
+
+impl Inner {
+    fn binding(&self, handle: IrqHandle) -> Option<&Binding> {
+        let line = self.by_handle.get(&handle.as_u64())?;
+        self.lines
+            .get(*line as usize)?
+            .sharers
+            .iter()
+            .find(|binding| binding.entry.handle == handle)
+    }
+
+    /// Every binding, in ascending line order and then bind order.
+    fn bindings(&self) -> impl Iterator<Item = &Binding> {
+        self.lines.iter().flat_map(|line| &line.sharers)
+    }
+
+    /// `handle`'s binding where `caller` owns it: the forgery check every
+    /// handle-keyed operation makes before it acts.
+    fn owned(&self, handle: IrqHandle, caller: ProcessId) -> Option<&Binding> {
+        self.binding(handle)
+            .filter(|binding| binding.entry.owner == caller)
+    }
+}
+
+/// One owner's binding of a line.
+#[derive(Debug)]
+struct Binding {
+    entry: IrqEntry,
+    /// The line's fire count when this binding last took a fire.
+    taken: AtomicU64,
+    /// The line's fire count when this binding last came back to wait with
+    /// nothing left to take.
+    armed: AtomicU64,
 }
 
 impl IrqTable {
@@ -375,39 +420,23 @@ impl IrqTable {
     /// state is touched (fail closed).
     #[must_use]
     pub fn new(max_line: u32) -> Self {
-        // One flag slot per addressable line (`0..=max_line`). `bind`
-        // rejects any line above `max_line`, so every bound line
-        // indexes a valid slot.
+        // One slot per addressable line (`0..=max_line`); `bind` rejects any
+        // line above `max_line`, so every bound line indexes a valid slot.
         let slots = (max_line as usize).saturating_add(1);
-        let mut ready = Vec::with_capacity(slots);
-        let mut bound = Vec::with_capacity(slots);
-        let mut storm_window_start_ns = Vec::with_capacity(slots);
-        let mut storm_fire_count = Vec::with_capacity(slots);
-        let mut quarantined = Vec::with_capacity(slots);
-        let mut fire_total = Vec::with_capacity(slots);
-        for _ in 0..slots {
-            ready.push(AtomicBool::new(false));
-            bound.push(AtomicBool::new(false));
-            storm_window_start_ns.push(AtomicU64::new(0));
-            storm_fire_count.push(AtomicU32::new(0));
-            quarantined.push(AtomicBool::new(false));
-            fire_total.push(AtomicU64::new(0));
-        }
         Self {
             inner: RwLock::new(Inner {
                 next_handle: 1,
-                entries: BTreeMap::new(),
-                by_handle: BTreeMap::new(),
+                lines: (0..slots).map(|_| Line::default()).collect(),
+                by_handle: HashMap::with_hasher(BuildFastHash::new()),
             }),
             max_line,
             observer: OnceCell::new(),
             clock: OnceCell::new(),
-            storm_window_start_ns,
-            storm_fire_count,
-            quarantined,
-            fire_total,
-            ready,
-            bound,
+            storm_window_start_ns: (0..slots).map(|_| AtomicU64::new(0)).collect(),
+            storm_fire_count: (0..slots).map(|_| AtomicU32::new(0)).collect(),
+            quarantined: (0..slots).map(|_| AtomicBool::new(false)).collect(),
+            fires: (0..slots).map(|_| AtomicU64::new(0)).collect(),
+            bound: (0..slots).map(|_| AtomicBool::new(false)).collect(),
         }
     }
 
@@ -460,92 +489,117 @@ impl IrqTable {
     /// Number of bindings currently recorded.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.inner.read().entries.len()
+        self.inner.read().by_handle.len()
     }
 
     /// `true` iff there are no recorded bindings.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.inner.read().entries.is_empty()
+        self.inner.read().by_handle.is_empty()
     }
 
-    /// Bind `line` to `owner`, minting a fresh [`IrqHandle`].
+    /// Bind `line` to `owner`, minting a fresh [`IrqHandle`]. The line may
+    /// already be bound to other owners, which then share it, unless a kernel
+    /// service holds it ([`Self::bind_exclusive`]).
     ///
     /// # Errors
     ///
     /// * [`IrqError::LineOutOfRange`] if `line > self.max_line()`.
-    /// * [`IrqError::LineAlreadyBound`] if a binding for `line`
-    ///   already exists (regardless of owner). `abi-v1` does not
-    ///   support shared lines.
+    /// * [`IrqError::LineAlreadyBound`] if `owner` already binds `line`, or a
+    ///   kernel service holds it.
+    /// * [`IrqError::Exhausted`] if the binding cannot be recorded.
     pub fn bind(&self, line: u32, owner: ProcessId) -> Result<BindOutcome, IrqError> {
+        self.bind_as(line, owner, false)
+    }
+
+    /// Bind `line` to the kernel service `owner` alone: no other binding may
+    /// join it while the service holds it, and the service takes no line
+    /// another already binds.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::bind`], and [`IrqError::LineAlreadyBound`] for a line
+    /// anything else binds.
+    pub fn bind_exclusive(&self, line: u32, owner: ProcessId) -> Result<BindOutcome, IrqError> {
+        self.bind_as(line, owner, true)
+    }
+
+    fn bind_as(
+        &self,
+        line: u32,
+        owner: ProcessId,
+        exclusive: bool,
+    ) -> Result<BindOutcome, IrqError> {
         if line > self.max_line {
             return Err(IrqError::LineOutOfRange);
         }
+        let slot = line as usize;
         let mut g = self.inner.write();
-        if g.entries.contains_key(&line) {
+        let Inner {
+            next_handle,
+            lines,
+            by_handle,
+        } = &mut *g;
+        let held = lines.get_mut(slot).ok_or(IrqError::LineOutOfRange)?;
+        if held.exclusive
+            || (exclusive && !held.sharers.is_empty())
+            || held
+                .sharers
+                .iter()
+                .any(|binding| binding.entry.owner == owner)
+        {
             return Err(IrqError::LineAlreadyBound);
         }
-        let raw = g.next_handle;
-        // `next_handle` starts at 1 and is monotonic; saturating at
-        // `u64::MAX` is a fail-closed limit, not a wrap, so a
-        // theoretical `2^63` rebind storm cannot collide with a
-        // live handle.
-        g.next_handle = g.next_handle.saturating_add(1);
+        let raw = *next_handle;
+        held.sharers
+            .try_reserve(1)
+            .map_err(|_| IrqError::Exhausted)?;
+        by_handle
+            .try_insert(raw, line)
+            .map_err(|_| IrqError::Exhausted)?;
+        if held.sharers.is_empty() {
+            // The first binding starts the line clean, recovering one a
+            // previous owner's storm quarantined.
+            self.storm_window_start_ns[slot].store(0, Ordering::SeqCst);
+            self.storm_fire_count[slot].store(0, Ordering::SeqCst);
+            self.quarantined[slot].store(false, Ordering::SeqCst);
+        }
+        held.exclusive = exclusive;
         let handle = IrqHandle::from_raw(raw);
-        let entry = IrqEntry {
-            handle,
-            owner,
-            line,
-        };
-        g.entries.insert(line, entry);
-        g.by_handle.insert(raw, line);
-        // Reset the lock-free flags for this line, then publish the
-        // binding. The store order (clear `ready`, clear the storm
-        // accounting + quarantine, set `bound` last) means `fire` only
-        // ever observes `bound == true` for a line whose `ready` slot and
-        // rate-accounting were already re-initialised. Clearing
-        // `quarantined` here is what lets a driver recover a previously
-        // stormed line: a fresh bind starts it clean.
-        self.ready[line as usize].store(false, Ordering::SeqCst);
-        self.storm_window_start_ns[line as usize].store(0, Ordering::SeqCst);
-        self.storm_fire_count[line as usize].store(0, Ordering::SeqCst);
-        self.quarantined[line as usize].store(false, Ordering::SeqCst);
-        self.bound[line as usize].store(true, Ordering::SeqCst);
+        // Fires before the bind are not this binding's to take.
+        let fires = self.fires[slot].load(Ordering::SeqCst);
+        held.sharers.push(Binding {
+            entry: IrqEntry {
+                handle,
+                owner,
+                line,
+            },
+            taken: AtomicU64::new(fires),
+            armed: AtomicU64::new(fires),
+        });
+        // `next_handle` starts at 1 and is monotonic; saturating at
+        // `u64::MAX` is a fail-closed limit, never a wrap onto a live handle.
+        *next_handle = raw.saturating_add(1);
+        self.bound[slot].store(true, Ordering::SeqCst);
         Ok(BindOutcome { handle, line })
     }
 
-    /// Atomically inspect the binding for `handle` on behalf of
-    /// `caller`, returning the next step the syscall handler must
-    /// take.
+    /// Inspect the binding for `handle` on behalf of `caller`, returning the
+    /// next step the waiter takes.
     ///
-    /// `now_ns` and `deadline_ns` come from
-    /// `KernelArch::monotonic_ns` at the caller's CPU. The handler
-    /// computes the deadline once (at entry to `irq_wait`) and
-    /// passes it verbatim on every iteration so the polling loop
-    /// is monotonic in wall-clock terms even if the per-CPU clock
-    /// jitters.
+    /// `now_ns` and `deadline_ns` come from `KernelArch::monotonic_ns`; the
+    /// waiter computes the deadline once and passes it on every poll.
     ///
     /// # Ordering
     ///
-    /// The check order is documented to make the forgery / quarantine /
-    /// timeout /  ready hierarchy explicit:
-    ///
-    /// 1. Look up by handle. If the handle is unknown or its
-    ///    binding's owner is not `caller`, return
-    ///    [`WaitStep::NotFound`]. The forgery check beats every
-    ///    other check (identify before any
-    ///    state-touching transition).
-    /// 2. If the line has been quarantined by the runaway-interrupt
-    ///    safety net, return [`WaitStep::Quarantined`] (terminal,
-    ///    fail-closed). A quarantined line never delivers a `ready`, so
-    ///    this cannot mask a real fire.
-    /// 3. If `ready` is set, clear it and return
-    ///    [`WaitStep::Ready`]. The ready flag wins over a
-    ///    near-simultaneous deadline because the wake-up did
-    ///    happen — surfacing `TimedOut` here would silently drop
-    ///    a successful interrupt.
-    /// 4. If `now_ns >= deadline_ns`, return
-    ///    [`WaitStep::TimedOut`].
+    /// 1. An unknown handle, or one another task owns, is
+    ///    [`WaitStep::NotFound`]: identify before any transition.
+    /// 2. A quarantined line is [`WaitStep::Quarantined`] (terminal, fail
+    ///    closed); it never delivers, so this masks no real fire.
+    /// 3. A fire the binding has not taken is [`WaitStep::Ready`], and is
+    ///    taken. It wins over a near-simultaneous deadline: the wake-up did
+    ///    happen.
+    /// 4. `now_ns >= deadline_ns` is [`WaitStep::TimedOut`].
     /// 5. Otherwise [`WaitStep::Continue`].
     #[must_use]
     pub fn try_wait_step(
@@ -555,42 +609,20 @@ impl IrqTable {
         now_ns: u64,
         deadline_ns: u64,
     ) -> WaitStep {
-        // Only a *read* guard is needed: the forgery check reads the
-        // immutable `by_handle` / `entries` maps, and the ready flag
-        // lives in the lock-free `self.ready` array. Holding a read
-        // guard (rather than a write guard) is what lets the same-CPU
-        // completion ISR run `fire` — which takes no `Inner` lock at
-        // all — without deadlocking against a parked waiter.
-        let line = {
-            let g = self.inner.read();
-            let raw = handle.as_u64();
-            let Some(&line) = g.by_handle.get(&raw) else {
-                return WaitStep::NotFound;
-            };
-            let Some(entry) = g.entries.get(&line) else {
-                // by_handle and entries are kept consistent; this is a
-                // belt-and-braces fail-closed.
-                return WaitStep::NotFound;
-            };
-            if entry.owner != caller {
-                return WaitStep::NotFound;
-            }
-            line
+        // A read guard only: `fire` takes no lock, so the same-CPU completion
+        // interrupt cannot deadlock against a parked waiter holding it.
+        let g = self.inner.read();
+        let Some(binding) = g.owned(handle, caller) else {
+            return WaitStep::NotFound;
         };
-        // A quarantined line is terminal and fail-closed: the runaway
-        // safety net disabled it, so report it before anything else (a
-        // real fire cannot have out-raced the quarantine — `fire` stops
-        // setting `ready` the moment it quarantines). The waiter surfaces
-        // an error instead of re-arming, which would immediately re-storm.
-        if self.quarantined[line as usize].load(Ordering::Acquire) {
+        let slot = binding.entry.line as usize;
+        if self.quarantined[slot].load(Ordering::Acquire) {
             return WaitStep::Quarantined;
         }
-        // The ready flag wins over a near-simultaneous deadline: a
-        // wake-up that happened must not be masked by `TimedOut`. The
-        // `swap` consumes the flag with `SeqCst`, pairing with the
-        // `SeqCst` fence `IrqController::mask` issues before `fire`
-        // sets it, so the mask-before-wake ordering holds.
-        if self.ready[line as usize].swap(false, Ordering::SeqCst) {
+        // `fire` advances the count after the controller mask, so taking it
+        // here observes the mask (mask-before-wake).
+        let fires = self.fires[slot].load(Ordering::SeqCst);
+        if binding.taken.swap(fires, Ordering::SeqCst) != fires {
             return WaitStep::Ready;
         }
         if now_ns >= deadline_ns {
@@ -599,103 +631,120 @@ impl IrqTable {
         WaitStep::Continue
     }
 
+    /// Record that `caller`, waiting on `handle` with nothing left to take,
+    /// is back for the next fire, and unmask the line through `controller`
+    /// once every sharer is. [`None`] if the handle is unknown or another
+    /// task's.
+    ///
+    /// The waiter calls this before each park: a user-space driver holds no
+    /// controller access, so the kernel re-arms on its behalf. A binding with
+    /// a fire it has not taken re-arms nothing — it is about to wake — and a
+    /// quarantined line is never re-armed.
+    pub fn rearm(
+        &self,
+        handle: IrqHandle,
+        caller: ProcessId,
+        controller: &dyn IrqController,
+    ) -> Option<Result<(), MaskError>> {
+        let g = self.inner.read();
+        let binding = g.owned(handle, caller)?;
+        let line = binding.entry.line;
+        let fires = self.fires[line as usize].load(Ordering::SeqCst);
+        if binding.taken.load(Ordering::SeqCst) != fires {
+            return Some(Ok(()));
+        }
+        binding.armed.store(fires, Ordering::SeqCst);
+        Some(self.unmask_if_armed(&g, line, fires, controller))
+    }
+
+    /// Unmask `line` if every binding of it is armed at `fires` and it is not
+    /// quarantined.
+    ///
+    /// Sharers store their own `armed` and then read the others' with
+    /// `SeqCst`, so of two racing to finish, at least one sees both.
+    fn unmask_if_armed(
+        &self,
+        g: &Inner,
+        line: u32,
+        fires: u64,
+        controller: &dyn IrqController,
+    ) -> Result<(), MaskError> {
+        let armed = g.lines.get(line as usize).is_some_and(|held| {
+            !held.sharers.is_empty()
+                && held
+                    .sharers
+                    .iter()
+                    .all(|binding| binding.armed.load(Ordering::SeqCst) == fires)
+        });
+        if !armed || self.quarantined[line as usize].load(Ordering::Acquire) {
+            return Ok(());
+        }
+        controller.rearm(line)
+    }
+
     /// The line bound to `handle` for `caller`, or [`None`] if the handle is
     /// unknown or its binding is owned by another task.
     #[must_use]
     pub fn line_for(&self, handle: IrqHandle, caller: ProcessId) -> Option<u32> {
-        self.with_bound_line(handle, caller, |line| line)
+        self.inner
+            .read()
+            .owned(handle, caller)
+            .map(|binding| binding.entry.line)
     }
 
-    /// Run `act` on the line bound to `handle` for `caller` while the binding
-    /// is held, or return [`None`] if the handle is unknown or another task's.
+    /// The task holding the earliest binding of `line`, or [`None`] if it
+    /// is unbound.
     ///
-    /// Applies the same owner check [`Self::try_wait_step`] performs, so the
-    /// `irq_wait` park path re-arms a line without trusting a caller-supplied
-    /// value, and a release cannot land between the lookup and `act`. `act`
-    /// must not take this table's lock; [`Self::fire`] never does, so an
-    /// interrupt taken meanwhile cannot wait on it.
-    pub fn with_bound_line<R>(
-        &self,
-        handle: IrqHandle,
-        caller: ProcessId,
-        act: impl FnOnce(u32) -> R,
-    ) -> Option<R> {
-        let g = self.inner.read();
-        let line = *g.by_handle.get(&handle.as_u64())?;
-        let entry = g.entries.get(&line)?;
-        if entry.owner != caller {
-            return None;
-        }
-        Some(act(line))
-    }
-
-    /// The task that owns the binding for `line`, or [`None`] if `line` is
-    /// bound to no task.
-    ///
-    /// A read-only, owner-agnostic lookup (no caller check): it answers
-    /// *who* a line belongs to, used by the CPU-lockup watchdog to attribute
-    /// a stuck controller line to the driver that owns it — turning a raw
-    /// interrupt id in a lockup report into `stuck_owner=<task>` for a bound
-    /// line, or `unbound` for a spurious/contained line no driver owns. It
-    /// grants no authority and mutates nothing.
+    /// A read-only, owner-agnostic lookup the CPU-lockup watchdog uses to
+    /// attribute a stuck line to a driver. It grants no authority.
     #[must_use]
     pub fn owner_of_line(&self, line: u32) -> Option<ProcessId> {
         self.inner
             .read()
-            .entries
-            .get(&line)
-            .map(|entry| entry.owner)
+            .lines
+            .get(line as usize)?
+            .sharers
+            .first()
+            .map(|binding| binding.entry.owner)
     }
 
     /// The wire-encoded IRQ-table page starting at record offset `first`, at
-    /// most `max_records` whole [`IrqRecord`]s in ascending line order
-    /// (`IntrospectDomain::Irqs` paging: an offset past the end returns the
-    /// empty terminator).
+    /// most `max_records` whole [`IrqRecord`]s (`IntrospectDomain::Irqs`
+    /// paging: an offset past the end returns the empty terminator).
     ///
-    /// One record per *bound* line — the ownership view: line id, the
-    /// kernel-attested owning task, the monotonic fire count since boot, and
-    /// the quarantine flag. Read-only: it takes only the `Inner` read lock
-    /// and the lock-free per-line counters, mutates nothing, and grants no
-    /// authority. The bindings live in a `BTreeMap` keyed by line, so
-    /// iteration is already ascending and stable across paged calls.
+    /// One record per binding, in ascending line order and then bind order:
+    /// line id, the kernel-attested owning task, the line's fire count since
+    /// boot, and its quarantine flag. Read-only; it grants no authority.
     #[must_use]
     pub fn records(&self, first: u64, max_records: usize) -> Vec<u8> {
         let skip = usize::try_from(first).unwrap_or(usize::MAX);
         let inner = self.inner.read();
         let mut out = Vec::new();
-        for entry in inner.entries.values().skip(skip).take(max_records) {
-            let index = entry.line as usize;
-            // Every bound line indexes a valid per-line slot (both are sized
-            // to `max_line + 1` and `bind` rejects an out-of-range line), so
-            // these reads never fall outside the vectors.
-            let count = self.fire_total[index].load(Ordering::Relaxed);
-            let flags = if self.quarantined[index].load(Ordering::Acquire) {
+        for binding in inner.bindings().skip(skip).take(max_records) {
+            let slot = binding.entry.line as usize;
+            let flags = if self.quarantined[slot].load(Ordering::Acquire) {
                 IRQ_FLAG_QUARANTINED
             } else {
                 0
             };
             let record = IrqRecord {
-                line: entry.line,
+                line: binding.entry.line,
                 flags,
-                owner: entry.owner.0,
-                count,
+                owner: binding.entry.owner.0,
+                count: self.fires[slot].load(Ordering::Relaxed),
             };
             out.extend_from_slice(&record.to_le_bytes());
         }
         out
     }
 
-    /// Fire `line`: mask the controller, then set the per-entry
-    /// ready flag.
+    /// Fire `line`: mask the controller, then advance the line's fire count
+    /// every binding of it is woken by.
     ///
-    /// **Mask-before-wake is the load-bearing invariant**: the
-    /// kernel's user-space IRQ contract
-    /// (`docs/src/security/irq.md`) requires the controller-level
-    /// mask to be installed *before* the waiter observes the
-    /// fire, so an edge-triggered device cannot re-fire while the
-    /// driver is still draining its completion queue. The call
-    /// order in this function — `controller.mask(line)?` first,
-    /// `entry.ready = true` second — is exactly this invariant.
+    /// **Mask-before-wake is the load-bearing invariant**
+    /// (`docs/src/security/irq.md`): the controller-level mask is installed
+    /// *before* a waiter can observe the fire, so the line cannot re-fire
+    /// while its drivers drain their completions.
     ///
     /// # Errors
     ///
@@ -706,10 +755,8 @@ impl IrqTable {
     ///   the table's `max_line`. A bug rather than a runtime
     ///   condition, but routed to a stable errno (fail closed, never panic).
     pub fn fire(&self, line: u32, controller: &dyn IrqController) -> Result<FireOutcome, IrqError> {
-        // Feed the interrupt-arrival timing to the entropy observer first, so
-        // the sample is taken as close to arrival as possible. It is purely
-        // observational (wait-free, no lock) and never affects the
-        // mask-before-wake path below. A poisoned or empty cell is a no-op.
+        // The entropy observer samples arrival timing first, as close to the
+        // edge as possible; it is wait-free and touches nothing below.
         if let Ok(Some(observer)) = self.observer.get() {
             observer.on_irq(line);
         }
@@ -717,72 +764,43 @@ impl IrqTable {
             MaskError::Unsupported => IrqError::ArchUnsupported,
             MaskError::OutOfRange => IrqError::LineOutOfRange,
         })?;
-        // Interrupt-context fast path: consult only the lock-free
-        // per-line flags. Taking `Inner`'s lock here would deadlock a
-        // single CPU whose parked task already holds it in
-        // `try_wait_step`; the `bound` / `ready` atoms exist precisely
-        // so `fire` never blocks.
-        let Some(bound) = self.bound.get(line as usize) else {
-            // Line outside the addressable range — the mask still
-            // happened (or failed above); treat as a contained stray.
+        // Interrupt context: only the lock-free per-line atomics. Taking
+        // `Inner`'s lock here would deadlock a CPU whose parked task holds it.
+        let slot = line as usize;
+        let (Some(bound), Some(fires)) = (self.bound.get(slot), self.fires.get(slot)) else {
             return Ok(FireOutcome::Stray);
         };
-        // Count every edge this addressable line takes — bound, stray, or
-        // storm fire alike — so the reported per-line total is an honest
-        // interrupt tally. One `Relaxed` add on the lock-free path; never
-        // blocks (the `fire_total` slot exists for every addressable line,
-        // sized alongside `bound`).
-        self.fire_total[line as usize].fetch_add(1, Ordering::Relaxed);
+        // `mask` fenced before returning; advancing the count after it is
+        // what a waiter's `SeqCst` take pairs with.
+        fires.fetch_add(1, Ordering::SeqCst);
         if !bound.load(Ordering::SeqCst) {
-            // No binding — the mask still happened, the stray edge is
-            // contained (and its arrival timing was already fed to the entropy
-            // observer at the top of `fire`). Surface to the caller so an
-            // arch-port audit observer can record stray-IRQ rate.
+            // Contained by the mask; the caller may audit the stray.
             return Ok(FireOutcome::Stray);
         }
-        // Runaway-line safety net: the line stays masked (done above) but
-        // stops being re-armed/re-delivered once it fires past its rate
-        // budget, so a never-quiesced or hostile source cannot peg a CPU
-        // through the mask/wake/re-arm cycle. A line already quarantined
-        // never re-delivers.
-        if self.note_fire_and_quarantined(line as usize) {
+        // A line firing past its rate budget stays masked and stops being
+        // re-armed, so a never-quiesced or hostile source cannot peg a CPU
+        // through the mask/wake/re-arm cycle.
+        if self.note_fire_and_quarantined(slot) {
             return Ok(FireOutcome::Quarantined);
         }
-        // `mask` issued a `SeqCst` fence before returning; setting
-        // `ready` after it preserves the mask-before-wake invariant a
-        // `try_wait_step` consumer observes through the paired load.
-        self.ready[line as usize].store(true, Ordering::SeqCst);
         Ok(FireOutcome::Marked)
     }
 
     /// Record one fire of `line` against its sliding-window rate budget and
     /// report whether the line is now (or already) **quarantined**.
     ///
-    /// Runs in interrupt context from [`Self::fire`], so it is wait-free:
-    /// it reads the set-once [`MonotonicClock`] and the per-line atomics
-    /// only, never a lock. Until a clock is installed it is inert and
-    /// returns `false` (accounting off), so an early-boot fire and a host
-    /// test without an installed clock behave exactly as before.
-    ///
-    /// The window is a coarse safety net, not a precise meter: cross-CPU
-    /// races on the count merely shift the trip point by a few fires, which
-    /// is immaterial against a [`STORM_FIRE_BUDGET`] of 100 000. Once the
-    /// sticky quarantine flag is set it stays set until the next
-    /// [`Self::bind`] clears it.
+    /// Wait-free, for [`Self::fire`]'s interrupt context; inert until a
+    /// clock is installed. Cross-CPU races on the count only shift the trip
+    /// point by a few fires, immaterial against [`STORM_FIRE_BUDGET`].
     fn note_fire_and_quarantined(&self, line: usize) -> bool {
         if self.quarantined[line].load(Ordering::Acquire) {
             return true;
         }
         let Ok(Some(clock)) = self.clock.get() else {
-            // No clock installed yet: accounting is inert (fail *open* on
-            // the safety net, never on security — the line is still masked
-            // and delivered normally).
             return false;
         };
         let now = clock.now_ns();
         let start = self.storm_window_start_ns[line].load(Ordering::Relaxed);
-        // A fresh window (first fire, or the previous one elapsed) resets
-        // the count to this fire and starts the clock again.
         if now.saturating_sub(start) >= STORM_WINDOW_NS {
             self.storm_window_start_ns[line].store(now, Ordering::Relaxed);
             self.storm_fire_count[line].store(1, Ordering::Relaxed);
@@ -792,9 +810,6 @@ impl IrqTable {
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1);
         if count > STORM_FIRE_BUDGET {
-            // Trip: keep the line masked (already masked by `fire`) and
-            // deliver no wake. The parked waiter observes
-            // `WaitStep::Quarantined` on its next poll and fails closed.
             self.quarantined[line].store(true, Ordering::Release);
             return true;
         }
@@ -804,36 +819,40 @@ impl IrqTable {
     /// Whether the line bound to `handle` for `caller` has been
     /// quarantined by the runaway-line safety net.
     ///
-    /// Owner-checked like [`Self::line_for`] (identify before acting): a
-    /// forged or foreign handle, or an unknown line, reports `false`. Used
-    /// by the wait-set path to fail a quarantined IRQ member closed rather
-    /// than re-arm and re-storm it. A pure read, safe from any context.
+    /// Owner-checked like [`Self::line_for`]: a forged or foreign handle
+    /// reports `false`. A pure read, safe from any context.
     #[must_use]
     pub fn is_quarantined(&self, handle: IrqHandle, caller: ProcessId) -> bool {
-        match self.line_for(handle, caller) {
-            Some(line) => self.quarantined[line as usize].load(Ordering::Acquire),
-            None => false,
-        }
+        self.line_for(handle, caller)
+            .is_some_and(|line| self.quarantined[line as usize].load(Ordering::Acquire))
     }
 
-    /// Drop every binding owned by `process`.
+    /// Drop every binding owned by `process`, unmasking through `controller`
+    /// a shared line it was holding masked once its other sharers are armed.
     ///
-    /// Called from `KernelSyscallHandlers::exit` on the syscall
-    /// path and from the scheduler-driven task teardown path.
-    /// Idempotent: a second call is a no-op. Scoped to the process, not to
-    /// one thread: a binding belongs to the driver process, so it is released
-    /// when the process dies, not when whichever thread happened to bind it
-    /// exits.
-    pub fn release_for(&self, process: ProcessId) -> ReleaseOutcome {
+    /// Idempotent. Scoped to the process, not to one thread: a binding is a
+    /// process resource like an open file. A device that may still be
+    /// raising a shared line is silenced before this, or the line re-asserts
+    /// as soon as it is unmasked.
+    pub fn release_for(
+        &self,
+        process: ProcessId,
+        controller: &dyn IrqController,
+    ) -> ReleaseOutcome {
         let mut g = self.inner.write();
-        let to_drop: alloc::vec::Vec<u32> = g
-            .entries
-            .iter()
-            .filter_map(|(line, e)| (e.owner == process).then_some(*line))
-            .collect();
-        let released = to_drop.len();
-        for line in to_drop {
-            self.drop_binding(&mut g, line);
+        let mut released = 0;
+        // A search per binding rather than a list of them: this runs when a
+        // process ends, where an allocation must not be able to fail it.
+        loop {
+            let next = g
+                .bindings()
+                .find(|binding| binding.entry.owner == process)
+                .map(|binding| binding.entry.handle);
+            let Some(handle) = next else {
+                break;
+            };
+            self.drop_binding(&mut g, handle, controller);
+            released += 1;
         }
         ReleaseOutcome { released }
     }
@@ -849,42 +868,63 @@ impl IrqTable {
         };
         self.inner
             .read()
-            .entries
-            .range(from..)
-            .map(|(_, entry)| *entry)
-            .find(|entry| entry.owner == owner)
+            .lines
+            .get(from as usize..)?
+            .iter()
+            .flat_map(|held| &held.sharers)
+            .find(|binding| binding.entry.owner == owner)
+            .map(|binding| binding.entry)
     }
 
-    /// Release the binding `handle`, returning whether `owner` still held it.
+    /// Release the binding `handle`, returning whether `owner` still held it,
+    /// unmasking as [`Self::release_for`] does.
     ///
     /// A parked [`Self::try_wait_step`] on the handle reports
     /// [`WaitStep::NotFound`] from its next poll. Keyed by handle, so a line
     /// the owner has since rebound is not released by a stale caller.
-    pub fn release_binding(&self, handle: IrqHandle, owner: ProcessId) -> bool {
+    pub fn release_binding(
+        &self,
+        handle: IrqHandle,
+        owner: ProcessId,
+        controller: &dyn IrqController,
+    ) -> bool {
         let mut g = self.inner.write();
-        let Some(&line) = g.by_handle.get(&handle.as_u64()) else {
-            return false;
-        };
-        if g.entries
-            .get(&line)
-            .is_none_or(|entry| entry.owner != owner)
-        {
+        if g.owned(handle, owner).is_none() {
             return false;
         }
-        self.drop_binding(&mut g, line);
+        self.drop_binding(&mut g, handle, controller);
         true
     }
 
-    /// Remove `line`'s binding and reset its lock-free state, so a late edge
-    /// on the unbound line is a stray and a later bind starts clean.
-    fn drop_binding(&self, g: &mut Inner, line: u32) {
-        if let Some(entry) = g.entries.remove(&line) {
-            g.by_handle.remove(&entry.handle.as_u64());
-            self.bound[line as usize].store(false, Ordering::SeqCst);
-            self.ready[line as usize].store(false, Ordering::SeqCst);
-            self.quarantined[line as usize].store(false, Ordering::SeqCst);
-            self.storm_fire_count[line as usize].store(0, Ordering::SeqCst);
-            self.storm_window_start_ns[line as usize].store(0, Ordering::SeqCst);
+    /// Remove `handle`'s binding. The last binding of a line resets its
+    /// lock-free state, so a late edge is a stray and a later bind starts
+    /// clean; a binding that was holding a shared line masked lets the
+    /// others' re-arm through.
+    fn drop_binding(&self, g: &mut Inner, handle: IrqHandle, controller: &dyn IrqController) {
+        let Some(line) = g.by_handle.remove(&handle.as_u64()) else {
+            return;
+        };
+        let slot = line as usize;
+        let Some(held) = g.lines.get_mut(slot) else {
+            return;
+        };
+        let Some(at) = held.sharers.iter().position(|b| b.entry.handle == handle) else {
+            return;
+        };
+        let gone = held.sharers.remove(at);
+        if held.sharers.is_empty() {
+            held.exclusive = false;
+            self.bound[slot].store(false, Ordering::SeqCst);
+            self.quarantined[slot].store(false, Ordering::SeqCst);
+            self.storm_fire_count[slot].store(0, Ordering::SeqCst);
+            self.storm_window_start_ns[slot].store(0, Ordering::SeqCst);
+            return;
+        }
+        let fires = self.fires[slot].load(Ordering::SeqCst);
+        if gone.armed.load(Ordering::SeqCst) != fires {
+            // Best-effort like every re-arm: a refusal leaves the line as it
+            // was and each sharer's wait stays bounded by its deadline.
+            let _ = self.unmask_if_armed(g, line, fires, controller);
         }
     }
 
@@ -892,36 +932,24 @@ impl IrqTable {
     /// emission only. Returns `None` if the handle is unknown.
     #[must_use]
     pub fn lookup(&self, handle: IrqHandle) -> Option<IrqEntry> {
-        let g = self.inner.read();
-        let line = *g.by_handle.get(&handle.as_u64())?;
-        g.entries.get(&line).copied()
+        self.inner
+            .read()
+            .binding(handle)
+            .map(|binding| binding.entry)
     }
 
-    /// Whether the line bound to `handle` has a pending, *un-consumed*
-    /// fire.
+    /// Whether `handle`'s binding has a fire it has not taken.
     ///
-    /// Read-only poll/diagnostic companion to [`Self::lookup`]: it
-    /// reports the lock-free per-line ready flag without clearing it
-    /// (only [`Self::try_wait_step`] consumes the flag). Returns
-    /// `false` for an unknown handle. Taking only a read guard, it is
-    /// safe to call from any context, including alongside an
-    /// in-flight [`Self::fire`] (a narrow read-only
-    /// query, not a new mutation surface).
+    /// Read-only: only [`Self::try_wait_step`] takes a fire. `false` for an
+    /// unknown handle. Safe from any context, alongside an in-flight
+    /// [`Self::fire`].
     #[must_use]
     pub fn ready_for(&self, handle: IrqHandle) -> bool {
         let g = self.inner.read();
-        let Some(&line) = g.by_handle.get(&handle.as_u64()) else {
-            return false;
-        };
-        self.ready[line as usize].load(Ordering::SeqCst)
-    }
-
-    /// Current value of the lock-free ready flag for `line`. Test-only
-    /// observer for the mask-before-wake ordering assertions.
-    #[cfg(test)]
-    #[must_use]
-    fn ready_flag(&self, line: u32) -> bool {
-        self.ready[line as usize].load(Ordering::SeqCst)
+        g.binding(handle).is_some_and(|binding| {
+            self.fires[binding.entry.line as usize].load(Ordering::SeqCst)
+                != binding.taken.load(Ordering::SeqCst)
+        })
     }
 }
 
@@ -933,36 +961,96 @@ impl IrqTable {
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_line_is_acted_on_only_while_its_owner_holds_the_binding() {
-        let table = IrqTable::new(15);
-        let owner = ProcessId(0x10);
-        let handle = table.bind(5, owner).expect("binds").handle;
-        assert_eq!(
-            table.with_bound_line(handle, owner, |line| line * 2),
-            Some(10)
-        );
-        assert_eq!(
-            table.with_bound_line(handle, ProcessId(0x11), |line| line),
-            None
-        );
-        assert!(table.release_binding(handle, owner));
-        assert_eq!(
-            table.with_bound_line(handle, owner, |line| line),
-            None,
-            "released"
-        );
-    }
     use alloc::vec::Vec;
-    use core::cell::RefCell;
+    use core::alloc::{GlobalAlloc, Layout};
+    use core::cell::{Cell, RefCell};
 
     extern crate std;
+
+    std::thread_local! {
+        /// Whether this thread's allocations are refused.
+        static STARVED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// The system allocator, refusing every allocation of a thread that
+    /// asked to be starved, so a bind with no memory to record it in is seen
+    /// refused rather than aborting the process.
+    struct Starving;
+
+    // SAFETY: every method forwards to `System`, which upholds the contract,
+    // or returns null, which the contract allows for any request.
+    unsafe impl GlobalAlloc for Starving {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            if STARVED.with(Cell::get) {
+                return core::ptr::null_mut();
+            }
+            // SAFETY: forwarded; the caller upholds the layout contract.
+            unsafe { std::alloc::System.alloc(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            // SAFETY: `ptr` came from `System` with `layout`, as no starved
+            // allocation ever returned one.
+            unsafe { std::alloc::System.dealloc(ptr, layout) }
+        }
+    }
+
+    #[global_allocator]
+    static ALLOCATOR: Starving = Starving;
+
+    /// Run `f` with this thread's allocations refused.
+    fn starved<T>(f: impl FnOnce() -> T) -> T {
+        STARVED.with(|starved| starved.set(true));
+        let out = f();
+        STARVED.with(|starved| starved.set(false));
+        out
+    }
+
+    #[test]
+    fn a_bind_with_nothing_to_record_it_in_is_refused_and_leaves_no_trace() {
+        let t = IrqTable::new(15);
+        assert_eq!(
+            starved(|| t.bind(9, ProcessId(1))),
+            Err(IrqError::Exhausted)
+        );
+        assert!(t.is_empty());
+        assert_eq!(t.owner_of_line(9), None);
+        assert!(t.bind(9, ProcessId(1)).is_ok(), "and binds once it can");
+    }
+
+    #[test]
+    fn a_kernel_service_s_line_takes_no_other_sharer() {
+        let t = IrqTable::new(15);
+        let service = t.bind_exclusive(7, ProcessId(0x5b6)).expect("binds");
+        assert_eq!(
+            t.bind(7, ProcessId(0x1_0000)),
+            Err(IrqError::LineAlreadyBound),
+            "a sharer that never waited would hold it masked"
+        );
+        assert!(t.release_binding(service.handle, ProcessId(0x5b6), &UnsupportedController));
+        assert!(t.bind(7, ProcessId(0x1_0000)).is_ok(), "free once it goes");
+        assert_eq!(
+            t.bind_exclusive(7, ProcessId(0x5b6)),
+            Err(IrqError::LineAlreadyBound),
+            "and a service takes no line another binds"
+        );
+    }
+
+    #[test]
+    fn a_controller_naming_no_trigger_gives_every_line_a_level() {
+        assert_eq!(UnsupportedController.set_trigger(4, Trigger::Level), Ok(()));
+        assert_eq!(
+            UnsupportedController.set_trigger(4, Trigger::Edge),
+            Err(MaskError::Unsupported)
+        );
+    }
 
     /// Deterministic mock controller. Records the sequence of
     /// `mask(line)` calls so tests can assert ordering against
     /// table state changes (the mask-before-wake invariant).
     struct MockController {
         calls: RefCell<Vec<u32>>,
+        rearms: RefCell<Vec<u32>>,
         unsupported: bool,
         out_of_range_above: Option<u32>,
     }
@@ -971,6 +1059,7 @@ mod tests {
         fn ok() -> Self {
             Self {
                 calls: RefCell::new(Vec::new()),
+                rearms: RefCell::new(Vec::new()),
                 unsupported: false,
                 out_of_range_above: None,
             }
@@ -978,22 +1067,24 @@ mod tests {
 
         fn unsupported() -> Self {
             Self {
-                calls: RefCell::new(Vec::new()),
                 unsupported: true,
-                out_of_range_above: None,
+                ..Self::ok()
             }
         }
 
         fn with_max(max: u32) -> Self {
             Self {
-                calls: RefCell::new(Vec::new()),
-                unsupported: false,
                 out_of_range_above: Some(max),
+                ..Self::ok()
             }
         }
 
         fn calls(&self) -> Vec<u32> {
             self.calls.borrow().clone()
+        }
+
+        fn rearms(&self) -> Vec<u32> {
+            self.rearms.borrow().clone()
         }
     }
 
@@ -1010,6 +1101,11 @@ mod tests {
             self.calls.borrow_mut().push(line);
             Ok(())
         }
+
+        fn rearm(&self, line: u32) -> Result<(), MaskError> {
+            self.rearms.borrow_mut().push(line);
+            Ok(())
+        }
     }
 
     #[test]
@@ -1021,7 +1117,7 @@ mod tests {
         let entry = t.lookup(out.handle).expect("present");
         assert_eq!(entry.line, 7);
         assert_eq!(entry.owner, ProcessId(42));
-        assert!(!t.ready_flag(7));
+        assert!(!t.ready_for(out.handle));
     }
 
     #[test]
@@ -1035,7 +1131,7 @@ mod tests {
         // A different, still-unbound line stays None.
         assert_eq!(t.owner_of_line(8), None);
         // Releasing the owner's bindings makes the line unbound again.
-        let _ = t.release_for(ProcessId(42));
+        let _ = t.release_for(ProcessId(42), &MockController::ok());
         assert_eq!(t.owner_of_line(7), None);
     }
 
@@ -1045,8 +1141,8 @@ mod tests {
         let ctl = MockController::ok();
         let _ = t.bind(5, ProcessId(7)).expect("bind 5");
         let _ = t.bind(10, ProcessId(9)).expect("bind 10");
-        // Fire line 5 three times, line 10 once. `fire_total` counts every
-        // edge on an addressable line.
+        // Fire line 5 three times, line 10 once; each record counts every
+        // edge on its line.
         for _ in 0..3 {
             t.fire(5, &ctl).expect("fire 5");
         }
@@ -1099,14 +1195,102 @@ mod tests {
     }
 
     #[test]
-    fn bind_refuses_duplicate_line() {
+    fn an_owner_binds_a_line_once_and_others_share_it() {
         let t = IrqTable::new(31);
         let _ = t.bind(7, ProcessId(1)).unwrap();
-        // Same task, same line: still refused — `abi-v1` does not
-        // share lines.
         assert_eq!(t.bind(7, ProcessId(1)), Err(IrqError::LineAlreadyBound));
-        // Different task, same line: refused for the same reason.
-        assert_eq!(t.bind(7, ProcessId(2)), Err(IrqError::LineAlreadyBound));
+        let _ = t
+            .bind(7, ProcessId(2))
+            .expect("a second owner shares the line");
+        assert_eq!(t.len(), 2);
+        assert_eq!(t.owner_of_line(7), Some(ProcessId(1)), "the earliest");
+        let blob = t.records(0, 16);
+        assert_eq!(blob.len(), 2 * IrqRecord::WIRE_LEN, "one record each");
+        let second = IrqRecord::from_bytes(&blob[IrqRecord::WIRE_LEN..]).expect("decode");
+        assert_eq!((second.line, second.owner), (7, 2));
+    }
+
+    #[test]
+    fn a_shared_line_wakes_every_sharer_and_unmasks_once_all_are_back() {
+        let t = IrqTable::new(31);
+        let ctl = MockController::ok();
+        let a = t.bind(7, ProcessId(1)).unwrap().handle;
+        let b = t.bind(7, ProcessId(2)).unwrap().handle;
+        assert_eq!(t.fire(7, &ctl), Ok(FireOutcome::Marked));
+        assert_eq!(t.try_wait_step(a, ProcessId(1), 0, 1), WaitStep::Ready);
+        assert_eq!(t.try_wait_step(b, ProcessId(2), 0, 1), WaitStep::Ready);
+        assert_eq!(t.try_wait_step(a, ProcessId(1), 0, 1), WaitStep::Continue);
+        assert_eq!(t.rearm(a, ProcessId(1), &ctl), Some(Ok(())));
+        assert!(ctl.rearms().is_empty(), "the other sharer is still busy");
+        assert_eq!(t.try_wait_step(b, ProcessId(2), 0, 1), WaitStep::Continue);
+        assert_eq!(t.rearm(b, ProcessId(2), &ctl), Some(Ok(())));
+        assert_eq!(ctl.rearms(), std::vec![7]);
+    }
+
+    #[test]
+    fn a_binding_with_a_fire_to_take_rearms_nothing() {
+        let t = IrqTable::new(31);
+        let ctl = MockController::ok();
+        let a = t.bind(7, ProcessId(1)).unwrap().handle;
+        t.fire(7, &ctl).unwrap();
+        assert_eq!(t.rearm(a, ProcessId(1), &ctl), Some(Ok(())));
+        assert!(ctl.rearms().is_empty(), "it is about to wake");
+        assert_eq!(t.try_wait_step(a, ProcessId(1), 0, 1), WaitStep::Ready);
+        assert_eq!(t.rearm(a, ProcessId(1), &ctl), Some(Ok(())));
+        assert_eq!(ctl.rearms(), std::vec![7]);
+        assert_eq!(t.rearm(a, ProcessId(2), &ctl), None, "another task's");
+    }
+
+    #[test]
+    fn a_late_sharer_takes_no_earlier_fire() {
+        let t = IrqTable::new(31);
+        let ctl = MockController::ok();
+        let a = t.bind(7, ProcessId(1)).unwrap().handle;
+        t.fire(7, &ctl).unwrap();
+        let b = t.bind(7, ProcessId(2)).unwrap().handle;
+        assert_eq!(t.try_wait_step(b, ProcessId(2), 0, 1), WaitStep::Continue);
+        assert_eq!(t.try_wait_step(a, ProcessId(1), 0, 1), WaitStep::Ready);
+    }
+
+    #[test]
+    fn a_departing_sharer_that_held_the_line_masked_lets_the_others_through() {
+        let t = IrqTable::new(31);
+        let ctl = MockController::ok();
+        let a = t.bind(7, ProcessId(1)).unwrap().handle;
+        let b = t.bind(7, ProcessId(2)).unwrap().handle;
+        t.fire(7, &ctl).unwrap();
+        assert_eq!(t.try_wait_step(a, ProcessId(1), 0, 1), WaitStep::Ready);
+        let _ = t.rearm(a, ProcessId(1), &ctl);
+        assert!(ctl.rearms().is_empty());
+        assert!(t.release_binding(b, ProcessId(2), &ctl));
+        assert_eq!(ctl.rearms(), std::vec![7], "the departed sharer owed it");
+    }
+
+    #[test]
+    fn a_departing_sharer_that_owed_nothing_unmasks_nothing() {
+        let t = IrqTable::new(31);
+        let ctl = MockController::ok();
+        let a = t.bind(7, ProcessId(1)).unwrap().handle;
+        let _ = t.bind(7, ProcessId(2)).unwrap();
+        let _ = t.rearm(a, ProcessId(1), &ctl);
+        assert_eq!(ctl.rearms(), std::vec![7], "both armed from the start");
+        assert_eq!(t.release_for(ProcessId(2), &ctl).released, 1);
+        assert_eq!(ctl.rearms(), std::vec![7]);
+        assert_eq!(t.owner_of_line(7), Some(ProcessId(1)));
+    }
+
+    #[test]
+    fn a_quarantined_line_is_never_rearmed() {
+        let t = IrqTable::new(31);
+        t.set_clock(leak_clock(0)).expect("clock");
+        let ctl = MockController::ok();
+        let a = t.bind(7, ProcessId(1)).unwrap().handle;
+        for _ in 0..=STORM_FIRE_BUDGET {
+            let _ = t.fire(7, &ctl);
+        }
+        let _ = t.try_wait_step(a, ProcessId(1), 0, 1);
+        assert_eq!(t.rearm(a, ProcessId(1), &ctl), Some(Ok(())));
+        assert!(ctl.rearms().is_empty());
     }
 
     #[test]
@@ -1133,7 +1317,7 @@ mod tests {
         let ctl = MockController::ok();
         let out = t.bind(7, ProcessId(42)).unwrap();
         assert_eq!(t.fire(7, &ctl), Ok(FireOutcome::Marked));
-        // First poll consumes the ready flag.
+        // The first poll takes the fire.
         assert_eq!(
             t.try_wait_step(out.handle, ProcessId(42), 0, 1_000),
             WaitStep::Ready
@@ -1217,44 +1401,34 @@ mod tests {
 
     #[test]
     fn mask_is_observed_before_wake() {
-        // Mask-before-wake invariant: the controller's `mask`
-        // must observe the line *before* the per-entry `ready`
-        // flag is set. The mock records `mask` calls; we verify
-        // the entry's `ready` flag is still `false` while
-        // `controller.mask` is executing by snapshotting state
-        // through a `RefCell` interlock.
+        // The binding must not read as ready while the controller's mask is
+        // still in flight.
         struct OrderingProbe<'a> {
             table: &'a IrqTable,
-            line: u32,
+            handle: IrqHandle,
             observed_ready_during_mask: RefCell<Option<bool>>,
         }
         impl IrqController for OrderingProbe<'_> {
             fn mask(&self, _line: u32) -> Result<(), MaskError> {
-                // Read the table's current ready flag for `line`
-                // *while* the mask is in flight. If the table set
-                // `ready = true` before calling us, this test
-                // fails.
-                let bound = self.table.bound.get(self.line as usize).is_some();
                 *self.observed_ready_during_mask.borrow_mut() =
-                    bound.then(|| self.table.ready_flag(self.line));
+                    Some(self.table.ready_for(self.handle));
                 Ok(())
             }
         }
         let t = IrqTable::new(31);
-        let _ = t.bind(7, ProcessId(42)).unwrap();
+        let handle = t.bind(7, ProcessId(42)).unwrap().handle;
         let probe = OrderingProbe {
             table: &t,
-            line: 7,
+            handle,
             observed_ready_during_mask: RefCell::new(None),
         };
         t.fire(7, &probe).unwrap();
         assert_eq!(
             *probe.observed_ready_during_mask.borrow(),
             Some(false),
-            "ready must still be false while mask is executing"
+            "not ready while the mask is executing"
         );
-        // And after fire returns, ready is set.
-        assert!(t.ready_flag(7));
+        assert!(t.ready_for(handle));
     }
 
     #[test]
@@ -1263,9 +1437,10 @@ mod tests {
         let a = t.bind(7, ProcessId(42)).unwrap();
         let b = t.bind(9, ProcessId(42)).unwrap();
         let c = t.bind(10, ProcessId(99)).unwrap();
-        assert_eq!(t.release_for(ProcessId(42)).released, 2);
+        let ctl = MockController::ok();
+        assert_eq!(t.release_for(ProcessId(42), &ctl).released, 2);
         // Releases are idempotent.
-        assert_eq!(t.release_for(ProcessId(42)).released, 0);
+        assert_eq!(t.release_for(ProcessId(42), &ctl).released, 0);
         // 42's handles are now unknown.
         assert_eq!(
             t.try_wait_step(a.handle, ProcessId(42), 0, 1_000),
@@ -1302,13 +1477,17 @@ mod tests {
         let t = IrqTable::new(31);
         let mine = t.bind(7, ProcessId(42)).unwrap();
         let other = t.bind(8, ProcessId(42)).unwrap();
+        let controller = MockController::ok();
 
         assert!(
-            !t.release_binding(mine.handle, ProcessId(99)),
+            !t.release_binding(mine.handle, ProcessId(99), &controller),
             "another owner releases nothing"
         );
-        assert!(t.release_binding(mine.handle, ProcessId(42)));
-        assert!(!t.release_binding(mine.handle, ProcessId(42)), "idempotent");
+        assert!(t.release_binding(mine.handle, ProcessId(42), &controller));
+        assert!(
+            !t.release_binding(mine.handle, ProcessId(42), &controller),
+            "idempotent"
+        );
         assert_eq!(
             t.try_wait_step(mine.handle, ProcessId(42), 0, 1_000),
             WaitStep::NotFound
@@ -1318,18 +1497,21 @@ mod tests {
             WaitStep::Continue,
             "only the named binding goes"
         );
-        let controller = MockController::ok();
-        assert_eq!(t.fire(7, &controller), Ok(FireOutcome::Stray));
-        assert!(t.bind(7, ProcessId(99)).is_ok(), "the line is free again");
+        assert_eq!(t.fire(7, &controller), Ok(FireOutcome::Stray), "unbound");
+        assert!(
+            t.bind(7, ProcessId(42)).is_ok(),
+            "its owner may bind it again"
+        );
     }
 
     #[test]
     fn a_stale_handle_does_not_release_the_line_rebound_under_a_new_one() {
         let t = IrqTable::new(31);
+        let ctl = MockController::ok();
         let old = t.bind(7, ProcessId(42)).unwrap();
-        assert!(t.release_binding(old.handle, ProcessId(42)));
+        assert!(t.release_binding(old.handle, ProcessId(42), &ctl));
         let new = t.bind(7, ProcessId(42)).unwrap();
-        assert!(!t.release_binding(old.handle, ProcessId(42)));
+        assert!(!t.release_binding(old.handle, ProcessId(42), &ctl));
         assert_eq!(
             t.try_wait_step(new.handle, ProcessId(42), 0, 1_000),
             WaitStep::Continue
@@ -1351,9 +1533,10 @@ mod tests {
         assert!(!t.is_empty());
         let _ = t.bind(8, ProcessId(2)).unwrap();
         assert_eq!(t.len(), 2);
-        t.release_for(ProcessId(1));
+        let ctl = MockController::ok();
+        t.release_for(ProcessId(1), &ctl);
         assert_eq!(t.len(), 1);
-        t.release_for(ProcessId(2));
+        t.release_for(ProcessId(2), &ctl);
         assert!(t.is_empty());
     }
 
@@ -1367,7 +1550,7 @@ mod tests {
     fn handles_are_unique_across_rebinds() {
         let t = IrqTable::new(31);
         let a = t.bind(7, ProcessId(1)).unwrap();
-        t.release_for(ProcessId(1));
+        t.release_for(ProcessId(1), &MockController::ok());
         let b = t.bind(7, ProcessId(1)).unwrap();
         assert_ne!(a.handle, b.handle, "fresh bind must mint a fresh handle");
     }
@@ -1518,8 +1701,7 @@ mod tests {
             clock.set(window * STORM_WINDOW_NS);
             for _ in 0..STORM_FIRE_BUDGET {
                 assert_eq!(t.fire(7, &ctl), Ok(FireOutcome::Marked));
-                // Consume the ready flag each time, mirroring a driver that
-                // services every interrupt (so `fire` re-sets it next round).
+                // Take each fire, as a driver servicing every interrupt does.
                 let _ = t.try_wait_step(out.handle, ProcessId(1), 0, u64::MAX);
             }
         }
@@ -1537,7 +1719,7 @@ mod tests {
         }
         assert!(t.is_quarantined(first.handle, ProcessId(1)));
         // The driver releases and rebinds the line to recover it.
-        t.release_for(ProcessId(1));
+        t.release_for(ProcessId(1), &ctl);
         let second = t.bind(7, ProcessId(1)).unwrap();
         assert!(!t.is_quarantined(second.handle, ProcessId(1)));
         assert_eq!(t.fire(7, &ctl), Ok(FireOutcome::Marked));
@@ -1568,5 +1750,67 @@ mod tests {
         let t = IrqTable::new(31);
         assert_eq!(t.set_clock(leak_clock(0)), Ok(()));
         assert_eq!(t.set_clock(leak_clock(0)), Err(ObserverAlreadyInstalled));
+    }
+
+    /// Two sharers coming back at once each store their own arm before they
+    /// read the other's, so at least one of them unmasks the line: the
+    /// store-buffering pairing in `unmask_if_armed`, run on real threads
+    /// because loom cannot build the kernel crate graph.
+    #[test]
+    fn two_sharers_returning_at_once_never_both_leave_the_line_masked() {
+        use std::sync::Arc;
+
+        struct Counting(AtomicU64);
+        impl IrqController for Counting {
+            fn mask(&self, _line: u32) -> Result<(), MaskError> {
+                Ok(())
+            }
+            fn rearm(&self, _line: u32) -> Result<(), MaskError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        const ROUNDS: u64 = 400_000;
+        let table = Arc::new(IrqTable::new(7));
+        let ctl = Arc::new(Counting(AtomicU64::new(0)));
+        let owners = [ProcessId(1), ProcessId(2)];
+        let handles = owners.map(|owner| table.bind(1, owner).unwrap().handle);
+        let round = Arc::new(AtomicU64::new(0));
+        let done = Arc::new(AtomicU64::new(0));
+        let workers: Vec<_> = (0..2)
+            .map(|i| {
+                let (table, ctl, round, done) =
+                    (table.clone(), ctl.clone(), round.clone(), done.clone());
+                let (handle, owner) = (handles[i], owners[i]);
+                std::thread::spawn(move || {
+                    for r in 1..=ROUNDS {
+                        while round.load(Ordering::Acquire) != r {
+                            core::hint::spin_loop();
+                        }
+                        let _ = table.rearm(handle, owner, &*ctl);
+                        done.fetch_add(1, Ordering::AcqRel);
+                    }
+                })
+            })
+            .collect();
+        for r in 1..=ROUNDS {
+            table.fire(1, &*ctl).unwrap();
+            for (handle, owner) in handles.iter().zip(owners) {
+                assert_eq!(table.try_wait_step(*handle, owner, 0, 1), WaitStep::Ready);
+            }
+            let before = ctl.0.load(Ordering::SeqCst);
+            round.store(r, Ordering::Release);
+            while done.load(Ordering::Acquire) != 2 * r {
+                core::hint::spin_loop();
+            }
+            assert!(
+                ctl.0.load(Ordering::SeqCst) > before,
+                "round {r}: both sharers left the line masked"
+            );
+        }
+        for worker in workers {
+            worker.join().unwrap();
+        }
     }
 }
