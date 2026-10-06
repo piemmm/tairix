@@ -12,6 +12,7 @@ mod architecture;
 mod chains;
 mod courses;
 mod cracked;
+mod fields;
 mod footprint;
 mod landscape;
 mod lattice;
@@ -93,6 +94,9 @@ pub enum Setting {
     Ruins,
     /// Rolling hills of grass and flowers, trees and cloud.
     Meadow,
+    /// Country cut into fields by hedges, walls, fences and ditches, lanes
+    /// and tracks between its farmsteads.
+    Farmland,
     /// A glade among trees, their crowns lit through.
     Forest,
     /// Mountains, snow on their peaks, over a still lake.
@@ -117,7 +121,7 @@ pub enum Setting {
 
 impl Setting {
     /// Every setting.
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 21] = [
         Self::Classic,
         Self::Studio,
         Self::Crystals,
@@ -128,6 +132,7 @@ impl Setting {
         Self::Rotunda,
         Self::Ruins,
         Self::Meadow,
+        Self::Farmland,
         Self::Forest,
         Self::Alpine,
         Self::Coast,
@@ -155,6 +160,7 @@ impl Setting {
             Self::Rotunda => "Rotunda",
             Self::Ruins => "Ruins",
             Self::Meadow => "Meadow",
+            Self::Farmland => "Farmland",
             Self::Forest => "Forest",
             Self::Alpine => "Alpine",
             Self::Coast => "Coast",
@@ -885,6 +891,7 @@ fn compose(setting: Setting, stage: &mut Stage, dice: &mut Dice) -> Option<Compo
         Setting::Rotunda => architecture::rotunda(stage, dice)?,
         Setting::Ruins => architecture::ruins(stage, dice)?,
         Setting::Meadow => landscape::meadow(stage, dice)?,
+        Setting::Farmland => landscape::farmland(stage, dice)?,
         Setting::Forest => landscape::forest(stage, dice)?,
         Setting::Alpine => landscape::alpine(stage, dice)?,
         Setting::Coast => landscape::coast(stage, dice)?,
@@ -2346,7 +2353,11 @@ impl Composition {
     /// Run its jobs until it is seen; the land it was planted on, if it
     /// stands on one.
     fn run_until_seen(&mut self) -> Option<Land> {
-        let runner = tairix_parallel::Threaded::new(8);
+        self.run_until_seen_on(&tairix_parallel::Threaded::new(8))
+    }
+
+    /// [`Self::run_until_seen`], across `runner`.
+    fn run_until_seen_on(&mut self, runner: &dyn JobRunner) -> Option<Land> {
         let mut land = None;
         while self.seen.is_none() {
             let job = self
@@ -2356,11 +2367,37 @@ impl Composition {
             if let (Job::Plant(planting), None) = (&job, &land) {
                 land = Some(planting.land.clone());
             }
-            if let Progress::Again(unfinished) = self.run(job, &runner).expect("runs") {
+            if let Progress::Again(unfinished) = self.run(job, runner).expect("runs") {
                 self.jobs.push_front(unfinished);
             }
         }
         land
+    }
+
+    /// Each structure laid unit by unit, in the order their prototypes were
+    /// planned: the stage's, or the grow's once it has taken them.
+    fn buildings(&self) -> impl Iterator<Item = &Building> {
+        self.jobs
+            .iter()
+            .find_map(|job| match job {
+                Job::Grow(grow) => Some(&grow.assembled),
+                _ => None,
+            })
+            .unwrap_or(&self.stage.assembled)
+            .iter()
+    }
+
+    /// Each structure laid unit by unit, by the prototype it grows into, and
+    /// the box it fills in that prototype's frame.
+    fn structures(&self) -> Vec<(u32, Aabb)> {
+        let mut buildings = self.buildings();
+        self.stage
+            .recipes
+            .iter()
+            .enumerate()
+            .filter(|(_, recipe)| matches!(recipe, Recipe::Assembled))
+            .filter_map(|(index, _)| Some((u32::try_from(index).ok()?, buildings.next()?.bounds())))
+            .collect()
     }
 
     /// How many woods carried on far off are still to be matched.

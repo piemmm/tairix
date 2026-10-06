@@ -1743,7 +1743,7 @@ shows, each scene drawn as the user's `screensaver.*` options set it
   is bounded, so a very large screen grows its cells rather than its work.
   Under reduced motion a cell is born and dies at once.
 - **A ray tracer** (`saver::raytrace`, over `lib/raytrace`): a scene composed
-  at random in one of the tracer's twenty settings — still lifes,
+  at random in one of the tracer's twenty-one settings — still lifes,
   buildings, and landscapes of land, sea, trees, grass and cloud — is
   prepared, its work done a bounded unit at a time, and then revealed coarse
   to fine (`plans/RAYTRACE.md`). The first pass traces every point of a grid

@@ -10,8 +10,8 @@ use crate::detail::Detail;
 use crate::heightfield::Attributes;
 
 /// Silt a flood laid and left, bare of growth; and the same grassed over.
-const SILT: Attributes = [60, 230, 0, 25, 0];
-const GRASSED: Attributes = [60, 230, 0, 255, 0];
+const SILT: Attributes = [60, 230, 0, 0, 25, 0];
+const GRASSED: Attributes = [60, 230, 0, 0, 255, 0];
 
 /// The eye, a little off a cell's corner.
 const EYE: Vec3 = Vec3::new(0.3, 1.7, 0.4);

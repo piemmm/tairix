@@ -130,6 +130,134 @@ fn terrain_is_level_in_its_clearing_and_settles_to_its_rim() {
     }
 }
 
+/// A tilted land falls as its tilt has it, straight from its middle out to
+/// where the fall begins to ease, then levelling off by its edge: never
+/// climbing again however far out, and falling one way as it rises the
+/// other.
+#[test]
+fn a_tilted_land_falls_evenly_then_levels_off() {
+    let flat = Landform::Hills {
+        scale: 300.0,
+        height: 0.0,
+        seed: 1,
+    };
+    let tilt = (-0.006, 0.008);
+    let radius = 2000.0;
+    let tilted = Terrain {
+        form: flat,
+        datum: 0.0,
+        centre: (100.0, -50.0),
+        radius,
+        rim: None,
+        tilt,
+        clearing: None,
+    };
+    let slope = mathf::hypot(tilt.0, tilt.1);
+    let (dx, dz) = (tilt.0 / slope, tilt.1 / slope);
+    let at = |along: f64| tilted.height(100.0 + dx * along, -50.0 + dz * along);
+    for step in 0..=20 {
+        let along = EASE * radius * f64::from(step) / 20.0;
+        assert!(
+            (at(along) - slope * along).abs() < 1e-9,
+            "{along}: {} not {}",
+            at(along),
+            slope * along
+        );
+        assert!(
+            (at(-along) + at(along)).abs() < 1e-9,
+            "{along}: falling as it rises"
+        );
+    }
+    let mut was = at(EASE * radius);
+    for step in 1..=60 {
+        let along = EASE * radius + 100.0 * f64::from(step);
+        let here = at(along);
+        assert!(here >= was - 1e-9, "{along}: climbs back");
+        assert!(here <= slope * radius + 1e-9, "{along}: past its level");
+        was = here;
+    }
+    // Across the tilt, it does not fall at all.
+    assert!(tilted.height(100.0 - dz * 900.0, -50.0 + dx * 900.0).abs() < 1e-9);
+}
+
+/// Without a rim, land past its disc runs on as its own shape, tilted.
+#[test]
+fn a_land_without_a_rim_runs_on_as_its_own_shape() {
+    let form = Landform::Hills {
+        scale: 300.0,
+        height: 60.0,
+        seed: 4,
+    };
+    let terrain = Terrain {
+        form: form.clone(),
+        datum: 7.0,
+        centre: (0.0, 0.0),
+        radius: 1000.0,
+        rim: None,
+        tilt: (0.0, 0.0),
+        clearing: None,
+    };
+    for (x, z) in places(400, 3000.0) {
+        assert!(
+            (terrain.height(x, z) - (form.height(x, z) - 7.0)).abs() < 1e-9,
+            "({x}, {z})"
+        );
+    }
+}
+
+/// A clearing keeps none of the land's relief well within it and all of it
+/// well beyond; between, its edge wanders in and out round it, as ground
+/// levelled by hand does, and the land pinned to it lies at the clearing's
+/// level exactly where no relief is kept.
+#[test]
+fn a_clearings_edge_wanders_and_pins_its_level_within() {
+    let form = Landform::Hills {
+        scale: 300.0,
+        height: 60.0,
+        seed: 6,
+    };
+    let (level, radius) = (3.0, 100.0);
+    let terrain = Terrain {
+        form,
+        datum: 0.0,
+        centre: (20.0, 30.0),
+        radius: 3000.0,
+        rim: None,
+        tilt: (0.0, 0.0),
+        clearing: Some((level, radius)),
+    };
+    let round = |distance: f64, angle: f64| {
+        (
+            20.0 + distance * mathf::sin(angle),
+            30.0 + distance * mathf::cos(angle),
+        )
+    };
+    let (mut kept_at_radius, mut bare_at_radius) = (0, 0);
+    for step in 0..96u32 {
+        let angle = core::f64::consts::TAU * f64::from(step) / 96.0;
+        let (x, z) = round(0.75 * radius, angle);
+        assert!(terrain.keep(x, z) <= 0.0, "{angle}: relief kept within");
+        assert!((terrain.pin(x, z, 99.0) - level).abs() < 1e-12);
+        assert!((terrain.height(x, z) - level).abs() < 1e-9);
+        let (x, z) = round(3.1 * radius, angle);
+        assert!(
+            (terrain.keep(x, z) - 1.0).abs() < 1e-12,
+            "{angle}: all kept beyond"
+        );
+        assert!((terrain.pin(x, z, 99.0) - 99.0).abs() < 1e-12);
+        let (x, z) = round(radius, angle);
+        if terrain.keep(x, z) > 0.0 {
+            kept_at_radius += 1;
+        } else {
+            bare_at_radius += 1;
+        }
+    }
+    assert!(
+        kept_at_radius > 0 && bare_at_radius > 0,
+        "its edge wanders: {kept_at_radius} kept and {bare_at_radius} bare at its radius"
+    );
+}
+
 #[test]
 fn a_sea_repeats_every_period_and_keeps_to_its_height() {
     let period = 1024.0;

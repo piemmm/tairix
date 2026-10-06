@@ -15,6 +15,7 @@ use crate::ground::{Ground, Rock};
 use crate::heightfield::CHANNELS;
 use crate::lily::Lily;
 use crate::masonry::Masonry;
+use crate::timber::Timber;
 use crate::mud::Mud;
 use crate::noise::{cell, cells2, cells3, noise3, octaves_within, smoothstep, turbulence3};
 use crate::sample::{mix32, unit};
@@ -177,6 +178,9 @@ pub(crate) enum Pigment {
     Masonry(Masonry),
     /// The moss and lichen growing on a structure.
     Cover(Cover),
+    /// Sawn timber, each post, rail and board its own shade, its grain
+    /// along it.
+    Timber(Timber),
 }
 
 impl Pigment {
@@ -275,6 +279,7 @@ impl Pigment {
             Self::Rock(rock) => rock.colour(p, spot.normal, width),
             Self::Masonry(masonry) => masonry.colour(spot),
             Self::Cover(cover) => cover.colour(spot),
+            Self::Timber(timber) => timber.colour(spot),
         }
     }
 }

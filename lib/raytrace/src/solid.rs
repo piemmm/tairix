@@ -3,20 +3,23 @@
 //!
 //! A [`Solid`] is a part of a prototype, a unit of a structure laid at its
 //! real size in its own frame: a block, its two ends leaning as a voussoir's
-//! do; a drum, tapering and swelling as a column's shaft, perhaps fluted; or
-//! a moulding turned to a profile. Its arrises are worn round, chips struck
+//! do; a drum, tapering and swelling as a column's shaft, perhaps fluted; a
+//! moulding turned to a profile; or a field stone, broken as it lay. Its
+//! arrises are worn round, chips struck
 //! from them, a split stone's faces wander, its faces pit as they erode, a
 //! crack may run into it, and moss and lichen grow on it ([`Cover`]).
 //!
 //! Every one of these is geometry, met by sphere tracing (Hart, "Sphere
 //! Tracing", 1996), and each fades out as it comes to span too few pixels
-//! from the eye, so far off a solid is its dressed form; what covers it is
-//! still coloured where it grows, read from the same point either way.
+//! from the eye, so far off a solid is its dressed form. Lumps too shallow
+//! to stand out of a face still turn the light on it while they are broad
+//! enough to see, and what covers it is still coloured where it grows, read
+//! from the same point either way.
 
 use tairix_util::mathf;
 
 use crate::cover::{Cover, Growth, Lodging, Shown, DEEPEST};
-use crate::cut::{gradient, Cutting, Seeking};
+use crate::cut::{gradient, slope, Cutting, Seeking};
 use crate::material::Material;
 use crate::noise::{cells3, noise3, smoothstep, NOISE_SLOPE};
 use crate::pigment::Pigment;
@@ -44,6 +47,11 @@ pub(crate) enum Form {
     /// carved in a spiral channel winding `turns` times in from its rim to
     /// the raised eye at its middle.
     Scroll { turns: u8 },
+    /// A field stone as frost and the plough left it: a lump broken along
+    /// `facets` planes its key places, the first the flat bed it lies on and
+    /// the next the face it is set by, the arrises they leave worn round by
+    /// `round` 255ths of its least half extent.
+    Rock { round: u8, facets: u8 },
 }
 
 /// How a solid has worn.
@@ -53,8 +61,8 @@ pub(crate) struct Wear {
     pub(crate) arris: f64,
     /// How many chips are struck from its arrises.
     pub(crate) chips: u8,
-    /// How far a split or rough-dressed stone's faces wander from its form,
-    /// in metres.
+    /// How far a split, broken or rough-dressed stone's faces wander from its
+    /// form, in metres.
     pub(crate) lumps: f64,
     /// How deep its faces are pitted as they erode, in metres.
     pub(crate) pits: f64,
@@ -88,6 +96,23 @@ const BARE: u16 = u16::MAX;
 
 /// The most chips a solid's arrises lose.
 const MOST_CHIPS: usize = 12;
+
+/// The most planes a field stone is broken along, its bed and its face among
+/// them.
+const MOST_FACETS: usize = 9;
+
+/// Where a field stone's face lies about its middle, as a share of how far
+/// its body reaches out along its own `z`: what a wall setting the stone by
+/// its face places it by.
+pub(crate) const ROCK_FACE: f64 = 0.88;
+
+/// The arc a field stone's sides are spread round, in radians in the plane
+/// of its face from its `x` toward its `y`: all of the way round but for
+/// the bed beneath it, which already bounds it there.
+const SIDES: (f64, f64) = (
+    -core::f64::consts::FRAC_PI_2 + 0.7,
+    3.0 * core::f64::consts::FRAC_PI_2 - 0.7,
+);
 
 /// How many pixels a feature must span to show at all, and from how many it
 /// shows in full: as a limb's cut bark is faded.
@@ -214,6 +239,7 @@ impl Solid {
                 Vec3::new(radius, half.y, radius)
             }
             Form::Scroll { .. } => Vec3::new(half.x, half.y, half.x),
+            Form::Rock { .. } => half,
         };
         let cover = if self.cover == BARE { 0.0 } else { DEEPEST };
         widest + Vec3::splat(self.wear().lumps + cover + 1e-4)
@@ -243,10 +269,10 @@ impl Solid {
         ((near, far), seeking): ((f64, f64), Seeking),
         cutting: Option<&Cutting<'_>>,
     ) -> Option<Hit> {
-        let shaped = Shaped::new(self, cutting);
+        let frame = self.frame();
         let local = Ray::new(
-            shaped.frame.to_local(ray.origin - shaped.centre),
-            shaped.frame.to_local(ray.dir),
+            frame.to_local(ray.origin - self.centre()),
+            frame.to_local(ray.dir),
         );
         let reach = self.reach();
         let (enter, leave) = Aabb {
@@ -258,7 +284,9 @@ impl Solid {
         if enter >= leave {
             return None;
         }
-        shaped.march(&local, ((enter, leave), seeking))
+        // Its chips and its broken faces are struck only for a ray that
+        // enters it.
+        Shaped::new(self, cutting).march(&local, ((enter, leave), seeking))
     }
 }
 
@@ -327,6 +355,14 @@ struct Chip {
     bite: f64,
 }
 
+/// A face a field stone is broken by: the plane, `offset` out from its
+/// middle along `normal`, beyond which its body is gone.
+#[derive(Copy, Clone, Debug)]
+struct Facet {
+    normal: Vec3,
+    offset: f64,
+}
+
 /// A crack running into a solid from one of its faces: the plane it runs
 /// in, the outward way of the face it opened from and the point on that
 /// face, how far it runs along the face, how deep it runs in from it, and
@@ -341,11 +377,15 @@ struct Crack {
     width: f64,
 }
 
-/// How much of a solid's wear shows at a point: its lumps, its chips, its
-/// pits and its crack, each `0.0..=1.0`, and its cover's relief.
+/// How much of a solid's wear shows at a point: its lumps, and how far they
+/// turn the light, its chips, its pits and its crack, each `0.0..=1.0`, and
+/// its cover's relief.
 #[derive(Copy, Clone, Debug)]
 struct Showing {
     lumps: f64,
+    /// Judged by how broad the lumps are rather than how deep, so they still
+    /// shade a face they no longer stand out of.
+    turning: f64,
     chips: f64,
     pits: f64,
     crack: f64,
@@ -355,6 +395,7 @@ struct Showing {
 impl Showing {
     const ALL: Self = Self {
         lumps: 1.0,
+        turning: 1.0,
         chips: 1.0,
         pits: 1.0,
         crack: 1.0,
@@ -365,12 +406,15 @@ impl Showing {
         },
     };
 
-    /// How much shows of features `wear` sizes where a pixel covers
-    /// `footprint` of the prototype's units, `scale` metres each.
-    fn at((footprint, scale): (f64, f64), wear: &Wear, chips: f64) -> Self {
+    /// How much shows of features `wear` sizes, its deepest chip `chips`
+    /// deep and its lumps `breadth` across, where a pixel covers `footprint`
+    /// of the prototype's units, `scale` metres each.
+    fn at((footprint, scale): (f64, f64), wear: &Wear, (chips, breadth): (f64, f64)) -> Self {
         let shows = |size: f64| smoothstep(SPANS.0, SPANS.1, size / footprint.max(1e-12));
+        let lumps = shows(wear.lumps);
         Self {
-            lumps: shows(wear.lumps),
+            lumps,
+            turning: shows(breadth).max(lumps),
             chips: shows(chips),
             pits: shows(wear.pits),
             crack: shows(wear.crack),
@@ -399,6 +443,8 @@ struct Shaped<'a> {
     /// The largest chip's bite, which how much of the chips shows is judged
     /// by.
     deepest_chip: f64,
+    facets: [Facet; MOST_FACETS],
+    faceted: usize,
     crack: Option<Crack>,
     cover: Option<&'a Cover>,
     view: Option<View>,
@@ -431,6 +477,9 @@ impl<'a> Shaped<'a> {
             // The channel's floor rises to its fillet over the inner part of
             // half its pitch, and winds in toward the eye round the face.
             Form::Scroll { .. } => 2.0 * SCROLL_DEPTH * 1.5 / (0.5 - SCROLL_FILLET),
+            // A rounded box cut by planes and blended between them measures
+            // a true distance throughout.
+            Form::Rock { .. } => 0.0,
         };
         let cover = cutting
             .filter(|_| solid.cover != BARE)
@@ -456,13 +505,97 @@ impl<'a> Shaped<'a> {
             }; MOST_CHIPS],
             chipped: 0,
             deepest_chip: 0.0,
+            facets: [Facet {
+                normal: Vec3::UP,
+                offset: 0.0,
+            }; MOST_FACETS],
+            faceted: 0,
             crack: None,
             cover,
             view,
         };
+        if let Form::Rock { facets, .. } = solid.form {
+            shaped.break_faces(facets);
+        }
         shaped.strike(least);
         shaped.crack = shaped.cracked(least);
         shaped
+    }
+
+    /// How far a field stone's arrises are worn round: its form's, or more
+    /// where it has weathered further, never past its least half extent.
+    fn rock_round(&self, round: u8) -> f64 {
+        let least = self.half.x.min(self.half.y).min(self.half.z);
+        (least * f64::from(round) / 255.0).max(self.wear.arris).min(least)
+    }
+
+    /// How far a field stone's body reaches along the unit way `out`.
+    fn rock_reach(&self, out: Vec3) -> f64 {
+        let half = self.half;
+        half.x * out.x.abs() + half.y * out.y.abs() + half.z * out.z.abs()
+    }
+
+    /// How far out from a field stone's middle along the unit way `out` its
+    /// broken body ends, its arrises taken sharp.
+    fn rock_extent(&self, out: Vec3) -> f64 {
+        let half = self.half;
+        let boxed = (half.x / out.x.abs()).min(half.y / out.y.abs()).min(half.z / out.z.abs());
+        self.facets
+            .iter()
+            .take(self.faceted)
+            .map(|facet| (facet.offset, facet.normal.dot(out)))
+            .filter(|&(_, toward)| toward > 0.0)
+            .fold(boxed, |nearest, (offset, toward)| nearest.min(offset / toward))
+    }
+
+    /// Break a field stone along `count` planes its key places: first the
+    /// flat bed it lies on, all but level, through the point a little above
+    /// its body's foot under its middle; then the face it is set by, tilted a
+    /// little about the point [`ROCK_FACE`] of the way out along its own `z`,
+    /// so it meets the body's own face along a crease; then a second break
+    /// across the face at a slant, so the face is never quite one plane; then
+    /// its sides, spread evenly round all of it but its bed and square to the
+    /// face, each cutting its body's reach that way back to three quarters
+    /// or more, so the face's outline is an irregular polygon edged straight.
+    fn break_faces(&mut self, count: u8) {
+        let (key, half) = (self.solid.key, self.half);
+        let count = usize::from(count).min(MOST_FACETS);
+        let sides = f64::from(u32::try_from(count.saturating_sub(3)).unwrap_or(1).max(1));
+        for index in 0..count {
+            let salted = u32::try_from(index).unwrap_or(0);
+            let draw = |salt: u32| unit(mix32(key ^ mix32(salted.wrapping_mul(0x7f4b) ^ salt)));
+            let tilt = |salt: u32, most: f64| 2.0 * most * (draw(salt) - 0.5);
+            let through = |normal: Vec3, at: Vec3| Facet { normal, offset: normal.dot(at) };
+            let facet = match index {
+                0 => through(
+                    Vec3::new(tilt(1, 0.1), -1.0, tilt(2, 0.1)).normalized(),
+                    Vec3::new(0.0, -0.97 * half.y, 0.0),
+                ),
+                1 => through(
+                    Vec3::new(tilt(1, 0.12), tilt(2, 0.12), 1.0).normalized(),
+                    Vec3::new(0.0, 0.0, ROCK_FACE * half.z),
+                ),
+                2 => through(
+                    Vec3::new(tilt(1, 0.45), tilt(2, 0.45), 1.0).normalized(),
+                    Vec3::new(0.0, 0.0, (ROCK_FACE + 0.02 + 0.06 * draw(3)) * half.z),
+                ),
+                _ => {
+                    let share = (f64::from(salted - 3) + 0.5 + 0.6 * (draw(1) - 0.5)) / sides;
+                    let angle = SIDES.0 + (SIDES.1 - SIDES.0) * share;
+                    let across = tilt(2, 0.1);
+                    let round = mathf::sqrt(1.0 - across * across);
+                    let normal = Vec3::new(round * mathf::cos(angle), round * mathf::sin(angle), across);
+                    Facet {
+                        normal,
+                        offset: self.rock_reach(normal) * (0.74 + 0.18 * draw(3)),
+                    }
+                }
+            };
+            if let Some(slot) = self.facets.get_mut(index) {
+                *slot = facet;
+                self.faceted = index + 1;
+            }
+        }
     }
 
     /// Strike the solid's chips: each from an arris its key picks, a ball
@@ -505,6 +638,14 @@ impl<'a> Shaped<'a> {
                         Vec3::new(c, sign(4), s),
                     )
                 }
+                // A field stone's spall off anywhere on its broken faces, where
+                // they face the way the chip flew.
+                Form::Rock { .. } => {
+                    let (angle, rise) = (core::f64::consts::TAU * draw(3), 2.0 * draw(6) - 1.0);
+                    let flat = mathf::sqrt(1.0 - rise * rise);
+                    let out = Vec3::new(flat * mathf::cos(angle), rise, flat * mathf::sin(angle));
+                    (out * self.rock_extent(out), out)
+                }
             };
             let out = out.normalized();
             if let Some(slot) = self.chips.get_mut(index) {
@@ -526,7 +667,7 @@ impl<'a> Shaped<'a> {
         match self.solid.form {
             Form::Turned { .. } => half.z,
             Form::Drum { taper, .. } => half.x * (1.0 - f64::from(taper) / 255.0),
-            Form::Block { .. } | Form::Scroll { .. } => half.x,
+            Form::Block { .. } | Form::Scroll { .. } | Form::Rock { .. } => half.x,
         }
     }
 
@@ -577,7 +718,8 @@ impl<'a> Shaped<'a> {
         match self.view {
             Some(view) => {
                 let footprint = (q - view.eye).length() * view.pixel;
-                Showing::at((footprint, view.scale), &self.wear, self.deepest_chip)
+                let breadth = self.half.x.min(self.half.y).min(self.half.z) / LUMPS;
+                Showing::at((footprint, view.scale), &self.wear, (self.deepest_chip, breadth))
             }
             None => Showing::ALL,
         }
@@ -642,6 +784,19 @@ impl<'a> Shaped<'a> {
                 let rho = mathf::hypot(q.x, q.z);
                 let face = half.y - self.channel((rho, mathf::atan2(q.z, q.x)), turns);
                 rounded((rho - half.x + round, q.y.abs() - face + round))
+            }
+            Form::Rock { round, .. } => {
+                let worn = self.rock_round(round);
+                let e = Vec3::new(
+                    q.x.abs() - half.x + worn,
+                    q.y.abs() - half.y + worn,
+                    q.z.abs() - half.z + worn,
+                );
+                let body = e.max(Vec3::ZERO).length() + e.x.max(e.y).max(e.z).min(0.0) - worn;
+                self.facets
+                    .iter()
+                    .take(self.faceted)
+                    .fold(body, |d, facet| smooth_max(d, facet.normal.dot(q) - facet.offset, worn))
             }
         }
     }
@@ -717,20 +872,24 @@ impl<'a> Shaped<'a> {
         SCROLL_DEPTH * pitch * smoothstep(SCROLL_FILLET, 0.5, share)
     }
 
+    /// How far its faces wander out at local point `q`, as a share of how far
+    /// its lumps reach: two octaves, the broader about as broad as the solid
+    /// is thin.
+    fn lumping(&self, q: Vec3) -> f64 {
+        let (key, scale) = (self.solid.key, LUMPS / self.half.x.min(self.half.y).min(self.half.z));
+        0.65 * noise3(q * scale, key ^ 0x1a) + 0.35 * noise3(q * (2.7 * scale), key ^ 0x1b)
+    }
+
     /// How far local point `q` stands outside the worn solid: its dressed
     /// form, its faces wandering and pitted, its chips taken and its crack
     /// opened, each as much as `showing` has it.
     fn worn(&self, q: Vec3, showing: &Showing) -> f64 {
         let key = self.solid.key;
-        let least = self.half.x.min(self.half.y).min(self.half.z);
         let dressed = self.dressed(q);
         let mut d = dressed;
         let lumps = self.wear.lumps * showing.lumps;
         if lumps > 0.0 {
-            let scale = LUMPS / least;
-            d += lumps
-                * (0.65 * noise3(q * scale, key ^ 0x1a)
-                    + 0.35 * noise3(q * (2.7 * scale), key ^ 0x1b));
+            d += lumps * self.lumping(q);
         }
         for chip in self.chips.iter().take(self.chipped) {
             let bite = chip.bite * showing.chips;
@@ -815,7 +974,7 @@ impl<'a> Shaped<'a> {
             Form::Drum { flutes, .. } => {
                 4.0 * FLUTE_DEPTH * f64::from(flutes) / core::f64::consts::TAU
             }
-            Form::Block { .. } | Form::Turned { .. } | Form::Scroll { .. } => 0.0,
+            Form::Block { .. } | Form::Turned { .. } | Form::Scroll { .. } | Form::Rock { .. } => 0.0,
         };
         let lumps =
             self.wear.lumps * showing.lumps * NOISE_SLOPE * LUMPS / least * (0.65 + 0.35 * 2.7);
@@ -946,6 +1105,12 @@ impl<'a> Shaped<'a> {
         } else {
             gradient(q, 1e-4, |at| self.dressed(at))
         };
+        let shading = match self.wear.lumps * (showing.turning - showing.lumps) {
+            unshown if unshown > 0.0 => {
+                (normal + slope(q, spacing, |at| self.lumping(at)) * unshown).normalized()
+            }
+            _ => normal,
+        };
         let (face, on_face) = self.face(q);
         let (material, uv) = match self.cover {
             Some(cover) => match cover.growth(&self.lodging(q)) {
@@ -954,11 +1119,10 @@ impl<'a> Shaped<'a> {
             },
             None => (self.solid.material, on_face),
         };
-        let world = self.frame.to_world(normal);
         Hit {
             t,
-            normal: world,
-            shading: world,
+            normal: self.frame.to_world(normal),
+            shading: self.frame.to_world(shading),
             mark: self.solid.key,
             along: face,
             uv,
@@ -990,6 +1154,20 @@ impl<'a> Shaped<'a> {
             (2.0, (x, y))
         }
     }
+}
+
+/// The greater of `a` and `b`, blended over `k` where they near each other:
+/// its gradient a blend of theirs, so it measures no steeper a distance
+/// than they do (Quilez, "Smooth Minimum").
+fn smooth_max(a: f64, b: f64, k: f64) -> f64 {
+    let apart = a - b;
+    // Away from an edge one side wins outright, as most of a stone's
+    // surface is.
+    if apart.abs() >= k {
+        return a.max(b);
+    }
+    let h = 0.5 + 0.5 * apart / k;
+    b + apart * h + k * h * (1.0 - h)
 }
 
 /// A cover's growth as its material's pigment holds it, if it is a cover's.

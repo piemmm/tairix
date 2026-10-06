@@ -1317,6 +1317,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-countryside"
+version = "0.0.0"
+dependencies = [
+ "tairix-hash",
+ "tairix-parallel",
+ "tairix-rng",
+ "tairix-terrain",
+ "tairix-util",
+]
+
+[[package]]
 name = "tairix-cp"
 version = "0.0.0"
 dependencies = [
@@ -3236,6 +3247,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-collections",
  "tairix-colour",
+ "tairix-countryside",
  "tairix-hash",
  "tairix-parallel",
  "tairix-raster",

@@ -64,6 +64,37 @@ fn each_unit_wears_its_own_shade() {
     assert!(shades.len() > 60, "{} shades among 64 stones", shades.len());
 }
 
+/// Field stones, gathered from many beds, differ more one from the next than
+/// quarried stones do, and each is blotched across its own face where a
+/// quarried stone is even.
+#[test]
+fn a_field_stone_is_blotched_and_wanders_further_in_shade_than_a_quarried_one() {
+    let (quarried, gathered) = (masonry(Unit::Stone), masonry(Unit::Field));
+    let range = |shades: &mut dyn Iterator<Item = f64>| {
+        shades.fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), shade| (low.min(shade), high.max(shade)))
+    };
+    let between = |stone: &Masonry| {
+        let (low, high) = range(&mut (0..64).map(|mark| stone.colour(&face(mark)).luminance()));
+        high - low
+    };
+    assert!(
+        between(&gathered) > 1.4 * between(&quarried),
+        "{} between field stones, {} between quarried ones",
+        between(&gathered),
+        between(&quarried)
+    );
+    let across = |stone: &Masonry| {
+        let (low, high) = range(&mut (0..64).map(|index| {
+            let draw = |salt: u32| unit(mix32(index ^ salt)) - 0.5;
+            let p = Vec3::new(0.3 * draw(1), 1.0 + 0.2 * draw(2), 0.0);
+            stone.colour(&spot(7, (p, Vec3::new(0.0, 0.0, 1.0)), (2.0, (0.0, 0.0)))).luminance()
+        }));
+        (high - low) / high
+    };
+    assert!(across(&gathered) > 0.15, "a field stone's face is even: {}", across(&gathered));
+    assert!(across(&quarried) < 0.02, "a quarried stone's face is blotched: {}", across(&quarried));
+}
+
 #[test]
 fn age_greys_and_darkens_a_face_and_crusts_what_faces_down() {
     let (new, old) = (

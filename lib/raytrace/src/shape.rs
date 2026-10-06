@@ -535,7 +535,7 @@ fn placed(ray: &Ray, pose: &Pose, scale: f64) -> Ray {
 }
 
 /// The world box around the local box `min..max` placed at `pose`.
-fn posed_box(pose: &Pose, min: Vec3, max: Vec3) -> Aabb {
+pub(crate) fn posed_box(pose: &Pose, min: Vec3, max: Vec3) -> Aabb {
     let mut bounds = Aabb::EMPTY;
     for corner in 0..8u8 {
         let local = Vec3::new(

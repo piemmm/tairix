@@ -24,7 +24,8 @@ fn ground(seed: u32) -> Ground {
         cliff: 0.7,
         bedding: 0.3,
         seed,
-        road: None,
+        ways: None,
+        bounds: None,
         floor: None,
     }
 }

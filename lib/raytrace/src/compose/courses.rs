@@ -20,6 +20,7 @@ use crate::prototype::{Assembly, Building, Part};
 use crate::sample::{mix32, unit};
 use crate::shape::Shape;
 use crate::solid::{Form, Solid, Wear};
+use crate::timber::Timber;
 use crate::vector::{Frame, Pose, Vec3};
 
 /// A stone a structure is built in.
@@ -30,6 +31,8 @@ pub(super) enum Quarry {
     Sandstone,
     RedSandstone,
     Granite,
+    /// Split thin for a roof: blue-grey, fine-grained, barely weathering.
+    Slate,
 }
 
 impl Quarry {
@@ -75,6 +78,12 @@ impl Quarry {
                 220.0,
                 0.08,
             ),
+            Self::Slate => (
+                [0x4A_50_58, 0x3A_3E_46],
+                [0x2E_32_38, 0x62_68_70],
+                1400.0,
+                0.08,
+            ),
         }
     }
 
@@ -85,14 +94,14 @@ impl Quarry {
             Self::Marble => 0.8,
             Self::Limestone => 0.7,
             Self::Sandstone | Self::RedSandstone => 0.85,
-            Self::Granite => 0.15,
+            Self::Granite | Self::Slate => 0.15,
         }
     }
 
     const fn substrate(self) -> Substrate {
         match self {
             Self::Marble | Self::Limestone => Substrate::Calcareous,
-            Self::Sandstone | Self::RedSandstone | Self::Granite => Substrate::Siliceous,
+            Self::Sandstone | Self::RedSandstone | Self::Granite | Self::Slate => Substrate::Siliceous,
         }
     }
 
@@ -101,7 +110,7 @@ impl Quarry {
     const fn roughness(self) -> f64 {
         match self {
             Self::Marble => 0.45,
-            Self::Granite => 0.6,
+            Self::Granite | Self::Slate => 0.6,
             Self::Limestone | Self::Sandstone | Self::RedSandstone => 0.85,
         }
     }
@@ -163,11 +172,34 @@ impl Stage {
         quarry: Quarry,
         (age, exposure): (f64, Weathering),
     ) -> Option<Stonework> {
+        self.rockwork(dice, (quarry, Unit::Stone), (age, exposure))
+    }
+
+    /// The materials a wall of field stones of `quarry`'s rock, gathered off
+    /// the land, `age` old stands in where `exposure` has it, and the moss
+    /// and lichen it carries.
+    pub(super) fn fieldwork(
+        &mut self,
+        dice: &mut Dice,
+        quarry: Quarry,
+        (age, exposure): (f64, Weathering),
+    ) -> Option<Stonework> {
+        self.rockwork(dice, (quarry, Unit::Field), (age, exposure))
+    }
+
+    /// The materials a structure of `quarry`'s rock laid as `unit` `age` old
+    /// stands in where `exposure` has it.
+    fn rockwork(
+        &mut self,
+        dice: &mut Dice,
+        (quarry, unit): (Quarry, Unit),
+        (age, exposure): (f64, Weathering),
+    ) -> Option<Stonework> {
         let (bases, flecks, grain, shade) = quarry.palette();
         let stone = self.masonry(
             dice,
             (bases, flecks, grain, shade),
-            (age, exposure, Unit::Stone),
+            (age, exposure, unit),
             quarry.roughness(),
         )?;
         self.work(
@@ -202,6 +234,44 @@ impl Stage {
             0.85,
         )?;
         self.work(dice, stone, (age, exposure), (Substrate::Calcareous, 0.6))
+    }
+
+    /// The materials a structure of sawn timber `age` old stands in where
+    /// `exposure` has it, painted where `paint` has it: its wood, which is
+    /// also what it is fixed with, and the moss and lichen grown on it.
+    pub(super) fn timberwork(
+        &mut self,
+        dice: &mut Dice,
+        (age, exposure): (f64, Weathering),
+        paint: Option<(Vec3, f64)>,
+    ) -> Option<Stonework> {
+        let timber = Timber {
+            bases: [rgb(0x7A_5C_3E), rgb(0x9C_7C_58)],
+            weathering: age,
+            damp: exposure.damp,
+            foot: exposure.foot,
+            paint,
+            seed: dice.seed(),
+        };
+        let material = Material::new(
+            Pigment::Timber(timber),
+            Finish::Coated {
+                roughness: 0.72 + 0.22 * age,
+            },
+        )
+        .with_relief(Relief::grain(0.04, 90.0, dice.seed()));
+        let wood = u16::try_from(self.material(material)?).ok()?;
+        let cover = match grown(dice, (age, exposure), Substrate::Siliceous) {
+            Some(cover) => Some(u16::try_from(self.material(Material::new(Pigment::Cover(cover), Finish::Matte))?).ok()?),
+            None => None,
+        };
+        Some(Stonework {
+            stone: wood,
+            mortar: wood,
+            cover,
+            age,
+            softness: 0.9,
+        })
     }
 
     /// The work a structure is laid in: its `stone`, the mortar it is bedded
@@ -336,6 +406,8 @@ pub(super) enum Dressing {
     Squared,
     /// Split from its bed as it came.
     Rubble,
+    /// Gathered off the fields as it lay, never dressed at all.
+    Field,
     /// Laid as a floor: worn smooth by feet, which keep it clear of moss
     /// and lichen but in its joints.
     Flag,
@@ -343,15 +415,20 @@ pub(super) enum Dressing {
     Brick,
     /// The mortar units are bedded in.
     Mortar,
+    /// Sawn timber: its arrises rounded and its grain checked by the weather.
+    Timber,
 }
 
 impl Dressing {
     /// How readily moss lodges on a unit so dressed: in a joint's mortar
-    /// most, on a split stone's rough faces next, on a dressed face least.
+    /// most, on a field stone's or a split stone's rough faces next, on a
+    /// dressed face least.
     const fn affinity(self) -> f64 {
         match self {
             Self::Mortar => 1.0,
+            Self::Field => 0.6,
             Self::Rubble => 0.65,
+            Self::Timber => 0.55,
             Self::Squared => 0.45,
             Self::Brick => 0.35,
             Self::Ashlar => 0.25,
@@ -602,6 +679,11 @@ impl Mason {
         self.work.stone
     }
 
+    /// Whether it has laid nothing yet.
+    pub(super) const fn is_empty(&self) -> bool {
+        self.laid == 0
+    }
+
     fn key(&mut self) -> u32 {
         self.laid = self.laid.wrapping_add(1);
         mix32(self.seed ^ mix32(self.laid))
@@ -676,6 +758,16 @@ impl Mason {
                 pits: 0.004 * weathered * draw(4),
                 crack: 0.0,
             },
+            // Its form already wears its arrises round, so its wear is its
+            // broken faces' wandering, the scars where frost spalled them and
+            // its weathered skin.
+            Dressing::Field => Wear {
+                arris: 0.0,
+                chips: count(5.0),
+                lumps: least * (0.14 + 0.1 * draw(2)),
+                pits: 0.0008 + 0.0025 * weathered * draw(4),
+                crack: 0.0,
+            },
             Dressing::Brick => Wear {
                 arris: 0.0015 + 0.004 * age * draw(1),
                 chips: count(0.5 + 3.0 * age),
@@ -689,6 +781,13 @@ impl Mason {
                 lumps: 0.0,
                 pits: 0.002 + 0.004 * age,
                 crack: 0.0,
+            },
+            Dressing::Timber => Wear {
+                arris: 0.002 + 0.008 * age * (0.5 + draw(1)),
+                chips: count(1.0 + 2.0 * age),
+                lumps: 0.0,
+                pits: 0.0008 * age * draw(4),
+                crack: cracked(0.15 + 0.5 * age, 0.004 * (0.3 + age)),
             },
         }
     }

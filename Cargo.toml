@@ -58,6 +58,7 @@ members = [
     "lib/compress",
     "lib/conout",
     "lib/controls",
+    "lib/countryside",
     "lib/cpuops",
     "lib/crc32",
     "lib/crc32c",
@@ -686,6 +687,11 @@ opt-level = 3
 # floods, incision and hundreds of thousands of droplets, whose cost at
 # `opt-level = 1` would measure the profile rather than the terrain.
 [profile.dev.package.tairix-terrain]
+opt-level = 3
+
+# The screensaver's countryside routes every lane, track and path across the
+# land and cuts every holding into its fields before a pixel is traced.
+[profile.dev.package.tairix-countryside]
 opt-level = 3
 
 # Every byte a debug kernel reads from an encrypted volume is authenticated

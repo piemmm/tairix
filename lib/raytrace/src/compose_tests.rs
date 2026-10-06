@@ -2,9 +2,11 @@
 //! makes a scene that is lit, sound, seen from the open, framed, and exposed
 //! to read on screen.
 //!
-//! A scene on a land is only whole once its land is built, which is the most
-//! a scene costs, so every scene the tests look at is built once, the lot
-//! spread over the host's threads, and every test reads the same corpus.
+//! What a scene shows once composed is checked over many seeds, each scene
+//! let go as soon as it is checked. What needs it built — its hierarchy, its
+//! caustics, its radiosity and its meter, which cost far more than composing
+//! it — is read from a smaller corpus built once, spread over the host's
+//! threads, that every such test shares.
 
 extern crate std;
 
@@ -19,13 +21,16 @@ use tairix_util::mathf;
 use super::*;
 use crate::deadwood::{Fungus, Habit};
 use crate::sample::{mix32, unit};
-use crate::scene::{Draft, Scene, Sight};
+use crate::scene::{Draft, Object, Scene, Sight};
 use crate::tone::Encoder;
 use crate::trace::{Quality, Tracer};
 use crate::vector::Ray;
 
 /// The picture a scene's tests are composed for.
 const SIZE: (u32, u32) = (64, 36);
+
+/// Seeds every setting is composed under, for what a composed scene shows.
+const COMPOSED_SEEDS: u64 = 24;
 
 /// Seeds every setting is built under.
 const SEEDS: u64 = 3;
@@ -173,81 +178,307 @@ fn every_setting_has_a_name_of_its_own() {
     }
 }
 
+/// What a scene is made of, as its tests read it, whether composed or built.
+struct Made<'a> {
+    objects: &'a [Object],
+    faces: &'a [Face],
+    fields: &'a [Heightfield],
+    lawns: &'a [Lawn],
+    materials: &'a [Material],
+    lights: &'a [Light],
+    camera: &'a Camera,
+    /// How many prototypes it grows, grown or not.
+    prototypes: usize,
+    /// Each structure laid unit by unit, by the prototype it is, and the box
+    /// it fills in that prototype's frame.
+    structures: Vec<(u32, Aabb)>,
+}
+
+impl<'a> Made<'a> {
+    /// A scene composed until it is seen, its prototypes, grids and sky still
+    /// to make.
+    fn of_composition(composition: &'a Composition) -> Self {
+        let stage = &composition.stage;
+        Self {
+            objects: &stage.objects,
+            faces: &stage.faces,
+            fields: &stage.fields,
+            lawns: &stage.lawns,
+            materials: &stage.materials,
+            lights: &stage.lights,
+            camera: &composition.seen.as_ref().expect("the scene is seen").1,
+            prototypes: stage.recipes.len(),
+            structures: composition.structures(),
+        }
+    }
+
+    fn of_scene(scene: &'a Scene) -> Self {
+        let structures = scene
+            .prototypes
+            .iter()
+            .enumerate()
+            .filter(|(_, prototype)| {
+                prototype
+                    .parts()
+                    .iter()
+                    .any(|part| matches!(part, crate::prototype::Part::Solid(_)))
+            })
+            .map(|(index, prototype)| {
+                (
+                    u32::try_from(index).expect("a prototype's index"),
+                    prototype.bounds(),
+                )
+            })
+            .collect();
+        Self {
+            objects: &scene.objects,
+            faces: &scene.faces,
+            fields: &scene.fields,
+            lawns: &scene.lawns,
+            materials: &scene.materials,
+            lights: &scene.lights,
+            camera: &scene.camera,
+            prototypes: scene.prototypes.len(),
+            structures,
+        }
+    }
+
+    fn geometry(&self) -> Geometry<'a> {
+        Geometry {
+            faces: self.faces,
+            fields: self.fields,
+            prototypes: &[],
+            lawns: self.lawns,
+            far_woods: &[],
+            materials: &[],
+            view: None,
+        }
+    }
+
+    /// Where a structure the scene raises lies, if `shape` is one.
+    fn structure(&self, shape: &Shape) -> Option<Aabb> {
+        let Shape::Instance {
+            prototype,
+            pose,
+            scale,
+            ..
+        } = *shape
+        else {
+            return None;
+        };
+        let (_, bounds) = self.structures.iter().find(|(at, _)| *at == prototype)?;
+        Some(crate::shape::posed_box(
+            &pose,
+            bounds.min * scale,
+            bounds.max * scale,
+        ))
+    }
+}
+
+/// How far below the horizon a sun still lights the sky: astronomical
+/// twilight's end, the sine of 18 degrees down.
+const TWILIGHT: f64 = -0.309;
+
+/// A scene is lit — by a sun or a moon no further below its horizon than
+/// twilight lasts, or by a lamp — and made of sound parts: every material
+/// within its bounds, every object made in one the scene holds, clear exactly
+/// where light passes it, glowing only by a lamp with a surface, and every
+/// shape drawn from grids and prototypes the scene holds.
+fn lit_and_sound(made: &Made<'_>, what: &str) {
+    let shining = made.lights.iter().any(|light| match *light {
+        Light::Sun {
+            toward, radiance, ..
+        } => toward.y > TWILIGHT && radiance.max_element() > 0.0,
+        Light::Spot { intensity, .. } => intensity.max_element() > 0.0,
+        Light::Orb { radiance, .. } | Light::Panel { radiance, .. } => radiance.max_element() > 0.0,
+    });
+    assert!(shining, "{what}: unlit");
+    assert!(
+        made.objects.len() >= 2,
+        "{what}: {} objects",
+        made.objects.len()
+    );
+    for material in made.materials {
+        assert!(sound(&material.finish), "{what}: {material:?}");
+        if let Pigment::Solid(colour) = material.pigment {
+            assert!(
+                nonnegative(colour) && colour.max_element() <= 1.0,
+                "{what}: {colour:?}"
+            );
+        }
+    }
+    for (index, object) in made.objects.iter().enumerate() {
+        assert!(object.material < made.materials.len(), "{what}");
+        // Light passes glass, water and bubbles, and nothing else.
+        let clear = matches!(
+            made.materials[object.material].finish,
+            Finish::Glass { .. } | Finish::Film { shell: true, .. }
+        );
+        assert_eq!(object.filter.is_some(), clear, "{what}: object {index}");
+        if let Some(light) = object.light {
+            assert!(
+                matches!(
+                    made.lights.get(light),
+                    Some(Light::Orb { .. } | Light::Panel { .. })
+                ),
+                "{what}: object {index}'s lamp {light} has a surface"
+            );
+        }
+        match object.shape {
+            Shape::Hull { first, count, .. } => {
+                assert!((first + count) as usize <= made.faces.len(), "{what}");
+            }
+            Shape::Land { field } => assert!((field as usize) < made.fields.len(), "{what}"),
+            Shape::Lawn { lawn } => {
+                let lawn = &made.lawns[lawn as usize];
+                assert!((lawn.field as usize) < made.fields.len(), "{what}");
+            }
+            Shape::Instance { prototype, .. } => {
+                assert!((prototype as usize) < made.prototypes, "{what}");
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Every hull, however it was cut, lies within the extent it is bounded by,
+/// so the hierarchy never culls a ray that would have met it.
+fn hulls_lie_within_their_extents(made: &Made<'_>, what: &str) {
+    let geometry = made.geometry();
+    for object in made.objects {
+        let Shape::Hull { pose, extent, .. } = object.shape else {
+            continue;
+        };
+        let reach = (extent.max - extent.min).length() * 2.0 + 1.0;
+        for probe in 0..64u32 {
+            let draw = |salt: u32| unit(mix32(mix32(probe) ^ salt));
+            let (rise, around) = (2.0 * draw(1) - 1.0, core::f64::consts::TAU * draw(2));
+            let level = mathf::sqrt(1.0 - rise * rise);
+            let dir = Vec3::new(level * mathf::cos(around), rise, level * mathf::sin(around));
+            let target = pose.at + pose.frame.to_world(extent.centre());
+            let ray = Ray::new(target - dir * reach, dir);
+            if let Some(hit) = object.shape.intersect(&ray, 1e-9, f64::INFINITY, geometry) {
+                let local = pose.point_to_local(ray.at(hit.t));
+                let inside = local.min(extent.max + Vec3::splat(1e-6)) == local
+                    && local.max(extent.min - Vec3::splat(1e-6)) == local;
+                assert!(inside, "{what}: {local:?} outside {extent:?}");
+            }
+        }
+    }
+}
+
+/// The eye is above every level quad beneath it: water is looked down on,
+/// never up at from beneath.
+fn above_the_water(made: &Made<'_>, what: &str) {
+    let eye = made.camera.eye();
+    for object in made.objects {
+        let Shape::Quad {
+            corner,
+            edge_u,
+            edge_v,
+        } = object.shape
+        else {
+            continue;
+        };
+        let normal = edge_u.cross(edge_v);
+        let offset = eye - corner;
+        let (a, b) = (
+            offset.dot(edge_u) / edge_u.dot(edge_u),
+            offset.dot(edge_v) / edge_v.dot(edge_v),
+        );
+        let level = normal.y.abs() > 0.999 * normal.length();
+        if level && (0.0..=1.0).contains(&a) && (0.0..=1.0).contains(&b) {
+            assert!(eye.y > corner.y + 0.05, "{what}: under water");
+        }
+    }
+}
+
+/// The pieces a still life is about are in the picture, and so is the
+/// structure a building's scene is about.
+fn pieces_in_frame(made: &Made<'_>, setting: Setting, what: &str) {
+    use Setting::{
+        Arcade, Bubbles, Classic, Colonnade, Crystals, Lagoon, Nocturne, Rotunda, Ruins, Studio,
+    };
+    let still_life = [Classic, Studio, Crystals, Nocturne, Bubbles].contains(&setting);
+    let building = [Colonnade, Arcade, Rotunda, Ruins, Lagoon].contains(&setting);
+    let in_frame = |bounds: Aabb| {
+        made.camera
+            .project(bounds.centre())
+            .is_some_and(|(x, y)| x.abs() <= 1.0 && y.abs() <= 1.0)
+    };
+    if building {
+        let framed = made
+            .objects
+            .iter()
+            .filter_map(|object| made.structure(&object.shape))
+            .filter(|bounds| in_frame(*bounds))
+            .count();
+        assert!(framed >= 1, "{what}: its structure out of the frame");
+    } else if still_life {
+        let geometry = made.geometry();
+        let framed = made
+            .objects
+            .iter()
+            .filter(|object| {
+                !matches!(
+                    object.shape,
+                    Shape::Instance { .. } | Shape::Land { .. } | Shape::Lawn { .. }
+                ) && object.shape.bounds(geometry).is_some_and(in_frame)
+            })
+            .count();
+        assert!(framed >= 3, "{what}: {framed} pieces in the frame");
+    }
+}
+
+/// Every setting composed under each of many seeds is lit and sound, every
+/// hull within its extent, its eye above its water, and what it is about in
+/// the frame. Each scene is checked once it is seen, before the prototypes,
+/// grids and sky it then makes, and let go; a few at once, each across a few
+/// threads.
 #[test]
-fn every_scene_is_lit_and_made_of_sound_parts() {
+fn every_composed_scene_keeps_its_invariants() {
+    let wanted: Vec<(Setting, u64)> = Setting::ALL
+        .into_iter()
+        .flat_map(|setting| (0..COMPOSED_SEEDS).map(move |seed| (setting, seed)))
+        .collect();
+    let next = core::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        for _ in 0..6 {
+            scope.spawn(|| {
+                let runner = Threaded::new(4);
+                while let Some(&(setting, seed)) =
+                    wanted.get(next.fetch_add(1, core::sync::atomic::Ordering::Relaxed))
+                {
+                    let mut composition = Composition::new(setting, seed, SIZE, Detail::Maximum)
+                        .unwrap_or_else(|| panic!("{setting:?} {seed} does not compose"));
+                    composition.run_until_seen_on(&runner);
+                    let made = Made::of_composition(&composition);
+                    let what = format!("{setting:?} {seed}");
+                    lit_and_sound(&made, &what);
+                    hulls_lie_within_their_extents(&made, &what);
+                    above_the_water(&made, &what);
+                    pieces_in_frame(&made, setting, &what);
+                }
+            });
+        }
+    });
+}
+
+/// A built scene is lit, sound — what it grew after it was seen included —
+/// and exposed to read.
+#[test]
+fn every_built_scene_is_sound_and_exposed() {
     for Built {
         setting,
         seed,
         scene,
     } in corpus()
     {
-        let what = alloc::format!("{setting:?} {seed}");
-        assert!(
-            !scene.lights.is_empty()
-                || scene
-                    .sky
-                    .radiance(
-                        Vec3::ZERO,
-                        Vec3::UP,
-                        crate::sky::Seeing {
-                            fine: false,
-                            spread: None,
-                            jitter: 0.5,
-                            air: 0.5,
-                            occulted: false,
-                        },
-                    )
-                    .max_element()
-                    > 0.0,
-            "{what}: unlit"
-        );
-        assert!(
-            scene.objects.len() >= 2,
-            "{what}: {} objects",
-            scene.objects.len()
-        );
+        let what = format!("{setting:?} {seed}");
+        let made = Made::of_scene(scene);
+        lit_and_sound(&made, &what);
+        pieces_in_frame(&made, *setting, &what);
         assert!(scene.exposure > 0.0 && scene.exposure.is_finite(), "{what}");
-        for material in &scene.materials {
-            assert!(sound(&material.finish), "{what}: {material:?}");
-            if let Pigment::Solid(colour) = material.pigment {
-                assert!(
-                    nonnegative(colour) && colour.max_element() <= 1.0,
-                    "{what}: {colour:?}"
-                );
-            }
-        }
-        for (index, object) in scene.objects.iter().enumerate() {
-            assert!(object.material < scene.materials.len(), "{what}");
-            // Light passes glass, water and bubbles, and nothing else.
-            let clear = matches!(
-                scene.materials[object.material].finish,
-                Finish::Glass { .. } | Finish::Film { shell: true, .. }
-            );
-            assert_eq!(object.filter.is_some(), clear, "{what}: object {index}");
-            if let Some(light) = object.light {
-                assert!(
-                    matches!(
-                        scene.lights.get(light),
-                        Some(Light::Orb { .. } | Light::Panel { .. })
-                    ),
-                    "{what}: object {index}'s lamp {light} has a surface"
-                );
-            }
-            match object.shape {
-                Shape::Hull { first, count, .. } => {
-                    assert!((first + count) as usize <= scene.faces.len(), "{what}");
-                }
-                Shape::Land { field } => assert!((field as usize) < scene.fields.len(), "{what}"),
-                Shape::Lawn { lawn } => {
-                    let lawn = &scene.lawns[lawn as usize];
-                    assert!((lawn.field as usize) < scene.fields.len(), "{what}");
-                }
-                Shape::Instance { prototype, .. } => {
-                    assert!((prototype as usize) < scene.prototypes.len(), "{what}");
-                }
-                _ => {}
-            }
-        }
     }
 }
 
@@ -306,10 +537,10 @@ fn a_landscape_stands_on_a_built_land() {
     }
 }
 
-/// Every hull, however it was cut, lies within the extent it is bounded by,
-/// so the hierarchy never culls a ray that would have met it.
+/// A hull's extent is found from its own corners, each where three of its
+/// faces meet within the rest.
 #[test]
-fn every_hull_lies_within_its_extent() {
+fn a_hulls_extent_is_found_from_its_corners() {
     let cube = [
         Face {
             normal: Vec3::new(1.0, 0.0, 0.0),
@@ -339,42 +570,6 @@ fn every_hull_lies_within_its_extent() {
     let extent = hull_extent(&cube).expect("a box");
     assert!((extent.min - Vec3::new(-2.0, -0.5, -1.0)).length() < 1e-6);
     assert!((extent.max - Vec3::new(1.0, 3.0, 1.0)).length() < 1e-6);
-    for Built {
-        setting,
-        seed,
-        scene,
-    } in corpus()
-    {
-        let geometry = Geometry {
-            faces: &scene.faces,
-            fields: &scene.fields,
-            prototypes: &scene.prototypes,
-            lawns: &scene.lawns,
-            far_woods: &scene.far_woods,
-            materials: &[],
-            view: None,
-        };
-        for object in &scene.objects {
-            let Shape::Hull { pose, extent, .. } = object.shape else {
-                continue;
-            };
-            let reach = (extent.max - extent.min).length() * 2.0 + 1.0;
-            for probe in 0..64u32 {
-                let draw = |salt: u32| unit(mix32(mix32(probe) ^ salt));
-                let (rise, around) = (2.0 * draw(1) - 1.0, core::f64::consts::TAU * draw(2));
-                let level = mathf::sqrt(1.0 - rise * rise);
-                let dir = Vec3::new(level * mathf::cos(around), rise, level * mathf::sin(around));
-                let target = pose.at + pose.frame.to_world(extent.centre());
-                let ray = Ray::new(target - dir * reach, dir);
-                if let Some(hit) = object.shape.intersect(&ray, 1e-9, f64::INFINITY, geometry) {
-                    let local = pose.point_to_local(ray.at(hit.t));
-                    let inside = local.min(extent.max + Vec3::splat(1e-6)) == local
-                        && local.max(extent.min - Vec3::splat(1e-6)) == local;
-                    assert!(inside, "{setting:?} {seed}: {local:?} outside {extent:?}");
-                }
-            }
-        }
-    }
 }
 
 /// What a scene is made of and how it is seen, as text to compare: each of
@@ -523,40 +718,6 @@ fn the_eye_stands_clear_of_the_ground_beneath_it() {
     }
 }
 
-/// The eye is above every level quad beneath it: water is looked down on,
-/// never up at from beneath.
-#[test]
-fn the_camera_is_above_the_water() {
-    for Built {
-        setting,
-        seed,
-        scene,
-    } in corpus()
-    {
-        let eye = scene.camera.eye();
-        for object in &scene.objects {
-            let Shape::Quad {
-                corner,
-                edge_u,
-                edge_v,
-            } = object.shape
-            else {
-                continue;
-            };
-            let normal = edge_u.cross(edge_v);
-            let offset = eye - corner;
-            let (a, b) = (
-                offset.dot(edge_u) / edge_u.dot(edge_u),
-                offset.dot(edge_v) / edge_v.dot(edge_v),
-            );
-            let level = normal.y.abs() > 0.999 * normal.length();
-            if level && (0.0..=1.0).contains(&a) && (0.0..=1.0).contains(&b) {
-                assert!(eye.y > corner.y + 0.05, "{setting:?} {seed}: under water");
-            }
-        }
-    }
-}
-
 /// A druse's crystals are rooted in its rock, however flat the rock came
 /// out, rather than standing in the air above it.
 #[test]
@@ -612,83 +773,6 @@ fn a_druses_crystals_grow_out_of_its_rock() {
         }
     }
     assert!(druses > 8, "{druses} druses in 64 scenes");
-}
-
-/// The pieces a still life is about are in the picture, and so is the
-/// structure a building's scene is about.
-#[test]
-fn the_pieces_stand_in_the_frame() {
-    use Setting::{
-        Arcade, Bubbles, Classic, Colonnade, Crystals, Lagoon, Nocturne, Rotunda, Ruins, Studio,
-    };
-    let still_lifes = [Classic, Studio, Crystals, Nocturne, Bubbles];
-    let buildings = [Colonnade, Arcade, Rotunda, Ruins, Lagoon];
-    for Built {
-        setting,
-        seed,
-        scene,
-    } in corpus()
-        .iter()
-        .filter(|built| still_lifes.contains(&built.setting) || buildings.contains(&built.setting))
-    {
-        let geometry = Geometry {
-            faces: &scene.faces,
-            fields: &scene.fields,
-            prototypes: &scene.prototypes,
-            lawns: &scene.lawns,
-            far_woods: &scene.far_woods,
-            materials: &[],
-            view: None,
-        };
-        // A structure is laid unit by unit into an instance of its own;
-        // every other instance is a plant.
-        let structure = |shape: &Shape| match *shape {
-            Shape::Instance { prototype, .. } => scene
-                .prototypes
-                .get(prototype as usize)
-                .is_some_and(|built| {
-                    built
-                        .parts()
-                        .iter()
-                        .any(|part| matches!(part, crate::prototype::Part::Solid(_)))
-                }),
-            _ => false,
-        };
-        let in_frame = |shape: &Shape| {
-            shape.bounds(geometry).is_some_and(|bounds| {
-                scene
-                    .camera
-                    .project(bounds.centre())
-                    .is_some_and(|(x, y)| x.abs() <= 1.0 && y.abs() <= 1.0)
-            })
-        };
-        if buildings.contains(setting) {
-            let framed = scene
-                .objects
-                .iter()
-                .filter(|object| structure(&object.shape) && in_frame(&object.shape))
-                .count();
-            assert!(
-                framed >= 1,
-                "{setting:?} {seed}: its structure out of the frame"
-            );
-        } else {
-            let framed = scene
-                .objects
-                .iter()
-                .filter(|object| {
-                    !matches!(
-                        object.shape,
-                        Shape::Instance { .. } | Shape::Land { .. } | Shape::Lawn { .. }
-                    ) && in_frame(&object.shape)
-                })
-                .count();
-            assert!(
-                framed >= 3,
-                "{setting:?} {seed}: {framed} pieces in the frame"
-            );
-        }
-    }
 }
 
 /// A coarse render of each setting is neither black, nor blown out, nor
@@ -765,10 +849,6 @@ fn a_canopy_grid_is_as_large_as_its_lawn_and_no_larger() {
     }
 }
 
-/// Every kind of prototype grows a bounded step a unit, as many at once as
-/// the runner runs and never more — a rock, a log, a stump, a fern or a palm
-/// made on a core of its own rather than all on the caller's — and each
-/// comes out as it does grown alone.
 /// Dead wood's bark, wood, rot, cut edge and soil as the tests' materials.
 const WOODS: Woods = Woods {
     bark: 0,
@@ -921,6 +1001,10 @@ fn deadwood_recipes() -> [Recipe; 2] {
     ]
 }
 
+/// Every kind of prototype grows a bounded step a unit, as many at once as
+/// the runner runs and never more — a rock, a log, a stump, a fern or a palm
+/// made on a core of its own rather than all on the caller's — and each
+/// comes out as it does grown alone.
 #[test]
 fn prototypes_grow_a_core_apiece_a_unit_as_each_grows_alone() {
     let recipes = every_recipe();

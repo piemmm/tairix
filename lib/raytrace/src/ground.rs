@@ -14,7 +14,7 @@ use core::f64::consts::{FRAC_PI_2, TAU};
 use tairix_util::mathf;
 
 use crate::course::{Courses, Nearest};
-use crate::land::{decode_lane, Surface, DAMP_BANK, SOAKED, TRACK_GAUGE};
+use crate::land::{Surface, Ways, DAMP_BANK, SOAKED, SURFACES, TRACK_GAUGE};
 use crate::noise::{cell, cells2, fbm2, hash3, noise2, octaves_within, smoothstep};
 use crate::pigment::Spot;
 use crate::sample::{mix32, unit};
@@ -87,8 +87,10 @@ pub(crate) struct Ground {
     /// How thick the rock's beds lie.
     pub(crate) bedding: f64,
     pub(crate) seed: u32,
-    /// The road across the land, painted where it runs.
-    pub(crate) road: Option<Road>,
+    /// The ways across the land, painted where they run.
+    pub(crate) ways: Option<Ways>,
+    /// The boundaries across a farmed land, painted where they run.
+    pub(crate) bounds: Option<Bounds>,
     /// The floor of the woods on the land, where they stand.
     pub(crate) floor: Option<Floor>,
 }
@@ -104,11 +106,16 @@ pub(crate) struct Floor {
     pub(crate) moss: f64,
 }
 
-/// A road to paint: what it is made of, and where it runs.
+/// How broad a tarmac road runs before it is lined along its edges, and
+/// before it is lined down its middle too.
+const LINED: (f64, f64) = (4.5, 5.2);
+
+/// The boundaries across a farmed land: what shows of each on the ground it
+/// runs over where it is not built, a hedge's shaded foot and a wall's grey.
 #[derive(Clone, Debug)]
-pub(crate) struct Road {
-    pub(crate) surface: Surface,
-    pub(crate) courses: Courses,
+pub(crate) struct Bounds {
+    pub(crate) hedges: Courses,
+    pub(crate) walls: Courses,
 }
 
 /// What the water in a land's ground does to its surface.
@@ -126,7 +133,7 @@ impl Ground {
     /// but the most saturated ground and covers the soil, and snow lies over
     /// whatever is beneath it.
     pub(crate) fn moisture(&self, spot: &Spot) -> Moisture {
-        let [wet, _, _, green, _] = spot.ground;
+        let [wet, _, _, _, green, _] = spot.ground;
         let bare = (1.0 - green) * (1.0 - self.snowed(spot, 0.0));
         Moisture {
             standing: smoothstep(0.82, 1.0, wet) * bare,
@@ -277,7 +284,7 @@ impl Ground {
     pub(crate) fn colour(&self, spot: &Spot) -> Vec3 {
         let palette = &self.palette;
         let (p, width) = (spot.p, spot.width.max(1e-5));
-        let [wet, laid, lane, green, _] = spot.ground;
+        let [wet, laid, road, footpath, green, _] = spot.ground;
         let laid = 2.0 * laid - 1.0;
         let upright = spot.normal.y;
         let seed = self.seed;
@@ -379,7 +386,10 @@ impl Ground {
             spot.height + 0.6 * patch,
         );
         colour = colour.lerp(palette.sand * (0.94 + 0.08 * mottle) * grit, beach);
-        colour = self.lanes(colour, spot, (lane, grit), (wet, patch, mottle));
+        colour = self.lanes(colour, spot, ((road, footpath), grit), (wet, patch, mottle));
+        if let Some(bounds) = &self.bounds {
+            colour = self.bounded(colour, spot, bounds, mottle);
+        }
         let snowed = self.snowed(
             &Spot {
                 normal: Vec3::new(spot.normal.x, upright + 0.08 * mottle, spot.normal.z),
@@ -558,24 +568,28 @@ impl Ground {
         blade.lerp(palette.moss, 0.7 * smoothstep(0.6, 0.95, wet + 0.1 * patch))
     }
 
-    /// `colour` with any path trodden into it and any road laid over it, the
-    /// path's earth showing the ground's `grit`.
+    /// `colour` with any `footpath` trodden into it and any `road` laid over
+    /// it, the path's earth showing the ground's `grit`.
     fn lanes(
         &self,
         colour: Vec3,
         spot: &Spot,
-        (lane, grit): (f64, f64),
+        ((road, footpath), grit): ((f64, f64), f64),
         (wet, patch, mottle): (f64, f64, f64),
     ) -> Vec3 {
-        let (road, footpath) = decode_lane(lane);
         let palette = &self.palette;
         let trodden = palette.earth.lerp(palette.silt, 0.4) * (0.82 + 0.25 * mottle) * grit;
         let mut colour = colour.lerp(trodden, smoothstep(0.2, 0.8, footpath + 0.15 * mottle));
-        let Some(painted) = &self.road else {
+        let Some(painted) = &self.ways else {
             return colour.lerp(palette.silt * 0.8, road);
         };
         let p = spot.p;
-        if let Some(near) = painted.courses.nearest(p.x, p.z) {
+        // The least way first, so where ways meet the greatest is laid over
+        // the others.
+        for surface in SURFACES {
+            let Some(near) = painted.of(surface).nearest(p.x, p.z) else {
+                continue;
+            };
             let half = 0.5 * near.width;
             let share = 1.0
                 - smoothstep(
@@ -584,15 +598,30 @@ impl Ground {
                     near.distance,
                 );
             if share > 0.0 {
-                let surface = match painted.surface {
+                let laid = match surface {
                     Surface::Tarmac => self.tarmac(p, &near, spot.width),
                     Surface::Gravel => self.gravel(p, &near, spot.width),
                     Surface::Track => self.track(p, &near, (wet, patch, mottle), spot.width),
                 };
-                colour = colour.lerp(surface, share);
+                colour = colour.lerp(laid, share);
             }
         }
         colour
+    }
+
+    /// `colour` where a boundary of `bounds` runs over it: under a hedge its
+    /// dark, shaded foot; under a wall, the wall's stone.
+    fn bounded(&self, colour: Vec3, spot: &Spot, bounds: &Bounds, mottle: f64) -> Vec3 {
+        let p = spot.p;
+        let share = |courses: &Courses| {
+            courses.nearest(p.x, p.z).map_or(0.0, |near| {
+                let half = 0.5 * near.width;
+                1.0 - smoothstep(half - 0.25 - 0.5 * spot.width, half + 0.25 + 0.5 * spot.width, near.distance)
+            })
+        };
+        let hedge = self.palette.moss * (0.36 + 0.12 * mottle);
+        let wall = self.palette.rock * (0.78 + 0.2 * mottle);
+        colour.lerp(hedge, share(&bounds.hedges)).lerp(wall, share(&bounds.walls))
     }
 
     /// Tarmac: its stone showing through where wheels wear it, patched and
@@ -620,9 +649,14 @@ impl Ground {
             asphalt * (1.0 + 0.35 * worn) * (1.0 - 0.3 * patched) * (1.0 - 0.5 * cracked);
         let paint = Vec3::splat(0.62)
             * (0.85 + 0.15 * fade(noise2(p.x * 12.0, p.z * 12.0, seed ^ 0x65), width * 12.0));
+        // A lane too narrow for two to pass is never lined, a road too narrow
+        // for a line down its middle lined only along its edges.
+        if near.width < LINED.0 {
+            return colour;
+        }
         let (_, dash) = cell(near.along / 9.0);
         let dashed = 1.0 - smoothstep(0.33 - 0.5 * width / 9.0, 0.33 + 0.5 * width / 9.0, dash);
-        let centre = coverage(across.abs(), 0.05, width) * dashed;
+        let centre = coverage(across.abs(), 0.05, width) * dashed * f64::from(u8::from(near.width >= LINED.1));
         let edges = coverage((across.abs() - (half - 0.3)).abs(), 0.05, width);
         colour = colour.lerp(paint, centre.max(edges) * (1.0 - 0.35 * worn));
         colour

@@ -87,9 +87,13 @@ struct Waiting {
 pub(crate) type Row<'a> = (usize, &'a mut [f32], &'a mut [Attributes]);
 
 /// The channels of what a land is like that a grid carries at each vertex:
-/// how wet, what the water laid down or wore away, the road or path there,
-/// how much grows, and how deep snow lies.
-pub(crate) const CHANNELS: usize = 5;
+/// how wet, what the water laid down or wore away, how much of a road and of
+/// a path is there, how much grows, and how deep snow lies. Each is one
+/// quantity, so blending vertices blends it.
+pub(crate) const CHANNELS: usize = 6;
+pub(crate) const WET: usize = 0;
+pub(crate) const SEDIMENT: usize = 1;
+pub(crate) const GREEN: usize = 4;
 
 /// What a land is like at one vertex, a byte to a channel.
 pub(crate) type Attributes = [u8; CHANNELS];
@@ -119,7 +123,7 @@ pub(crate) const ABSENT: f32 = f32::NEG_INFINITY;
 /// What a grid carrying no attributes is like everywhere: dry, neither worn
 /// nor built up, on no road or path, green enough for anything to grow, and
 /// bare of snow.
-pub(crate) const PLAIN: [f64; CHANNELS] = [0.0, 0.5, 0.0, 1.0, 0.0];
+pub(crate) const PLAIN: [f64; CHANNELS] = [0.0, 0.5, 0.0, 0.0, 1.0, 0.0];
 
 impl Heightfield {
     /// Its rows `range`, as disjoint bands `rows` rows high, each with the

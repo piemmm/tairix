@@ -613,6 +613,7 @@ tairix/
 │   │                    #   and zlib codec foreign formats need.
 │   ├── conout/          # Shared kernel console-output engine (framed queue).
 │   ├── controls/        # Shared Reactive Alloy GUI control behaviour.
+│   ├── countryside/     # Countryside layout: holdings, ways, fields, boundaries, plots.
 │   ├── cpuops/          # Self-optimising CPU-dispatch framework.
 │   ├── crc32/           # CRC-32 (IEEE): the PNG and GPT framing checksum.
 │   ├── crc32c/          # CRC-32C (Castagnoli) block-integrity checksum.

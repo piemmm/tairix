@@ -872,9 +872,21 @@ fn a_bank_lit_from_beneath_its_level_keeps_a_finite_light() {
         .all(|value| value.is_finite() && *value >= 0.0));
 }
 
+/// The optical depth of the cloud straight up from `point`, as a ray seen
+/// directly meets it.
+fn column(bank: &Cloudbank, point: Vec3) -> f64 {
+    let reader = Reader { bank };
+    (0..8000u32)
+        .filter_map(|metre| reader.density(point + Vec3::UP * (f64::from(metre) + 0.5), true))
+        .map(|sample| sample.density * sample.thickness)
+        .sum()
+}
+
 /// A deck thick enough to scatter the sun many times over sends most of it
-/// back up from its sunlit top and lets less down through its grey base;
-/// and a veil too thin to scatter it twice is barely lit at all.
+/// back up from its sunlit top and lets less down through its grey base, as
+/// much less as its own optical depth has it — the diffusion limit's τ(1−g)/2
+/// of a lossless slab, the light it is shaded by coming of the very cloud a
+/// ray sees; and a veil too thin to scatter it twice is barely lit at all.
 #[test]
 fn a_thick_deck_shines_above_and_greys_below_and_a_thin_veil_barely_glows() {
     let deck = bank_of(OVERCAST, high_sun(), None);
@@ -882,7 +894,16 @@ fn a_thick_deck_shines_above_and_greys_below_and_a_thin_veil_barely_glows() {
     let (top, _, _) = cloud(&deck, above, -Vec3::UP, true).expect("its top");
     let (base, kept, _) = cloud(&deck, below, Vec3::UP, true).expect("its base");
     assert!(kept < 0.05, "{kept}");
-    assert!(top.y > 1.5 * base.y, "{top:?} above, {base:?} below");
+    let scaled = column(&deck, below) * (1.0 - DROPLETS.asymmetry);
+    assert!(
+        scaled > 2.0,
+        "too thin a deck to send most back up: {scaled}"
+    );
+    let (seen, expected) = (top.y / base.y, 0.5 * scaled);
+    assert!(
+        (seen / expected - 1.0).abs() < 0.15,
+        "{top:?} above, {base:?} below: {seen} where its depth asks {expected}"
+    );
     let veil = bank_of(
         Deck {
             thickness: 2e-4,
@@ -894,4 +915,122 @@ fn a_thick_deck_shines_above_and_greys_below_and_a_thin_veil_barely_glows() {
     let (faint, shows, _) = cloud(&veil, below, Vec3::UP, true).expect("the veil");
     assert!(shows > 0.5, "{shows}");
     assert!(faint.y < 0.5 * base.y, "{faint:?} beside {base:?}");
+}
+
+/// A coarse march — what a diffuse surface gathers its sky through — lets
+/// through on the whole what the cloud it crosses lets through, the wisps it
+/// is too coarse to resolve eroding the billows by what they leave on
+/// average: its longer steps may stray at a cloud's edge, but rarely far,
+/// and never darken the sky behind clear air as uneroded billows would.
+#[test]
+fn a_coarse_march_lets_through_what_the_cloud_does_on_the_whole() {
+    let bank = built(&tairix_parallel::SERIAL);
+    let (mut strayed, mut signed, mut crossed) = (0u32, 0.0, 0u32);
+    let rays = 240u32;
+    for step in 0..rays {
+        let rise = 0.03 + 0.9 * f64::from(step % 40) / 40.0;
+        let dir = heading(f64::from(step) * 2.399_963, mathf::atan(rise));
+        let origin = Vec3::new(
+            f64::from(step % 13) * 300.0 - 1800.0,
+            2.0,
+            f64::from(step % 11) * -250.0,
+        );
+        let reference = integrated(&bank, origin, dir, 2.0);
+        let expected = if reference < OPAQUE { 0.0 } else { reference };
+        let kept = cloud(&bank, origin, dir, false).map_or(1.0, |(_, kept, _)| kept);
+        signed += kept - expected;
+        strayed += u32::from((kept - expected).abs() > 0.3);
+        crossed += u32::from(reference < 0.9);
+    }
+    assert!(crossed > 40, "{crossed} of {rays} rays cross cloud");
+    let bias = signed / f64::from(rays);
+    assert!(
+        bias.abs() < 0.03,
+        "a coarse march strays by {bias} on the whole"
+    );
+    assert!(
+        strayed * 20 < rays,
+        "{strayed} of {rays} coarse marches stray far"
+    );
+}
+
+/// A texture's quantiles are the values that split its texels into equal
+/// shares, in order.
+#[test]
+fn a_textures_quantiles_split_its_texels_evenly() {
+    let mut tile = Tile::new(4).expect("a texture");
+    for (index, texel) in tile.texels.iter_mut().enumerate() {
+        *texel = u8::try_from(index * 4).expect("a byte");
+    }
+    let quantiles: [f32; 4] = tile.quantiles();
+    // 64 texels 0, 4, …, 252: each share of sixteen centred on its middle.
+    for (index, &quantile) in quantiles.iter().enumerate() {
+        let middle = (16 * index + 8) * 4;
+        assert!(
+            (f64::from(quantile) - real(middle) / 255.0).abs() < 1e-6,
+            "{index}: {quantile}"
+        );
+    }
+    let mut level = Tile::new(2).expect("a texture");
+    level.texels.fill(77);
+    let quantiles: [f32; 8] = level.quantiles();
+    assert!(quantiles
+        .iter()
+        .all(|&q| (f64::from(q) - 77.0 / 255.0).abs() < 1e-6));
+}
+
+/// Beneath a deck the clear sky straight overhead shows only as far as the
+/// deck's column lets it through, and the deck sheds its own light down in
+/// its place, as much as the two-stream solution sends out of its column's
+/// base for the sun at its top and the sky above it: a thick deck hides the
+/// sky and glows, a veil leaves the sky nearly open and sheds a fraction of
+/// the thick deck's light.
+#[test]
+fn a_deck_sheds_its_own_light_down_in_place_of_the_sky_it_hides() {
+    let below = Vec3::new(120.0, 0.0, -340.0);
+    let shed = |deck: Deck| {
+        let bank = bank_of(deck, high_sun(), None);
+        let (open, glow) = bank.beneath(below);
+        let whole = column(&bank, below);
+        assert!(
+            (open - mathf::exp(-whole)).abs() < 0.05 + 0.05 * open,
+            "{open} open over a column {whole} deep"
+        );
+        let lighting = bank.lighting.as_ref().expect("lit");
+        let base = Depth {
+            below_top: whole,
+            whole,
+        };
+        let down = |diffuse: slab::Diffuse| diffuse.mean - diffuse.rising * (2.0 / 3.0);
+        let sun = sunlight_at(lighting, 1.0, high_sun().y);
+        let expected = down(slab::sunlit(DROPLETS, base, (sun, high_sun().y)))
+            + (down(slab::skylit(
+                DROPLETS,
+                base,
+                (lighting.above, lighting.below),
+            )) - lighting.above * open)
+                .max(Vec3::ZERO);
+        assert!(
+            (glow - expected).max_element().abs() < 0.08 * expected.max_element() + 1e-3,
+            "{glow:?} shed where its column sends {expected:?}"
+        );
+        (open, glow)
+    };
+    let (thick, glowing) = shed(OVERCAST);
+    assert!(thick < 0.01, "a thick deck hides the sky: {thick}");
+    let (veil, faint) = shed(Deck {
+        thickness: 2e-4,
+        ..OVERCAST
+    });
+    assert!(veil > 0.9, "a veil leaves it open: {veil}");
+    assert!(
+        faint.max_element() < 0.2 * glowing.max_element(),
+        "a veil sheds {faint:?} beside {glowing:?}"
+    );
+    let bank = bank_of(OVERCAST, high_sun(), None);
+    assert_eq!(
+        bank.beneath(Vec3::new(0.0, 9000.0, 0.0)),
+        (1.0, Vec3::ZERO),
+        "nothing overhead above it"
+    );
 }

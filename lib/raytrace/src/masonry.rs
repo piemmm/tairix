@@ -3,11 +3,14 @@
 //! stands.
 //!
 //! A unit's key gives it its shade and its hue, so no two stones or bricks
-//! of a wall match. Weathering follows where water goes: rain streaks a face
-//! below what it runs off, grime and biofilm blacken old stone in patches and
-//! along the joints water creeps into, soot and gypsum crust in black where
-//! rain never washes, algae greens the foot of a wall and its damp side, and
-//! a reclaimed brick keeps the lime mortar of the wall it was taken from.
+//! of a wall match; a field stone's wander further, and it is blotched, now
+//! and then stained rust, as it lay half buried in the land, weathering for
+//! a while of its own. Weathering follows where water goes: rain streaks a
+//! face below what it runs off, grime and biofilm blacken old stone in
+//! patches and along the joints water creeps into, soot and gypsum crust in
+//! black where rain never washes, algae greens the foot of a wall and its
+//! damp side, and a reclaimed brick keeps the lime mortar of the wall it was
+//! taken from.
 
 use crate::noise::{noise3, smoothstep};
 use crate::pigment::{speckle, Spot};
@@ -19,6 +22,9 @@ use crate::vector::Vec3;
 pub(crate) enum Unit {
     /// A dressed or split stone.
     Stone,
+    /// A field stone, gathered off the land as it lay: each weathered its own
+    /// way, and blotched over its faces by what it lay in.
+    Field,
     /// A fired brick: `burnt` of those whose end shows overfired dark,
     /// `reclaimed` of them taken from an older wall.
     Brick { burnt: f64, reclaimed: f64 },
@@ -58,14 +64,25 @@ const GRIME: Vec3 = Vec3::new(0.06, 0.06, 0.05);
 /// Old lime mortar left on a reclaimed brick.
 const OLD_MORTAR: Vec3 = Vec3::new(0.55, 0.53, 0.48);
 
+/// How much further field stones' shades wander than quarried ones': they
+/// came from many beds, not one.
+const GATHERED: f64 = 1.8;
+
+/// What iron in the soil a stone lay in stains its colour by.
+const RUST: Vec3 = Vec3::new(1.12, 0.88, 0.66);
+
 impl Masonry {
     /// The colour at `spot`: the unit its mark names, at the place on it
     /// its coordinates name.
     pub(crate) fn colour(&self, spot: &Spot) -> Vec3 {
         let key = mix32(spot.mark ^ self.seed);
-        let tint = 1.0 + self.shade * (2.0 * unit(mix32(key ^ 1)) - 1.0);
+        let shade = match self.unit {
+            Unit::Field => GATHERED * self.shade,
+            Unit::Stone | Unit::Brick { .. } | Unit::Mortar => self.shade,
+        };
+        let tint = 1.0 + shade * (2.0 * unit(mix32(key ^ 1)) - 1.0);
         // Each bed of a quarry has its own hue, some warmer, some greyer.
-        let warmth = self.shade * (2.0 * unit(mix32(key ^ 2)) - 1.0);
+        let warmth = shade * (2.0 * unit(mix32(key ^ 2)) - 1.0);
         let hue = Vec3::new(1.0 + 0.5 * warmth, 1.0, 1.0 - 0.8 * warmth);
         let base = self.bases[0].lerp(self.bases[1], unit(key)) * hue * tint;
         let mut colour = speckle(
@@ -74,8 +91,10 @@ impl Masonry {
             key,
             spot.width * self.grain,
         );
-        if let Unit::Brick { burnt, reclaimed } = self.unit {
-            colour = brick(colour, spot, (burnt, reclaimed), key);
+        match self.unit {
+            Unit::Brick { burnt, reclaimed } => colour = brick(colour, spot, (burnt, reclaimed), key),
+            Unit::Field => colour = blotched(colour, spot, key),
+            Unit::Stone | Unit::Mortar => {}
         }
         self.weathered(colour, spot, key)
     }
@@ -110,11 +129,17 @@ impl Masonry {
             * ((1.0 - smoothstep(self.foot, self.foot + 0.6, p.y))
                 .max(0.5 * smoothstep(0.0, 0.8, noise3(p * 2.2, self.seed ^ 0x5c))));
         // Age greys and darkens a face under the grime and the microbial
-        // film it gathers, most on what faces the sky and holds the rain.
+        // film it gathers, most on what faces the sky and holds the rain; a
+        // field stone weathered as long again as it lay in the land, each
+        // for its own while.
         let film = 1.0 - 0.38 * smoothstep(0.3, 0.9, normal.y);
         let patina = Vec3::splat(colour.luminance()) * Vec3::new(0.8, 0.78, 0.72) * film;
+        let aged = match self.unit {
+            Unit::Field => 0.4 + 1.2 * unit(mix32(key ^ 0x60)),
+            Unit::Stone | Unit::Brick { .. } | Unit::Mortar => 1.0,
+        };
         (colour * mottle)
-            .lerp(patina, 0.55 * w)
+            .lerp(patina, (0.55 * w * aged).min(1.0))
             .lerp(colour * 0.62, 0.55 * streaked)
             .lerp(GRIME, 0.5 * grimed)
             .lerp(CRUST, 0.8 * sheltered)
@@ -145,6 +170,20 @@ fn brick(colour: Vec3, spot: &Spot, (burnt, reclaimed): (f64, f64), key: u32) ->
         colour = colour.lerp(OLD_MORTAR, 0.85 * edge * patchy);
     }
     colour
+}
+
+/// A field stone's `colour` as it lay half buried in the land: paler and
+/// darker in patches over its faces, a few stones stained rust by the iron in
+/// the soil, each blotch settling to its mean where `spot` is too wide to
+/// show it.
+fn blotched(colour: Vec3, spot: &Spot, key: u32) -> Vec3 {
+    let shows = |size: f64| 1.0 - smoothstep(0.3 * size, 1.5 * size, spot.width);
+    let p = spot.p;
+    let patches = 0.6 * shows(0.11) * noise3(p * 9.0, key ^ 0x61)
+        + 0.4 * shows(0.03) * noise3(p * 33.0, key ^ 0x62);
+    let rusty = unit(mix32(key ^ 0x63));
+    let stained = rusty * rusty * smoothstep(-0.1, 0.5, noise3(p * 4.0, key ^ 0x64));
+    (colour * (1.0 + 0.32 * patches)).lerp(colour * RUST, 0.6 * stained)
 }
 
 #[cfg(test)]

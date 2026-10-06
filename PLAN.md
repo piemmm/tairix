@@ -259,11 +259,11 @@ README requires this file to name them:
 | `conf` | `lib/sysconfig`, `lib/netconfig`, `lib/enrolment`, `lib/users`, `lib/fontface`, `lib/proglib`, `lib/syntax`, `userland/system/init` |
 | `count`, `tailwindow` | `head`, `tail` |
 | `defer` | the terminal's and the desktop session's settings publishers, the session's catalogue scan and file desk, the file manager's bundle scan, occupancy probes and document opens, the document host's queue (`lib/window::docapp`) and Paint's decode queue (through `lib/rt`) |
-| `fallible` | `lib/audio`, `lib/cursor`, `lib/discovery`, `lib/image`, `lib/raster`, `lib/raytrace`, `lib/resolver`, `lib/ribbon`, `lib/rt`, `lib/sandbox`, `lib/terrain`, `userland/gui/wm`, the desktop session, the greeter, `audiod`, `discoveryd`, TextEdit, `view`, Paint |
+| `fallible` | `lib/audio`, `lib/countryside`, `lib/cursor`, `lib/discovery`, `lib/image`, `lib/raster`, `lib/raytrace`, `lib/resolver`, `lib/ribbon`, `lib/rt`, `lib/sandbox`, `lib/terrain`, `userland/gui/wm`, the desktop session, the greeter, `audiod`, `discoveryd`, TextEdit, `view`, Paint |
 | `fmt` | `kernel/sec`, `kernel/ipc` |
 | `hexdump` | `fstree`, TextEdit |
 | `lanes` | `lib/collections`, TextEdit |
-| `mathf` | `lib/audio`, `lib/colour`, `lib/cursor`, `lib/fontface`, `lib/raster`, `lib/raytrace`, `lib/ribbon`, `lib/svg`, `lib/terrain`, `cinder`, WinterSun, the desktop session's screensavers |
+| `mathf` | `lib/audio`, `lib/colour`, `lib/countryside`, `lib/cursor`, `lib/fontface`, `lib/raster`, `lib/raytrace`, `lib/ribbon`, `lib/svg`, `lib/terrain`, `cinder`, WinterSun, the desktop session's screensavers |
 | `retry` | `userland/system/timed`, `userland/system/init` |
 | `utf8` | `lib/syntax`, `wc`, TextEdit |
 | `secret` | `lib/rt`'s elevation client, `elsh`'s `elevate`, `login`'s elevation broker, `lib/controls`' masked field |
@@ -488,7 +488,9 @@ and its hex notation), `lib/theme`, `lib/geometry` (the one logical-to-physical
 (document formats, lexers and settings validation, run only in the parser
 sandbox; `plans/TEXTEDIT.md`), `lib/raytrace` (the ray-traced
 screensaver's scenes and tracer, whose lands `lib/terrain` shapes — the grid
-drainage, erosion and least-cost routing WinterSun's world shares), and
+drainage, erosion and least-cost routing WinterSun's world shares — and whose
+farmland `lib/countryside` lays out: the holdings, ways, fields, boundaries,
+farmsteads and village plots WinterSun's settlements are to share), and
 `lib/ribbon` (the ribbon of light behind the minimal-clock screensaver and the
 login screen). The service enrolment store is `lib/enrolment`,
 shared by `init` and the editor's validation of it.

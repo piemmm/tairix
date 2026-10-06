@@ -457,11 +457,10 @@ fn no_tree_stands_on_a_bridges_deck() {
         let land = composition
             .run_until_seen()
             .expect("a valley stands on a land");
-        let road = land.road.map_or(0.0, |road| road.width);
         let decks: Vec<Deck> = land
             .crossings
             .iter()
-            .map(|deck| ((deck.from.x, deck.from.z), (deck.to.x, deck.to.z), road))
+            .map(|deck| ((deck.from.x, deck.from.z), (deck.to.x, deck.to.z), deck.from.width))
             .collect();
         crossed += decks.len();
         for trunk in trunks(&composition) {

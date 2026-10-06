@@ -633,9 +633,16 @@ the crate holds the geometry and the algorithms.
 Boundaries are instanced geometry along their polylines: hedges as dense
 shrub masses of leaf-bearing prototypes, varying in height and width, with a
 standard tree now and then and a repaired gap of post and rail where one
-collapsed; dry-stone walls coursed from individual stones with a batter and
-coping, collapsing here and there, lichen on their faces and grass at their
-foot, snow drifting against a wall's lee face and scoured from its windward
+collapsed; dry-stone walls of field stones, each face built up haphazard,
+every stone let fall where the work stands lowest to settle in the nook it
+fits (Visscher and Bolsterli's packing, squeezed along the wall so its
+stones lie flat and longer than tall), the largest at the foot, broken
+angular along the planes it split on and never squared, set by its rough face
+flush with the batter so the face reads as a wall, battered, hearted and
+capped with big stones across the top, collapsing here and there, lichen on
+their faces, moss in a few damp patches and grass at their foot, laid window by
+window from where each stretch starts so where a detail stops building never
+changes a stone nearer the eye; snow drifting against a wall's lee face and scoured from its windward
 one where a land lies under snow (RT29); fences of posts and rails, true where
 kept and leaning, moss-green and missing rails where not; gates hung on posts, open, shut or off a hinge, with
 mud and hoof-churned ruts in a pasture's gateway. Crops are lawns of their own

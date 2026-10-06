@@ -116,6 +116,8 @@ const _: () = assert!(SHAPE_SIDE.is_power_of_two() && DETAIL_SIDE.is_power_of_tw
 const WEATHER_CELLS: usize = 384;
 const LIGHT_CELLS: usize = 96;
 const SHADOW_CELLS: usize = 256;
+/// The layers of what a level's floor holds of the sky overhead.
+const BENEATH_LAYERS: usize = 5;
 const _: () = assert!(
     WEATHER_CELLS.is_multiple_of(4)
         && LIGHT_CELLS.is_multiple_of(4)
@@ -143,6 +145,9 @@ pub(crate) const SUN_COSINES: usize = 33;
 
 /// How far apart the finer noise's features lie, over the billows'.
 const DETAIL_SCALE: f64 = 0.2;
+/// How many quantiles of the finer noise a coarse march's erosion is the
+/// mean over.
+const WISP_QUANTILES: usize = 16;
 /// How deep the finer noise bites into a cloud's edge.
 const EROSION: f64 = 0.62;
 /// The looks toward the sun a fine sample takes through its own billows, as
@@ -205,6 +210,29 @@ impl Tile {
     /// The most the texture holds anywhere, which no read of it passes.
     fn peak(&self) -> f64 {
         f64::from(self.texels.iter().copied().max().unwrap_or(u8::MAX)) / 255.0
+    }
+
+    /// The values the texture holds at `N` evenly spaced quantiles, each the
+    /// middle of an equally likely share of its texels: what a read of it
+    /// stands for where it cannot be resolved.
+    fn quantiles<const N: usize>(&self) -> [f32; N] {
+        let mut counts = [0usize; 256];
+        for &texel in &self.texels {
+            counts[usize::from(texel)] += 1;
+        }
+        let total = self.texels.len().max(1);
+        let mut quantiles = [0.0; N];
+        let (mut value, mut below) = (0usize, 0usize);
+        for (index, slot) in quantiles.iter_mut().enumerate() {
+            // The middle of the index-th share, in texels: (2i + 1) / 2N.
+            let wanted = (2 * index + 1) * total / (2 * N);
+            while value < 255 && below + counts[value] <= wanted {
+                below += counts[value];
+                value += 1;
+            }
+            *slot = single(f64::from(u8::try_from(value).unwrap_or(u8::MAX)) / 255.0);
+        }
+        quantiles
     }
 
     /// The texture read trilinearly at `p`, in texels, wrapping.
@@ -278,6 +306,12 @@ struct Level {
     /// Empty with no bank above.
     overhead: Vec<f32>,
     shadow: Vec<f32>,
+    /// Over each point of its shadow's grid, what its column does to the sky
+    /// overhead, a layer each: how much of the clear sky it leaves open; the
+    /// light it sheds down from its base per unit of the sun's at its top,
+    /// of the sky's above it, and of the ground's below it; and the cosine
+    /// of the sun's angle from the vertical at its top.
+    beneath: [Vec<f32>; BENEATH_LAYERS],
 }
 
 impl Level {
@@ -298,6 +332,13 @@ impl Level {
             shade: room(true, LIGHT_POINTS)?,
             overhead: Vec::new(),
             shadow: room(true, points(SHADOW_CELLS))?,
+            beneath: [
+                room(true, points(SHADOW_CELLS))?,
+                room(true, points(SHADOW_CELLS))?,
+                room(true, points(SHADOW_CELLS))?,
+                room(true, points(SHADOW_CELLS))?,
+                room(true, points(SHADOW_CELLS))?,
+            ],
         })
     }
 }
@@ -601,6 +642,9 @@ pub(crate) struct Cloudbank {
     detail: Tile,
     /// The most the billows reach, once their texture is built.
     peak: f64,
+    /// The wisps' texture at evenly spaced quantiles, once it is built: the
+    /// erosion a march too coarse to resolve the wisps takes the mean of.
+    wisps: [f32; WISP_QUANTILES],
     /// What ice scatters again and again at each height, per unit of the
     /// sunlight there; and for each way toward the eye, the share of ice's
     /// phase the sky above sends it.
@@ -648,6 +692,7 @@ impl Cloudbank {
             shape: Tile::new(SHAPE_SIDE)?,
             detail: Tile::new(DETAIL_SIDE)?,
             peak: 1.0,
+            wisps: [0.5; WISP_QUANTILES],
             scatter: [0.0; SCATTER_LEVELS],
             downward: [0.0; HEMISPHERE],
             lighting: None,
@@ -746,6 +791,9 @@ impl Cloudbank {
             Stage::Detail(_) => {
                 let seed = self.seed() ^ 0xd37a;
                 fill_tile(&mut self.detail, start..end, runner, &|p| wisps(p, seed));
+                if end >= rows {
+                    self.wisps = self.detail.quantiles();
+                }
             }
             Stage::Weather(level, _) => self.fill_weather(level, start..end, runner),
             Stage::Bands(level, _) => self.fill_bands(level, start..end, runner),
@@ -944,33 +992,89 @@ impl Cloudbank {
         runner: &dyn JobRunner,
     ) -> Option<()> {
         let points = SHADOW_CELLS + 1;
-        let mut values = fallible::filled(rows.len() * points, 1.0f32)?;
+        let medium = self.medium();
+        // Each point's shadow, then what it holds of the sky overhead.
+        let mut values = fallible::filled(rows.len() * points * (1 + BENEATH_LAYERS), 1.0f32)?;
         {
             let reader = Reader { bank: self };
             let level = self.levels.get(index)?;
             let next = self.levels.get(index + 1);
-            band::for_each(runner, &mut values, (rows.start, points), &|j, band| {
-                for (i, slot) in band.iter_mut().enumerate() {
-                    let (x, z) = vertex_of(self.centre, level.half, (i, j), SHADOW_CELLS);
-                    let point = Vec3::new(x, self.height_at(self.floor, (x, z)), z);
-                    let mut kept = mathf::exp(-reader.toward_sun(point, LIGHT_STEPS * 2));
-                    let rimmed = rim(SHADOW_CELLS, (i, j));
-                    if let Some(coarse) = next.filter(|_| rimmed > 0.0).and_then(|next| {
-                        plane(&next.shadow, points, 0, coarse_place(SHADOW_CELLS, (i, j)))
-                    }) {
-                        kept += (coarse - kept) * rimmed;
+            band::for_each(
+                runner,
+                &mut values,
+                (rows.start, points * (1 + BENEATH_LAYERS)),
+                &|j, band| {
+                    for (i, slot) in band.chunks_mut(1 + BENEATH_LAYERS).enumerate() {
+                        let (x, z) = vertex_of(self.centre, level.half, (i, j), SHADOW_CELLS);
+                        let point = Vec3::new(x, self.height_at(self.floor, (x, z)), z);
+                        let mut held = [0.0; 1 + BENEATH_LAYERS];
+                        held[0] = mathf::exp(-reader.toward_sun(point, LIGHT_STEPS * 2));
+                        held[1..].copy_from_slice(&reader.overhead_sky(point, medium));
+                        let rimmed = rim(SHADOW_CELLS, (i, j));
+                        if let Some(next) = next.filter(|_| rimmed > 0.0) {
+                            let place = coarse_place(SHADOW_CELLS, (i, j));
+                            if let Some(coarse) = plane(&next.shadow, points, 0, place) {
+                                held[0] += (coarse - held[0]) * rimmed;
+                            }
+                            for (value, layer) in held[1..].iter_mut().zip(&next.beneath) {
+                                if let Some(coarse) = plane(layer, points, 0, place) {
+                                    *value += (coarse - *value) * rimmed;
+                                }
+                            }
+                        }
+                        for (out, value) in slot.iter_mut().zip(held) {
+                            *out = single(value);
+                        }
                     }
-                    *slot = single(kept);
-                }
-            });
+                },
+            );
         }
-        for (slot, &kept) in rows_of(&mut self.levels.get_mut(index)?.shadow, rows, points, 1.0)?
-            .iter_mut()
-            .zip(&values)
-        {
-            *slot = kept;
+        let level = self.levels.get_mut(index)?;
+        let layers = core::iter::once(&mut level.shadow).chain(level.beneath.iter_mut());
+        for (layer, map) in layers.enumerate() {
+            let held = rows_of(map, rows.clone(), points, 0.0)?;
+            for (slot, cell) in held.iter_mut().zip(values.chunks(1 + BENEATH_LAYERS)) {
+                *slot = cell[layer];
+            }
         }
         Some(())
+    }
+
+    /// What its cloud is made of, which scatters what light it sheds: its
+    /// first deck's.
+    fn medium(&self) -> Medium {
+        match self.decks.iter().flatten().next().map(|deck| deck.matter) {
+            Some(Matter::Ice) => ICE,
+            _ => DROPLETS,
+        }
+    }
+
+    /// What the bank does to the sky over `point`, below its ceiling: how
+    /// much of the clear sky straight overhead it leaves open, and the light
+    /// its cloud sheds down from its base there of its own, less what of the
+    /// sky's light passes it unscattered, which its open share stands for. A
+    /// clear sky's, and none, above it or before it is lit.
+    pub(crate) fn beneath(&self, point: Vec3) -> (f64, Vec3) {
+        let (Some(lighting), Some(level)) = (self.lighting.as_ref(), self.level_over(point)) else {
+            return (1.0, Vec3::ZERO);
+        };
+        if self.altitude(point) >= self.ceiling {
+            return (1.0, Vec3::ZERO);
+        }
+        let place = place_on(self.centre, level.half, (point.x, point.z), SHADOW_CELLS);
+        let read = |layer: usize, none: f64| {
+            level
+                .beneath
+                .get(layer)
+                .and_then(|map| plane(map, SHADOW_CELLS + 1, 0, place))
+                .unwrap_or(none)
+        };
+        let open = read(0, 1.0).clamp(0.0, 1.0);
+        let sun = sunlight_at(lighting, 1.0, read(4, 1.0));
+        let shed = sun * read(1, 0.0)
+            + lighting.above * (read(2, 0.0) - open).max(0.0)
+            + lighting.below * read(3, 0.0);
+        (open, shed.max(Vec3::ZERO))
     }
 
     /// What ice scatters again and again at each height through the bank,
@@ -1517,6 +1621,13 @@ const DROPLETS: Medium = Medium {
     asymmetry: (1.0 - DROPLET_LOBES.1) * DROPLET_LOBES.0 + DROPLET_LOBES.1 * BACK_LOBE,
 };
 
+/// Ice crystals as a medium, scattering almost all they meet as rough
+/// crystals do.
+const ICE: Medium = Medium {
+    albedo: 0.99998,
+    asymmetry: ICE_ASYMMETRY,
+};
+
 /// A blend of a forward and a backward Henyey–Greenstein lobe.
 fn dual_phase(cos: f64, g: f64, back: f64) -> f64 {
     henyey_greenstein(cos, g) * (1.0 - back) + henyey_greenstein(cos, BACK_LOBE) * back
@@ -1749,14 +1860,25 @@ impl Reader<'_> {
             if density <= 0.0 {
                 continue;
             }
-            if fine {
-                let wisp = bank
-                    .detail
-                    .at(grained * (real(DETAIL_SIDE) / (deck.billow * 8.0 * DETAIL_SCALE)));
-                // Ragged wisps at a cloud's base, round billows at its top.
+            // Ragged wisps at a cloud's base, round billows at its top; a
+            // march too coarse to resolve them takes what they leave on
+            // average, never the billows uneroded.
+            let eroded = |wisp: f64| {
                 let bite = EROSION * (wisp + (1.0 - 2.0 * wisp) * within.min(1.0));
-                density = remap(density, bite, 1.0);
-            }
+                remap(density, bite, 1.0)
+            };
+            density = if fine {
+                eroded(
+                    bank.detail
+                        .at(grained * (real(DETAIL_SIDE) / (deck.billow * 8.0 * DETAIL_SCALE))),
+                )
+            } else {
+                bank.wisps
+                    .iter()
+                    .map(|&wisp| eroded(f64::from(wisp)))
+                    .sum::<f64>()
+                    / real(WISP_QUANTILES)
+            };
             if density > best.as_ref().map_or(0.0, |held| held.density) {
                 best = Some(Sample {
                     density,
@@ -1877,6 +1999,36 @@ impl Reader<'_> {
         let above = self.layered(&level.column, level, point, altitude)?;
         let whole = self.layered(&level.column, level, point, bank.floor)?;
         Some((above, whole.max(above)))
+    }
+
+    /// What the column over `point` on the bank's floor does to the sky
+    /// overhead, as [`Level::beneath`] holds it: the two-stream solution's
+    /// downward light at the column's base, flux-weighted over the sky
+    /// beneath it, per unit of each light that enters the column.
+    fn overhead_sky(&self, point: Vec3, medium: Medium) -> [f64; BENEATH_LAYERS] {
+        let bank = self.bank;
+        let whole = self
+            .column_at(point, bank.floor)
+            .map_or(0.0, |(_, whole)| whole);
+        let top = Vec3::new(
+            point.x,
+            bank.height_at(bank.ceiling, (point.x, point.z)),
+            point.z,
+        );
+        let cosine = bank.cosine(top, bank.ceiling, bank.sun);
+        if whole <= 0.0 {
+            return [1.0, 0.0, 1.0, 0.0, cosine];
+        }
+        let base = Depth {
+            below_top: whole,
+            whole,
+        };
+        let down = |diffuse: slab::Diffuse| diffuse.mean.x - diffuse.rising.x * (2.0 / 3.0);
+        let shed_sun = down(slab::sunlit(medium, base, (Vec3::ONE, cosine.max(0.0))))
+            * self.overhead_at(top, bank.ceiling);
+        let shed_sky = down(slab::skylit(medium, base, (Vec3::ONE, Vec3::ZERO)));
+        let shed_ground = down(slab::skylit(medium, base, (Vec3::ZERO, Vec3::ONE)));
+        [mathf::exp(-whole), shed_sun, shed_sky, shed_ground, cosine]
     }
 
     /// Where `point`, `altitude` above the scene's level and `optical` deep

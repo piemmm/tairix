@@ -894,6 +894,7 @@ fn aqueduct(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
             outcrops: 0.1,
         }),
         road: None,
+        farming: None,
         roughness: 1.0,
         ridges: 0.35,
         droplets: 0.05,

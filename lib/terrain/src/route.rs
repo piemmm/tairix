@@ -6,7 +6,9 @@
 //! heuristic is octile distance times the cheapest straight step, a diagonal
 //! counted as three halves of it, so it never overestimates while the caller
 //! prices no straight step below that least and no diagonal below three
-//! halves of it — and the path found is then genuinely the cheapest.
+//! halves of it — and the path found is then genuinely the cheapest. A caller
+//! that knows a tighter bound passes it instead
+//! ([`advance_guided`](Router::advance_guided)), and the search settles less.
 //!
 //! A search settles a bounded number of samples per
 //! [`advance`](Router::advance), within the box its two ends span widened by a
@@ -23,6 +25,11 @@ use crate::{filled, TerrainError};
 /// What pricing a step means: the step from a sample to its neighbour, and
 /// whether it is diagonal; `None` where no route may step at all.
 pub type Pricing<'a> = &'a dyn Fn(usize, usize, bool) -> Option<u32>;
+
+/// A bound on what the rest of a route costs from a sample to the search's
+/// goal. It must never overestimate, and must never fall by more than a step
+/// costs, or the path found is not the cheapest.
+pub type Guide<'a> = &'a dyn Fn(usize) -> u32;
 
 /// Where a search stands.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -114,8 +121,27 @@ impl Router {
         Ok(())
     }
 
-    /// Settle up to `budget` more samples, each step priced by `price`.
+    /// Settle up to `budget` more samples, each step priced by `price`, the
+    /// rest of the way bounded by octile distance times the search's least
+    /// step.
     pub fn advance(&mut self, budget: usize, price: Pricing<'_>) -> Result<Routed, TerrainError> {
+        let Some(search) = self.search else {
+            return Ok(Routed::Unreachable);
+        };
+        let (grid, goal, least) = (search.grid, search.goal, search.least);
+        self.advance_guided(budget, price, &|index| heuristic(grid, (index, goal), least))
+    }
+
+    /// Settle up to `budget` more samples, each step priced by `price` and
+    /// the rest of the way bounded by `guide`: for a caller that knows a
+    /// tighter bound than the least step gives, as where most of the grid
+    /// costs far more than its cheapest steps.
+    pub fn advance_guided(
+        &mut self,
+        budget: usize,
+        price: Pricing<'_>,
+        guide: Guide<'_>,
+    ) -> Result<Routed, TerrainError> {
         let Some(search) = self.search else {
             return Ok(Routed::Unreachable);
         };
@@ -164,9 +190,7 @@ impl Router {
                 }
                 self.cost[next] = total;
                 self.came[next] = narrow(index);
-                let Some(priority) =
-                    total.checked_add(heuristic(grid, (next, search.goal), search.least))
-                else {
+                let Some(priority) = total.checked_add(guide(next)) else {
                     continue;
                 };
                 self.open.push(Reverse((priority, narrow(next))));

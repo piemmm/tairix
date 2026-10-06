@@ -137,5 +137,20 @@ impl Footprints {
 }
 
 #[cfg(test)]
+impl Footprints {
+    /// How many circles are taken.
+    pub(super) const fn len(&self) -> usize {
+        self.circles.len()
+    }
+
+    /// Where the circle taken `index`th stands, and how far it reaches.
+    pub(super) fn circle(&self, index: usize) -> Option<((f64, f64), f64)> {
+        self.circles
+            .get(index)
+            .map(|circle| (circle.at, circle.radius))
+    }
+}
+
+#[cfg(test)]
 #[path = "footprint_tests.rs"]
 mod tests;

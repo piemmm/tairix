@@ -8,7 +8,7 @@ forbids `unsafe`.
 ## Scenes
 
 A `Draft::new(setting, seed, size, detail)` composes a scene in one of the
-twenty `Setting`s. Within a setting everything is drawn from the seed: which
+twenty-one `Setting`s. Within a setting everything is drawn from the seed: which
 pieces, where, in what, lit from where, at what hour and under what weather,
 and seen from where — and every draw is bounded so the scene is lit and framed
 to read.
@@ -44,7 +44,9 @@ takes, a seed shows the same place at either detail.
   the hill it holds back and whose arch's tympanum is walled up in rubble
   over the conduit, and where the hill is too low it runs on buried until
   the hill covers it.
-- **Landscapes** are lands: rolling meadows, a forest, mountains over a lake,
+- **Landscapes** are lands: rolling meadows, farmland seen from one of its
+  lanes — fields in hedges, dry-stone walls and fences, gated, with woodlots
+  among them (`lib/countryside`) — a forest, mountains over a lake,
   an island's coast, dunes or rocky desert, snow over a frozen pond, a lagoon
   at sunset, canyons between mesas, a river valley crossed by a stone
   bridge, and a stream running clear over its stones, seen from its edge.
@@ -175,7 +177,8 @@ roads are laid where the water and the ground let them run; and a far grid and
 a finer grid about the eye refine it, droplets running over each for the rills
 and fans no coarser pass makes, a turn of the land's tiles at a time across the
 runner. Each vertex carries what the land is like
-there — wet, worn or built up, on a road or a path, how much grows — which its
+there — wet, worn or built up, how much of a road and of a path, how much
+grows, each a quantity blended on its own — which its
 shading, its sward and its woods read; the coarse grid running on to the
 horizon carries it too, judged by its slope, its height and the sea as the far
 land's is, so a dry land's distant ground grows no greener than its near. The rivers' and lakes' surface is a grid
@@ -606,15 +609,23 @@ each where three faces meet within the rest.
   they stay on.
 - **Solids** (`solid`) are a structure's units: a block, its ends leaning in
   as a voussoir's do; a drum, tapering and swelling in its entasis and cut in
-  flutes; a turned moulding; an Ionic volute channelled between its turns.
+  flutes; a turned moulding; an Ionic volute channelled between its turns; a
+  field stone, a slab broken along a few planes: the flat bed it lies on, a
+  face tilted about where a wall sets it by and broken again across at a
+  slant, and sides cut square to the face at angles spread round it, so its
+  face is an irregular polygon edged straight, its arrises blunted by the
+  weather.
   Each is worn as long as its structure stood — its arrises rounded, chips
-  struck from them as shallow scallops, its faces lumped where split or
-  hammer-dressed and pitted as they erode, now and then a crack running in
-  from one face — and wear only ever takes stone away. A solid is found by
-  sphere tracing against the steepest its surface can rise, its crossing
-  narrowed by regula falsi, its wear and its cover shown only as far as each
-  spans pixels and settling to its exact form far off; a block's dressed face
-  is read off its rounded box rather than sampled.
+  struck from them as shallow scallops (a field stone's spalled from its
+  broken faces), its faces lumped where split, hammer-dressed or broken and
+  pitted as they erode, now and then a crack running in from one face — and
+  wear only ever takes stone away. A solid is found by sphere tracing against
+  the steepest its surface can rise, its crossing narrowed by regula falsi,
+  its wear and its cover shown only as far as each spans pixels and settling
+  to its exact form far off; lumps too shallow to stand out of a face still
+  turn the light on it for as long as they are broad enough to see, so a
+  rough face never shades as a plane. A block's dressed face is read off its
+  rounded box rather than sampled.
 - **Masonry** (`compose::courses`). A mason lays a wall in courses, each
   course's top brought to an arch's springing, its stones' lengths drawn and
   their joints broken course on course; each stretch an opening leaves is
@@ -625,7 +636,9 @@ each where three faces meet within the rest.
   closing each course, a few bricks lost; columns rise in drums to their
   capitals or break off; a round building's courses are rings of stones; a
   walled-up opening is filled with rubble in mortar. Each unit's colour
-  (`masonry`) is its own shade and hue, as a quarry's beds differ; old stone
+  (`masonry`) is its own shade and hue, as a quarry's beds differ, a field
+  stone's further still, blotched and now and then stained rust as it lay
+  half buried in the land and weathered for a while of its own; old stone
   is greyed and darkened, streaked below where rain runs off, blackened with
   grime and biofilm in patches and along the joints water creeps into,
   crusted under what shelters it and greened at a damp wall's foot; a brick
@@ -659,12 +672,12 @@ tapering at their margins until they break into the cushions they are made
 of, each mat one moss or another, hoary where dry and exposed, browning in
 a dry season; beyond them a lone cushion lodges here and there, most of all
 in a joint. Nothing clings to a floor worn smooth by feet. Lichen colonises
-over decades: young colonies stand alone, most of them small, and where it
-grows thick the old crusts have spread until they meet, a mosaic whose joins
-wander, each crust cracked into areoles and edged in its dark prothallus;
-the orange lichens that feed on what birds leave keep to where they perch on
-what faces the sky, and lime-rich stone and acid stone each carry their own
-species.
+over decades: young colonies stand alone, most of them small, their margins
+lobed, and where it grows thick the old crusts have spread until they meet,
+a mosaic whose joins wander, each crust cracked into areoles and edged in
+its dark prothallus; the orange lichens that feed on what birds leave keep
+to where they perch on what faces the sky, and lime-rich stone and acid
+stone each carry their own species.
 
 ## Water and relief
 

@@ -618,7 +618,7 @@ fn grids_are_taken_apart_and_never_past_the_last() {
 fn the_most_a_channel_stands_over_a_rectangle_is_the_most_at_the_corners_it_blends_from() {
     let mut field = Heightfield::new(8, (0.0, 0.0), 1.0, false).expect("a grid");
     assert!(
-        (field.most_of(3, (0.0, 0.0), (8.0, 8.0)) - PLAIN[3]).abs() < 1e-12,
+        (field.most_of(GREEN, (0.0, 0.0), (8.0, 8.0)) - PLAIN[GREEN]).abs() < 1e-12,
         "none carried"
     );
     let side = field.side();
@@ -627,18 +627,18 @@ fn the_most_a_channel_stands_over_a_rectangle_is_the_most_at_the_corners_it_blen
         let (_, attributes) = field.rows_mut(0..side);
         for (index, slot) in attributes.iter_mut().enumerate() {
             let (column, row) = (index % side, index / side);
-            slot[3] = u8::try_from(column * 10 + row).expect("a byte");
+            slot[GREEN] = u8::try_from(column * 10 + row).expect("a byte");
         }
     }
     field.seal();
     // Over cells 2–3 across and 1 down: corners 2–4 across, 1–2 down.
-    let most = field.most_of(3, (2.5, 1.5), (3.5, 1.9));
+    let most = field.most_of(GREEN, (2.5, 1.5), (3.5, 1.9));
     assert!(
         (most - f64::from(4 * 10 + 2) / 255.0).abs() < 1e-12,
         "{most}"
     );
     // Past the edge, its edge's vertices.
-    let edge = field.most_of(3, (6.5, 6.5), (40.0, 40.0));
+    let edge = field.most_of(GREEN, (6.5, 6.5), (40.0, 40.0));
     assert!(
         (edge - f64::from(8 * 10 + 8) / 255.0).abs() < 1e-12,
         "{edge}"
@@ -649,4 +649,127 @@ fn the_most_a_channel_stands_over_a_rectangle_is_the_most_at_the_corners_it_blen
         let [.., green, _] = field.attributes_at(x, 1.7);
         assert!(green <= most + 1e-12);
     }
+}
+
+/// Cells left out for a finer grid have no surface: a ray straight down
+/// through one meets nothing, and one through any other cell meets the
+/// grid where it lies.
+#[test]
+fn a_cell_left_out_for_a_finer_grid_is_met_by_no_ray() {
+    let mut field = unsealed(8, (0.0, 0.0), 1.0, false, |x, z| 0.2 * x + 0.1 * z);
+    field.leave_out(2..5, 3..6);
+    field.seal();
+    for row in 0..8usize {
+        for column in 0..8usize {
+            let (x, z) = (real(column) + 0.5, real(row) + 0.5);
+            let hit = field.intersect(&Ray::new(Vec3::new(x, 50.0, z), -Vec3::UP), 0.0, 100.0);
+            let left_out = (2..5).contains(&column) && (3..6).contains(&row);
+            assert_eq!(hit.is_none(), left_out, "({column}, {row})");
+            if let Some(hit) = hit {
+                assert!(
+                    (50.0 - hit.t - field.height_at(x, z)).abs() < 1e-5,
+                    "({column}, {row})"
+                );
+            }
+        }
+    }
+}
+
+/// A vertex with no height takes the four cells about it out of the
+/// surface, and the normals of the cells beside them stay finite, the
+/// missing neighbour read at the vertex's own height.
+#[test]
+fn a_vertex_with_no_height_takes_its_cells_out_and_leaves_its_neighbours_sound() {
+    let mut field = unsealed(8, (0.0, 0.0), 1.0, false, rugged);
+    let side = field.side();
+    field.heights_mut()[4 * side + 4] = ABSENT;
+    field.seal();
+    for row in 0..8usize {
+        for column in 0..8usize {
+            let (x, z) = (real(column) + 0.5, real(row) + 0.5);
+            let hit = field.intersect(&Ray::new(Vec3::new(x, 50.0, z), -Vec3::UP), 0.0, 100.0);
+            let touches = (3..5).contains(&column) && (3..5).contains(&row);
+            assert_eq!(hit.is_none(), touches, "({column}, {row})");
+            if let Some(hit) = hit {
+                assert!(hit.shading.is_finite() && hit.normal.is_finite());
+                assert!((hit.shading.length() - 1.0).abs() < 1e-9);
+            }
+        }
+    }
+}
+
+/// What the land is like at a place is blended from the four vertices about
+/// it, exactly bilinearly in 255ths; past the grid's edge, its edge's; and a
+/// grid that carries nothing reads as plain land.
+#[test]
+fn a_places_attributes_are_its_vertices_blended() {
+    let mut field = Heightfield::new(4, (10.0, -2.0), 2.0, false).expect("a grid");
+    assert_eq!(field.attributes_at(11.0, 0.0), PLAIN);
+    let side = field.side();
+    assert!(field.carry_attributes());
+    {
+        let (_, attributes) = field.rows_mut(0..side);
+        for (index, slot) in attributes.iter_mut().enumerate() {
+            let (column, row) = (index % side, index / side);
+            *slot = [
+                u8::try_from(column * 40).expect("a byte"),
+                u8::try_from(row * 50).expect("a byte"),
+                u8::try_from(column * row * 10).expect("a byte"),
+                0,
+                255,
+                0,
+            ];
+        }
+    }
+    field.seal();
+    // A quarter of the way across cell (1, 2) and three quarters down it.
+    let (u, v) = (0.25, 0.75);
+    let (x, z) = (10.0 + 2.0 * (1.0 + u), -2.0 + 2.0 * (2.0 + v));
+    let at = field.attributes_at(x, z);
+    let blend = |a: f64, b: f64, c: f64, d: f64| {
+        (a * (1.0 - u) + b * u) * (1.0 - v) + (c * (1.0 - u) + d * u) * v
+    };
+    let expected = [
+        blend(40.0, 80.0, 40.0, 80.0) / 255.0,
+        blend(100.0, 100.0, 150.0, 150.0) / 255.0,
+        blend(20.0, 40.0, 30.0, 60.0) / 255.0,
+        0.0,
+        1.0,
+        0.0,
+    ];
+    for (channel, (got, want)) in at.iter().zip(expected).enumerate() {
+        assert!(
+            (got - want).abs() < 1e-12,
+            "channel {channel}: {got} not {want}"
+        );
+    }
+    // Beyond the far corner, the far corner's own.
+    let beyond = field.attributes_at(100.0, 100.0);
+    assert!((beyond[0] - 160.0 / 255.0).abs() < 1e-12);
+    assert!((beyond[1] - 200.0 / 255.0).abs() < 1e-12);
+}
+
+/// The lowest a grid lies over a rectangle never stands above the surface
+/// anywhere within it, and is the lowest of the corners it blends from.
+#[test]
+fn the_lowest_over_a_rectangle_lies_at_or_below_everywhere_in_it() {
+    let field = filled(16, (-8.0, -8.0), 1.0, false, rugged);
+    for probe in 0..64u32 {
+        let draw = |salt: u32| unit(mix32(mix32(probe) ^ salt));
+        let (x0, z0) = (-9.0 + 17.0 * draw(1), -9.0 + 17.0 * draw(2));
+        let (x1, z1) = (x0 + 6.0 * draw(3), z0 + 6.0 * draw(4));
+        let lowest = field.lowest_over((x0, z0), (x1, z1));
+        for step in 0..=16 {
+            for across in 0..=16 {
+                let x = x0 + (x1 - x0) * real(across) / 16.0;
+                let z = z0 + (z1 - z0) * real(step) / 16.0;
+                assert!(
+                    field.height_at(x, z) >= lowest - 1e-9,
+                    "{probe}: ({x}, {z}) below the lowest {lowest}"
+                );
+            }
+        }
+    }
+    let level = filled(4, (0.0, 0.0), 1.0, false, |x, _| x);
+    assert!((level.lowest_over((1.2, 0.0), (2.6, 3.0)) - 1.0).abs() < 1e-9);
 }

@@ -25,7 +25,8 @@ definition of each algorithm. `no_std` + `alloc`, and
   whose tiles reach no sample in common, so a phase's tiles share a
   `tairix_parallel::JobRunner`.
 - `route` — A\* with integer costs: the least-cost path between two samples
-  under a caller's pricing of each step.
+  under a caller's pricing of each step, bounded by octile distance or by a
+  tighter bound the caller supplies (`lib/countryside` routes every way by it).
 
 ## Guarantees
 

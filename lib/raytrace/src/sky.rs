@@ -208,9 +208,20 @@ impl Sky {
         // keeps of the light beyond.
         let shaded = |before: &Scattered, reached: f64, to: f64| {
             let between = sight.between(to);
-            let lit = self.sunlit(origin + dir * sight.drawn((reached, to), seeing.air));
-            let air = (between.sun - before.sun).max(Vec3::ZERO) * lit
-                + (between.sky - before.sky).max(Vec3::ZERO);
+            let at = origin + dir * sight.drawn((reached, to), seeing.air);
+            let (open, glow) = self.beneath(at);
+            let stretch = Scattered {
+                sun: (between.sun - before.sun).max(Vec3::ZERO),
+                sky: (between.sky - before.sky).max(Vec3::ZERO),
+                scatter: (between.scatter - before.scatter).max(Vec3::ZERO),
+                kept: between.kept,
+            };
+            let air = stretch.lit_by(Lit {
+                sun: Vec3::splat(self.sunlit(at)),
+                sky: 1.0,
+                open,
+                glow,
+            });
             (air, between)
         };
         for (cloud, kept, depth) in clouds {
@@ -234,6 +245,21 @@ impl Sky {
         }
         let clear = self.clear(origin, dir, (seeing.spread, seeing.occulted));
         light + (clear - before.light()).max(Vec3::ZERO) * through
+    }
+
+    /// What the clouds do to the sky over `point`: how much of the clear sky
+    /// overhead they leave open, and the light they shed down on it of their
+    /// own, the higher bank's through the lower's openings.
+    pub(crate) fn beneath(&self, point: Vec3) -> (f64, Vec3) {
+        let low = self
+            .low
+            .as_ref()
+            .map_or((1.0, Vec3::ZERO), |bank| bank.beneath(point));
+        let high = self
+            .high
+            .as_ref()
+            .map_or((1.0, Vec3::ZERO), |bank| bank.beneath(point));
+        (low.0 * high.0, low.1 + high.1 * low.0)
     }
 
     /// What of the sun's light the clouds let reach `point`, each bank's

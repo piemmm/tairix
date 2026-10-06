@@ -162,22 +162,14 @@ fn toward_a_low_sun_the_air_glows_with_the_suns_light_which_a_shadow_takes_away(
         "and far less away from it: {backward:?}"
     );
     let ground = Vec3::splat(0.1);
-    let open = atmosphere.aerial(
-        toward,
-        300.0,
-        ground,
-        Lit {
-            sun: Vec3::ONE,
-            sky: 1.0,
-        },
-    );
+    let open = atmosphere.aerial(toward, 300.0, ground, Lit::OPEN);
     let shadowed = atmosphere.aerial(
         toward,
         300.0,
         ground,
         Lit {
             sun: Vec3::ZERO,
-            sky: 1.0,
+            ..Lit::OPEN
         },
     );
     let expected = ground * sunward.kept + sunward.sky;

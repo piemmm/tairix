@@ -662,14 +662,21 @@ fn crossing(
 /// or open, is not read by the side's, so a hit at its rim faces out of the
 /// side it is on.
 pub(crate) fn gradient(p: Vec3, step: f64, standing: impl Fn(Vec3) -> f64) -> Vec3 {
+    differences(p, step, standing).normalized()
+}
+
+/// How fast `field` rises at `p`, and which way, taken `step` about it.
+pub(crate) fn slope(p: Vec3, step: f64, field: impl Fn(Vec3) -> f64) -> Vec3 {
+    differences(p, step, field) * (0.25 / step)
+}
+
+/// Four times `step` times the gradient of `field` at `p`.
+fn differences(p: Vec3, step: f64, field: impl Fn(Vec3) -> f64) -> Vec3 {
     // Four samples at a tetrahedron's corners find as much as six along the
     // axes would.
     TETRAHEDRON
         .iter()
-        .fold(Vec3::ZERO, |sum, &corner| {
-            sum + corner * standing(p + corner * step)
-        })
-        .normalized()
+        .fold(Vec3::ZERO, |sum, &corner| sum + corner * field(p + corner * step))
 }
 
 /// The corners of a tetrahedron about the origin, each a step along every

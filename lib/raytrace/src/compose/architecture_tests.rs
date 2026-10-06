@@ -321,3 +321,45 @@ fn an_aqueduct_tunnels_where_its_hill_covers_it_and_runs_on_buried_where_not() {
     }
     let _ = aqueduct;
 }
+
+/// An aqueduct is seen from down its valley, off to one side and a few
+/// metres above the ground there, looking back at its crossing, which stands
+/// in sight.
+#[test]
+fn an_aqueduct_is_seen_from_down_its_valley_with_its_crossing_in_sight() {
+    let mut framed = 0;
+    for seed in 0..6 {
+        let (stage, landing, mut dice) = landscape::surveyed(aqueduct, seed);
+        let Scheme::Aqueduct(works) = landing.scheme else {
+            panic!("an aqueduct's scheme");
+        };
+        let survey = landing.build.survey(&stage.fields).expect("a survey");
+        let Vantage { eye, heading } = works.site(&survey, &mut dice);
+        let (sin, cos) = (mathf::sin(works.heading), mathf::cos(works.heading));
+        let back = -(eye.x * sin + eye.z * cos);
+        let aside = (eye.x * cos - eye.z * sin).abs();
+        assert!(
+            (120.0 - 1e-6..=220.0 + 1e-6).contains(&back),
+            "{seed}: {back} back"
+        );
+        assert!(
+            (40.0 - 1e-6..=90.0 + 1e-6).contains(&aside),
+            "{seed}: {aside} aside"
+        );
+        let rise = eye.y - survey.surface(eye.x, eye.z);
+        assert!(
+            (2.0 - 1e-9..=8.0 + 1e-9).contains(&rise),
+            "{seed}: {rise} up"
+        );
+        let toward = mathf::atan2(-eye.x, -eye.z);
+        assert!(
+            (heading - toward).abs() < 1e-12,
+            "{seed}: looking at its crossing"
+        );
+        let crossing = Vec3::new(0.0, works.channel, 0.0);
+        if landscape::in_sight(&|x, z| survey.height(x, z), eye, crossing) {
+            framed += 1;
+        }
+    }
+    assert!(framed >= 4, "only {framed} aqueducts in sight");
+}

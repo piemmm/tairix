@@ -1,0 +1,30 @@
+[package]
+name = "tairix-countryside"
+description = "TAIRiX countryside layout, renderer-neutral: the holdings a land is farmed in, the farmsteads, villages and towns on it, the road, lane, track and path network between them routed over the ground, the fields the land between ways and water is cut into, each field's boundary, gates and use, and the plots of a farmstead's yard and a village's streets. Keyed by place, seam-free, no_std, forbids unsafe, and bit-identical on every Tier-1 target."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The one float maths every target rounds identically, and fallible buffers.
+tairix-util = { path = "../util", version = "=0.0.0" }
+# The keyed hash every draw is a word of, so a draw is a pure function of
+# its seed, its purpose and its place.
+tairix-hash = { path = "../hash", version = "=0.0.0" }
+# A draw's word scaled to a unit draw, as every keyed generator scales it.
+tairix-rng = { path = "../rng", version = "=0.0.0" }
+# The integer-cost A* every way is routed over the ground by.
+tairix-terrain = { path = "../terrain", version = "=0.0.0" }
+# The runner a layout's routes and holdings are shared across.
+tairix-parallel = { path = "../parallel", version = "=0.0.0", default-features = false }
+
+[dev-dependencies]
+# The host test runners, so the tests prove a layout comes out the same
+# however its work is shared.
+tairix-parallel = { path = "../parallel", version = "=0.0.0", default-features = false, features = ["test-util"] }

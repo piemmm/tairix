@@ -55,7 +55,8 @@ pub(super) fn grounded(stage: &mut Stage) {
         cliff: 0.6,
         bedding: 2.0,
         seed: 1,
-        road: None,
+        ways: None,
+        bounds: None,
         floor: None,
     };
     let material = stage

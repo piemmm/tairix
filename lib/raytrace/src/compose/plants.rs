@@ -46,6 +46,9 @@ pub(super) enum Kind {
     Palm,
     Saguaro,
     Hazel,
+    /// The hedge's thorn: dense and twiggy, white with blossom in May, red
+    /// with haws in autumn.
+    Hawthorn,
     Box,
     Heather,
     Gorse,
@@ -71,7 +74,7 @@ impl Kind {
     pub(super) const fn shrub(self) -> bool {
         matches!(
             self,
-            Self::Hazel | Self::Box | Self::Heather | Self::Gorse | Self::Fern
+            Self::Hazel | Self::Hawthorn | Self::Box | Self::Heather | Self::Gorse | Self::Fern
         )
     }
 
@@ -85,6 +88,7 @@ impl Kind {
             Self::Heather | Self::Gorse => (0.5, 0.5),
             Self::Oak => (0.5, 0.15),
             Self::Hazel => (0.52, 0.52),
+            Self::Hawthorn => (0.48, 0.48),
             Self::Box => (0.47, 0.47),
             Self::Olive => (0.43, 0.135),
             Self::Beech => (0.42, 0.13),
@@ -1596,6 +1600,7 @@ fn species(kind: Kind) -> Species {
             snapped: false,
         },
         Kind::Hazel
+        | Kind::Hawthorn
         | Kind::Box
         | Kind::Heather
         | Kind::Gorse
@@ -1610,6 +1615,7 @@ fn species(kind: Kind) -> Species {
 fn shrub(kind: Kind) -> Species {
     let (height, trunks, leaf, per_twig, outline) = match kind {
         Kind::Hazel => ((3.0, 5.0), 7, 0.1, 16, Outline::Ovate { teeth: 12 }),
+        Kind::Hawthorn => ((2.0, 4.0), 6, 0.035, 34, Outline::Ovate { teeth: 7 }),
         Kind::Box => ((0.8, 1.6), 6, 0.025, 30, Outline::Ovate { teeth: 0 }),
         Kind::Heather => ((0.3, 0.6), 8, 0.01, 36, Outline::Lanceolate),
         Kind::Fern => ((0.4, 1.1), 1, 0.12, 12, Outline::Shoot { count: 12 }),
@@ -1672,7 +1678,7 @@ fn shrub(kind: Kind) -> Species {
             angle: 50.0,
             toward_light: 0.6,
         },
-        evergreen: !matches!(kind, Kind::Hazel),
+        evergreen: !matches!(kind, Kind::Hazel | Kind::Hawthorn),
         snapped: false,
     }
 }
@@ -1690,6 +1696,8 @@ fn bark(kind: Kind, seed: u32) -> Bark {
         Kind::Maple => (BarkKind::Furrowed, 0x6E_62_56, 0x32_2A_24, 0x88_8E_74, 0.0),
         // Smooth and coppery, banded with pale lenticels, peeling thinly.
         Kind::Hazel => (BarkKind::Banded, 0x7E_60_4C, 0x3E_2E_24, 0xA8_9A_86, 0.0),
+        // Grey-brown, fissured into small plates as it ages.
+        Kind::Hawthorn => (BarkKind::Furrowed, 0x76_6C_62, 0x34_2E_2A, 0x8E_92_78, 0.0),
         // Glossy mahogany, darker than it looks in the sun, peeling coppery.
         Kind::Cherry => (BarkKind::Banded, 0x4E_2C_26, 0x1C_11_0F, 0x74_5E_52, 0.0),
         Kind::Birch => (BarkKind::Papery, 0xC8_C4_BC, 0x22_20_1E, 0xBC_AC_9C, 0.0),
@@ -1738,7 +1746,7 @@ fn sloughs(kind: Kind) -> f64 {
         Kind::Oak | Kind::Olive => 0.25,
         Kind::Palm | Kind::Saguaro | Kind::Fern | Kind::Box | Kind::Heather | Kind::Gorse => 0.3,
         Kind::Cherry => 0.4,
-        Kind::Maple | Kind::Hazel => 0.45,
+        Kind::Maple | Kind::Hazel | Kind::Hawthorn => 0.45,
         Kind::Pine | Kind::Willow | Kind::Poplar => 0.5,
         Kind::Spruce => 0.65,
         Kind::Beech => 0.75,
@@ -1751,7 +1759,7 @@ fn bark_depth(kind: Kind) -> f64 {
         Kind::Oak | Kind::Pine => 0.024,
         Kind::Poplar | Kind::Willow | Kind::Olive => 0.012,
         Kind::Saguaro => RIB_DEPTH * saguaro_girth(5.5) / (1.0 - FELT),
-        Kind::Maple | Kind::Hazel => 0.008,
+        Kind::Maple | Kind::Hazel | Kind::Hawthorn => 0.008,
         Kind::Palm => 0.006,
         Kind::Birch => 0.005,
         Kind::Spruce | Kind::Box | Kind::Heather | Kind::Gorse => 0.004,
@@ -1824,6 +1832,9 @@ fn palette(kind: Kind, season: Season) -> [u32; 4] {
         Kind::Saguaro => [0x6A_32_24, 0xB0_96_6E, 0x8E_8A_80, 0xC4_C0_B6],
         Kind::Hazel if autumn => [0xC8_B0_40, 0xB0_98_34, 0xD8_C0_50, 0x9A_84_2C],
         Kind::Hazel => [0x4E_7C_2A, 0x5C_8A_33, 0x44_6E_24, 0x68_94_3A],
+        Kind::Hawthorn if spring => [0xF2_EE_E2, 0x5A_84_30, 0xFA_F6_EE, 0x4C_76_2A],
+        Kind::Hawthorn if autumn => [0x6A_5A_2A, 0xA0_28_1E, 0x5A_4A_24, 0xB8_34_22],
+        Kind::Hawthorn => [0x3C_60_26, 0x4A_70_2E, 0x32_52_1E, 0x56_7C_34],
         Kind::Box => [0x2E_50_1E, 0x38_5C_24, 0x28_46_1A, 0x42_66_2A],
         Kind::Heather => [0x7A_4A_8A, 0x8C_5A_9A, 0x5E_3A_6C, 0x3E_5A_2A],
         Kind::Gorse => [0x3A_5A_24, 0xE8_C8_20, 0x32_50_1E, 0xF0_D0_30],

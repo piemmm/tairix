@@ -31,7 +31,6 @@ use core::f64::consts::TAU;
 use tairix_util::mathf::{self, fmax, fmin};
 
 use crate::heightfield::{Attributes, Heightfield, ABSENT, CHANNELS};
-use crate::land::decode_lane;
 use crate::leaf::Outline;
 use crate::noise::{cell, cells2, hash2, noise2, smoothstep};
 use crate::sample::{mix32, mix64, unit};
@@ -561,8 +560,7 @@ impl Lawn {
         if thrives <= THRIVES {
             return None;
         }
-        let [wet, _, lane, _, snow] = field.attributes_at(middle.0, middle.1);
-        let (_, path) = decode_lane(lane);
+        let [wet, _, _, path, _, snow] = field.attributes_at(middle.0, middle.1);
         let (index, kind) = self.kind(grass, (middle, hash2(cx, cz, self.seed)), (wet, path))?;
         let sward = self.sward(middle);
         let (thickness, grown) = sward.growth(kind.tufted);
@@ -611,8 +609,8 @@ impl Lawn {
     /// `stand`, in the bytes a canopy grid's vertex keeps: its kind, vigour
     /// and splay; its shoots, as a share of the most its kind holds; its
     /// stature, as a share of the rankest; and the way out from its tussock,
-    /// in 256ths of a turn. The channel a land keeps its snow in stays
-    /// empty. No shoots at all packs as none.
+    /// in 256ths of a turn. The channels a land keeps its growth and its
+    /// snow in stay empty. No shoots at all packs as none.
     fn pack(&self, grass: &Grass, stand: &Stand) -> Attributes {
         let kind = (stand.marks >> KIND_SHIFT) & KIND_MASK;
         let vigour = (stand.marks >> VIGOUR_SHIFT) & VIGOUR_STEPS;
@@ -627,12 +625,13 @@ impl Lawn {
             byte(stand.stature / RANKEST),
             u8::try_from(heading & 0xff).unwrap_or(0),
             0,
+            0,
         ]
     }
 
     /// The stand the bytes `packed` keep for the cell about `middle`.
     fn unpack(&self, grass: &Grass, packed: Attributes, middle: (f64, f64)) -> Option<Stand> {
-        let [head, shoots, stature, heading, _] = packed;
+        let [head, shoots, stature, heading, _, _] = packed;
         if shoots == 0 {
             return None;
         }
@@ -851,8 +850,7 @@ impl Lawn {
         if near <= 0.0 {
             return 0.0;
         }
-        let [_, _, lane, green, _] = field.attributes_at(x, z);
-        let (road, path) = decode_lane(lane);
+        let [_, _, road, path, green, _] = field.attributes_at(x, z);
         let (under, hidden) = self
             .shade
             .as_ref()

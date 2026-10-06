@@ -26,6 +26,10 @@ tairix-colour = { path = "../colour", version = "=0.0.0" }
 # Water's work on a land: drainage, incision, creep and slumping, droplet
 # erosion, and the router a road finds its way by.
 tairix-terrain = { path = "../terrain", version = "=0.0.0" }
+# The countryside a farmed land is laid out in: its holdings, the ways between
+# its farms and villages, its fields, their boundaries and gates, and the
+# farmsteads' yards.
+tairix-countryside = { path = "../countryside", version = "=0.0.0" }
 # The runner a scene's grids are prepared across, so a caller holding the
 # desktop's pool fills them on every core.
 tairix-parallel = { path = "../parallel", version = "=0.0.0", default-features = false }

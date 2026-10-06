@@ -473,3 +473,44 @@ fn a_snag_stands_snapped_off_thick_its_limbs_broken() {
         }
     }
 }
+
+/// Where a tree bears its leaves: the share in each quarter about its crown's
+/// middle, then in its upper and lower halves.
+fn leaf_shares(tree: &Prototype) -> [f64; 6] {
+    let middle = tree.bounds().centre();
+    let mut counts = [0usize; 6];
+    for part in tree.parts() {
+        if let Part::Leaf(leaf) = part {
+            let at = crate::prototype::point(leaf.base) - middle;
+            counts[usize::from(at.x >= 0.0) + 2 * usize::from(at.z >= 0.0)] += 1;
+            counts[4 + usize::from(at.y >= 0.0)] += 1;
+        }
+    }
+    let leaves = crate::vector::real(counts[4] + counts[5]).max(1.0);
+    counts.map(|count| crate::vector::real(count) / leaves)
+}
+
+/// A tree that would bear more leaves than one tree may hold bears as many
+/// as its budget leaves room for, nearly all of it spent, and thins every
+/// twig alike: its leaves stand over its crown in the very proportions the
+/// same tree bears them where it has room for all.
+#[test]
+fn a_tree_too_leafy_for_its_budget_thins_every_twig_alike() {
+    let mut leafy = species();
+    leafy.leafing.per_twig = 4000;
+    let tree = grown_as(&leafy, Season::Summer, 5);
+    let parts = tree.parts().len();
+    assert!(parts <= MOST_PARTS, "{parts} parts");
+    assert!(
+        parts * 100 > MOST_PARTS * 97,
+        "only {parts} of {MOST_PARTS} spent"
+    );
+    let unbudgeted = grown_as(&species(), Season::Summer, 5);
+    let (thinned, natural) = (leaf_shares(&tree), leaf_shares(&unbudgeted));
+    for (part, (thinned, natural)) in thinned.iter().zip(natural).enumerate() {
+        assert!(
+            (thinned - natural).abs() < 0.02,
+            "share {part}: {thinned} thinned where the tree bears {natural}"
+        );
+    }
+}

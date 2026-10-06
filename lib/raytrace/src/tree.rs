@@ -166,6 +166,9 @@ pub(crate) struct Stock {
 /// in leaf holds nearly this many, most of them leaves at their real size.
 pub(crate) const MOST_PARTS: usize = 150_000;
 
+/// The share of a twig's length from its base that bears no leaves.
+const LEAFLESS_FOOT: f64 = 0.25;
+
 /// A stem being grown.
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct Stem {
@@ -368,10 +371,12 @@ impl Grower {
             .twigs()
             .map_or(1, |twigs| twigs.segments.max(1)) as usize;
         let tubes = twigs.saturating_mul(segments);
-        let leaves = twigs.saturating_mul(self.species.leafing.per_twig as usize);
-        let room = MOST_PARTS.saturating_sub(self.assembly.parts() + tubes);
+        let leaves =
+            crate::vector::real(twigs.saturating_mul(self.species.leafing.per_twig as usize))
+                * (1.0 - LEAFLESS_FOOT);
+        let room = crate::vector::real(MOST_PARTS.saturating_sub(self.assembly.parts() + tubes));
         self.leaf_share = if leaves > room {
-            crate::vector::real(room) / crate::vector::real(leaves.max(1))
+            room / leaves.max(1.0)
         } else {
             1.0
         };
@@ -883,7 +888,7 @@ impl Grower {
             }
             let along = (f64::from(index) + self.unit()) / f64::from(leaves.max(1));
             // Leaves crowd toward a twig's tip, and none near its base.
-            if s0 + along / segments < 0.25 {
+            if s0 + along / segments < LEAFLESS_FOOT {
                 continue;
             }
             let base = from + (to - from) * along;

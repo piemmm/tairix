@@ -733,15 +733,23 @@ impl<'a> Tracer<'a> {
         }
         let sky = self.lit_air(ray, t);
         // What the eye sees of the air is shadowed by what stands in the
-        // sun's way; a bounce's shorter, dimmer stretch takes the sky's
-        // roofing for the sun's too.
-        let lit = || Lit {
-            sun: if path.depth == 0 && !path.scattered {
-                self.sunlit_air(ray, t, sampler)
+        // sun's way, judged at one point drawn along it as that air gathers
+        // its sunlight; a bounce's shorter, dimmer stretch takes the sky's
+        // roofing for the sun's too, and its middle for the sky overhead.
+        let lit = || {
+            let (sun, at) = if path.depth == 0 && !path.scattered {
+                let at = ray.at(self.scene.sky.drawn(ray.dir, (0.0, t), sampler.next_1d()));
+                (self.sunlit_air(at), at)
             } else {
-                Vec3::splat(sky)
-            },
-            sky,
+                (Vec3::splat(sky), ray.at(0.5 * t))
+            };
+            let (open, glow) = self.scene.sky.beneath(at);
+            Lit {
+                sun,
+                sky,
+                open,
+                glow,
+            }
         };
         self.scene
             .sky
@@ -749,17 +757,15 @@ impl<'a> Tracer<'a> {
             .unwrap_or(light)
     }
 
-    /// How much of the sun's light reaches the air along `ray` out to `t`,
-    /// judged at one point drawn along it as that air gathers its sunlight:
-    /// what stands between that point and the sun, and the clouds overhead.
-    /// Drawn afresh for each of a pixel's samples, the points average to the
+    /// How much of the sun's light reaches the air at `at`: what stands
+    /// between it and the sun, and the clouds overhead. Drawn afresh along
+    /// the air for each of a pixel's samples, the points average to the
     /// share of the air lit, so shafts through a wood's gaps glow and its
     /// shadow does not.
-    fn sunlit_air(&self, ray: &Ray, t: f64, sampler: &mut Sampler) -> Vec3 {
+    fn sunlit_air(&self, at: Vec3) -> Vec3 {
         let Some(toward) = self.sun else {
             return Vec3::ONE;
         };
-        let at = ray.at(self.scene.sky.drawn(ray.dir, (0.0, t), sampler.next_1d()));
         self.scene
             .transmittance(&Ray::new(at, toward), f64::INFINITY, None)
             * self.scene.sky.clouded(at, toward)

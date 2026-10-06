@@ -15,7 +15,14 @@ use core::f64::consts::{FRAC_PI_2, PI, TAU};
 use tairix_parallel::JobRunner;
 use tairix_util::{fallible, mathf};
 
+use tairix_countryside::boundary::Style;
+use tairix_countryside::network::Rank;
+use tairix_countryside::site::Villages;
+use tairix_countryside::usage::Mix;
+use tairix_countryside::{self as countryside, Point};
+
 use super::architecture::Aqueduct;
+use super::fields;
 use super::courses::{Dressing, Mason, Opening, Quarry, Ring, Wall, Weathering};
 use super::cracked;
 use super::plants::{self, Character, Fallen, Grassland, Grove, Kind, Stand, Tier};
@@ -32,11 +39,11 @@ use crate::solid::Form;
 use crate::channel::{Section, Station};
 use crate::course::Mark;
 use crate::grass::Seen;
-use crate::ground::{Ground, Palette, Road, Rock};
+use crate::ground::{Ground, Palette, Rock};
 use crate::heightfield::Heightfield;
 use crate::land::{
-    self, Build, Crossing, Fields, Horizon, Laid, Land, Lie, NearWater, Nest, Plan, Rivers,
-    Roadway, Surface, Survey, Wear, NESTS,
+    self, Build, Crossing, Farming, Fields, Horizon, Laid, Land, Lie, NearWater, Nest, Plan,
+    Rivers, Roadway, Surface, Survey, Ways, Wear, NESTS,
 };
 use crate::material::{Finish, Foam, Material, Relief, Wind};
 use crate::noise::smoothstep;
@@ -201,7 +208,8 @@ pub(super) fn ground(
         cliff,
         bedding,
         seed: dice.seed(),
-        road: None,
+        ways: None,
+        bounds: None,
         floor: None,
     };
     // Grain a few centimetres across: the land's own grids carry every
@@ -371,6 +379,7 @@ pub(super) enum Scheme {
     /// A scene already set out and seen, on a land about it.
     Set(Set),
     Meadow,
+    Farmland,
     Forest {
         glade: f64,
     },
@@ -428,7 +437,7 @@ impl Scheme {
         survey: &Survey<'_>,
         runner: &dyn JobRunner,
     ) -> Option<(Option<Vantage>, Siting)> {
-        let vantage = match *self {
+        match *self {
             Self::Set(ref set) => {
                 let focus = set
                     .planting
@@ -440,12 +449,41 @@ impl Scheme {
                     path: None,
                     cuttings: Vec::new(),
                 };
-                return Some((None, siting));
+                Some((None, siting))
             }
+            Self::Sculpture(grounds) => {
+                let scheme = grounds.scheme();
+                let vantage = room_ahead(survey, scheme.vantage(dice, survey, runner)?);
+                scheme.sited(dice, survey, vantage)
+            }
+            _ => {
+                let vantage = self.vantage(dice, survey, runner)?;
+                self.sited(dice, survey, vantage)
+            }
+        }
+    }
+
+    /// Where the eye stands on the far land `survey` shows; `None` for a
+    /// scheme that sites no eye of its own: a scene already set, or a
+    /// sculpture, whose grounds site it.
+    fn vantage(
+        &self,
+        dice: &mut Dice,
+        survey: &Survey<'_>,
+        runner: &dyn JobRunner,
+    ) -> Option<Vantage> {
+        Some(match *self {
+            Self::Set(_) | Self::Sculpture(_) => return None,
             Self::Meadow => {
                 let rise = dice.range(1.6, 3.0);
                 overlook(survey, dice, rise)
             }
+            Self::Farmland => lane_vantage(survey, dice)
+                .filter(|_| dice.chance(0.45))
+                .unwrap_or_else(|| {
+                    let rise = dice.range(1.6, 4.0);
+                    overlook(survey, dice, rise)
+                }),
             Self::Forest { glade } => {
                 let heading = dice.range(0.0, TAU);
                 let back = glade * dice.range(0.6, 0.9);
@@ -501,8 +539,17 @@ impl Scheme {
                 overlook(survey, dice, rise)
             }),
             Self::Aqueduct(ref aqueduct) => aqueduct.site(survey, dice),
-            Self::Sculpture(grounds) => return grounds.scheme().site(dice, survey, runner),
-        };
+        })
+    }
+
+    /// The finer grids laid about `vantage`, and the cuttings and footpath
+    /// worn into them; `None` when the heap will not hold a path.
+    fn sited(
+        &self,
+        dice: &mut Dice,
+        survey: &Survey<'_>,
+        vantage: Vantage,
+    ) -> Option<(Option<Vantage>, Siting)> {
         let mut siting = Siting::ahead(&vantage);
         if let Self::Aqueduct(ref aqueduct) = *self {
             siting.cuttings = aqueduct.cuttings(&|x, z| survey.height(x, z))?;
@@ -510,6 +557,8 @@ impl Scheme {
         }
         let paths = match self {
             Self::Meadow | Self::Valley => 0.4,
+            // A farmed land's paths are its countryside's own.
+            Self::Farmland => 0.0,
             Self::Forest { .. } => 0.5,
             Self::Alpine { .. } | Self::Winter { .. } => 0.25,
             _ => 0.0,
@@ -528,7 +577,7 @@ impl Scheme {
         land: &mut Land,
         vantage: Option<Vantage>,
     ) -> Option<Look> {
-        paint_road(stage, land);
+        paint_ways(stage, land);
         self.scene(stage, dice, land, vantage)
     }
 
@@ -543,6 +592,7 @@ impl Scheme {
         match self {
             Self::Set(set) => set.plant(stage, dice),
             Self::Meadow => meadow_scene(stage, dice, land, vantage?),
+            Self::Farmland => farmland_scene(stage, dice, land, vantage?),
             Self::Forest { glade } => forest_scene(stage, dice, land, (vantage?, glade)),
             Self::Alpine { lake } => alpine_scene(stage, dice, land, (vantage?, lake)),
             Self::Coast { centre, out } => coast_scene(stage, dice, land, (vantage?, centre, out)),
@@ -568,16 +618,13 @@ fn main_crossing(crossings: &[Crossing]) -> Option<&Crossing> {
     crossings.iter().min_by(|a, b| a.water.total_cmp(&b.water))
 }
 
-/// A stone bridge carrying `land`'s road over each river it crosses: arches
-/// of voussoirs, segmental where the road runs low, springing from piers
-/// cutwatered against the stream; spandrels coursed about a core of rubble
-/// and mortar; parapets coped along its edges; its deck surfaced as the road
-/// is; founded in either bank. The road's bridges were built alike, of one
-/// stone, and are laid as one structure.
+/// A stone bridge carrying each of `land`'s ways over each river it crosses:
+/// arches of voussoirs, segmental where the way runs low, springing from
+/// piers cutwatered against the stream; spandrels coursed about a core of
+/// rubble and mortar; parapets coped along its edges; its deck surfaced as
+/// its way is; founded in either bank. A land's bridges were built alike, of
+/// one stone, and are laid as one structure.
 fn bridges(stage: &mut Stage, dice: &mut Dice, land: &Land) -> Option<()> {
-    let Some(roadway) = land.road else {
-        return Some(());
-    };
     if land.crossings.is_empty() {
         return Some(());
     }
@@ -600,7 +647,7 @@ fn bridges(stage: &mut Stage, dice: &mut Dice, land: &Land) -> Option<()> {
         let (from, to) = (crossing.from, crossing.to);
         let length = mathf::hypot(to.x - from.x, to.z - from.z);
         if length >= 1.0 {
-            bridge(stage, dice, &mut mason, (crossing, roadway, length))?;
+            bridge(stage, dice, &mut mason, (crossing, length))?;
         }
     }
     stage.raise(mason, Pose::new(Vec3::ZERO, Frame::WORLD), dice.seed())?;
@@ -643,13 +690,12 @@ fn piers(
     Some(())
 }
 
-/// Lay one bridge over `crossing`, `length` from bank to bank, carrying
-/// `roadway`.
+/// Lay one bridge over `crossing`, `length` from bank to bank.
 fn bridge(
     stage: &mut Stage,
     dice: &mut Dice,
     mason: &mut Mason,
-    (crossing, roadway, length): (&Crossing, Roadway, f64),
+    (crossing, length): (&Crossing, f64),
 ) -> Option<()> {
     let (from, to) = (crossing.from, crossing.to);
     let heading = mathf::atan2(to.x - from.x, to.z - from.z);
@@ -659,7 +705,7 @@ fn bridge(
         0.0,
         f64::midpoint(from.z, to.z),
     );
-    let half = 0.5 * roadway.width + 0.45;
+    let half = 0.5 * crossing.from.width.max(crossing.to.width) + 0.45;
     let run = length + 4.0;
     stage.claim_along(
         (
@@ -728,7 +774,7 @@ fn bridge(
         dice,
         (foot, crossing.deck - bed),
         (run, half - 0.38),
-        roadway,
+        crossing.surface,
     )
 }
 
@@ -808,15 +854,15 @@ fn parapet(
 
 /// The deck of the bridge laid at `foot`, `deck` above it, `run` long and
 /// `half` either side of its line between the parapets: flagged where its
-/// road is a track or gravel, a slab of tarmac where it is tarmac.
+/// way is a track or gravel, a slab of tarmac where it is tarmac.
 fn deck(
     mason: &mut Mason,
     dice: &mut Dice,
     (foot, deck): (Pose, f64),
     (run, half): (f64, f64),
-    roadway: Roadway,
+    surface: Surface,
 ) -> Option<()> {
-    if roadway.surface == Surface::Tarmac {
+    if surface == Surface::Tarmac {
         let middle = foot.point_to_world(Vec3::new(0.0, deck - 0.06, 0.0));
         return mason.unit(
             (
@@ -932,7 +978,7 @@ fn bridge_spot(
 
 /// Whether the land `height` gives leaves `target` in sight from `eye`: no
 /// ground rising into the line between them.
-fn in_sight(height: &dyn Fn(f64, f64) -> f64, eye: Vec3, target: Vec3) -> bool {
+pub(super) fn in_sight(height: &dyn Fn(f64, f64) -> f64, eye: Vec3, target: Vec3) -> bool {
     let steps = 48;
     (1..steps).all(|step| {
         let t = f64::from(step) / f64::from(steps);
@@ -941,20 +987,14 @@ fn in_sight(height: &dyn Fn(f64, f64) -> f64, eye: Vec3, target: Vec3) -> bool {
     })
 }
 
-/// Paint `land`'s road onto its ground, the road's course handed to the
+/// Paint `land`'s ways onto its ground, their courses handed to the
 /// ground's pigment.
-fn paint_road(stage: &mut Stage, land: &mut Land) {
-    let Some(roadway) = land.road else {
-        return;
-    };
-    if land.roads.len() == 0 {
+fn paint_ways(stage: &mut Stage, land: &mut Land) {
+    if land.ways.surfaced.iter().all(|courses| courses.len() == 0) {
         return;
     }
     if let Some(ground) = ground_of(stage, land) {
-        ground.road = Some(Road {
-            surface: roadway.surface,
-            courses: core::mem::take(&mut land.roads),
-        });
+        ground.ways = Some(core::mem::replace(&mut land.ways, Ways::none()));
     }
 }
 
@@ -1128,6 +1168,7 @@ pub(super) fn backdrop(
         wear: GENTLE,
         rivers: None,
         road: None,
+        farming: None,
         roughness: 0.6,
         ridges: 0.35,
         droplets: 0.03,
@@ -1535,14 +1576,11 @@ fn lies_still(lie: &Lie) -> bool {
 /// A large ball of something that shows light off, resting in the land
 /// ahead of the eye: chrome, gold, glass.
 fn marvel(stage: &mut Stage, dice: &mut Dice, land: &Land, vantage: &Vantage) -> Option<()> {
-    let Vantage { eye, heading } = *vantage;
-    let distance = dice.range(7.0, 16.0);
-    let angle = heading + dice.range(-0.25, 0.25);
-    let (x, z) = (
-        eye.x + mathf::sin(angle) * distance,
-        eye.z + mathf::cos(angle) * distance,
-    );
     let radius = dice.range(0.8, 1.8);
+    let Some((x, z)) = standing_room(stage, dice, land, vantage, ((7.0, 16.0), 0.25), radius)
+    else {
+        return Some(());
+    };
     stage.claim((x, z), radius)?;
     let material = match dice.count(0, 3) {
         0 => stage.metal(Vec3::splat(0.93), 0.0)?,
@@ -1686,6 +1724,7 @@ pub(super) fn meadow(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
             outcrops: 0.05,
         }),
         road,
+        farming: None,
         roughness: 1.2,
         ridges: 0.35,
         droplets: 0.05,
@@ -1768,6 +1807,292 @@ fn meadow_scene(stage: &mut Stage, dice: &mut Dice, land: &Land, vantage: Vantag
     Some(look(weather, view, 1.0))
 }
 
+/// A farmed country's custom: how its fields are bounded and what they are
+/// used for, the soil its grass grows in, how high its hills rise, how
+/// wooded it is, how much stone lies at hand in it wherever it is, and the
+/// shares of its lanes tarmacked and gravelled.
+#[derive(Copy, Clone, Debug)]
+struct Region {
+    style: Style,
+    mix: Mix,
+    soil: Soil,
+    hills: (f64, f64),
+    wooded: (f64, f64),
+    stone: f64,
+    lanes: (f64, f64),
+}
+
+/// The farmed countries a farmland is drawn from: lowland hedge country,
+/// upland wall country, drained levels cut by ditches, and vine country.
+const REGIONS: [Region; 4] = [
+    Region {
+        style: Style {
+            hedge: 1.0,
+            wall: 0.08,
+            fence: 0.3,
+            ditch: 0.12,
+            open: 0.04,
+        },
+        mix: Mix {
+            arable: 1.0,
+            pasture: 0.9,
+            meadow: 0.45,
+            orchard: 0.12,
+            vineyard: 0.0,
+            woodlot: 0.15,
+            overgrown: 0.08,
+        },
+        soil: GREEN,
+        hills: (35.0, 90.0),
+        wooded: (0.15, 0.35),
+        stone: 0.05,
+        lanes: (0.55, 0.6),
+    },
+    Region {
+        style: Style {
+            hedge: 0.25,
+            wall: 1.2,
+            fence: 0.2,
+            ditch: 0.04,
+            open: 0.04,
+        },
+        mix: Mix {
+            arable: 0.25,
+            pasture: 1.0,
+            meadow: 0.6,
+            orchard: 0.02,
+            vineyard: 0.0,
+            woodlot: 0.1,
+            overgrown: 0.2,
+        },
+        soil: HIGHLAND,
+        hills: (80.0, 150.0),
+        wooded: (0.05, 0.2),
+        stone: 0.75,
+        lanes: (0.35, 0.5),
+    },
+    Region {
+        style: Style {
+            hedge: 0.4,
+            wall: 0.0,
+            fence: 0.35,
+            ditch: 1.4,
+            open: 0.15,
+        },
+        mix: Mix {
+            arable: 1.0,
+            pasture: 0.6,
+            meadow: 0.35,
+            orchard: 0.05,
+            vineyard: 0.0,
+            woodlot: 0.05,
+            overgrown: 0.05,
+        },
+        soil: GREEN,
+        hills: (6.0, 18.0),
+        wooded: (0.05, 0.15),
+        stone: 0.0,
+        lanes: (0.6, 0.5),
+    },
+    Region {
+        style: Style {
+            hedge: 0.25,
+            wall: 0.7,
+            fence: 0.4,
+            ditch: 0.05,
+            open: 0.3,
+        },
+        mix: Mix {
+            arable: 0.6,
+            pasture: 0.3,
+            meadow: 0.2,
+            orchard: 0.4,
+            vineyard: 0.9,
+            woodlot: 0.2,
+            overgrown: 0.3,
+        },
+        soil: GOLDEN,
+        hills: (50.0, 120.0),
+        wooded: (0.15, 0.3),
+        stone: 0.45,
+        lanes: (0.4, 0.7),
+    },
+];
+
+/// Farmland: country cut into fields, their hedges, walls, fences and
+/// ditches about them, lanes and tracks between them from farmstead to
+/// farmstead, and now and then a road through it all.
+pub(super) fn farmland(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
+    let reach = 4000.0;
+    let region = dice.pick(&REGIONS)?;
+    let height = dice.range(region.hills.0, region.hills.1);
+    let relief = Terrain {
+        form: Landform::Hills {
+            scale: dice.range(650.0, 1300.0),
+            height,
+            seed: dice.seed(),
+        },
+        datum: 0.0,
+        centre: (0.0, 0.0),
+        radius: reach,
+        rim: None,
+        tilt: tilt(dice, height / reach),
+        clearing: None,
+    };
+    let road = if dice.chance(0.45) {
+        Some(roadway(dice, &[Surface::Tarmac])?)
+    } else {
+        None
+    };
+    let spacing = dice.range(420.0, 620.0);
+    let farming = Farming {
+        spacing,
+        villages: Villages {
+            spacing: spacing * dice.range(4.5, 6.0),
+            exclusion: 0.75,
+            gathers: 0.28,
+        },
+        style: region.style,
+        mix: region.mix,
+        wooded: dice.range(region.wooded.0, region.wooded.1),
+        stone: region.stone,
+        reach: FARMED,
+        lanes: region.lanes,
+    };
+    let plan = Plan {
+        relief,
+        reach,
+        sea: None,
+        wear: Wear {
+            passes: 28,
+            incision: 1.6e-3,
+            creep: 0.09,
+            repose: 0.9,
+            infill: 0.35,
+            strata: None,
+        },
+        rivers: Some(Rivers {
+            catchment: 5.0e5,
+            width: 3.0,
+            meander: 1.3,
+            flowing: 1.0,
+            ledges: 0.0,
+            outcrops: 0.04,
+        }),
+        road,
+        farming: Some(farming),
+        roughness: 0.9,
+        ridges: 0.25,
+        droplets: 0.04,
+        cells: (256, 1024),
+        nests: nests((700.0, 80.0), (0.06, 0.1)),
+        near_water: None,
+        horizon: Some(horizon(reach)),
+        snow_line: None,
+        snowpack: None,
+        pond: None,
+        growth: 1.0,
+        seed: dice.seed(),
+    };
+    let material = ground(stage, dice, &region.soil, (-1e3, NO_SNOW, 0.72), 4.0)?;
+    let water = river(stage, dice)?;
+    let build = lay(stage, plan, material, Some(water))?;
+    Some(Composed::Landed(Landing {
+        build,
+        scheme: Scheme::Farmland,
+        vantage: None,
+    }))
+}
+
+/// How far about a farmed land's middle its countryside is laid out: out to
+/// where the horizon's land takes over from the far grid's.
+const FARMED: f64 = 3600.0;
+
+/// Standing in a lane or on a track near the land's middle, looking along
+/// it, if one runs there.
+fn lane_vantage(survey: &Survey<'_>, dice: &mut Dice) -> Option<Vantage> {
+    let layout = survey.layout()?;
+    let (centre, _) = survey.extent();
+    let near = |way: &&countryside::layout::Way| {
+        matches!(way.id.rank, Rank::Lane | Rank::Track)
+            && way.line.stations.len() > 40
+            && way
+                .line
+                .nearest(Point::new(centre.0, centre.1))
+                .is_some_and(|(near, _)| near.distance < 900.0)
+    };
+    let lanes: Vec<&countryside::layout::Way> = layout.ways().filter(near).collect();
+    let lane = lanes.get(usize::try_from(dice.count(0, u32::try_from(lanes.len()).ok()?.checked_sub(1)?)).ok()?)?;
+    let stations = &lane.line.stations;
+    let middle = stations.len() / 2 + usize::try_from(dice.count(0, 10)).ok()?;
+    let (here, ahead) = (stations.get(middle)?, stations.get(middle + 8)?);
+    let heading = mathf::atan2(ahead.at.x - here.at.x, ahead.at.y - here.at.y);
+    let lie = survey.lie(here.at.x, here.at.y);
+    if survey.wet_at(here.at.x, here.at.y) || lie.upright < 0.85 {
+        return None;
+    }
+    Some(Vantage {
+        eye: stand(survey, (here.at.x, here.at.y), dice.range(1.55, 1.75)),
+        heading: heading + dice.angle(-6.0, 6.0),
+    })
+}
+
+fn farmland_scene(stage: &mut Stage, dice: &mut Dice, land: &Land, vantage: Vantage) -> Option<Look> {
+    bridges(stage, dice, land)?;
+    let kinds: &[Kind] = match dice.count(0, 2) {
+        0 => &[Kind::Oak, Kind::Willow, Kind::Poplar],
+        1 => &[Kind::Oak, Kind::Birch, Kind::Cherry],
+        _ => &[Kind::Maple, Kind::Oak, Kind::Poplar],
+    };
+    let season = dice.pick(&[
+        Season::Spring,
+        Season::Summer,
+        Season::Summer,
+        Season::Autumn { fallen: 10 },
+    ])?;
+    let grove = Grove::new(stage, dice, (kinds, season), Stand::Open)?;
+    let eye = vantage.eye;
+    stage.keep_open((eye.x, eye.z), 2.5)?;
+    let grassland = Grassland {
+        fallen: grove
+            .of(kinds[0])
+            .and_then(|grown| Fallen::from(&grown, season, 0.4)),
+        ..plants::grassland(dice, Character::Meadow, season)
+    };
+    // A farmed land's woods are its woodlots, which its fields stand; the
+    // rest of its trees take to its streams.
+    let woodland = Woodland {
+        cover: 0.0,
+        patch: 180.0,
+        closure: (0.7, 1.6),
+        stature: (0.65, 0.9),
+        gaps: 0.1,
+        most: stage.densities.woods.meadow,
+        open: (4.0, 0.6),
+    };
+    fields::set_out(stage, dice, land, (&vantage, season, &grove))?;
+    stage.sow(Wood {
+        grove,
+        woodland,
+        rooting: Rooting {
+            streams: 0.6,
+            ..ANYWHERE
+        },
+        vantage,
+        beneath: None,
+        deadfall: None,
+    })?;
+    waterside::margins(stage, dice, ((eye.x, eye.z), season, None))?;
+    stage.sward = Some(Lawning {
+        eye: (eye.x, eye.z),
+        grassland,
+    });
+    let weather = weather::outdoors(stage, dice, &MEADOW, vantage.heading)?;
+    let fov = dice.angle(46.0, 62.0);
+    let view = view(stage, land, &vantage, (fov, dice.range(0.52, 0.68)));
+    Some(look(weather, view, 1.0))
+}
+
 const FOREST: Climate = Climate {
     hours: &[
         (Hour::Day, 4),
@@ -1819,6 +2144,7 @@ pub(super) fn forest(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
             outcrops: 0.1,
         }),
         road: None,
+        farming: None,
         roughness: 0.8,
         ridges: 0.3,
         droplets: 0.04,
@@ -2059,6 +2385,7 @@ pub(super) fn alpine(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
             outcrops: 0.3,
         }),
         road: None,
+        farming: None,
         roughness: 22.0,
         ridges: 0.75,
         droplets: 0.06,
@@ -2270,6 +2597,7 @@ pub(super) fn coast(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
             outcrops: 0.05,
         }),
         road: None,
+        farming: None,
         roughness: 1.5,
         ridges: 0.5,
         droplets: 0.05,
@@ -2625,6 +2953,7 @@ fn desert_of(stage: &mut Stage, dice: &mut Dice, dunes: bool) -> Option<Composed
         wear,
         rivers: None,
         road,
+        farming: None,
         roughness,
         ridges: if dunes { 0.0 } else { 0.6 },
         droplets: droplets.0,
@@ -2646,7 +2975,8 @@ fn desert_of(stage: &mut Stage, dice: &mut Dice, dunes: bool) -> Option<Composed
             cliff: 0.3,
             bedding: 2.0,
             seed: dice.seed(),
-            road: None,
+            ways: None,
+            bounds: None,
             floor: None,
         };
         // Wind ripples in the sand: a narrow band of lengths, steep, their
@@ -2677,7 +3007,7 @@ fn desert_of(stage: &mut Stage, dice: &mut Dice, dunes: bool) -> Option<Composed
 /// Beside the land's road, looking down it, if it has a road the eye can
 /// stand beside near the land's middle.
 fn road_vantage(survey: &Survey<'_>, dice: &mut Dice) -> Option<Vantage> {
-    let roads = survey.roads();
+    let roads = survey.ways().of(survey.road()?.surface);
     if roads.len() == 0 || !dice.chance(0.65) {
         return None;
     }
@@ -2724,6 +3054,161 @@ fn ahead(vantage: &Vantage, distance: f64, turn: f64) -> (f64, f64) {
     )
 }
 
+/// How many spots a piece looks over for room to stand on.
+const ROOM_TRIES: u32 = 32;
+
+/// How much a piece's ground may rise across it, as a share of its radius:
+/// level enough to stand it on, and the steepest it is stood on where no
+/// ground about is as level.
+const LEVEL_ENOUGH: f64 = 0.35;
+const STEEPEST_STAND: f64 = 0.7;
+
+/// Of up to [`ROOM_TRIES`] spots `distance` ahead of `vantage` and up to
+/// `turn` either side of its heading, the first with room for a piece
+/// `radius` across on level enough ground, or else the most level with room;
+/// `None` where none has room.
+fn standing_room(
+    stage: &Stage,
+    dice: &mut Dice,
+    land: &Land,
+    vantage: &Vantage,
+    reach: ((f64, f64), f64),
+    radius: f64,
+) -> Option<(f64, f64)> {
+    room_among(stage, dice, land, vantage, &[reach], radius)
+}
+
+/// [`standing_room`] over each of `reaches` in turn, a level spot in any of
+/// them before the most level of all.
+fn room_among(
+    stage: &Stage,
+    dice: &mut Dice,
+    land: &Land,
+    vantage: &Vantage,
+    reaches: &[((f64, f64), f64)],
+    radius: f64,
+) -> Option<(f64, f64)> {
+    let mut best: Option<(f64, (f64, f64))> = None;
+    for &((near, far), turn) in reaches {
+        for _ in 0..ROOM_TRIES {
+            let at = ahead(vantage, dice.range(near, far), dice.range(-turn, turn));
+            let Some(rise) = room(stage, land, at, radius) else {
+                continue;
+            };
+            if rise <= LEVEL_ENOUGH {
+                return Some(at);
+            }
+            if rise <= STEEPEST_STAND && best.is_none_or(|(least, _)| rise < least) {
+                best = Some((rise, at));
+            }
+        }
+    }
+    best.map(|(_, at)| at)
+}
+
+/// How much the ground `radius` about `at` rises across it, as a share of
+/// the radius, where it is dry, off every way and clear of every piece
+/// standing; `None` where it is not.
+fn room(stage: &Stage, land: &Land, at: (f64, f64), radius: f64) -> Option<f64> {
+    if !stage.clear(at, radius) {
+        return None;
+    }
+    let fields = &stage.fields;
+    let (mut low, mut high) = (f64::INFINITY, f64::NEG_INFINITY);
+    for (x, z) in rim_and_middle(at, radius) {
+        let lie = land.grids.lie(fields, x, z);
+        if lie.road > 0.05 || lie.path > 0.3 || land.grids.wet_over(fields, (x, z), lie.height) {
+            return None;
+        }
+        low = low.min(lie.height);
+        high = high.max(lie.height);
+    }
+    Some((high - low) / radius.max(1.0))
+}
+
+/// The points a piece's ground is read at: [`RIM_POINTS`] about its rim
+/// `radius` from `at`, then `at` itself.
+fn rim_and_middle(at: (f64, f64), radius: f64) -> impl Iterator<Item = (f64, f64)> {
+    (0..RIM_POINTS)
+        .map(move |step| {
+            let angle = TAU * f64::from(step) / f64::from(RIM_POINTS);
+            (
+                at.0 + radius * mathf::sin(angle),
+                at.1 + radius * mathf::cos(angle),
+            )
+        })
+        .chain(core::iter::once(at))
+}
+
+/// How many points about its rim a piece's ground is read at.
+const RIM_POINTS: u32 = 8;
+
+/// `vantage`, its view kept, moved so the sculpture it frames has room: the
+/// eye stood [`FRAMED`] back from the spot nearest it, as far as the far land
+/// `survey` shows, with room for the largest sculpture — dry, level enough
+/// and off every way — and itself dry; as it was where it has such a spot
+/// ahead already or none is near.
+fn room_ahead(survey: &Survey<'_>, vantage: Vantage) -> Vantage {
+    let (sin, cos) = (mathf::sin(vantage.heading), mathf::cos(vantage.heading));
+    let rise = vantage.eye.y - survey.surface(vantage.eye.x, vantage.eye.z);
+    let eye = (vantage.eye.x, vantage.eye.z);
+    if surveyed_room(
+        survey,
+        (eye.0 + sin * FRAMED, eye.1 + cos * FRAMED),
+        LARGEST,
+    ) {
+        return vantage;
+    }
+    let mut nearest: Option<(f64, (f64, f64))> = None;
+    for ring in 1..=ROOM_RINGS {
+        let distance = ROOM_STEP * f64::from(ring);
+        let around = (TAU * distance / ROOM_STEP) as u32;
+        for step in 0..around {
+            let angle = TAU * f64::from(step) / f64::from(around);
+            let spot = (
+                eye.0 + distance * mathf::sin(angle),
+                eye.1 + distance * mathf::cos(angle),
+            );
+            let stood = (spot.0 - sin * FRAMED, spot.1 - cos * FRAMED);
+            if !survey.wet_at(stood.0, stood.1) && surveyed_room(survey, spot, LARGEST) {
+                nearest = Some((distance, stood));
+                break;
+            }
+        }
+        if nearest.is_some() {
+            break;
+        }
+    }
+    nearest.map_or(vantage, |(_, (x, z))| Vantage {
+        eye: Vec3::new(x, survey.surface(x, z) + rise, z),
+        heading: vantage.heading,
+    })
+}
+
+/// Whether the far land `survey` shows has room `radius` about `at` for a
+/// piece: dry, off every way, and level enough to stand it on with half the
+/// rise the finer land laid later may add to spare.
+fn surveyed_room(survey: &Survey<'_>, at: (f64, f64), radius: f64) -> bool {
+    let (mut low, mut high) = (f64::INFINITY, f64::NEG_INFINITY);
+    for (x, z) in rim_and_middle(at, radius) {
+        let lie = survey.lie(x, z);
+        if lie.road > 0.05 || survey.wet_at(x, z) {
+            return false;
+        }
+        low = low.min(lie.height);
+        high = high.max(lie.height);
+    }
+    high - low <= 0.5 * LEVEL_ENOUGH * radius.max(1.0)
+}
+
+/// How far ahead of the eye a sculpture is looked for room at first; how
+/// far apart the rings of spots about the eye lie, and how many it looks
+/// over; and the most ground a sculpture claims.
+const FRAMED: f64 = 40.0;
+const ROOM_STEP: f64 = 10.0;
+const ROOM_RINGS: u32 = 30;
+const LARGEST: f64 = 13.0;
+
 /// What stands on a sea of dunes: pyramids far off, now and then something
 /// nearer that catches the light, and the stones the wind has left bare.
 fn erg(stage: &mut Stage, dice: &mut Dice, land: &Land, vantage: &Vantage) -> Option<()> {
@@ -2741,7 +3226,7 @@ fn erg(stage: &mut Stage, dice: &mut Dice, land: &Land, vantage: &Vantage) -> Op
         for _ in 0..dice.count(1, 3) {
             let at = ahead(vantage, dice.range(400.0, 1400.0), dice.range(-0.5, 0.5));
             let half = dice.range(40.0, 140.0);
-            if !stage.clear(at, 1.2 * half) {
+            if room(stage, land, at, 1.2 * half).is_none() {
                 continue;
             }
             stage.claim(at, 1.2 * half)?;
@@ -2759,8 +3244,12 @@ fn erg(stage: &mut Stage, dice: &mut Dice, land: &Land, vantage: &Vantage) -> Op
             )?;
         }
     }
-    if dice.chance(0.4) {
-        let at = ahead(vantage, dice.range(14.0, 40.0), dice.range(-0.3, 0.3));
+    let near = if dice.chance(0.4) {
+        standing_room(stage, dice, land, vantage, ((14.0, 40.0), 0.3), 2.0)
+    } else {
+        None
+    };
+    if let Some(at) = near {
         stage.claim(at, 2.0)?;
         let base = Vec3::new(
             at.0,
@@ -2912,6 +3401,7 @@ pub(super) fn winter(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
         },
         rivers: None,
         road: None,
+        farming: None,
         roughness: 0.6,
         // Snow lies smooth over whatever the ground beneath it is, and
         // softens what water cut in it.
@@ -3155,6 +3645,7 @@ fn island(stage: &mut Stage, dice: &mut Dice, facing: f64) -> Option<Build> {
         },
         rivers: None,
         road: None,
+        farming: None,
         roughness: 1.0,
         ridges: 0.5,
         droplets: 0.04,
@@ -3293,6 +3784,7 @@ pub(super) fn canyon(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
             outcrops: 0.4,
         }),
         road: None,
+        farming: None,
         roughness: 2.5,
         ridges: 0.6,
         droplets: 0.06,
@@ -3316,44 +3808,53 @@ pub(super) fn canyon(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
     }))
 }
 
-/// How many spots a vantage is chosen among.
+/// How many spots a vantage's view is weighed from, and how many a side of
+/// the lattice its ground is looked over on.
 const SPOTS: usize = 32;
+const LATTICE: u32 = 32;
 
-/// Of a few level, dry spots on the far land, those on the lowest ground
-/// among them — within `terrace` of it — and of those the one looking
-/// furthest before the land stands across the view: the eye `rise` above
-/// it, and the way it looks. Where no spot is level and dry, the lowest one
-/// seen, looking its most open way, the eye clear of any water.
+/// Of the dry, level ground on the far land about its middle, the lowest
+/// terrace — within `terrace` of its lowest — found over a jittered lattice,
+/// and of a few spots on it the one looking furthest before the land stands
+/// across the view: the eye `rise` above it, and the way it looks. Where no
+/// ground is dry and level, the lowest seen, looking its most open way, the
+/// eye clear of any water.
 fn terrace_vantage(survey: &Survey<'_>, dice: &mut Dice, terrace: f64, rise: f64) -> Vantage {
     let (centre, reach) = survey.extent();
     let spread = 0.3 * reach;
+    let cell = 2.0 * spread / f64::from(LATTICE);
     let height = |x: f64, z: f64| survey.height(x, z);
-    let mut spots = [None; SPOTS];
     let mut lowest = (centre, f64::INFINITY);
-    for spot in &mut spots {
-        let at = (
-            centre.0 + dice.range(-spread, spread),
-            centre.1 + dice.range(-spread, spread),
-        );
-        let lie = survey.lie(at.0, at.1);
-        if lie.height < lowest.1 {
-            lowest = (at, lie.height);
-        }
-        if !survey.wet_at(at.0, at.1) && lie.upright >= 0.9 {
-            *spot = Some((at, lie.height));
+    let mut level: Vec<((f64, f64), f64)> = Vec::new();
+    // Without room for the level spots, the eye stands on the lowest seen.
+    let roomy = level
+        .try_reserve_exact((LATTICE * LATTICE) as usize)
+        .is_ok();
+    for row in 0..LATTICE {
+        for column in 0..LATTICE {
+            let at = (
+                centre.0 - spread + cell * (f64::from(column) + dice.unit()),
+                centre.1 - spread + cell * (f64::from(row) + dice.unit()),
+            );
+            let lie = survey.lie(at.0, at.1);
+            if lie.height < lowest.1 {
+                lowest = (at, lie.height);
+            }
+            if roomy && !survey.wet_at(at.0, at.1) && lie.upright >= 0.9 {
+                level.push((at, lie.height));
+            }
         }
     }
-    let floor = spots
+    let floor = level
         .iter()
-        .flatten()
-        .fold(f64::INFINITY, |floor, &(_, lie)| floor.min(lie));
+        .fold(f64::INFINITY, |floor, &(_, ground)| floor.min(ground));
+    level.retain(|&(_, ground)| ground <= floor + terrace);
+    // Spots spread evenly over the terrace, so its views are weighed from
+    // all over it rather than from one corner.
+    let every = level.len().div_ceil(SPOTS).max(1);
     let mut best: Option<(f64, (f64, f64), f64)> = None;
-    for &(at, lie) in spots
-        .iter()
-        .flatten()
-        .filter(|(_, lie)| *lie <= floor + terrace)
-    {
-        let eye = Vec3::new(at.0, lie + rise, at.1);
+    for &(at, ground) in level.iter().step_by(every) {
+        let eye = Vec3::new(at.0, ground + rise, at.1);
         for _ in 0..8 {
             let heading = dice.range(0.0, TAU);
             let open = openness(&height, eye, heading, (8.0_f64.to_radians(), 2500.0));
@@ -3473,6 +3974,7 @@ pub(super) fn valley(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
             outcrops: 0.15,
         }),
         road: Some(road),
+        farming: None,
         roughness: 1.2,
         ridges: 0.35,
         droplets: 0.05,
@@ -3647,6 +4149,7 @@ pub(super) fn stream(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
             outcrops,
         }),
         road: None,
+        farming: None,
         roughness: 1.0,
         ridges: 0.4,
         droplets: 0.05,
@@ -3957,6 +4460,14 @@ pub(super) fn sculpture(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> 
     }))
 }
 
+/// Where ahead of the eye a sculpture looks for room, nearest the middle
+/// distance first: how far off, and how far either side of the heading.
+const SCULPTURE_ROOM: [((f64, f64), f64); 3] = [
+    ((28.0, 60.0), 0.22),
+    ((16.0, 90.0), 0.35),
+    ((10.0, 140.0), 0.42),
+];
+
 /// The pieces a sculpture is made of.
 #[derive(Copy, Clone, Debug)]
 enum Piece {
@@ -3968,8 +4479,9 @@ enum Piece {
     Orbs,
 }
 
-/// A sculpture set in the middle distance ahead of `vantage`, claiming its
-/// ground so nothing grows over it.
+/// A sculpture set in the middle distance ahead of `vantage`, on dry, level
+/// ground clear of every other piece, claiming that ground so nothing grows
+/// over it; `None` where no ground ahead has room for it.
 fn sculpture_piece(
     stage: &mut Stage,
     dice: &mut Dice,
@@ -3977,17 +4489,25 @@ fn sculpture_piece(
     vantage: &Vantage,
 ) -> Option<()> {
     let piece = dice.pick(&[Piece::Rings, Piece::Monoliths, Piece::Orbs])?;
-    let distance = dice.range(28.0, 60.0);
-    let (x, z) = ahead(vantage, distance, dice.range(-0.22, 0.22));
+    let (size, count) = match piece {
+        Piece::Rings => (dice.range(3.5, 7.0), dice.count(2, 4)),
+        Piece::Monoliths => (dice.range(6.0, 11.0), dice.count(5, 9)),
+        Piece::Orbs => (6.0, dice.count(5, 11)),
+    };
+    let reach = match piece {
+        Piece::Rings => 1.2 * size,
+        Piece::Monoliths => size + 2.0,
+        Piece::Orbs => size,
+    };
+    let (x, z) = room_among(stage, dice, land, vantage, &SCULPTURE_ROOM, reach)?;
+    stage.claim((x, z), reach)?;
     let ground = land.grids.height(&stage.fields, x, z);
     let facing = vantage.heading + PI;
     match piece {
         Piece::Rings => {
             let chrome = stage.metal(Vec3::splat(0.93), 0.0)?;
             let gold = stage.metal(GOLD, dice.range(0.0, 0.12))?;
-            let count = dice.count(2, 4);
-            let major = dice.range(3.5, 7.0);
-            stage.claim((x, z), 1.2 * major)?;
+            let major = size;
             for index in 0..count {
                 let turn =
                     facing + f64::from(index) * PI / f64::from(count) + dice.range(-0.15, 0.15);
@@ -4009,9 +4529,7 @@ fn sculpture_piece(
             } else {
                 stage.metal(Vec3::splat(0.92), 0.02)?
             };
-            let count = dice.count(5, 9);
-            let radius = dice.range(6.0, 11.0);
-            stage.claim((x, z), radius + 2.0)?;
+            let radius = size;
             let height = dice.range(4.0, 7.0);
             for index in 0..count {
                 let angle = TAU * f64::from(index) / f64::from(count) + dice.range(-0.05, 0.05);
@@ -4035,8 +4553,7 @@ fn sculpture_piece(
             }
         }
         Piece::Orbs => {
-            stage.claim((x, z), 6.0)?;
-            for _ in 0..dice.count(5, 11) {
+            for _ in 0..count {
                 let radius = dice.range(0.4, 2.2);
                 let material = match dice.count(0, 3) {
                     0 => stage.metal(Vec3::splat(0.93), 0.0)?,
@@ -4044,10 +4561,11 @@ fn sculpture_piece(
                     2 => stage.metal(GOLD, 0.03)?,
                     _ => stage.precious(dice)?,
                 };
+                let spread = size - 1.0;
                 let centre = Vec3::new(
-                    x + dice.range(-5.0, 5.0),
+                    x + dice.range(-spread, spread),
                     ground + dice.range(1.5, 9.0),
-                    z + dice.range(-5.0, 5.0),
+                    z + dice.range(-spread, spread),
                 );
                 stage.add(
                     Shape::Sphere { centre, radius },
@@ -4059,6 +4577,31 @@ fn sculpture_piece(
         }
     }
     Some(())
+}
+
+/// The landing `plan` composes under `seed`, its far land built and waiting
+/// to be sited, and the stage it is set out on.
+#[cfg(test)]
+pub(super) fn surveyed(
+    plan: fn(&mut Stage, &mut Dice) -> Option<Composed>,
+    seed: u64,
+) -> (Stage, Landing, Dice) {
+    let mut dice = Dice(tairix_rng::NonCryptoRng::seed_from_u64(seed));
+    let mut stage = Stage::new(crate::detail::Detail::Maximum.densities()).expect("a stage");
+    let Some(Composed::Landed(mut landing)) = plan(&mut stage, &mut dice) else {
+        panic!("a landscape stands on a land");
+    };
+    let runner = tairix_parallel::Threaded::new(8);
+    while !landing
+        .build
+        .step(&mut stage.fields, &runner)
+        .expect("builds")
+    {}
+    assert!(
+        landing.build.waiting(),
+        "the far land stands, waiting to be sited"
+    );
+    (stage, landing, dice)
 }
 
 #[cfg(test)]

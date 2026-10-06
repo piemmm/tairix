@@ -18,6 +18,7 @@
 //! Every stage runs a bounded unit at a time, so a caller answering frames
 //! spreads the land over as many as it takes.
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::f64::consts::TAU;
 use core::ops::Range;
@@ -31,10 +32,19 @@ use tairix_terrain::route::{Routed, Router};
 use tairix_terrain::{FlowDir, Grid as Square};
 use tairix_util::{fallible, mathf};
 
+use tairix_countryside::boundary::{Kind as Bound, Side, Style, Through};
+use tairix_countryside::usage::Use;
+use tairix_countryside::layout::{Countryside, Highway, Laying, Layout};
+use tairix_countryside::network::Rank;
+use tairix_countryside::route::Line;
+use tairix_countryside::site::Villages;
+use tairix_countryside::usage::Mix;
+use tairix_countryside::{self as countryside, Key as CountryKey, Point, Rect};
+
 use crate::band;
 use crate::channel::{self, Banked, Form, Section, Station, BROADEST};
 use crate::course::{smoothed, Courses, Mark, Nearest, Reach};
-use crate::heightfield::{apart, Attributes, Heightfield, Sealing, ABSENT};
+use crate::heightfield::{apart, Attributes, Heightfield, Sealing, ABSENT, GREEN, SEDIMENT, WET};
 use crate::noise::{fbm2, noise2, ridged2, smoothstep};
 use crate::snow::{self, Snowpack};
 use crate::terrain::Terrain;
@@ -122,6 +132,58 @@ pub(crate) struct Roadway {
     pub(crate) heading: f64,
 }
 
+/// The countryside laid out over a land: how far apart its holdings and
+/// villages lie, its custom in boundaries and in what its fields are used
+/// for, how wooded its country is on the whole and how much stone lies at
+/// hand in it wherever it is, how far about the land's middle it is laid
+/// out, and how its lanes are surfaced.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct Farming {
+    pub(crate) spacing: f64,
+    pub(crate) villages: Villages,
+    pub(crate) style: Style,
+    pub(crate) mix: Mix,
+    pub(crate) wooded: f64,
+    pub(crate) stone: f64,
+    pub(crate) reach: f64,
+    /// The share of its lanes tarmacked, and of them and the rest the share
+    /// gravelled; the others are green lanes, a track's two ruts.
+    pub(crate) lanes: (f64, f64),
+}
+
+/// A land's ways, each surface's apart, and the paths worn across it; and
+/// what its countryside cuts and treads into its fields: the ditches dug
+/// along their boundaries, and the gateways where stock churn the ground.
+#[derive(Clone, Debug)]
+pub(crate) struct Ways {
+    /// Each surface's ways: tarmac, gravel and tracks, in that order.
+    pub(crate) surfaced: [Courses; 3],
+    pub(crate) trodden: Courses,
+    pub(crate) ditches: Courses,
+    pub(crate) churned: Courses,
+}
+
+impl Ways {
+    /// No ways at all.
+    pub(crate) fn none() -> Self {
+        Self {
+            surfaced: [Courses::none(), Courses::none(), Courses::none()],
+            trodden: Courses::none(),
+            ditches: Courses::none(),
+            churned: Courses::none(),
+        }
+    }
+
+    /// The ways surfaced with `surface`.
+    pub(crate) fn of(&self, surface: Surface) -> &Courses {
+        &self.surfaced[surface as usize]
+    }
+}
+
+/// Every surface a way is laid with, the least first: the order a place's
+/// ways are carved and painted in, so the greatest has the last say.
+pub(crate) const SURFACES: [Surface; 3] = [Surface::Track, Surface::Gravel, Surface::Tarmac];
+
 /// Everything a land is made from, chosen before any of it is built.
 #[derive(Clone, Debug)]
 pub(crate) struct Plan {
@@ -133,7 +195,10 @@ pub(crate) struct Plan {
     pub(crate) sea: Option<f64>,
     pub(crate) wear: Wear,
     pub(crate) rivers: Option<Rivers>,
+    /// A road through the land, which it routes itself.
     pub(crate) road: Option<Roadway>,
+    /// The countryside laid out over it, about that road if it has one.
+    pub(crate) farming: Option<Farming>,
     /// How rough the land is below the coarse grid's step, in metres.
     pub(crate) roughness: f64,
     /// How much of that roughness is sharp-crested ridges, as bare rock and
@@ -261,8 +326,9 @@ pub(crate) struct Delta {
     pub(crate) level: f64,
 }
 
-/// Where the road crosses a river on a bridge: the road's marks either side
-/// of the water, the deck's level, the water's, and the river's breadth.
+/// Where a way crosses a river on a bridge: its marks either side of the
+/// water, the deck's level, the water's, the river's breadth, and what the
+/// way is surfaced with.
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct Crossing {
     pub(crate) from: Mark,
@@ -270,6 +336,7 @@ pub(crate) struct Crossing {
     pub(crate) deck: f64,
     pub(crate) water: f64,
     pub(crate) width: f64,
+    pub(crate) surface: Surface,
 }
 
 /// The land once built, as a scene's grids hold it.
@@ -279,10 +346,11 @@ pub(crate) struct Land {
     /// The rivers, and what shapes their channels.
     pub(crate) rivers: Courses,
     pub(crate) form: Option<Form>,
-    pub(crate) roads: Courses,
-    pub(crate) road: Option<Roadway>,
-    /// Where the road bridges its rivers.
+    pub(crate) ways: Ways,
+    /// Where its ways bridge its rivers.
     pub(crate) crossings: Vec<Crossing>,
+    /// The countryside laid out over it, where it is farmed.
+    pub(crate) layout: Option<Layout>,
 }
 
 #[cfg(test)]
@@ -303,9 +371,9 @@ impl Land {
             },
             rivers: Courses::none(),
             form: None,
-            roads: Courses::none(),
-            road: None,
+            ways: Ways::none(),
             crossings: Vec::new(),
+            layout: None,
         }
     }
 }
@@ -484,12 +552,14 @@ impl Grids {
             .or_else(|| self.water.and_then(level_on))
     }
 
-    /// What one stands on at `(x, z)`: the ground, or the fresh water's
-    /// surface where it lies above the ground.
+    /// What one stands on at `(x, z)`: the ground, or the water's surface,
+    /// fresh or salt, where it lies above the ground.
     pub(crate) fn surface(&self, fields: &[Heightfield], x: f64, z: f64) -> f64 {
         let ground = self.height(fields, x, z);
         self.water_level(fields, x, z)
-            .map_or(ground, |level| level.max(ground))
+            .into_iter()
+            .chain(self.sea)
+            .fold(ground, f64::max)
     }
 
     /// Whether `(x, z)` lies under water, fresh or salt.
@@ -524,18 +594,13 @@ fn overlaps(grid: &Heightfield, (from, to): ((f64, f64), (f64, f64))) -> bool {
     })
 }
 
-/// Which of a vertex's channels holds how much grows there, as
-/// [`lie_on`] reads them.
-const GREEN: usize = 3;
-
 /// What `grid` says the land is like at `(x, z)`.
 fn lie_on(grid: &Heightfield, x: f64, z: f64) -> Lie {
     let (_, step) = grid.placing();
     let height = grid.height_at(x, z);
     let dx = (grid.height_at(x + step, z) - grid.height_at(x - step, z)) / (2.0 * step);
     let dz = (grid.height_at(x, z + step) - grid.height_at(x, z - step)) / (2.0 * step);
-    let [wet, sediment, lane, green, snow] = grid.attributes_at(x, z);
-    let (road, path) = decode_lane(lane);
+    let [wet, sediment, road, path, green, snow] = grid.attributes_at(x, z);
     Lie {
         height,
         upright: 1.0 / mathf::sqrt(1.0 + dx * dx + dz * dz),
@@ -560,8 +625,8 @@ impl Survey<'_> {
         self.far.height_at(x, z)
     }
 
-    /// What one stands on at `(x, z)`: the ground, or a lake's or a river's
-    /// surface where it lies above the ground.
+    /// What one stands on at `(x, z)`: the ground, or the surface of the
+    /// sea, a lake or a river where it lies above the ground.
     pub(crate) fn surface(&self, x: f64, z: f64) -> f64 {
         let ground = self.height(x, z);
         self.water_above((x, z), ground).unwrap_or(ground)
@@ -571,29 +636,16 @@ impl Survey<'_> {
         lie_on(self.far, x, z)
     }
 
-    /// The surface of a lake or a river at `(x, z)`, where one stands above
-    /// the ground there.
+    /// The surface of the sea, a lake or a river at `(x, z)`, where one
+    /// stands above the ground there.
     pub(crate) fn water(&self, x: f64, z: f64) -> Option<f64> {
         self.water_above((x, z), self.height(x, z))
     }
 
-    /// The surface of a lake or a river at `(x, z)`, where one stands above
-    /// ground `ground` high there.
-    fn water_above(&self, (x, z): (f64, f64), ground: f64) -> Option<f64> {
-        let build = self.build;
-        let lake = build
-            .lakes
-            .get(build.sample_at(x, z))
-            .map(|&level| f64::from(level));
-        let river = build.form().and_then(|form| {
-            let near = build.rivers.nearest(x, z)?;
-            let section = Section::new(&Station::of(&near), &form);
-            (near.distance < section.half).then_some(section.water)
-        });
-        lake.into_iter()
-            .chain(river)
-            .filter(|level| level.is_finite() && *level > ground)
-            .reduce(f64::max)
+    /// The surface of the sea, a lake or a river at `(x, z)`, where one
+    /// stands above ground `ground` high there.
+    fn water_above(&self, at: (f64, f64), ground: f64) -> Option<f64> {
+        self.build.water_above(at, ground)
     }
 
     /// Whether `(x, z)` lies under water, fresh or salt.
@@ -602,8 +654,19 @@ impl Survey<'_> {
         drowned(self.build.plan.sea, ground) || self.water_above((x, z), ground).is_some()
     }
 
-    pub(crate) fn roads(&self) -> &Courses {
-        &self.build.roads
+    /// The land's ways, the road through it the first of its surface's.
+    pub(crate) fn ways(&self) -> &Ways {
+        &self.build.ways
+    }
+
+    /// The road through the land, if it has one.
+    pub(crate) fn road(&self) -> Option<Roadway> {
+        self.build.plan.road
+    }
+
+    /// The countryside laid out over the land, where it is farmed.
+    pub(crate) fn layout(&self) -> Option<&Layout> {
+        self.build.layout.as_ref()
     }
 
     pub(crate) fn rivers(&self) -> &Courses {
@@ -635,25 +698,6 @@ impl Survey<'_> {
             .flatten()
             .next()
             .map_or(0.0, |laid| laid.reach)
-    }
-}
-
-/// A lane attribute's share of road and of path.
-pub(crate) fn decode_lane(lane: f64) -> (f64, f64) {
-    let byte = lane * 255.0;
-    if byte >= 127.5 {
-        (((byte - 128.0) / 127.0).clamp(0.0, 1.0), 0.0)
-    } else {
-        (0.0, (byte / 127.0).clamp(0.0, 1.0))
-    }
-}
-
-/// A lane attribute of `road` and `path`, the road winning where both lie.
-fn encode_lane(road: f64, path: f64) -> u8 {
-    if road > 0.01 {
-        byte((128.0 + 127.0 * road.clamp(0.0, 1.0)) / 255.0)
-    } else {
-        byte(127.0 / 255.0 * path.clamp(0.0, 1.0))
     }
 }
 
@@ -706,6 +750,11 @@ enum Step {
     Road {
         network: Network,
         router: Router,
+    },
+    /// Laying out the countryside over the land.
+    Countryside {
+        network: Network,
+        laying: Box<Laying>,
     },
     /// Reading how sheltered from the wind each coarse sample stands, from
     /// row `row`, where snow lies.
@@ -784,7 +833,11 @@ pub(crate) struct Build {
     origin: (f64, f64),
     step: f64,
     rivers: Courses,
-    roads: Courses,
+    /// The road through the land as graded, held until every way is laid.
+    through: Vec<Mark>,
+    ways: Ways,
+    /// The countryside laid out over the land, where it is farmed.
+    layout: Option<Layout>,
     paths: Courses,
     /// The level beds a scene cuts into the land about the eye: an
     /// aqueduct's channel running on into a hillside.
@@ -831,6 +884,9 @@ const SETTLE_NS: f64 = 50.0;
 const WATER_NS: f64 = 30.0;
 /// A coarse sample's shelter from the wind read, where snow lies.
 const SHELTER_NS: f64 = 280.0;
+/// A holding of a farmed land laid out: its share of the countryside's ways
+/// routed, its fields cut and bounded.
+const HOLDING_NS: f64 = 4_000_000.0;
 
 impl Build {
     /// A land of `plan`, built into the scene's grids `fields`; `None` when
@@ -888,7 +944,9 @@ impl Build {
             origin,
             step,
             rivers: Courses::none(),
-            roads: Courses::none(),
+            through: Vec::new(),
+            ways: Ways::none(),
+            layout: None,
             paths: Courses::none(),
             cuttings: Courses::none(),
             deltas: Vec::new(),
@@ -922,7 +980,11 @@ impl Build {
             * real(self.square.area())
             * SHELTER_NS;
         let read = relief + horizon + pass * (f64::from(self.plan.wear.passes) + 1.0);
-        let worn = read + sheltered;
+        let countryside = self.plan.farming.map_or(0.0, |farming| {
+            let breadth = 2.0 * farming.reach.min(self.plan.reach) / farming.spacing;
+            breadth * breadth * HOLDING_NS
+        });
+        let worn = read + countryside + sheltered;
         let far_side = self.plan.cells.1 + 1;
         let far = vertices(self.plan.cells.1);
         let (far_fill, far_drops, far_settle) =
@@ -982,6 +1044,7 @@ impl Build {
                 f64::from(u8::from(*settle)).midpoint(coarse(*row)),
             ),
             Step::Waters { .. } | Step::Road { .. } => read,
+            Step::Countryside { laying, .. } => read + countryside * laying.done(),
             Step::Shelter { row, .. } => read + sheltered * share(*row, coarse_side),
             Step::Far { row, .. } => worn + far_fill * share(*row, far_side),
             Step::FarDroplets { erosion, .. } => worn + far_fill + far_drops * ran(erosion),
@@ -1135,9 +1198,9 @@ impl Build {
             },
             form: self.form(),
             rivers: self.rivers,
-            roads: self.roads,
-            road: self.plan.road,
+            ways: self.ways,
             crossings: self.crossings,
+            layout: self.layout,
         })
     }
 
@@ -1171,6 +1234,38 @@ impl Build {
             .get(index)
             .map_or(f64::NEG_INFINITY, |&level| f64::from(level));
         lake.max(self.plan.sea.unwrap_or(f64::NEG_INFINITY))
+    }
+
+    /// The surface of the sea, a lake or a river at `(x, z)`, where one
+    /// stands above ground `ground` high there.
+    fn water_above(&self, (x, z): (f64, f64), ground: f64) -> Option<f64> {
+        let lake = self.lakes.get(self.sample_at(x, z)).map(|&level| f64::from(level));
+        let river = self.form().and_then(|form| {
+            let near = self.rivers.nearest(x, z)?;
+            let section = Section::new(&Station::of(&near), &form);
+            (near.distance < section.half).then_some(section.water)
+        });
+        lake.into_iter()
+            .chain(river)
+            .chain(self.plan.sea)
+            .filter(|level| level.is_finite() && *level > ground)
+            .reduce(f64::max)
+    }
+
+    /// How wet the ground at `(x, z)` lies by what drains through it, as
+    /// the `network` routes the water: read between the coarse samples, so
+    /// it never steps from one to the next.
+    fn drained(&self, network: &Network, (x, z): (f64, f64)) -> f64 {
+        let cell_area = self.step * self.step;
+        let wetness = |index: usize| {
+            let drained = network
+                .discharge
+                .get(index)
+                .map_or(0.0, |&count| f64::from(count))
+                * cell_area;
+            (mathf::ln(1.0 + drained / 5_000.0) / 9.0).clamp(0.0, 1.0)
+        };
+        self.between((x, z), &wetness)
     }
 
     /// Whether water stands over the coarse sample `index`: a lake's surface
@@ -1254,6 +1349,7 @@ impl Build {
             } => self.slumping(pass, row, (before, sheds), settle)?,
             Step::Waters { network } => self.reading_waters(network)?,
             Step::Road { network, router } => self.routing_road(network, router)?,
+            Step::Countryside { network, laying } => self.laying_countryside(network, laying, runner)?,
             Step::Shelter { network, row } => self.sheltering(network, row, runner)?,
             Step::Far { network, row } => self.filling_far(fields, network, row, runner)?,
             Step::FarDroplets {
@@ -1510,7 +1606,7 @@ impl Build {
     fn reading_waters(&mut self, network: Network) -> Option<Step> {
         self.waters(&network)?;
         let Some(ends) = self.plan.road.and_then(|roadway| self.road_ends(roadway)) else {
-            return Some(self.toward_far(network));
+            return self.toward_countryside(network);
         };
         let mut router = Router::new(self.square.area()).ok()?;
         router
@@ -1528,10 +1624,69 @@ impl Build {
             Routed::Pending => Some(Step::Road { network, router }),
             Routed::Found(path) => {
                 self.grade_road(&path)?;
-                Some(self.toward_far(network))
+                self.toward_countryside(network)
             }
-            Routed::Unreachable => Some(self.toward_far(network)),
+            Routed::Unreachable => self.toward_countryside(network),
         }
+    }
+
+    /// The countryside's laying begun where the land is farmed, about its
+    /// road if it has one; else its ways laid and the far grid begun.
+    fn toward_countryside(&mut self, network: Network) -> Option<Step> {
+        let Some(farming) = self.plan.farming else {
+            self.lay_ways(None)?;
+            return Some(self.toward_far(network));
+        };
+        let mut highways = Vec::new();
+        if !self.through.is_empty() {
+            highways.try_reserve_exact(1).ok()?;
+            highways.push(Highway {
+                number: 0,
+                line: Line {
+                    stations: fallible::collected(self.through.len(), self.through.iter().map(|mark| countryside::route::Station {
+                        at: Point::new(mark.x, mark.z),
+                        level: mark.level,
+                        width: mark.width,
+                        water: None,
+                    }))?,
+                },
+            });
+        }
+        let countryside = Countryside {
+            key: CountryKey::new(u64::from(self.plan.seed) ^ 0x0c0a_57ee),
+            spacing: farming.spacing,
+            villages: farming.villages,
+            style: farming.style,
+            mix: farming.mix,
+            // The noon sun stands toward the land's south, its far side along -z.
+            warm: Point::new(0.0, -1.0),
+            highways,
+        };
+        let (cx, cz) = self.plan.relief.centre;
+        let region = Rect::around(Point::new(cx, cz), farming.reach.min(self.plan.reach));
+        let laying = Laying::new(countryside, region).ok()?;
+        Some(Step::Countryside {
+            network,
+            laying: Box::new(laying),
+        })
+    }
+
+    /// A unit of the countryside's laying across `runner`, and its ways laid
+    /// into the land and the far grid begun once it is laid.
+    fn laying_countryside(&mut self, network: Network, mut laying: Box<Laying>, runner: &dyn JobRunner) -> Option<Step> {
+        let Some(farming) = self.plan.farming else {
+            return None;
+        };
+        let country = Country {
+            build: self,
+            network: &network,
+            farming,
+        };
+        let Some(layout) = laying.step(&country, runner).ok()? else {
+            return Some(Step::Countryside { network, laying });
+        };
+        self.lay_ways(Some(layout))?;
+        Some(self.toward_far(network))
     }
 
     /// The far grid begun, once how sheltered the land stands from the wind
@@ -1589,6 +1744,13 @@ impl Build {
             }
             None => (None, fields.get_mut(self.far as usize)?),
         };
+        // A far grid laid otherwise than the plan lays it would be filled at
+        // the wrong places, and silently: refuse it instead.
+        if row == 0
+            && (field.side() != self.plan.cells.1 + 1 || field.placing() != self.far_placing())
+        {
+            return None;
+        }
         let end = (row + UNIT_ROWS * runner.width().max(1)).min(field.side());
         self.fill_far((horizon, field), &network, row..end, runner)?;
         if end < field.side() {
@@ -2310,28 +2472,62 @@ impl Build {
             }
         }
         // Where it crosses a river it rises to a deck clear of the water, and
-        // nothing grades the deck back down.
+        // nothing grades the deck back down; then it is held to its steepest
+        // grade along its length, so it ramps up to each deck and down from it.
         let mut pinned = fallible::filled(course.len(), false)?;
-        self.crossings = self.bridge(&mut course, &mut pinned)?;
-        // Then held to its steepest grade walking each way, so it ramps up to
-        // each deck and down from it.
-        for pass in 0..2 {
-            for step in 1..course.len() {
-                let (index, other) = if pass == 0 {
-                    (step, step - 1)
-                } else {
-                    (course.len() - 1 - step, course.len() - step)
-                };
-                if pinned[index] {
-                    continue;
+        let crossings = self.bridge(&mut course, &mut pinned, roadway.surface)?;
+        self.crossings.try_reserve(crossings.len()).ok()?;
+        self.crossings.extend(crossings);
+        held_to(&mut course, &pinned, (MOST_ROAD_GRADE, usize::MAX));
+        self.through = course;
+        Some(())
+    }
+
+    /// Lay the land's ways into its courses, each surface's apart: the road
+    /// through it, and the ways of the countryside `layout` laid out over it,
+    /// their bridges raised over its rivers.
+    fn lay_ways(&mut self, layout: Option<Layout>) -> Option<()> {
+        let mut surfaced: [Vec<Vec<Mark>>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+        let mut trodden: Vec<Vec<Mark>> = Vec::new();
+        if let Some(roadway) = self.plan.road.filter(|_| !self.through.is_empty()) {
+            surfaced[roadway.surface as usize].try_reserve(1).ok()?;
+            surfaced[roadway.surface as usize].push(core::mem::take(&mut self.through));
+        }
+        let lanes = self.plan.farming.map_or((1.0, 1.0), |farming| farming.lanes);
+        for way in layout.iter().flat_map(Layout::ways) {
+            let surface = match way.id.rank {
+                // The road through the land is laid already.
+                Rank::Highway => continue,
+                Rank::Road => Some(Surface::Tarmac),
+                Rank::Lane => Some(lane_surface(way.key, lanes)),
+                Rank::Track => Some(Surface::Track),
+                Rank::Path => None,
+            };
+            let mut course = fallible::collected(way.line.stations.len(), way.line.stations.iter().map(|station| Mark {
+                x: station.at.x,
+                z: station.at.y,
+                level: station.level,
+                width: station.width,
+                ..Mark::default()
+            }))?;
+            match surface {
+                Some(surface @ (Surface::Tarmac | Surface::Gravel)) => {
+                    let mut pinned = fallible::filled(course.len(), false)?;
+                    let crossings = self.bridge(&mut course, &mut pinned, surface)?;
+                    held_to(&mut course, &pinned, (way.id.rank.laying().steepest, RAMP_MARKS));
+                    self.crossings.try_reserve(crossings.len()).ok()?;
+                    self.crossings.extend(crossings);
+                    surfaced[surface as usize].try_reserve(1).ok()?;
+                    surfaced[surface as usize].push(course);
                 }
-                let run = mathf::hypot(
-                    course[index].x - course[other].x,
-                    course[index].z - course[other].z,
-                );
-                let limit = MOST_ROAD_GRADE * run;
-                let (from, to) = (course[other].level, course[index].level);
-                course[index].level = mathf::clamp(to, from - limit, from + limit);
+                Some(Surface::Track) => {
+                    surfaced[Surface::Track as usize].try_reserve(1).ok()?;
+                    surfaced[Surface::Track as usize].push(course);
+                }
+                None => {
+                    trodden.try_reserve(1).ok()?;
+                    trodden.push(course);
+                }
             }
         }
         let bounds = ((self.origin.0, self.origin.1), 2.0 * self.plan.reach);
@@ -2339,13 +2535,25 @@ impl Build {
             per_width: 3.0,
             beyond: 4.0 * self.far_placing().1,
         };
-        self.roads = Courses::new(&[course], bounds, reach)?;
+        for (courses, laid) in self.ways.surfaced.iter_mut().zip(&surfaced) {
+            *courses = Courses::new(laid, bounds, reach)?;
+        }
+        let narrow = Reach {
+            per_width: 1.0,
+            beyond: 3.0,
+        };
+        self.ways.trodden = Courses::new(&trodden, bounds, narrow)?;
+        let (ditches, churned) = layout.as_ref().map_or_else(|| Some((Vec::new(), Vec::new())), dug)?;
+        self.ways.ditches = Courses::new(&ditches, bounds, narrow)?;
+        self.ways.churned = Courses::new(&churned, bounds, narrow)?;
+        self.layout = layout;
         Some(())
     }
 
-    /// The spans of `course` over a river, each raised to a deck clear of the
-    /// water and `pinned` there; `None` when the heap will not hold them.
-    fn bridge(&self, course: &mut [Mark], pinned: &mut [bool]) -> Option<Vec<Crossing>> {
+    /// The spans of `course`, a way of `surface`, over a river, each raised to
+    /// a deck clear of the water and `pinned` there; `None` when the heap will
+    /// not hold them.
+    fn bridge(&self, course: &mut [Mark], pinned: &mut [bool], surface: Surface) -> Option<Vec<Crossing>> {
         let mut crossings = Vec::new();
         let mut index = 0;
         while index < course.len() {
@@ -2384,6 +2592,7 @@ impl Build {
                 deck,
                 water,
                 width,
+                surface,
             });
         }
         Some(crossings)
@@ -2442,22 +2651,13 @@ impl Build {
         });
         let height = natural + keep * (self.shelve(carved) - natural) + snow;
         let height = self.plan.relief.pin(x, z, height);
-        // Read between the coarse samples, so neither steps from one to the
+        // Read between the coarse samples, so it never steps from one to the
         // next along the coarse grid's lines.
-        let cell_area = self.step * self.step;
-        let wetness = |index: usize| {
-            let drained = network
-                .discharge
-                .get(index)
-                .map_or(0.0, |&count| f64::from(count))
-                * cell_area;
-            (mathf::ln(1.0 + drained / 5_000.0) / 9.0).clamp(0.0, 1.0)
-        };
         let laid = |index: usize| match (self.height.get(index), self.original.get(index)) {
             (Some(now), Some(was)) => ((now - was) / self.plan.roughness.max(1.0)).clamp(-1.0, 1.0),
             _ => 0.0,
         };
-        let wet = self.between((x, z), &wetness).max(lie.wet);
+        let wet = self.drained(network, (x, z)).max(lie.wet);
         let sediment = self.between((x, z), &laid).max(lie.sediment);
         let lie = Lie {
             wet,
@@ -2518,22 +2718,38 @@ impl Build {
             lie.green *= 1.0 - bedding.scoured;
             channel = (bedding.laid, bedding.say);
         }
-        if let (Some(near), Some(roadway)) = (self.roads.nearest(x, z), self.plan.road) {
-            // A road bridges a river rather than filling it, and its bridge
-            // carries it: the ground beneath is the river's.
-            let bridging =
-                river.is_some_and(|river| river.distance < 0.5 * river.width + BRIDGE_REACH);
-            if !bridging {
-                let (bed, weight) = road_bed(&near, height, (roadway.surface, step));
-                height = bed;
-                lie.road = weight;
+        // A road bridges a river rather than filling it, and its bridge
+        // carries it; a track or path fords it: the ground beneath is the
+        // river's either way.
+        let bridging = river.is_some_and(|river| river.distance < 0.5 * river.width + BRIDGE_REACH);
+        if !bridging {
+            for surface in SURFACES {
+                if let Some(near) = self.ways.of(surface).nearest(x, z) {
+                    let (bed, weight) = road_bed(&near, height, (surface, step));
+                    height = bed;
+                    lie.road = lie.road.max(weight);
+                }
+            }
+            for paths in [&self.paths, &self.ways.trodden] {
+                if let Some(near) = paths.nearest(x, z) {
+                    let worn = path_worn(&near, step);
+                    height -= 0.08 * worn;
+                    lie.path = lie.path.max(worn);
+                }
+            }
+            if let Some(near) = self.ways.churned.nearest(x, z) {
+                // Hooves tread a gateway to bare mud, pocked where they sink.
+                let churned = path_worn(&near, step);
+                let pocked = noise2(x * 1.7, z * 1.7, self.plan.seed ^ 0x6a7e);
+                height -= churned * (0.05 + 0.035 * pocked);
+                lie.path = lie.path.max(0.95 * churned);
+                lie.wet = lie.wet.max(0.8 * churned);
             }
         }
-        if let Some(near) = self.paths.nearest(x, z) {
-            let half = 0.5 * near.width;
-            let worn = 1.0 - smoothstep(half * 0.6, half + step, near.distance);
-            height -= 0.08 * worn;
-            lie.path = worn;
+        if let Some(near) = self.ways.ditches.nearest(x, z) {
+            let (bed, water) = ditch_bed(&near, height);
+            height = height.min(bed);
+            lie.wet = lie.wet.max(water);
         }
         if let Some(near) = self.cuttings.nearest(x, z) {
             height = height.min(cutting_bed(&near));
@@ -2566,7 +2782,8 @@ impl Build {
         [
             byte(lie.wet),
             byte(0.5 + 0.5 * lie.sediment),
-            encode_lane(lie.road, lie.path),
+            byte(lie.road),
+            byte(lie.path),
             byte(green),
             snow::kept(lie.snow),
         ]
@@ -2617,7 +2834,7 @@ impl Build {
         let (smooth, dx, dz) = cubic_on(parent, (x, z));
         let slope = mathf::hypot(dx, dz);
         let keep = self.plan.relief.keep(x, z);
-        let [wet, sediment, _, _, snow] = parent.attributes_at(x, z);
+        let [wet, sediment, _, _, _, snow] = parent.attributes_at(x, z);
         let lying = snow::depth_of(snow);
         let windworn = self
             .plan
@@ -2643,9 +2860,10 @@ impl Build {
     }
 
     /// Row `row` of a grid placed at `placing` put back toward what it stood
-    /// at `before` the droplets ran, as far as a river's channel has its say
-    /// there: its floods, not the droplets, shape a channel and its banks'
-    /// faces. A height absent either side is left as it is.
+    /// at `before` the droplets ran, as far as a river's channel or a way's
+    /// bed has its say there: floods shape a channel and its banks' faces,
+    /// and a way's bed is laid and kept, where droplets would gully both. A
+    /// height absent either side is left as it is.
     fn keep_channel(
         &self,
         (row, heights): (usize, &mut [f32]),
@@ -2655,10 +2873,27 @@ impl Build {
         let z = origin_z + real(row) * step;
         for (column, (slot, &was)) in heights.iter_mut().zip(before).enumerate() {
             if slot.is_finite() && was.is_finite() {
-                let say = self.channel_say((origin_x + real(column) * step, z), step);
+                let at = (origin_x + real(column) * step, z);
+                let say = self.channel_say(at, step).max(self.way_say(at, step));
                 *slot += single(say) * (was - *slot);
             }
         }
+    }
+
+    /// How much of the say a way's bed has over the ground at `(x, z)` on a
+    /// grid `step` apart: all of it across its breadth, fading across its
+    /// verges; a path's, a ditch's and a churned gateway's as far as it is
+    /// worn.
+    fn way_say(&self, (x, z): (f64, f64), step: f64) -> f64 {
+        let surfaced = SURFACES
+            .iter()
+            .filter_map(|&surface| self.ways.of(surface).nearest(x, z))
+            .map(|near| 1.0 - smoothstep(0.5 * near.width, 1.5 * near.width + step, near.distance));
+        let trodden = [&self.paths, &self.ways.trodden, &self.ways.churned, &self.ways.ditches]
+            .into_iter()
+            .filter_map(|paths| paths.nearest(x, z))
+            .map(|near| path_worn(&near, step));
+        surfaced.chain(trodden).fold(0.0, f64::max)
     }
 
     /// How much of the say a river's channel has over the ground at
@@ -2883,22 +3118,178 @@ const SHELF: f64 = 0.3;
 /// The least a river's banks stand above its water.
 const FREEBOARD: f64 = 0.35;
 
-/// `natural` ground `near` a road of `surface`: its bed level across its
-/// breadth — cambered, or for a track worn into two ruts — cut or filled back
-/// to the land across its verges; and how much of the place is road.
+/// A land being built, as its countryside reads it: the ground as worn, the
+/// water standing on it, and how it lies, as wooded as its `farming` says
+/// its country is and with at least as much stone at hand.
+struct Country<'a> {
+    build: &'a Build,
+    network: &'a Network,
+    farming: Farming,
+}
+
+impl countryside::Ground for Country<'_> {
+    fn height(&self, at: Point) -> f64 {
+        self.build.worn(at.x, at.y)
+    }
+
+    fn water(&self, at: Point) -> Option<f64> {
+        self.build.water_above((at.x, at.y), self.height(at))
+    }
+
+    fn lie(&self, at: Point) -> countryside::Lie {
+        let plan = &self.build.plan;
+        let (_, dx, dz) = self.build.worn_sloped(at.x, at.y);
+        let slope = mathf::hypot(dx, dz);
+        let wet = self.build.drained(self.network, (at.x, at.y));
+        // Stone lies at hand where the ground is steep and its rock breaks
+        // through, the more so where the rock stands in beds or ridges.
+        let breaking = plan.ridges.max(plan.rivers.map_or(0.0, |rivers| rivers.outcrops));
+        let stony = (smoothstep(0.08, 0.45, slope) * (0.55 + 0.45 * breaking)).max(self.farming.stone);
+        countryside::Lie {
+            wet,
+            stony,
+            wooded: self.farming.wooded,
+            fertile: (plan.growth * (1.0 - smoothstep(0.12, 0.4, slope)) * (1.0 - 0.5 * wet)).clamp(0.0, 1.0),
+        }
+    }
+}
+
+/// How many marks either side of a bridge's deck its approach is held to its
+/// way's grade over, at the most: a ramp, not a regrading of the whole way.
+const RAMP_MARKS: usize = 40;
+
+/// How far a track lies worn below the ground it runs over.
+const WORN: f64 = 0.12;
+
+/// Hold `course`'s levels to `grade`, rise over run, walking it each way, the
+/// `pinned` marks held where they stand: from every pinned mark at most
+/// `reach` marks on, or along the whole course where every mark is graded.
+fn held_to(course: &mut [Mark], pinned: &[bool], (grade, reach): (f64, usize)) {
+    let count = course.len();
+    for pass in 0..2 {
+        let mut since = usize::MAX;
+        for step in 0..count {
+            let index = if pass == 0 { step } else { count - 1 - step };
+            if pinned.get(index).copied().unwrap_or(false) {
+                since = 0;
+                continue;
+            }
+            since = since.saturating_add(1);
+            let other = if pass == 0 { index.checked_sub(1) } else { Some(index + 1).filter(|&next| next < count) };
+            let Some(other) = other.filter(|_| reach == usize::MAX || since <= reach) else {
+                continue;
+            };
+            let run = mathf::hypot(course[index].x - course[other].x, course[index].z - course[other].z);
+            let limit = grade * run;
+            let (from, to) = (course[other].level, course[index].level);
+            course[index].level = mathf::clamp(to, from - limit, from + limit);
+        }
+    }
+}
+
+/// What the lane keyed `key` is surfaced with, of the shares `(tarmac,
+/// gravel)` a land's lanes are.
+fn lane_surface(key: u64, (tarmac, gravel): (f64, f64)) -> Surface {
+    let drawn = real(usize::try_from(key >> 40).unwrap_or(0)) / real(1 << 24);
+    if drawn < tarmac {
+        Surface::Tarmac
+    } else if drawn < tarmac + (1.0 - tarmac) * gravel {
+        Surface::Gravel
+    } else {
+        Surface::Track
+    }
+}
+
+/// `natural` ground `near` a way of `surface`: its bed across its breadth —
+/// an engineered way's cambered at its graded level, a track's worn into two
+/// ruts a little below the ground it runs over — cut or filled back to the
+/// land across its verges; and how much of the place is way.
 fn road_bed(near: &Nearest, natural: f64, (surface, step): (Surface, f64)) -> (f64, f64) {
     let half = 0.5 * near.width;
     let across = near.distance;
-    let shape = match surface {
-        Surface::Tarmac | Surface::Gravel => -0.03 * across.min(half),
-        Surface::Track => -0.09 * (1.0 - smoothstep(0.1, 0.32, (across - TRACK_GAUGE).abs())),
+    let (level, shape) = match surface {
+        Surface::Tarmac | Surface::Gravel => (near.level, -0.03 * across.min(half)),
+        Surface::Track => (
+            natural - WORN,
+            -0.09 * (1.0 - smoothstep(0.1, 0.32, (across - TRACK_GAUGE).abs())),
+        ),
     };
-    let bed = near.level + shape;
+    let bed = level + shape;
     // Verges and cuttings as broad as the road, softened across a step.
     let verge = smoothstep(half, half + near.width + step, across);
     let height = bed + (natural - bed) * verge;
     let weight = 1.0 - smoothstep(half - 0.3, half + 0.3 + 0.5 * step, across);
     (height, weight)
+}
+
+/// The ditches dug along the boundaries of `layout` its kind says are
+/// ditched, and the gateways stock churn: a mark across each gateway into a
+/// field they graze, reaching a little into the ground either side.
+fn dug(layout: &Layout) -> Option<(Vec<Vec<Mark>>, Vec<Vec<Mark>>)> {
+    let (mut ditches, mut churned) = (Vec::new(), Vec::new());
+    let grazed = |side: Side| match side {
+        Side::Field(id) => layout
+            .parcels()
+            .binary_search_by(|parcel| parcel.field.id.cmp(&id))
+            .ok()
+            .and_then(|index| layout.parcels().get(index))
+            .is_some_and(|parcel| matches!(parcel.usage.used, Use::Pasture | Use::Meadow)),
+        _ => false,
+    };
+    for boundary in layout.boundaries() {
+        if boundary.kind == Bound::Ditch {
+            let course = fallible::collected(boundary.line.len(), boundary.line.iter().map(|at| Mark {
+                x: at.x,
+                z: at.y,
+                width: DITCH.0,
+                depth: DITCH.1,
+                ..Mark::default()
+            }))?;
+            ditches.try_reserve(1).ok()?;
+            ditches.push(course);
+        }
+        if !(grazed(boundary.left) || grazed(boundary.right)) {
+            continue;
+        }
+        for gap in boundary.gaps.iter().filter(|gap| gap.through == Through::Gateway) {
+            let Some((at, way)) = countryside::plane::at(&boundary.line, gap.along) else {
+                continue;
+            };
+            let across = way.left() * CHURNED;
+            let mark = |at: Point| Mark {
+                x: at.x,
+                z: at.y,
+                width: gap.width + 1.5,
+                ..Mark::default()
+            };
+            churned.try_reserve(1).ok()?;
+            churned.push(fallible::collected(2, [mark(at - across), mark(at + across)].into_iter())?);
+        }
+    }
+    Some((ditches, churned))
+}
+
+/// How broad a ditch is cut and how deep.
+const DITCH: (f64, f64) = (1.4, 0.65);
+
+/// How far into the ground either side a gateway's churned mud reaches.
+const CHURNED: f64 = 5.0;
+
+/// The ground a ditch `near` leaves at `natural` ground: its bed falling to
+/// its depth across its breadth, rounded as a ditch silts and slumps; and how
+/// wet it lies, its foot holding water.
+fn ditch_bed(near: &Nearest, natural: f64) -> (f64, f64) {
+    let half = 0.5 * near.width;
+    let across = (near.distance / half).min(1.0);
+    let deep = near.depth * (1.0 - across * across);
+    (natural - deep, smoothstep(0.65, 0.15, across))
+}
+
+/// How far the ground `near` a path is worn by it: bare along its middle,
+/// fading out across a step past its edges.
+fn path_worn(near: &Nearest, step: f64) -> f64 {
+    let half = 0.5 * near.width;
+    1.0 - smoothstep(half * 0.6, half + step, near.distance)
 }
 
 /// The ground a cutting `near` leaves: its level floor across its breadth,
@@ -3196,13 +3587,13 @@ fn settle_row(
     for ((&now, attributes), (&was, &water)) in settled.zip(before.iter().zip(flux)) {
         let change = f64::from(now - was) / (0.2 * roughness.max(0.5));
         let runs = (f64::from(water) / 12.0).clamp(0.0, 1.0);
-        let sediment = f64::from(attributes[1]) / 255.0 * 2.0 - 1.0;
-        attributes[1] = byte(0.5 + 0.5 * (sediment + change).clamp(-1.0, 1.0));
-        let wet = f64::from(attributes[0]) / 255.0;
-        attributes[0] = byte(wet.max(0.8 * runs));
+        let sediment = f64::from(attributes[SEDIMENT]) / 255.0 * 2.0 - 1.0;
+        attributes[SEDIMENT] = byte(0.5 + 0.5 * (sediment + change).clamp(-1.0, 1.0));
+        let wet = f64::from(attributes[WET]) / 255.0;
+        attributes[WET] = byte(wet.max(0.8 * runs));
         // Fresh wash and gullies grow less for a while.
-        let green = f64::from(attributes[3]) / 255.0;
-        attributes[3] = byte(green * (1.0 - 0.5 * smoothstep(0.3, 1.0, change.abs())));
+        let green = f64::from(attributes[GREEN]) / 255.0;
+        attributes[GREEN] = byte(green * (1.0 - 0.5 * smoothstep(0.3, 1.0, change.abs())));
     }
 }
 

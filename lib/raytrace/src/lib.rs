@@ -77,6 +77,7 @@ mod solid;
 mod stars;
 mod stream;
 mod terrain;
+mod timber;
 mod tone;
 mod trace;
 mod tree;

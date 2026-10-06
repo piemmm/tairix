@@ -482,7 +482,7 @@ impl Atmosphere {
     /// that air.
     pub(crate) fn aerial(&self, dir: Vec3, distance: f64, light: Vec3, lit: Lit) -> Vec3 {
         let between = self.between(dir, distance);
-        light * between.kept + between.sun * lit.sun + between.sky * lit.sky
+        light * between.kept + between.lit_by(lit)
     }
 
     /// The light the air scatters toward the eye along `dir` over its first
@@ -619,15 +619,21 @@ fn place_of(distance: f64) -> f64 {
 }
 
 /// The light the air scatters toward the eye over a stretch of a ray — the
-/// sun's own, scattered once, and the sky's — and what of the light beyond
+/// sun's own, scattered once, and the clear sky's — how much of the stretch
+/// scatters whatever lights it from every way, and what of the light beyond
 /// the stretch crosses it.
 ///
-/// The two are kept apart because what stands in the sun's way shadows the
-/// one and not the other: the air in a wood's shadow still sees the sky.
+/// They are kept apart because what stands in the sun's way shadows the one
+/// and not the other — the air in a wood's shadow still sees the sky — and a
+/// cloud overhead stands in for the clear sky with its own light.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub(crate) struct Scattered {
     pub(crate) sun: Vec3,
     pub(crate) sky: Vec3,
+    /// The stretch's scattering depth, each step's as the light beyond it
+    /// reaches the eye: what light the same from every way scatters toward
+    /// the eye, per unit of it.
+    pub(crate) scatter: Vec3,
     pub(crate) kept: Vec3,
 }
 
@@ -636,6 +642,7 @@ impl Scattered {
     pub(crate) const NONE: Self = Self {
         sun: Vec3::ZERO,
         sky: Vec3::ZERO,
+        scatter: Vec3::ZERO,
         kept: Vec3::ONE,
     };
 
@@ -648,18 +655,42 @@ impl Scattered {
         Self {
             sun: self.sun.lerp(other.sun, t),
             sky: self.sky.lerp(other.sky, t),
+            scatter: self.scatter.lerp(other.scatter, t),
             kept: self.kept.lerp(other.kept, t),
         }
+    }
+
+    /// The light the stretch scatters toward the eye as `lit` lights it: the
+    /// sun as far as it reaches, the clear sky as far as the clouds leave it
+    /// open, the clouds' own light where they stand overhead, the last two
+    /// as far as crowns roofing the air let any of the sky reach it.
+    pub(crate) fn lit_by(&self, lit: Lit) -> Vec3 {
+        self.sun * lit.sun + (self.sky * lit.open + self.scatter * lit.glow) * lit.sky
     }
 }
 
 /// How much of the sun's light, and of the sky's, reaches the air along a
 /// ray: the sun's shadowed by what stands in its way, the sky's by the
-/// crowns roofing it.
+/// crowns roofing it and the clouds overhead, which light it with their own.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub(crate) struct Lit {
     pub(crate) sun: Vec3,
     pub(crate) sky: f64,
+    /// How much of the clear sky overhead the clouds leave open.
+    pub(crate) open: f64,
+    /// The light the clouds overhead shed down on the air.
+    pub(crate) glow: Vec3,
+}
+
+#[cfg(test)]
+impl Lit {
+    /// Air under an open, clear sky in the sun.
+    pub(crate) const OPEN: Self = Self {
+        sun: Vec3::ONE,
+        sky: 1.0,
+        open: 1.0,
+        glow: Vec3::ZERO,
+    };
 }
 
 /// A slice of the aerial table, held in single precision.
@@ -667,6 +698,7 @@ pub(crate) struct Lit {
 struct Slice {
     sun: [f32; 3],
     sky: [f32; 3],
+    scatter: [f32; 3],
     kept: [f32; 3],
 }
 
@@ -675,6 +707,7 @@ impl Slice {
         Self {
             sun: singles(scattered.sun),
             sky: singles(scattered.sky),
+            scatter: singles(scattered.scatter),
             kept: singles(scattered.kept),
         }
     }
@@ -684,6 +717,7 @@ impl Slice {
         Scattered {
             sun: widen(self.sun),
             sky: widen(self.sky),
+            scatter: widen(self.scatter),
             kept: widen(self.kept),
         }
     }
@@ -749,6 +783,7 @@ impl Reader<'_> {
                 gathered = Scattered {
                     sun: gathered.sun + span.sun * gathered.kept,
                     sky: gathered.sky + span.sky * gathered.kept,
+                    scatter: gathered.scatter + span.scatter * gathered.kept,
                     kept: gathered.kept * span.kept,
                 };
                 reached = target;
@@ -781,11 +816,17 @@ impl Reader<'_> {
                     * bent.lit()
             });
             let multiple = self.multiple(r, sun_cos);
-            let sky = (medium.rayleigh + Vec3::splat(medium.mie)) * multiple;
+            let scattering = medium.rayleigh + Vec3::splat(medium.mie);
             let through = (medium.extinction * -step).exp();
             let kept = gathered.kept;
             gathered.sun += kept * integrated(single * self.air.solar, medium.extinction, through);
-            gathered.sky += kept * integrated(sky * self.air.solar, medium.extinction, through);
+            gathered.sky += kept
+                * integrated(
+                    scattering * multiple * self.air.solar,
+                    medium.extinction,
+                    through,
+                );
+            gathered.scatter += kept * integrated(scattering, medium.extinction, through);
             gathered.kept = kept * through;
         }
         gathered

@@ -84,7 +84,7 @@ const BREAK: f64 = 0.12;
 
 /// How many young and old colonies' cells and lichen's patches span a
 /// metre.
-const COLONIES: f64 = 9.0;
+const COLONIES: f64 = 13.0;
 const OLD_COLONIES: f64 = 2.0;
 const LICHEN_PATCHES: f64 = 0.9;
 
@@ -99,7 +99,7 @@ const MORE_REACH: f64 = 0.45;
 
 /// How far a colony's margin wanders, as shares of its reach, in lobes as
 /// many as these span its reach.
-const WANDER: [(f64, f64); 2] = [(3.5, 0.14), (11.0, 0.07)];
+const WANDER: [(f64, f64); 2] = [(3.0, 0.24), (9.0, 0.11)];
 
 /// How far inside where a crust meets its neighbour its margin's colour
 /// and its rise reach, in metres.

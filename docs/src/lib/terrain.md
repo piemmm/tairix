@@ -37,7 +37,12 @@ one value a sample, and refuses one of any other length (`TerrainError::Shape`).
   — on as many of its tiles as the runner is wide.
 - **Routes** are A\* over integer costs the caller prices step by step, so a
   road can prefer gentle ground, reuse an existing road, and bridge a river
-  where it is narrowest; ties break on a sample's index.
+  where it is narrowest; ties break on a sample's index. The rest of the way is
+  bounded by octile distance times the cheapest step, or by a tighter bound the
+  caller knows (`advance_guided`): it must never overestimate, nor fall by more
+  than a step costs, and then settles far fewer samples where most of the grid
+  costs far more than its cheapest steps. `lib/countryside`
+  (`docs/src/lib/countryside.md`) routes every way of a countryside this way.
 
 ## Bounds and determinism
 

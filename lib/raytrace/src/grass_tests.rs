@@ -438,7 +438,7 @@ fn fallen_leaves_slide_off_a_steep_bank() {
 fn grass_shows_only_what_stands_above_the_snow() {
     let tallest = |depth: f64| {
         let kept = crate::snow::kept(depth);
-        let hits = met(&lawn(0.0), level(Some([0, 128, 0, 255, kept])), (3000, 0.6));
+        let hits = met(&lawn(0.0), level(Some([0, 128, 0, 0, 255, kept])), (3000, 0.6));
         hits.iter()
             .map(|(ray, hit)| ray.at(hit.t).y)
             .fold(0.0f64, f64::max)
@@ -451,9 +451,9 @@ fn grass_shows_only_what_stands_above_the_snow() {
 
 #[test]
 fn nothing_grows_on_a_road_and_less_on_a_path() {
-    let open = met(&lawn(0.0), level(Some([0, 128, 0, 255, 0])), (3000, 0.6)).len();
-    let road = met(&lawn(0.0), level(Some([0, 128, 255, 255, 0])), (3000, 0.6)).len();
-    let path = met(&lawn(0.0), level(Some([0, 128, 120, 255, 0])), (3000, 0.6)).len();
+    let open = met(&lawn(0.0), level(Some([0, 128, 0, 0, 255, 0])), (3000, 0.6)).len();
+    let road = met(&lawn(0.0), level(Some([0, 128, 255, 0, 255, 0])), (3000, 0.6)).len();
+    let path = met(&lawn(0.0), level(Some([0, 128, 0, 241, 255, 0])), (3000, 0.6)).len();
     assert_eq!(road, 0, "no grass on a road");
     assert!(
         path < open && path > 0,
@@ -786,7 +786,7 @@ fn greening(edge: f64) -> Heightfield {
     let attributes = field.rows_mut(0..side).1;
     for (index, slot) in attributes.iter_mut().enumerate() {
         let x = -4.0 + 0.5 * f64::from(u32::try_from(index % side).expect("a column"));
-        *slot = [0, 128, 0, if x < edge { 255 } else { 0 }, 0];
+        *slot = [0, 128, 0, 0, if x < edge { 255 } else { 0 }, 0];
     }
     field.seal();
     field
@@ -823,7 +823,7 @@ fn a_swards_shade_on_the_ground_runs_smoothly_from_cell_to_cell() {
 fn grass_thinning_out_grows_short_as_well_as_sparse() {
     let lawn = lawn(0.0);
     let statures = |green: u8| {
-        let field = level(Some([0, 128, 0, green, 0]));
+        let field = level(Some([0, 128, 0, 0, green, 0]));
         let (count, total) = (0..60)
             .filter_map(|index| {
                 let at = (-0.95 + 0.032 * f64::from(index), 0.3);
@@ -881,7 +881,7 @@ fn canopy_grid(
 #[test]
 fn a_blocks_canopy_is_read_from_its_own_vertex() {
     let block = 2u32;
-    let ground = || level(Some([0, 128, 0, 255, 0]));
+    let ground = || level(Some([0, 128, 0, 0, 255, 0]));
     let green = ground();
     let mut lawn = lawn(0.0);
     let grid = canopy_grid(&lawn, block, &|at| lawn.canopy_at(&green, at, block));
@@ -924,7 +924,7 @@ fn a_blocks_canopy_is_read_from_its_own_vertex() {
 #[test]
 fn a_large_lawns_canopy_is_read_from_its_grid() {
     let block = 2u32;
-    let green = level(Some([0, 128, 0, 255, 0]));
+    let green = level(Some([0, 128, 0, 0, 255, 0]));
     let mut lawn = lawn(0.0);
     let grid = canopy_grid(&lawn, block, &|at| lawn.canopy_at(&green, at, block));
     lawn.tops = Some(Tops { field: 1, block });
@@ -933,8 +933,41 @@ fn a_large_lawns_canopy_is_read_from_its_grid() {
     let grown = lawn.canopy(at, &fields).expect("grass over the point");
     let [_, grid] = fields;
     let kept = lawn
-        .canopy(at, &[level(Some([0, 128, 0, 0, 0])), grid])
+        .canopy(at, &[level(Some([0, 128, 0, 0, 0, 0])), grid])
         .expect("the grid still keeps it");
     assert_eq!(grown.density.to_bits(), kept.density.to_bits());
     assert_eq!(grown.up.to_bits(), kept.up.to_bits());
+}
+
+/// Every blade a lawn shows is met within the box it bounds the lawn by, so
+/// the hierarchy never culls a ray that would have met one.
+#[test]
+fn a_lawn_is_met_only_within_its_box() {
+    let fields = [level(None)];
+    let lawns = [lawn(0.3)];
+    let geometry = Geometry {
+        faces: &[],
+        fields: &fields,
+        prototypes: &[],
+        lawns: &lawns,
+        far_woods: &[],
+        materials: &[],
+        view: None,
+    };
+    let shape = Shape::Lawn { lawn: 0 };
+    let bounds = shape.bounds(geometry).expect("bounded");
+    let mut met = 0;
+    for index in 0..4000 {
+        let ray = looking_down(index, 0.6);
+        if let Some(hit) = shape.intersect(&ray, 1e-9, f64::INFINITY, geometry) {
+            let point = ray.at(hit.t);
+            let pad = Vec3::splat(1e-7);
+            assert!(
+                point.min(bounds.max + pad) == point && point.max(bounds.min - pad) == point,
+                "{index}: {point:?} outside {bounds:?}"
+            );
+            met += 1;
+        }
+    }
+    assert!(met > 400, "only {met} rays met the lawn");
 }

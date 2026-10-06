@@ -343,7 +343,8 @@ fn ground() -> Pigment {
         cliff: 0.7,
         bedding: 3.0,
         seed: 3,
-        road: None,
+        ways: None,
+        bounds: None,
         floor: None,
     })
 }
@@ -370,7 +371,7 @@ fn ground_at(pigment: &Pigment, height: f64, normal: Vec3, lie: [f64; CHANNELS])
 #[test]
 fn ground_is_sand_by_the_shore_rock_on_cliffs_and_snow_on_high_flat_ground() {
     let pigment = ground();
-    let green = [0.0, 0.5, 0.0, 1.0, 0.0];
+    let green = [0.0, 0.5, 0.0, 0.0, 1.0, 0.0];
     let beach = ground_at(&pigment, -2.0, Vec3::UP, green);
     // Its grains lighten or darken it, never change its colour.
     let hue = |colour: Vec3| colour * (1.0 / colour.luminance());
@@ -402,12 +403,12 @@ fn ground_is_sand_by_the_shore_rock_on_cliffs_and_snow_on_high_flat_ground() {
 #[test]
 fn nothing_grows_where_the_land_says_it_cannot_and_a_path_is_trodden_bare() {
     let pigment = ground();
-    let barren = ground_at(&pigment, 50.0, Vec3::UP, [0.0, 0.5, 0.0, 0.0, 0.0]);
+    let barren = ground_at(&pigment, 50.0, Vec3::UP, [0.0, 0.5, 0.0, 0.0, 0.0, 0.0]);
     assert!(
         barren.x > barren.y * 0.5 && barren.y < 0.3,
         "bare earth: {barren:?}"
     );
-    let silted = ground_at(&pigment, 50.0, Vec3::UP, [0.6, 1.0, 0.0, 0.0, 0.0]);
+    let silted = ground_at(&pigment, 50.0, Vec3::UP, [0.6, 1.0, 0.0, 0.0, 0.0, 0.0]);
     assert!(
         silted.x > barren.x,
         "fresh silt is paler than earth: {silted:?}"
@@ -416,9 +417,9 @@ fn nothing_grows_where_the_land_says_it_cannot_and_a_path_is_trodden_bare() {
         &pigment,
         50.0,
         Vec3::UP,
-        [0.0, 0.5, 100.0 / 255.0, 1.0, 0.0],
+        [0.0, 0.5, 0.0, 100.0 / 127.0, 1.0, 0.0],
     );
-    let meadow = ground_at(&pigment, 50.0, Vec3::UP, [0.0, 0.5, 0.0, 1.0, 0.0]);
+    let meadow = ground_at(&pigment, 50.0, Vec3::UP, [0.0, 0.5, 0.0, 0.0, 1.0, 0.0]);
     assert!(
         path.y < meadow.y && path.x > meadow.x,
         "{path:?} beside {meadow:?}"
@@ -430,7 +431,7 @@ fn nothing_grows_where_the_land_says_it_cannot_and_a_path_is_trodden_bare() {
 #[test]
 fn ground_bare_of_snow_shows_none_wherever_its_patches_lie() {
     let pigment = ground();
-    let bare = [0.0, 0.5, 0.0, 1.0, 0.0];
+    let bare = [0.0, 0.5, 0.0, 0.0, 1.0, 0.0];
     for step in 0..400u32 {
         let p = Vec3::new(f64::from(step) * 7.3, 50.0, f64::from(step % 37) * 11.9);
         let colour = pigment.colour(&Spot {
@@ -463,7 +464,7 @@ fn drifted_snow_hides_the_ground_only_where_it_lies_deep_enough() {
     let pigment = ground();
     let lying = |depth: f64| {
         let kept = f64::from(crate::snow::kept(depth)) / 255.0;
-        ground_at(&pigment, 50.0, Vec3::UP, [0.0, 0.5, 0.0, 1.0, kept])
+        ground_at(&pigment, 50.0, Vec3::UP, [0.0, 0.5, 0.0, 0.0, 1.0, kept])
     };
     let (bared, crusted, drifted) = (lying(0.0), lying(0.02), lying(0.4));
     assert!(
@@ -512,7 +513,7 @@ fn a_woods_floor_is_its_fallen_leaves_where_the_open_ground_is_grass() {
             girth: 0.0,
             instance: 0,
             front: true,
-            ground: [0.0, 0.5, 0.0, 1.0, 0.0],
+            ground: [0.0, 0.5, 0.0, 0.0, 1.0, 0.0],
             thatch: 0.0,
             cover: None,
         })
@@ -580,9 +581,9 @@ fn ground_grain_shows_up_close_and_settles_to_its_mean_far_off() {
     let places: Vec<f64> = (0..40).map(|step| 1.0 + 0.003 * f64::from(step)).collect();
     // Bare soil, a river's scoured bed of gravel, and the sand of a shore.
     for lie in [
-        ([0.3, 0.5, 0.0, 0.0, 0.0], 5.0),
-        ([0.9, 0.5, 0.0, 0.0, 0.0], 5.0),
-        ([0.3, 0.5, 0.0, 0.0, 0.0], 0.0),
+        ([0.3, 0.5, 0.0, 0.0, 0.0, 0.0], 5.0),
+        ([0.9, 0.5, 0.0, 0.0, 0.0, 0.0], 5.0),
+        ([0.3, 0.5, 0.0, 0.0, 0.0, 0.0], 0.0),
     ] {
         let spread = |width: f64| {
             let shades: Vec<f64> = places

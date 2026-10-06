@@ -6,7 +6,10 @@ use tairix_util::mathf;
 
 use core::f64::consts::PI;
 
-use super::{power, Quality, Tally, Tracer, GATHERED_LEAST, SETTLED_ERROR};
+use super::{
+    power, sun_in_view, Quality, Tally, Tracer, DAMP, GATHERED_LEAST, GLARE_BLOOM, GLARE_VEIL,
+    SETTLED_ERROR,
+};
 use crate::atmosphere::Air;
 use crate::camera::Camera;
 use crate::light::{Light, Limb};
@@ -628,9 +631,8 @@ fn the_sun_lights_only_the_air_it_reaches() {
         (0..draws)
             .map(|index| {
                 let mut sampler = Sampler::new(0x5eed, index);
-                tracer
-                    .sunlit_air(&Ray::new(from, dir), reach, &mut sampler)
-                    .max_element()
+                let at = from + dir * scene.sky.drawn(dir, (0.0, reach), sampler.next_1d());
+                tracer.sunlit_air(at).max_element()
             })
             .sum::<f64>()
             / f64::from(draws)
@@ -690,7 +692,8 @@ fn a_set_sun_shadows_none_of_the_air_the_eye_looks_through() {
     );
     for index in 0..16 {
         let mut sampler = Sampler::new(0x5eed, index);
-        assert_eq!(tracer.sunlit_air(&ray, 1000.0, &mut sampler), Vec3::ONE);
+        let at = ray.at(scene.sky.drawn(ray.dir, (0.0, 1000.0), sampler.next_1d()));
+        assert_eq!(tracer.sunlit_air(at), Vec3::ONE);
     }
 }
 
@@ -1223,4 +1226,165 @@ fn a_floor_seen_through_glass_or_in_a_mirror_shows_no_black_pixel() {
     mirrored.eye = Vec3::new(0.0, 0.5, -0.3);
     mirrored.target = Vec3::new(0.0, 0.5, 0.2);
     assert!(no_pixel_black(&mirrored.scene()), "in a mirror");
+}
+
+/// A sun the eye looks out at under an open sky shines into its lens, the
+/// glare coming in the way the sun stands; one hidden behind a stone, or
+/// none at all, shines none.
+#[test]
+fn the_sun_shines_into_the_lens_only_where_the_eye_sees_it() {
+    let elevation = 0.3;
+    let toward = Vec3::new(mathf::cos(elevation), mathf::sin(elevation), 0.0);
+    let open = {
+        let mut setup = Setup::new(uniform_sky(0.0));
+        setup.eye = Vec3::ZERO;
+        setup.target = toward;
+        setup.lights.push(sun_at(elevation, 10.0));
+        setup.scene()
+    };
+    let glare = sun_in_view(&open).expect("the sun in view");
+    assert!(glare.irradiance.max_element() > 0.0);
+    assert!(
+        glare.toward.dot(toward) > 0.999_99,
+        "{:?} toward {toward:?}",
+        glare.toward
+    );
+    let hidden = {
+        let mut setup = Setup::new(uniform_sky(0.0));
+        setup.eye = Vec3::ZERO;
+        setup.target = toward;
+        setup.lights.push(sun_at(elevation, 10.0));
+        let stone = Material::new(Pigment::Solid(Vec3::splat(0.3)), Finish::Matte);
+        setup.add(ball(toward * 4.0, 1.0), stone, None);
+        setup.scene()
+    };
+    assert!(sun_in_view(&hidden).is_none(), "glare from behind a stone");
+    let dark = {
+        let mut setup = Setup::new(uniform_sky(0.0));
+        setup.eye = Vec3::ZERO;
+        setup.target = toward;
+        setup.scene()
+    };
+    assert!(sun_in_view(&dark).is_none(), "glare with no sun");
+}
+
+/// A lens's glare about the sun's image is brightest toward the sun and
+/// falls away from it, none behind the eye, and spreads over the sky the
+/// share of the sun's light the lens is rated to scatter, no more.
+#[test]
+fn a_lenss_glare_spreads_the_share_of_the_sun_it_is_rated_at() {
+    let elevation = 0.4;
+    let mut setup = Setup::new(uniform_sky(0.0));
+    setup.eye = Vec3::ZERO;
+    let toward = Vec3::new(mathf::cos(elevation), mathf::sin(elevation), 0.0);
+    setup.target = toward;
+    setup.lights.push(sun_at(elevation, 10.0));
+    let mut scene = setup.scene();
+    scene.glare = sun_in_view(&scene);
+    let irradiance = scene.glare.as_ref().expect("the sun in view").irradiance;
+    let encoder = Encoder::new().expect("an encoder");
+    let tracer = Tracer::new(&scene, &encoder, SIZE, 1);
+    let frame = Frame::around(toward);
+    let at = |angle: f64| {
+        tracer
+            .glare(frame.to_world(Vec3::new(mathf::sin(angle), 0.0, mathf::cos(angle))))
+            .max_element()
+    };
+    let mut was = f64::INFINITY;
+    for step in 0..=90 {
+        let here = at(core::f64::consts::FRAC_PI_2 * f64::from(step) / 90.0);
+        assert!(here <= was, "{step}: rises away from the sun");
+        was = here;
+    }
+    assert_eq!(tracer.glare(-toward), Vec3::ZERO, "glare behind the eye");
+    // Over the sphere, in rings about the sun finer near it, where it is
+    // most.
+    let (rings, mut spread) = (40_000u32, 0.0);
+    for ring in 0..rings {
+        let (from, to) = (
+            f64::from(ring) / f64::from(rings),
+            f64::from(ring + 1) / f64::from(rings),
+        );
+        let angle = |share: f64| core::f64::consts::PI * share * share;
+        let (a, b) = (angle(from), angle(to));
+        let middle = 0.5 * (a + b);
+        let solid = core::f64::consts::TAU * (mathf::cos(a) - mathf::cos(b));
+        spread += at(middle) * solid;
+    }
+    let rated = (GLARE_BLOOM + GLARE_VEIL) * irradiance.max_element();
+    assert!(
+        (spread / rated - 1.0).abs() < 0.03,
+        "{spread} spread against {rated} rated"
+    );
+}
+
+/// Ground under a film of standing water, beneath an even sky: never giving
+/// back more light than falls on it, its film shining more the lower it is
+/// seen, and as matte ground once the film is too thin to shine.
+#[test]
+fn damp_ground_shines_low_down_and_gives_back_no_more_than_it_takes() {
+    let level = 1.0;
+    let mut setup = Setup::new(uniform_sky(level));
+    let earth = Material::new(Pigment::Solid(Vec3::splat(0.5)), Finish::Matte);
+    let floor = setup.add(ground(), earth.clone(), None);
+    let scene = setup.scene();
+    let encoder = Encoder::new().expect("an encoder");
+    let tracer = Tracer::new(&scene, &encoder, SIZE, 1);
+    let pigment = Vec3::splat(0.5);
+    let seen = |dip: f64, wet: Option<f64>| {
+        let dir = Vec3::new(mathf::cos(dip), -mathf::sin(dip), 0.0);
+        let ray = crate::vector::Ray::new(-dir * 5.0, dir);
+        let (_, hit) = scene
+            .closest(&ray, f64::INFINITY, crate::scene::Sight::Eye)
+            .expect("the ground");
+        let (surface, _) = tracer.surface(
+            &ray,
+            &hit,
+            (&scene.objects[floor], &earth),
+            (0.0, super::Cone::PINHOLE),
+        );
+        let samples = 256u32;
+        (0..samples)
+            .map(|index| {
+                let mut sampler = Sampler::new(index, 0);
+                match wet {
+                    Some(wet) => {
+                        tracer.damp(&surface, pigment, wet, super::Path::EYE, &mut sampler)
+                    }
+                    None => tracer.matte(&surface, pigment, super::Path::EYE, &mut sampler),
+                }
+                .light
+                .max_element()
+            })
+            .sum::<f64>()
+            / f64::from(samples)
+    };
+    for dip in [1.4, 0.8, 0.3, 0.08] {
+        let matte = seen(dip, None);
+        assert!(
+            (matte - 0.5 * level).abs() < 1e-9,
+            "{dip}: matte gives {matte}"
+        );
+        for wet in [DAMP, 0.4, 1.0] {
+            let damp = seen(dip, Some(wet));
+            assert!(
+                damp <= level * (1.0 + 1e-9),
+                "{dip}, {wet}: gives back {damp}"
+            );
+        }
+        let thin = seen(dip, Some(DAMP));
+        assert!(
+            (thin - matte).abs() < 0.01,
+            "{dip}: a thin film {thin} against {matte}"
+        );
+    }
+    let (high, low) = (seen(1.4, Some(1.0)), seen(0.08, Some(1.0)));
+    assert!(
+        low > high + 0.1,
+        "the film shines low: {low} against {high} from above"
+    );
+    assert!(
+        low > seen(0.08, None) + 0.1,
+        "and more than matte ground there"
+    );
 }

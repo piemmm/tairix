@@ -239,3 +239,59 @@ fn a_bending_limbs_bark_starts_round_it_alike_either_side_of_a_joint() {
         assert!(apart < 0.03, "{step}: {first} against {second}");
     }
 }
+
+/// A placed prototype, however it is turned and scaled, is met only within
+/// the box its placing bounds it by, so the hierarchy never culls a ray that
+/// would have met it.
+#[test]
+fn a_placed_prototype_lies_within_its_box() {
+    let bend = Vec3::new(0.3, 1.0, -0.2);
+    let prototypes = vec![Prototype::new(
+        vec![
+            tube(Vec3::ZERO, bend, (0.2, 0.12)),
+            tube(bend, bend + Vec3::new(0.8, 0.5, 0.3), (0.12, 0.05)),
+        ],
+        vec![],
+        vec![],
+    )
+    .expect("a forked limb")];
+    let geometry = Geometry {
+        faces: &[],
+        fields: &[],
+        prototypes: &prototypes,
+        lawns: &[],
+        far_woods: &[],
+        materials: &[],
+        view: None,
+    };
+    let mut state = 23u32;
+    let mut draw = || {
+        state = crate::sample::mix32(state.wrapping_add(0x6d2b_79f5));
+        crate::sample::unit(state) * 2.0 - 1.0
+    };
+    for (turn, tilt, scale) in [(0.0, 0.0, 1.0), (0.7, 0.4, 2.5), (2.9, -1.1, 0.4)] {
+        let placed = Shape::Instance {
+            prototype: 0,
+            pose: Pose::new(Vec3::new(4.0, -1.0, 2.0), Frame::turned(turn, tilt)),
+            scale,
+            key: 0x31,
+        };
+        let bounds = placed.bounds(geometry).expect("bounded");
+        let mut met = 0;
+        for _ in 0..2000 {
+            let origin = bounds.centre() + Vec3::new(draw(), draw(), draw()) * 10.0;
+            let target = bounds.centre() + Vec3::new(draw(), draw(), draw()) * scale;
+            let probe = Ray::new(origin, (target - origin).normalized());
+            if let Some(hit) = placed.intersect(&probe, 1e-9, f64::INFINITY, geometry) {
+                let point = probe.at(hit.t);
+                let pad = Vec3::splat(1e-7);
+                assert!(
+                    point.min(bounds.max + pad) == point && point.max(bounds.min - pad) == point,
+                    "{turn}, {tilt}, {scale}: {point:?} outside {bounds:?}"
+                );
+                met += 1;
+            }
+        }
+        assert!(met > 50, "{turn}, {tilt}, {scale}: only {met} met");
+    }
+}

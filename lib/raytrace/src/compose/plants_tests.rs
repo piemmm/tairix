@@ -5,7 +5,9 @@ use crate::detail::Detail;
 use crate::prototype::Prototype;
 use crate::tree::Growth;
 
-const KINDS: [Kind; 13] = [
+/// Every kind grown as a tree's stems are: all but the palm, the saguaro and
+/// the fern, each made in a shape of its own.
+const KINDS: [Kind; 15] = [
     Kind::Oak,
     Kind::Maple,
     Kind::Birch,
@@ -17,8 +19,10 @@ const KINDS: [Kind; 13] = [
     Kind::Olive,
     Kind::Cherry,
     Kind::Hazel,
+    Kind::Hawthorn,
     Kind::Box,
     Kind::Heather,
+    Kind::Gorse,
 ];
 
 /// `kind` grown as `stand` has it from `seed`, and the height it was asked

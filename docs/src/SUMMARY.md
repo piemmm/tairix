@@ -66,6 +66,7 @@
   - [`tairix-compress`](./lib/compress.md)
   - [`tairix-conout`](./lib/conout.md)
   - [`tairix-controls`](./lib/controls.md)
+  - [`tairix-countryside`](./lib/countryside.md)
   - [`tairix-cpuops`](./lib/cpuops.md)
   - [`tairix-crc32`](./lib/crc32.md)
   - [`tairix-crypto`](./lib/crypto.md)

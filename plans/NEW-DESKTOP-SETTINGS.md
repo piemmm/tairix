@@ -1549,7 +1549,7 @@ What it guarantees:
 What it guarantees (its scenes, sampling and reveal are `plans/RAYTRACE.md`'s):
 
 - **A scene coarse to fine.** `screensaver.kind` = `raytrace` composes a
-  scene in one of `lib/raytrace`'s twenty settings, never the last one's,
+  scene in one of `lib/raytrace`'s twenty-one settings, never the last one's,
   prepares it a bounded unit at a time, then reveals it in
   `lib/raytrace::Reveal`'s order: a first pass of every point of a grid at
   least eight points to the shorter side, each later pass halving the grid's

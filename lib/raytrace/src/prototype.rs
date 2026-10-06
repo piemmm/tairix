@@ -402,6 +402,18 @@ impl Building {
         self.builder.step(budget)
     }
 
+    /// The box the prototype will lie in, in its own frame.
+    #[cfg(test)]
+    pub(crate) const fn bounds(&self) -> Aabb {
+        self.bounds
+    }
+
+    /// Its parts.
+    #[cfg(test)]
+    pub(crate) fn parts(&self) -> &[Part] {
+        &self.parts
+    }
+
     /// The prototype, its hierarchy built whole at once.
     #[cfg(test)]
     pub(crate) fn whole(mut self) -> Prototype {

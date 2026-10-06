@@ -89,6 +89,7 @@ redacts the key like `HashSeed`'s does.
 | `lib/pagezero`'s self-verify fingerprint | `FastHash` | The buffer is the crate's own scratch. |
 | `lib/net`'s multicast revision counters | `FastHash` | Folded over this host's own configured addresses. |
 | `kernel/tairix-kernel`'s build-provenance id | `FastHash` | Distinguishes developer working trees; the image's integrity guarantee is the reproducible build and signed SBOM. |
+| `lib/countryside`'s keyed draws | `FastHash` | Every draw is a word of the world's own seed, its purpose and its place, none of which a principal outside the world chooses; the hash is a distinguisher, so a layout is the same however it is laid. |
 | `kernel/mem`'s DMA-window allocation index | `FastHash` | The keys are that allocator's own page-aligned window addresses, and the window is private to one process, so a caller steering its own allocations can only lengthen its own probes. |
 
 ## Determinism across ports

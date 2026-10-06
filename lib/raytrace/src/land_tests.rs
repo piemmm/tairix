@@ -51,6 +51,7 @@ fn plan(rivers: bool, seed: u32) -> Plan {
             width: 3.0,
             heading: 0.7,
         }),
+        farming: None,
         roughness: 1.0,
         ridges: 0.4,
         droplets: 0.02,
@@ -73,14 +74,19 @@ fn plan(rivers: bool, seed: u32) -> Plan {
     }
 }
 
-/// `plan` built into grids of its own, sited at the land's middle: the land,
-/// its grids, its rivers, and whether water stands anywhere on it.
-fn built(plan: Plan) -> (Land, Vec<Heightfield>, Courses, bool) {
+/// The far grid `plan` is built into, laid as a scene lays it.
+fn far_of(plan: &Plan) -> Heightfield {
     let origin = (
         plan.relief.centre.0 - plan.reach,
         plan.relief.centre.1 - plan.reach,
     );
-    let far = Heightfield::new(1, origin, 1.0, false).expect("a grid");
+    Heightfield::new(plan.cells.1, origin, plan.far_step(), false).expect("a grid")
+}
+
+/// `plan` built into grids of its own, sited at the land's middle: the land,
+/// its grids, its rivers, and whether water stands anywhere on it.
+fn built(plan: Plan) -> (Land, Vec<Heightfield>, Courses, bool) {
+    let far = far_of(&plan);
     built_on(plan, far)
 }
 
@@ -147,8 +153,8 @@ fn a_built_land_lies_as_its_grids_hold_it() {
             assert!((-1.0..=1.0).contains(&lie.sediment));
         }
     }
-    for course in 0..land.roads.len() {
-        for mark in land.roads.course(course).iter().step_by(4) {
+    for course in 0..land.ways.of(Surface::Track).len() {
+        for mark in land.ways.of(Surface::Track).course(course).iter().step_by(4) {
             if land.grids.lie(&fields, mark.x, mark.z).road > 0.5 {
                 on_road += 1;
             }
@@ -189,8 +195,8 @@ fn rivers_run_downhill_and_the_road_keeps_out_of_their_water() {
             mathf::hypot(x - middle.0, z - middle.1) < half + 3.0 * crossing.width
         })
     };
-    for course in 0..land.roads.len() {
-        for mark in land.roads.course(course) {
+    for course in 0..land.ways.of(Surface::Track).len() {
+        for mark in land.ways.of(Surface::Track).course(course) {
             if !bridged(mark.x, mark.z) {
                 assert!(
                     !land.grids.wet_at(&fields, mark.x, mark.z),
@@ -209,12 +215,22 @@ fn rivers_run_downhill_and_the_road_keeps_out_of_their_water() {
 #[test]
 fn a_dry_land_keeps_no_water_grid_and_a_wet_one_keeps_one() {
     let mut kinds = [false, false];
-    for seed in 0..6 {
-        let (land, fields, rivers, watered) = built(plan(false, 20 + seed));
-        assert_eq!(rivers.len(), 0);
+    for (rivers, seed) in (0..6).map(|seed| (false, 20 + seed)).chain([(true, 7)]) {
+        let planned = plan(rivers, seed);
+        let cells = planned.cells.1;
+        let (land, fields, courses, watered) = built(planned);
+        assert_eq!(
+            courses.len() > 0,
+            rivers,
+            "{seed}: rivers where a land drains through them"
+        );
         let water = fields.get(2).expect("the water grid");
         if watered {
-            assert!(water.side() > 2, "{seed}: a lake keeps its water grid");
+            assert_eq!(
+                water.side(),
+                cells + 1,
+                "{seed}: water keeps a grid as fine as the far land's"
+            );
         } else {
             assert!(
                 water.side() <= 2,
@@ -235,24 +251,31 @@ fn a_dry_land_keeps_no_water_grid_and_a_wet_one_keeps_one() {
         kinds[usize::from(watered)] = true;
     }
     assert!(kinds[0], "some of the lands are dry");
+    assert!(kinds[1], "a land with rivers holds water");
 }
 
+/// Between a road's last vertex and the plain ground beside it the road
+/// thins away, and no path appears: its road and its path are each a
+/// quantity of their own, blended on their own.
 #[test]
-fn a_lane_carries_its_road_or_its_path_and_the_road_wins() {
-    for share in [0.0, 0.25, 0.5, 1.0] {
-        let (road, path) = decode_lane(f64::from(encode_lane(share, 0.0)) / 255.0);
-        assert!(
-            (road - if share > 0.01 { share } else { 0.0 }).abs() < 0.01 && path == 0.0,
-            "{share}"
-        );
-        let (road, path) = decode_lane(f64::from(encode_lane(0.0, share)) / 255.0);
-        assert!(road == 0.0 && (path - share).abs() < 0.01, "{share}");
+fn a_roads_edge_thins_to_plain_ground_and_is_never_read_as_a_path() {
+    let mut grid = Heightfield::new(4, (0.0, 0.0), 1.0, false).expect("a grid");
+    let side = grid.side();
+    assert!(grid.carry_attributes());
+    {
+        let (_, attributes) = grid.rows_mut(0..side);
+        for (index, slot) in attributes.iter_mut().enumerate() {
+            let road = if index % side == 0 { 255 } else { 0 };
+            *slot = [0, 128, road, 0, 255, 0];
+        }
     }
-    let (road, path) = decode_lane(f64::from(encode_lane(0.6, 0.9)) / 255.0);
-    assert!(
-        (road - 0.6).abs() < 0.01 && path == 0.0,
-        "the road over a path"
-    );
+    grid.seal();
+    for step in 0..=20u32 {
+        let x = f64::from(step) / 20.0;
+        let lie = lie_on(&grid, x, 1.5);
+        assert!((lie.road - (1.0 - x)).abs() < 1e-9, "at {x}: road {}", lie.road);
+        assert!(lie.path == 0.0, "at {x}: read as a path {}", lie.path);
+    }
 }
 
 #[test]
@@ -449,9 +472,11 @@ fn a_channel_stands_as_carved_against_the_droplets() {
     let grid = &fields[nest.field as usize];
     let ((origin_x, origin_z), step) = grid.placing();
     let side = grid.side();
-    // Clear of the border, where the grid gives way to the far one's.
+    // Clear of the band within its border where the grid gives way to the
+    // far one's.
+    let (_, parent_step) = fields[land.grids.far as usize].placing();
     let inner = Laid {
-        reach: 0.9 * nest.reach,
+        reach: nest.reach - NEST_BAND.1 * parent_step,
         ..nest
     };
     let mut checked = 0;
@@ -479,7 +504,7 @@ fn a_channel_stands_as_carved_against_the_droplets() {
                 "({x}, {z}): {height} against the bed's {}",
                 section.bed(across)
             );
-            let [_, sediment, _, _, _] = grid.attributes_of(column, row);
+            let [_, sediment, _, _, _, _] = grid.attributes_of(column, row);
             let sediment = 2.0 * f64::from(sediment) / 255.0 - 1.0;
             assert!(
                 (sediment - banked.laid(across)).abs() < 0.01,
@@ -497,16 +522,7 @@ fn a_channel_stands_as_carved_against_the_droplets() {
 /// uncut.
 #[test]
 fn a_cutting_is_dug_level_and_square_and_stays_dug() {
-    let far = || {
-        let p = plan(false, 3);
-        Heightfield::new(
-            1,
-            (p.relief.centre.0 - p.reach, p.relief.centre.1 - p.reach),
-            1.0,
-            false,
-        )
-        .expect("a grid")
-    };
+    let far = || far_of(&plan(false, 3));
     let (land, fields, _, _) = built_cut(plan(false, 3), far(), &[]);
     let finest = |fields: &[Heightfield], x: f64| land.grids.height(fields, x, 0.0);
     let lowest = (0..=40)
@@ -653,7 +669,7 @@ fn a_bank_past_the_finer_grids_brim_reads_the_far_level() {
 fn a_water_grids_units_reach_only_their_own_rows() {
     let origin = (-1500.0, -1500.0);
     let placeholder = || Heightfield::new(1, origin, 1.0, false).expect("a grid");
-    let mut fields = alloc::vec![placeholder(), placeholder(), placeholder()];
+    let mut fields = alloc::vec![far_of(&plan(true, 6)), placeholder(), placeholder()];
     let grids = Fields {
         far: 0,
         nests: [Some(1), None],
@@ -707,6 +723,7 @@ fn snow_lies_on_a_land_as_the_wind_drifted_it() {
         reach,
         rivers: None,
         road: None,
+        farming: None,
         ridges: 0.0,
         roughness: 0.6,
         droplets: 0.0,
@@ -721,18 +738,14 @@ fn snow_lies_on_a_land_as_the_wind_drifted_it() {
         snowpack: Some(pack),
         ..bare.clone()
     };
-    let whole = |plan: &Plan| {
-        let origin = (-plan.reach, -plan.reach);
-        Heightfield::new(plan.cells.1, origin, plan.far_step(), false).expect("a grid")
-    };
-    let (_, bare_fields, _, _) = built_on(bare.clone(), whole(&bare));
-    let (_, snowy_fields, _, _) = built_on(snowy.clone(), whole(&snowy));
+    let (_, bare_fields, _, _) = built_on(bare.clone(), far_of(&bare));
+    let (_, snowy_fields, _, _) = built_on(snowy.clone(), far_of(&snowy));
     let (bare, snowy) = (&bare_fields[0], &snowy_fields[0]);
     let side = snowy.side();
     let (mut depths, mut deepest, mut thinnest) = (Vec::new(), 0.0f64, f64::INFINITY);
     for row in (8..side - 8).step_by(7) {
         for column in (8..side - 8).step_by(7) {
-            let [_, _, _, green, kept] = snowy.attributes_of(column, row);
+            let [_, _, _, _, green, kept] = snowy.attributes_of(column, row);
             let depth = snow::depth_of(f64::from(kept) / 255.0);
             let at = row * side + column;
             let risen = f64::from(snowy.heights()[at] - bare.heights()[at]);
@@ -759,5 +772,230 @@ fn snow_lies_on_a_land_as_the_wind_drifted_it() {
     assert!(
         (0.6 * pack.fallen..1.5 * pack.fallen).contains(&mean),
         "{mean}"
+    );
+}
+
+/// A finer grid meets the far grid along its border, giving way to it there
+/// to the far grid's own height, and the far grid leaves out the cells the
+/// finer one covers, keeping one ring under its border, so a ray meets one
+/// land there and not two.
+#[test]
+fn a_finer_grid_meets_the_far_one_along_its_border() {
+    let (land, fields, _, _) = built(plan(true, 3));
+    let far = &fields[land.grids.far as usize];
+    let nest = land.grids.nests[0].expect("a finer grid");
+    let grid = &fields[nest.field as usize];
+    let ((origin_x, origin_z), step) = grid.placing();
+    let side = grid.side();
+    for index in 0..side {
+        for (column, row) in [(index, 0), (index, side - 1), (0, index), (side - 1, index)] {
+            let (x, z) = (origin_x + step * real(column), origin_z + step * real(row));
+            let height = f64::from(grid.heights()[row * side + column]);
+            assert!(
+                (height - far.height_at(x, z)).abs() < 2e-3,
+                "({x}, {z}): {height} against the far grid's {}",
+                far.height_at(x, z)
+            );
+        }
+    }
+    let (_, far_step) = far.placing();
+    for (x, z) in [
+        (nest.centre.0, nest.centre.1),
+        (
+            nest.centre.0 + 0.5 * nest.reach,
+            nest.centre.1 - 0.4 * nest.reach,
+        ),
+        (nest.centre.0 - nest.reach + 3.0 * far_step, nest.centre.1),
+    ] {
+        let down = Ray::new(Vec3::new(x, 1e4, z), -Vec3::UP);
+        assert!(
+            far.intersect(&down, 0.0, 2e4).is_none(),
+            "({x}, {z}): the far grid stands under the finer one"
+        );
+        assert!(grid.intersect(&down, 0.0, 2e4).is_some(), "({x}, {z})");
+    }
+}
+
+/// A road's bridge stands its clearance and more over the water it spans,
+/// its road level along the deck from end to end.
+#[test]
+fn a_bridges_deck_clears_its_river_and_carries_its_road_level() {
+    let mut decks = 0;
+    for seed in [7, 11, 13] {
+        let (land, _, _, _) = built(plan(true, seed));
+        if land.ways.of(Surface::Track).len() == 0 {
+            continue;
+        }
+        let course = land.ways.of(Surface::Track).course(0);
+        for crossing in &land.crossings {
+            assert!(
+                crossing.deck >= crossing.water + CLEARANCE + 0.08 * crossing.width - 1e-9,
+                "{seed}: a deck {} over water {}",
+                crossing.deck,
+                crossing.water
+            );
+            let at = |mark: &Mark| {
+                course
+                    .iter()
+                    .position(|other| other.x == mark.x && other.z == mark.z)
+                    .expect("a crossing's ends lie on its road")
+            };
+            let (from, to) = (at(&crossing.from), at(&crossing.to));
+            for mark in &course[from.min(to)..=from.max(to)] {
+                assert!(
+                    (mark.level - crossing.deck).abs() < 1e-9,
+                    "{seed}: the road at {} on a deck at {}",
+                    mark.level,
+                    crossing.deck
+                );
+            }
+            decks += 1;
+        }
+    }
+    assert!(decks > 0, "some road crosses its land's rivers");
+}
+
+/// A river running out into standing water fans its silt out before it:
+/// built a little above the water at its mouth, shelving under it toward
+/// its fringe, cut by its distributaries, and leaving the bed beyond its
+/// spread as it was.
+#[test]
+fn a_delta_fans_its_silt_out_into_the_water() {
+    let course: Vec<Mark> = (0..8u32)
+        .map(|index| Mark {
+            x: 100.0 + 10.0 * f64::from(index),
+            z: -40.0,
+            width: 6.0,
+            level: 3.0,
+            ..Mark::default()
+        })
+        .collect();
+    let fan = delta(&course, 2.0).expect("a delta at the mouth");
+    assert_eq!(fan.apex, (170.0, -40.0));
+    assert!((fan.toward.0 - 1.0).abs() < 1e-12 && fan.toward.1.abs() < 1e-12);
+    assert!((fan.length - (40.0 + 7.0 * 6.0)).abs() < 1e-12);
+    assert!(delta(&course[..3], 2.0).is_none(), "too short a river");
+    assert!(delta(&course, f64::NAN).is_none(), "no water to fan into");
+    let bed = -1.5;
+    let probe = |along: f64, across: f64| delta_bed(&fan, (170.0 + along, -40.0 + across), bed);
+    let (mouth, silt) = probe(1.0, 0.0);
+    assert!(mouth > fan.level - 0.8, "a mouth at {mouth}");
+    assert!(silt > 0.5, "fresh silt at the mouth: {silt}");
+    // Its fan's crest shelves from above the water at the mouth to below it.
+    let crest = |along: f64| {
+        (0..=400u32)
+            .map(|step| probe(along, -60.0 + 0.3 * f64::from(step)).0)
+            .fold(f64::NEG_INFINITY, f64::max)
+    };
+    assert!(crest(2.0) > fan.level, "built above the water at its mouth");
+    assert!(
+        crest(0.75 * fan.length) < fan.level,
+        "under the water at its fringe"
+    );
+    assert_eq!(
+        probe(1.0, 3.0 * fan.width + 10.0),
+        (bed, 0.0),
+        "beyond its spread"
+    );
+    assert_eq!(probe(fan.length + 1.0, 0.0), (bed, 0.0), "past its fringe");
+    assert_eq!(
+        probe(-2.0 * fan.width, 0.0),
+        (bed, 0.0),
+        "upstream of its mouth"
+    );
+    let across: Vec<f64> = (0..=200u32)
+        .map(|step| probe(30.0, -20.0 + 0.2 * f64::from(step)).0)
+        .collect();
+    let (low, high) = across.iter().fold(
+        (f64::INFINITY, f64::NEG_INFINITY),
+        |(low, high), &height| (low.min(height), high.max(height)),
+    );
+    assert!(
+        high - low > 0.5,
+        "distributaries cut its fan: {low} to {high}"
+    );
+}
+
+/// A land running on to the horizon lays the far grid on whole cells of the
+/// horizon's, meets it at the far grid's border with no step, and leaves
+/// out the horizon's cells the far grid covers.
+#[test]
+fn the_far_grid_lies_on_the_horizons_cells_and_meets_it_without_a_step() {
+    let planned = Plan {
+        horizon: Some(Horizon {
+            reach: 6000.0,
+            cells: 64,
+        }),
+        ..plan(true, 3)
+    };
+    let (origin, step) = planned.horizon_placing().expect("a horizon grid");
+    let mut fields = alloc::vec![
+        far_of(&planned),
+        Heightfield::new(1, origin, 1.0, false).expect("a grid"),
+        Heightfield::new(1, origin, 1.0, false).expect("a grid"),
+        Heightfield::new(64, origin, step, false).expect("a grid"),
+    ];
+    let grids = Fields {
+        far: 0,
+        nests: [Some(1), None],
+        water: Some(2),
+        near_water: None,
+        horizon: Some(3),
+    };
+    let mut build = Build::new(planned, grids).expect("a build");
+    let runner = Threaded::new(8);
+    loop {
+        let done = build.step(&mut fields, &runner).expect("builds");
+        if done && build.waiting() {
+            build
+                .site((0.0, 0.0), (0.0, 0.0), (None, &[]))
+                .expect("sited");
+        } else if done {
+            break;
+        }
+    }
+    let (far, horizon) = (&fields[0], &fields[3]);
+    let ((far_x, far_z), far_step) = far.placing();
+    let whole = |offset: f64| {
+        let cells = offset / step;
+        (cells - mathf::round(cells)).abs() < 1e-9
+    };
+    assert!(
+        whole(far_x - origin.0) && whole(far_z - origin.1),
+        "on the horizon's cells"
+    );
+    let far_side = far.side();
+    assert!(
+        whole(far_step * real(far_side - 1)),
+        "the far grid spans whole cells of the horizon's"
+    );
+    for index in (0..far_side).step_by(8) {
+        for (column, row) in [
+            (index, 0),
+            (index, far_side - 1),
+            (0, index),
+            (far_side - 1, index),
+        ] {
+            let (x, z) = (
+                far_x + far_step * real(column),
+                far_z + far_step * real(row),
+            );
+            let height = f64::from(far.heights()[row * far_side + column]);
+            assert!(
+                (height - horizon.height_at(x, z)).abs() < 2e-3,
+                "({x}, {z}): {height} against the horizon's {}",
+                horizon.height_at(x, z)
+            );
+        }
+    }
+    let down = Ray::new(Vec3::new(0.0, 1e4, 0.0), -Vec3::UP);
+    assert!(
+        horizon.intersect(&down, 0.0, 2e4).is_none(),
+        "the horizon under the far grid"
+    );
+    let beyond = Ray::new(Vec3::new(far_x - 2.0 * step, 1e4, 0.0), -Vec3::UP);
+    assert!(
+        horizon.intersect(&beyond, 0.0, 2e4).is_some(),
+        "the horizon beyond it"
     );
 }

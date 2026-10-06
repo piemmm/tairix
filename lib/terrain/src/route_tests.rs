@@ -96,6 +96,38 @@ fn a_search_advanced_a_little_at_a_time_finds_the_path_one_search_does() {
 }
 
 #[test]
+fn a_guided_search_finds_as_cheap_a_path_and_settles_far_less() {
+    let grid = Grid::new(24);
+    // Every step costs four times the least, so octile distance bounds the
+    // rest of the way loosely and four times it exactly.
+    let price = |_: usize, _: usize, diagonal: bool| Some(if diagonal { 6 * LEAST } else { 4 * LEAST });
+    let ends = (grid.index(1, 20), grid.index(22, 2));
+    let exact = |index: usize| 4 * heuristic(grid, (index, ends.1), LEAST);
+    let mut router = Router::new(grid.area()).expect("a router");
+    let mut search = |guided: bool| {
+        router.begin(grid, ends, 6, LEAST).expect("begins");
+        let mut settles = 0;
+        loop {
+            settles += 1;
+            let outcome = if guided {
+                router.advance_guided(1, &price, &exact)
+            } else {
+                router.advance(1, &price)
+            };
+            match outcome.expect("advances") {
+                Routed::Pending => {}
+                Routed::Found(path) => break (path, settles),
+                Routed::Unreachable => panic!("no path"),
+            }
+        }
+    };
+    let (loose, loosely) = search(false);
+    let (tight, tightly) = search(true);
+    assert_eq!(cost(&tight, grid), cost(&loose, grid));
+    assert!(4 * tightly < loosely, "{tightly} settles guided, {loosely} not");
+}
+
+#[test]
 fn a_route_to_where_it_starts_is_that_one_sample() {
     let grid = Grid::new(5);
     let mut router = Router::new(grid.area()).expect("a router");
