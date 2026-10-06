@@ -25,6 +25,7 @@ fn meet(shape: &Shape, ray: &Ray, faces: &[Face]) -> Option<(f64, Vec3)> {
                 fields: &[],
                 prototypes: &[],
                 lawns: &[],
+                far_woods: &[],
                 materials: &[],
                 view: None,
             },
@@ -38,6 +39,7 @@ const NOTHING: Geometry<'static> = Geometry {
     fields: &[],
     prototypes: &[],
     lawns: &[],
+    far_woods: &[],
     materials: &[],
     view: None,
 };
@@ -363,6 +365,7 @@ fn every_bounded_shape_lies_within_its_box() {
                 fields: &[],
                 prototypes: &[],
                 lawns: &[],
+                far_woods: &[],
                 materials: &[],
                 view: None,
             })

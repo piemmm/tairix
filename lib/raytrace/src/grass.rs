@@ -39,6 +39,7 @@ use crate::shade::Shade;
 use crate::shape::{reciprocal, Aabb, Geometry, Hit};
 use crate::snow;
 use crate::vector::{byte, whole, Members, Ray, Vec3};
+use crate::walk::Walk;
 
 /// The most cells a ray walks across one cover: past any a lawn holds along
 /// a ray, so only a walk gone wrong ever meets it.
@@ -327,16 +328,37 @@ impl Sward {
 }
 
 /// The blades of a sward about a point within it: how much blade a cubic
-/// metre holds, one side of each, and how far the sward rises above the
-/// point and it above the ground.
+/// metre holds, one side of each, how far the sward rises above the point and
+/// it above the ground, and the share of the whole sky's light they let
+/// through.
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct Canopy {
     density: f64,
     up: f64,
     down: f64,
+    sky: f64,
 }
 
 impl Canopy {
+    /// The blades about a point `density` of blade a cubic metre holds, the
+    /// sward rising `up` above it and it `down` above the ground.
+    pub(crate) fn new(density: f64, up: f64, down: f64) -> Self {
+        let mut canopy = Self {
+            density,
+            up,
+            down,
+            sky: 1.0,
+        };
+        canopy.sky = QUADRATURE
+            .iter()
+            .map(|&(rise, weight)| {
+                let dir = Vec3::new(mathf::sqrt(1.0 - rise * rise), rise, 0.0);
+                2.0 * rise * weight * canopy.through(dir)
+            })
+            .sum();
+        canopy
+    }
+
     /// How much of the light bound for the point along the unit `dir` the
     /// blades let through: upright, they stop low light more than light from
     /// overhead, and light from below crosses only those between the point
@@ -350,14 +372,8 @@ impl Canopy {
 
     /// The share of the light from the whole sky, weighed by its cosine
     /// about the vertical, that the blades let through.
-    pub(crate) fn diffuse(&self) -> f64 {
-        QUADRATURE
-            .iter()
-            .map(|&(rise, weight)| {
-                let dir = Vec3::new(mathf::sqrt(1.0 - rise * rise), rise, 0.0);
-                2.0 * rise * weight * self.through(dir)
-            })
-            .sum()
+    pub(crate) const fn diffuse(&self) -> f64 {
+        self.sky
     }
 }
 
@@ -787,11 +803,7 @@ impl Lawn {
             return None;
         }
         let above = above.max(0.0);
-        Some(Canopy {
-            density,
-            up: top - above,
-            down: above,
-        })
+        Some(Canopy::new(density, top - above, above))
     }
 
     /// Whether anything grows anywhere on the lawn over `field`, looked for
@@ -1292,7 +1304,7 @@ impl<'a, const N: usize> Passage<'a, N> {
             strides[lane] = Stride {
                 leave,
                 t,
-                walk: Walk::from(self.lawn, ray, t),
+                walk: Walk::from((self.lawn.from, self.lawn.cell), ray, t),
                 over: 0,
                 steps: 0,
             };
@@ -1387,7 +1399,7 @@ impl<'a, const N: usize> Passage<'a, N> {
                     match self.comes_down(lane, exits[lane], stride.leave) {
                         Some(t) => {
                             stride.t = t;
-                            stride.walk = Walk::from(lawn, &self.rays[lane], t);
+                            stride.walk = Walk::from((lawn.from, lawn.cell), &self.rays[lane], t);
                             stride.over = 0;
                         }
                         None => live = live.without(lane),
@@ -1419,66 +1431,6 @@ impl<'a, const N: usize> Passage<'a, N> {
             }
         }
         live
-    }
-}
-
-/// Where a walk across a cover's cells has come: the cell it is in, where
-/// along the ray it next crosses a wall across x and one across z, how far
-/// it goes between such walls, and which way it steps across each.
-#[derive(Copy, Clone, Debug, Default)]
-struct Walk {
-    cell: (u32, u32),
-    next: (f64, f64),
-    delta: (f64, f64),
-    step: (u32, u32),
-}
-
-impl Walk {
-    /// The walk across `lawn`'s cells of `ray`, from `t` along it.
-    fn from(lawn: &Lawn, ray: &Ray, t: f64) -> Self {
-        let first = ray.at(t);
-        let ((cx, fx), (cz, fz)) = (
-            cell((first.x - lawn.from.0) / lawn.cell),
-            cell((first.z - lawn.from.1) / lawn.cell),
-        );
-        let wall = |fraction: f64, dir: f64| {
-            if dir.abs() < 1e-12 {
-                f64::INFINITY
-            } else {
-                let to = if dir > 0.0 { 1.0 - fraction } else { fraction };
-                t + to * lawn.cell / dir.abs()
-            }
-        };
-        let delta = |dir: f64| {
-            if dir.abs() < 1e-12 {
-                f64::INFINITY
-            } else {
-                lawn.cell / dir.abs()
-            }
-        };
-        let step = |dir: f64| if dir > 0.0 { 1 } else { u32::MAX };
-        Self {
-            cell: (cx, cz),
-            next: (wall(fx, ray.dir.x), wall(fz, ray.dir.z)),
-            delta: (delta(ray.dir.x), delta(ray.dir.z)),
-            step: (step(ray.dir.x), step(ray.dir.z)),
-        }
-    }
-
-    /// Where along the ray the walk leaves its cell.
-    fn exit(&self) -> f64 {
-        fmin(self.next.0, self.next.1)
-    }
-
-    /// On into the next cell.
-    fn step(&mut self) {
-        if self.next.0 <= self.next.1 {
-            self.cell.0 = self.cell.0.wrapping_add(self.step.0);
-            self.next.0 += self.delta.0;
-        } else {
-            self.cell.1 = self.cell.1.wrapping_add(self.step.1);
-            self.next.1 += self.delta.1;
-        }
     }
 }
 
@@ -1668,6 +1620,7 @@ fn member(t: f64, normal: Vec3, mark: u32, along: f64, uv: (f64, f64)) -> Hit {
         material: None,
         tangent: Vec3::ZERO,
         relieved: false,
+        member: None,
     }
 }
 

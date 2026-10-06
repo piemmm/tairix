@@ -149,21 +149,8 @@ fn what_a_ray_meets_lies_on_the_cut_faces_out_and_carries_its_relief() {
     let materials = [material()];
     let near = cutting(&materials, Vec3::new(3.0, 1.0, 0.0));
     let tube = limb(0.3);
-    let (bark, deepest) = near.of(&tube).expect("cut");
-    let axis = Vec3::UP;
-    let limb = Limb {
-        a: Vec3::ZERO,
-        axis,
-        length: 2.0,
-        radius: 0.3,
-        taper: -0.015 / 2.0,
-        ends: (0.3, 0.285),
-        round: round(axis),
-        tube: &tube,
-        bark: Some(bark),
-        depth: deepest,
-        flare: None,
-    };
+    let cut = near.of(&tube).expect("cut");
+    let limb = Limb::new(&tube, (Some(&near), Some(cut)), None).expect("a limb");
     for step in 0..400u32 {
         let ray = level_ray(0.4 + f64::from(step) * 0.003, f64::from(step) * 0.37, 0.05);
         let hit = met(&tube, &ray, &near).expect("met");

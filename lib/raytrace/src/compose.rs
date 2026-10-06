@@ -10,6 +10,7 @@
 
 mod architecture;
 mod chains;
+mod cracked;
 mod footprint;
 mod landscape;
 mod lattice;
@@ -18,6 +19,8 @@ mod snowman;
 mod still;
 mod stones;
 mod strewn;
+#[cfg(test)]
+mod testland;
 mod waterside;
 mod weather;
 mod woodland;
@@ -26,6 +29,7 @@ mod work;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::f64::consts::{FRAC_PI_2, PI, TAU};
+use core::ops::ControlFlow;
 
 use tairix_colour::srgb_to_linear;
 use tairix_parallel::JobRunner;
@@ -33,14 +37,17 @@ use tairix_rng::{NonCryptoRng, RandU64};
 use tairix_util::mathf;
 
 use crate::body;
+use crate::cactus::{Bristling, Flesh};
 use crate::camera::Camera;
 use crate::deadwood::{log, stump, Decay, Sprouting, Top, Woods};
-use crate::detail::{Densities, Detail};
+use crate::detail::{Densities, Detail, Spines};
+use crate::far_wood::{self, FarWood, Matching, Surveying};
 use crate::grass::{Lawn, Tops};
 use crate::heightfield::Heightfield;
 use crate::land::{Build, Land};
 use crate::light::Light;
 use crate::material::{Finish, Foam, Material, Relief};
+use crate::mud::{tile, Crust};
 use crate::pigment::Pigment;
 use crate::prototype::{Building, Prototype, BUILD_UNIT};
 use crate::rock::{Habit, Wearing};
@@ -51,7 +58,7 @@ use crate::shape::{Aabb, Face, Geometry, Shape};
 use crate::sky::{Dome, Sky};
 use crate::snowman::{carrot, stick, Ball, Rolling};
 use crate::terrain::Sea;
-use crate::tree::{fern, palm, saguaro, Growth, Season, Species, Stock};
+use crate::tree::{fern, palm, Growth, Season, Species, Stock};
 use crate::vector::{real, share, Frame, Pose, Ray, Vec3};
 use crate::waterside::{patch, Margin, Marsh};
 use footprint::{Footprints, Taken};
@@ -178,15 +185,21 @@ pub(super) enum Recipe {
         stock: Stock,
         seed: u64,
     },
+    /// A palm `height` tall in `stock`, standing on its mat of `roots`.
     Palm {
         height: f64,
         stock: Stock,
+        roots: u16,
         fronds: u16,
         seed: u64,
     },
+    /// A saguaro `height` tall, its trunk `girth.0` in radius at its
+    /// thickest and its arms `girth.1` as thick against it.
     Saguaro {
         height: f64,
-        stock: Stock,
+        girth: (f64, f64),
+        flesh: Flesh,
+        spines: Spines,
         seed: u64,
     },
     Fern {
@@ -241,6 +254,15 @@ pub(super) enum Recipe {
         bark: u16,
         seed: u64,
     },
+    /// A square tile of mud dried and cracked into plates, in `material`:
+    /// tile `variant` of those drawn under `seed`, which all meet edge to
+    /// edge.
+    Mud {
+        crust: Crust,
+        material: u16,
+        seed: u32,
+        variant: u32,
+    },
 }
 
 /// The prototypes a composition's recipes are growing: as many at once as
@@ -264,6 +286,8 @@ enum Work {
     Planned(Recipe),
     /// A tree, growing its stems and then its hierarchy.
     Growing(Growth),
+    /// A saguaro, setting its spines before its hierarchy is built.
+    Bristling(Bristling),
     /// A rock, being worn before its hierarchy is built.
     Wearing(Wearing),
     /// A ball of snow, being shaped before its hierarchy is built.
@@ -285,6 +309,11 @@ impl Work {
             Self::Growing(mut growth) => match growth.step() {
                 Some(true) => growth.finish().map_or(Self::Refused, Self::Grown),
                 Some(false) => Self::Growing(growth),
+                None => Self::Refused,
+            },
+            Self::Bristling(mut bristling) => match bristling.step() {
+                Some(true) => bristling.finish().map_or(Self::Refused, Self::Indexing),
+                Some(false) => Self::Bristling(bristling),
                 None => Self::Refused,
             },
             Self::Wearing(mut wearing) => match wearing.step() {
@@ -324,14 +353,17 @@ fn begun(recipe: &Recipe) -> Option<Work> {
         Recipe::Palm {
             height,
             stock,
+            roots,
             fronds,
             seed,
-        } => Work::Indexing(palm(height, stock, fronds, seed)?),
+        } => Work::Indexing(palm(height, (stock, roots), fronds, seed)?),
         Recipe::Saguaro {
             height,
-            stock,
+            girth,
+            flesh,
+            spines,
             seed,
-        } => Work::Indexing(saguaro(height, stock, seed)?),
+        } => Work::Bristling(Bristling::new(height, girth, flesh, spines, seed)?),
         Recipe::Fern {
             height,
             stock,
@@ -384,6 +416,12 @@ fn begun(recipe: &Recipe) -> Option<Work> {
             bark,
             seed,
         } => Work::Indexing(stick(length, radius, bark, seed)?),
+        Recipe::Mud {
+            crust,
+            material,
+            seed,
+            variant,
+        } => Work::Indexing(tile(crust, material, (seed, variant))?),
     })
 }
 
@@ -437,6 +475,7 @@ impl Grow {
             }
             Work::Planned(_)
             | Work::Growing(_)
+            | Work::Bristling(_)
             | Work::Wearing(_)
             | Work::Rolling(_)
             | Work::Indexing(_) => true,
@@ -482,9 +521,25 @@ enum Job {
     Plant(Planting),
     /// Grow the planned prototypes.
     Grow(Grow),
+    /// Match a wood carried on far off to the trees stood before it, survey
+    /// it, then trace it.
+    Beyond(Beyond),
     /// Build the atmosphere's tables and the cloud's, then light the clouds
     /// by the air.
     Sky,
+}
+
+/// A wood carried on far off, matched to the trees stood before it,
+/// surveyed, and then traced, a step at a time.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "a wood or two at once, and a box could not fail gracefully"
+)]
+#[derive(Debug)]
+enum Beyond {
+    Matching(Matching),
+    Surveying(Surveying),
+    Tracing(FarWood),
 }
 
 /// How far a unit of a job has brought it: done, or to be run again —
@@ -570,12 +625,21 @@ impl Composition {
     /// from it.
     fn settle(&mut self, mut look: Look) -> Option<()> {
         let stage = &mut self.stage;
-        self.jobs.try_reserve(stage.fills.len() + 2).ok()?;
+        self.jobs
+            .try_reserve(stage.fills.len() + stage.beyond.len() + 2)
+            .ok()?;
         self.jobs.extend(stage.fills.drain(..).map(Job::Fill));
         if !stage.recipes.is_empty() {
             self.jobs
                 .push_back(Job::Grow(Grow::new(stage.recipes.len())?));
         }
+        // Measured by their trees' prototypes, so surveyed once those grow.
+        self.jobs.extend(
+            stage
+                .beyond
+                .drain(..)
+                .map(|matching| Job::Beyond(Beyond::Matching(matching))),
+        );
         let camera = stage.camera(&look.view, self.aspect);
         let eye = camera.eye();
         let pixel = camera.pixel_angle(self.height);
@@ -632,6 +696,10 @@ impl Composition {
                 .get(fill.field)
                 .map_or(1.0, |field| fill.done(field)),
             Job::Grow(grow) => grow.done(),
+            // Matching reads a fraction of the places a survey does.
+            Job::Beyond(Beyond::Matching(matching)) => 0.15 * matching.done(),
+            Job::Beyond(Beyond::Surveying(surveying)) => 0.15 + 0.85 * surveying.done(),
+            Job::Beyond(Beyond::Tracing(_)) => 1.0,
             Job::Sky => self.seen.as_ref().map_or(0.0, |(look, _)| look.sky.done()),
             Job::Land(_) | Job::Plant(_) => 0.0,
         }
@@ -700,6 +768,30 @@ impl Composition {
                     Progress::Again(Job::Grow(grow))
                 }
             }
+            Job::Beyond(Beyond::Matching(matching)) => {
+                let next = match matching.step(&self.stage.fields, runner)? {
+                    ControlFlow::Continue(matching) => Beyond::Matching(matching),
+                    ControlFlow::Break(wood) => {
+                        Beyond::Surveying(wood.surveying(&self.stage.prototypes)?)
+                    }
+                };
+                Progress::Again(Job::Beyond(next))
+            }
+            Job::Beyond(Beyond::Surveying(surveying)) => {
+                let ground = (
+                    self.stage.fields.as_slice(),
+                    self.stage.prototypes.as_slice(),
+                );
+                let next = match surveying.step(ground, runner)? {
+                    ControlFlow::Continue(surveying) => Beyond::Surveying(surveying),
+                    ControlFlow::Break(wood) => Beyond::Tracing(wood),
+                };
+                Progress::Again(Job::Beyond(next))
+            }
+            Job::Beyond(Beyond::Tracing(wood)) => {
+                self.stage.trace_beyond(wood)?;
+                Progress::Done
+            }
             Job::Sky => {
                 let (look, _) = self.seen.as_mut()?;
                 let built = look.sky.build(runner)?;
@@ -730,13 +822,12 @@ impl Composition {
             return Some(Progress::Again(Job::Land(landing)));
         }
         let mut land = landing.build.finish()?;
-        self.stage.footprints.index(land.centre, land.reach)?;
         // The finer land laid about the eye stands higher or lower than the
         // far land it was sited on: the eye keeps its rise above what is
         // really there, rather than ending up beneath it.
         let fields = &self.stage.fields;
         let vantage = landing.vantage.map(|(mut vantage, rise)| {
-            vantage.eye.y = land.surface(fields, vantage.eye.x, vantage.eye.z) + rise;
+            vantage.eye.y = land.grids.surface(fields, vantage.eye.x, vantage.eye.z) + rise;
             vantage
         });
         let look = landing
@@ -894,6 +985,11 @@ struct Stage {
     fields: Vec<Heightfield>,
     prototypes: Vec<Prototype>,
     lawns: Vec<Lawn>,
+    /// The woods carried on far off, each traced once surveyed, and those
+    /// still to be matched and surveyed once the prototypes they are
+    /// measured by grow.
+    far_woods: Vec<FarWood>,
+    beyond: Vec<Matching>,
     /// The prototypes planned, grown in order into `prototypes` before the
     /// scene is traced.
     recipes: Vec<Recipe>,
@@ -958,6 +1054,8 @@ impl Stage {
             fields: Vec::new(),
             prototypes: Vec::new(),
             lawns: Vec::new(),
+            far_woods: Vec::new(),
+            beyond: Vec::new(),
             recipes: Vec::new(),
             fills: Vec::new(),
             materials: Vec::new(),
@@ -988,6 +1086,7 @@ impl Stage {
             fields: &self.fields,
             prototypes: &self.prototypes,
             lawns: &self.lawns,
+            far_woods: &self.far_woods,
             materials: &self.materials,
             view: None,
         }
@@ -1229,6 +1328,31 @@ impl Stage {
         push(&mut self.woods, MAX_WOODS, wood).map(|_| ())
     }
 
+    /// Carry a wood on far off, `matching` the trees stood before it, to be
+    /// surveyed once the prototypes its trees are measured by grow; `None`
+    /// when the stage will not hold it.
+    fn carry_on(&mut self, matching: Matching) -> Option<()> {
+        push(&mut self.beyond, MAX_WOODS, matching).map(|_| ())
+    }
+
+    /// Trace `wood`, a wood far off and surveyed, as objects of its own, one
+    /// a tile a crown stands over; its trees' parts are made in their own
+    /// kinds' materials. `None` when the stage will not hold it.
+    fn trace_beyond(&mut self, wood: FarWood) -> Option<()> {
+        let index = u32::try_from(self.far_woods.len()).ok()?;
+        let tiles = tairix_util::fallible::collected(
+            usize::try_from(far_wood::TILES * far_wood::TILES).ok()?,
+            wood.tiles(&self.fields),
+        )?;
+        let bark = wood.bark()?;
+        push(&mut self.far_woods, MAX_WOODS, wood)?;
+        let still = Pose::new(Vec3::ZERO, Frame::WORLD);
+        for tile in tiles {
+            self.add(Shape::FarWood { wood: index, tile }, bark, still, false)?;
+        }
+        Some(())
+    }
+
     /// How many more objects the stage will hold.
     const fn room(&self) -> usize {
         self.densities.objects.saturating_sub(self.objects.len())
@@ -1299,6 +1423,7 @@ impl Stage {
             fields: self.fields,
             prototypes: self.prototypes,
             lawns: self.lawns,
+            far_woods: self.far_woods,
             materials: self.materials,
             lights: self.lights,
             sky: look.sky,
@@ -2222,6 +2347,14 @@ impl Composition {
             }
         }
         land
+    }
+
+    /// How many woods carried on far off are still to be matched.
+    fn carried_on(&self) -> usize {
+        self.jobs
+            .iter()
+            .filter(|job| matches!(job, Job::Beyond(Beyond::Matching(_))))
+            .count()
     }
 }
 

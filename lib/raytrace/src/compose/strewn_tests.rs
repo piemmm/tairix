@@ -6,51 +6,10 @@
 use alloc::vec::Vec;
 
 use super::*;
-use crate::course::Courses;
+use crate::compose::testland::{grounded, land};
 use crate::detail::Detail;
-use crate::ground::{Ground, Palette};
-use crate::heightfield::{Attributes, Heightfield};
-use crate::land::NESTS;
-use crate::material::{Finish, Material};
-use crate::pigment::Pigment;
+use crate::heightfield::Attributes;
 use crate::shape::Shape;
-use crate::vector::{Frame, Pose};
-
-/// A land of one grid 400 m across whose height `profile` gives, carrying
-/// `lie` everywhere, on `stage`.
-fn land(stage: &mut Stage, profile: &dyn Fn(f64, f64) -> f64, lie: Attributes) -> Land {
-    let mut field = Heightfield::new(400, (-200.0, -200.0), 1.0, false).expect("a grid");
-    let side = field.side();
-    assert!(field.carry_attributes());
-    {
-        let (heights, attributes) = field.rows_mut(0..side);
-        for (index, slot) in heights.iter_mut().enumerate() {
-            let (column, row) = (index % side, index / side);
-            *slot = crate::vector::single(profile(
-                -200.0 + crate::vector::real(column),
-                -200.0 + crate::vector::real(row),
-            ));
-        }
-        attributes.fill(lie);
-    }
-    field.seal();
-    stage.fields.push(field);
-    Land {
-        far: 0,
-        nests: [None; NESTS],
-        water: None,
-        near_water: None,
-        horizon: None,
-        rivers: Courses::none(),
-        form: None,
-        roads: Courses::none(),
-        road: None,
-        crossings: Vec::new(),
-        sea: None,
-        centre: (0.0, 0.0),
-        reach: 200.0,
-    }
-}
 
 /// Dry ground neither worn nor built up, on no road, bare of snow.
 const DRY: Attributes = [0, 128, 0, 255, 0];
@@ -65,44 +24,6 @@ fn stones(stage: &Stage) -> Vec<((f64, f64), f64)> {
             _ => None,
         })
         .collect()
-}
-
-/// `land`'s ground, as a stage holds a land's: a material the land's own
-/// grid is laid in, whose rock its stones are of.
-fn grounded(stage: &mut Stage) {
-    let palette = Palette {
-        grass: Vec3::splat(0.2),
-        dry: Vec3::splat(0.3),
-        moss: Vec3::splat(0.2),
-        earth: Vec3::splat(0.3),
-        silt: Vec3::splat(0.4),
-        rock: Vec3::splat(0.4),
-        strata: Vec3::splat(0.3),
-        lichen: Vec3::splat(0.5),
-        sand: Vec3::splat(0.6),
-        snow: Vec3::ONE,
-    };
-    let ground = Ground {
-        palette,
-        shore: -1e3,
-        snow_line: 1e5,
-        cliff: 0.6,
-        bedding: 2.0,
-        seed: 1,
-        road: None,
-        floor: None,
-    };
-    let material = stage
-        .material(Material::new(Pigment::Ground(ground), Finish::Matte))
-        .expect("a material");
-    stage
-        .add(
-            Shape::Land { field: 0 },
-            material,
-            Pose::new(Vec3::ZERO, Frame::WORLD),
-            false,
-        )
-        .expect("the land");
 }
 
 /// An eye at the land's middle, looking along +z.
@@ -179,7 +100,7 @@ fn scree_lies_below_a_crag_and_the_larger_rolled_the_further() {
         DRY,
     );
     let below = |z: f64| {
-        let lie = land.lie(&stage.fields, 5.0, z);
+        let lie = land.grids.lie(&stage.fields, 5.0, z);
         scree(&land, &stage.fields, ((5.0, z), &lie))
     };
     let (near, far) = (

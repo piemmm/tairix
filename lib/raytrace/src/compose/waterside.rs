@@ -26,7 +26,8 @@ use super::{rgb, Dice, Recipe, Stage};
 use crate::heightfield::Heightfield;
 use crate::land::Land;
 use crate::leaf::Outline;
-use crate::material::{Finish, Material};
+use crate::lily::Lily;
+use crate::material::{Finish, Material, Relief};
 use crate::noise::{fbm2, hash2, smoothstep};
 use crate::pigment::{Foliage, Pigment};
 use crate::sample::{mix32, unit};
@@ -66,6 +67,11 @@ const FAR_ROWS: usize = 6;
 const PLACED_A_UNIT: usize = 8192;
 /// How far apart along the water its fall is measured.
 const FALL_REACH: f64 = 2.0;
+/// How steeply a lily pad's fine quilting between its veins stands, and how
+/// many of its swellings span a metre; and likewise a reedmace spike's
+/// velvet.
+const PAD_QUILT: (f64, f64) = (0.03, 260.0);
+const VELVET: (f64, f64) = (0.08, 600.0);
 /// How near the eye no patch stands, which one there would fill the picture.
 const EYE_CLEAR: f64 = 2.5;
 /// The most a bank may rise above the water beside it and still be read
@@ -518,10 +524,10 @@ fn edge_at(
 ) -> Option<Edge> {
     // Most places lie well above any water: rule them out before reading
     // the rest of the ground.
-    let ground = land.height(fields, x, z);
-    let river = land.water_level(fields, x, z);
+    let ground = land.grids.height(fields, x, z);
+    let river = land.grids.water_level(fields, x, z);
     let level = river.or(lake).filter(|&level| level - ground > -BANK)?;
-    let lie = land.lie(fields, x, z);
+    let lie = land.grids.lie(fields, x, z);
     Some(Edge {
         ground,
         level,
@@ -544,7 +550,7 @@ fn edge_at(
 /// stands at `level`: from either side where both hold water, from the one
 /// that does at a bank.
 fn fall_of(land: &Land, fields: &[Heightfield], (x, z): (f64, f64), level: f64) -> f64 {
-    let at = |dx: f64, dz: f64| land.water_level(fields, x + dx, z + dz);
+    let at = |dx: f64, dz: f64| land.grids.water_level(fields, x + dx, z + dz);
     let slope = |before: Option<f64>, after: Option<f64>| match (before, after) {
         (Some(before), Some(after)) => (after - before) / (2.0 * FALL_REACH),
         (Some(before), None) => (level - before) / FALL_REACH,
@@ -639,103 +645,141 @@ fn density(margin: Margin) -> f64 {
 /// The materials `margin`'s patches are made in, as they are in `season`;
 /// `None` when the stage will not hold them.
 fn marsh(stage: &mut Stage, margin: Margin, season: Season) -> Option<Marsh> {
-    let made = |stage: &mut Stage, colours: [u32; 4], outline: Outline, finish: Finish| {
-        let material = stage.material(Material::new(
-            Pigment::Foliage(foliage(colours, outline, season)),
-            finish,
-        ))?;
-        u16::try_from(material).ok()
-    };
-    let leaf = |translucency: f64| Finish::Leaf { translucency };
+    let leafy =
+        |colours: [u32; 4], outline: Outline| Pigment::Foliage(foliage(colours, outline, season));
     let palette = |colours: [[u32; 4]; 4]| colours[season_index(season)];
-    let strap = Outline::Strap { from: 0, to: 255 };
     Some(match margin {
         Margin::Reed => {
-            let stems = made(stage, palette(REED_STEMS), strap, leaf(0.15))?;
-            let leaves = made(stage, palette(REED_LEAVES), strap, leaf(0.3))?;
+            let stems = made(stage, leafy(palette(REED_STEMS), STRAP), leaf(0.15))?;
+            let leaves = made(stage, leafy(palette(REED_LEAVES), STRAP), leaf(0.3))?;
             let heads = made(
                 stage,
-                palette(PLUMES),
-                Outline::Fascicle { count: 7 },
+                leafy(palette(PLUMES), Outline::Fascicle { count: 7 }),
                 leaf(0.45),
             )?;
             Marsh {
                 stems,
                 leaves,
+                sepals: heads,
                 heads,
                 hearts: heads,
             }
         }
-        Margin::Reedmace => {
-            let stems = made(stage, palette(MACE_STEMS), strap, leaf(0.15))?;
-            let leaves = made(stage, palette(MACE_LEAVES), strap, leaf(0.25))?;
-            let heads = made(stage, SPIKES, Outline::Lanceolate, Finish::Matte)?;
-            Marsh {
-                stems,
-                leaves,
-                heads,
-                hearts: heads,
-            }
-        }
-        Margin::Lily => {
-            let leaves = made(
-                stage,
-                palette(PADS),
-                Outline::Pad,
-                Finish::Coated { roughness: 0.3 },
-            )?;
-            let heads = made(stage, PETALS, Outline::Ovate { teeth: 0 }, leaf(0.5))?;
-            let hearts = made(
-                stage,
-                HEARTS,
-                Outline::Ovate { teeth: 0 },
-                Finish::Coated { roughness: 0.6 },
-            )?;
-            Marsh {
-                stems: leaves,
-                leaves,
-                heads,
-                hearts,
-            }
-        }
+        Margin::Reedmace => mace_marsh(
+            stage,
+            [
+                leafy(palette(MACE_STEMS), STRAP),
+                leafy(palette(MACE_LEAVES), STRAP),
+                leafy(SPIKES, Outline::Lanceolate),
+                leafy(FLUFF, Outline::Fascicle { count: 11 }),
+            ],
+        )?,
+        Margin::Lily => lily_marsh(stage, palette(PADS))?,
         Margin::Pondweed => {
             let leaves = made(
                 stage,
-                palette(PONDWEED),
-                Outline::Ovate { teeth: 0 },
+                leafy(palette(PONDWEED), Outline::Ovate { teeth: 0 }),
                 Finish::Coated { roughness: 0.35 },
             )?;
             Marsh {
                 stems: leaves,
                 leaves,
+                sepals: leaves,
                 heads: leaves,
                 hearts: leaves,
             }
         }
         Margin::Crowfoot => {
-            let stems = made(stage, palette(CROWFOOT), strap, leaf(0.2))?;
+            let stems = made(stage, leafy(palette(CROWFOOT), STRAP), leaf(0.2))?;
             let leaves = made(
                 stage,
-                palette(CROWFOOT),
-                strap,
+                leafy(palette(CROWFOOT), STRAP),
                 Finish::Coated { roughness: 0.4 },
             )?;
-            let heads = made(stage, PETALS, Outline::Ovate { teeth: 0 }, leaf(0.5))?;
+            let heads = made(
+                stage,
+                Pigment::Lily(Lily::Broad(PETALS.map(rgb))),
+                leaf(0.5),
+            )?;
             let hearts = made(
                 stage,
-                HEARTS,
-                Outline::Ovate { teeth: 0 },
-                Finish::Coated { roughness: 0.6 },
+                Pigment::Lily(Lily::Hearts(HEARTS.map(rgb))),
+                leaf(0.3),
             )?;
             Marsh {
                 stems,
                 leaves,
+                sepals: heads,
                 heads,
                 hearts,
             }
         }
     })
 }
+
+/// The materials reedmace's patches are made in, of its stems', leaves',
+/// spikes' and fluff's pigments.
+fn mace_marsh(stage: &mut Stage, [stems, leaves, spikes, fluff]: [Pigment; 4]) -> Option<Marsh> {
+    let stems = made(stage, stems, leaf(0.15))?;
+    let leaves = made(stage, leaves, leaf(0.25))?;
+    // A spike's velvet is its seeds' hairs packed close.
+    let heads = u16::try_from(stage.material(
+        Material::new(spikes, Finish::Matte).with_relief(Relief::grain(VELVET.0, VELVET.1, 0x7e1)),
+    )?)
+    .ok()?;
+    let fluff = made(stage, fluff, leaf(0.6))?;
+    Some(Marsh {
+        stems,
+        leaves,
+        sepals: fluff,
+        heads,
+        hearts: heads,
+    })
+}
+
+/// The materials a water lily's patches are made in, its pads of `pads`.
+fn lily_marsh(stage: &mut Stage, pads: [u32; 4]) -> Option<Marsh> {
+    Some(Marsh {
+        stems: made(stage, Pigment::Lily(Lily::Stalks), leaf(0.1))?,
+        // A pad's waxed skin sheds the water and shines, quilted finely
+        // between its veins.
+        leaves: u16::try_from(
+            stage.material(
+                Material::new(
+                    Pigment::Lily(Lily::Pads(pads.map(rgb))),
+                    Finish::Coated { roughness: 0.15 },
+                )
+                .with_relief(Relief::grain(PAD_QUILT.0, PAD_QUILT.1, 0x1a7d)),
+            )?,
+        )
+        .ok()?,
+        sepals: made(stage, Pigment::Lily(Lily::Sepals), leaf(0.25))?,
+        heads: made(
+            stage,
+            Pigment::Lily(Lily::Petals(PETALS.map(rgb))),
+            leaf(0.5),
+        )?,
+        hearts: made(
+            stage,
+            Pigment::Lily(Lily::Hearts(HEARTS.map(rgb))),
+            leaf(0.3),
+        )?,
+    })
+}
+
+/// A material of `pigment` and `finish` on `stage`, by the index a part
+/// keeps; `None` when the stage will not hold it.
+fn made(stage: &mut Stage, pigment: Pigment, finish: Finish) -> Option<u16> {
+    u16::try_from(stage.material(Material::new(pigment, finish))?).ok()
+}
+
+/// A leaf's finish, letting `translucency` of the light through it.
+const fn leaf(translucency: f64) -> Finish {
+    Finish::Leaf { translucency }
+}
+
+/// A blade's outline, its whole length kept.
+const STRAP: Outline = Outline::Strap { from: 0, to: 255 };
 
 /// A plant's leaves of `colours` and `outline` as they are in `season`.
 fn foliage(colours: [u32; 4], outline: Outline, season: Season) -> Foliage {
@@ -766,7 +810,8 @@ fn season_index(season: Season) -> usize {
 /// The plants' colours by season, spring to winter: a reed's stems green and
 /// last year's straw in spring, gold in autumn and pale in winter; its
 /// leaves; its plume, a dull mauve-brown as it flowers and buff once dry;
-/// and likewise reedmace's blue-green leaves, a lily's pads and pondweed.
+/// and likewise reedmace's blue-green leaves, a lily's pads — green each
+/// season, as a pad's own age yellows and browns it — and pondweed.
 const REED_STEMS: [[u32; 4]; 4] = [
     [0x7E_9A_44, 0xB8_A8_78, 0x86_A2_4E, 0xC4_B4_84],
     [0x6C_8A_3A, 0x78_94_4A, 0x5E_7C_34, 0x84_A0_52],
@@ -798,10 +843,10 @@ const MACE_LEAVES: [[u32; 4]; 4] = [
     [0xB0_A0_7A, 0xA4_94_6E, 0xBC_AC_86, 0x98_88_62],
 ];
 const PADS: [[u32; 4]; 4] = [
-    [0x3A_6A_30, 0x6A_4A_30, 0x34_60_2A, 0x52_82_3E],
+    [0x3E_6A_30, 0x46_72_34, 0x36_62_2C, 0x4E_7A_3A],
     [0x2C_54_26, 0x36_62_2C, 0x28_4A_22, 0x40_6E_34],
-    [0x7A_7A_34, 0x8E_84_36, 0x5E_6A_2C, 0xA0_8E_3C],
-    [0x6A_5A_34, 0x5E_52_30, 0x74_64_3A, 0x54_4A_2C],
+    [0x34_52_26, 0x3E_5A_2A, 0x2E_4A_22, 0x46_60_2E],
+    [0x34_52_26, 0x3E_5A_2A, 0x2E_4A_22, 0x46_60_2E],
 ];
 const PONDWEED: [[u32; 4]; 4] = [
     [0x66_7A_34, 0x72_86_3C, 0x5C_70_2E, 0x7C_90_44],
@@ -817,9 +862,10 @@ const CROWFOOT: [[u32; 4]; 4] = [
     [0x2E_3C_1A, 0x36_44_1E, 0x28_3416, 0x3E_4C_22],
 ];
 
-/// A reedmace's spikes, a lily's petals and the heart of its flower, the
-/// same each season.
+/// A reedmace's spikes and the fluff a winter's spikes burst in, a lily's
+/// petals and the heart of its flower, the same each season.
 const SPIKES: [u32; 4] = [0x4A_2E_1C, 0x54_34_1E, 0x40_28_18, 0x5E_3C_24];
+const FLUFF: [u32; 4] = [0xE6_DE_CC, 0xDC_D2_BE, 0xEE_E8_DA, 0xD2_C8_B2];
 const PETALS: [u32; 4] = [0xF2_F0_E6, 0xFA_F8_F0, 0xEA_E6_DA, 0xF6_EE_EC];
 const HEARTS: [u32; 4] = [0xE2_B8_30, 0xEA_C4_40, 0xD8_AC_28, 0xF0_CC_4C];
 

@@ -18,7 +18,7 @@ use core::ops::Range;
 use tairix_util::{fallible, mathf};
 
 use crate::shape::{reciprocal, Aabb};
-use crate::vector::{real, share, single, Ray, Vec3};
+use crate::vector::{above, below, real, share, Ray, Vec3};
 
 /// How deep the tree may grow, and so how deep a walk's stack must be.
 const MAX_DEPTH: usize = 40;
@@ -67,26 +67,6 @@ impl Node {
         (0..3).all(|axis| {
             (bounds.min.along(axis)..=bounds.max.along(axis)).contains(&point.along(axis))
         })
-    }
-}
-
-/// The nearest single-precision value at or below `value`.
-fn below(value: f64) -> f32 {
-    let near = single(value);
-    if f64::from(near) > value {
-        near.next_down()
-    } else {
-        near
-    }
-}
-
-/// The nearest single-precision value at or above `value`.
-fn above(value: f64) -> f32 {
-    let near = single(value);
-    if f64::from(near) < value {
-        near.next_up()
-    } else {
-        near
     }
 }
 

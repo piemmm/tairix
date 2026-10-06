@@ -14,7 +14,8 @@ use tairix_util::{fallible, mathf};
 
 use super::{rgb, Dice, Recipe, Stage};
 use crate::bark::{Bark, BarkKind};
-use crate::deadwood::{Decay, Fungus, Habit, Sprouting, Top, Woods};
+use crate::cactus::{Flesh, Ribs, FELT, RIB_DEPTH};
+use crate::deadwood::{Decay, Fungus, Habit as Shelving, Sprouting, Top, Woods};
 use crate::fracture::Grain;
 use crate::grass::{
     Cover, Grass, GrassKind, Habit as Tufting, Head, Lawn, Litter, Seen, Weeds, GRASS_KINDS,
@@ -27,6 +28,7 @@ use crate::shade::{Rect, Sampling, Shade, Shades};
 use crate::shape::Shape;
 use crate::tree::{Envelope, Leafing, Level, Season, Species, Stock};
 use crate::vector::{real, share, Frame, Pose, Vec3};
+use crate::wood::{Affinity, Habit, KINDS, VARIANTS};
 
 /// The kinds of tree and shrub a scene can grow.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -66,7 +68,7 @@ pub(super) enum Stand {
 impl Kind {
     /// Whether this kind is a shrub, which grows as it does however it
     /// stands.
-    const fn shrub(self) -> bool {
+    pub(super) const fn shrub(self) -> bool {
         matches!(
             self,
             Self::Hazel | Self::Box | Self::Heather | Self::Gorse | Self::Fern
@@ -105,71 +107,34 @@ impl Kind {
     }
 }
 
-/// How many trees of each kind a scene grows to choose among: grown to
-/// heights spread from a sapling's past the shortest of the kind grown up to
-/// its tallest, so a wood stands young trees beneath its old ones.
-pub(super) const VARIANTS: usize = 4;
-
 /// The share of its kind's least grown height the shortest grown tree of a
 /// kind stands.
 const YOUNGEST: f64 = 0.5;
 
-/// A kind's grown trees: the prototypes it placed, how tall each grew, the
-/// bark they are made of, and how far their crowns spread for their height.
+/// A kind's grown trees.
 #[derive(Copy, Clone, Debug)]
 pub(super) struct Grown {
     pub(super) kind: Kind,
-    prototypes: [u32; VARIANTS],
-    pub(super) heights: [f64; VARIANTS],
-    bark: usize,
-    pub(super) crown: f64,
+    pub(super) habit: Habit,
 }
-
-impl Grown {
-    /// Which of the kind's grown trees stands nearest `height` tall: between
-    /// the two nearest, as `draw` falls, so a wood of one height is not one
-    /// tree over and over.
-    pub(super) fn nearest(&self, height: f64, draw: f64) -> usize {
-        let apart = |variant: usize| {
-            self.heights.get(variant).map_or(f64::INFINITY, |&natural| {
-                mathf::ln(height.max(1e-3) / natural.max(1e-3)).abs()
-            })
-        };
-        let mut order: [usize; VARIANTS] = core::array::from_fn(|variant| variant);
-        order.sort_unstable_by(|&a, &b| apart(a).total_cmp(&apart(b)));
-        let (first, second) = (
-            order.first().copied().unwrap_or(0),
-            order.get(1).copied().unwrap_or(0),
-        );
-        // The second nearest only while it is still near.
-        if apart(second) < 0.25 && draw < 0.5 {
-            second
-        } else {
-            first
-        }
-    }
-}
-
-/// The most kinds one grove holds.
-const GROVE_KINDS: usize = 6;
 
 /// The kinds a scene grows, grown.
 #[derive(Clone, Debug)]
 pub(super) struct Grove {
-    grown: [Option<Grown>; GROVE_KINDS],
+    grown: [Option<Grown>; KINDS],
 }
 
 impl Grove {
-    /// The first [`GROVE_KINDS`] of `kinds`, each grown a few times for
-    /// `season` as `stand` has them; its trees to be grown before the scene
-    /// is traced. `None` when the heap will not hold them.
+    /// The first [`KINDS`] of `kinds`, each grown a few times for `season`
+    /// as `stand` has them; its trees to be grown before the scene is
+    /// traced. `None` when the heap will not hold them.
     pub(super) fn new(
         stage: &mut Stage,
         dice: &mut Dice,
         (kinds, season): (&[Kind], Season),
         stand: Stand,
     ) -> Option<Self> {
-        let mut grown = [None; GROVE_KINDS];
+        let mut grown = [None; KINDS];
         for (slot, &kind) in grown.iter_mut().zip(kinds) {
             *slot = Some(grow(stage, dice, (kind, stand), season)?);
         }
@@ -179,6 +144,11 @@ impl Grove {
     /// The grove's kinds, grown.
     pub(super) fn kinds(&self) -> impl Iterator<Item = &Grown> + '_ {
         self.grown.iter().flatten()
+    }
+
+    /// The grove's kinds as a wood reads them, in order.
+    pub(super) fn habits(&self) -> [Option<Habit>; KINDS] {
+        self.grown.map(|grown| grown.map(|grown| grown.habit))
     }
 
     /// The first of the grove's kinds.
@@ -397,7 +367,7 @@ impl Rotting {
 fn fungus(stage: &mut Stage, dice: &mut Dice, kind: Kind) -> Option<Fungus> {
     let (habit, [first, second], margin, pores) = if kind == Kind::Birch {
         (
-            Habit::Thick,
+            Shelving::Thick,
             [0xB8_A0_80, 0xC8_B4_98],
             0xD8_CC_B4,
             0xF2_EE_E4,
@@ -408,10 +378,10 @@ fn fungus(stage: &mut Stage, dice: &mut Dice, kind: Kind) -> Option<Fungus> {
             [0x5A_4A_3A, 0xA8_8A_5A],
             [0x4E_56_5E, 0x8A_8E_88],
         ])?;
-        (Habit::Thin, zones, 0xE8_E0_CC, 0xD8_D0_BC)
+        (Shelving::Thin, zones, 0xE8_E0_CC, 0xD8_D0_BC)
     } else {
         (
-            Habit::Thick,
+            Shelving::Thick,
             [0x006A_4A32, 0x8A_6A_4A],
             0xE0_D8_C8,
             0xF0_EC_E0,
@@ -695,53 +665,68 @@ pub(super) fn litter(kind: Kind, age: f64) -> ([Vec3; 2], Vec3, f64) {
     ([lying, lying.lerp(rotted, 0.6)], humus, moss)
 }
 
-/// Plant a tree of `grown` at `base`, about `height` tall, turned any way.
+/// Plant a tree of `habit` at `base`, about `height` tall, turned any way.
 pub(super) fn plant(
     stage: &mut Stage,
     dice: &mut Dice,
-    grown: &Grown,
+    habit: &Habit,
     base: Vec3,
     height: f64,
 ) -> Option<()> {
-    let variant = grown.nearest(height, dice.unit());
-    let natural = *grown.heights.get(variant)?;
-    let turn = dice.range(0.0, TAU);
-    let key = dice.seed();
+    let variant = habit.nearest(height, dice.unit());
+    let natural = *habit.heights.get(variant)?;
+    let pose = Pose::new(base, Frame::turned(dice.range(0.0, TAU), 0.0));
     place(
         stage,
-        grown,
-        (variant, sized(height, natural)),
-        base,
-        (turn, key),
+        habit,
+        (variant, habit.sized(height, natural)),
+        (pose, dice.seed()),
     )
     .map(|_| ())
 }
 
-/// The least and most a grown tree is scaled by: never so far its limbs and
-/// leaves stop looking the size they are.
-const SHORTEST: f64 = 0.75;
-pub(super) const TALLEST: f64 = 1.35;
+/// The least and most a grown plant is scaled by: never so far its limbs and
+/// leaves stop looking the size they are, and a saguaro, whose areoles and
+/// spines grow with it, by less.
+const SCALED: (f64, f64) = (0.75, 1.35);
+const SAGUARO_SCALED: (f64, f64) = (0.88, 1.14);
 
-/// How far a tree grown `natural` tall is scaled to stand `height` tall.
-pub(super) fn sized(height: f64, natural: f64) -> f64 {
-    (height / natural.max(1e-3)).clamp(SHORTEST, TALLEST)
+/// How readily `kind` takes to ground against the other kinds of its wood:
+/// willows and poplars to the wet, pines to the dry and poor, beeches to deep
+/// and well-drained soil, birches wherever others give way.
+const fn affinity(kind: Kind) -> Affinity {
+    let (base, wet, rich, least) = match kind {
+        Kind::Willow | Kind::Poplar => (0.25, 1.6, 0.0, 0.0),
+        Kind::Pine => (1.7, -0.6, -0.4, 0.0),
+        Kind::Spruce => (0.8, 0.5, 0.0, 0.0),
+        Kind::Beech => (1.0, -1.2, 0.5, 0.1),
+        Kind::Oak => (1.0, -0.6, 0.3, 0.1),
+        Kind::Maple => (0.9, 0.0, 0.4, 0.0),
+        Kind::Birch => (1.3, 0.0, -0.5, 0.0),
+        Kind::Fern => (0.7, 0.8, 0.0, 0.0),
+        _ => return Affinity::EVEN,
+    };
+    Affinity {
+        base,
+        wet,
+        rich,
+        least,
+    }
 }
 
-/// Stand grown tree `variant` of `grown`, `scale` times its size, at `base`,
-/// turned `turn` about its trunk and set apart from the rest by `key`, its
-/// crown recorded on the stage: how far the crown reaches.
+/// Stand grown tree `variant` of `habit`, `scale` times its size, at `pose`,
+/// set apart from the rest by `key`, its crown recorded on the stage: how far
+/// the crown reaches.
 pub(super) fn place(
     stage: &mut Stage,
-    grown: &Grown,
+    habit: &Habit,
     (variant, scale): (usize, f64),
-    base: Vec3,
-    (turn, key): (f64, u32),
+    (pose, key): (Pose, u32),
 ) -> Option<f64> {
     let (prototype, natural) = (
-        *grown.prototypes.get(variant)?,
-        *grown.heights.get(variant)?,
+        *habit.prototypes.get(variant)?,
+        *habit.heights.get(variant)?,
     );
-    let pose = Pose::new(base, Frame::turned(turn, 0.0));
     stage.add(
         Shape::Instance {
             prototype,
@@ -749,12 +734,12 @@ pub(super) fn place(
             scale,
             key,
         },
-        grown.bark,
+        habit.bark,
         pose,
         false,
     )?;
-    let reach = grown.crown * natural * scale;
-    stage.canopy((base.x, base.z), reach)?;
+    let reach = habit.crown * natural * scale;
+    stage.canopy((pose.at.x, pose.at.z), reach)?;
     Some(reach)
 }
 
@@ -766,6 +751,9 @@ fn grow(
     (kind, stand): (Kind, Stand),
     season: Season,
 ) -> Option<Grown> {
+    if kind == Kind::Saguaro {
+        return grow_saguaro(stage, dice, season);
+    }
     let snow = if season == Season::Winter { 0.85 } else { 0.0 };
     let pattern = bark(kind, dice.seed());
     let bark = stage.material(
@@ -804,6 +792,11 @@ fn grow(
         leaves: u16::try_from(leaves).ok()?,
         grain,
     };
+    let roots = if kind == Kind::Palm {
+        u16::try_from(palm_roots(stage, dice)?).ok()?
+    } else {
+        stock.bark
+    };
     let mut prototypes = [0u32; VARIANTS];
     let mut heights = [0.0f64; VARIANTS];
     for (variant, (prototype, height)) in prototypes.iter_mut().zip(heights.iter_mut()).enumerate()
@@ -814,14 +807,8 @@ fn grow(
             Recipe::Palm {
                 height: *height,
                 stock,
+                roots,
                 fronds: u16::try_from(dice.count(13, 18)).ok()?,
-                seed,
-            }
-        } else if kind == Kind::Saguaro {
-            *height = dice.range(3.0, 8.0);
-            Recipe::Saguaro {
-                height: *height,
-                stock,
                 seed,
             }
         } else if kind == Kind::Fern {
@@ -849,10 +836,149 @@ fn grow(
     }
     Some(Grown {
         kind,
-        prototypes,
-        heights,
-        bark,
-        crown: kind.crown(stand),
+        habit: Habit {
+            affinity: affinity(kind),
+            prototypes,
+            heights,
+            bark,
+            crown: kind.crown(stand),
+            scaled: SCALED,
+        },
+    })
+}
+
+/// The material a palm's mat of roots is made in: smooth, tan where it is
+/// fresh and greyed where the sun has had it, ringed faintly where its
+/// rootlets grew.
+fn palm_roots(stage: &mut Stage, dice: &mut Dice) -> Option<usize> {
+    let skin = Bark {
+        kind: BarkKind::Taproot,
+        light: rgb(0x6E_5A_46),
+        dark: rgb(0x36_2C_22),
+        accent: rgb(0x6A_64_5C),
+        rise: 0.0,
+        snow: 0.0,
+        moss: 0.0,
+        bare: 0.0,
+        seed: dice.seed(),
+    };
+    stage.material(
+        Material::new(
+            Pigment::Bark(skin.clone()),
+            Finish::Coated { roughness: 0.75 },
+        )
+        .with_relief(Relief::Bark {
+            bark: skin,
+            depth: 0.0008,
+        }),
+    )
+}
+
+/// A saguaro's skin: dull grey-green on its crests and darker down its
+/// grooves, its young areoles' felt a greyish brown.
+const FLESH: (u32, u32, u32) = (0x7A_8A_62, 0x42_4E_38, 0x6E_60_4E);
+
+/// A saguaro's girth for its height: thickening as it grows taller, to about
+/// a third of a metre in radius on the tallest.
+fn saguaro_girth(height: f64) -> f64 {
+    (0.1 + 0.024 * height).min(0.34)
+}
+
+/// How many ribs run round a saguaro's stem `girth` in radius, `stray` more
+/// or fewer than most such stems: a dozen on a slender stem, two dozen on the
+/// stoutest.
+fn ribs_round(girth: f64, stray: f64) -> u8 {
+    let count = mathf::round_i32(girth * 72.0 + stray).clamp(11, 26);
+    u8::try_from(count).unwrap_or(18)
+}
+
+/// A saguaro's skin folded into `ribs`.
+fn flesh(ribs: Ribs) -> Bark {
+    let (light, dark, accent) = FLESH;
+    Bark {
+        kind: BarkKind::Ribbed { ribs: ribs.count },
+        light: rgb(light),
+        dark: rgb(dark),
+        accent: rgb(accent),
+        rise: 0.0,
+        snow: 0.0,
+        moss: 0.0,
+        bare: 0.0,
+        seed: ribs.seed,
+    }
+}
+
+/// The material of a saguaro's stem `girth` in radius folded into `ribs`,
+/// snow lying on it as `snow` has it: its ribs cut as deep as its girth asks.
+fn flesh_material(stage: &mut Stage, ribs: Ribs, (girth, snow): (f64, f64)) -> Option<u16> {
+    let skin = flesh(ribs);
+    let made = stage.material(
+        Material::new(
+            Pigment::Bark(Bark {
+                snow,
+                ..skin.clone()
+            }),
+            Finish::Coated { roughness: 0.78 },
+        )
+        .with_relief(Relief::Bark {
+            bark: skin,
+            depth: RIB_DEPTH * girth / (1.0 - FELT),
+        }),
+    )?;
+    u16::try_from(made).ok()
+}
+
+/// Saguaros for `season`, each grown in materials of its own: its trunk's
+/// and its arms' ribs as many as their girths ask, and its spines coloured by
+/// their age.
+fn grow_saguaro(stage: &mut Stage, dice: &mut Dice, season: Season) -> Option<Grown> {
+    let snow = if season == Season::Winter { 0.85 } else { 0.0 };
+    let spines = stage.material(Material::new(
+        Pigment::Spines(palette(Kind::Saguaro, season).map(rgb)),
+        Finish::Leaf {
+            translucency: translucency(Kind::Saguaro),
+        },
+    ))?;
+    let spines = u16::try_from(spines).ok()?;
+    let mut prototypes = [0u32; VARIANTS];
+    let mut heights = [0.0f64; VARIANTS];
+    let mut skin = None;
+    for (prototype, height) in prototypes.iter_mut().zip(heights.iter_mut()) {
+        *height = dice.range(3.0, 8.0);
+        let girth = saguaro_girth(*height) * dice.range(0.88, 1.12);
+        let arms = dice.range(0.62, 0.82);
+        let trunk = Ribs {
+            count: ribs_round(girth, dice.range(-1.5, 1.5)),
+            seed: dice.seed(),
+        };
+        let limbs = Ribs {
+            count: ribs_round(girth * arms, dice.range(-1.5, 1.5)).min(trunk.count),
+            seed: dice.seed(),
+        };
+        let flesh = Flesh {
+            trunk: (flesh_material(stage, trunk, (girth, snow))?, trunk),
+            arms: (flesh_material(stage, limbs, (girth * arms, snow))?, limbs),
+            spines,
+        };
+        skin.get_or_insert(flesh.trunk.0);
+        *prototype = stage.plan(&Recipe::Saguaro {
+            height: *height,
+            girth: (girth, arms),
+            flesh,
+            spines: stage.densities.spines,
+            seed: dice.wide(),
+        })?;
+    }
+    Some(Grown {
+        kind: Kind::Saguaro,
+        habit: Habit {
+            affinity: affinity(Kind::Saguaro),
+            prototypes,
+            heights,
+            bark: usize::from(skin?),
+            crown: Kind::Saguaro.crown(Stand::Open),
+            scaled: SAGUARO_SCALED,
+        },
     })
 }
 
@@ -1479,8 +1605,8 @@ fn species(kind: Kind) -> Species {
     }
 }
 
-/// How a shrub grows: several stems from the ground, and no trunk to speak
-/// of.
+/// How a shrub grows: several stems rising from the woody stool they share,
+/// each swelling a little where it leaves it, and no trunk to speak of.
 fn shrub(kind: Kind) -> Species {
     let (height, trunks, leaf, per_twig, outline) = match kind {
         Kind::Hazel => ((3.0, 5.0), 7, 0.1, 16, Outline::Ovate { teeth: 12 }),
@@ -1494,7 +1620,7 @@ fn shrub(kind: Kind) -> Species {
         height,
         base: 0.1,
         girth: 0.012,
-        flare: 0.0,
+        flare: 0.8,
         stubs: 0.0,
         ratio_power: 1.3,
         trunks,
@@ -1551,12 +1677,21 @@ fn shrub(kind: Kind) -> Species {
     }
 }
 
-/// `kind`'s bark.
+/// `kind`'s bark: a saguaro's skin as a stem of middling girth wears it.
 fn bark(kind: Kind, seed: u32) -> Bark {
     let (bark_kind, light, dark, accent, rise) = match kind {
+        Kind::Saguaro => {
+            return flesh(Ribs {
+                count: ribs_round(saguaro_girth(5.5), 0.0),
+                seed,
+            });
+        }
         Kind::Oak => (BarkKind::Furrowed, 0x7A_6A_58, 0x2A_22_1C, 0x8C_94_70, 0.0),
-        Kind::Maple | Kind::Hazel => (BarkKind::Furrowed, 0x6E_62_56, 0x32_2A_24, 0x88_8E_74, 0.0),
-        Kind::Cherry => (BarkKind::Banded, 0x6A_3A_30, 0x26_16_12, 0x8C_6A_5C, 0.0),
+        Kind::Maple => (BarkKind::Furrowed, 0x6E_62_56, 0x32_2A_24, 0x88_8E_74, 0.0),
+        // Smooth and coppery, banded with pale lenticels, peeling thinly.
+        Kind::Hazel => (BarkKind::Banded, 0x7E_60_4C, 0x3E_2E_24, 0xA8_9A_86, 0.0),
+        // Glossy mahogany, darker than it looks in the sun, peeling coppery.
+        Kind::Cherry => (BarkKind::Banded, 0x4E_2C_26, 0x1C_11_0F, 0x74_5E_52, 0.0),
         Kind::Birch => (BarkKind::Papery, 0xC8_C4_BC, 0x22_20_1E, 0xBC_AC_9C, 0.0),
         Kind::Beech => (BarkKind::Smooth, 0x9A_98_92, 0x6A_68_62, 0x84_90_76, 0.0),
         Kind::Willow | Kind::Olive => (BarkKind::Furrowed, 0x7A_70_62, 0x3A_32_2A, 0x92_96_7A, 0.0),
@@ -1566,7 +1701,6 @@ fn bark(kind: Kind, seed: u32) -> Bark {
             (BarkKind::Scaly, 0x6A_58_4A, 0x30_26_20, 0x7A_7A_68, 0.0)
         }
         Kind::Palm => (BarkKind::Ringed, 0x8C_7C_66, 0x4A_3E_33, 0x9A_8A_70, 0.0),
-        Kind::Saguaro => (BarkKind::Ribbed, 0x6A_8A_4A, 0x34_4C_2C, 0x88_9A_5E, 0.0),
         Kind::Fern => (BarkKind::Smooth, 0x5E_6A_33, 0x3A_42_20, 0x6E_7A_3A, 0.0),
     };
     Bark {
@@ -1616,8 +1750,9 @@ fn bark_depth(kind: Kind) -> f64 {
     match kind {
         Kind::Oak | Kind::Pine => 0.024,
         Kind::Poplar | Kind::Willow | Kind::Olive => 0.012,
+        Kind::Saguaro => RIB_DEPTH * saguaro_girth(5.5) / (1.0 - FELT),
         Kind::Maple | Kind::Hazel => 0.008,
-        Kind::Palm | Kind::Saguaro => 0.006,
+        Kind::Palm => 0.006,
         Kind::Birch => 0.005,
         Kind::Spruce | Kind::Box | Kind::Heather | Kind::Gorse => 0.004,
         Kind::Beech | Kind::Cherry => 0.002,
@@ -1629,7 +1764,9 @@ fn bark_depth(kind: Kind) -> f64 {
 fn translucency(kind: Kind) -> f64 {
     match kind {
         Kind::Pine | Kind::Spruce | Kind::Box | Kind::Heather | Kind::Gorse | Kind::Olive => 0.2,
-        Kind::Palm | Kind::Saguaro | Kind::Fern => 0.3,
+        Kind::Palm | Kind::Fern => 0.3,
+        // A saguaro's spines, which a low sun behind one lights in a halo.
+        Kind::Saguaro => 0.4,
         _ => 0.45,
     }
 }
@@ -1682,7 +1819,9 @@ fn palette(kind: Kind, season: Season) -> [u32; 4] {
         Kind::Spruce => [0x1E_36_1C, 0x26_42_22, 0x18_2E_18, 0x2E_4C_28],
         Kind::Olive => [0x7A_8A_5A, 0x8A_9A_6A, 0x6A_7A_4E, 0x98_A6_7A],
         Kind::Palm => [0x5A_8A_2E, 0x6A_9A_3A, 0x4E_7A_28, 0x8A_7A_4A],
-        Kind::Saguaro => [0x5A_7A_42, 0x6A_8A_4A, 0x4A_6A_3A, 0x7A_9A_52],
+        // A saguaro's spines by their age: red-brown and young, tan, grey,
+        // and weathered pale.
+        Kind::Saguaro => [0x6A_32_24, 0xB0_96_6E, 0x8E_8A_80, 0xC4_C0_B6],
         Kind::Hazel if autumn => [0xC8_B0_40, 0xB0_98_34, 0xD8_C0_50, 0x9A_84_2C],
         Kind::Hazel => [0x4E_7C_2A, 0x5C_8A_33, 0x44_6E_24, 0x68_94_3A],
         Kind::Box => [0x2E_50_1E, 0x38_5C_24, 0x28_46_1A, 0x42_66_2A],

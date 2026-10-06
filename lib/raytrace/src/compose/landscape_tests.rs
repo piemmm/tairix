@@ -129,7 +129,7 @@ fn a_backdrops_clearing_stays_level_once_its_land_is_built() {
         let angle = TAU * f64::from(step) / 64.0;
         for distance in [0.0, 5.0, 12.5, 18.75] {
             let (x, z) = (distance * mathf::sin(angle), distance * mathf::cos(angle));
-            let height = land.height(&stage.fields, x, z);
+            let height = land.grids.height(&stage.fields, x, z);
             assert!(height.abs() < 1e-3, "{height} at {x:.1}, {z:.1}");
         }
     }
@@ -192,10 +192,6 @@ fn a_stream_scene_away_from_its_stream_still_composes() {
         .expect("builds")
     {}
     let land = landing.build.finish().expect("a land");
-    stage
-        .footprints
-        .index(land.centre, land.reach)
-        .expect("indexed");
     assert!(land.rivers.nearest(eye.x, eye.z).is_none());
     let look = stream_scene(&mut stage, &mut dice, &land, (vantage, Lithology::Granite));
     assert!(look.is_some(), "the scene composes");

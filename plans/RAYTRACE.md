@@ -43,7 +43,7 @@ D503, D505 and D514–D520 (the tracer's open defects).
 | RT25 | Farmhouse interiors: kitchen, range, sink, table and chairs, dressers, stone floors and rugs, by day and by night, the air dusty enough to show a sunbeam | planned |
 | RT26 | Bark in true relief: ridges, plates and corrugation as displaced geometry near the eye | done |
 | RT27 | Stumps, sawn and splintered, some with new shoots at the foot | done |
-| RT28 | Mud cracks as modelled geometry: polygonal plates with curled edges and real depth | planned |
+| RT28 | Mud cracks as modelled geometry: polygonal plates with curled edges and real depth | done |
 | RT29 | Snow that lies unevenly and drifts; snowmen never quite round | done |
 | RT30 | Mountains near and far, ridged and eroded, some snow-capped | planned |
 | RT31 | Weathered stone everywhere: erosion, chips, cracks, lichen and moss on every stone structure | planned |
@@ -52,15 +52,15 @@ D503, D505 and D514–D520 (the tracer's open defects).
 | RT34 | Planetary scenes: gas giants, ringed planets, earthlike and Mars-like worlds, views from icy moons, nebulae, stars, and the sun with its corona and spots | planned |
 | RT35 | Macro shots: a leaf with a drop hanging from it, focused on the drop over a blurred landscape, in many variations | planned |
 | RT36 | Caves: stalactites, stalagmites, pools, iridescent water, crystal outcrops that glow | planned |
-| RT37 | Woods to the horizon: at *Maximum* a wood reaches as far as its trees still span a pixel, its places sown coarser the further they lie wherever they would not otherwise fit the budget | planned |
+| RT37 | Woods to the horizon: at *Maximum* a wood of trees reaches as far as its trees still span a pixel, stood one by one near the eye and hashed from cells past them, as thickly far off as near | done |
 | RT38 | Stones in patches: boulder fields, scree below crags and pebbles in drifts, strewn by noise and slope from eight rocks a scene, and leaf litter as thick as the canopy sheds | done |
 | RT39 | Scene detail: one generator at two profiles, *Simple* (low memory, every setting, the screensaver's default) and *Maximum* (up to 2 GB, all the realism the budget buys), chosen by `screensaver.raytrace.detail` | done |
 | RT40 | One land generator, the tracer's and WinterSun's: the land's stages renderer-neutral, keyed by place and seam-free, in crates WinterSun builds its realm's land with at *Maximum* | planned |
 | RT41 | Local adaptation, a gentle photographic HDR: a sky seen from a dark room or over a dark wood keeps its detail and the room its shadows, only the range a display cannot hold compressed, and a scene one exposure holds left exactly as it is | done |
 | RT42 | Lights as measured: the sun at its true size with its limb darkened, bent by the standard atmosphere; the full moon at its true size, brightness and colour; Allen's stars with Tycho-2's colours; lamps in lumens and candelas; the dusk and night still lifes under the open sky; cirrus lit as ice | done |
-| RT43 | Water clouds lit by multiple scattering that holds for thin cloud too, in place of the octave, powder and ambient approximations | planned |
+| RT43 | Water clouds lit by multiple scattering that holds for thin cloud too, in place of the octave, powder and ambient approximations | done |
 | RT44 | Cloud to the horizon: decks over the Earth's curve, mapped in levels about the eye out to as far as they can be seen, the air beneath them shaded by them, each place lit by the sun as it stands there | done |
-| RT45 | No primitive stand-ins: every limb's foot flares into the roots it grows out of, every break torn, every end tapered, cut or broken as the real thing's is — trees, snags, stumps, fallen trunks and their root plates, the snowman's carrot and sticks done; saguaro ribs, spines and areoles, a palm's and a shrub's foot, a reed's tip and a lily's heart remaining | in progress |
+| RT45 | No primitive stand-ins: every limb's foot flares into the roots it grows out of, every break torn, every end tapered, cut or broken as the real thing's is, every leaf and flower worn as the real one is — trees, snags, stumps, fallen trunks and their root plates, the snowman's carrot and sticks, saguaro ribs, spines and areoles, a palm's and a shrub's foot, a reed's tip and plume, a reedmace's spike, a lily's pads and flowers and a crowfoot's flower | done |
 
 ## Standing rules
 
@@ -268,9 +268,9 @@ At *Maximum* (RT39) the budget is spent where it measurably buys realism.
 Radiosity records hold a hemisphere of 1024 rays, are laid down to half the
 radius *Simple* keeps and four times as many to a square, and hold within
 fifteen degrees of turn, as their own rule says: the light a wood's trunks gather from about them, which records
-spread over trunks too thin for them missed. Woods may stand three to ten
-times as many trees, so they carry on to 2–4 km where they stopped at about
-1.3 km and a forest fills its land. Droplet erosion is not made denser:
+spread over trunks too thin for them missed. Woods may stand six to a
+hundred times as many trees one by one, out to 2–3 km where they stopped at
+about 1.3 km, and a wood of trees carries on past them (RT37). Droplet erosion is not made denser:
 measured, more droplets under the present law wear the finer grids' relief
 smooth and silt the river and road beds they run through, so denser erosion
 waits on the law RT30 brings.
@@ -389,6 +389,10 @@ one with nothing laid does not.
   14%, preparation takes about 0.1 s more, and a scene holds at most 5 MB
   more; at *Maximum* a winter scene prepares about 3 s longer, its radiosity
   records' rays crossing the reeds.
+- A clump (a patch no wider than 1.5 m) is drawn in full and a bed beyond
+  plainer (`waterside::Grain`): a pad's mesh in 36 spokes or 14, a petal's in
+  9 rows by 6 or 4 by 2, a lily's 56 stamens or 18, the stalks under the
+  water only in a clump.
 - Deltas and coasts (RT11): distributaries building lobes into still water;
   beaches graded by exposure — sand, shingle and stones — with driftwood and
   wrack along the tide line, shells, footprints and paw prints in tracks that
@@ -559,8 +563,8 @@ stands by no stream looks over its dale with no brook laid.
   beams stray.
 
 Measured on Stream at 1920×1080 preparing across 8 threads, seeds 0–2: at
-*Simple* in 5.0–6.4 s, holding at most 304 MB; at *Maximum* in 39–63 s, at
-most 712 MB at its peak and 710 MB once prepared.
+*Simple* in 7.0–9.3 s, holding at most 373 MB; at *Maximum* in 65–102 s, at
+most 840 MB at its peak and once prepared.
 The flow is solved on 2048 × 256 points at *Simple* and 4096 × 512 at
 *Maximum*, holding at most 34 MB and 134 MB while it is solved, each grid
 reserved only once the solve reaches it.
@@ -650,8 +654,19 @@ scene holds, so a window glows because a room is lit.
 
 ## RT26–RT31 — Nature detail
 
-Mud cracks are plates of a Voronoi desiccation pattern with curled,
-undercut rims.
+Mud cracks (RT28, `mud`, `compose::cracked`) are 3 m tiles of the plates of a
+Voronoi desiccation pattern, 10–25 across: each plate curls toward its rim,
+most at its corners and a few far more than most, dished at its middle and
+undercut beneath the curl; cracks run from hairlines to a third of the
+crust's thickness and more, every side bent by a field that repeats with the
+tile. Every tile shares its feature points two cells in from its edges, so
+four variants meet any other edge to edge in whole plates without a seam.
+They are laid square to the land's own lattice out to 18 m (*Simple*) or 36 m
+(*Maximum*) on level, bare silt out of the water — a canyon's or the
+badlands' washes, a valley's banks in summer and autumn — in patches, and
+only where a tile lies within a centimetre of its plane; coloured in the
+land's own silt bleached paler over its earth gone damp beneath, some plates
+faintly crazed.
 
 Mountains (RT30) need an erosion law that carves as it gathers: channels
 deepening where droplets converge and branching up every slope, the beds of
@@ -797,11 +812,39 @@ drift a stream carried, 0.1 to 0.4.
 
 ## RT37, RT38 — Woods and stones by the budget
 
-- Woods to the horizon (RT37): at *Maximum* a wood stands out to as far as
-  its trees still span a pixel. Its places are sown at its own spacing near
-  the eye and coarser beyond only where their candidates — about 80 bytes a
-  place, a dozen places a tree — would not otherwise fit the budget, and never
-  coarser than its trees keep apart.
+- Woods to the horizon (RT37): at *Maximum* a wood of trees reaches as far
+  as its trees still span a pixel. Its trees are stood one by one at its own
+  spacing over every grid the land is traced on, out to where its most trees
+  fill, its places fit the budget (about 80 bytes a place) or its trees stop
+  spanning a pixel; never sown coarser, which would thin it. Past them it
+  carries on hashed from cells (`far_wood`): one place a cell on a lattice as
+  fine as its middling trees stand apart where it grows thickest, read by the
+  one reading every wood is stood by (`wood::Reader`), and kept as often as
+  places sown as closely as the trees stood one by one, each growing a tree as
+  often as the ground suits one, come to once thinned to their crowns' room.
+  The share of the ground those crowns fill is matched, over the ring short of
+  where it begins, to the trees stood there, so it stands as thickly far off
+  as near on any other ground. Once its trees' prototypes grow, the ring is
+  read for that match 16 384 places a step and its lattice surveyed 256 blocks
+  a step, across the runner (`far_wood::Matching`, `far_wood::Surveying`): over
+  the ring across the view and a crown's reach beyond it, every place's tree is
+  read once, keeping a bit a cell for those that stand one and, a block of
+  16 × 16 cells at a time, the lowest ground under it and the highest crown
+  that stands over it, its neighbours' reaching over included. Nothing else of
+  it is stored: about 12 bytes a block and 32 more where a tree stands in it.
+  It is traced as the tiles of its square a crown stands over, each boxed to
+  those crowns. A ray passes a block it crosses over every crown, walks the
+  rest a cell at a time meeting each tree that stands within reach once,
+  reads the ground for a tree only where it passes beneath the crowns about
+  it, and grows the tree only where it passes low enough to meet the tallest
+  its place could grow; a tree it meets is placed again from its cell when it
+  is shaded. Shrubs are
+  low enough to be stood one by one as far as they are seen, so a wood of them
+  carries on no further; a moorland's heather and gorse and a mountain forest
+  stand as many as the detail's table allows. The pieces and trunks a scene
+  sets out are kept apart over a grid hashed by cell, so each is asked of only
+  its neighbours however far out it stands, and the land's coarse grid out to
+  the horizon carries what grows there as its far land does.
 - Stones in patches (RT38, `compose::strewn`): eight rocks a scene, strewn
   from draws of their own. A place takes a stone with a chance of
   `0.04 + 0.96 × max(field, scree)`: `field` the boulder fields, a 70 m noise
@@ -843,11 +886,23 @@ Every light out of doors comes of a published measurement, nothing tuned
   Hillaire's series for the rest, the sky and ground in by the phase's share,
   its shadow on the bank beneath.
 
-RT43 remains: the water decks still take the production approximations —
-scattering octaves whose weights add light a thin edge has not scattered,
-powdered edges that darken it, and an ambient eased by height. They want the
-same footing as ice: a multiple-scattering term that vanishes as the cloud
-thins and holds energy as it thickens.
+- Water decks (RT43, `slab`): the sun scattered once exactly through a
+  droplet phase of a forward lobe (g 0.9) and a twentieth's backward one
+  (g −0.3); every further order by the δ-Eddington two-stream solution, its
+  albedo 0.99998 and asymmetry the lobes' mean. The light grids hold the
+  cloud's optical depth toward the sun, away from it, straight up, and level
+  away from it (the last two in steps growing from 10 m out to 32 km). The
+  sun's light is solved in a slab facing its beam, as deep as its way in and
+  as thick as the cloud runs on behind, as a heap lit from aside is; and in
+  its column, as a deck is, through which the light diffuses down whatever
+  way it fell in — blended toward the deck's the further the cloud runs
+  across than down, from four times to twelve. The sky's light and the
+  ground's are solved in the column, entering by its nearest face the sky
+  lights. The scattered
+  light toward the eye is each diffuse field's mean and first moment through
+  the full phase's asymmetry. Energy holds to a percent in a lossless slab, a
+  thin cloud takes little but its single scattering, a shaded side greys
+  under the sky's light, and nothing overflows however thick the cloud.
 
 ## RT44 — Cloud to the horizon
 
@@ -905,6 +960,30 @@ ground from a low sun; an overcast grey to the horizon; the aerial table
 keeping its near slices; a point drawn along the air falling as its sunlight
 is gathered; and a resolved sum keeping only the octaves its footprint holds.
 
+## RT45 — No primitive stand-ins
+
+- **Saguaros** (`cactus`) are ribbed flesh: ribs counted by girth, each crest
+  wandering, felted areoles set along it with spines by age, red-brown at the
+  apex to grey and pale toward the corked base, constrictions where droughts
+  pinched it; built a share of areoles a step (`Bristling`).
+- **A palm's foot** swells into a dense mat of short curved roots at the soil,
+  some dead and snapped; **a shrub** grows from a buried stool, its stems
+  swelling where they leave it.
+- **Lily pads** (`lily::Pad`, `waterside`) are meshes each cut to an outline
+  its key draws — oval, waved, its lobes meeting, parted or overlapping, frayed,
+  bitten, split and holed the more the older it is — laid one after another so
+  each rests on those floating beneath it; young pads still rolled and bronze,
+  crowded ones raised, dying ones sinking; coloured by the same draw, so a
+  wound's dark rim follows the cut.
+- **Flowers** sit at every stage from bud to spent: sepals and petals are
+  sheets cut to their own outlines, each bent, twisted and cupped its own way,
+  spiralled round the ovary, browning from the tip as they fade and shed onto
+  the water; stamens are narrow straps crowding a rayed, horned stigma. A
+  crowfoot's broad petals ring a knobbly head of carpels.
+- **Reeds** end in a spear of rolled leaf or a branched plume of silky tufts;
+  **a reedmace's spike** swells between blunt ends under a withered spire and
+  bursts in fluff over winter.
+
 ## RT32 — The moon
 
 `body::moon` sets the moon toward any direction with the sun toward another.
@@ -945,31 +1024,38 @@ gathering read, and nothing else:
 
 | | *Simple* | *Maximum* |
 |---|---|---|
-| objects a scene holds | 131 072 | 524 288 |
-| trees a meadow's, a valley's or a building's wood stands | 20 000 | 120 000 |
-| a forest's | 90 000 | 270 000 |
-| a winter wood's | 40 000 | 160 000 |
-| a canyon's | 4000 | 40 000 |
-| a rocky desert's saguaros and scrub | 600 and 900 | 6000 and 9000 |
+| objects a scene holds | 131 072 | 2 097 152 |
+| trees a meadow's, a valley's or a building's wood stands | 20 000 | 360 000 |
+| a forest's | 90 000 | 900 000 |
+| a winter wood's | 40 000 | 480 000 |
+| a canyon's | 4000 | 120 000 |
+| a mountain forest's, and a moorland's heather and gorse | 60 000 and 2500 | 360 000 and 250 000 |
+| a rocky desert's saguaros and scrub | 600 and 900 | 18 000 and 27 000 |
+| places a wood's trees are sown over at once | 1 200 000 | 3 500 000 |
+| a wood of trees carried on past them, hashed | no | to where its trees span a pixel |
 | rays a radiosity record gathers | 256, eight rows by 32 | 1024, sixteen by 64 |
 | the least a record holds for, of the picture's height | a 240th | a 480th |
 | records a square of the picture, and pixels a record | 1600 and 64 | 6400 and 16 |
 
-A wood's cap also bounds how far it is sown, so a *Simple* wood reaches about
-1.3 km where a *Maximum* one carries on to 2–4 km. A profile changes how much
+A wood's caps also bound how far its trees are stood one by one: a *Simple*
+wood's reach about 1.3 km and a *Maximum* one's 2–3 km, past which a wood of
+trees carries on hashed (RT37). A profile changes how much
 is set out, never what a setting is: the land, the eye, the hour and the
 weather are drawn before any wood grows, and each wood and the sward draw from
 streams of their own keyed from one draw, so however many draws one wood takes
 a seed shows the same place — woods and sward included — at either.
-`Detail::peak` states each profile's budget, 384 MiB and 2 GiB, which the
+`Detail::peak` states each profile's budget, 512 MiB and 2 GiB, which the
 session weighs against the memory band (`plans/NEW-DESKTOP-SETTINGS.md`
 DS24); each profile has its own measured progress shares.
 
 Measured at 1920×1080 on a 24-thread desktop preparing across 8 threads, a
-landscape prepares at *Simple* in 0.5–6.4 s, holding at most 374 MB at its
-peak and once prepared, and at *Maximum* in 1.3–63 s, at most 712 MB and
-710 MB, a stream's — most of *Maximum*'s time its radiosity records. RT37's woods to the
-horizon, RT38's stones, and what later items buy are *Maximum*'s to spend the
+landscape prepares at *Simple* in 0.35–9.3 s, holding at most 475 MB at its
+peak and once prepared, a mountain lake's, its tree prototypes and the
+clouds' light grids most of it; and at *Maximum* in 1.0–102 s, at most
+840 MB at its peak and once prepared, a stream's — most of *Maximum*'s time
+its radiosity records. A wood carried on far off adds its survey, about 4 s
+of a mountain forest's 50 at *Maximum*, and a few per cent to gathering and
+tracing. RT38's stones and what later items buy are *Maximum*'s to spend the
 rest of its budget on.
 
 Tests: a seed showing the same land, eye, sun, weather and sward at either

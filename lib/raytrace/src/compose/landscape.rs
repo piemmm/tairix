@@ -16,6 +16,7 @@ use tairix_parallel::JobRunner;
 use tairix_util::{fallible, mathf};
 
 use super::architecture::Aqueduct;
+use super::cracked;
 use super::plants::{self, Character, Fallen, Grassland, Grove, Kind, Stand, Tier};
 use super::plants::{Dead, Drift};
 use super::snowman;
@@ -23,7 +24,7 @@ use super::stones::{self, Brook};
 use super::strewn::{self, Strewing};
 use super::waterside;
 use super::weather::{self, Climate, Cover, Hour, Outdoors};
-use super::woodland::{Beneath, Deadfall, Rooting, Wood, Woodland, ANYWHERE};
+use super::woodland::{Beneath, Deadfall, Wood};
 use super::{direction, lumens, rgb, Composed, Dice, Landing, Look, Stage, View, GOLD};
 
 use crate::channel::{Section, Station};
@@ -46,6 +47,7 @@ use crate::snow::Snowpack;
 use crate::terrain::{Landform, Sea, Terrain};
 use crate::tree::Season;
 use crate::vector::{real, Frame, Pose, Vec3};
+use crate::wood::{Rooting, Woodland, ANYWHERE};
 
 /// The colours of a region's ground, as sRGB.
 #[derive(Copy, Clone, Debug)]
@@ -591,7 +593,10 @@ fn bridges(stage: &mut Stage, dice: &mut Dice, land: &Land) -> Option<()> {
         }
         // Each end founded below the lower of its bank and the water.
         for end in [from, to] {
-            let ground = land.height(&stage.fields, end.x, end.z).min(crossing.water);
+            let ground = land
+                .grids
+                .height(&stage.fields, end.x, end.z)
+                .min(crossing.water);
             let top = crossing.deck - 0.8;
             let depth = (top - ground + 1.5).max(1.0);
             let at = Vec3::new(end.x, top - 0.5 * depth, end.z);
@@ -1119,16 +1124,21 @@ pub(super) fn sward(
     let Lawning { eye, grassland } = *lawning;
     let on = |grid: Laid| square(grid.centre, GRID_INSET * grid.reach);
     let far = Laid {
-        field: land.far,
-        centre: land.centre,
-        reach: land.reach,
+        field: land.grids.far,
+        centre: land.grids.centre,
+        reach: land.grids.reach,
     };
     // The land's grids, finest first.
     let mut grids = [None; NESTS + 1];
-    for (slot, grid) in grids
-        .iter_mut()
-        .zip(land.nests.iter().rev().flatten().copied().chain([far]))
-    {
+    for (slot, grid) in grids.iter_mut().zip(
+        land.grids
+            .nests
+            .iter()
+            .rev()
+            .flatten()
+            .copied()
+            .chain([far]),
+    ) {
         *slot = Some(grid);
     }
     let finest = grids[0].unwrap_or(far);
@@ -1185,7 +1195,7 @@ fn ground_material(stage: &Stage, land: &Land) -> Option<usize> {
     stage
         .objects
         .iter()
-        .find(|object| matches!(object.shape, Shape::Land { field } if field == land.far))
+        .find(|object| matches!(object.shape, Shape::Land { field } if field == land.grids.far))
         .map(|object| object.material)
 }
 
@@ -1229,7 +1239,7 @@ fn moorland(stage: &mut Stage, dice: &mut Dice, vantage: &Vantage, season: Seaso
         closure: (1.2, 2.6),
         stature: (0.6, 1.0),
         gaps: 0.0,
-        most: 2500,
+        most: stage.densities.woods.moor,
         open: (3.0, 0.4),
     };
     stage.sow(Wood {
@@ -1269,7 +1279,7 @@ fn marvel(stage: &mut Stage, dice: &mut Dice, land: &Land, vantage: &Vantage) ->
         2 => stage.glass(Vec3::splat(0.97), 0.0)?,
         _ => stage.precious(dice)?,
     };
-    let base = Vec3::new(x, land.height(&stage.fields, x, z) - 0.15 * radius, z);
+    let base = Vec3::new(x, land.grids.height(&stage.fields, x, z) - 0.15 * radius, z);
     stage.ball(base, radius, material, dice).map(|_| ())
 }
 
@@ -1291,13 +1301,13 @@ fn look(weather: Outdoors, view: View, brightness: f64) -> Look {
 /// A camera at the vantage looking along it, the land ahead set `sky` of
 /// the way down a picture `fov` tall.
 fn view(stage: &Stage, land: &Land, vantage: &Vantage, (fov, sky): (f64, f64)) -> View {
-    let height = |x: f64, z: f64| land.height(&stage.fields, x, z);
+    let height = |x: f64, z: f64| land.grids.height(&stage.fields, x, z);
     looking(
         &height,
         vantage.eye,
         vantage.heading,
         (fov, sky),
-        0.9 * land.reach,
+        0.9 * land.grids.reach,
     )
 }
 
@@ -1685,7 +1695,7 @@ fn forest_scene(
         grove,
         woodland: forest.woodland,
         rooting: Rooting {
-            clearing: Some((land.centre, 1.1 * glade)),
+            clearing: Some((land.grids.centre, 1.1 * glade)),
             ..ANYWHERE
         },
         vantage,
@@ -1890,7 +1900,7 @@ fn alpine_scene(
         closure: (0.5, 1.0),
         stature: (0.65, 0.95),
         gaps: 0.2,
-        most: 60_000,
+        most: stage.densities.woods.alpine,
         open: (4.0, 0.6),
     };
     let deadfall = deadfall(stage, dice, (kinds, season), (15.0, 4.0, 6.0))?;
@@ -2141,8 +2151,8 @@ fn coast_scene(
     });
     let angle = out + dice.sign() * dice.angle(4.0, 16.0);
     let edge = shore(
-        &|x, z| land.height(&stage.fields, x, z),
-        (centre, land.reach),
+        &|x, z| land.grids.height(&stage.fields, x, z),
+        (centre, land.grids.reach),
         angle,
     );
     if let Some(reach) = edge.filter(|_| dice.chance(0.45)) {
@@ -2150,7 +2160,7 @@ fn coast_scene(
             centre.0 + mathf::sin(angle) * (reach - 25.0),
             centre.1 + mathf::cos(angle) * (reach - 25.0),
         );
-        let base = land.height(&stage.fields, at.0, at.1);
+        let base = land.grids.height(&stage.fields, at.0, at.1);
         if base > 2.0 {
             let lit = matches!(weather.hour, Hour::Dusk | Hour::Night | Hour::Sunset);
             lighthouse(stage, dice, Vec3::new(at.0, base, at.1), lit)?;
@@ -2466,7 +2476,7 @@ fn erg(stage: &mut Stage, dice: &mut Dice, land: &Land, vantage: &Vantage) -> Op
             stage.claim(at, 1.2 * half)?;
             let base = Vec3::new(
                 at.0,
-                land.height(&stage.fields, at.0, at.1) - 0.1 * half,
+                land.grids.height(&stage.fields, at.0, at.1) - 0.1 * half,
                 at.1,
             );
             stage.pyramid(
@@ -2481,7 +2491,11 @@ fn erg(stage: &mut Stage, dice: &mut Dice, land: &Land, vantage: &Vantage) -> Op
     if dice.chance(0.4) {
         let at = ahead(vantage, dice.range(14.0, 40.0), dice.range(-0.3, 0.3));
         stage.claim(at, 2.0)?;
-        let base = Vec3::new(at.0, land.height(&stage.fields, at.0, at.1) - 1.0, at.1);
+        let base = Vec3::new(
+            at.0,
+            land.grids.height(&stage.fields, at.0, at.1) - 1.0,
+            at.1,
+        );
         match dice.count(0, 2) {
             0 => {
                 let stone = stage.stone(dice)?;
@@ -2532,6 +2546,7 @@ fn badlands(stage: &mut Stage, dice: &mut Dice, land: &Land, vantage: &Vantage) 
         },
         &lies_still,
     )?;
+    cracked::crack(stage, dice, (land, vantage.eye), &cracked::wash)?;
     // Saguaros stand far apart over the flats, scrub between them, on ground
     // too dry for anything green.
     let flat = Rooting {
@@ -2705,7 +2720,7 @@ fn winter_scene(
         rooting: Rooting {
             upright: (0.72, 0.86),
             bare: 0.85,
-            clearing: Some((land.centre, 1.6 * pond)),
+            clearing: Some((land.grids.centre, 1.6 * pond)),
             ..ANYWHERE
         },
         vantage,
@@ -3099,6 +3114,7 @@ fn canyon_scene(stage: &mut Stage, dice: &mut Dice, land: &Land, vantage: Vantag
     })?;
     let eye = vantage.eye;
     waterside::margins(stage, dice, ((eye.x, eye.z), Season::Summer, None))?;
+    cracked::crack(stage, dice, (land, eye), &cracked::wash)?;
     let weather = weather::outdoors(stage, dice, &CANYON, vantage.heading)?;
     let fov = dice.angle(48.0, 62.0);
     let view = view(stage, land, &vantage, (fov, dice.range(0.35, 0.5)));
@@ -3237,6 +3253,10 @@ fn valley_scene(stage: &mut Stage, dice: &mut Dice, land: &Land, vantage: Vantag
         },
         &riverside,
     )?;
+    // The banks the river has fallen from crack once a summer has dried them.
+    if matches!(season, Season::Summer | Season::Autumn { .. }) {
+        cracked::crack(stage, dice, (land, eye), &cracked::bank)?;
+    }
     let weather = weather::outdoors(stage, dice, &MEADOW, vantage.heading)?;
     let fov = dice.angle(44.0, 58.0);
     // Framed on its bridge, where it has one, a little below the middle of
@@ -3638,7 +3658,7 @@ fn sculpture_piece(
     let piece = dice.pick(&[Piece::Rings, Piece::Monoliths, Piece::Orbs])?;
     let distance = dice.range(28.0, 60.0);
     let (x, z) = ahead(vantage, distance, dice.range(-0.22, 0.22));
-    let ground = land.height(&stage.fields, x, z);
+    let ground = land.grids.height(&stage.fields, x, z);
     let facing = vantage.heading + PI;
     match piece {
         Piece::Rings => {
@@ -3678,7 +3698,7 @@ fn sculpture_piece(
                     x + radius * mathf::sin(angle),
                     z + radius * mathf::cos(angle),
                 );
-                let base = land.height(&stage.fields, at.0, at.1) - 0.6;
+                let base = land.grids.height(&stage.fields, at.0, at.1) - 0.6;
                 let tall = height * dice.range(0.8, 1.15);
                 let half = Vec3::new(
                     dice.range(0.35, 0.6),

@@ -23,73 +23,22 @@ use tairix_util::{fallible, mathf};
 
 use super::chains::Chains;
 use super::landscape::{self, Lawning, Vantage};
-use super::plants::{self, Dead, Grove, Grown, Kind, Laying, DEAD_VARIANTS, VARIANTS};
+use super::plants::{self, Dead, Grove, Laying, DEAD_VARIANTS};
 use super::stones::{self, Bed};
 use super::waterside::Margins;
 use super::{Dice, Stage};
 use crate::detail;
+use crate::far_wood::{FarWood, Stretch};
 use crate::ground::Floor;
 use crate::heightfield::{Heightfield, Sealing};
 use crate::land::{Land, Lie};
-use crate::noise::{cells2, fbm2, hash3, smoothstep};
+use crate::noise::{hash3, smoothstep};
 use crate::sample::{mix32, unit};
 use crate::shade::{Casting, Shade, Shades, Shading, NEAR_CELL, ROOFED};
 use crate::stream::{Flow, Solving};
 use crate::vector::{real, share, single, Frame, Pose, Vec3};
-
-/// How a wood grows over a land.
-#[derive(Copy, Clone, Debug)]
-pub(super) struct Woodland {
-    /// The share of the ground that suits trees the wood covers, and how
-    /// broad its patches, and the open ground between them, are.
-    pub(super) cover: f64,
-    pub(super) patch: f64,
-    /// How far apart trunks stand, as a share of their two crowns' reaches
-    /// together, where the wood grows thickest and where it is most open.
-    pub(super) closure: (f64, f64),
-    /// How much of their kinds' grown height its youngest and oldest stands
-    /// reach.
-    pub(super) stature: (f64, f64),
-    /// The share of the places a gap may open in the canopy where one has:
-    /// where a tree or a stand of them fell, and light reaches the floor.
-    pub(super) gaps: f64,
-    /// The most trees it stands.
-    pub(super) most: u32,
-    /// How far ahead of the eye, in heights of a tree, and how far either
-    /// side of the view in radians it keeps clear, so that no tree walls the
-    /// view off.
-    pub(super) open: (f64, f64),
-}
-
-/// The ground a wood takes to, beyond the somewhere to root, off roads and
-/// paths and out of the water, that every tree needs.
-#[derive(Copy, Clone, Debug)]
-pub(super) struct Rooting {
-    /// How upright the ground stands where trees begin taking to it, and
-    /// where they take to it fully.
-    pub(super) upright: (f64, f64),
-    /// How strongly wet ground draws trees to it, out of the wood's patches
-    /// as well as in them: willows along a stream across open fields.
-    pub(super) streams: f64,
-    /// How readily it roots where nothing grows green: under snow, where the
-    /// land's green gives out though the trees stand on.
-    pub(super) bare: f64,
-    /// The heights over which it comes to take to the land, going up, and
-    /// over which it gives out.
-    pub(super) above: Option<(f64, f64)>,
-    pub(super) below: Option<(f64, f64)>,
-    /// A clearing it keeps out of: its middle, and how far it reaches.
-    pub(super) clearing: Option<((f64, f64), f64)>,
-}
-
-/// Ground as level as most trees want it, anywhere on the land.
-pub(super) const ANYWHERE: Rooting = Rooting {
-    upright: (0.74, 0.88),
-    streams: 0.0,
-    bare: 0.0,
-    above: None,
-    below: None,
-    clearing: None,
+use crate::wood::{
+    gap, rooted, wooded, Habit, Reader, Rooting, Tree, Woodland, EDGE_OPENING, PACKED, VARIANTS,
 };
 
 /// A wood a scene sets out, grown once the land stands: its trees, how they
@@ -148,30 +97,11 @@ const SPANNED: f64 = 2.0;
 /// the way round: as far as their shadows reach.
 const SHADOWED: f64 = 8.0;
 
-/// How much of the ground crowns thrown down at random, no closer than they
-/// allow, come to fill: the jamming limit of random sequential adsorption.
-const PACKED: f64 = 0.55;
-
 /// How closely the places a tree might stand lie, as a share of how far
 /// apart the wood's trees of middling height stand where it is thickest:
 /// close enough that thinning, not the lattice, sets where they stand.
 const SOWN: f64 = 0.45;
 const LEAST_SOWN: f64 = 0.35;
-
-/// How broad the stands a wood's ages and kinds come in are, in metres.
-const STANDS: f64 = 140.0;
-
-/// How much openness a wood's edge adds to the spacing of its trees.
-const EDGE_OPENING: f64 = 0.4;
-
-/// How broad the stretches a wood grows thick or open in are, as a share of
-/// its patches' breadth.
-const DENSITY_BREADTH: f64 = 0.45;
-
-/// How far apart the places a gap may open in a canopy lie, and how broad
-/// one is, least and most: a fallen tree's worth to a windthrown stand's.
-const GAP_SPACING: f64 = 90.0;
-const GAP_REACH: (f64, f64) = (8.0, 35.0);
 
 /// How much of a crown a much shorter tree may stand under: at a trunk's
 /// share `UNDER` of its neighbour's height and below, its crown needs only
@@ -204,245 +134,25 @@ struct Seedling {
     tree: Option<Tree>,
 }
 
-/// A tree as the ground and the wood would grow it.
-#[derive(Copy, Clone, Debug)]
-struct Tree {
-    /// Which of the grove's kinds, which of that kind's grown trees, and how
-    /// much of that tree's size.
-    kind: u8,
-    variant: u8,
-    scale: f64,
-    height: f64,
-    reach: f64,
-    /// How far apart it stands from others, as a share of their crowns'
-    /// reaches together.
-    apart: f64,
-    /// The height its trunk is based at.
-    base: f64,
-}
-
 /// What reading the ground for a wood's trees needs, shared by every band of
 /// places read at once.
 struct Reading<'a> {
+    reader: &'a Reader,
     land: &'a Land,
     fields: &'a [Heightfield],
-    woodland: &'a Woodland,
-    rooting: &'a Rooting,
-    grove: &'a Grove,
     /// The shade the canopy above casts, where what grows beneath it is read.
     beneath: Option<&'a Shade>,
-    /// The seeds the wood's patches, and its stands and kinds, are laid out
-    /// under.
-    seeds: (u32, u32),
 }
 
 impl Reading<'_> {
     /// Read the ground at `seedling`'s place for the tree it would grow.
     fn read(&self, seedling: &mut Seedling) {
-        seedling.tree = self.tree(seedling.at, seedling.draw);
-    }
-
-    fn tree(&self, at: (f64, f64), draw: u32) -> Option<Tree> {
-        let (patches, stands) = self.seeds;
-        let chance = unit(draw);
-        // The canopy's gaps are its own; what grows beneath takes to them.
-        let open = match self.beneath {
-            Some(_) => 0.0,
-            None => gap(self.woodland, patches, at),
-        };
-        let in_patches = wooded(self.woodland, patches, at) * (1.0 - open);
-        let streams = self.rooting.streams;
-        if streams <= 0.0 && chance >= in_patches {
-            return None;
-        }
-        let light = match self.beneath {
-            Some(canopy) => thrives_beneath(canopy.at(at.0, at.1).1),
-            None => 1.0,
-        };
-        if chance >= light {
-            return None;
-        }
-        let lie = self.land.lie(self.fields, at.0, at.1);
-        let wooded = in_patches.max(streams * lie.wet).min(1.0);
-        let suits = wooded * light * self.rooting.suits(&lie, at);
-        if chance >= suits || self.land.wet_at(self.fields, at.0, at.1) {
-            return None;
-        }
-        let (kind, grown) = self.kind(&lie, at, draw)?;
-        let tallest = grown.heights.iter().copied().fold(0.0, f64::max);
-        let age = smoothstep(
-            0.3,
-            0.7,
-            0.5 + 0.5 * fbm2(at.0 / STANDS, at.1 / STANDS, stands ^ 0x41, (3, 0.5, 2.0)),
+        seedling.tree = self.reader.tree(
+            (&self.land.grids, self.fields),
+            (seedling.at, seedling.draw),
+            self.beneath,
         );
-        let (least, most) = self.woodland.stature;
-        // A wood's edge is lower than its heart, and good ground grows taller.
-        let edge = 0.82 + 0.18 * smoothstep(0.35, 0.95, wooded);
-        let wanted = tallest
-            * (least + (most - least) * age)
-            * rank(draw)
-            * edge
-            * (0.92 + 0.12 * lie.green);
-        let variant = grown.nearest(wanted, unit(mix32(draw ^ 0x6a09_e667)));
-        let natural = *grown.heights.get(variant)?;
-        let scale = plants::sized(wanted, natural);
-        let height = natural * scale;
-        let (thickest, openest) = self.woodland.closure;
-        let breadth = DENSITY_BREADTH * self.woodland.patch.max(1.0);
-        let openness = 0.5
-            + 0.5
-                * fbm2(
-                    at.0 / breadth,
-                    at.1 / breadth,
-                    patches ^ 0x77,
-                    (3, 0.5, 2.0),
-                );
-        let apart = (thickest + (openest - thickest) * smoothstep(0.3, 0.7, openness))
-            * (1.0 + EDGE_OPENING * (1.0 - wooded));
-        Some(Tree {
-            kind,
-            variant: u8::try_from(variant).ok()?,
-            scale,
-            height,
-            reach: grown.crown * height,
-            apart,
-            base: rooted(&lie, height),
-        })
     }
-
-    /// Which of the grove's kinds grows at `at`, on ground `lie` describes:
-    /// the one that takes to it best, in the stands its kind grows in, and
-    /// its index among them.
-    fn kind(&self, lie: &Lie, at: (f64, f64), draw: u32) -> Option<(u8, &Grown)> {
-        let mut best: Option<(f64, u8, &Grown)> = None;
-        for (index, grown) in self.grove.kinds().enumerate() {
-            let index = u8::try_from(index).ok()?;
-            let salt = u32::from(index).wrapping_mul(0x9e37_79b9);
-            let stand = 0.5
-                + 0.5
-                    * fbm2(
-                        at.0 / STANDS,
-                        at.1 / STANDS,
-                        self.seeds.1 ^ 0x5eed ^ salt,
-                        (2, 0.5, 2.0),
-                    );
-            let own = 0.75 + 0.5 * unit(mix32(draw ^ salt));
-            let score = affinity(grown.kind, lie) * (0.3 + stand) * own;
-            if best.is_none_or(|(most, _, _)| score > most) {
-                best = Some((score, index, grown));
-            }
-        }
-        best.map(|(_, index, grown)| (index, grown))
-    }
-}
-
-impl Rooting {
-    /// How well the ground `lie` describes at `at` suits the wood's trees,
-    /// `0.0..=1.0`.
-    pub(super) fn suits(&self, lie: &Lie, at: (f64, f64)) -> f64 {
-        if let Some((middle, reach)) = self.clearing {
-            if mathf::hypot(at.0 - middle.0, at.1 - middle.1) < reach {
-                return 0.0;
-            }
-        }
-        let above = self
-            .above
-            .map_or(1.0, |(low, high)| smoothstep(low, high, lie.height));
-        let below = self
-            .below
-            .map_or(1.0, |(low, high)| 1.0 - smoothstep(low, high, lie.height));
-        lie.green.max(self.bare)
-            * smoothstep(self.upright.0, self.upright.1, lie.upright)
-            * (1.0 - lie.road)
-            * (1.0 - 0.95 * lie.path)
-            * above
-            * below
-    }
-}
-
-/// How much of the ground `woodland` covers at `at`, `0.0..=1.0`: patches
-/// `patch` across, covering the share of the land its `cover` asks for.
-fn wooded(woodland: &Woodland, seed: u32, at: (f64, f64)) -> f64 {
-    let patch = woodland.patch.max(1.0);
-    let field = 0.5 + 0.5 * fbm2(at.0 / patch, at.1 / patch, seed, (4, 0.5, 2.0));
-    // Four octaves of the plane's noise, halved and raised, fall about their
-    // middle nearly as a logistic spread of 0.056 does: this threshold leaves
-    // the share asked for above it.
-    let cover = woodland.cover.clamp(0.02, 0.98);
-    let threshold = 0.5 + 0.056 * mathf::ln((1.0 - cover) / cover);
-    smoothstep(threshold - 0.02, threshold + 0.02, field)
-}
-
-/// How far into one of its canopy's gaps `at` lies, `0.0..=1.0`, for
-/// `woodland` under `seed`: each lattice cell of the gaps holding one as its
-/// `gaps` share has it, about the cell's jittered middle.
-fn gap(woodland: &Woodland, seed: u32, at: (f64, f64)) -> f64 {
-    if woodland.gaps <= 0.0 {
-        return 0.0;
-    }
-    let found = cells2(at.0 / GAP_SPACING, at.1 / GAP_SPACING, seed ^ 0x6a95, 0.8);
-    if unit(mix32(found.id)) >= woodland.gaps {
-        return 0.0;
-    }
-    let reach = GAP_REACH.0 + (GAP_REACH.1 - GAP_REACH.0) * unit(mix32(found.id ^ 0x2545));
-    1.0 - smoothstep(0.75 * reach, reach, found.nearest * GAP_SPACING)
-}
-
-/// How readily a shrub or a young tree grows under a canopy hiding `hidden`
-/// of the sky, `0.0..=1.0`: least in the deepest shade, most in the gaps and
-/// along the edges, and less again out in the open, where grass takes the
-/// ground.
-fn thrives_beneath(hidden: f64) -> f64 {
-    let light = 1.0 - hidden;
-    (0.03 + 0.97 * smoothstep(0.05, 0.3, light)) * (1.0 - 0.6 * smoothstep(0.7, 0.95, light))
-}
-
-/// The shares of a stand's trees overtopped by the canopy, and suppressed
-/// beneath it: trees that came up late, or lost the race for the light, and
-/// wait in the shade for a gap.
-const OVERTOPPED: f64 = 0.25;
-const SUPPRESSED: f64 = 0.15;
-
-/// The share of its stand's height a tree as `draw` has it grows to: most
-/// the canopy's, the overtopped and the suppressed lower.
-fn rank(draw: u32) -> f64 {
-    let (place, within) = (
-        unit(mix32(draw ^ 0x1f83_d9ab)),
-        unit(mix32(draw ^ 0x5be0_cd19)),
-    );
-    if place < SUPPRESSED {
-        0.35 + 0.25 * within
-    } else if place < SUPPRESSED + OVERTOPPED {
-        0.6 + 0.25 * within
-    } else {
-        0.88 + 0.24 * within
-    }
-}
-
-/// How readily `kind` takes to the ground `lie` describes against the other
-/// kinds of its wood: willows and poplars to the wet, pines to the dry and
-/// poor, beeches to deep and well-drained soil, birches wherever others give
-/// way.
-fn affinity(kind: Kind, lie: &Lie) -> f64 {
-    let (wet, rich) = (lie.wet, lie.green);
-    match kind {
-        Kind::Willow | Kind::Poplar => 0.25 + 1.6 * wet,
-        Kind::Pine => 0.7 + 0.6 * (1.0 - wet) + 0.4 * (1.0 - rich),
-        Kind::Spruce => 0.8 + 0.5 * wet,
-        Kind::Beech => (1.0 + 0.5 * rich - 1.2 * wet).max(0.1),
-        Kind::Oak => (1.0 + 0.3 * rich - 0.6 * wet).max(0.1),
-        Kind::Maple => 0.9 + 0.4 * rich,
-        Kind::Birch => 0.8 + 0.5 * (1.0 - rich),
-        Kind::Fern => 0.7 + 0.8 * wet,
-        _ => 1.0,
-    }
-}
-
-/// The height a trunk `height` tall is based at on ground `lie` describes:
-/// sunk far enough that its flare meets the ground on its downhill side.
-pub(super) fn rooted(lie: &Lie, height: f64) -> f64 {
-    let slope = mathf::sqrt((1.0 - lie.upright * lie.upright).max(0.0)) / lie.upright.max(0.1);
-    lie.height - 0.08 - 0.035 * height * slope
 }
 
 /// The room about a trunk `height` tall that other pieces keep clear of.
@@ -450,32 +160,28 @@ fn trunk(height: f64) -> f64 {
     0.25 + 0.025 * height
 }
 
-/// How many rings a wood's places are sown in.
-fn rings(sowing: &Sowing) -> u32 {
-    u32::try_from(mathf::round_i32(mathf::ceil(sowing.far / sowing.sown)).max(0)).unwrap_or(0)
-}
-
 /// Sow ring `ring` of the places a plant might stand seen from `vantage`,
-/// sown as `sowing` has them: all the way round near the eye and across the
-/// view beyond, within the square `(centre, reach)`, into `into`; how many
-/// places the ring was drawn over, those beyond the square included, or
-/// `None` when the heap will not hold them.
+/// from `inner` to `outer` from the eye, the wood's places sown `about` it
+/// all the way round and across the view beyond, within the square
+/// `(centre, reach)`, into `into`; how many places the ring was drawn over,
+/// those beyond the square included, or `None` when the heap will not hold
+/// them.
 fn sow_ring(
-    ring: u32,
-    (vantage, sowing): (&Vantage, &Sowing),
+    (ring, (inner, outer)): (u32, (f64, f64)),
+    (vantage, about): (&Vantage, f64),
     (centre, reach): ((f64, f64), f64),
     seed: u32,
     into: &mut Vec<Seedling>,
 ) -> Option<usize> {
     let Vantage { eye, heading } = *vantage;
-    let Sowing { sown, about, .. } = *sowing;
-    let (inner, outer) = (f64::from(ring) * sown, f64::from(ring + 1) * sown);
     let (from, span) = if inner < about {
         (0.0, TAU)
     } else {
         (heading - ACROSS, 2.0 * ACROSS)
     };
-    let count = u32::try_from(mathf::round_i32(span * 0.5 * (inner + outer) / sown).max(1)).ok()?;
+    let breadth = (outer - inner).max(1e-9);
+    let count =
+        u32::try_from(mathf::round_i32(span * 0.5 * (inner + outer) / breadth).max(1)).ok()?;
     if !fallible::reserve(into, count as usize) {
         return None;
     }
@@ -581,15 +287,67 @@ struct Sowing {
     far: f64,
 }
 
+impl Sowing {
+    /// How many rings its places are sown in, each as broad as they lie
+    /// apart, out to the first edge at or past its far one.
+    fn rings(&self) -> u32 {
+        whole(mathf::ceil(self.far / self.sown.max(1e-9)))
+    }
+
+    /// Where ring `ring` begins and ends.
+    fn ring(&self, ring: u32) -> (f64, f64) {
+        (f64::from(ring) * self.sown, f64::from(ring + 1) * self.sown)
+    }
+
+    /// How many of its rings begin within the eye's round, sown all the way
+    /// about it.
+    fn round(&self) -> u32 {
+        whole(mathf::ceil(self.about / self.sown.max(1e-9)))
+    }
+
+    /// About how many places its first `rings` rings sow: each as many as its
+    /// span about the eye and its breadth hold, the `k`th `k + ½` times its
+    /// span.
+    fn places_in(&self, rings: u32) -> f64 {
+        let (all, round) = (f64::from(rings), f64::from(rings.min(self.round())));
+        0.5 * TAU * round * round + ACROSS * (all * all - round * round)
+    }
+
+    /// The sowing kept to `most` places, reaching only as far as its rings
+    /// fit.
+    fn fitted(self, most: f64) -> Self {
+        if self.places_in(self.rings()) <= most {
+            return self;
+        }
+        let round = f64::from(self.round());
+        let within = 0.5 * TAU * round * round;
+        let rings = if within >= most {
+            mathf::sqrt(2.0 * most / TAU)
+        } else {
+            mathf::sqrt((most - within) / ACROSS + round * round)
+        };
+        Self {
+            far: mathf::floor(rings) * self.sown,
+            ..self
+        }
+    }
+}
+
+/// `value`, already whole, as a count; nought below it and the most a count
+/// holds above.
+fn whole(value: f64) -> u32 {
+    u32::try_from(mathf::round_i32(value).max(0)).unwrap_or(u32::MAX)
+}
+
 /// A wood's plants being stood a step at a time: the places they might stand
 /// sown and the ground there read a band at a time, then those that would
 /// grow thinned tallest first, a batch at a time.
 #[derive(Debug)]
 struct Standing {
+    reader: Reader,
     sowing: Sowing,
-    /// The next ring to sow, and how many there are.
+    /// The next ring to sow.
     ring: u32,
-    rings: u32,
     /// The places sown in this band, read, their room kept for the next.
     band: Vec<Seedling>,
     /// The places read that would grow, in the order they were sown.
@@ -599,9 +357,8 @@ struct Standing {
     crowns: Crowns,
     stood: u32,
     most: u32,
-    /// The seeds the wood's patches, and its stands and lattice, are laid
-    /// out under.
-    seeds: (u32, u32),
+    /// The wood carried on past them, to be matched to them once they stand.
+    beyond: Option<FarWood>,
 }
 
 /// How many places a step reads at least, across the runner, and how many it
@@ -611,46 +368,49 @@ const READ_UNIT: usize = 1 << 14;
 const THIN_UNIT: usize = 1 << 9;
 
 impl Standing {
-    /// `grove`'s plants to be stood as `woodland` grows them, seen from
-    /// `vantage` and sown as `sowing` has it, under `seeds`; `None` when the
-    /// heap will not hold the grid their crowns are kept apart by.
-    fn new(
-        stage: &Stage,
-        (grove, woodland): (&Grove, &Woodland),
-        (vantage, sowing): (&Vantage, Sowing),
-        seeds: (u32, u32),
-    ) -> Option<Self> {
-        let tallest = grove
-            .kinds()
-            .map(|grown| plants::TALLEST * grown.heights.iter().copied().fold(0.0, f64::max))
-            .fold(0.0, f64::max);
-        let widest = grove.kinds().map(|grown| grown.crown).fold(0.0, f64::max) * tallest;
-        let crowned =
-            woodland.closure.1.max(woodland.closure.0) * (1.0 + EDGE_OPENING) * 2.0 * widest;
+    /// The plants `reader` reads to be stood, seen from `vantage` and sown as
+    /// `sowing` has it; `None` when the heap will not hold the grid their
+    /// crowns are kept apart by.
+    fn new(stage: &Stage, reader: &Reader, (vantage, sowing): (&Vantage, Sowing)) -> Option<Self> {
+        let tallest = reader.kinds().map(Habit::tallest).fold(0.0, f64::max);
+        let widest = reader.kinds().map(|habit| habit.crown).fold(0.0, f64::max) * tallest;
+        let closure = reader.woodland.closure;
+        let crowned = closure.1.max(closure.0) * (1.0 + EDGE_OPENING) * 2.0 * widest;
         let most_room = crowned.max(2.0 * trunk(tallest) + 0.5);
         Some(Self {
+            reader: *reader,
             sowing,
             ring: 0,
-            rings: rings(&sowing),
             band: Vec::new(),
             grown: Runs::default(),
             ranking: Ranking::default(),
             crowns: Crowns::new(((vantage.eye.x, vantage.eye.z), sowing.far), most_room)?,
             stood: 0,
-            most: woodland
+            most: reader
+                .woodland
                 .most
                 .min(u32::try_from(stage.room().saturating_sub(KEPT)).unwrap_or(u32::MAX)),
-            seeds,
+            beyond: None,
         })
+    }
+
+    /// How far from the eye its places reach: where its last ring ends.
+    fn reach(&self) -> f64 {
+        self.sowing.ring(self.rings()).0
+    }
+
+    /// How many rings its places are sown in.
+    fn rings(&self) -> u32 {
+        self.sowing.rings()
     }
 
     /// How far the standing has come: its rings read, its places ranked,
     /// then thinned.
     fn done(&self) -> f64 {
-        let read = share(self.ring as usize, self.rings as usize);
+        let read = share(self.ring as usize, self.rings() as usize);
         // Until every ring is read the ranking holds only what has been, and
         // an empty one has done nothing.
-        if self.ring < self.rings {
+        if self.ring < self.rings() {
             return 0.6 * read;
         }
         let thinned = if self.stood >= self.most {
@@ -661,39 +421,35 @@ impl Standing {
         0.6 + 0.05 * self.ranking.sorted() + 0.35 * thinned
     }
 
-    /// The next step of standing `wood`'s plants — its trees, or those of
-    /// `beneath` in `shade` — seen from `vantage`: whether all are stood, or
-    /// `None` when the heap will not hold them.
+    /// The next step of standing its plants — a wood's trees, or what grows
+    /// beneath them in `shade` — seen from `vantage`: whether all are stood,
+    /// or `None` when the heap will not hold them.
     fn step(
         &mut self,
         stage: &mut Stage,
         (land, runner): (&Land, &dyn JobRunner),
-        (grove, woodland, rooting): (&Grove, &Woodland, &Rooting),
         (vantage, shade): (&Vantage, Option<&Shade>),
     ) -> Option<bool> {
-        if self.ring < self.rings {
+        if self.ring < self.rings() {
             self.band.clear();
             // Bounded by the places drawn, not those kept: across the view
             // from near the land's edge most of a far ring lies off it.
             let mut drawn = 0;
-            while self.ring < self.rings && drawn < READ_UNIT {
+            while self.ring < self.rings() && drawn < READ_UNIT {
                 drawn += sow_ring(
-                    self.ring,
-                    (vantage, &self.sowing),
-                    (land.centre, land.reach),
-                    self.seeds.1,
+                    (self.ring, self.sowing.ring(self.ring)),
+                    (vantage, self.sowing.about),
+                    land.grids.traced(&stage.fields),
+                    self.reader.seeds.1,
                     &mut self.band,
                 )?;
                 self.ring += 1;
             }
             let reading = Reading {
+                reader: &self.reader,
                 land,
                 fields: &stage.fields,
-                woodland,
-                rooting,
-                grove,
                 beneath: shade,
-                seeds: self.seeds,
             };
             read_all(runner, &mut self.band, &reading);
             let growing = self.band.iter().filter(|seedling| seedling.tree.is_some());
@@ -735,22 +491,19 @@ impl Standing {
                 reach: tree.reach,
                 apart: tree.apart,
             };
-            if walls_off(woodland.open, vantage, at, tree.height)
+            if walls_off(self.reader.woodland.open, vantage, at, tree.height)
                 || !stage.clear(at, trunk(tree.height))
                 || self.crowns.crowds(&standing)
             {
                 continue;
             }
             self.crowns.add(standing)?;
-            let grown = grove.kinds().nth(usize::from(tree.kind))?;
-            let base = Vec3::new(at.0, tree.base, at.1);
-            let turn = TAU * unit(mix32(draw ^ 0x510e_527f));
+            let habit = self.reader.kinds().nth(usize::from(tree.kind))?;
             plants::place(
                 stage,
-                grown,
+                habit,
                 (usize::from(tree.variant), tree.scale),
-                base,
-                (turn, mix32(draw ^ 0x9b05_688c)),
+                tree.placing(at, draw),
             )?;
             stage.claim(at, trunk(tree.height))?;
             self.stood += 1;
@@ -994,7 +747,9 @@ fn surfacing(
             shades,
             mut sealing,
         } => {
-            let field = stage.fields.get_mut(land.near_water?.field as usize)?;
+            let field = stage
+                .fields
+                .get_mut(land.grids.near_water?.field as usize)?;
             if sealing.step(field, runner) {
                 Phase::Edging { shades }
             } else {
@@ -1015,7 +770,7 @@ fn flowing(
     shades: Option<Shades>,
     densities: &detail::Bed,
 ) -> Option<Phase> {
-    let Some(near) = land.near_water else {
+    let Some(near) = land.grids.near_water else {
         return Some(Phase::Edging { shades });
     };
     // Behind the eye and ahead of it along the stream, as far as the grid
@@ -1032,33 +787,35 @@ fn flowing(
 }
 
 /// How a wood's trees are sown: closely enough for its middling trees where
-/// it grows thickest; all the way about the eye as far as their shadows
-/// reach, and across the view beyond out to the land's edge, as far as its
+/// it grows thickest, all the way about the eye as far as their shadows
+/// reach, and across the view beyond out to the horizon, as far as its
 /// tallest still span a pixel or two, or as far as its most trees would
-/// stand thickly enough to fill.
-fn sown_for(
-    stage: &Stage,
-    land: &Land,
-    (grove, woodland): (&Grove, &Woodland),
-    vantage: &Vantage,
-) -> Sowing {
+/// stand thickly enough to fill, or its places fit the detail's; and how far
+/// off its trees are still seen.
+fn sown_for(stage: &Stage, land: &Land, reader: &Reader, vantage: &Vantage) -> Sown {
     let (count, middling, tallest) =
-        grove
+        reader
             .kinds()
-            .fold((0.0, 0.0, 0.0f64), |(count, total, tallest), grown| {
-                let typical = grown.heights.iter().sum::<f64>() / real(VARIANTS);
-                let top = plants::TALLEST * grown.heights.iter().copied().fold(0.0, f64::max);
-                (count + 1.0, total + grown.crown * typical, tallest.max(top))
+            .fold((0.0, 0.0, 0.0f64), |(count, total, tallest), habit| {
+                let typical = habit.heights.iter().sum::<f64>() / real(VARIANTS);
+                (
+                    count + 1.0,
+                    total + habit.crown * typical,
+                    tallest.max(habit.tallest()),
+                )
             });
     let middling = middling / f64::max(count, 1.0);
+    let woodland = &reader.woodland;
     let thickest = woodland.closure.0;
-    let sown = (SOWN * thickest * 2.0 * middling * woodland.stature.0).max(LEAST_SOWN);
+    let apart = thickest * 2.0 * middling * woodland.stature.0;
+    let sown = (SOWN * apart).max(LEAST_SOWN);
     let about = ABOUT.min(SHADOWED * tallest);
+    let (centre, reach) = land.grids.traced(&stage.fields);
     let corner = mathf::hypot(
-        (vantage.eye.x - land.centre.0).abs() + land.reach,
-        (vantage.eye.z - land.centre.1).abs() + land.reach,
+        (vantage.eye.x - centre.0).abs() + reach,
+        (vantage.eye.z - centre.1).abs() + reach,
     );
-    let seen = tallest / (SPANNED * stage.pixel.max(1e-6));
+    let seen = corner.min(tallest / (SPANNED * stage.pixel.max(1e-6)));
     // Crowns spaced at random no closer than the wood allows fill about
     // this share of the ground they could tile.
     let spacing = thickest * middling.max(1e-3);
@@ -1070,11 +827,26 @@ fn sown_for(
     } else {
         mathf::sqrt((covered - round) / ACROSS + about * about)
     };
-    Sowing {
+    let sowing = Sowing {
         sown,
         about: about.min(filled),
-        far: corner.min(seen).min(filled),
+        far: seen.min(filled),
     }
+    .fitted(f64::from(stage.densities.woods.places));
+    Sown {
+        sowing,
+        seen,
+        apart,
+    }
+}
+
+/// How a wood's trees are sown, how far off they are still seen, and how far
+/// apart its middling trees stand where it grows thickest.
+#[derive(Copy, Clone, Debug)]
+struct Sown {
+    sowing: Sowing,
+    seen: f64,
+    apart: f64,
 }
 
 /// Whether a tree `height` tall at `at` would wall off the view from
@@ -1246,8 +1018,11 @@ impl Growing {
                 mut standing,
                 patches,
             } => {
-                let trees = (&wood.grove, &wood.woodland, &wood.rooting);
-                if standing.step(stage, (land, runner), trees, (&wood.vantage, None))? {
+                if standing.step(stage, (land, runner), (&wood.vantage, None))? {
+                    if let Some(far) = standing.beyond.take() {
+                        let stood = standing.crowns.trees.iter().map(|tree| tree.at);
+                        stage.carry_on(far.matching(stood)?)?;
+                    }
                     roof(stage, wood, patches)?
                 } else {
                     Phase::Trees { standing, patches }
@@ -1268,10 +1043,7 @@ impl Growing {
                 shade,
                 patches,
             } => {
-                let beneath = wood.beneath.as_ref()?;
-                let understory = understory(&wood.woodland);
-                let plants = (&beneath.grove, &understory, &wood.rooting);
-                if standing.step(stage, (land, runner), plants, (&wood.vantage, Some(&shade)))? {
+                if standing.step(stage, (land, runner), (&wood.vantage, Some(&shade)))? {
                     Phase::Deadfall { patches }
                 } else {
                     Phase::Beneath {
@@ -1373,7 +1145,11 @@ impl Growing {
                 };
                 self.phase = match eye {
                     Some(eye) => Phase::Shading {
-                        shading: Shading::new(&stage.canopies, (land.centre, land.reach), eye)?,
+                        shading: Shading::new(
+                            &stage.canopies,
+                            (land.grids.centre, land.grids.reach),
+                            eye,
+                        )?,
                     },
                     None => Phase::Edging { shades: None },
                 };
@@ -1404,17 +1180,35 @@ impl Growing {
 /// `wood`'s trees sown over `land`: the places they might stand, to be read
 /// and thinned step by step.
 fn sow(stage: &Stage, dice: &mut Dice, land: &Land, wood: &Wood) -> Option<Phase> {
-    let seeds = (dice.seed(), dice.seed());
-    let sowing = sown_for(stage, land, (&wood.grove, &wood.woodland), &wood.vantage);
-    let standing = Standing::new(
-        stage,
-        (&wood.grove, &wood.woodland),
-        (&wood.vantage, sowing),
-        seeds,
-    )?;
+    let reader = Reader {
+        woodland: wood.woodland,
+        rooting: wood.rooting,
+        kinds: wood.grove.habits(),
+        seeds: (dice.seed(), dice.seed()),
+    };
+    let vantage = &wood.vantage;
+    let sown = sown_for(stage, land, &reader, vantage);
+    let mut standing = Standing::new(stage, &reader, (vantage, sown.sowing))?;
+    let stood = standing.reach();
+    // Shrubs are low enough to be stood one by one as far as they are seen.
+    let trees = wood.grove.kinds().all(|grown| !grown.kind.shrub());
+    if stage.densities.woods.beyond && trees && sown.seen > stood {
+        let stretch = Stretch {
+            eye: (vantage.eye.x, vantage.eye.z),
+            heading: vantage.heading,
+            across: ACROSS,
+            from: stood,
+            to: sown.seen,
+            cell: sown.apart,
+            sown: sown.sowing.sown,
+        };
+        // Over a lattice of its own, keyed from the wood's.
+        let seed = mix32(reader.seeds.1 ^ 0xfa12_3e3d);
+        standing.beyond = FarWood::new((reader, seed), (land.grids, &stage.fields), stretch);
+    }
     Some(Phase::Trees {
         standing,
-        patches: seeds.0,
+        patches: reader.seeds.0,
     })
 }
 
@@ -1452,22 +1246,22 @@ fn beneath(
     if shade.is_open() {
         return Some(Phase::Deadfall { patches });
     }
+    let sown = 100.0 / mathf::sqrt(beneath.plants.max(1.0));
     let sowing = Sowing {
-        sown: 100.0 / mathf::sqrt(beneath.plants.max(1.0)),
+        sown,
         about: ABOUT_BENEATH,
         far: BENEATH,
+    }
+    .fitted(f64::from(stage.densities.woods.places));
+    let reader = Reader {
+        woodland: understory(&wood.woodland),
+        rooting: wood.rooting,
+        kinds: beneath.grove.habits(),
+        // Over a lattice of its own.
+        seeds: (patches, dice.seed()),
     };
-    // Over a lattice of its own.
-    let seeds = (patches, dice.seed());
-    let understory = understory(&wood.woodland);
-    let standing = Standing::new(
-        stage,
-        (&beneath.grove, &understory),
-        (&wood.vantage, sowing),
-        seeds,
-    )?;
     Some(Phase::Beneath {
-        standing,
+        standing: Standing::new(stage, &reader, (&wood.vantage, sowing))?,
         shade,
         patches,
     })
@@ -1522,12 +1316,12 @@ fn lay_deadfall(
             if chance >= wooded(&wood.woodland, patches, at) * (1.0 + 2.0 * opened) / 3.0 {
                 continue;
             }
-            let lie = land.lie(&stage.fields, at.0, at.1);
+            let lie = land.grids.lie(&stage.fields, at.0, at.1);
             if lie.upright < 0.8
                 || lie.road > 0.0
                 || lie.path > 0.3
                 || wood.rooting.suits(&lie, at) < 0.2
-                || land.wet_at(&stage.fields, at.0, at.1)
+                || land.grids.wet_at(&stage.fields, at.0, at.1)
             {
                 continue;
             }
@@ -1586,8 +1380,8 @@ fn fell(
     }
     let tip = disc(discs - 1);
     let (foot, top) = (
-        land.height(&stage.fields, at.0, at.1),
-        land.height(&stage.fields, tip.0, tip.1),
+        land.grids.height(&stage.fields, at.0, at.1),
+        land.grids.height(&stage.fields, tip.0, tip.1),
     );
     let pitch = mathf::atan2(top - foot, length);
     let pose = Pose::new(Vec3::new(at.0, foot, at.1), Frame::turned(heading, -pitch));
@@ -1633,24 +1427,19 @@ fn stand_snag(
     (lie, dead): (&Lie, &Dead),
     (at, eye): ((f64, f64), (f64, f64)),
 ) -> Option<bool> {
-    let snags = &dead.snags;
+    let snags = &dead.snags.habit;
     let tallest = snags.heights.iter().copied().fold(0.0, f64::max);
     let wanted = tallest * dice.range(0.5, 1.0);
     let variant = snags.nearest(wanted, dice.unit());
-    let scale = plants::sized(wanted, *snags.heights.get(variant)?);
+    let scale = snags.sized(wanted, *snags.heights.get(variant)?);
     let height = scale * *snags.heights.get(variant)?;
     if mathf::hypot(at.0 - eye.0, at.1 - eye.1) <= DEADFALL_CLEAR || !stage.clear(at, trunk(height))
     {
         return Some(false);
     }
     let base = Vec3::new(at.0, rooted(lie, height), at.1);
-    plants::place(
-        stage,
-        snags,
-        (variant, scale),
-        base,
-        (dice.range(0.0, TAU), dice.seed()),
-    )?;
+    let pose = Pose::new(base, Frame::turned(dice.range(0.0, TAU), 0.0));
+    plants::place(stage, snags, (variant, scale), (pose, dice.seed()))?;
     stage.claim(at, trunk(height))?;
     Some(true)
 }

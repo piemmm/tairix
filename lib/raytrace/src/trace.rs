@@ -277,10 +277,13 @@ struct Surface {
     travelled: f64,
     /// How wide a patch across the view one pixel's view of the point covers.
     width: f64,
-    /// The point in the object's texture frame, and that frame's first axis
-    /// in the world, which a brushed surface is brushed along.
+    /// The point in the texture frame of what was met, that frame's first
+    /// axis in the world, which a brushed surface is brushed along, the frame
+    /// itself, and the key of the placing met.
     texture: Vec3,
     grain: Vec3,
+    frame: Frame,
+    instance: u32,
     /// The surface's own coordinates there, and whether its front was met.
     uv: (f64, f64),
     front: bool,
@@ -970,14 +973,15 @@ impl<'a> Tracer<'a> {
         let point = ray.at(hit.t);
         let toward_eye = -ray.dir;
         let outside = hit.normal.dot(toward_eye) >= 0.0;
-        let texture = object.texture.point_to_local(point);
+        let (placing, instance) = object.placing(hit, self.scene.geometry());
+        let texture = placing.point_to_local(point);
         let width = cone.width(self.pixel_angle, travelled + hit.t);
         let bump = Bump {
             p: texture,
             uv: hit.uv,
             tangent: hit.tangent,
             girth: hit.girth,
-            instance: object.shape.instance(),
+            instance,
             width,
             stretch: along_view(width, hit.shading, toward_eye),
         };
@@ -999,7 +1003,9 @@ impl<'a> Tracer<'a> {
             travelled: travelled + hit.t,
             width,
             texture,
-            grain: object.texture.frame.x,
+            grain: placing.frame.x,
+            frame: placing.frame,
+            instance,
             uv: hit.uv,
             front: outside,
             canopy: None,
@@ -1020,14 +1026,14 @@ impl<'a> Tracer<'a> {
         };
         Spot {
             p: surface.texture,
-            normal: object.texture.frame.to_local(surface.normal),
+            normal: surface.frame.to_local(surface.normal),
             height: surface.point.y,
             width: Self::footprint(surface),
             mark: hit.mark,
             along: hit.along,
             uv: surface.uv,
             girth: hit.girth,
-            instance: object.shape.instance(),
+            instance: surface.instance,
             front: surface.front,
             ground,
             thatch: surface.canopy.map_or(0.0, |canopy| 1.0 - canopy.diffuse()),

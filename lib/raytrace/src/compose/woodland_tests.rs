@@ -12,70 +12,6 @@ const EYE: Vantage = Vantage {
     heading: 0.0,
 };
 
-fn woodland(cover: f64) -> Woodland {
-    Woodland {
-        cover,
-        patch: 200.0,
-        closure: (0.6, 1.0),
-        stature: (0.8, 1.0),
-        gaps: 0.3,
-        most: 1000,
-        open: (1.5, 0.3),
-    }
-}
-
-#[test]
-fn a_wood_covers_about_the_share_of_the_ground_asked_of_it() {
-    for cover in [0.15, 0.4, 0.65, 0.9] {
-        let (mut wooded_places, mut places) = (0.0, 0.0);
-        for row in 0..160 {
-            for column in 0..160 {
-                let at = (f64::from(column) * 37.0, f64::from(row) * 37.0);
-                wooded_places += wooded(&woodland(cover), 99, at);
-                places += 1.0;
-            }
-        }
-        let share = wooded_places / places;
-        assert!((share - cover).abs() < 0.08, "{cover}: {share}");
-    }
-}
-
-#[test]
-fn a_canopy_opens_gaps_where_its_lattice_holds_them_and_none_where_it_is_closed() {
-    let share_open = |gaps: f64| {
-        let woodland = Woodland {
-            gaps,
-            ..woodland(0.9)
-        };
-        let mut open = 0.0;
-        for row in 0..300 {
-            for column in 0..300 {
-                open += gap(
-                    &woodland,
-                    5,
-                    (f64::from(column) * 7.3, f64::from(row) * 7.3),
-                );
-            }
-        }
-        open / (300.0 * 300.0)
-    };
-    assert!(share_open(0.0).abs() < 1e-12);
-    let (few, many) = (share_open(0.2), share_open(0.6));
-    assert!((0.01..0.06).contains(&few), "{few}");
-    assert!((0.05..0.15).contains(&many), "{many}");
-    // A gap's heart is open all through, its edge closing over it.
-    let woodland = Woodland {
-        gaps: 1.0,
-        ..woodland(0.9)
-    };
-    let found = cells2(0.5, 0.5, 5 ^ 0x6a95, 0.8);
-    let middle = (
-        (0.5 + found.toward.x) * GAP_SPACING,
-        (0.5 + found.toward.z) * GAP_SPACING,
-    );
-    assert!(gap(&woodland, 5, middle) > 0.99, "at {middle:?}");
-}
-
 #[test]
 fn a_crown_keeps_its_peers_off_but_a_much_shorter_tree_may_stand_beneath_it() {
     let mut crowns = Crowns::new(((0.0, 0.0), 100.0), 30.0).expect("a grid");
@@ -135,14 +71,52 @@ fn a_tree_just_ahead_of_the_eye_walls_the_view_off_and_one_aside_does_not() {
     );
 }
 
+/// Every place `sowing` sows within the square `square`.
+fn sown_over(sowing: &Sowing, square: ((f64, f64), f64)) -> Vec<Seedling> {
+    let mut seedlings = Vec::new();
+    for ring in 0..sowing.rings() {
+        sow_ring(
+            (ring, sowing.ring(ring)),
+            (&EYE, sowing.about),
+            square,
+            7,
+            &mut seedlings,
+        )
+        .expect("sown");
+    }
+    seedlings
+}
+
 #[test]
-fn what_grows_beneath_a_wood_takes_to_its_gaps_and_edges() {
-    let deep = thrives_beneath(0.99);
-    let gap = thrives_beneath(0.5);
-    let open = thrives_beneath(0.0);
-    assert!(deep < 0.25, "{deep}");
-    assert!(gap > 0.95, "{gap}");
-    assert!(open > deep && open < 0.6 * gap, "{open}");
+fn a_wood_is_sown_as_closely_throughout_reaching_only_as_far_as_its_places_fit() {
+    let fine = Sowing {
+        sown: 4.0,
+        about: 40.0,
+        far: 1200.0,
+    };
+    let whole = fine.places_in(fine.rings());
+    let kept = fine.fitted(2.0 * whole);
+    assert!((kept.far - fine.far).abs() < 1e-9, "fits as it is");
+    // Kept to a third of them, it stops short, its places as close as ever
+    // and as many as fit.
+    let budget = whole / 3.0;
+    let kept = fine.fitted(budget);
+    assert!(kept.far < fine.far && (kept.sown - fine.sown).abs() < 1e-12);
+    let places = kept.places_in(kept.rings());
+    assert!(
+        places <= budget && places > 0.98 * budget,
+        "{places} of {budget}"
+    );
+    // The places it sows are the places it planned.
+    let sown = real(sown_over(&kept, ((0.0, 0.0), 1e5)).len());
+    assert!((sown / places - 1.0).abs() < 0.01, "{sown} of {places}");
+    // An eye's round alone too big to hold is cut short too.
+    let round = fine.fitted(100.0);
+    assert!(
+        round.far < fine.about && round.places_in(round.rings()) <= 100.0,
+        "{}",
+        round.far
+    );
 }
 
 #[test]
@@ -152,13 +126,7 @@ fn places_are_sown_all_about_the_eye_near_it_and_across_the_view_beyond() {
         about: 40.0,
         far: 120.0,
     };
-    let sown = |square: ((f64, f64), f64)| {
-        let mut seedlings = Vec::new();
-        for ring in 0..rings(&sowing) {
-            sow_ring(ring, (&EYE, &sowing), square, 7, &mut seedlings).expect("sown");
-        }
-        seedlings
-    };
+    let sown = |square: ((f64, f64), f64)| sown_over(&sowing, square);
     let seedlings = sown(((0.0, 0.0), 1000.0));
     let (mut near, mut ahead) = (0, 0);
     for seedling in &seedlings {
@@ -190,66 +158,6 @@ fn places_are_sown_all_about_the_eye_near_it_and_across_the_view_beyond() {
     assert!(inland
         .iter()
         .all(|seedling| seedling.at.0.abs() < 20.0 && (seedling.at.1 - 50.0).abs() < 20.0));
-}
-
-#[test]
-fn a_wood_keeps_out_of_its_clearing_off_the_road_and_within_its_heights() {
-    let lie = Lie {
-        height: 40.0,
-        upright: 0.98,
-        green: 1.0,
-        ..Lie::default()
-    };
-    let rooting = Rooting {
-        above: Some((10.0, 20.0)),
-        below: Some((60.0, 80.0)),
-        clearing: Some(((100.0, 0.0), 15.0)),
-        ..ANYWHERE
-    };
-    let suits = |lie: Lie, at: (f64, f64)| rooting.suits(&lie, at);
-    let barred = |lie: Lie, at: (f64, f64)| suits(lie, at).abs() < 1e-12;
-    assert!((suits(lie, (0.0, 0.0)) - 1.0).abs() < 1e-9);
-    assert!(barred(lie, (110.0, 0.0)), "in the clearing");
-    assert!(barred(Lie { road: 1.0, ..lie }, (0.0, 0.0)), "on the road");
-    assert!(
-        suits(Lie { path: 1.0, ..lie }, (0.0, 0.0)) < 0.1,
-        "on a path"
-    );
-    assert!(
-        barred(Lie { height: 5.0, ..lie }, (0.0, 0.0)),
-        "below its heights"
-    );
-    assert!(
-        barred(
-            Lie {
-                height: 90.0,
-                ..lie
-            },
-            (0.0, 0.0)
-        ),
-        "above them"
-    );
-    assert!(
-        barred(
-            Lie {
-                upright: 0.6,
-                ..lie
-            },
-            (0.0, 0.0)
-        ),
-        "too steep"
-    );
-    // Under snow nothing grows green, but a wood that roots bare stands on.
-    let snowed = Lie { green: 0.0, ..lie };
-    assert!(barred(snowed, (0.0, 0.0)));
-    assert!(
-        Rooting {
-            bare: 0.8,
-            ..rooting
-        }
-        .suits(&snowed, (0.0, 0.0))
-            > 0.79
-    );
 }
 
 /// A composition of `setting` under `seed` for a picture `size`, its jobs run
@@ -506,6 +414,9 @@ fn a_simple_wood_stands_fewer_trees_nearer_the_eye_and_keeps_to_its_room() {
         reach(&maximum)
     );
     assert!(simple.stage.objects.len() <= Detail::Simple.densities().objects);
+    // Only Maximum carries a wood on past the trees it stands one by one.
+    assert_eq!(simple.carried_on(), 0);
+    assert!(maximum.carried_on() > 0);
 }
 
 #[test]
@@ -624,4 +535,69 @@ fn a_streams_growing_never_reports_less_done() {
         steps += 1;
     }
     assert!(steps > 10, "grown in {steps} steps");
+}
+
+#[test]
+fn a_wood_far_off_stands_as_thickly_as_the_trees_stood_one_by_one_before_it() {
+    let mut composition = planted(Setting::Forest, 1, (640, 360));
+    let carried = composition.carried_on();
+    assert!(carried > 0, "a forest carried on at Maximum");
+    // Matched and surveyed once the prototypes its trees are measured by grow.
+    let runner = tairix_parallel::Threaded::new(8);
+    while !composition
+        .advance(&runner, &mut || false)
+        .expect("composes")
+    {}
+    assert_eq!(composition.carried_on(), 0);
+    let stage = &composition.stage;
+    assert_eq!(stage.far_woods.len(), carried);
+    let far = stage.far_woods.first().expect("a forest carried on");
+    let eye = composition
+        .seen
+        .as_ref()
+        .map(|(_, camera)| camera.eye())
+        .expect("seen");
+    let from = far.begins();
+    let stood_in = |ring: (f64, f64)| {
+        let stood = stage
+            .objects
+            .iter()
+            .filter(|object| match object.shape {
+                Shape::Instance {
+                    prototype, pose, ..
+                } => {
+                    let (dx, dz) = (pose.at.x - eye.x, pose.at.z - eye.z);
+                    let distance = mathf::hypot(dx, dz);
+                    matches!(
+                        stage.recipes.get(prototype as usize),
+                        Some(Recipe::Tree { .. })
+                    ) && (ring.0..ring.1).contains(&distance)
+                        && far.across((pose.at.x, pose.at.z))
+                }
+                _ => false,
+            })
+            .count();
+        crate::vector::real(stood) / (ACROSS * (ring.1 * ring.1 - ring.0 * ring.0))
+    };
+    // Matched over the ring short of where it begins, it stands as thickly
+    // nearer still, where the trees stood one by one met other ground.
+    let ring = (0.3 * from, 0.6 * from);
+    let (near, (off, _)) = (stood_in(ring), far.density(ring, &stage.fields));
+    assert!(
+        near > 0.0 && (off / near - 1.0).abs() < 0.15,
+        "{off} against {near}"
+    );
+    // Each is traced as the tiles a crown stands over.
+    let mut tiles = 0;
+    for object in &stage.objects {
+        if let Shape::FarWood { wood, tile } = object.shape {
+            assert!(stage.far_woods.get(wood as usize).is_some(), "its wood");
+            assert!(tile.crowns > tile.ground.0 && tile.bounds().max.y > tile.crowns);
+            tiles += 1;
+        }
+    }
+    assert!(
+        tiles > 0 && tiles < crate::far_wood::TILES * crate::far_wood::TILES,
+        "{tiles}"
+    );
 }

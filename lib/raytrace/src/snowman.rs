@@ -287,12 +287,11 @@ impl Rolling {
         let normals = normals_of(&self.vertices, &self.faces)?;
         let mut parts = Vec::new();
         parts.try_reserve_exact(self.faces.len()).ok()?;
-        parts.extend(self.faces.iter().map(|&corners| {
-            Part::Facet(Facet {
-                corners,
-                material: None,
-            })
-        }));
+        parts.extend(
+            self.faces
+                .iter()
+                .map(|&corners| Part::Facet(Facet::plain(corners, None))),
+        );
         let mut vertices = Vec::new();
         vertices.try_reserve_exact(self.vertices.len()).ok()?;
         vertices.extend(self.vertices.iter().map(|&vertex| singles(vertex)));

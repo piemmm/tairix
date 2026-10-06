@@ -15,7 +15,7 @@ random from a seed, and a tracer that answers what one pixel of one shows.
   forest, mountains over a lake, a coast, desert, snow, a lagoon, canyons, a
   river valley, a stream through its pools, riffles and ledges).
 - `Detail` — how much a scene sets out: `Simple`, every setting plainer
-  within about 384 MiB at its peak, or `Maximum`, all the realism a 2 GiB peak
+  within about 512 MiB at its peak, or `Maximum`, all the realism a 2 GiB peak
   buys; `peak` states each one's budget for a caller weighing its memory.
 - `Draft` — a scene composed at a `Detail` but not yet traceable: its lands
   built, its woods, water's edge and swards grown, its trees and deadwood grown into
@@ -49,9 +49,10 @@ random from a seed, and a tracer that answers what one pixel of one shows.
 - **Fallible allocation.** Every buffer is reserved fallibly: a heap that will
   not hold a scene answers `None`, never an abort.
 - **Bounded cost.** A scene holds at most 131 072 objects at `Simple` and
-  524 288 at `Maximum`, 4096 hull faces,
+  2 097 152 at `Maximum`, 4096 hull faces,
   256 materials, 12 lights, 12 height grids, 96 prototypes, 16 lawns and 8
-  woods, and beams over at most 2²¹ cells of water at `Simple` and 2²³ at
+  woods, each carried on far off at `Maximum` as at most 576 tiles of its
+  land, and beams over at most 2²¹ cells of water at `Simple` and 2²³ at
   `Maximum`; a pixel at most 128 samples, a path at most nine bounces, and a
   point under or over water gathers about 256 beams a level at most. Every unit of
   preparation is a fixed amount of work a core, whatever the scene holds: a

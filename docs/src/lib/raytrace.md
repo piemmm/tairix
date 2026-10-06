@@ -135,8 +135,24 @@ again is Hillaire's isotropic series over the deck as its mean extinction
 lays it out by height, scaled by `1 − g`; and the sky's light and the
 ground's are scattered in by the share of the phase each hemisphere sends
 the eye. Its bank's shadow dims the light the lower bank is lit by, and both
-shade the ground. The water decks' octaves, powdered edges and ambient remain
-the production approximations of Schneider and Wrenninge.
+shade the ground.
+
+Water cloud scatters the sun once exactly, through a droplet phase of a
+forward lobe and a small backward one; every further order of its light is
+the δ-Eddington two-stream solution (Joseph, Wiscombe and Weinman 1976,
+`slab`). The cloud's light grids hold its optical depth toward the sun, away
+from it, straight up, and level away from it. The sun's light is solved in a
+slab facing its beam, as deep as the beam's way in and as thick as the cloud
+runs on behind it, as a heap lit from aside is, and in the cloud's column,
+as a deck is, through which it diffuses down whatever way it fell in —
+the deck's taking over the further the cloud runs across than down. The
+sky's light and the ground's are solved in the column, entering by the
+nearest face the sky lights. The light the cloud scatters
+toward the eye is each diffuse field's mean and its first moment, through the
+full phase's asymmetry. A thin cloud thus takes little but its single
+scattering, a heap's sunlit side shines and its base greys, its shaded side
+is lit by the sky and by what of the sun diffuses through it, and a lossless
+slab sends back or through all the sun it takes in, to a percent.
 
 ## Lands
 
@@ -148,7 +164,9 @@ a finer grid about the eye refine it, droplets running over each for the rills
 and fans no coarser pass makes, a turn of the land's tiles at a time across the
 runner. Each vertex carries what the land is like
 there — wet, worn or built up, on a road or a path, how much grows — which its
-shading, its sward and its woods read. The rivers' and lakes' surface is a grid
+shading, its sward and its woods read; the coarse grid running on to the
+horizon carries it too, judged by its slope, its height and the sea as the far
+land's is, so a dry land's distant ground grows no greener than its near. The rivers' and lakes' surface is a grid
 of its own, wet a cell's diagonal past a river's banks, so a river however
 narrow and however it slants across the grid keeps its water in every cell its
 course crosses; what lies past the banks lies under the ground, unseen. Grass is laid over it in lawns of
@@ -185,6 +203,18 @@ and drifts of four to a dozen pebbles washed into the wet or silted hollows
 within 15 m of the eye at `Simple` and 30 m at `Maximum`, which strews three
 times the boulders too.
 
+Mud dries and cracks (`mud`, `compose::cracked`) on level, bare silt out of
+the water — a canyon's or the badlands' washes, a valley's banks in summer
+and autumn — within 18 m of the eye at `Simple` and 36 m at `Maximum`, in
+patches. It is laid in 3 m tiles square to the land's own lattice, each the
+plates of a Voronoi pattern: every plate curls toward its rim, its corners
+the most, over a wall undercut beneath the curl, and the cracks between them
+run from hairlines to wide ones, every side bent by a field that repeats with
+the tile. Each tile shares the plates along its edges with every other, so
+the few drawn meet in any order without a seam. A tile is laid only where
+its ground lies within a centimetre of its plane, in the land's own silt,
+bleached paler, over its earth gone damp beneath.
+
 ## Woods
 
 A scene asks for its woods (`compose::woodland`) and they are grown once its
@@ -197,11 +227,17 @@ land stands, a bounded step at a time.
   poor) in stands of their own, each stand as tall as it is old; and gaps open
   in the canopy where a tree or a stand of them fell, a lattice of them each
   holding one as the wood's share has it.
+- **One reading, near and far** (`wood`). Whether a place grows a tree and
+  what tree is read from the place and the ground there alone, by the one
+  reading every wood is stood by: its patches and gaps first, then the
+  ground's slope, wet, growth, roads and heights, then the kind that takes to
+  it best and its stand's age.
 - **Thinned tallest first.** The places a tree might stand are sown in rings
   about the eye — all the way round as far as the trees' shadows reach, then
-  across the view out to the land's edge, as far as a tree still spans a
-  pixel or two, or as far as the wood's most trees would fill — and read
-  across the runner a band at a time. Those that would grow are ranked by
+  across the view out to the horizon, as far as a tree still spans a pixel or
+  two, as far as the wood's most trees would fill, or as far as the detail's
+  budget of places holds them, never sown coarser, which would thin the wood —
+  and read across the runner a band at a time. Those that would grow are ranked by
   height, sorted in runs a core apiece and merged tallest first as they are
   taken, and thinned in that order: a tree stands only where its trunk keeps from every taller
   one's by their crowns' reaches together, times the wood's closure there, a
@@ -218,6 +254,28 @@ land stands, a bounded step at a time.
   short and less branched; a dead one stands snapped off where its trunk was
   still thick, its biggest limbs broken back to a third of their length, as
   thick where they broke, every break torn.
+- **Far off** (`far_wood`). At *Maximum* a wood of trees carries on past the
+  trees it stands one by one, out to as far as its trees still span a pixel:
+  its trees hashed from the cells of a lattice rather than stood, each cell's
+  one place read by the same reading and kept as often as places sown as
+  closely as the trees stood near, each growing as often as the ground suits
+  it, come to once thinned to their crowns' room — the share of the ground
+  their crowns fill matched to the trees stood near over the ring where they
+  meet, so the wood stands as thickly far off as near. Once its trees'
+  prototypes grow, its lattice is surveyed a few hundred blocks a step: every
+  place's tree read once, a bit a cell kept for those that stand one, and for
+  each block of 16 × 16 cells the lowest ground under it and the highest crown
+  standing over it. Nothing else of it is stored, and it is traced as the
+  tiles of its land a crown stands over, each boxed to those crowns. A ray
+  passes a block it crosses over every crown, walks the rest a cell at a time
+  meeting each tree that stands within reach once, and grows a tree only
+  where it passes beneath the crowns about it and low enough to meet the
+  tallest the place could grow; a tree met is placed again from its cell when
+  it is shaded, so its pattern and its key are its own. Seen from the eye's
+  height in the settings' own views, the trees stood near hide it; it shows
+  from higher up, and costs a few per cent of a scene's preparation and
+  tracing at *Maximum*. A wood of shrubs is low enough to be stood one by one
+  as far as it is seen.
 - **Beneath.** Shrubs, ferns and young trees are sown in the shade the canopy
   casts: next to none under a closed canopy, most in its gaps and along its
   edges, fewer again out in the open, where grass takes the ground.
@@ -284,9 +342,24 @@ stands for. Over winter the floating plants die back and the reeds stand on,
 dry.
 
 Each plant is grown into square patches (`waterside`): reeds leafy up their
-stems under nodding plumes that open over the summer, reedmace in fans of
-strap leaves with its brown spikes, round slit pads with a white flower on
-one in eight in summer, and rosettes of pondweed. Each cell of a lattice of
+stems, each ending in its youngest leaf rolled into a spear or, once it
+flowers, in a nodding branched plume tufted with silky spikelets; reedmace in
+fans of strap leaves, its velvet spike blunt at both ends under the withered
+spire of its male spike and bursting in fluff over winter; water lilies; and
+rosettes of pondweed. A lily's pads (`lily`) are meshes, each cut to an
+outline and worn as its own key and its age have it — oval and waved, its
+lobes meeting, parted or overlapping, bronze and rolled as it unrolls, then
+grazed by beetle larvae, bitten from its margin by moth larvae, split along
+its veins, holed, spotted and frayed, yellowing and browning as it dies and
+sinking at last — and its colour is drawn from the same key, so a wound dries
+dark along the very cut. The pads are laid one after another, each resting on
+those already floating beneath it. On one plant in eight in summer a flower
+floats beside its pad at its own stage, from bud to spent: sepals and
+spiralled petals cut to their own outlines, each bent, twisted and cupped its
+own way and browning from the tip as it fades, stamens crowding a rayed
+stigma. A crowfoot's small flower rings a knobbly head of carpels with broad
+petals. A clump near the eye is drawn in full, its stalks running down under
+the water; a bed beyond plainer. Each cell of a lattice of
 0.75 m cells within about 45 m of the eye, and of 3.75 m cells beyond to the
 detail's reach, holds a patch of the plant its place suits best or none, as
 likely as the place suits it in that plant's own patches and gaps; the better
@@ -409,7 +482,18 @@ each where three faces meet within the rest.
   foot flaring, leaves cut to an outline, triangles — under a hierarchy of
   its own, built a slice at a time. A triangle with no material of its own
   takes the one its placing is made in, so one rock is laid wet, dry or
-  mossed.
+  mossed. A mesh may be mapped: its vertices carry where on its own surface
+  they lie, in metres, and its triangles its key, its size and the outline it
+  is cut to, so a pad or a petal shaped in the round is cut to an edge finer
+  than its mesh and shaded by where on itself a ray met it.
+- **Saguaros** (`cactus`) are ribbed flesh, their ribs counted by their
+  girth, each crest wandering and grooved between, felted areoles along each
+  crest and spines from them coloured by their age — red-brown at the apex,
+  then tan and grey, weathered pale toward the corked base — and pinched where
+  droughts constricted them; a saguaro is built a share of its areoles a
+  step. A palm stands on a swollen foot matted with short curved roots, some
+  dead and snapped; a shrub grows from a buried stool, its stems swelling
+  where they leave it.
   A trunk holds its girth up its bole by its kind's form before narrowing into
   its crown and bows in one gentle sweep. Its foot (`foot`) swells all round
   and out toward each of its roots as a buttress, the trunk deforming toward
@@ -679,20 +763,22 @@ keeps pace with a desert's droplets as with a valley's wear.
 
 ## Budgets
 
-A scene holds at most 131 072 objects at `Simple` and 524 288 at `Maximum` (a
-forest's trees, understory and deadwood among them, each 320 bytes), 4096 hull
-faces, 256 materials, 12 lights, 12 height grids, 96 prototypes, 16 lawns and
-8 woods, and a path at most nine bounces.
+A scene holds at most 131 072 objects at `Simple` and 2 097 152 at `Maximum`
+(a forest's trees, understory and deadwood among them, each 320 bytes), 4096
+hull faces, 256 materials, 12 lights, 12 height grids, 96 prototypes, 16 lawns
+and 8 woods, each carried on far off at `Maximum` as at most 576 tiles of its
+land, and a path at most nine bounces.
 
 A scene may take up to 160 s to prepare on a desktop-class machine across 8
 threads and hold up to 2 GB at its peak at `Maximum`, far less at `Simple`
 (`plans/RAYTRACE.md`). Measured at 1920×1080 on a 24-thread desktop preparing
-across 8 threads, a landscape prepares at `Maximum` in 1.3–63 s — a stream
-in 39–63 s, a meadow in 26–36 s, a forest in 33–34 s, snow over a frozen pond
-in 32–41 s, a desert in 7–9 s, a lagoon in 1.3–2.6 s, most of each its
-radiosity records and up to half of a lagoon's its caustics — holding at most
-about 710 MB at its peak and once prepared, a stream's; at `Simple` it
-prepares in 0.5–6.4 s, holding at most 374 MB.
+across 8 threads, a landscape prepares at `Maximum` in 1.0–102 s — a stream
+in 65–102 s, a meadow in 48–64 s, a forest in 65–74 s, a mountain forest over
+a lake in 44–55 s, snow over a frozen pond in 72–76 s, a desert in 7–20 s, a
+lagoon in 1.0–4.6 s, most of each its radiosity records and up to half of a
+lagoon's its caustics — holding at most about 840 MB at its peak and once
+prepared, a stream's; at `Simple` it prepares in 0.35–9.3 s, holding at most
+475 MB.
 Laying a scene's caustics takes up to 0.25 s at `Simple` and
 0.95 s at `Maximum`, and holds up to about 75 MB and 330 MB. Traced on one of its cores,
 built for the x86-64 baseline (SSE2), a sample costs from about 2.4 µs (the
@@ -703,7 +789,8 @@ cent more, and beneath or over water the caustics about 2.5 µs.
 
 Every unit of preparation is a fixed amount of work a core — a band of a
 grid's rows or of a shade's, a turn of a land's droplet tiles, a band of the
-objects' boxes or a slice of a hierarchy, a ring's places drawn or a run of
+objects' boxes or a slice of a hierarchy, a run of a far wood's ring read or
+a few hundred of its blocks surveyed, a ring's places drawn or a run of
 their ranking, a few rows of the water's edge's lattice, a bed's stones read,
 thinned or set out a few thousand at a time, a stream's flow solved a few
 thousand of its points a core, a few rows of a

@@ -11,7 +11,7 @@
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum Detail {
     /// Every setting, plainer: woods reaching less far and radiosity records
-    /// of fewer rays laid more sparingly, within about 384 MiB at the scene's
+    /// of fewer rays laid more sparingly, within about 512 MiB at the scene's
     /// peak.
     Simple,
     /// All the realism the budget buys, within 2 GiB at the scene's peak.
@@ -27,7 +27,7 @@ impl Detail {
     #[must_use]
     pub const fn peak(self) -> u64 {
         match self {
-            Self::Simple => 384 << 20,
+            Self::Simple => 512 << 20,
             Self::Maximum => 2 << 30,
         }
     }
@@ -53,6 +53,16 @@ pub(crate) struct Densities {
     pub(crate) records: Records,
     pub(crate) focus: Focus,
     pub(crate) strewn: Strewn,
+    pub(crate) spines: Spines,
+    /// How far about the eye a land's dried, cracked mud is laid.
+    pub(crate) mud: f64,
+}
+
+/// The most spines a cactus's areole bears: its centrals and its radials.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct Spines {
+    pub(crate) centrals: u8,
+    pub(crate) radials: u8,
 }
 
 /// How thickly a land's stones are strewn: as many times the boulders its
@@ -99,9 +109,19 @@ pub(crate) struct Woods {
     pub(crate) winter: u32,
     pub(crate) canyon: u32,
     pub(crate) valley: u32,
+    /// A mountain valley's forest, up to its tree line, and a moorland's
+    /// heather and gorse.
+    pub(crate) alpine: u32,
+    pub(crate) moor: u32,
     /// A rocky desert's saguaros, and its scrub.
     pub(crate) cacti: u32,
     pub(crate) scrub: u32,
+    /// The most places a wood's trees are sown over, read and ranked at
+    /// once: some 80 bytes each.
+    pub(crate) places: u32,
+    /// Whether a wood carries on past the trees it stands one by one, out to
+    /// as far as its trees still span a pixel, hashed from cells.
+    pub(crate) beyond: bool,
 }
 
 /// How a scene's radiosity records are laid.
@@ -149,8 +169,12 @@ const SIMPLE: Densities = Densities {
         winter: 40_000,
         canyon: 4000,
         valley: 20_000,
+        alpine: 60_000,
+        moor: 2500,
         cacti: 600,
         scrub: 900,
+        places: 1_200_000,
+        beyond: false,
     },
     waterside: Waterside {
         reach: 250.0,
@@ -180,19 +204,28 @@ const SIMPLE: Densities = Densities {
         drifts: 40,
         pebbles: 15.0,
     },
+    spines: Spines {
+        centrals: 2,
+        radials: 4,
+    },
+    mud: 18.0,
 };
 
 const MAXIMUM: Densities = Densities {
-    objects: 1 << 19,
+    objects: 1 << 21,
     woods: Woods {
-        backdrop: 120_000,
-        meadow: 120_000,
-        forest: 270_000,
-        winter: 160_000,
-        canyon: 40_000,
-        valley: 120_000,
-        cacti: 6000,
-        scrub: 9000,
+        backdrop: 360_000,
+        meadow: 360_000,
+        forest: 900_000,
+        winter: 480_000,
+        canyon: 120_000,
+        valley: 360_000,
+        alpine: 360_000,
+        moor: 250_000,
+        cacti: 18_000,
+        scrub: 27_000,
+        places: 3_500_000,
+        beyond: true,
     },
     waterside: Waterside {
         reach: 700.0,
@@ -222,4 +255,9 @@ const MAXIMUM: Densities = Densities {
         drifts: 160,
         pebbles: 30.0,
     },
+    spines: Spines {
+        centrals: 4,
+        radials: 9,
+    },
+    mud: 36.0,
 };

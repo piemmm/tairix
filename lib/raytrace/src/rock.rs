@@ -221,10 +221,7 @@ impl Wearing {
         parts.try_reserve_exact(self.faces.len()).ok()?;
         parts.extend(self.faces.iter().map(|&corners| {
             // Made in whatever each stone is placed in: wet, dry or mossed.
-            Part::Facet(Facet {
-                corners,
-                material: None,
-            })
+            Part::Facet(Facet::plain(corners, None))
         }));
         let mut stored_vertices = Vec::new();
         stored_vertices.try_reserve_exact(vertices.len()).ok()?;

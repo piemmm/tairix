@@ -119,9 +119,9 @@ fn a_built_land_lies_as_its_grids_hold_it() {
     for row in -12..=12 {
         for column in -12..=12 {
             let (x, z) = (f64::from(column) * 110.0, f64::from(row) * 110.0);
-            let lie = land.lie(&fields, x, z);
+            let lie = land.grids.lie(&fields, x, z);
             assert!(
-                (lie.height - land.height(&fields, x, z)).abs() < 1e-9,
+                (lie.height - land.grids.height(&fields, x, z)).abs() < 1e-9,
                 "({x}, {z})"
             );
             assert!(lie.height.is_finite());
@@ -138,7 +138,7 @@ fn a_built_land_lies_as_its_grids_hold_it() {
     }
     for course in 0..land.roads.len() {
         for mark in land.roads.course(course).iter().step_by(4) {
-            if land.lie(&fields, mark.x, mark.z).road > 0.5 {
+            if land.grids.lie(&fields, mark.x, mark.z).road > 0.5 {
                 on_road += 1;
             }
         }
@@ -182,7 +182,7 @@ fn rivers_run_downhill_and_the_road_keeps_out_of_their_water() {
         for mark in land.roads.course(course) {
             if !bridged(mark.x, mark.z) {
                 assert!(
-                    !land.wet_at(&fields, mark.x, mark.z),
+                    !land.grids.wet_at(&fields, mark.x, mark.z),
                     "the road runs through water at ({}, {})",
                     mark.x,
                     mark.z
@@ -215,7 +215,9 @@ fn a_dry_land_keeps_no_water_grid_and_a_wet_one_keeps_one() {
                     f64::from(index % 20) * 140.0 - 1400.0,
                     f64::from(index / 20) * 140.0 - 1400.0,
                 );
-                land.water(&fields, x, z).is_none()
+                land.grids
+                    .water_level(&fields, x, z)
+                    .is_none_or(|level| level <= land.grids.height(&fields, x, z))
             });
             assert!(dry, "{seed}: nothing stands on a dry land");
         }
@@ -431,7 +433,7 @@ fn a_low_rivers_bare_margin_is_soaked_and_its_banks_thin_toward_it() {
 fn a_channel_stands_as_carved_against_the_droplets() {
     let (land, fields, rivers, _) = built(plan(true, 7));
     let form = land.form.expect("a river's form");
-    let nest = land.nests[0].expect("a finer grid");
+    let nest = land.grids.nests[0].expect("a finer grid");
     let grid = &fields[nest.field as usize];
     let ((origin_x, origin_z), step) = grid.placing();
     let side = grid.side();
@@ -490,8 +492,8 @@ fn a_finer_water_grid_meets_the_far_one_at_its_seam() {
         cells: 512,
     });
     let (land, fields, _, _) = built(plan);
-    let near = land.near_water.expect("a finer water grid");
-    let water = land.water.expect("a water grid");
+    let near = land.grids.near_water.expect("a finer water grid");
+    let water = land.grids.water.expect("a water grid");
     let (finer, far) = (&fields[near.field as usize], &fields[water as usize]);
     let (cx, cz, reach) = (near.centre.0, near.centre.1, near.reach);
     let mut met = 0;
@@ -538,7 +540,7 @@ fn a_finer_water_grid_meets_the_far_one_at_its_seam() {
                 finer.intersect(&down, 0.0, 100.0).is_some(),
                 "({x}, {z}) never"
             );
-            assert_eq!(land.water_level(&fields, x, z), Some(level));
+            assert_eq!(land.grids.water_level(&fields, x, z), Some(level));
             inner += 1;
         }
     }
@@ -556,8 +558,8 @@ fn a_bank_past_the_finer_grids_brim_reads_the_far_level() {
         cells: 512,
     });
     let (land, fields, _, _) = built(plan);
-    let near = land.near_water.expect("a finer water grid");
-    let water = land.water.expect("a water grid");
+    let near = land.grids.near_water.expect("a finer water grid");
+    let water = land.grids.water.expect("a water grid");
     let (finer, far) = (&fields[near.field as usize], &fields[water as usize]);
     let ((origin_x, origin_z), cell) = far.placing();
     let mut banks = 0;
@@ -574,7 +576,7 @@ fn a_bank_past_the_finer_grids_brim_reads_the_far_level() {
             if own.is_finite() || !other.is_finite() {
                 continue;
             }
-            assert_eq!(land.water_level(&fields, x, z), Some(other));
+            assert_eq!(land.grids.water_level(&fields, x, z), Some(other));
             banks += 1;
         }
     }

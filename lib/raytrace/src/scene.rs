@@ -22,6 +22,7 @@ use crate::caustic::{Caustics, Focusing};
 use crate::compose::{Composition, Setting};
 use crate::cut::Viewpoint;
 use crate::detail::Detail;
+use crate::far_wood::FarWood;
 use crate::grass::{Canopy, Cover, Lawn};
 use crate::heightfield::Heightfield;
 use crate::light::Light;
@@ -83,6 +84,24 @@ pub(crate) struct Object {
     pub(crate) in_view: bool,
 }
 
+impl Object {
+    /// The frame the part `hit` met has its pattern fixed in, and the key of
+    /// the placing it belongs to: the object's own, but for a tree of a wood
+    /// far off, placed afresh from its cell.
+    pub(crate) fn placing(&self, hit: &Hit, geometry: Geometry<'_>) -> (Pose, u32) {
+        if let (Shape::FarWood { wood, .. }, Some(cell)) = (&self.shape, hit.member) {
+            let tree = geometry
+                .far_woods
+                .get(*wood as usize)
+                .and_then(|wood| wood.placing(cell, geometry.fields));
+            if let Some(placed) = tree {
+                return placed;
+            }
+        }
+        (self.texture, self.shape.instance())
+    }
+}
+
 /// How a scene's light is scaled before it is toned for the screen.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub(crate) enum Exposure {
@@ -112,6 +131,7 @@ pub(crate) struct Parts {
     pub(crate) fields: Vec<Heightfield>,
     pub(crate) prototypes: Vec<Prototype>,
     pub(crate) lawns: Vec<Lawn>,
+    pub(crate) far_woods: Vec<FarWood>,
     pub(crate) materials: Vec<Material>,
     pub(crate) lights: Vec<Light>,
     pub(crate) sky: Sky,
@@ -341,6 +361,7 @@ pub struct Scene {
     pub(crate) fields: Vec<Heightfield>,
     pub(crate) prototypes: Vec<Prototype>,
     pub(crate) lawns: Vec<Lawn>,
+    pub(crate) far_woods: Vec<FarWood>,
     pub(crate) materials: Vec<Material>,
     pub(crate) lights: Vec<Light>,
     pub(crate) sky: Sky,
@@ -468,6 +489,7 @@ impl Building {
             fields: parts.fields,
             prototypes: parts.prototypes,
             lawns: parts.lawns,
+            far_woods: parts.far_woods,
             materials: parts.materials,
             daylight: daylight(&parts.sky, &parts.lights, parts.camera.eye()),
             lights: parts.lights,
@@ -519,6 +541,7 @@ impl Scene {
             fields: &parts.fields,
             prototypes: &parts.prototypes,
             lawns: &parts.lawns,
+            far_woods: &parts.far_woods,
             materials: &parts.materials,
             view: None,
         };
@@ -576,6 +599,7 @@ impl Scene {
             fields: &self.fields,
             prototypes: &self.prototypes,
             lawns: &self.lawns,
+            far_woods: &self.far_woods,
             materials: &self.materials,
             view: Some(self.view),
         }

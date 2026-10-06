@@ -29,6 +29,26 @@ pub(crate) fn single(value: f64) -> f32 {
     value as f32
 }
 
+/// The nearest single-precision value at or below `value`.
+pub(crate) fn below(value: f64) -> f32 {
+    let near = single(value);
+    if f64::from(near) > value {
+        near.next_down()
+    } else {
+        near
+    }
+}
+
+/// The nearest single-precision value at or above `value`.
+pub(crate) fn above(value: f64) -> f32 {
+    let near = single(value);
+    if f64::from(near) < value {
+        near.next_up()
+    } else {
+        near
+    }
+}
+
 /// Each of `value`'s three in single precision.
 pub(crate) fn singles(value: Vec3) -> [f32; 3] {
     [single(value.x), single(value.y), single(value.z)]

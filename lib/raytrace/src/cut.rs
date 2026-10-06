@@ -79,7 +79,9 @@ impl Cutting<'_> {
         let Some(Relief::Bark { bark, depth }) = material.relief.as_ref() else {
             return None;
         };
-        let deepest = *depth * smoothstep(CUT_GIRTH.0, CUT_GIRTH.1, girth * self.scale);
+        let deepest = *depth
+            * (self.scale / bark.measure(self.scale))
+            * smoothstep(CUT_GIRTH.0, CUT_GIRTH.1, girth * self.scale);
         if deepest <= 0.0 {
             return None;
         }
@@ -100,6 +102,11 @@ impl Cutting<'_> {
     }
 }
 
+/// The girth, in metres, at which a bark rising the faster the thinner its
+/// limb, as a cactus's ribs do, rises fastest once its cut has faded with
+/// its girth: where `smoothstep(CUT_GIRTH)` over the girth peaks.
+const FASTEST_FADED: f64 = 0.11;
+
 /// How far `p` lies from the segment from `a` to `b`.
 fn segment_distance(p: Vec3, (a, b): (Vec3, Vec3)) -> f64 {
     let span = b - a;
@@ -109,41 +116,104 @@ fn segment_distance(p: Vec3, (a, b): (Vec3, Vec3)) -> f64 {
 
 /// A tube laid out for its march: its first end, the unit way to the
 /// second, its length, its radius at the first and how fast it narrows, the
-/// two directions its angle is measured between, the bark cut in it if any
-/// is near enough to show, and the flare its foot swells in if it does. Past
-/// each end it rounds, the limb runs on within that end's sphere, so
-/// neighbours along a bending limb overlap rather than open a notch on its
-/// outer side, and a free end is rounded as the tube's is.
+/// sine and cosine of the angle its side leans in at, the two directions its
+/// angle is measured between, the bark cut in it if any is near enough to
+/// show and what takes the prototype's units to that bark's, and the flare
+/// its foot swells in if it does.
+///
+/// Its side is the cone tangent to the spheres rounding its ends, the tube's
+/// own surface, and past where the side meets each it is that sphere, its
+/// bark run on over it down its meridians: so a bending limb's joints stay
+/// closed, a limb's neighbours meet it without a crease in the sphere they
+/// share rather than one's side showing through the other's, and a free end
+/// rounds, its bark crowding over it as a cactus's ribs crowd over its apex.
+/// A flared foot's side swells by its flare from the cone between its ends'
+/// rounds instead.
 struct Limb<'a> {
     a: Vec3,
     axis: Vec3,
     length: f64,
     radius: f64,
     taper: f64,
+    lean: (f64, f64),
     /// Each end's radius, the sphere that rounds it.
     ends: (f64, f64),
     round: (Vec3, Vec3),
     tube: &'a Tube,
     bark: Option<&'a Bark>,
+    measure: f64,
     depth: f64,
     flare: Option<&'a Flare>,
 }
 
 /// Where a point lies on a limb: how far along it, as a share of its
-/// length, its way out from the axis and how far out, the limb's radius
-/// there, its angle round it, how far from the eye in metres, and the cut's
-/// depth there in the prototype's own units.
+/// length, its way out from the axis, the limb's radius there, its angle
+/// round it, how far from the eye in metres, the cut's depth there in the
+/// prototype's own units, how far it stands out from the uncut limb, and,
+/// past its side, where over the sphere rounding the end it lies past.
 struct Place {
     along: f64,
     out: Vec3,
-    reach: f64,
     radius: f64,
     angle: f64,
     distance: f64,
     cut: f64,
+    over: f64,
+    end: Option<End>,
 }
 
-impl Limb<'_> {
+/// Where a point past an end a limb rounds lies over the sphere rounding it:
+/// that sphere's radius, how far from its middle the point is and the way
+/// out to it, how far along the stem carried on over the sphere down its
+/// meridian, the sphere's girth there about the limb's axis, and the cut's
+/// depth there in the prototype's own units.
+struct End {
+    radius: f64,
+    reach: f64,
+    out: Vec3,
+    stem: f64,
+    girth: f64,
+    cut: f64,
+}
+
+impl<'a> Limb<'a> {
+    /// `tube` laid out for its march, its bark `cut` as `cutting` places the
+    /// tube, if any of it is, and its foot swelling in `flare`, if it does;
+    /// `None` for a tube of no length.
+    fn new(
+        tube: &'a Tube,
+        (cutting, cut): (Option<&Cutting<'_>>, Option<(&'a Bark, f64)>),
+        flare: Option<&'a Flare>,
+    ) -> Option<Self> {
+        let (a, b) = (point(tube.a), point(tube.b));
+        let length = (b - a).length();
+        if length <= 1e-12 {
+            return None;
+        }
+        let axis = (b - a) * (1.0 / length);
+        let (ra, rb) = (f64::from(tube.radii[0]), f64::from(tube.radii[1]));
+        let bark = cut.map(|(bark, _)| bark);
+        let sine = ((ra - rb) / length).clamp(-0.999, 0.999);
+        Some(Self {
+            a,
+            axis,
+            length,
+            radius: ra,
+            taper: (rb - ra) / length,
+            lean: (sine, mathf::sqrt(1.0 - sine * sine)),
+            ends: (ra, rb),
+            round: round(axis),
+            tube,
+            bark,
+            measure: match (bark, cutting) {
+                (Some(bark), Some(cutting)) => bark.measure(cutting.scale),
+                _ => 1.0,
+            },
+            depth: cut.map_or(0.0, |(_, deepest)| deepest),
+            flare,
+        })
+    }
+
     /// Where `p` lies on the limb, seen as `cutting` sees it, if anything
     /// does yet.
     fn place(&self, p: Vec3, cutting: Option<&Cutting<'_>>) -> Place {
@@ -160,37 +230,82 @@ impl Limb<'_> {
             mathf::atan2(out.dot(self.round.1), out.dot(self.round.0)) - f64::from(self.tube.turn);
         let round_radius = self.radius + self.taper * up;
         let radius = round_radius * self.flare.map_or(1.0, |flare| flare.factor(up, angle));
-        let (distance, cut) = match cutting {
-            Some(cutting) => {
-                let distance = (p - cutting.eye).length() * cutting.scale;
-                let cut = if self.bark.is_some() {
-                    cutting.depth(self.depth, (radius * cutting.scale, distance)) / cutting.scale
-                } else {
-                    0.0
-                };
-                (distance, cut)
+        let distance = cutting.map_or(f64::INFINITY, |cutting| {
+            (p - cutting.eye).length() * cutting.scale
+        });
+        let cut = self.cut_at(radius, distance, cutting);
+        let along = up / self.length;
+        // Where along the side's own slant the point lies: before its first
+        // end's tangent round, or past its second's.
+        let (sine, cosine) = self.lean;
+        let (slant, past) = match self.flare {
+            Some(_) => (up, self.length),
+            None => (up * cosine - reach * sine, self.length * cosine),
+        };
+        let end = match slant {
+            _ if slant < 0.0 && !self.tube.open[0] => Some((0, self.a, self.ends.0, -self.axis)),
+            _ if slant > past && !self.tube.open[1] => {
+                Some((1, self.a + self.axis * self.length, self.ends.1, self.axis))
             }
-            None => (f64::INFINITY, 0.0),
+            _ => None,
+        }
+        .map(|(index, middle, radius, outward)| {
+            let from = p - middle;
+            let reach = from.length();
+            let out = if reach > 1e-12 {
+                from * (1.0 / reach)
+            } else {
+                outward
+            };
+            let (stem, girth) = self.tube.over_end(index, out);
+            End {
+                radius,
+                reach,
+                out,
+                stem,
+                girth,
+                cut: self.cut_at(girth, distance, cutting),
+            }
+        });
+        let over = match (&end, self.flare) {
+            (Some(end), _) => end.reach - end.radius,
+            (None, Some(_)) => reach - radius,
+            (None, None) => up * sine + reach * cosine - self.ends.0,
         };
         Place {
-            along: up / self.length,
+            along,
             out,
-            reach,
             radius,
             angle,
             distance,
             cut,
+            over,
+            end,
         }
     }
 
-    /// Where `place` lies on the limb's bark, seen from the eye.
-    fn bark_at(&self, place: &Place, cutting: &Cutting<'_>) -> OnLimb {
-        let stem = self.stem(place.along) * cutting.scale;
+    /// The cut's depth, in the prototype's own units, on a limb `girth`
+    /// thick in those units `distance` metres from the eye.
+    fn cut_at(&self, girth: f64, distance: f64, cutting: Option<&Cutting<'_>>) -> f64 {
+        match (self.bark, cutting) {
+            (Some(_), Some(cutting)) => {
+                cutting.depth(self.depth, (girth * cutting.scale, distance)) / cutting.scale
+            }
+            _ => 0.0,
+        }
+    }
+
+    /// Where `place` lies on the limb's bark, `stem` along its stem and
+    /// `girth` thick there in the prototype's own units, seen from the eye.
+    fn bark_at(&self, (stem, girth): (f64, f64), place: &Place, cutting: &Cutting<'_>) -> OnLimb {
         OnLimb::new(
-            stem,
+            stem * self.measure,
             place.angle,
-            place.radius * cutting.scale,
-            (cutting.key, place.distance * cutting.pixel),
+            girth * self.measure,
+            (
+                cutting.key,
+                place.distance * cutting.pixel * self.measure / cutting.scale,
+            ),
         )
     }
 
@@ -202,7 +317,10 @@ impl Limb<'_> {
 
     /// How far `place` stands out from the limb: negative within it.
     fn above(&self, place: &Place, cutting: Option<&Cutting<'_>>) -> f64 {
-        self.beside(place, cutting).max(self.beyond(place))
+        match &place.end {
+            Some(end) => self.beyond(end, place, cutting),
+            None => self.beside(place, cutting),
+        }
     }
 
     /// How far `place` stands out from the limb's side, its ends aside.
@@ -210,12 +328,13 @@ impl Limb<'_> {
     /// cannot change which side of the cut surface a place stands, so it is
     /// read only between.
     fn beside(&self, place: &Place, cutting: Option<&Cutting<'_>>) -> f64 {
-        let over = place.reach - place.radius;
+        let over = place.over;
         match (self.bark, cutting) {
             (Some(bark), Some(cutting))
                 if (-place.cut..=0.0).contains(&over) && place.cut > 0.0 =>
             {
-                over + place.cut * (1.0 - bark.height(&self.bark_at(place, cutting)))
+                let at = self.bark_at((self.stem(place.along), place.radius), place, cutting);
+                over + place.cut * (1.0 - bark.height(&at))
             }
             _ => over,
         }
@@ -226,15 +345,17 @@ impl Limb<'_> {
         self.flare.map_or(1.0, Flare::most)
     }
 
-    /// How far `place` stands outside the sphere rounding the end it lies
-    /// past, if it lies past either end.
-    fn beyond(&self, place: &Place) -> f64 {
-        if place.along < 0.0 {
-            mathf::hypot(place.along * self.length, place.reach) - self.ends.0
-        } else if place.along > 1.0 {
-            mathf::hypot((place.along - 1.0) * self.length, place.reach) - self.ends.1
-        } else {
-            f64::NEG_INFINITY
+    /// How far `place`, past `end`, stands outside the sphere rounding it,
+    /// cut by the bark run on over it; read only within the cut, as the
+    /// side's is.
+    fn beyond(&self, end: &End, place: &Place, cutting: Option<&Cutting<'_>>) -> f64 {
+        let over = place.over;
+        match (self.bark, cutting) {
+            (Some(bark), Some(cutting)) if (-end.cut..=0.0).contains(&over) && end.cut > 0.0 => {
+                let at = self.bark_at((end.stem, end.girth), place, cutting);
+                over + end.cut * (1.0 - bark.height(&at))
+            }
+            _ => over,
         }
     }
 }
@@ -258,43 +379,54 @@ pub(crate) fn meet_relieved(
     (cutting, cut): (Option<&Cutting<'_>>, Option<(&Bark, f64)>),
     flare: Option<&Flare>,
 ) -> Option<Hit> {
-    let (a, b) = (point(tube.a), point(tube.b));
-    let length = (b - a).length();
-    if length <= 1e-12 {
-        return None;
-    }
-    let axis = (b - a) * (1.0 / length);
-    let (ra, rb) = (f64::from(tube.radii[0]), f64::from(tube.radii[1]));
-    let limb = Limb {
-        a,
-        axis,
-        length,
-        radius: ra,
-        taper: (rb - ra) / length,
-        ends: (ra, rb),
-        round: round(axis),
-        tube,
-        bark: cut.map(|(bark, _)| bark),
-        depth: cut.map_or(0.0, |(_, deepest)| deepest),
-        flare,
-    };
-    let overlap = (
-        if tube.open[0] { 0.0 } else { ra },
-        if tube.open[1] { 0.0 } else { rb },
-    );
-    let (enter, leave) = body_span(&limb, ray, overlap)?;
+    let limb = Limb::new(tube, (cutting, cut), flare)?;
+    let (enter, leave) = body_span(&limb, ray)?;
     let (enter, leave) = (enter.max(near), leave.min(far));
     (enter < leave)
         .then(|| march(&limb, ray, ((enter, leave), seeking), cutting))
         .flatten()
 }
 
-/// The stretch of `ray` within the cone the limb and its flare lie in, run
-/// on past its first end and its second by `overlap`, if it crosses any.
-fn body_span(limb: &Limb<'_>, ray: &Ray, overlap: (f64, f64)) -> Option<(f64, f64)> {
+/// The stretch of `ray` within the limb's bounds, if it crosses any: the
+/// cone the limb and its flare lie in between its ends, and the sphere
+/// rounding each end it rounds, which a narrowing limb's cone run on would
+/// not hold.
+fn body_span(limb: &Limb<'_>, ray: &Ray) -> Option<(f64, f64)> {
+    let ends = [
+        (limb.a, limb.ends.0, limb.tube.open[0]),
+        (
+            limb.a + limb.axis * limb.length,
+            limb.ends.1,
+            limb.tube.open[1],
+        ),
+    ];
+    ends.into_iter()
+        .filter(|&(_, _, open)| !open)
+        .filter_map(|(middle, radius, _)| sphere_span(ray, middle, radius))
+        .chain(cone_span(limb, ray))
+        .reduce(|(enter, leave), (from, to)| (enter.min(from), leave.max(to)))
+}
+
+/// The stretch of `ray` within the sphere about `middle` `radius` across, if
+/// it crosses it.
+fn sphere_span(ray: &Ray, middle: Vec3, radius: f64) -> Option<(f64, f64)> {
+    let to = ray.origin - middle;
+    let half_b = to.dot(ray.dir);
+    let reach = half_b * half_b - to.dot(to) + radius * radius;
+    (reach > 0.0).then(|| {
+        let root = mathf::sqrt(reach);
+        (-half_b - root, -half_b + root)
+    })
+}
+
+/// The stretch of `ray` within the cone the limb and its flare lie in
+/// between its ends, if it crosses any.
+fn cone_span(limb: &Limb<'_>, ray: &Ray) -> Option<(f64, f64)> {
     let offset = ray.origin - limb.a;
     let (up, rate) = (offset.dot(limb.axis), ray.dir.dot(limb.axis));
-    let (low, high) = (-overlap.0, limb.length + overlap.1);
+    // The side tangent to the ends' spheres stands outside the cone between
+    // their rounds by its lean, and meets them a little past each end.
+    let (low, high) = (-limb.ends.0, limb.length + limb.ends.1);
     let slab = if rate.abs() > 1e-12 {
         let (from, to) = ((low - up) / rate, (high - up) / rate);
         (from.min(to), from.max(to))
@@ -303,7 +435,7 @@ fn body_span(limb: &Limb<'_>, ray: &Ray, overlap: (f64, f64)) -> Option<(f64, f6
     } else {
         return None;
     };
-    let most = limb.most();
+    let most = limb.most() / limb.lean.1;
     let taper = limb.taper * most;
     let radius = limb.radius * most + taper * up;
     let a = 1.0 - rate * rate * (1.0 + taper * taper);
@@ -334,7 +466,21 @@ fn march(
     ((enter, leave), seeking): ((f64, f64), Seeking),
     cutting: Option<&Cutting<'_>>,
 ) -> Option<Hit> {
-    let barked = limb.bark.map_or(0.0, |bark| limb.depth * bark.steepest());
+    let barked = match (limb.bark, cutting) {
+        (Some(bark), Some(cutting)) => {
+            let side = limb.ends.0.min(limb.ends.1);
+            // Over an end's sphere the girth falls away to nothing, but its
+            // cut fades out as it thins.
+            let rounded = !(limb.tube.open[0] && limb.tube.open[1]);
+            let thinnest = if rounded {
+                side.min(FASTEST_FADED / cutting.scale)
+            } else {
+                side
+            };
+            limb.depth * (limb.measure / cutting.scale) * bark.steepest(thinnest * limb.measure)
+        }
+        _ => 0.0,
+    };
     let flared = limb
         .flare
         .map_or(0.0, |flare| flare.steepest(limb.ends.0.max(limb.ends.1)));
@@ -372,7 +518,7 @@ fn march(
         if above >= 0.0 {
             inside = false;
         }
-        let over = place.reach - place.radius;
+        let over = place.over;
         let step = if over > 0.0 {
             over / envelope
         } else {
@@ -407,43 +553,52 @@ fn crossing(
         }
     }
     let t = outside.midpoint(within);
-    let place = limb.place(ray.at(t), cutting);
-    let rounded = limb.beyond(&place) >= place.reach - place.radius;
-    let normal = if rounded {
-        let end = if place.along < 0.0 {
-            limb.a
+    let p = ray.at(t);
+    let place = limb.place(p, cutting);
+    let spacing = 4.0 * tolerance;
+    let ((normal, relieved), (stem, girth)) = if let Some(end) = &place.end {
+        let normal = if end.cut > 0.0 {
+            gradient(p, spacing, |q| limb.above(&limb.place(q, cutting), cutting))
         } else {
-            limb.a + limb.axis * limb.length
+            end.out
         };
-        (ray.at(t) - end).normalized()
-    } else if place.cut > 0.0 || limb.flare.is_some() {
-        outward(limb, ray.at(t), 4.0 * tolerance, cutting)
+        ((normal, end.cut > 0.0), (end.stem, end.girth))
     } else {
-        (place.out - limb.axis * limb.taper).normalized()
+        let normal = if place.cut > 0.0 || limb.flare.is_some() {
+            gradient(p, spacing, |q| {
+                limb.beside(&limb.place(q, cutting), cutting)
+            })
+        } else {
+            place.out * limb.lean.1 + limb.axis * limb.lean.0
+        };
+        (
+            (normal, place.cut > 0.0),
+            (limb.stem(place.along), place.radius),
+        )
     };
-    let along = place.along.clamp(0.0, 1.0);
     Hit {
         t,
         normal,
         shading: normal,
         mark: limb.tube.key,
-        along,
-        uv: (limb.stem(place.along), place.angle),
-        girth: place.radius,
+        along: place.along.clamp(0.0, 1.0),
+        uv: (stem, place.angle),
+        girth,
         material: Some(u32::from(limb.tube.material)),
         tangent: limb.axis,
-        relieved: place.cut > 0.0 && !rounded,
+        relieved,
+        member: None,
     }
 }
 
-/// The way out of the limb's side at `p`: how fast a point's standing
-/// beside it grows, taken `step` either side along each axis. It is the
-/// surface the march crossed, so it faces whatever ray crossed into it,
-/// however steep the bark's walls or the flare's lobes; an end, rounded or
-/// open, is not read, so a hit at its rim faces out of the side it is on.
-fn outward(limb: &Limb<'_>, p: Vec3, step: f64, cutting: Option<&Cutting<'_>>) -> Vec3 {
-    let above = |q: Vec3| limb.beside(&limb.place(q, cutting), cutting);
-    let rise = |way: Vec3| above(p + way * step) - above(p - way * step);
+/// The way out of a surface at `p`: how fast `standing` — how far a point
+/// stands out from it — grows, taken `step` either side along each axis. It
+/// is the surface the march crossed, so it faces whatever ray crossed into
+/// it, however steep the bark's walls or the flare's lobes; an end, rounded
+/// or open, is not read by the side's, so a hit at its rim faces out of the
+/// side it is on.
+fn gradient(p: Vec3, step: f64, standing: impl Fn(Vec3) -> f64) -> Vec3 {
+    let rise = |way: Vec3| standing(p + way * step) - standing(p - way * step);
     Vec3::new(
         rise(Vec3::new(1.0, 0.0, 0.0)),
         rise(Vec3::UP),

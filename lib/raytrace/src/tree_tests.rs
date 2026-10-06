@@ -134,14 +134,12 @@ fn a_seed_grows_the_same_tree_and_another_seed_another() {
 }
 
 #[test]
-fn a_palm_and_a_saguaro_grow_to_their_heights() {
-    let palm = palm(12.0, STOCK, 14, 4).expect("a palm").whole();
+fn a_palm_grows_to_its_height() {
+    let palm = palm(12.0, (STOCK, 0), 14, 4).expect("a palm").whole();
     // Its crown rises above the trunk no more than a frond is long.
     let top = palm.bounds().max.y;
     assert!(top > 10.0 && top < 12.0 * 1.38, "{top}");
     assert!(counts(&palm).1 > 1000, "fronds of leaflets");
-    let cactus = saguaro(5.0, STOCK, 9).expect("a saguaro").whole();
-    assert!(cactus.bounds().max.y > 4.0 && cactus.bounds().max.y < 6.0);
 }
 
 #[test]
@@ -185,6 +183,7 @@ fn bole(radius: f64, length: f64, forked: bool) -> Stem {
         forked,
         crown: 0.5,
         from: 0.0,
+        emerges: 0.0,
     }
 }
 

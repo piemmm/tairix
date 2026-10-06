@@ -6,27 +6,11 @@
 use alloc::vec::Vec;
 
 use super::*;
-use crate::course::Courses;
 use crate::detail::Detail;
-use crate::land::NESTS;
 
 /// Level ground at nought, holding no grids.
 fn level() -> Land {
-    Land {
-        far: 0,
-        nests: [None; NESTS],
-        water: None,
-        near_water: None,
-        horizon: None,
-        rivers: Courses::none(),
-        form: None,
-        roads: Courses::none(),
-        road: None,
-        crossings: Vec::new(),
-        sea: None,
-        centre: (0.0, 0.0),
-        reach: 500.0,
-    }
+    Land::plain(0, ((0.0, 0.0), 500.0))
 }
 
 #[test]

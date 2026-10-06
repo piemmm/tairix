@@ -12,6 +12,9 @@ use core::f64::consts::TAU;
 
 use tairix_util::mathf;
 
+use crate::cactus::{
+    self, cushion, profile, Ribs, CORK_ROUGH, CROWN, CUSHION, CUTICLE, FELT, MEAN_RIB, WOOL,
+};
 use crate::noise::{cells3, hash2, noise3, smoothstep};
 use crate::pigment::{lying, Spot, SNOW};
 use crate::sample::{mix32, unit};
@@ -37,8 +40,10 @@ pub(crate) enum BarkKind {
     Scaly,
     /// Rings where old fronds fell: a palm.
     Ringed,
-    /// Ribs running its length: a cactus.
-    Ribbed,
+    /// A cactus's skin, folded into `ribs` ribs round its stem however thick
+    /// it is, felted areoles along their crests: laid in its plant's own
+    /// measure, its stem reckoned down from its apex.
+    Ribbed { ribs: u8 },
     /// Shallow rings across it where its fine roots grew: a carrot.
     Taproot,
 }
@@ -150,6 +155,13 @@ const BIRCH_TWIG: Vec3 = Vec3::new(0.2, 0.12, 0.1);
 /// Metres between the rows a trunk's scars are strewn in.
 const SCAR_ROW: f64 = 0.8;
 
+/// A cactus's skin as it ages: grey-olive where the years have weathered its
+/// wax; cork in its lighter and darker tones where it has barked over; and
+/// the grey its felt fades to.
+const AGED_SKIN: Vec3 = Vec3::new(0.156, 0.168, 0.098);
+const CORK: [Vec3; 2] = [Vec3::new(0.195, 0.133, 0.08), Vec3::new(0.069, 0.045, 0.03)];
+const OLD_FELT: Vec3 = Vec3::new(0.102, 0.093, 0.08);
+
 /// The wood where bark sloughed from dead wood: tan sapwood where it lately
 /// fell, grey-brown where the weather has had it long; how high it lies, as
 /// the bark's own height, sunk below all but the floors of its fissures; and
@@ -218,19 +230,31 @@ impl Bark {
         )
     }
 
-    /// The most the bark's height rises a metre along or round its limb,
-    /// however fine its detail: twice the steepest found over a dense
-    /// sampling of each pattern. A palm's rings step, so theirs bounds only
-    /// the smooth stretches between the steps.
-    pub(crate) const fn steepest(&self) -> f64 {
+    /// The most the bark's height rises a metre along or round a limb no
+    /// thinner than `girth`, however fine its detail: twice the steepest found
+    /// over a dense sampling of each pattern, and a cactus's ribs as their
+    /// profile bounds them. A palm's rings step, so theirs bounds only the
+    /// smooth stretches between the steps.
+    pub(crate) fn steepest(&self, girth: f64) -> f64 {
         match self.kind {
             BarkKind::Furrowed => 1_800.0,
             BarkKind::Plated | BarkKind::Scaly => 720.0,
             BarkKind::Papery => 460.0,
             BarkKind::Smooth | BarkKind::Banded => 330.0,
-            BarkKind::Ribbed => 230.0,
+            BarkKind::Ribbed { ribs } => cactus::steepest(ribs, girth),
             BarkKind::Taproot => 2_200.0,
             BarkKind::Ringed => 1_000.0,
+        }
+    }
+
+    /// What takes a limb placed `scale` times its prototype's size from the
+    /// prototype's units to the bark's: a bark is laid at its real size, but
+    /// a cactus's in its plant's own, since its areoles carry the spines the
+    /// plant is built with.
+    pub(crate) const fn measure(&self, scale: f64) -> f64 {
+        match self.kind {
+            BarkKind::Ribbed { .. } => 1.0,
+            _ => scale,
         }
     }
 
@@ -257,7 +281,7 @@ impl Bark {
             BarkKind::Plated | BarkKind::Furrowed => 0.7,
             BarkKind::Papery => 0.55,
             BarkKind::Scaly => 0.45,
-            BarkKind::Ringed | BarkKind::Ribbed => 0.3,
+            BarkKind::Ringed | BarkKind::Ribbed { .. } => 0.3,
             BarkKind::Taproot => 0.25,
             BarkKind::Banded => 0.2,
             BarkKind::Smooth => 0.15,
@@ -275,7 +299,7 @@ impl Bark {
             BarkKind::Banded => self.banded(at, paint),
             BarkKind::Scaly => self.scaly(at, paint),
             BarkKind::Ringed => return self.ringed(at, paint),
-            BarkKind::Ribbed => return self.ribbed(at, paint),
+            BarkKind::Ribbed { ribs } => return self.ribbed(ribs, at, paint),
             BarkKind::Taproot => return self.taproot(at, paint),
         };
         let (height, colour) = self.scarred(at, (height, colour), paint);
@@ -611,21 +635,77 @@ impl Bark {
         (height, self.dark.lerp(scale, smoothstep(0.3, 0.75, height)))
     }
 
-    /// Rings where a palm's old fronds fell, one above another.
+    /// A palm's trunk: the narrow scar each old frond left as it fell, one
+    /// above another and never quite level, its upper lip a little proud;
+    /// between them a face of fibres running up the trunk, split here and
+    /// there along them and weathered grey where they stand out.
     fn ringed(&self, at: &OnLimb, paint: bool) -> (f64, Vec3) {
-        let ring = at.along * 6.5 + 0.2 * noise3(at.at((5.0, 1.0)), self.seed);
+        let seed = self.seed;
+        let ring = at.along * 6.5 + 0.2 * noise3(at.at((5.0, 1.0)), seed);
         let within = ring - mathf::floor(ring);
-        let height = smoothstep(0.0, 0.25, within)
-            * (0.8 + 0.2 * noise3(at.at((30.0, 30.0)), self.seed ^ 5) * at.shows(0.03));
-        let colour = self.dark.lerp(self.light, height);
-        (height, if paint { colour } else { Vec3::ZERO })
+        let scar = 1.0 - smoothstep(0.0, 0.12, within.min(1.0 - within));
+        let lip = smoothstep(0.1, 0.2, within) * (1.0 - smoothstep(0.2, 0.42, within));
+        let fibres = noise3(at.at((150.0, 5.0)), seed ^ 5) * at.shows(0.006);
+        let split = (1.0 - smoothstep(0.0, 0.06, noise3(at.at((40.0, 1.5)), seed ^ 6).abs()))
+            * at.shows(0.01);
+        let scars = at.shows(0.04);
+        let height = (0.82 - 0.5 * scar * scars + 0.1 * lip * scars + 0.05 * fibres - 0.18 * split)
+            .clamp(0.0, 1.0);
+        if !paint {
+            return (height, Vec3::ZERO);
+        }
+        let weathered = smoothstep(0.0, 0.6, fibres) * 0.25 + 0.15 * lip;
+        let face = self.light.lerp(self.accent, weathered);
+        (
+            height,
+            face.lerp(self.dark, (0.85 * scar * scars).max(0.6 * split)),
+        )
     }
 
-    /// Ribs running a cactus's length, as many round it however thick.
-    fn ribbed(&self, at: &OnLimb, paint: bool) -> (f64, Vec3) {
-        let height = 0.5 + 0.5 * mathf::cos(at.angle * 18.0);
-        let colour = self.dark.lerp(self.light, height);
-        (height, if paint { colour } else { Vec3::ZERO })
+    /// A cactus's skin folded into `ribs` ribs: rounded crests between V
+    /// grooves, a felted cushion every couple of centimetres along each crest
+    /// and a crown of felt over the apex; waxy green where it is young,
+    /// greying as it ages and corked brown over the oldest. Its folds settle
+    /// to their mean where a pixel spans more than the gap between crests.
+    fn ribbed(&self, ribs: u8, at: &OnLimb, paint: bool) -> (f64, Vec3) {
+        let seed = self.seed;
+        let layout = Ribs { count: ribs, seed };
+        let stem = at.along;
+        let lie = layout.lie(at.angle, stem);
+        let pitch = layout.pitch() * at.girth;
+        let corked = layout.corked(at.angle, stem);
+        let rough =
+            noise3(at.at((CORK_ROUGH.0, CORK_ROUGH.0)), seed ^ 0xc0) * at.shows(1.0 / CORK_ROUGH.0);
+        let fold = mix(MEAN_RIB, profile(lie.toward), at.shows(pitch));
+        // Cork rounds the ribs over and roughens them.
+        let rib = mix(fold, 0.3 + 0.5 * fold + CORK_ROUGH.1 * rough, corked);
+        let (along, _) = layout.nearest_areole(lie.rib, stem);
+        let wool = noise3(at.at((WOOL.0, WOOL.0)), seed ^ 0xf1) * at.shows(1.0 / WOOL.0);
+        let felt =
+            cushion(along, lie.off * pitch, wool) * at.shows(2.0 * CUSHION.1) * (1.0 - corked);
+        let crown = 1.0 - smoothstep(0.5 * CROWN, CROWN, stem);
+        let grain = noise3(at.at((CUTICLE.0, CUTICLE.0)), seed ^ 0x9c) * at.shows(1.0 / CUTICLE.0);
+        let height =
+            ((1.0 - FELT) * rib + FELT * felt.max(0.7 * crown) + CUTICLE.1 * grain).clamp(0.0, 1.0);
+        if !paint {
+            return (height, Vec3::ZERO);
+        }
+        let young = 1.0 - smoothstep(0.6, 3.5, stem);
+        let mottle = smoothstep(-0.6, 0.6, noise3(at.at((3.0, 1.2)), seed ^ 0x77));
+        let crest = smoothstep(0.05, 0.85, fold);
+        let skin = self.dark.lerp(self.light, crest) * (0.9 + 0.14 * mottle);
+        // Waxy and green while young, its crests weathering greyer with age.
+        let skin = skin.lerp(
+            AGED_SKIN.lerp(skin, 0.4),
+            (1.0 - young) * (0.2 + 0.2 * crest),
+        );
+        let skin = skin.lerp(CORK[0].lerp(CORK[1], smoothstep(-0.4, 0.5, rough)), corked);
+        let tufts = 0.8 + 0.25 * wool;
+        let felted = self.accent.lerp(OLD_FELT, smoothstep(0.15, 1.6, stem)) * tufts;
+        (
+            height,
+            skin.lerp(felted, smoothstep(0.05, 0.35, felt).max(crown)),
+        )
     }
 
     /// A taproot's skin: shallow rings across it where its fine roots grew,
@@ -695,7 +775,7 @@ impl Bark {
     fn weathered(&self, at: &OnLimb, colour: Vec3, height: f64) -> Vec3 {
         let seed = self.seed;
         let lichen = match self.kind {
-            BarkKind::Ringed | BarkKind::Ribbed | BarkKind::Banded => 0.0,
+            BarkKind::Ringed | BarkKind::Ribbed { .. } | BarkKind::Banded => 0.0,
             BarkKind::Plated => 0.35,
             _ => 0.7,
         };

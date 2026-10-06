@@ -17,6 +17,7 @@ use core::f64::consts::{FRAC_PI_2, PI, TAU};
 use tairix_rng::{NonCryptoRng, RandU64};
 use tairix_util::mathf;
 
+use crate::flare::{Flare, MOST_LOBES};
 use crate::foot::{Foot, FLARE_TOP, ROOTS};
 use crate::fracture::{snapped, Grain};
 use crate::leaf::Outline;
@@ -185,11 +186,25 @@ pub(crate) struct Stem {
     /// The share of its whole stem below its own base: nought but for a
     /// fork's arms, which carry on its narrowing from where it forked.
     from: f64,
+    /// How far up it from its base a trunk comes out into the open, out of
+    /// the ground or out of the stool a shrub's stems rise from.
+    emerges: f64,
 }
 
 /// How long a living tree's dead stubs, and a dead tree's breaks, have stood
 /// weathering, as a break's age.
 const SNAPPED_AGE: f64 = 0.4;
+
+/// The stool a shrub's stems rise from: its radius.
+#[derive(Copy, Clone, Debug)]
+struct Stool {
+    radius: f64,
+}
+
+/// How far a shrub's stool flares toward the roots it spreads, and how far
+/// beneath the ground its stems rise from, in its radii.
+const STOOL_FLARE: f64 = 0.35;
+const STOOL_SUNK: f64 = 0.3;
 
 /// How far up its bare bole, as a share of the way to its crown, a trunk
 /// still carries the stubs of its dead branches: below that they have long
@@ -377,14 +392,15 @@ impl Grower {
         }
     }
 
-    /// The tree's trunks, `height` tall.
+    /// The tree's trunks, `height` tall: one rising out of the ground, or a
+    /// shrub's stems rising out of the stool they share.
     fn trunks(&mut self, height: f64) -> Option<Vec<Stem>> {
         let species = self.species;
         let trunks = species.trunks.max(1);
-        let mut queue: Vec<Stem> = Vec::new();
-        queue.try_reserve(usize::try_from(trunks).ok()?).ok()?;
-        for index in 0..trunks {
-            let (lean, turn) = if trunks == 1 {
+        let radius = height * species.girth / mathf::sqrt(f64::from(trunks));
+        let mut ways = [(0.0, 0.0); MOST_LOBES];
+        for (index, way) in (0..trunks).zip(ways.iter_mut()) {
+            *way = if trunks == 1 {
                 (self.about((0.0, 4.0)), self.range((0.0, TAU)))
             } else {
                 (
@@ -392,6 +408,16 @@ impl Grower {
                     TAU * f64::from(index) / f64::from(trunks) + self.about((0.0, 0.4)),
                 )
             };
+        }
+        let stems = ways.get(..usize::try_from(trunks).ok()?)?;
+        let stool = if trunks > 1 {
+            Some(self.stool(height * species.girth, radius)?)
+        } else {
+            None
+        };
+        let mut queue: Vec<Stem> = Vec::new();
+        queue.try_reserve(usize::try_from(trunks).ok()?).ok()?;
+        for &(lean, turn) in stems {
             let frame = Frame::turned(turn, lean.to_radians());
             let length = height
                 * if trunks == 1 {
@@ -399,10 +425,24 @@ impl Grower {
                 } else {
                     self.range((0.7, 1.0))
                 };
-            let radius = height * species.girth / mathf::sqrt(f64::from(trunks));
+            let (base, emerges) = match stool {
+                // Each from its own place over the stool, the way it leans,
+                // its foot swelling into its neighbours' where it leaves the
+                // ground.
+                Some(stool) => {
+                    let spread = stool.radius * self.range((0.1, 0.55));
+                    let out = Vec3::new(mathf::sin(turn), 0.0, mathf::cos(turn));
+                    let sunk = STOOL_SUNK * stool.radius;
+                    (
+                        out * spread - Vec3::UP * sunk,
+                        sunk / mathf::cos(lean.to_radians()),
+                    )
+                }
+                None => (Vec3::new(0.0, -0.2 * radius, 0.0), 0.2 * radius),
+            };
             queue.push(Stem {
                 level: 0,
-                base: Vec3::new(0.0, -0.2 * radius, 0.0),
+                base,
                 frame,
                 length,
                 radius,
@@ -411,9 +451,72 @@ impl Grower {
                 // A snag snapped off below its crown, thick where it broke.
                 crown: if species.snapped { 1.0 } else { species.base },
                 from: 0.0,
+                emerges,
             });
         }
         Some(queue)
+    }
+
+    /// The stool a shrub's stems rise from, as broad as one trunk `girth`
+    /// across would stand and its stems `stem` thick each: a woody crown
+    /// sunk just beneath the ground, flaring into the roots it spreads, the
+    /// stubs of its oldest stems standing dead and snapped about it.
+    fn stool(&mut self, girth: f64, stem: f64) -> Option<Stool> {
+        let radius = girth * self.range((1.5, 2.1));
+        let dome = 0.72 * radius;
+        let (foot, crown) = (-1.1 * radius, -dome - 0.03 * radius);
+        let bark = self.stock.bark;
+        let key = self.next_key();
+        let tube = Tube::new(
+            (Vec3::UP * foot, Vec3::UP * crown),
+            ((radius, dome), (foot, crown)),
+            (bark, key),
+            Vec3::new(1.0, 0.0, 0.0),
+        );
+        let roots = ROOTS.0 + self.dice.next_u32() % (ROOTS.1 - ROOTS.0 + 1);
+        let laid = Foot::new(
+            &tube,
+            (radius, -foot, crown - foot),
+            (STOOL_FLARE, roots),
+            &mut self.dice,
+        )?;
+        let index = self.assembly.flare(laid.flare())?;
+        self.push(Part::Tube(tube.flared(index)))?;
+        let key = self.next_key();
+        laid.roots((bark, key), foot, &mut |part| self.push(part))?;
+        // A big stool's oldest stems died back and snapped.
+        let dead = if radius > 0.04 {
+            self.dice.next_u32() % 3
+        } else {
+            0
+        };
+        for _ in 0..dead {
+            let turn = self.range((0.0, TAU));
+            let lean = self.range((15.0, 50.0)).to_radians();
+            let way = Frame::turned(turn, lean).y;
+            let out = Vec3::new(mathf::sin(turn), 0.0, mathf::cos(turn));
+            let from = out * (radius * self.range((0.2, 0.65))) - Vec3::UP * (STOOL_SUNK * radius);
+            let thick = stem * self.range((0.6, 1.0));
+            let end =
+                from + way * (STOOL_SUNK * radius / mathf::cos(lean) + self.range((0.04, 0.25)));
+            let key = self.next_key();
+            self.push(Part::Tube(
+                Tube::new(
+                    (from, end),
+                    ((thick, 0.85 * thick), (0.0, (end - from).length())),
+                    (bark, key),
+                    out,
+                )
+                .opened([false, true]),
+            ))?;
+            let broken = snapped(
+                (end, way, 0.85 * thick),
+                (self.stock.grain, 0.7),
+                &mut self.dice,
+            )?;
+            self.assembly.mesh(&broken.points, &broken.faces)?;
+        }
+        Some(Stool { radius })
     }
 
     /// A tree's trunk's first segment, from `base` up `frame`'s `y` and
@@ -459,7 +562,7 @@ impl Grower {
         };
         let foot = Foot::new(
             &tube,
-            (stem.radius, base.y.abs(), top),
+            (stem.radius, stem.emerges.min(0.9 * top), top),
             (flare, roots),
             &mut self.dice,
         )?;
@@ -651,6 +754,7 @@ impl Grower {
                     forked: true,
                     crown: stem.crown,
                     from: stem.from + s1 * (1.0 - stem.from),
+                    emerges: 0.0,
                 };
                 return self.fork(rest, level.fork.1, height, next);
             }
@@ -749,6 +853,7 @@ impl Grower {
             forked: false,
             crown: 1.0,
             from: 0.0,
+            emerges: 0.0,
         })
     }
 
@@ -868,97 +973,60 @@ fn bent(frame: Frame, angle: f64, around: f64) -> Frame {
     frame.aligning(frame.y, dir)
 }
 
-/// A saguaro: a ribbed column rounded at its top, with up to three arms
-/// turned up from elbows, grown from `seed` in `stock`'s flesh, its
-/// hierarchy still to build; `None` when the heap will not hold it.
-pub(crate) fn saguaro(height: f64, stock: Stock, seed: u64) -> Option<Building> {
-    let mut dice = NonCryptoRng::seed_from_u64(seed);
-    let mut parts: Vec<Part> = Vec::new();
-    parts.try_reserve(64).ok()?;
-    let girth = height * (0.045 + 0.02 * dice.next_f64());
-    let mut key = crate::sample::mix32(u32::try_from(seed >> 32).unwrap_or(0));
-    // Its ribs run on round an arm's elbow when both of its runs are begun
-    // from the side square to the upright plane they bend in.
-    let limb = |parts: &mut Vec<Part>, (from, to): (Vec3, Vec3), radii: (f64, f64), (key, side)| {
-        parts.push(Part::Tube(Tube::new(
-            (from, to),
-            (radii, (0.0, (to - from).length())),
-            (stock.bark, key),
-            side,
-        )));
-    };
-    limb(
-        &mut parts,
-        (Vec3::new(0.0, -0.3, 0.0), Vec3::UP * (height - girth)),
-        (girth, 0.92 * girth),
-        (key, Vec3::new(1.0, 0.0, 0.0)),
-    );
-    let arms = dice.next_u32() % 4;
-    for arm in 0..arms {
-        key = crate::sample::mix32(key ^ arm);
-        let heading = TAU * dice.next_f64();
-        let out = Vec3::new(mathf::cos(heading), 0.0, mathf::sin(heading));
-        let joint = Vec3::UP * (height * (0.35 + 0.25 * dice.next_f64()));
-        let thick = 0.72 * girth;
-        let reach = out * (0.35 + 0.3 * dice.next_f64()) * height * 0.2;
-        let elbow = joint + reach + Vec3::UP * (0.15 * height * 0.2);
-        let rise = Vec3::UP * (height * (0.15 + 0.22 * dice.next_f64()));
-        let side = Vec3::new(-out.z, 0.0, out.x);
-        limb(&mut parts, (joint, elbow), (thick, thick), (key, side));
-        limb(
-            &mut parts,
-            (elbow, elbow + rise),
-            (thick, 0.9 * thick),
-            (mix_key(key), side),
-        );
-    }
-    Prototype::building(parts, Vec::new(), Vec::new())
-}
-
-fn mix_key(key: u32) -> u32 {
-    crate::sample::mix32(key ^ 0x5bd1_e995)
-}
-
 /// Leaflets either side of each tenth of a palm frond's rachis.
 const LEAFLETS: u32 = 5;
 
-/// A palm, `height` tall, its trunk curving away from the vertical, and a
+/// How far below the ground a palm's trunk runs, and how far up it its foot
+/// swells, in its radii there.
+const PALM_BURIED: f64 = 0.3;
+const PALM_FOOT: f64 = 2.2;
+
+/// A palm, `height` tall, its trunk swelling at its foot into the mat of
+/// roots it stands on in `roots`, curving away from the vertical, and a
 /// crown of `fronds` fronds, its hierarchy still to build; `None` when the
 /// heap will not hold it.
-pub(crate) fn palm(height: f64, stock: Stock, fronds: u16, seed: u64) -> Option<Building> {
+pub(crate) fn palm(
+    height: f64,
+    (stock, roots): (Stock, u16),
+    fronds: u16,
+    seed: u64,
+) -> Option<Building> {
     let mut dice = NonCryptoRng::seed_from_u64(seed);
-    let mut parts: Vec<Part> = Vec::new();
-    parts.try_reserve(4096).ok()?;
+    let mut assembly = Assembly::with_room(4096, 0)?;
     let lean = (8.0 + 22.0 * dice.next_f64()).to_radians();
     let turn = TAU * dice.next_f64();
     let side = Vec3::new(mathf::cos(turn), 0.0, mathf::sin(turn));
     let segments = 24u32;
-    let mut at = Vec3::ZERO;
     let radius = 0.018 * height;
-    let mut dir = Vec3::UP;
     let mut key = crate::sample::mix32(u32::try_from(seed & 0xffff_ffff).unwrap_or(0));
+    let foot = 1.35 * radius;
+    let mut at = palm_foot(&mut assembly, (foot, side), (stock, roots, key), &mut dice)?;
+    let mut dir = Vec3::UP;
+    let rising = height - at.y;
     for segment in 0..segments {
         let s = f64::from(segment) / f64::from(segments);
         // Curving away from the vertical, most at its foot.
         let bend = lean * (1.0 - s) * 2.0 / f64::from(segments);
         dir = (dir * mathf::cos(bend) + side * mathf::sin(bend)).normalized();
-        let end = at + dir * (height / f64::from(segments));
+        let end = at + dir * (rising / f64::from(segments));
         key = crate::sample::mix32(key ^ segment);
-        parts.try_reserve(1).ok()?;
         // The trunk bends in the upright plane through `side`, square to which
         // its bark is begun.
-        parts.push(Part::Tube(Tube::new(
+        assembly.push(Part::Tube(Tube::new(
             (at, end),
             (
                 (
                     radius * (1.35 - 0.4 * s),
                     radius * (1.35 - 0.4 * s - 0.4 / f64::from(segments)),
                 ),
-                (s * height, (s + 1.0 / f64::from(segments)) * height),
+                (
+                    at.y + s * rising,
+                    at.y + (s + 1.0 / f64::from(segments)) * rising,
+                ),
             ),
             (stock.bark, key),
             Vec3::UP.cross(side),
-        )));
+        )))?;
         at = end;
     }
     let crown = at;
@@ -976,10 +1044,108 @@ pub(crate) fn palm(height: f64, stock: Stock, fronds: u16, seed: u64) -> Option<
             hang: 0.35,
         };
         key = crate::sample::mix32(key ^ (u32::from(frond) << 8));
-        grow_frond(&mut parts, (crown, around), &shape, (stock, key), &mut dice)?;
+        grow_frond(
+            &mut |part| assembly.push(part),
+            (crown, around),
+            &shape,
+            (stock, key),
+            &mut dice,
+        )?;
     }
-    Prototype::building(parts, Vec::new(), Vec::new())
+    assembly.finish()
 }
+
+/// A palm trunk's foot, `radius` thick where it leaves the ground and bent
+/// in the upright plane square to `side`, laid into `assembly` in `stock`'s
+/// bark and its roots in `roots`, keyed from `key`: buried a little and
+/// swelling all round toward the ground, and from the swelling the mat of
+/// roots a palm stands on, thick as a finger, running out and down into the
+/// soil, a few long dead and snapped short. Where the trunk rises from it.
+fn palm_foot(
+    assembly: &mut Assembly,
+    (radius, side): (f64, Vec3),
+    (stock, roots, key): (Stock, u16, u32),
+    dice: &mut NonCryptoRng,
+) -> Option<Vec3> {
+    let buried = PALM_BURIED * radius;
+    let top = PALM_FOOT * radius;
+    let tube = Tube::new(
+        (Vec3::UP * -buried, Vec3::UP * top),
+        ((radius, radius), (-buried, top)),
+        (stock.bark, key),
+        Vec3::UP.cross(side),
+    );
+    let swell = 0.3 + 0.3 * dice.next_f64();
+    let flare = Flare::new(buried, buried + top, (swell, 0.9 * radius), &[])?;
+    let index = assembly.flare(flare)?;
+    assembly.push(Part::Tube(tube.flared(index)))?;
+    // Roots spring from the swelling just above the ground, the most nearest
+    // it, as thickly as they can stand side by side.
+    let thick = (0.025 * radius).clamp(0.004, 0.009);
+    let band = (0.35 * radius).clamp(0.05, 0.14);
+    let around = TAU * radius * (1.0 + swell);
+    let count = mathf::round_i32(around * band / (2.0 * thick * 2.0 * thick)).clamp(40, 1200);
+    for root in 0..count {
+        let rise = band * dice.next_f64() * (0.4 + 0.6 * dice.next_f64());
+        let angle = TAU * dice.next_f64();
+        let girth = radius * flare.factor(buried + rise, angle);
+        let out = tube.way(angle);
+        let thick = thick * (0.65 + 0.6 * dice.next_f64());
+        let from = Vec3::UP * rise + out * (girth - 1.2 * thick);
+        let root_key = crate::sample::mix32(key ^ u32::try_from(root).unwrap_or(0) ^ 0x7007);
+        let reach = 0.015 + 0.07 * dice.next_f64() * dice.next_f64() + 0.3 * rise;
+        // Out from the swelling, bowing down under its own weight into the
+        // soil, and on beneath it out of sight.
+        let path = |t: f64| {
+            from + out * (1.2 * thick + reach * mathf::exp(0.8 * mathf::ln(t.max(1e-9))))
+                - Vec3::UP * ((rise + 2.0 * thick) * t * t)
+        };
+        if dice.next_f64() < 0.12 {
+            // Long dead, dried and snapped off short of the soil.
+            let snap = 0.25 + 0.4 * dice.next_f64();
+            let (near, end) = (path(0.5 * snap), path(snap));
+            let way = (end - near).normalized();
+            for (a, b, radii) in [
+                (from, near, (thick, 0.95 * thick)),
+                (near, end, (0.95 * thick, 0.9 * thick)),
+            ] {
+                assembly.push(Part::Tube(
+                    Tube::new((a, b), (radii, (0.0, 0.0)), (roots, root_key), side)
+                        .opened([false, b == end]),
+                ))?;
+            }
+            let torn = snapped((end, way, 0.9 * thick), (stock.grain, 0.8), dice)?;
+            assembly.mesh(&torn.points, &torn.faces)?;
+            continue;
+        }
+        let mut last = from;
+        for step in 1..=PALM_ROOT_STEPS {
+            let next = path(f64::from(step) / f64::from(PALM_ROOT_STEPS));
+            let s = f64::from(step - 1) / f64::from(PALM_ROOT_STEPS);
+            assembly.push(Part::Tube(Tube::new(
+                (last, next),
+                (
+                    (thick * (1.0 - 0.08 * s), thick * (0.92 - 0.08 * s)),
+                    (0.0, 0.0),
+                ),
+                (roots, root_key),
+                side,
+            )))?;
+            last = next;
+        }
+        let beneath = last + (out * 0.4 - Vec3::UP).normalized() * (0.05 + 0.05 * dice.next_f64());
+        assembly.push(Part::Tube(Tube::new(
+            (last, beneath),
+            ((0.84 * thick, 0.6 * thick), (0.0, 0.0)),
+            (roots, root_key),
+            side,
+        )))?;
+    }
+    Some(Vec3::UP * top)
+}
+
+/// The segments a palm's root bows down into the soil in.
+const PALM_ROOT_STEPS: u32 = 5;
 
 /// How a frond grows: how long it is; how far from the vertical it sets out
 /// and how far it droops over its length, in radians; how thick its rachis
@@ -998,9 +1164,9 @@ struct Frond {
 }
 
 /// Grow a frond shaped as `shape` from `from`, leaving it `around` the
-/// vertical, into `parts`, in `stock` and keyed from `key`.
+/// vertical, through `push`, in `stock` and keyed from `key`.
 fn grow_frond(
-    parts: &mut Vec<Part>,
+    push: &mut dyn FnMut(Part) -> Option<()>,
     (from, around): (Vec3, f64),
     shape: &Frond,
     (stock, key): (Stock, u32),
@@ -1017,8 +1183,7 @@ fn grow_frond(
         heading = (heading - Vec3::UP * (shape.droop / f64::from(steps))).normalized();
         let next = point + heading * (shape.length / f64::from(steps));
         key = crate::sample::mix32(key ^ step);
-        parts.try_reserve(1 + 2 * LEAFLETS as usize).ok()?;
-        parts.push(Part::Tube(Tube::new(
+        push(Part::Tube(Tube::new(
             (point, next),
             (
                 (
@@ -1029,7 +1194,7 @@ fn grow_frond(
             ),
             (stock.bark, key),
             Vec3::UP.cross(out),
-        )));
+        )))?;
         if s >= shape.bare {
             // Leaflets either side of the rachis, hanging from it, shorter
             // toward its tip.
@@ -1048,7 +1213,7 @@ fn grow_frond(
                         * (1.0 - 0.55 * leafy)
                         * (0.85 + 0.3 * dice.next_f64());
                     key = crate::sample::mix32(key ^ pair ^ 0x5a);
-                    parts.push(Part::Leaf(Blade {
+                    push(Part::Leaf(Blade {
                         base: singles(base),
                         normal: singles(normal),
                         axis: singles(axis),
@@ -1058,7 +1223,7 @@ fn grow_frond(
                         fold: 0.35,
                         material: stock.leaves,
                         key,
-                    }));
+                    }))?;
                 }
             }
         }
@@ -1073,10 +1238,8 @@ fn grow_frond(
 /// hold it.
 pub(crate) fn fern(height: f64, stock: Stock, fronds: u16, seed: u64) -> Option<Building> {
     let mut dice = NonCryptoRng::seed_from_u64(seed);
-    let mut parts: Vec<Part> = Vec::new();
-    parts
-        .try_reserve(usize::from(fronds) * (1 + 2 * LEAFLETS as usize) * 10)
-        .ok()?;
+    let mut assembly =
+        Assembly::with_room(usize::from(fronds) * (1 + 2 * LEAFLETS as usize) * 10, 0)?;
     let mut key = crate::sample::mix32(u32::try_from(seed >> 32).unwrap_or(0) ^ 0xf3);
     for frond in 0..fronds {
         let around = TAU * (f64::from(frond) + 0.6 * dice.next_f64()) / f64::from(fronds);
@@ -1094,14 +1257,14 @@ pub(crate) fn fern(height: f64, stock: Stock, fronds: u16, seed: u64) -> Option<
         };
         key = crate::sample::mix32(key ^ (u32::from(frond) << 8));
         grow_frond(
-            &mut parts,
+            &mut |part| assembly.push(part),
             (Vec3::ZERO, around),
             &shape,
             (stock, key),
             &mut dice,
         )?;
     }
-    Prototype::building(parts, Vec::new(), Vec::new())
+    assembly.finish()
 }
 
 #[cfg(test)]

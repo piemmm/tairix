@@ -5,10 +5,12 @@ use core::f64::consts::TAU;
 use tairix_util::mathf::{self, fmin};
 
 use crate::cut::{Cutting, Viewpoint};
+use crate::far_wood::{FarWood, Tile};
 use crate::grass::Lawn;
 use crate::heightfield::Heightfield;
 use crate::lanes::Corners;
 use crate::material::Material;
+use crate::pigment::Pigment;
 use crate::prototype::Prototype;
 use crate::vector::{Pose, Ray, Vec3};
 
@@ -43,6 +45,9 @@ pub(crate) struct Hit {
     /// Whether its normal is already its relief's, as a limb's bark cut in
     /// true relief is: no relief is to tilt it again.
     pub(crate) relieved: bool,
+    /// The cell of a wood far off whose tree the ray met, which places that
+    /// tree again; `None` on any other shape.
+    pub(crate) member: Option<(u32, u32)>,
 }
 
 impl Hit {
@@ -59,6 +64,7 @@ impl Hit {
             material: None,
             tangent: Vec3::ZERO,
             relieved: false,
+            member: None,
         }
     }
 }
@@ -73,6 +79,7 @@ pub(crate) struct Geometry<'a> {
     pub(crate) fields: &'a [Heightfield],
     pub(crate) prototypes: &'a [Prototype],
     pub(crate) lawns: &'a [Lawn],
+    pub(crate) far_woods: &'a [FarWood],
     pub(crate) materials: &'a [Material],
     pub(crate) view: Option<Viewpoint>,
 }
@@ -260,6 +267,11 @@ pub(crate) enum Shape {
         scale: f64,
         key: u32,
     },
+    /// Tile `tile` of the scene's wood far off `wood`.
+    FarWood {
+        wood: u32,
+        tile: Tile,
+    },
 }
 
 impl Shape {
@@ -328,6 +340,9 @@ impl Shape {
                 .get(usize::try_from(field).ok()?)
                 .and_then(Heightfield::bounds),
             Self::Lawn { lawn } => geometry.lawns.get(lawn as usize).map(Lawn::bounds),
+            Self::FarWood { wood, tile } => {
+                geometry.far_woods.get(wood as usize).map(|_| tile.bounds())
+            }
             Self::Instance {
                 prototype,
                 pose,
@@ -390,24 +405,12 @@ impl Shape {
                 pose,
                 scale,
                 key,
-            } => {
-                let prototype = geometry.prototypes.get(prototype as usize)?;
-                let local = placed(ray, &pose, scale);
-                let cutting = geometry.cutting((pose, scale, key));
-                let mut hit =
-                    prototype.intersect(&local, (near / scale, far / scale), cutting.as_ref())?;
-                hit.t *= scale;
-                // A limb's bark is laid at its real size, so its girth and the
-                // way along its stem are the placed tree's, not its prototype's.
-                if hit.girth > 0.0 {
-                    hit.girth *= scale;
-                    hit.uv.0 *= scale;
-                }
-                hit.normal = pose.frame.to_world(hit.normal);
-                hit.shading = pose.frame.to_world(hit.shading);
-                hit.tangent = pose.frame.to_world(hit.tangent);
-                hit.mark ^= key;
-                Some(hit)
+            } => meet_placed((prototype, &pose, scale, key), ray, (near, far), geometry),
+            Self::FarWood { wood, tile } => {
+                geometry
+                    .far_woods
+                    .get(wood as usize)?
+                    .intersect(&tile, ray, (near, far), geometry)
             }
         }
     }
@@ -421,17 +424,11 @@ impl Shape {
                 pose,
                 scale,
                 key,
-            } => geometry
-                .prototypes
-                .get(prototype as usize)
-                .is_some_and(|prototype| {
-                    let cutting = geometry.cutting((pose, scale, key));
-                    prototype.occludes(
-                        &placed(ray, &pose, scale),
-                        (near / scale, far / scale),
-                        cutting.as_ref(),
-                    )
-                }),
+            } => occluded_by_placed((prototype, &pose, scale, key), ray, (near, far), geometry),
+            Self::FarWood { wood, tile } => geometry
+                .far_woods
+                .get(wood as usize)
+                .is_some_and(|wood| wood.occludes(&tile, ray, (near, far), geometry)),
             _ => self.intersect(ray, near, far, geometry).is_some(),
         }
     }
@@ -445,6 +442,20 @@ impl Shape {
 }
 
 impl Geometry<'_> {
+    /// What takes a limb in `material`, placed `scale` times its prototype's
+    /// size, from the prototype's units to its bark's: the placed size, but
+    /// for a bark laid in its plant's own measure, and a cactus's spines,
+    /// whose stems carry their age.
+    fn measure(&self, material: Option<u32>, scale: f64) -> f64 {
+        let made =
+            material.and_then(|material| self.materials.get(usize::try_from(material).ok()?));
+        match made.map(|made| &made.pigment) {
+            Some(Pigment::Bark(bark)) => bark.measure(scale),
+            Some(Pigment::Spines(_)) => 1.0,
+            _ => scale,
+        }
+    }
+
     /// How a prototype placed at `pose`, `scale` times its size under `key`,
     /// has its limbs cut, once the scene is seen from somewhere.
     fn cutting(&self, (pose, scale, key): (Pose, f64, u32)) -> Option<Cutting<'_>> {
@@ -457,6 +468,55 @@ impl Geometry<'_> {
             pixel: view.pixel,
         })
     }
+}
+
+/// Where `ray` meets, in `(near, far)`, the scene's prototype `prototype`
+/// placed at `pose`, `scale` times its own size, under `key`.
+pub(crate) fn meet_placed(
+    (prototype, pose, scale, key): (u32, &Pose, f64, u32),
+    ray: &Ray,
+    (near, far): (f64, f64),
+    geometry: Geometry<'_>,
+) -> Option<Hit> {
+    let built = geometry.prototypes.get(prototype as usize)?;
+    let local = placed(ray, pose, scale);
+    let cutting = geometry.cutting((*pose, scale, key));
+    let mut hit = built.intersect(&local, (near / scale, far / scale), cutting.as_ref())?;
+    hit.t *= scale;
+    // A limb's girth and the way along its stem are read in its bark's
+    // measure: the placed tree's, as most barks are laid at their real size,
+    // or its prototype's.
+    if hit.girth > 0.0 {
+        let measure = geometry.measure(hit.material, scale);
+        hit.girth *= measure;
+        hit.uv.0 *= measure;
+    }
+    hit.normal = pose.frame.to_world(hit.normal);
+    hit.shading = pose.frame.to_world(hit.shading);
+    hit.tangent = pose.frame.to_world(hit.tangent);
+    hit.mark ^= key;
+    Some(hit)
+}
+
+/// Whether `ray` meets the placed prototype [`meet_placed`] meets, anywhere
+/// in `(near, far)`.
+pub(crate) fn occluded_by_placed(
+    (prototype, pose, scale, key): (u32, &Pose, f64, u32),
+    ray: &Ray,
+    (near, far): (f64, f64),
+    geometry: Geometry<'_>,
+) -> bool {
+    geometry
+        .prototypes
+        .get(prototype as usize)
+        .is_some_and(|built| {
+            let cutting = geometry.cutting((*pose, scale, key));
+            built.occludes(
+                &placed(ray, pose, scale),
+                (near / scale, far / scale),
+                cutting.as_ref(),
+            )
+        })
 }
 
 /// `ray` in the frame of a prototype placed at `pose`, `scale` times its size:

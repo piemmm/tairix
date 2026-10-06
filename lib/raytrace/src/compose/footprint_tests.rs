@@ -43,12 +43,7 @@ fn the_index_answers_as_asking_every_circle_would() {
         .filter_map(|index| circles.get(index).copied())
         .collect();
     let mut indexed = Footprints::default();
-    // Half claimed before the grid is laid, half after, so both ways in are
-    // proved.
     for (index, &(x, z, radius)) in circles.iter().enumerate() {
-        if index == 1500 {
-            indexed.index((0.0, 0.0), reach).expect("indexed");
-        }
         indexed
             .claim((x, z), radius, taken(index))
             .expect("claimed");
@@ -81,29 +76,23 @@ fn the_index_answers_as_asking_every_circle_would() {
 /// Open ground bars a piece but not what grows wild; a piece bars both.
 #[test]
 fn open_ground_bars_a_piece_and_nothing_that_grows() {
-    for indexed in [false, true] {
-        let mut footprints = Footprints::default();
-        if indexed {
-            footprints.index((0.0, 0.0), 100.0).expect("indexed");
-        }
-        footprints
-            .claim((0.0, 0.0), 5.0, Taken::Open)
-            .expect("kept open");
-        footprints
-            .claim((20.0, 0.0), 1.0, Taken::Piece)
-            .expect("claimed");
-        assert!(!footprints.clear((2.0, 0.0), 0.5), "{indexed}");
-        assert!(footprints.clear_of_pieces((2.0, 0.0), 0.5), "{indexed}");
-        assert!(!footprints.clear((20.5, 0.0), 0.5), "{indexed}");
-        assert!(!footprints.clear_of_pieces((20.5, 0.0), 0.5), "{indexed}");
-        assert!(footprints.clear_of_pieces((22.0, 0.0), 0.5), "{indexed}");
-    }
+    let mut footprints = Footprints::default();
+    footprints
+        .claim((0.0, 0.0), 5.0, Taken::Open)
+        .expect("kept open");
+    footprints
+        .claim((20.0, 0.0), 1.0, Taken::Piece)
+        .expect("claimed");
+    assert!(!footprints.clear((2.0, 0.0), 0.5));
+    assert!(footprints.clear_of_pieces((2.0, 0.0), 0.5));
+    assert!(!footprints.clear((20.5, 0.0), 0.5));
+    assert!(!footprints.clear_of_pieces((20.5, 0.0), 0.5));
+    assert!(footprints.clear_of_pieces((22.0, 0.0), 0.5));
 }
 
 #[test]
 fn circles_just_apart_are_clear_and_just_touching_are_not() {
     let mut footprints = Footprints::default();
-    footprints.index((0.0, 0.0), 100.0).expect("indexed");
     footprints
         .claim((10.0, 10.0), 2.0, Taken::Piece)
         .expect("claimed");
@@ -119,18 +108,28 @@ fn circles_just_apart_are_clear_and_just_touching_are_not() {
 }
 
 #[test]
-fn a_circle_past_the_grid_is_still_kept_clear_of() {
+fn a_circle_is_kept_clear_of_however_far_off_it_stands_and_however_broad() {
     let mut footprints = Footprints::default();
-    footprints.index((0.0, 0.0), 50.0).expect("indexed");
     footprints
-        .claim((70.0, 0.0), 30.0, Taken::Piece)
+        .claim((30_070.0, -18_000.0), 30.0, Taken::Piece)
         .expect("claimed");
     assert!(
-        !footprints.clear((45.0, 0.0), 1.0),
-        "within the grid, under a circle reaching in from past it"
+        !footprints.clear((30_045.0, -18_000.0), 1.0),
+        "under its edge"
     );
-    assert!(!footprints.clear((90.0, 0.0), 1.0), "past the grid");
+    assert!(!footprints.clear((30_090.0, -18_000.0), 1.0));
+    assert!(footprints.clear((30_102.0, -18_000.0), 1.0));
     assert!(footprints.clear((-40.0, 0.0), 1.0));
+    // As many far off as about the eye, each asked of only its neighbours.
+    for index in 0..20_000u32 {
+        let at = (
+            25_000.0 + f64::from(index % 200) * 3.0,
+            f64::from(index / 200) * 3.0,
+        );
+        footprints.claim(at, 0.4, Taken::Piece).expect("claimed");
+    }
+    assert!(!footprints.clear((25_003.0, 3.0), 0.4));
+    assert!(footprints.clear((25_001.5, 1.5), 0.3));
 }
 
 /// A circle given a negative radius takes no room of its own, and the index
@@ -145,7 +144,6 @@ fn a_negative_radius_is_answered_as_the_whole_list_would() {
             .claim((x, z), radius, Taken::Piece)
             .expect("claimed");
     }
-    indexed.index((0.0, 0.0), reach).expect("indexed");
     for probe in 0..2_000u32 {
         let draw = |salt: u32| unit(mix32(probe.wrapping_mul(0x85eb_ca6b) ^ salt));
         let at = ((draw(5) * 2.4 - 1.2) * reach, (draw(6) * 2.4 - 1.2) * reach);

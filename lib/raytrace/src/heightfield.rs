@@ -491,17 +491,42 @@ impl Heightfield {
 
     /// The grid's height at vertex `(column, row)`, wrapping when it wraps.
     fn at(&self, column: usize, row: usize) -> f64 {
+        f64::from(
+            self.heights
+                .get(self.vertex(column, row))
+                .copied()
+                .unwrap_or(0.0),
+        )
+    }
+
+    /// Where vertex `(column, row)` is kept among the grid's: round the far
+    /// side for a grid that wraps, its edge's for one that does not.
+    fn vertex(&self, column: usize, row: usize) -> usize {
         let cells = cells_of(self.side);
         let (column, row) = if self.wrap {
-            (column % cells, row % cells)
+            (column % cells.max(1), row % cells.max(1))
         } else {
             (column.min(cells), row.min(cells))
         };
-        f64::from(
-            self.heights
-                .get(row * self.side + column)
-                .copied()
-                .unwrap_or(0.0),
+        row * self.side + column
+    }
+
+    /// The first column and row of the cells the rectangle from `(x0, z0)`
+    /// to `(x1, z1)` lies over, and how many of each, counted round the far
+    /// side for a grid that wraps.
+    fn spanned(
+        &self,
+        (x0, z0): (f64, f64),
+        (x1, z1): (f64, f64),
+    ) -> ((usize, usize), (usize, usize)) {
+        let cells = cells_of(self.side).max(1);
+        let column = |x: f64| self.split((x - self.origin.0) / self.step).0;
+        let row = |z: f64| self.split((z - self.origin.1) / self.step).0;
+        let span = |first: usize, last: usize| (last + cells - first) % cells + 1;
+        let (first_column, first_row) = (column(x0), row(z0));
+        (
+            (first_column, span(first_column, column(x1))),
+            (first_row, span(first_row, row(z1))),
         )
     }
 
@@ -686,16 +711,12 @@ impl Heightfield {
 
     /// The highest the surface stands over the rectangle from `(x0, z0)` to
     /// `(x1, z1)`: the highest corner of every cell it lies over.
-    pub(crate) fn highest_over(&self, (x0, z0): (f64, f64), (x1, z1): (f64, f64)) -> f64 {
+    pub(crate) fn highest_over(&self, from: (f64, f64), to: (f64, f64)) -> f64 {
         let cells = cells_of(self.side).max(1);
-        let column = |x: f64| self.split((x - self.origin.0) / self.step).0;
-        let row = |z: f64| self.split((z - self.origin.1) / self.step).0;
-        // Counted round the far side for a grid that wraps.
-        let span = |first: usize, last: usize| (last + cells - first) % cells + 1;
-        let (first_column, first_row) = (column(x0), row(z0));
+        let ((first_column, columns), (first_row, rows)) = self.spanned(from, to);
         let mut peak = f64::NEG_INFINITY;
-        for down in 0..span(first_row, row(z1)) {
-            for across in 0..span(first_column, column(x1)) {
+        for down in 0..rows {
+            for across in 0..columns {
                 let at = ((first_row + down) % cells) * cells + (first_column + across) % cells;
                 peak = fmax(
                     peak,
@@ -706,18 +727,38 @@ impl Heightfield {
         peak
     }
 
+    /// The most channel `channel` of what the land is like stands anywhere
+    /// over the rectangle `(x0, z0)`–`(x1, z1)`: the most at any corner of
+    /// the cells it covers, which every place within is blended from; its
+    /// [`PLAIN`] value for a grid that carries none.
+    pub(crate) fn most_of(&self, channel: usize, from: (f64, f64), to: (f64, f64)) -> f64 {
+        if !self.carries {
+            return PLAIN.get(channel).copied().unwrap_or(0.0);
+        }
+        let ((first_column, columns), (first_row, rows)) = self.spanned(from, to);
+        let mut most = 0u8;
+        for down in 0..=rows {
+            for across in 0..=columns {
+                let value = self
+                    .attributes
+                    .get(self.vertex(first_column + across, first_row + down))
+                    .and_then(|attributes| attributes.get(channel))
+                    .copied()
+                    .unwrap_or(0);
+                most = most.max(value);
+            }
+        }
+        f64::from(most) / 255.0
+    }
+
     /// The lowest the surface lies over the rectangle `(x0, z0)`–`(x1, z1)`:
     /// the lowest of the corners of the cells it covers, since a cell's patch
     /// lies nowhere below its lowest corner.
-    pub(crate) fn lowest_over(&self, (x0, z0): (f64, f64), (x1, z1): (f64, f64)) -> f64 {
-        let cells = cells_of(self.side).max(1);
-        let column = |x: f64| self.split((x - self.origin.0) / self.step).0;
-        let row = |z: f64| self.split((z - self.origin.1) / self.step).0;
-        let span = |first: usize, last: usize| (last + cells - first) % cells + 2;
-        let (first_column, first_row) = (column(x0), row(z0));
+    pub(crate) fn lowest_over(&self, from: (f64, f64), to: (f64, f64)) -> f64 {
+        let ((first_column, columns), (first_row, rows)) = self.spanned(from, to);
         let mut least = f64::INFINITY;
-        for down in 0..span(first_row, row(z1)) {
-            for across in 0..span(first_column, column(x1)) {
+        for down in 0..=rows {
+            for across in 0..=columns {
                 least = fmin(least, self.at(first_column + across, first_row + down));
             }
         }
@@ -899,6 +940,7 @@ impl Heightfield {
             material: None,
             tangent: Vec3::ZERO,
             relieved: false,
+            member: None,
         })
     }
 

@@ -8,7 +8,6 @@ use alloc::vec::Vec;
 use super::*;
 use crate::course::{Courses, Mark, Reach};
 use crate::detail::Detail;
-use crate::land::NESTS;
 
 fn brook(lithology: Lithology, run: f64) -> Brook {
     Brook {
@@ -161,19 +160,9 @@ fn straight_land_from(level: f64) -> Land {
         beyond: 10.0,
     };
     Land {
-        far: 0,
-        nests: [None; NESTS],
-        water: None,
-        near_water: None,
-        horizon: None,
         rivers: Courses::new(&[marks], ((-500.0, -500.0), 1000.0), reach).expect("courses"),
         form: Some(brook(Lithology::Granite, 1000.0).form),
-        roads: Courses::none(),
-        road: None,
-        crossings: Vec::new(),
-        sea: None,
-        centre: (0.0, 0.0),
-        reach: 500.0,
+        ..Land::plain(0, ((0.0, 0.0), 500.0))
     }
 }
 
@@ -220,10 +209,6 @@ fn a_streams_flow_is_solved_further_the_way_the_eye_looks() {
 fn a_boulder_stands_in_the_flow_as_it_lies() {
     let land = straight_land();
     let (mut stage, mut bed) = laid_bed(0.0);
-    stage
-        .footprints
-        .index(land.centre, land.reach)
-        .expect("indexed");
     let (mut along, mut across) = (0, 0);
     for index in 0..32u32 {
         let z = 100.0 + 4.0 * f64::from(index);
@@ -268,10 +253,6 @@ fn drift_in_the_water_reaches_the_flow_as_one_obstacle() {
     // falls in, so the branch lies in it.
     let land = straight_land_from(1.7);
     let (mut stage, mut bed) = laid_bed(0.0);
-    stage
-        .footprints
-        .index(land.centre, land.reach)
-        .expect("indexed");
     let mut dice = Dice::keyed(5, 0);
     let drift = Drift::new(
         &mut stage,
@@ -314,10 +295,6 @@ fn drift_in_the_water_reaches_the_flow_as_one_obstacle() {
 fn a_boulder_is_never_set_through_what_already_stands() {
     let land = straight_land();
     let (mut stage, mut bed) = laid_bed(0.0);
-    stage
-        .footprints
-        .index(land.centre, land.reach)
-        .expect("indexed");
     // A trunk's claim where a boulder would fall, and two boulders whose
     // ground overlaps though no nearer than thinning keeps stones apart,
     // each with a pebble beside it that only the boulder would crowd out.
@@ -345,8 +322,9 @@ fn a_boulder_is_never_set_through_what_already_stands() {
     while !bed.ranking.ranked() {
         bed.ranking.rank(&tairix_parallel::SERIAL).expect("ranked");
     }
-    bed.chains =
-        Some(Chains::new((land.centre, land.reach), KEPT_APART, MOST_SIDE).expect("chains"));
+    bed.chains = Some(
+        Chains::new((land.grids.centre, land.grids.reach), KEPT_APART, MOST_SIDE).expect("chains"),
+    );
     bed.laid.clear();
     bed.pass = Pass::Thinning;
     while bed.pass == Pass::Thinning {
@@ -382,10 +360,6 @@ fn a_boulder_is_never_set_through_what_already_stands() {
 fn branches_jam_against_a_spanning_trunk() {
     let land = straight_land_from(1.7);
     let (mut stage, mut bed) = laid_bed(0.0);
-    stage
-        .footprints
-        .index(land.centre, land.reach)
-        .expect("indexed");
     let mut dice = Dice::keyed(5, 0);
     let drift = Drift::new(
         &mut stage,

@@ -8,7 +8,6 @@ use tairix_util::mathf;
 use super::landscape::{self, Backdrop, Lawning, Scheme, Vantage, GOLDEN, GREEN};
 use super::plants::{self, Character, Grassland, Grove, Kind, Stand};
 use super::weather::{self, Climate, Cover, Hour};
-use super::woodland::ANYWHERE;
 use super::{direction, rgb, Composed, Dice, Landing, Look, Stage, View, COPPER, GOLD};
 use crate::land::{Land, Plan, Rivers, Survey, Wear};
 use crate::material::{Finish, Material, Relief};
@@ -16,6 +15,7 @@ use crate::pigment::Pigment;
 use crate::terrain::{Landform, Terrain};
 use crate::tree::Season;
 use crate::vector::{Frame, Pose, Vec3};
+use crate::wood::ANYWHERE;
 
 const MONUMENT: Climate = Climate {
     hours: &[
@@ -708,7 +708,8 @@ impl Aqueduct {
         vantage: Vantage,
     ) -> Option<Look> {
         let deck = dice.range(0.45, 0.62) * self.height;
-        let (left, right, lowest) = self.crossing(&|x, z| land.height(&stage.fields, x, z), deck);
+        let (left, right, lowest) =
+            self.crossing(&|x, z| land.grids.height(&stage.fields, x, z), deck);
         let (middle, top) = bridge(stage, dice, (left, right, lowest), (self.heading, deck))?;
         let eye = vantage.eye;
         let target = Vec3::new(middle.x, 0.45 * top, middle.z);
@@ -959,7 +960,7 @@ pub(super) fn ruins(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
         plants::plant(
             stage,
             dice,
-            &bush,
+            &bush.habit,
             Vec3::new(x, land.terrain.height(x, z), z),
             height,
         )?;

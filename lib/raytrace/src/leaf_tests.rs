@@ -3,7 +3,7 @@
 
 use super::*;
 
-const OUTLINES: [Outline; 10] = [
+const OUTLINES: [Outline; 9] = [
     Outline::Ovate { teeth: 8 },
     Outline::Lanceolate,
     Outline::Lobed { lobes: 4 },
@@ -13,7 +13,6 @@ const OUTLINES: [Outline; 10] = [
     Outline::Trefoil,
     Outline::Runcinate,
     Outline::Strap { from: 0, to: 255 },
-    Outline::Pad,
 ];
 
 #[test]
@@ -94,21 +93,4 @@ fn a_strap_leaf_in_pieces_keeps_the_one_outline_drawn_to_its_point() {
     assert!(whole.covers(0.5, 0.95), "full width along its middle");
     assert!(!whole.covers(1.0, 0.05), "drawn to a point");
     assert!(!whole.covers(0.0, 0.7), "narrower where it sheathes");
-}
-
-#[test]
-fn a_pad_is_round_about_its_stalk_but_for_its_slit() {
-    let pad = Outline::Pad;
-    // On a blade half as wide as it is long, the outline is a circle.
-    for step in 0..64u32 {
-        let angle = core::f64::consts::TAU * f64::from(step) / 64.0;
-        let (x, y) = (mathf::cos(angle), mathf::sin(angle));
-        let inside = |r: f64| pad.covers(0.5 + 0.5 * r * x, r * y);
-        let in_slit = x < 0.0 && y.abs() < -0.105 * x;
-        assert_eq!(inside(0.9), !in_slit, "at {angle}");
-        assert!(!inside(1.05), "at {angle}");
-    }
-    assert!(pad.covers(0.5, 0.0), "whole at its stalk");
-    assert!(!pad.covers(0.2, 0.0), "cut to its edge on the stalk's side");
-    assert!(pad.covers(0.8, 0.0));
 }

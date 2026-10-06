@@ -2,9 +2,10 @@
 //! placed as many times as a scene wants it.
 //!
 //! A prototype is a list of parts — tapering limbs with rounded or open ends,
-//! flat leaves cut to an outline, and the triangles of a mesh — and a hierarchy
-//! over them, so a ray entering an instance tests the few parts along its
-//! path. Its parts are stored in single precision, since a forest's worth of
+//! flat leaves cut to an outline, and the triangles of a mesh, which may be a
+//! pad or a petal shaped in the round and cut to its own outline — and a
+//! hierarchy over them, so a ray entering an instance tests the few parts
+//! along its path. Its parts are stored in single precision, since a forest's worth of
 //! leaves is what a scene holds most of; they are met in double.
 
 use alloc::vec::Vec;
@@ -15,6 +16,7 @@ use crate::bvh::{Builder, Bvh, Walk};
 use crate::cut::{meet_relieved, Cutting, Seeking};
 use crate::flare::Flare;
 use crate::leaf::Outline;
+use crate::lily::Trim;
 use crate::shape::{Aabb, Hit};
 use crate::vector::{single, singles, Ray, Vec3};
 
@@ -75,6 +77,29 @@ impl Tube {
     /// The same limb with each end `open` where it is, rather than rounded.
     pub(crate) const fn opened(self, open: [bool; 2]) -> Self {
         Self { open, ..self }
+    }
+
+    /// Where on the sphere rounding its end `end` — `0` its first, `1` its
+    /// second — a point facing `normal` from that sphere's middle lies: how
+    /// far along its stem, carried on over the sphere down its meridian from
+    /// the round where the limb meets it, and the sphere's girth there about
+    /// the limb's axis. Over a free end the bark crowds to a point, as a
+    /// cactus's ribs crowd over its apex.
+    pub(crate) fn over_end(&self, end: usize, normal: Vec3) -> (f64, f64) {
+        let axis = (point(self.b) - point(self.a)).normalized();
+        let (from, to) = (f64::from(self.stem[0]), f64::from(self.stem[1]));
+        let onward = if to >= from { 1.0 } else { -1.0 };
+        let (outward, stem, radius, onward) = if end == 0 {
+            (-axis, from, self.radii[0], -onward)
+        } else {
+            (axis, to, self.radii[1], onward)
+        };
+        let polar = mathf::acos(normal.dot(outward).clamp(-1.0, 1.0));
+        let radius = f64::from(radius);
+        (
+            stem + onward * (core::f64::consts::FRAC_PI_2 - polar) * radius,
+            radius * mathf::sin(polar),
+        )
     }
 
     /// The same limb, its foot swelling in its prototype's flare `flare`.
@@ -140,11 +165,30 @@ pub(crate) struct Blade {
 
 /// A triangle of the prototype's vertices, shaded by their normals blended,
 /// in its own material, or in whatever its placing is made in where it has
-/// none.
+/// none; keyed as its mesh is, and, where its mesh is a pad or a petal
+/// shaped in the round, `size` across and cut to that part's outline where
+/// its surface coordinates fall.
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct Facet {
     pub(crate) corners: [u32; 3],
     pub(crate) material: Option<u16>,
+    pub(crate) key: u32,
+    pub(crate) trim: Option<Trim>,
+    pub(crate) size: f32,
+}
+
+impl Facet {
+    /// A triangle of a mesh that is not mapped, in `material` or its
+    /// placing's.
+    pub(crate) const fn plain(corners: [u32; 3], material: Option<u16>) -> Self {
+        Self {
+            corners,
+            material,
+            key: 0,
+            trim: None,
+            size: 0.0,
+        }
+    }
 }
 
 /// One part of a prototype.
@@ -161,9 +205,23 @@ pub(crate) struct Prototype {
     parts: Vec<Part>,
     vertices: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
+    /// Where on its mesh's own surface each vertex lies, in metres; empty
+    /// where no mesh of the prototype is mapped.
+    coords: Vec<[f32; 2]>,
     flares: Vec<Flare>,
     bvh: Bvh,
     bounds: Aabb,
+}
+
+/// A mesh's own surface, a pad's or a petal's: where on it each of its
+/// points lies, in metres; the key it is drawn from; the size its outline is
+/// reckoned in; and the outline it is cut to, if any.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct Mapping<'a> {
+    pub(crate) coords: &'a [[f32; 2]],
+    pub(crate) key: u32,
+    pub(crate) size: f64,
+    pub(crate) trim: Option<Trim>,
 }
 
 /// A mesh to add to an assembly: its points, and its faces, each three of
@@ -174,13 +232,15 @@ pub(crate) struct Mesh {
     pub(crate) faces: Vec<([u32; 3], u16)>,
 }
 
-/// A prototype as it is put together: its parts, the vertices and normals
-/// its facets are cut from, and the flares its limbs' feet swell in.
+/// A prototype as it is put together: its parts, the vertices, normals and
+/// surface coordinates its facets are cut from, and the flares its limbs'
+/// feet swell in.
 #[derive(Debug, Default)]
 pub(crate) struct Assembly {
     parts: Vec<Part>,
     vertices: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
+    coords: Vec<[f32; 2]>,
     flares: Vec<Flare>,
 }
 
@@ -217,6 +277,30 @@ impl Assembly {
     /// The mesh of `points` whose `faces` each name three of them and a
     /// material, shaded smooth where they share a point.
     pub(crate) fn mesh(&mut self, points: &[Vec3], faces: &[([u32; 3], u16)]) -> Option<()> {
+        self.add_mesh(points, faces, None)
+    }
+
+    /// [`Self::mesh`], its points lying on its own surface where `mapping`
+    /// has them and its facets cut to the outline it names; `None` too when
+    /// the mapping does not place every point.
+    pub(crate) fn mesh_mapped(
+        &mut self,
+        points: &[Vec3],
+        faces: &[([u32; 3], u16)],
+        mapping: Mapping<'_>,
+    ) -> Option<()> {
+        if mapping.coords.len() != points.len() || mapping.size.is_nan() || mapping.size <= 0.0 {
+            return None;
+        }
+        self.add_mesh(points, faces, Some(mapping))
+    }
+
+    fn add_mesh(
+        &mut self,
+        points: &[Vec3],
+        faces: &[([u32; 3], u16)],
+        mapping: Option<Mapping<'_>>,
+    ) -> Option<()> {
         let mut corners = Vec::new();
         corners.try_reserve_exact(faces.len()).ok()?;
         corners.extend(faces.iter().map(|&(corners, _)| corners));
@@ -227,11 +311,29 @@ impl Assembly {
         self.vertices
             .extend(points.iter().map(|&point| singles(point)));
         self.normals.extend_from_slice(&normals);
+        // Once any mesh is mapped, every vertex carries coordinates, those of
+        // an unmapped mesh nought.
+        if mapping.is_some() || !self.coords.is_empty() {
+            self.coords
+                .try_reserve(self.vertices.len() - self.coords.len())
+                .ok()?;
+            self.coords.resize(usize::try_from(first).ok()?, [0.0; 2]);
+            match mapping {
+                Some(mapping) => self.coords.extend_from_slice(mapping.coords),
+                None => self.coords.resize(self.vertices.len(), [0.0; 2]),
+            }
+        }
         self.parts.try_reserve(faces.len()).ok()?;
         for &([a, b, c], material) in faces {
-            self.parts.push(Part::Facet(Facet {
-                corners: [first + a, first + b, first + c],
-                material: Some(material),
+            let plain = Facet::plain([first + a, first + b, first + c], Some(material));
+            self.parts.push(Part::Facet(match mapping {
+                Some(mapping) => Facet {
+                    key: mapping.key,
+                    trim: mapping.trim,
+                    size: single(mapping.size),
+                    ..plain
+                },
+                None => plain,
             }));
         }
         Some(())
@@ -240,7 +342,10 @@ impl Assembly {
     /// The prototype it makes, its hierarchy still to build; `None` when the
     /// heap will not hold it, or a part names what the assembly lacks.
     pub(crate) fn finish(self) -> Option<Building> {
-        Prototype::flared(self.parts, (self.vertices, self.normals), self.flares)
+        let mut building =
+            Prototype::flared(self.parts, (self.vertices, self.normals), self.flares)?;
+        building.coords = self.coords;
+        Some(building)
     }
 }
 
@@ -279,6 +384,7 @@ pub(crate) struct Building {
     parts: Vec<Part>,
     vertices: Vec<[f32; 3]>,
     normals: Vec<[f32; 3]>,
+    coords: Vec<[f32; 2]>,
     flares: Vec<Flare>,
     builder: Builder,
     bounds: Aabb,
@@ -307,6 +413,7 @@ impl Building {
             parts: self.parts,
             vertices: self.vertices,
             normals: self.normals,
+            coords: self.coords,
             flares: self.flares,
             bvh: self.builder.finish(),
             bounds: self.bounds,
@@ -367,6 +474,7 @@ impl Prototype {
             parts,
             vertices,
             normals,
+            coords: Vec::new(),
             flares,
             builder,
             bounds,
@@ -511,6 +619,13 @@ impl Prototype {
         if !(t > near && t < far) {
             return None;
         }
+        let at = self.mapped(facet, (u, v))?;
+        let size = f64::from(facet.size);
+        if let Some(trim) = facet.trim {
+            if !trim.keeps((at.0 / size, at.1 / size), facet.key) {
+                return None;
+            }
+        }
         // Out is the way the corners' normals face, however the corners wind.
         let blended = (n0 * (1.0 - u - v) + n1 * u + n2 * v).normalized();
         let face = e1.cross(e2).normalized();
@@ -519,14 +634,31 @@ impl Prototype {
             t,
             normal,
             shading: blended,
-            mark: 0,
+            mark: facet.key,
             along: 0.0,
-            uv: (u, v),
-            girth: 0.0,
+            uv: at,
+            girth: size,
             material: facet.material.map(u32::from),
             tangent: Vec3::ZERO,
             relieved: false,
+            member: None,
         })
+    }
+
+    /// Where on its mesh's own surface the point `(u, v)` of `facet`'s
+    /// corners lies, in metres: nought on a mesh that is not mapped. `None`
+    /// when a corner names a vertex the prototype lacks.
+    fn mapped(&self, facet: &Facet, (u, v): (f64, f64)) -> Option<(f64, f64)> {
+        if self.coords.is_empty() {
+            return Some((0.0, 0.0));
+        }
+        let corner = |at: usize| {
+            let [x, y] = *self.coords.get(*facet.corners.get(at)? as usize)?;
+            Some((f64::from(x), f64::from(y)))
+        };
+        let ((x0, y0), (x1, y1), (x2, y2)) = (corner(0)?, corner(1)?, corner(2)?);
+        let w = 1.0 - u - v;
+        Some((x0 * w + x1 * u + x2 * v, y0 * w + y1 * u + y2 * v))
     }
 }
 
@@ -599,12 +731,13 @@ fn meet_tube(tube: &Tube, ray: &Ray, (near, far): (f64, f64)) -> Option<Hit> {
             }
             let normal = ((oa + ray.dir * t) * d2 - ba * y).normalized();
             let along = y / d2;
-            return Some(limb_hit(t, normal, (stem(along), along), tube));
+            let girth = ra + (rb - ra) * along;
+            return Some(limb_hit(t, normal, (stem(along), along, girth), tube));
         }
     }
     let mut best: Option<Hit> = None;
     let ends = [(a, ra, oa, 0.0), (b, rb, ob, 1.0)];
-    for ((centre, radius, to, at), open) in ends.into_iter().zip(tube.open) {
+    for (end, ((centre, radius, to, at), open)) in ends.into_iter().zip(tube.open).enumerate() {
         let dot = ray.dir.dot(to);
         let reach = dot * dot - to.dot(to) + radius * radius;
         if open || reach <= 0.0 || radius <= 0.0 {
@@ -613,21 +746,26 @@ fn meet_tube(tube: &Tube, ray: &Ray, (near, far): (f64, f64)) -> Option<Hit> {
         let t = -dot - mathf::sqrt(reach);
         if t > near && t < far && best.is_none_or(|held| t < held.t) {
             let normal = (ray.at(t) - centre) / radius;
-            best = Some(limb_hit(t, normal, (stem(at), at), tube));
+            let (stem, girth) = tube.over_end(end, normal);
+            best = Some(limb_hit(t, normal, (stem, at, girth), tube));
         }
     }
     best
 }
 
-/// A hit on `tube` at `t` with outward `normal`, `stem` along its stem and
-/// `along` of the way from its first end to its second: its surface
-/// coordinates are the distance along the stem and the distance round it.
-fn limb_hit(t: f64, normal: Vec3, (stem, along): (f64, f64), tube: &Tube) -> Hit {
+/// A hit on `tube` at `t` with outward `normal`, `stem` along its stem,
+/// `along` of the way from its first end to its second and `girth` in
+/// radius there: its surface coordinates are the distance along the stem
+/// and the distance round it.
+pub(crate) fn limb_hit(
+    t: f64,
+    normal: Vec3,
+    (stem, along, girth): (f64, f64, f64),
+    tube: &Tube,
+) -> Hit {
     let axis = (point(tube.b) - point(tube.a)).normalized();
     let (first, second) = round(axis);
     let angle = mathf::atan2(normal.dot(second), normal.dot(first)) - f64::from(tube.turn);
-    let radius =
-        f64::from(tube.radii[0]) + (f64::from(tube.radii[1]) - f64::from(tube.radii[0])) * along;
     Hit {
         t,
         normal,
@@ -635,10 +773,11 @@ fn limb_hit(t: f64, normal: Vec3, (stem, along): (f64, f64), tube: &Tube) -> Hit
         mark: tube.key,
         along,
         uv: (stem, angle),
-        girth: radius,
+        girth,
         material: Some(u32::from(tube.material)),
         tangent: axis,
         relieved: false,
+        member: None,
     }
 }
 
@@ -678,6 +817,7 @@ fn meet_blade(blade: &Blade, ray: &Ray, (near, far): (f64, f64)) -> Option<Hit> 
         material: Some(u32::from(blade.material)),
         tangent: axis,
         relieved: false,
+        member: None,
     })
 }
 

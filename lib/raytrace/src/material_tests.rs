@@ -452,9 +452,10 @@ fn widening_adds_the_unresolved_slope_variance_to_the_roughness() {
 /// the way its pattern is.
 #[test]
 fn bark_relief_leans_the_normal_away_from_where_the_bark_rises() {
+    let ribs = crate::cactus::Ribs { count: 18, seed: 1 };
     let relief = Relief::Bark {
         bark: crate::bark::Bark {
-            kind: crate::bark::BarkKind::Ribbed,
+            kind: crate::bark::BarkKind::Ribbed { ribs: ribs.count },
             light: Vec3::ONE,
             dark: Vec3::ZERO,
             accent: Vec3::ONE,
@@ -467,12 +468,12 @@ fn bark_relief_leans_the_normal_away_from_where_the_bark_rises() {
         depth: 0.004,
     };
     // A limb standing up the y axis, met where it faces x: its angle grows
-    // toward -z, and its ribs rise that way just short of a crest.
+    // toward -z, and its ribs rise that way short of a crest.
     let (normal, axis) = (Vec3::new(1.0, 0.0, 0.0), Vec3::UP);
     let rising = axis.cross(normal);
     let bump = Bump {
         p: Vec3::ZERO,
-        uv: (1.0, -core::f64::consts::PI / 36.0),
+        uv: (1.0, ribs.crest_angle(0, 1.0) - 0.25 * ribs.pitch()),
         tangent: axis,
         girth: 0.2,
         instance: 0,

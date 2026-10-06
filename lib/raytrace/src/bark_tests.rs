@@ -3,7 +3,7 @@ use core::f64::consts::PI;
 use super::*;
 use crate::heightfield::CHANNELS;
 
-const KINDS: [BarkKind; 9] = [
+const KINDS: [BarkKind; 10] = [
     BarkKind::Furrowed,
     BarkKind::Papery,
     BarkKind::Plated,
@@ -12,7 +12,8 @@ const KINDS: [BarkKind; 9] = [
     BarkKind::Scaly,
     BarkKind::Ringed,
     BarkKind::Taproot,
-    BarkKind::Ribbed,
+    BarkKind::Ribbed { ribs: 12 },
+    BarkKind::Ribbed { ribs: 26 },
 ];
 
 fn bark(kind: BarkKind) -> Bark {
@@ -321,21 +322,27 @@ fn a_barks_steepest_bounds_how_fast_it_rises() {
             seed: 23,
             ..bark(kind)
         };
-        let mut steepest = 0.0f64;
+        let mut worst = (0.0f64, 0.0, 0.0);
         for step in 0..30_000u32 {
             let along = 0.05 + f64::from(step % 300) * 0.0191;
             let angle = f64::from(step / 300) * 0.0617;
-            let girth = [0.07, 0.25, 0.55][(step % 3) as usize];
+            let girth = [0.035, 0.07, 0.25, 0.55][(step % 4) as usize];
             let at = OnLimb::new(along, angle, girth, (step % 11, 0.0));
             let here = bark.height(&at);
             let along_limb = (bark.height(&at.moved(STEP, 0.0)) - here) / STEP;
             let round_it = (bark.height(&at.moved(0.0, STEP)) - here) / STEP;
-            steepest = steepest.max(along_limb.abs()).max(round_it.abs());
+            let rise = along_limb.abs().max(round_it.abs());
+            let bound = bark.steepest(girth);
+            if rise / bound > worst.0 {
+                worst = (rise / bound, rise, girth);
+            }
         }
         assert!(
-            steepest < bark.steepest(),
-            "{kind:?} rises {steepest} a metre against {}",
-            bark.steepest()
+            worst.0 < 1.0,
+            "{kind:?} rises {} a metre on a limb {} thick against {}",
+            worst.1,
+            worst.2,
+            bark.steepest(worst.2)
         );
     }
 }

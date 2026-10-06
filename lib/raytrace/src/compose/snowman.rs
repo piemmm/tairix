@@ -167,8 +167,8 @@ fn stack(
     (at, balls): ((f64, f64), &[Option<Ball>; 3]),
     snow: usize,
 ) -> Option<[Option<Placed>; 3]> {
-    let ground = land.height(&stage.fields, at.0, at.1);
-    let normal = land.normal(&stage.fields, at.0, at.1);
+    let ground = land.grids.height(&stage.fields, at.0, at.1);
+    let normal = land.grids.normal(&stage.fields, at.0, at.1);
     let mut placed = [None; 3];
     let mut below: Option<Placed> = None;
     for (slot, ball) in placed.iter_mut().zip(balls.iter().flatten()) {

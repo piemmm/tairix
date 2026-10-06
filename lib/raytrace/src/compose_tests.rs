@@ -350,6 +350,7 @@ fn every_hull_lies_within_its_extent() {
             fields: &scene.fields,
             prototypes: &scene.prototypes,
             lawns: &scene.lawns,
+            far_woods: &scene.far_woods,
             materials: &[],
             view: None,
         };
@@ -705,6 +706,7 @@ fn the_pieces_stand_in_the_frame() {
             fields: &scene.fields,
             prototypes: &scene.prototypes,
             lawns: &scene.lawns,
+            far_woods: &scene.far_woods,
             materials: &[],
             view: None,
         };
@@ -839,7 +841,7 @@ const STOCK: crate::tree::Stock = crate::tree::Stock {
 };
 
 /// One of every kind of prototype a scene plans: rocks, a log and a stump,
-/// a snowball, a carrot and a stick, a fern and a palm.
+/// a snowball, a carrot and a stick, a fern, a palm and a saguaro.
 fn every_recipe() -> Vec<Recipe> {
     use crate::rock::Habit;
     let stock = STOCK;
@@ -855,7 +857,75 @@ fn every_recipe() -> Vec<Recipe> {
             seed,
         })
         .collect();
+    recipes.extend(deadwood_recipes());
     recipes.extend([
+        Recipe::Snowball {
+            ball: crate::snowman::Ball::made(
+                0.4,
+                crate::snowman::Making {
+                    rolled: true,
+                    pressed: 0.12,
+                    seat: Some(0.05),
+                },
+                11,
+            ),
+        },
+        Recipe::Carrot {
+            length: 0.12,
+            radius: 0.015,
+            skin: 0,
+            seed: 12,
+        },
+        Recipe::Stick {
+            length: 0.6,
+            radius: 0.015,
+            bark: 0,
+            seed: 13,
+        },
+        Recipe::Fern {
+            height: 0.9,
+            stock,
+            fronds: 12,
+            seed: 9,
+        },
+        Recipe::Palm {
+            height: 11.0,
+            stock,
+            roots: 0,
+            fronds: 14,
+            seed: 10,
+        },
+        Recipe::Saguaro {
+            height: 7.5,
+            girth: (0.27, 0.75),
+            flesh: crate::cactus::Flesh {
+                trunk: (
+                    0,
+                    crate::cactus::Ribs {
+                        count: 20,
+                        seed: 14,
+                    },
+                ),
+                arms: (
+                    0,
+                    crate::cactus::Ribs {
+                        count: 15,
+                        seed: 15,
+                    },
+                ),
+                spines: 1,
+            },
+            spines: Detail::Maximum.densities().spines,
+            seed: 16,
+        },
+    ]);
+    recipes
+}
+
+/// A thrown log and a sawn stump sprouting again, both rotting under a
+/// fungus.
+fn deadwood_recipes() -> [Recipe; 2] {
+    [
         Recipe::Log {
             length: 9.0,
             radius: 0.3,
@@ -891,43 +961,7 @@ fn every_recipe() -> Vec<Recipe> {
             }),
             seed: 8,
         },
-        Recipe::Snowball {
-            ball: crate::snowman::Ball::made(
-                0.4,
-                crate::snowman::Making {
-                    rolled: true,
-                    pressed: 0.12,
-                    seat: Some(0.05),
-                },
-                11,
-            ),
-        },
-        Recipe::Carrot {
-            length: 0.12,
-            radius: 0.015,
-            skin: 0,
-            seed: 12,
-        },
-        Recipe::Stick {
-            length: 0.6,
-            radius: 0.015,
-            bark: 0,
-            seed: 13,
-        },
-        Recipe::Fern {
-            height: 0.9,
-            stock,
-            fronds: 12,
-            seed: 9,
-        },
-        Recipe::Palm {
-            height: 11.0,
-            stock,
-            fronds: 14,
-            seed: 10,
-        },
-    ]);
-    recipes
+    ]
 }
 
 #[test]

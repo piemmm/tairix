@@ -84,6 +84,7 @@ impl Setup {
             fields: Vec::new(),
             prototypes: Vec::new(),
             lawns: Vec::new(),
+            far_woods: Vec::new(),
             materials: self.materials,
             lights: self.lights,
             sky: self.sky,

@@ -133,7 +133,7 @@ fn rolled(
     let reach = (0.5 * size).max(ROLL);
     let mut at = at;
     for _ in 0..ROLLS {
-        let height = |dx: f64, dz: f64| land.height(fields, at.0 + dx, at.1 + dz);
+        let height = |dx: f64, dz: f64| land.grids.height(fields, at.0 + dx, at.1 + dz);
         let (dx, dz) = (
             height(reach, 0.0) - height(-reach, 0.0),
             height(0.0, reach) - height(0.0, -reach),
@@ -699,7 +699,6 @@ impl Bed {
                         KEPT_APART,
                         MOST_SIDE,
                     )?);
-                    self.boulders.index(self.eye, self.reach + 1.0)?;
                     self.pass = Pass::Thinning;
                 }
                 Some(())
@@ -801,7 +800,7 @@ impl Bed {
         if near.distance > 0.5 * BROADEST * near.width + 0.5 * size {
             return None;
         }
-        let lie = land.lie(fields, at.0, at.1);
+        let lie = land.grids.lie(fields, at.0, at.1);
         // Gravel lies no steeper than it rests at; what fell on a steeper
         // wall rolled down to the stones below.
         if lie.upright * lie.upright * (1.0 + GRAVEL_REST * GRAVEL_REST) < 1.0 {
@@ -1242,8 +1241,8 @@ impl Bed {
         }
         let tip = disc(discs - 1).0;
         let (foot, top) = (
-            land.height(&stage.fields, start.0, start.1),
-            land.height(&stage.fields, tip.0, tip.1),
+            land.grids.height(&stage.fields, start.0, start.1),
+            land.grids.height(&stage.fields, tip.0, tip.1),
         );
         let pitch = mathf::atan2(top - foot, long);
         let pose = Pose::new(
@@ -1308,7 +1307,7 @@ impl Bed {
     /// kept for the flow.
     fn lie(&self, fields: &[Heightfield], land: &Land, stone: Laid) -> Option<Lie> {
         let (x, z) = stone.at;
-        let ground = land.height(fields, x, z);
+        let ground = land.grids.height(fields, x, z);
         // A stone the rivers' index finds no course near lies past where any
         // bed is laid, so it is left out rather than refusing the scene.
         let Some(near) = land.rivers.nearest(x, z) else {
@@ -1339,7 +1338,9 @@ impl Bed {
                 Lying::Outcropping => (1.0, 0.55 + 0.15 * unit(mix32(stone.key ^ 8))),
                 _ => (0.5, 0.3 + 0.15 * unit(mix32(stone.key ^ 8))),
             };
-            let upright = Vec3::UP.lerp(land.normal(fields, x, z), lean).normalized();
+            let upright = Vec3::UP
+                .lerp(land.grids.normal(fields, x, z), lean)
+                .normalized();
             let turn = TAU * unit(mix32(stone.key ^ 6));
             let frame = Frame::turned(turn, 0.0).aligning(Vec3::UP, upright);
             (
@@ -1434,7 +1435,7 @@ pub(super) fn surface(
     row: usize,
     runner: &dyn JobRunner,
 ) -> Option<(usize, bool)> {
-    let finer = land.near_water?;
+    let finer = land.grids.near_water?;
     let field = stage.fields.get_mut(finer.field as usize)?;
     let side = field.side();
     let end = (row + water_rows(side) * runner.width().max(1)).min(side);

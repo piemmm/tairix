@@ -12,6 +12,8 @@ use crate::bark::Bark;
 use crate::grass::{grass_kind, vigour, FLOWER, GRASS_KINDS, HEAD, LITTER, WEED};
 use crate::ground::{Ground, Rock};
 use crate::heightfield::CHANNELS;
+use crate::lily::Lily;
+use crate::mud::Mud;
 use crate::noise::{cell, cells2, cells3, noise3, octaves_within, smoothstep, turbulence3};
 use crate::sample::{mix32, unit};
 use crate::snowman::Rolled;
@@ -145,6 +147,15 @@ pub(crate) enum Pigment {
     /// Leaves: veined, paler beneath, and in autumn browning at their edges
     /// and spotted.
     Foliage(Foliage),
+    /// A cactus's spines, coloured by their age: red-brown and dark-tipped
+    /// while young, then tan, then grey, the oldest weathering pale. A spine
+    /// is as old as its areole lies below the apex, which its stem carries.
+    Spines([Vec3; 4]),
+    /// A water lily's pads, stalks, sepals, petals or heart, each part as
+    /// worn as its key says it is.
+    Lily(Lily),
+    /// Mud dried and cracked into plates, each its own shade.
+    Mud(Mud),
     /// Bands of `a` and `b` across the texture's y axis, each `width` high.
     Stripes {
         a: Vec3,
@@ -244,6 +255,9 @@ impl Pigment {
             Self::Bark(bark) => bark.colour(spot),
             Self::Rolled(rolled) => rolled.colour(spot),
             Self::Foliage(foliage) => foliage.colour(spot),
+            Self::Spines(ages) => spine(ages, spot),
+            Self::Lily(lily) => lily.colour(spot),
+            Self::Mud(mud) => mud.colour(spot),
             &Self::Stripes { a, b, width: band } => {
                 a.lerp(b, 0.5 - 0.5 * square_wave(p.y / band, width / band))
             }
@@ -378,6 +392,22 @@ impl Foliage {
         let clump = 0.6 + 0.4 * unit(mix32(key ^ 0x5a));
         colour.lerp(SNOW, lying(self.snow, spot.normal) * clump)
     }
+}
+
+/// A spine's colour at `spot`, its colours by age `ages`: red-brown, tan,
+/// grey, and weathered pale. No two of an age quite alike.
+fn spine(ages: &[Vec3; 4], spot: &Spot) -> Vec3 {
+    let key = spot.mark;
+    let age = spot.uv.0 + 0.45 * (unit(mix32(key)) - 0.5);
+    let [young, tan, grey, pale] = *ages;
+    let grown = young
+        .lerp(tan, smoothstep(0.15, 0.7, age))
+        .lerp(grey, smoothstep(0.9, 2.2, age));
+    let weathered = smoothstep(2.8, 5.5, age) * unit(mix32(key ^ 0x9e));
+    let colour = grown.lerp(pale, weathered);
+    // A young spine darkens toward its tip.
+    let tip = (1.0 - smoothstep(0.3, 0.9, age)) * smoothstep(0.55, 1.0, spot.along);
+    colour.lerp(colour * 0.35, tip) * (0.85 + 0.25 * unit(mix32(key ^ 0x3c)))
 }
 
 /// A crowd of small things over the ground, each coloured as its mark says

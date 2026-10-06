@@ -501,9 +501,9 @@ fn a_march_stands_over_the_cell_beneath_each_point_of_it_on_every_level() {
         let mut t = enter;
         while t < leave {
             bank.advance(&mut cursor, origin, dir, t);
-            assert!(cursor.walk.until() > t, "ray {index} at {t}");
+            assert!(cursor.walk.exit() > t, "ray {index} at {t}");
             let point = origin + dir * t;
-            if let (Some(level), Some(at)) = (bank.levels.get(cursor.level), cursor.walk.cell()) {
+            if let (Some(level), Some(at)) = (bank.levels.get(cursor.level), mapped(&cursor.walk)) {
                 let (east, north) =
                     place_on(bank.centre, level.half, (point.x, point.z), WEATHER_CELLS);
                 // On a line of cells or a level's edge, rounding may put a
@@ -870,4 +870,28 @@ fn a_bank_lit_from_beneath_its_level_keeps_a_finite_light() {
         .scatter
         .iter()
         .all(|value| value.is_finite() && *value >= 0.0));
+}
+
+/// A deck thick enough to scatter the sun many times over sends most of it
+/// back up from its sunlit top and lets less down through its grey base;
+/// and a veil too thin to scatter it twice is barely lit at all.
+#[test]
+fn a_thick_deck_shines_above_and_greys_below_and_a_thin_veil_barely_glows() {
+    let deck = bank_of(OVERCAST, high_sun(), None);
+    let (above, below) = (Vec3::new(0.0, 6000.0, 0.0), Vec3::ZERO);
+    let (top, _, _) = cloud(&deck, above, -Vec3::UP, true).expect("its top");
+    let (base, kept, _) = cloud(&deck, below, Vec3::UP, true).expect("its base");
+    assert!(kept < 0.05, "{kept}");
+    assert!(top.y > 1.5 * base.y, "{top:?} above, {base:?} below");
+    let veil = bank_of(
+        Deck {
+            thickness: 2e-4,
+            ..OVERCAST
+        },
+        high_sun(),
+        None,
+    );
+    let (faint, shows, _) = cloud(&veil, below, Vec3::UP, true).expect("the veil");
+    assert!(shows > 0.5, "{shows}");
+    assert!(faint.y < 0.5 * base.y, "{faint:?} beside {base:?}");
 }

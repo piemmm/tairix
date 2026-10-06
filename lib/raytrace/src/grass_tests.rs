@@ -105,6 +105,7 @@ fn met(lawn: &Lawn, field: Heightfield, (rays, height): (u32, f64)) -> Vec<(Ray,
         fields: &fields,
         prototypes: &[],
         lawns: &[],
+        far_woods: &[],
         materials: &[],
         view: None,
     };
@@ -226,6 +227,7 @@ fn what_a_cover_holds_is_met_nearest_first() {
         fields: &fields,
         prototypes: &[],
         lawns: &[],
+        far_woods: &[],
         materials: &[],
         view: None,
     };
@@ -280,6 +282,7 @@ fn rays_crossing_a_lawn_together_meet_what_each_meets_alone() {
         fields: &fields,
         prototypes: &[],
         lawns: &[],
+        far_woods: &[],
         materials: &[],
         view: None,
     };
@@ -466,6 +469,7 @@ fn nothing_is_met_above_the_shoots_or_beside_the_lawn() {
         fields: &fields,
         prototypes: &[],
         lawns: &[],
+        far_woods: &[],
         materials: &[],
         view: None,
     };
@@ -494,6 +498,7 @@ fn a_finer_lawn_keeps_the_ground_it_covers_to_itself() {
         fields: &fields,
         prototypes: &[],
         lawns: &[],
+        far_woods: &[],
         materials: &[],
         view: None,
     };
@@ -651,12 +656,19 @@ fn the_blades_above_thin_the_light_below() {
         lawn.canopy(Vec3::new(at.0, 2.0, at.1), fields).is_none(),
         "above it, nothing"
     );
-    let open = Canopy {
-        density: 0.0,
-        up: 0.3,
-        down: 0.0,
-    };
+    let open = Canopy::new(0.0, 0.3, 0.0);
     assert!((open.diffuse() - 1.0).abs() < 1e-9, "{}", open.diffuse());
+    // Held as the blades were read, the share is what weighing every way
+    // up through them comes to.
+    let weighed: f64 = QUADRATURE
+        .iter()
+        .map(|&(rise, weight)| {
+            2.0 * rise
+                * weight
+                * ground.through(Vec3::new(mathf::sqrt(1.0 - rise * rise), rise, 0.0))
+        })
+        .sum();
+    assert!((ground.diffuse() - weighed).abs() < 1e-12);
 }
 
 #[test]

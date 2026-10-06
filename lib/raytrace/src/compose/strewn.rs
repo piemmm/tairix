@@ -81,8 +81,8 @@ pub(super) fn strew(
             eye.x + mathf::sin(angle) * distance,
             eye.z + mathf::cos(angle) * distance,
         );
-        let lie = land.lie(&stage.fields, at.0, at.1);
-        if !lies(&lie) || land.wet_at(&stage.fields, at.0, at.1) {
+        let lie = land.grids.lie(&stage.fields, at.0, at.1);
+        if !lies(&lie) || land.grids.wet_at(&stage.fields, at.0, at.1) {
             continue;
         }
         let field = smoothstep(
@@ -117,7 +117,7 @@ pub(super) fn strew(
                     at.0 + mathf::sin(around) * off,
                     at.1 + mathf::cos(around) * off,
                 );
-                if lies(&land.lie(&stage.fields, beside.0, beside.1)) {
+                if lies(&land.grids.lie(&stage.fields, beside.0, beside.1)) {
                     let smaller = size * dice.range(0.25, 0.65);
                     lay(stage, &mut dice, (land, &stones), (beside, smaller))?;
                 }
@@ -146,8 +146,8 @@ fn lay(
         return Some(false);
     }
     stage.claim(at, 0.5 * size)?;
-    let base = Vec3::new(at.0, land.height(&stage.fields, at.0, at.1), at.1);
-    let normal = land.normal(&stage.fields, at.0, at.1);
+    let base = Vec3::new(at.0, land.grids.height(&stage.fields, at.0, at.1), at.1);
+    let normal = land.grids.normal(&stage.fields, at.0, at.1);
     stones.lay(stage, dice, (base, normal), size)?;
     Some(true)
 }
@@ -166,19 +166,21 @@ fn scree(
     if on_talus <= 0.0 {
         return None;
     }
-    let normal = land.normal(fields, at.0, at.1);
+    let normal = land.grids.normal(fields, at.0, at.1);
     let fall = mathf::hypot(normal.x, normal.z);
     if fall < 1e-6 {
         return None;
     }
     let uphill = (-normal.x / fall, -normal.z / fall);
     let crag = UPHILL.iter().copied().find(|&distance| {
-        land.normal(
-            fields,
-            at.0 + uphill.0 * distance,
-            at.1 + uphill.1 * distance,
-        )
-        .y < CRAG
+        land.grids
+            .normal(
+                fields,
+                at.0 + uphill.0 * distance,
+                at.1 + uphill.1 * distance,
+            )
+            .y
+            < CRAG
     })?;
     let farthest = UPHILL[UPHILL.len() - 1];
     let rolled = smoothstep(UPHILL[0], farthest, crag);
@@ -204,7 +206,7 @@ fn drifts(
             eye.x + mathf::sin(angle) * distance,
             eye.z + mathf::cos(angle) * distance,
         );
-        let lie = land.lie(&stage.fields, at.0, at.1);
+        let lie = land.grids.lie(&stage.fields, at.0, at.1);
         let washed = lie.wet.max(lie.sediment);
         let patch = smoothstep(0.0, 0.4, noise2(at.0 / 8.0, at.1 / 8.0, seed ^ 0xd1));
         if !lies(&lie) || washed < WASHED || dice.unit() >= patch {

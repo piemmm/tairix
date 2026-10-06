@@ -38,7 +38,7 @@ use crate::heightfield::{apart, Attributes, Heightfield, Sealing, ABSENT};
 use crate::noise::{fbm2, noise2, ridged2, smoothstep};
 use crate::snow::{self, Snowpack};
 use crate::terrain::Terrain;
-use crate::vector::{byte, power, real, share, single, Vec3};
+use crate::vector::{byte, power, real, share, single, Ray, Vec3};
 
 /// How water wears a land.
 #[derive(Copy, Clone, Debug)]
@@ -275,6 +275,45 @@ pub(crate) struct Crossing {
 /// The land once built, as a scene's grids hold it.
 #[derive(Clone, Debug)]
 pub(crate) struct Land {
+    pub(crate) grids: Grids,
+    /// The rivers, and what shapes their channels.
+    pub(crate) rivers: Courses,
+    pub(crate) form: Option<Form>,
+    pub(crate) roads: Courses,
+    pub(crate) road: Option<Roadway>,
+    /// Where the road bridges its rivers.
+    pub(crate) crossings: Vec<Crossing>,
+}
+
+#[cfg(test)]
+impl Land {
+    /// A land traced on the one grid `far` over the square `(centre, reach)`:
+    /// no finer grids, water, horizon, courses or road.
+    pub(crate) fn plain(far: u32, (centre, reach): ((f64, f64), f64)) -> Self {
+        Self {
+            grids: Grids {
+                far,
+                nests: [None; NESTS],
+                water: None,
+                near_water: None,
+                horizon: None,
+                sea: None,
+                centre,
+                reach,
+            },
+            rivers: Courses::none(),
+            form: None,
+            roads: Courses::none(),
+            road: None,
+            crossings: Vec::new(),
+        }
+    }
+}
+
+/// The grids a land is traced on: all that reading it at a place needs,
+/// small enough for the tracer to keep.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct Grids {
     /// The scene's grids that hold it: the far land, the finer grids laid
     /// about the eye, coarsest first, the fresh water's surface, and the land
     /// beyond out to the horizon.
@@ -284,13 +323,6 @@ pub(crate) struct Land {
     /// The fresh water's own finer grid about the eye, if it has one.
     pub(crate) near_water: Option<Laid>,
     pub(crate) horizon: Option<u32>,
-    /// The rivers, and what shapes their channels.
-    pub(crate) rivers: Courses,
-    pub(crate) form: Option<Form>,
-    pub(crate) roads: Courses,
-    pub(crate) road: Option<Roadway>,
-    /// Where the road bridges its rivers.
-    pub(crate) crossings: Vec<Crossing>,
     pub(crate) sea: Option<f64>,
     /// The square the far land covers.
     pub(crate) centre: (f64, f64),
@@ -317,7 +349,79 @@ pub(crate) struct Lie {
     pub(crate) snow: f64,
 }
 
-impl Land {
+impl Grids {
+    /// The square the land's grids trace, out to the horizon where it runs
+    /// on to one.
+    pub(crate) fn traced(&self, fields: &[Heightfield]) -> ((f64, f64), f64) {
+        self.horizon
+            .and_then(|horizon| fields.get(horizon as usize)?.bounds())
+            .map_or((self.centre, self.reach), |bounds| {
+                let reach = 0.5 * (bounds.max.x - bounds.min.x);
+                (
+                    (
+                        f64::midpoint(bounds.min.x, bounds.max.x),
+                        f64::midpoint(bounds.min.z, bounds.max.z),
+                    ),
+                    reach,
+                )
+            })
+    }
+
+    /// The land's own grids among `fields`: the far land, its finer grids
+    /// and the horizon's, without its water.
+    fn ground<'a>(&self, fields: &'a [Heightfield]) -> impl Iterator<Item = &'a Heightfield> {
+        let nests = self.nests.map(|laid| laid.map(|laid| laid.field));
+        [Some(self.far), self.horizon]
+            .into_iter()
+            .chain(nests)
+            .flatten()
+            .filter_map(|field| fields.get(field as usize))
+    }
+
+    /// The lowest and the highest any of the land's grids reaching the square
+    /// from `from` to `to` stands over it.
+    pub(crate) fn extremes(
+        &self,
+        fields: &[Heightfield],
+        (from, to): ((f64, f64), (f64, f64)),
+    ) -> (f64, f64) {
+        self.ground(fields)
+            .filter(|grid| overlaps(grid, (from, to)))
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), grid| {
+                (
+                    low.min(grid.lowest_over(from, to)),
+                    high.max(grid.highest_over(from, to)),
+                )
+            })
+    }
+
+    /// The most anything grows anywhere over the square from `from` to `to`
+    /// on any of the land's grids reaching it.
+    pub(crate) fn greenest(
+        &self,
+        fields: &[Heightfield],
+        (from, to): ((f64, f64), (f64, f64)),
+    ) -> f64 {
+        self.ground(fields)
+            .filter(|grid| overlaps(grid, (from, to)))
+            .map(|grid| grid.most_of(GREEN, from, to))
+            .fold(0.0, f64::max)
+    }
+
+    /// Where `ray` first comes within `lift` above any of the land's grids
+    /// in `(from, to)`; `None` if it passes above them all.
+    pub(crate) fn approach(
+        &self,
+        fields: &[Heightfield],
+        ray: &Ray,
+        lift: f64,
+        span: (f64, f64),
+    ) -> Option<f64> {
+        self.ground(fields)
+            .filter_map(|grid| grid.approach(ray, lift, span))
+            .reduce(f64::min)
+    }
+
     /// The grid that traces `(x, z)`: the finest that reaches it.
     fn grid<'a>(&self, fields: &'a [Heightfield], x: f64, z: f64) -> Option<&'a Heightfield> {
         let finest = self
@@ -362,12 +466,6 @@ impl Land {
             .map_or_else(Lie::default, |grid| lie_on(grid, x, z))
     }
 
-    /// The fresh water's surface at `(x, z)`, if water stands there.
-    pub(crate) fn water(&self, fields: &[Heightfield], x: f64, z: f64) -> Option<f64> {
-        self.water_level(fields, x, z)
-            .filter(|&level| level > self.height(fields, x, z))
-    }
-
     /// The fresh water's level about `(x, z)` wherever its grids hold one,
     /// over a bank beside the water as over the water itself: the finer
     /// grid's where it lies, as the flow has shaped it. The finer grid holds
@@ -389,17 +487,46 @@ impl Land {
     /// What one stands on at `(x, z)`: the ground, or the fresh water's
     /// surface where it lies above the ground.
     pub(crate) fn surface(&self, fields: &[Heightfield], x: f64, z: f64) -> f64 {
-        self.water(fields, x, z)
-            .unwrap_or(f64::NEG_INFINITY)
-            .max(self.height(fields, x, z))
+        let ground = self.height(fields, x, z);
+        self.water_level(fields, x, z)
+            .map_or(ground, |level| level.max(ground))
     }
 
     /// Whether `(x, z)` lies under water, fresh or salt.
     pub(crate) fn wet_at(&self, fields: &[Heightfield], x: f64, z: f64) -> bool {
-        let ground = self.height(fields, x, z);
-        self.sea.is_some_and(|sea| ground < sea + 0.2) || self.water(fields, x, z).is_some()
+        self.wet_over(fields, (x, z), self.height(fields, x, z))
+    }
+
+    /// Whether ground `ground` high at `(x, z)` lies under water, fresh or
+    /// salt.
+    pub(crate) fn wet_over(&self, fields: &[Heightfield], (x, z): (f64, f64), ground: f64) -> bool {
+        drowned(self.sea, ground)
+            || self
+                .water_level(fields, x, z)
+                .is_some_and(|level| level > ground)
     }
 }
+
+/// How far above the sea's level ground still lies wet: its shore's lapping
+/// edge.
+const SHORE: f64 = 0.2;
+
+/// Whether ground `ground` high lies under the sea `sea`, if the land has
+/// one.
+fn drowned(sea: Option<f64>, ground: f64) -> bool {
+    sea.is_some_and(|sea| ground < sea + SHORE)
+}
+
+/// Whether `grid` reaches over any of the square from `from` to `to`.
+fn overlaps(grid: &Heightfield, (from, to): ((f64, f64), (f64, f64))) -> bool {
+    grid.bounds().is_some_and(|bounds| {
+        bounds.min.x < to.0 && bounds.max.x > from.0 && bounds.min.z < to.1 && bounds.max.z > from.1
+    })
+}
+
+/// Which of a vertex's channels holds how much grows there, as
+/// [`lie_on`] reads them.
+const GREEN: usize = 3;
 
 /// What `grid` says the land is like at `(x, z)`.
 fn lie_on(grid: &Heightfield, x: f64, z: f64) -> Lie {
@@ -436,9 +563,8 @@ impl Survey<'_> {
     /// What one stands on at `(x, z)`: the ground, or a lake's or a river's
     /// surface where it lies above the ground.
     pub(crate) fn surface(&self, x: f64, z: f64) -> f64 {
-        self.water(x, z)
-            .unwrap_or(f64::NEG_INFINITY)
-            .max(self.height(x, z))
+        let ground = self.height(x, z);
+        self.water_above((x, z), ground).unwrap_or(ground)
     }
 
     pub(crate) fn lie(&self, x: f64, z: f64) -> Lie {
@@ -448,8 +574,13 @@ impl Survey<'_> {
     /// The surface of a lake or a river at `(x, z)`, where one stands above
     /// the ground there.
     pub(crate) fn water(&self, x: f64, z: f64) -> Option<f64> {
+        self.water_above((x, z), self.height(x, z))
+    }
+
+    /// The surface of a lake or a river at `(x, z)`, where one stands above
+    /// ground `ground` high there.
+    fn water_above(&self, (x, z): (f64, f64), ground: f64) -> Option<f64> {
         let build = self.build;
-        let ground = self.height(x, z);
         let lake = build
             .lakes
             .get(build.sample_at(x, z))
@@ -468,7 +599,7 @@ impl Survey<'_> {
     /// Whether `(x, z)` lies under water, fresh or salt.
     pub(crate) fn wet_at(&self, x: f64, z: f64) -> bool {
         let ground = self.height(x, z);
-        self.build.plan.sea.is_some_and(|sea| ground < sea + 0.2) || self.water(x, z).is_some()
+        drowned(self.build.plan.sea, ground) || self.water_above((x, z), ground).is_some()
     }
 
     pub(crate) fn roads(&self) -> &Courses {
@@ -977,19 +1108,21 @@ impl Build {
     /// The land, once built.
     pub(crate) fn finish(self) -> Option<Land> {
         matches!(self.stage, Step::Done).then(|| Land {
-            far: self.far,
-            nests: self.nests,
-            water: self.water,
-            near_water: self.near_water,
-            horizon: self.horizon,
+            grids: Grids {
+                far: self.far,
+                nests: self.nests,
+                water: self.water,
+                near_water: self.near_water,
+                horizon: self.horizon,
+                sea: self.plan.sea,
+                centre: self.plan.relief.centre,
+                reach: self.plan.reach,
+            },
             form: self.form(),
             rivers: self.rivers,
             roads: self.roads,
             road: self.plan.road,
             crossings: self.crossings,
-            sea: self.plan.sea,
-            centre: self.plan.relief.centre,
-            reach: self.plan.reach,
         })
     }
 
@@ -1143,6 +1276,9 @@ impl Build {
         runner: &dyn JobRunner,
     ) -> Option<Step> {
         let field = fields.get_mut(self.horizon? as usize)?;
+        if row == 0 && !field.carry_attributes() {
+            return None;
+        }
         let end = (row + UNIT_ROWS * runner.width().max(1)).min(field.side());
         self.fill_horizon(field, row..end, runner);
         if end < field.side() {
@@ -1772,25 +1908,33 @@ impl Build {
     }
 
     /// Fill rows `rows` of the horizon grid across `runner`, from the relief
-    /// and the coarsest of the far land's detail: water has not worn the land
-    /// that far off, and the haze would hide it if it had.
+    /// and the coarsest of the far land's detail, with what grows there as
+    /// the far land's own ground is judged: water has not worn the land that
+    /// far off, and the haze would hide it if it had.
     fn fill_horizon(&self, field: &mut Heightfield, rows: Range<usize>, runner: &dyn JobRunner) {
-        let side = field.side();
         let ((origin_x, origin_z), step) = field.placing();
-        let (heights, _) = field.rows_mut(rows.clone());
         let relief = &self.plan.relief;
         let longest = 8.0 * step;
         let octaves = octaves_between(longest, step);
-        band::for_each(runner, heights, (rows.start, side), &|row, band| {
-            let z = origin_z + real(row) * step;
-            for (column, slot) in band.iter_mut().enumerate() {
+        field.each_row(rows, runner, &|(row, heights, kept)| {
+            let z = origin_z + real(*row) * step;
+            for (column, slot) in heights.iter_mut().enumerate() {
                 let x = origin_x + real(column) * step;
                 let rise = |dx: f64, dz: f64| relief.height(x + dx, z + dz);
                 let slope = mathf::hypot(
                     rise(step, 0.0) - rise(-step, 0.0),
                     rise(0.0, step) - rise(0.0, -step),
                 ) / (2.0 * step);
-                *slot = single(rise(0.0, 0.0) + self.detail((x, z), slope, (longest, octaves)));
+                let height = rise(0.0, 0.0) + self.detail((x, z), slope, (longest, octaves));
+                *slot = single(height);
+                let lie = Lie {
+                    upright: 1.0 / mathf::sqrt(1.0 + slope * slope),
+                    green: 1.0,
+                    ..Lie::default()
+                };
+                if let Some(attributes) = kept.get_mut(column) {
+                    *attributes = self.attributes(&lie, height);
+                }
             }
         });
     }

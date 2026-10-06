@@ -328,6 +328,7 @@ fn courtyard() -> Scene {
         fields: Vec::new(),
         prototypes: Vec::new(),
         lawns: Vec::new(),
+        far_woods: Vec::new(),
         materials: alloc::vec![matte(0.6), matte(0.8)],
         lights: alloc::vec![Light::Sun {
             toward: Vec3::new(-0.6, 0.5, 0.2).normalized(),

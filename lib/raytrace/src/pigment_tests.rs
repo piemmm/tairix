@@ -593,3 +593,39 @@ fn ground_grain_shows_up_close_and_settles_to_its_mean_far_off() {
         assert!(spread(0.5) < 5e-3, "{lie:?} far off: {}", spread(0.5));
     }
 }
+
+/// A spine is coloured by the age its stem carries: red-brown and darker
+/// toward its tip while young, grey once old, whatever key it was placed
+/// under.
+#[test]
+fn a_spine_greys_as_it_ages_and_a_young_one_darkens_toward_its_tip() {
+    let ages = [
+        Vec3::new(0.14, 0.03, 0.017),
+        Vec3::new(0.43, 0.3, 0.16),
+        Vec3::new(0.27, 0.25, 0.22),
+        Vec3::new(0.55, 0.53, 0.47),
+    ];
+    let spines = Pigment::Spines(ages);
+    let at = |age: f64, along: f64, mark: u32| {
+        spines.colour(&Spot {
+            uv: (age, 0.0),
+            along,
+            mark,
+            ..spot(Vec3::ZERO, 1e-4)
+        })
+    };
+    for mark in (0..64u32).map(mix32) {
+        let (young, old) = (at(0.0, 0.2, mark), at(2.6, 0.2, mark));
+        // Red-brown: far more red than blue; grey: nearly as blue as red.
+        assert!(young.x > 3.0 * young.z, "{mark}: {young:?}");
+        assert!(old.z > 0.6 * old.x, "{mark}: {old:?}");
+        assert!(
+            at(0.0, 0.95, mark).x < 0.6 * young.x,
+            "{mark}: its tip is darker"
+        );
+        assert!(
+            (at(2.6, 0.95, mark) - old).length() < 1e-9,
+            "{mark}: an old tip is not"
+        );
+    }
+}

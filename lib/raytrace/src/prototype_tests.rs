@@ -109,10 +109,7 @@ fn a_leaf_is_met_within_its_outline_and_missed_outside_it() {
 #[test]
 fn a_facet_is_shaded_by_its_corners_normals_blended() {
     let rock = Prototype::new(
-        vec![Part::Facet(Facet {
-            corners: [0, 1, 2],
-            material: Some(2),
-        })],
+        vec![Part::Facet(Facet::plain([0, 1, 2], Some(2)))],
         vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
         vec![[0.0, 1.0, 0.0], [0.6, 0.8, 0.0], [0.0, 0.8, 0.6]],
     )
@@ -133,10 +130,7 @@ fn a_facet_is_shaded_by_its_corners_normals_blended() {
     );
     assert!(
         Prototype::new(
-            vec![Part::Facet(Facet {
-                corners: [0, 1, 7],
-                material: None
-            })],
+            vec![Part::Facet(Facet::plain([0, 1, 7], None))],
             vec![[0.0; 3]; 3],
             vec![[0.0, 1.0, 0.0]; 3]
         )
@@ -157,6 +151,7 @@ fn a_placed_prototype_is_met_where_its_placing_puts_it() {
         fields: &[],
         prototypes: &prototypes,
         lawns: &[],
+        far_woods: &[],
         materials: &[],
         view: None,
     };
@@ -193,6 +188,7 @@ fn a_scaled_limb_is_met_at_its_placed_girth_and_its_placed_way_along_its_stem() 
         fields: &[],
         prototypes: &prototypes,
         lawns: &[],
+        far_woods: &[],
         materials: &[],
         view: None,
     };
@@ -236,7 +232,8 @@ fn a_bending_limbs_bark_starts_round_it_alike_either_side_of_a_joint() {
     for step in 0..12u32 {
         let around = f64::from(step) * core::f64::consts::TAU / 12.0;
         let normal = side * mathf::cos(around) + across * mathf::sin(around);
-        let [first, second] = segments.map(|tube| limb_hit(1.0, normal, (1.0, 0.5), &tube).uv.1);
+        let [first, second] =
+            segments.map(|tube| limb_hit(1.0, normal, (1.0, 0.5, 0.1), &tube).uv.1);
         let apart = (first - second).abs();
         let apart = apart.min(core::f64::consts::TAU - apart);
         assert!(apart < 0.03, "{step}: {first} against {second}");

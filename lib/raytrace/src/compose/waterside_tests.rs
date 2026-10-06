@@ -367,14 +367,17 @@ fn a_lake_sets_reeds_in_its_shallows_and_floats_lilies_on_it_in_the_light() {
         let mut composition =
             Composition::new(Setting::Alpine, seed, (320, 180), Detail::Simple).expect("composes");
         let land = composition.run_until_seen().expect("a lake lies in a land");
-        let lake = land.sea.expect("the land's sea is its lake");
+        let lake = land.grids.sea.expect("the land's sea is its lake");
         let stage = &composition.stage;
         for (margin, at, far) in patches(&composition) {
             if let Some(slot) = KINDS.iter().position(|&kind| kind == margin) {
                 set[slot] += 1;
             }
-            let ground = land.height(&stage.fields, at.x, at.z);
-            let level = land.water_level(&stage.fields, at.x, at.z).unwrap_or(lake);
+            let ground = land.grids.height(&stage.fields, at.x, at.z);
+            let level = land
+                .grids
+                .water_level(&stage.fields, at.x, at.z)
+                .unwrap_or(lake);
             // Crowfoot streams beneath the surface of the water running into
             // the lake, as the floating plants lie on its still water.
             let (stands, (shallowest, deepest)) = match margin {
@@ -396,7 +399,7 @@ fn a_lake_sets_reeds_in_its_shallows_and_floats_lilies_on_it_in_the_light() {
                 // Never on the lake's still water: only where a river runs
                 // into it or out of it does its surface fall.
                 let level_at =
-                    |x: f64, z: f64| land.water_level(&stage.fields, x, z).unwrap_or(level);
+                    |x: f64, z: f64| land.grids.water_level(&stage.fields, x, z).unwrap_or(level);
                 let fall = mathf::hypot(
                     level_at(at.x + 1.0, at.z) - level_at(at.x - 1.0, at.z),
                     level_at(at.x, at.z + 1.0) - level_at(at.x, at.z - 1.0),
@@ -431,7 +434,7 @@ fn a_streams_floating_plants_float_on_its_shaped_water() {
         let land = composition
             .run_until_seen()
             .expect("a stream lies in a land");
-        let near = land.near_water.expect("a finer water grid");
+        let near = land.grids.near_water.expect("a finer water grid");
         let finer = &composition.stage.fields[near.field as usize];
         for (margin, at, _) in patches(&composition) {
             let within = (at.x - near.centre.0).abs() < near.reach

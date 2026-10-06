@@ -613,3 +613,40 @@ fn grids_are_taken_apart_and_never_past_the_last() {
     assert!(apart(&mut fields, 0, 3).is_none());
     assert!(apart(&mut fields, 7, 1).is_none());
 }
+
+#[test]
+fn the_most_a_channel_stands_over_a_rectangle_is_the_most_at_the_corners_it_blends_from() {
+    let mut field = Heightfield::new(8, (0.0, 0.0), 1.0, false).expect("a grid");
+    assert!(
+        (field.most_of(3, (0.0, 0.0), (8.0, 8.0)) - PLAIN[3]).abs() < 1e-12,
+        "none carried"
+    );
+    let side = field.side();
+    assert!(field.carry_attributes());
+    {
+        let (_, attributes) = field.rows_mut(0..side);
+        for (index, slot) in attributes.iter_mut().enumerate() {
+            let (column, row) = (index % side, index / side);
+            slot[3] = u8::try_from(column * 10 + row).expect("a byte");
+        }
+    }
+    field.seal();
+    // Over cells 2–3 across and 1 down: corners 2–4 across, 1–2 down.
+    let most = field.most_of(3, (2.5, 1.5), (3.5, 1.9));
+    assert!(
+        (most - f64::from(4 * 10 + 2) / 255.0).abs() < 1e-12,
+        "{most}"
+    );
+    // Past the edge, its edge's vertices.
+    let edge = field.most_of(3, (6.5, 6.5), (40.0, 40.0));
+    assert!(
+        (edge - f64::from(8 * 10 + 8) / 255.0).abs() < 1e-12,
+        "{edge}"
+    );
+    // Every place within is no more than that.
+    for step in 0..=20 {
+        let x = 2.5 + f64::from(step) * 0.05;
+        let [.., green, _] = field.attributes_at(x, 1.7);
+        assert!(green <= most + 1e-12);
+    }
+}
