@@ -13,7 +13,7 @@
 use tairix_util::mathf;
 
 use crate::noise::{cells3, cells3_among, noise3, smoothstep, Cells, NOISE_SLOPE};
-use crate::pigment::Spot;
+use crate::pigment::{lying, Spot, SNOW};
 use crate::sample::{mix32, unit};
 use crate::vector::Vec3;
 
@@ -143,7 +143,12 @@ pub(crate) struct Cover {
     /// frame: the side moss climbs; nought where no side stays shaded.
     pub(crate) shade: Vec3,
     pub(crate) substrate: Substrate,
+    /// Whether the units it grows on meet in joints, where grit gathers and
+    /// moss creeps out of: masonry's do, a timber's arrises are no joints.
+    pub(crate) jointed: bool,
     pub(crate) seed: u32,
+    /// How much of what faces the sky the snow lying on it covers.
+    pub(crate) snow: f64,
 }
 
 /// What grows at a point.
@@ -420,7 +425,11 @@ impl Cover {
         let level = Vec3::new(normal.x, 0.0, normal.z);
         let shaded = smoothstep(0.0, 0.8, level.dot(self.shade));
         let foot = 1.0 - smoothstep(self.foot - SPLASH.0, self.foot + SPLASH.1, at.p.y);
-        let joint = 1.0 - smoothstep(0.0, JOINT_REACH, at.joint);
+        let joint = if self.jointed {
+            1.0 - smoothstep(0.0, JOINT_REACH, at.joint)
+        } else {
+            0.0
+        };
         let wet = up + (1.0 - up) * under * self.damp * (0.35 * shaded + 0.65 * foot);
         let cells = at.p * CUSHIONS;
         let size = |id: u32| 0.6 + 0.4 * unit(mix32(id ^ 0x3e));
@@ -527,13 +536,14 @@ impl Cover {
     /// The colour of the cover at `spot`, which its solid found growing there
     /// and carried in the spot's coordinates.
     pub(crate) fn colour(&self, spot: &Spot) -> Vec3 {
-        match Growth::of_carried(spot.uv) {
+        let grown = match Growth::of_carried(spot.uv) {
             Growth::Moss(height) => self.moss_colour(spot, height),
             Growth::Lichen(lichen, inside) => lichen_colour(spot, lichen, inside),
             // Nothing grows: the deep shade between moss shoots, where a ray
             // can only have found the cover's own underside.
             Growth::Bare => MOSS[0],
-        }
+        };
+        grown.lerp(SNOW, lying(self.snow, spot.normal))
     }
 
     /// Moss's colour `height` up its cushion: dark in its crevices and

@@ -1,7 +1,7 @@
 use core::f64::consts::PI;
 
 use super::*;
-use crate::heightfield::CHANNELS;
+use crate::heightfield::{Grows, QUANTITIES};
 
 const KINDS: [BarkKind; 10] = [
     BarkKind::Furrowed,
@@ -47,7 +47,8 @@ fn spot(at: (f64, f64), girth: f64, (key, width): (u32, f64)) -> Spot {
         girth,
         instance: key,
         front: true,
-        ground: [0.0; CHANNELS],
+        ground: [0.0; QUANTITIES],
+        grows: Grows::default(),
         thatch: 0.0,
         cover: None,
     }

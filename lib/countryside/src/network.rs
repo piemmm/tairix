@@ -1,6 +1,8 @@
-//! The ways between the countryside's places: a relative-neighbourhood graph
-//! over its settlements and its holdings' gateways, ranked by what each way
-//! joins, so it loops where its places do rather than branching as a tree.
+//! The ways between the countryside's places, ranked by what each way joins:
+//! roads and lanes over a relative-neighbourhood graph of its settlements, so
+//! the network loops where its places do rather than branching as a tree;
+//! footpaths along the Gabriel graph's edges the lanes leave out; and tracks
+//! from each holding out to its fields' gateways.
 
 use core::hash::Hasher;
 
@@ -17,7 +19,8 @@ pub enum Rank {
     Highway,
     /// A road between villages, or from a village to a highway.
     Road,
-    /// A lane between farmsteads, and from them to a village or a road.
+    /// A lane between farmsteads, and from them to a village, a road or a
+    /// highway.
     Lane,
     /// A track from a farmstead to the gateways of its holding's fields.
     Track,
@@ -28,7 +31,13 @@ pub enum Rank {
 impl Rank {
     /// Every rank, the greatest first: the order ways are routed in, each
     /// rank drawn to the greater ways it may follow.
-    pub const ALL: [Self; 5] = [Self::Highway, Self::Road, Self::Lane, Self::Track, Self::Path];
+    pub const ALL: [Self; 5] = [
+        Self::Highway,
+        Self::Road,
+        Self::Lane,
+        Self::Track,
+        Self::Path,
+    ];
 
     /// Whether a way of this rank runs between boundaries of its own, which
     /// the land beside it is cut to: every rank but a path, which crosses
@@ -63,7 +72,9 @@ pub enum Joins {
 pub enum Placed {
     /// A settlement.
     Settled(Settled),
-    /// A holding's `n`th gateway.
+    /// A holding's gateway `n`: from one, where its fields' tracks run out
+    /// to; nought, where the tracks of a holding whose farm a village
+    /// gathers leave the greater way nearest it.
     Gateway(HoldingId, u8),
     /// The point of highway `n` nearest a place, in centimetres along it.
     OnHighway(u32, i64),
@@ -137,6 +148,7 @@ impl Node {
 
 /// Places filed by the square of a grid each stands in, so the places near
 /// another are found among the squares about it alone.
+#[derive(Debug)]
 pub(crate) struct Filed {
     cell: f64,
     /// Each place's square's row and column, then its index, in that order.
@@ -160,7 +172,9 @@ impl Filed {
     /// Every place within the squares `reach` reaches about `at`, by index,
     /// in no particular order: a superset of those within `reach` of it.
     pub(crate) fn near(&self, at: Point, reach: f64) -> impl Iterator<Item = usize> + '_ {
-        let span = i64::from(tairix_util::mathf::round_i32(tairix_util::mathf::ceil(reach / self.cell)));
+        let span = i64::from(tairix_util::mathf::round_i32(tairix_util::mathf::ceil(
+            reach / self.cell,
+        )));
         let (column, row) = square(at, self.cell);
         (row - span..=row + span).flat_map(move |within| {
             let from = self
@@ -177,45 +191,12 @@ impl Filed {
 /// The column and row of the square of a grid `cell` across that `at`
 /// stands in.
 fn square(at: Point, cell: f64) -> (i64, i64) {
-    let whole = |value: f64| i64::from(tairix_util::mathf::round_i32(tairix_util::mathf::floor(value / cell)));
+    let whole = |value: f64| {
+        i64::from(tairix_util::mathf::round_i32(tairix_util::mathf::floor(
+            value / cell,
+        )))
+    };
     (whole(at.x), whole(at.y))
-}
-
-/// The edges of the relative-neighbourhood graph over `nodes` no longer
-/// than `longest`, each a pair of indices into `nodes`, the lesser first,
-/// that `keeps`: two nodes are joined where no third lies nearer both of
-/// them than they lie to each other. Ties go to the nodes' order, so the
-/// graph is the same whichever of its nodes are asked about first. `None`
-/// where the heap will not hold the edges.
-pub(crate) fn neighbourhood(
-    nodes: &[Node],
-    longest: f64,
-    keeps: &dyn Fn(&Node, &Node) -> bool,
-) -> Option<Vec<(usize, usize)>> {
-    joined(nodes, longest, keeps, &|(a, b), span, third| {
-        let far = squared(third.1, nodes[a].at).max(squared(third.1, nodes[b].at));
-        // Of three equidistant nodes, the edge between the later two yields.
-        far < span || (far <= span && third.0 < a.min(b))
-    })
-}
-
-/// The edges of the Gabriel graph over `nodes` no longer than `longest`
-/// that `keeps` and the relative-neighbourhood graph lacks: two nodes are
-/// joined where no third lies within the circle the two span. Footpaths
-/// take these, the shortcuts the lanes leave out. `None` where the heap
-/// will not hold them.
-pub(crate) fn gabriel_only(
-    nodes: &[Node],
-    longest: f64,
-    keeps: &dyn Fn(&Node, &Node) -> bool,
-) -> Option<Vec<(usize, usize)>> {
-    let lanes = neighbourhood(nodes, longest, keeps)?;
-    let mut edges = joined(nodes, longest, keeps, &|(a, b), span, third| {
-        let middle = nodes[a].at.lerp(nodes[b].at, 0.5);
-        squared(third.1, middle) < 0.25 * span
-    })?;
-    edges.retain(|edge| lanes.binary_search(edge).is_err());
-    Some(edges)
 }
 
 /// The squared distance between `a` and `b`.
@@ -223,38 +204,65 @@ fn squared(a: Point, b: Point) -> f64 {
     (a - b).dot(a - b)
 }
 
-/// The edges between `nodes` no longer than `longest` that `keeps`, and no
-/// third node `blocks` — told the pair, their squared span, and the third's
-/// index and place — in the pairs' order. `None` where the heap will not
-/// hold them.
-fn joined(
-    nodes: &[Node],
-    longest: f64,
+/// Which graph a network's nodes are joined by.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Graph {
+    /// The relative-neighbourhood graph: two nodes are joined where no third
+    /// lies nearer both of them than they lie to each other.
+    Neighbourhood,
+    /// The Gabriel graph's edges the relative-neighbourhood graph lacks: two
+    /// nodes are joined where no third lies within the circle the two span,
+    /// though one lies in their lune. Footpaths take these, the shortcuts the
+    /// lanes leave out.
+    GabrielOnly,
+}
+
+/// The edges of `graph` over `nodes`, filed in `filed`, from node `a` to each
+/// later node within `longest` of it that `keeps`, by index, in their order.
+/// Ties go to the nodes' order, so the graph is the same whichever of its
+/// nodes are asked about first, and in whatever order. `None` where the heap
+/// will not hold them.
+pub(crate) fn edges_from(
+    graph: Graph,
+    (nodes, filed): (&[Node], &Filed),
+    (a, longest): (usize, f64),
     keeps: &dyn Fn(&Node, &Node) -> bool,
-    blocks: &dyn Fn((usize, usize), f64, (usize, Point)) -> bool,
-) -> Option<Vec<(usize, usize)>> {
-    let filed = Filed::new(nodes.iter().map(|node| node.at), longest.max(1e-6))?;
-    let mut edges = Vec::new();
-    for a in 0..nodes.len() {
-        for b in filed.near(nodes[a].at, longest) {
-            let span = squared(nodes[a].at, nodes[b].at);
-            if b <= a || span > longest * longest || !keeps(&nodes[a], &nodes[b]) {
-                continue;
-            }
-            // Every node that could block the pair lies within its span of
-            // either end.
-            let reach = tairix_util::mathf::sqrt(span);
-            let blocked = filed.near(nodes[a].at, reach).any(|c| {
-                c != a && c != b && blocks((a, b), span, (c, nodes[c].at))
-            });
-            if !blocked {
-                edges.try_reserve(1).ok()?;
-                edges.push((a, b));
-            }
+) -> Option<Vec<usize>> {
+    let here = nodes.get(a)?;
+    let mut ends = Vec::new();
+    for b in filed.near(here.at, longest) {
+        let Some(there) = nodes.get(b) else {
+            continue;
+        };
+        let span = squared(here.at, there.at);
+        if b <= a || span > longest * longest || !keeps(here, there) {
+            continue;
+        }
+        // Every node that could part the pair lies within its span of `a`.
+        let thirds = || {
+            filed
+                .near(here.at, tairix_util::mathf::sqrt(span))
+                .filter(|&c| c != a && c != b)
+                .filter_map(|c| Some((c, nodes.get(c)?.at)))
+        };
+        // Of three equidistant nodes, the edge between the later two yields.
+        let in_lune = |(c, at): (usize, Point)| {
+            let far = squared(at, here.at).max(squared(at, there.at));
+            far < span || (far <= span && c < a)
+        };
+        let middle = here.at.lerp(there.at, 0.5);
+        let in_circle = |(_, at): (usize, Point)| squared(at, middle) < 0.25 * span;
+        let joined = match graph {
+            Graph::Neighbourhood => !thirds().any(in_lune),
+            Graph::GabrielOnly => thirds().any(in_lune) && !thirds().any(in_circle),
+        };
+        if joined {
+            ends.try_reserve(1).ok()?;
+            ends.push(b);
         }
     }
-    edges.sort_unstable();
-    Some(edges)
+    ends.sort_unstable();
+    Some(ends)
 }
 
 /// The two ends of a way between `a` and `b`, the lesser first, as its

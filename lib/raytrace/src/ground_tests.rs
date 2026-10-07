@@ -26,6 +26,7 @@ fn ground(seed: u32) -> Ground {
         seed,
         ways: None,
         bounds: None,
+        tilled: None,
         floor: None,
     }
 }

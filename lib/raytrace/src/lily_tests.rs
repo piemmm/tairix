@@ -2,7 +2,7 @@
 //! of its own, worn as its age says, and coloured to agree with the cut.
 
 use super::*;
-use crate::heightfield::CHANNELS;
+use crate::heightfield::{Grows, QUANTITIES};
 
 /// Keys enough to see a lily's pads and petals vary.
 fn keys(count: u32) -> impl Iterator<Item = u32> {
@@ -189,7 +189,8 @@ fn spot(key: u32, (at, size): ((f64, f64), f64), front: bool) -> Spot {
         girth: size,
         instance: 0x5a5a,
         front,
-        ground: [0.0; CHANNELS],
+        ground: [0.0; QUANTITIES],
+        grows: Grows::default(),
         thatch: 0.0,
         cover: None,
     }

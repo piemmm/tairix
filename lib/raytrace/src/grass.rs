@@ -30,7 +30,9 @@ use core::f64::consts::TAU;
 
 use tairix_util::mathf::{self, fmax, fmin};
 
-use crate::heightfield::{Attributes, Heightfield, ABSENT, CHANNELS};
+use crate::farmed::{Drill, Grown, CODES};
+use crate::grazing;
+use crate::heightfield::{Attributes, Grows, Heightfield, ABSENT, CHANNELS, QUANTITIES};
 use crate::leaf::Outline;
 use crate::noise::{cell, cells2, hash2, noise2, smoothstep};
 use crate::sample::{mix32, mix64, unit};
@@ -60,14 +62,16 @@ pub(crate) const HEAD: u32 = 1 << 28;
 /// its own key.
 const VIGOUR_SHIFT: u32 = 24;
 const VIGOUR_STEPS: u32 = 15;
-const KIND_SHIFT: u32 = 22;
+const KIND_SHIFT: u32 = 20;
 const KEY: u32 = (1 << KIND_SHIFT) - 1;
 
-/// The most kinds of grass one sward holds, as the bits a mark carries its
-/// kind in.
-const KIND_BITS: u32 = 2;
+/// The most kinds one sward holds: its wild grasses, then the crops sown in
+/// it; and the bits a mark carries its kind in.
+pub(crate) const WILD_KINDS: usize = 4;
+pub(crate) const CROP_KINDS: usize = 12;
+pub(crate) const GRASS_KINDS: usize = WILD_KINDS + CROP_KINDS;
+const KIND_BITS: u32 = 4;
 const KIND_MASK: u32 = (1 << KIND_BITS) - 1;
-pub(crate) const GRASS_KINDS: usize = 1 << KIND_BITS;
 
 // A mark's key, its kind of grass, its vigour and what it is never share a
 // bit, and every kind of grass has a place in it.
@@ -78,6 +82,7 @@ const _: () = {
     assert!(KEY & (kinds | kind | vigour) == 0);
     assert!(kind & (kinds | vigour) == 0 && vigour & kinds == 0);
     assert!(KIND_SHIFT + KIND_BITS <= VIGOUR_SHIFT);
+    assert!(GRASS_KINDS <= 1 << KIND_BITS);
 };
 
 /// The widest a flower's head spreads from its stalk's tip.
@@ -103,9 +108,12 @@ const THICKEST: f64 = 2.4;
 /// the most of a cell's breadth one may take, so it stays within its cell.
 const MERGED: f64 = 0.7;
 const WIDEST: f64 = 0.25;
-/// How much broader than its stem a spike stands, and a plume spreads.
+/// How much broader than its stem a spike stands, a plume spreads, a wheat
+/// ear stands and a barley ear's awns spread.
 const SPIKE: f64 = 3.2;
 const PLUME: f64 = 7.0;
+const EAR: f64 = 3.8;
+const AWNED: f64 = 5.0;
 
 /// The least a cell must thrive to grow anything, and the most points a
 /// side a lawn is looked over at for whether anything grows on it.
@@ -116,6 +124,12 @@ const THRIVES: f64 = 0.02;
 /// than ending in a wall.
 const STUNTED: f64 = 0.25;
 const SURVEY: u32 = 256;
+
+/// The tallest a pasture's grass stands where stock graze it: they bite
+/// every kind to the same height, and its stems with it. And the tallest it
+/// grows over the weeks they shun it about a pat.
+const GRAZED: f64 = 0.07;
+const SHUNNED: f64 = 0.22;
 
 /// How much of a leaf's height by its width it covers, tapering to its tip.
 const BLADE_FILL: f64 = 0.6;
@@ -210,13 +224,66 @@ pub(crate) enum Cover {
     Litter(Litter),
 }
 
-/// A sward: the kinds of grass it holds; how many shoots stand to a square
-/// metre where it grows best; and the share of them ending in a wildflower.
+/// A sward: the kinds of grass it holds wild; what a farmed land's fields
+/// grow in it, and the seed its pastures' pats are scattered under, which
+/// it stands rank about; how many shoots stand to a square metre where it
+/// grows best; and the share of them ending in a wildflower.
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct Grass {
-    pub(crate) kinds: [Option<GrassKind>; GRASS_KINDS],
+    pub(crate) kinds: [Option<GrassKind>; WILD_KINDS],
+    pub(crate) sown: Sown,
+    pub(crate) grazing: Option<u32>,
     pub(crate) shoots: f64,
     pub(crate) flowers: f64,
+}
+
+/// What a farmed land's fields grow in a sward, in place of its wild
+/// grasses: the kinds of crop and of cut grass, and which of them each byte a
+/// grid keeps a growth in grows as — by its place among the sward's kinds,
+/// past its wild ones — or nought for one that grows none of them.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct Sown {
+    pub(crate) kinds: [Option<GrassKind>; CROP_KINDS],
+    pub(crate) by_growth: [u8; CODES],
+}
+
+#[cfg(test)]
+impl Sown {
+    /// A sward on land nobody farms.
+    pub(crate) const NONE: Self = Self {
+        kinds: [None; CROP_KINDS],
+        by_growth: [0; CODES],
+    };
+}
+
+impl Grass {
+    /// The kind growing where a grid's growth byte is `grown`, if one of the
+    /// sward's sown kinds does, and its place among the sward's kinds.
+    fn sown(&self, grown: u8) -> Option<(u32, GrassKind)> {
+        let index = self
+            .sown
+            .by_growth
+            .get(usize::from(grown))
+            .copied()
+            .unwrap_or(0);
+        if usize::from(index) < WILD_KINDS {
+            return None;
+        }
+        Some((u32::from(index), self.kind_at(usize::from(index))?))
+    }
+
+    /// Its kind at `index` among its kinds, wild or sown.
+    fn kind_at(&self, index: usize) -> Option<GrassKind> {
+        match index.checked_sub(WILD_KINDS) {
+            None => self.kinds.get(index).copied().flatten(),
+            Some(slot) => self.sown.kinds.get(slot).copied().flatten(),
+        }
+    }
+
+    /// Every kind it holds, wild or sown.
+    fn every_kind(&self) -> impl Iterator<Item = &GrassKind> + '_ {
+        self.kinds.iter().chain(self.sown.kinds.iter()).flatten()
+    }
 }
 
 /// A kind of grass.
@@ -234,13 +301,23 @@ pub(crate) struct GrassKind {
     /// How much it grows in tussocks: `0.0` for an even sod, `1.0` for clumps
     /// with bare ground between.
     pub(crate) tufted: f64,
-    /// The share of its shoots that are stems, and the seed heads they carry.
+    /// The share of its shoots that are stems, the seed heads they carry —
+    /// none on a cut stem — and how far over a ripe head bows them, `0.0`
+    /// upright to `1.0` hanging.
     pub(crate) stems: f64,
-    pub(crate) head: Head,
+    pub(crate) head: Option<Head>,
+    pub(crate) nod: f64,
     /// The ground it takes to.
     pub(crate) habit: Habit,
     /// How much of the sward it holds, against its other kinds.
     pub(crate) share: f64,
+    /// How far apart a sown crop's rows are drilled; nought for grass
+    /// growing wild.
+    pub(crate) rows: f64,
+    /// For a crop standing as plants about the eye, how far from it the
+    /// sward begins to take over from them and has wholly; `None` for one
+    /// only ever a sward.
+    pub(crate) stood: Option<(f64, f64)>,
 }
 
 /// A grass's seed head.
@@ -248,8 +325,13 @@ pub(crate) struct GrassKind {
 pub(crate) enum Head {
     /// A slender spike along the stem's top: rye, timothy.
     Spike,
-    /// A loose plume spreading from it: bent, hair-grass, reed.
+    /// A loose plume spreading from it: bent, hair-grass, reed, an oat's
+    /// panicle, a maize's tassel, rape's racemes.
     Plume,
+    /// A short, dense ear: wheat's.
+    Ear,
+    /// An ear bristling with long awns: barley's.
+    Awned,
 }
 
 impl Head {
@@ -259,6 +341,18 @@ impl Head {
         match self {
             Self::Spike => (SPIKE, 1),
             Self::Plume => (PLUME, 2),
+            Self::Ear => (EAR, 1),
+            Self::Awned => (AWNED, 2),
+        }
+    }
+
+    /// How much of its stem's height it takes from the top, and how far past
+    /// the stem's tip it reaches, each as a share of that height.
+    const fn length(self) -> (f64, f64) {
+        match self {
+            Self::Spike | Self::Plume => (0.18, 0.08),
+            Self::Ear => (0.09, 0.04),
+            Self::Awned => (0.14, 0.065),
         }
     }
 }
@@ -384,7 +478,9 @@ impl Canopy {
 /// shoots before its own draw rounds them, how tall over its kind's own, how
 /// many finer shoots each of its shoots stands for, the mark bits its shoots
 /// carry, and the way out from its tussock's middle with how far out toward
-/// the rim it lies.
+/// the rim it lies; for a sown crop, the bytes of its growth and its rows,
+/// which say how its field is drilled; and how far stock have bitten its
+/// stems away, `0.0` none to `1.0` every one.
 #[derive(Copy, Clone, Debug)]
 struct Stand {
     kind: GrassKind,
@@ -394,6 +490,8 @@ struct Stand {
     marks: u32,
     out: (f64, f64),
     splay: f64,
+    drilled: Option<(u8, u8)>,
+    bitten: f64,
 }
 
 /// Steps a cached stand's splay is kept in: coarser than it varies across a
@@ -403,8 +501,8 @@ const SPLAY_STEPS: u32 = 3;
 /// One shoot of grass: the level way its tip bows toward, and how far out;
 /// how high it stands; its width at the root, and the most it spreads either
 /// side of its line; how far its tip droops back; how far its blade turns
-/// about itself root to tip; the seed head a stem carries and the wildflower
-/// a leaf may; and its key.
+/// about itself root to tip; the seed head a stem carries and how far it
+/// hangs, and the wildflower a leaf may; and its key.
 #[derive(Copy, Clone, Debug)]
 struct Placed {
     toward: (f64, f64),
@@ -415,6 +513,7 @@ struct Placed {
     droop: f64,
     twist: f64,
     head: Option<Head>,
+    nod: f64,
     flower: Option<f64>,
     key: u32,
 }
@@ -468,12 +567,10 @@ impl Lawn {
 
     /// The highest anything of the cover stands above the ground.
     fn reach(&self) -> f64 {
-        match self.cover {
+        match &self.cover {
             Cover::Grass(grass) => {
                 let tallest = grass
-                    .kinds
-                    .iter()
-                    .flatten()
+                    .every_kind()
                     .map(|kind| kind.height.1)
                     .fold(0.0, f64::max);
                 tallest * RANKEST * STEM_RISE * BOW + FLOWER_ROOM
@@ -556,14 +653,60 @@ impl Lawn {
         field: &Heightfield,
         ((cx, cz), middle): ((u32, u32), (f64, f64)),
     ) -> Option<Stand> {
-        let thrives = self.thrives(field, middle);
+        let near = self.near(middle);
+        if near <= 0.0 {
+            return None;
+        }
+        let carried = field.carried_at(middle.0, middle.1);
+        let thrives = self.thriving(near, carried, middle);
         if thrives <= THRIVES {
             return None;
         }
-        let [wet, _, _, path, _, snow] = field.attributes_at(middle.0, middle.1);
-        let (index, kind) = self.kind(grass, (middle, hash2(cx, cz, self.seed)), (wet, path))?;
+        let ([wet, _, _, path, _, snow], growing) = carried;
+        let (grown_code, rows) = growing.nearest();
+        let sown = grass.sown(grown_code);
+        let (index, kind) = match sown {
+            Some(crop) => crop,
+            None => self.kind(grass, (middle, hash2(cx, cz, self.seed)), (wet, path))?,
+        };
         let sward = self.sward(middle);
-        let (thickness, grown) = sward.growth(kind.tufted);
+        // A crop stands even across its field, barely thicker or taller where
+        // its ground is better.
+        let (thickness, grown) = match sown {
+            Some(_) => (0.9 + 0.2 * sward.swathe, 0.92 + 0.12 * sward.swathe),
+            None => sward.growth(kind.tufted),
+        };
+        // About the eye a crop stood as plants leaves the sward to carry it
+        // on only beyond them.
+        let taken = kind.stood.map_or(1.0, |(from, to)| {
+            smoothstep(
+                from,
+                to,
+                mathf::hypot(middle.0 - self.seen.eye.0, middle.1 - self.seen.eye.1),
+            )
+        });
+        if taken <= 0.0 {
+            return None;
+        }
+        let thickness = thickness * taken;
+        // Grazed short, but rank and greener where stock shun their pats, and
+        // smothered beneath them.
+        let rank = match grass.grazing {
+            Some(seed) if Grown::of(grown_code) == Grown::Grazed => {
+                Some(grazing::rank(middle, seed)?)
+            }
+            _ => None,
+        };
+        let grown = rank.map_or(grown, |rank| {
+            let tallest = kind.height.1.max(1e-6);
+            let (bitten, shunned) = (
+                fmin(GRAZED / tallest, grown),
+                fmin(SHUNNED / tallest, grown),
+            );
+            bitten + (shunned - bitten) * rank
+        });
+        let bitten = rank.map_or(0.0, |rank| 1.0 - rank);
+        let vigour = rank.map_or(sward.vigour(), |rank| sward.vigour().max(rank));
         // Rooted on the snow, a shoot shows only what stands above it.
         let buried = snow::depth_of(snow) / (kind.height.1 * grown).max(1e-6);
         let stature = grown * (1.0 - buried);
@@ -571,8 +714,7 @@ impl Lawn {
             return None;
         }
         let share = grass.shoots * kind.thickness * self.cell * self.cell;
-        let vigour =
-            u32::try_from(mathf::round_i32(sward.vigour() * f64::from(VIGOUR_STEPS))).unwrap_or(0);
+        let vigour = u32::try_from(mathf::round_i32(vigour * f64::from(VIGOUR_STEPS))).unwrap_or(0);
         Some(Stand {
             kind,
             shoots: fmin(share * thrives * thickness, share * THICKEST),
@@ -581,6 +723,8 @@ impl Lawn {
             marks: marks(index, vigour),
             out: sward.out,
             splay: sward.splay,
+            drilled: sown.map(|_| (grown_code, rows)),
+            bitten,
         })
     }
 
@@ -606,46 +750,70 @@ impl Lawn {
         grass.shoots * kind.thickness * self.cell * self.cell * THICKEST
     }
 
-    /// `stand`, in the bytes a canopy grid's vertex keeps: its kind, vigour
-    /// and splay; its shoots, as a share of the most its kind holds; its
-    /// stature, as a share of the rankest; and the way out from its tussock,
-    /// in 256ths of a turn. The channels a land keeps its growth and its
-    /// snow in stay empty. No shoots at all packs as none.
+    /// `stand`, in the bytes a canopy grid's vertex keeps: its kind and
+    /// vigour; its shoots, as a share of the most its kind holds; its
+    /// stature, as a share of the rankest; the way out from its tussock, in
+    /// 256ths of a turn; its splay; a crop's growth and rows; and how far its
+    /// stems are bitten. No shoots at all packs as none.
     fn pack(&self, grass: &Grass, stand: &Stand) -> Attributes {
         let kind = (stand.marks >> KIND_SHIFT) & KIND_MASK;
         let vigour = (stand.marks >> VIGOUR_SHIFT) & VIGOUR_STEPS;
-        let splay = u32::try_from(mathf::round_i32(stand.splay * f64::from(SPLAY_STEPS)))
-            .unwrap_or(0)
-            .min(SPLAY_STEPS);
+        let splay = mathf::round_i32(stand.splay * f64::from(SPLAY_STEPS)).clamp(0, 255);
         let turn = mathf::atan2(stand.out.1, stand.out.0) / TAU;
         let heading = mathf::round_i32(256.0 * (turn - mathf::floor(turn)));
+        let (grown, rows) = stand.drilled.unwrap_or_default();
         [
-            u8::try_from(kind | (vigour << 2) | (splay << 6)).unwrap_or(0),
+            u8::try_from(kind | (vigour << KIND_BITS)).unwrap_or(0),
             byte(stand.shoots / self.most(grass, &stand.kind).max(1e-9)),
             byte(stand.stature / RANKEST),
             u8::try_from(heading & 0xff).unwrap_or(0),
-            0,
-            0,
+            u8::try_from(splay).unwrap_or(0),
+            grown,
+            rows,
+            byte(stand.bitten),
         ]
     }
 
     /// The stand the bytes `packed` keep for the cell about `middle`.
     fn unpack(&self, grass: &Grass, packed: Attributes, middle: (f64, f64)) -> Option<Stand> {
-        let [head, shoots, stature, heading, _, _] = packed;
+        let [head, shoots, stature, heading, splay, grown, rows, bitten] = packed;
         if shoots == 0 {
             return None;
         }
-        let index = u32::from(head & 3);
-        let kind = grass.kinds.get(index as usize).copied().flatten()?;
+        let index = u32::from(head) & KIND_MASK;
+        let kind = grass.kind_at(index as usize)?;
         let angle = TAU * f64::from(heading) / 256.0;
         Some(Stand {
             kind,
             shoots: f64::from(shoots) / 255.0 * self.most(grass, &kind),
             stature: f64::from(stature) / 255.0 * RANKEST,
             merged: self.merged(middle, kind.width),
-            marks: marks(index, u32::from(head >> 2) & VIGOUR_STEPS),
+            marks: marks(index, u32::from(head) >> KIND_BITS),
             out: (mathf::cos(angle), mathf::sin(angle)),
-            splay: f64::from(u32::from(head >> 6)) / f64::from(SPLAY_STEPS),
+            splay: f64::from(splay) / f64::from(SPLAY_STEPS),
+            drilled: (grown != 0).then_some((grown, rows)),
+            bitten: f64::from(bitten) / 255.0,
+        })
+    }
+
+    /// How the cell whose first corner is `corner` is drilled, growing as
+    /// `stand` has it: `None` for one not sown.
+    fn rows(&self, stand: &Stand, corner: (f64, f64)) -> Option<Rows> {
+        let drilled = stand.drilled?;
+        let spacing = stand.kind.rows;
+        if spacing <= 0.0 {
+            return None;
+        }
+        let drill = Drill::of(spacing, drilled);
+        let middle = (corner.0 + 0.5 * self.cell, corner.1 + 0.5 * self.cell);
+        let distance = mathf::hypot(middle.0 - self.seen.eye.0, middle.1 - self.seen.eye.1);
+        let pull = smoothstep(1.5, 3.0, spacing / fmax(distance * self.seen.pixel, 1e-9));
+        let side = self.cell - fmin(stand.kind.width * stand.merged, 0.9 * self.cell);
+        Some(Rows {
+            drill,
+            pull,
+            kept: drill.kept(side, pull),
+            corner,
         })
     }
 
@@ -689,7 +857,7 @@ impl Lawn {
         block: u32,
     ) -> (f64, Attributes) {
         let none = (f64::from(ABSENT), [0; CHANNELS]);
-        let Cover::Grass(grass) = self.cover else {
+        let Cover::Grass(grass) = &self.cover else {
             return none;
         };
         let block = block.max(1);
@@ -714,12 +882,12 @@ impl Lawn {
                     self.from.1 + (kept_z * f64::from(block) + f64::from(dz)) * self.cell,
                 );
                 let cell = self.cell_of((corner.0 + 0.5 * self.cell, corner.1 + 0.5 * self.cell));
-                let Some(stand) = self.grown(&grass, ground, cell) else {
+                let Some(stand) = self.grown(grass, ground, cell) else {
                     continue;
                 };
                 // The vertex keeps the cell it stands in: the block's middle.
                 if dx == block / 2 && dz == block / 2 {
-                    packed = self.pack(&grass, &stand);
+                    packed = self.pack(grass, &stand);
                 }
                 let highest =
                     ground.highest_over(corner, (corner.0 + self.cell, corner.1 + self.cell));
@@ -735,7 +903,7 @@ impl Lawn {
 
     /// The blades about `point`, if it lies within this lawn's grass.
     pub(crate) fn canopy(&self, point: Vec3, fields: &[Heightfield]) -> Option<Canopy> {
-        let Cover::Grass(grass) = self.cover else {
+        let Cover::Grass(grass) = &self.cover else {
             return None;
         };
         let at = (point.x, point.z);
@@ -784,9 +952,9 @@ impl Lawn {
             let kept = match tops {
                 Some((grid, _)) => {
                     let vertex = (whole(column + dx) + 1, whole(row + dz) + 1);
-                    self.unpack(&grass, grid.attributes_of(vertex.0, vertex.1), middle)
+                    self.unpack(grass, grid.attributes_of(vertex.0, vertex.1), middle)
                 }
-                None => self.grown(&grass, field, self.cell_of(middle)),
+                None => self.grown(grass, field, self.cell_of(middle)),
             };
             let Some(Stand {
                 kind,
@@ -841,16 +1009,33 @@ impl Lawn {
     /// as much as the land lets grow there, less on a path, none on a road,
     /// none where a finer lawn covers the ground instead, and fading far
     /// from the eye.
-    fn thrives(&self, field: &Heightfield, (x, z): (f64, f64)) -> f64 {
+    fn thrives(&self, field: &Heightfield, at: (f64, f64)) -> f64 {
+        let near = self.near(at);
+        if near <= 0.0 {
+            return 0.0;
+        }
+        self.thriving(near, field.carried_at(at.0, at.1), at)
+    }
+
+    /// How much of the lawn shows at `(x, z)` for how near the eye it lies:
+    /// none off the ground it covers.
+    fn near(&self, (x, z): (f64, f64)) -> f64 {
         if !self.covers((x, z)) {
             return 0.0;
         }
         let distance = mathf::hypot(x - self.seen.eye.0, z - self.seen.eye.1);
-        let near = 1.0 - smoothstep(self.seen.fade.0, self.seen.fade.1, distance);
-        if near <= 0.0 {
-            return 0.0;
-        }
-        let [_, _, road, path, green, _] = field.attributes_at(x, z);
+        1.0 - smoothstep(self.seen.fade.0, self.seen.fade.1, distance)
+    }
+
+    /// [`Self::thrives`] at `(x, z)`, its cell showing `near` of it, on land
+    /// carrying `quantities` and growing `grows` there.
+    fn thriving(
+        &self,
+        near: f64,
+        (quantities, grows): ([f64; QUANTITIES], Grows),
+        (x, z): (f64, f64),
+    ) -> f64 {
+        let [_, _, road, path, green, _] = quantities;
         let (under, hidden) = self
             .shade
             .as_ref()
@@ -859,8 +1044,14 @@ impl Lawn {
         // closed wood, and weeds all but as soon; their leaves gather under
         // their crowns. Weeds take to the trodden edges of a path and the
         // gaps between tussocks, where fallen leaves show too.
-        let grows = match self.cover {
-            Cover::Grass(_) => green * (1.0 - 0.65 * path) * (1.0 - smoothstep(0.3, 0.85, hidden)),
+        let grows = match &self.cover {
+            Cover::Grass(grass) => {
+                // A sown crop grows wherever its field is drilled, which grows
+                // nothing wild.
+                let sown = grass.sown(grows.nearest().0).is_some();
+                let green = if sown { 1.0 } else { green };
+                green * (1.0 - 0.65 * path) * (1.0 - smoothstep(0.3, 0.85, hidden))
+            }
             Cover::Weeds(_) => {
                 let gap = 1.0 - self.sward((x, z)).clump;
                 fmin(green * (0.6 + 0.8 * path), 1.0)
@@ -893,12 +1084,12 @@ impl Lawn {
         let key = mix32(cell_key ^ index.wrapping_mul(0x9e37_79b9)) & KEY;
         let [first, second, third] = [0, 0x9e37_79b9_7f4a_7c15, 0x7f4a_7c15_9e37_79b9]
             .map(|salt| mix64(u64::from(key) ^ salt));
-        let stem = draw(third, 0) < kind.stems;
+        let stem = draw(third, 0) < kind.stems * (1.0 - stand.bitten);
         let width = fmin(
             kind.width * stand.merged * if stem { 0.35 } else { 1.0 },
             WIDEST * self.cell,
         );
-        let head = stem.then_some(kind.head);
+        let head = kind.head.filter(|_| stem);
         let breadth = fmin(
             head.map_or(0.5 * width, |head| 0.5 * width * head.spread().0),
             0.45 * self.cell,
@@ -965,7 +1156,7 @@ impl Lawn {
             }
         };
         let bows = if stem {
-            0.15
+            0.15 + 0.6 * kind.nod
         } else {
             splay * (0.3 + 0.7 * draw(second, 0))
         };
@@ -993,12 +1184,13 @@ impl Lawn {
             width,
             breadth,
             droop: if stem {
-                0.02
+                0.02 + 0.3 * kind.nod * (0.6 + 0.8 * draw(third, 2))
             } else {
                 kind.droop * (0.5 + draw(third, 2))
             },
             twist: 2.4 * (draw(third, 3) - 0.5),
             head,
+            nod: kind.nod,
             flower,
             key,
         }
@@ -1052,8 +1244,8 @@ impl Lawn {
         testers: &mut Testers<'_, N>,
     ) {
         let middle = (corner.0 + 0.5 * self.cell, corner.1 + 0.5 * self.cell);
-        let (stand, thrives) = match self.cover {
-            Cover::Grass(grass) => match self.stand(&grass, (field, tops), ((cx, cz), middle)) {
+        let (stand, thrives) = match &self.cover {
+            Cover::Grass(grass) => match self.stand(grass, (field, tops), ((cx, cz), middle)) {
                 Some(stand) => (Some(stand), 1.0),
                 None => return,
             },
@@ -1079,12 +1271,15 @@ impl Lawn {
             highest,
         };
         let cell_key = hash2(cx, cz, self.seed);
-        match (self.cover, stand) {
+        match (&self.cover, stand) {
             (Cover::Grass(grass), Some(stand)) => {
-                self.grass_hits((&stand, grass.flowers), (cell_key, corner, plane), testers);
+                // A field's own crop is sown clean of the sward's wildflowers.
+                let wild = grass_kind(stand.marks) < WILD_KINDS;
+                let flowers = if wild { grass.flowers } else { 0.0 };
+                self.grass_hits((&stand, flowers), (cell_key, corner, plane), testers);
             }
             (Cover::Weeds(weeds), _) => rosette_hits(
-                (&weeds, thrives, self.cell),
+                (weeds, thrives, self.cell),
                 (cell_key, corner, plane),
                 testers,
             ),
@@ -1092,7 +1287,7 @@ impl Lawn {
                 if mathf::hypot(plane.slope.0, plane.slope.1) <= LEAF_REPOSE =>
             {
                 litter_hits(
-                    (&litter, thrives, self.cell),
+                    (litter, thrives, self.cell),
                     (cell_key, corner, plane),
                     testers,
                 );
@@ -1110,10 +1305,13 @@ impl Lawn {
         (cell_key, (x0, z0), plane): (u32, (f64, f64), Plane),
         testers: &mut Testers<'_, N>,
     ) {
-        let (count, start) = rooted(stand.shoots / stand.merged, cell_key);
+        let rows = self.rows(stand, (x0, z0));
+        let kept = rows.as_ref().map_or(1.0, |rows| rows.kept);
+        let (count, start) = rooted(stand.shoots / stand.merged / kept, cell_key);
         let mut heading = (mathf::cos(start), mathf::sin(start));
         let fountain = 1.5 * stand.splay * stand.kind.tufted;
         let splay = 0.6 + 0.8 * stand.splay;
+        let bow = fmax(splay, 0.15 + 0.6 * stand.kind.nod);
         // How far across the ground each ray runs per unit along it.
         let mut flat = [0.0; N];
         let mut root_flat = [0.0; N];
@@ -1132,10 +1330,17 @@ impl Lawn {
             let length = fmax(mathf::hypot(hx, hz), 1e-9);
             heading = turn_golden(heading);
             let sprout = self.sprout(stand, (cell_key, index));
+            let Some(sprout) = rows.as_ref().map_or(Some(sprout), |rows| rows.sown(sprout)) else {
+                continue;
+            };
             // Whether the shoot can reach a ray at all: near enough its line,
             // and not wholly beneath the stretch of it over the shoot.
             let (rx, rz) = (x0 + sprout.root.0, z0 + sprout.root.1);
-            let spread = stand.kind.lean * splay * sprout.height + sprout.breadth + FLOWER_ROOM;
+            let hang = sprout
+                .head
+                .map_or(0.0, |head| stand.kind.nod * head.length().1 * sprout.height);
+            let spread =
+                stand.kind.lean * bow * sprout.height + hang + sprout.breadth + FLOWER_ROOM;
             let top = plane.at((rx, rz)) + sprout.height * BOW + FLOWER_ROOM;
             let wanting = testers
                 .members
@@ -1169,7 +1374,7 @@ impl Lawn {
             // middle of its bow; a ray passing wide of that meets neither.
             let (lx, lz) = placed.toward;
             let (centre_x, centre_z) = (rx + 0.5 * placed.reach * lx, rz + 0.5 * placed.reach * lz);
-            let spread = 0.5 * placed.reach + placed.breadth + placed.flower.unwrap_or(0.0);
+            let spread = 0.5 * placed.reach + hang + placed.breadth + placed.flower.unwrap_or(0.0);
             let shoot = Shoot {
                 // Rooted a little into the ground it stands on.
                 root: Vec3::new(rx, plane.at((rx, rz)) - 0.01, rz),
@@ -1224,6 +1429,32 @@ struct Sprout {
     outer: f64,
     root: (f64, f64),
     height: f64,
+}
+
+/// A sown cell's rows: how its field is drilled; how far each seed it draws
+/// is moved onto its row, which is as far as a pixel there resolves the rows;
+/// the share of the seeds it draws that stay within it once moved; and its
+/// first corner.
+struct Rows {
+    drill: Drill,
+    pull: f64,
+    kept: f64,
+    corner: (f64, f64),
+}
+
+impl Rows {
+    /// `sprout` moved onto its row; `None` where that takes it out of its
+    /// cell, which another cell's seed stands in for, or into a tramline's
+    /// wheel track, where nothing grows.
+    fn sown(&self, sprout: Sprout) -> Option<Sprout> {
+        let (x0, z0) = self.corner;
+        let at = (x0 + sprout.root.0, z0 + sprout.root.1);
+        let (x, z) = self.drill.sown(at, self.pull, draw(sprout.second, 3));
+        let root = (x - x0, z - z0);
+        let within = |at: f64| (sprout.inner..=sprout.outer).contains(&at);
+        (within(root.0) && within(root.1) && self.drill.tracked((x, z), 0.0) < 0.5)
+            .then_some(Sprout { root, ..sprout })
+    }
 }
 
 /// One of `bits`' four sixteen-bit draws, finer than any shoot can show, as
@@ -1484,13 +1715,15 @@ impl Shoot {
             width,
             twist,
             head,
+            nod,
             key,
             ..
         } = self.placed;
         // Square to the shoot's line, and so to every piece of its curve,
         // which bows only in the upright plane through that line.
         let level_side = Vec3::new(-lz, 0.0, lx);
-        let top = if head.is_some() { 0.82 } else { 1.0 };
+        let (taken, past) = head.map_or((0.0, 0.0), Head::length);
+        let top = 1.0 - taken;
         let along = [0.0, top / 3.0, 2.0 * top / 3.0, top];
         let points = along.map(|share| self.at(share));
         // Each piece turned by the twist at its middle, a sixth, a half and
@@ -1526,8 +1759,12 @@ impl Shoot {
         }
         if let Some(head) = head {
             // A spike is a slender ear; a plume spreads loose about the stem,
-            // in sprays across one another.
-            let (start, end) = (points[3], self.at(1.0) + Vec3::new(0.0, 0.08 * height, 0.0));
+            // in sprays across one another. A ripe head hangs over the way
+            // its stem bows.
+            let hangs = Vec3::UP
+                .lerp(Vec3::new(lx, -0.6, lz).normalized(), nod)
+                .normalized();
+            let (start, end) = (points[3], self.at(1.0) + hangs * (past * height));
             let (spread, sprays) = head.spread();
             let wide = spread * width;
             let (turn_cos, turn_sin) = (mathf::cos(twist), mathf::sin(twist));

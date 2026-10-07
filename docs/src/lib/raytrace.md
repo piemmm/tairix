@@ -154,19 +154,31 @@ shade the ground.
 Water cloud scatters the sun once exactly, through a droplet phase of a
 forward lobe and a small backward one; every further order of its light is
 the δ-Eddington two-stream solution (Joseph, Wiscombe and Weinman 1976,
-`slab`). The cloud's light grids hold its optical depth toward the sun, away
-from it, straight up, and level away from it. The sun's light is solved in a
-slab facing its beam, as deep as the beam's way in and as thick as the cloud
-runs on behind it, as a heap lit from aside is, and in the cloud's column,
-as a deck is, through which it diffuses down whatever way it fell in —
-the deck's taking over the further the cloud runs across than down. The
-sky's light and the ground's are solved in the column, entering by the
-nearest face the sky lights. The light the cloud scatters
-toward the eye is each diffuse field's mean and its first moment, through the
-full phase's asymmetry. A thin cloud thus takes little but its single
-scattering, a heap's sunlit side shines and its base greys, its shaded side
-is lit by the sky and by what of the sun diffuses through it, and a lossless
-slab sends back or through all the sun it takes in, to a percent.
+`slab`). A deck's extinction is through the body of its clouds, each kind's
+from the liquid water it holds and its droplets' size, 3·LWC / (2·ρ·r)
+(Stephens 1978), so a cumulus is as opaque as real ones are. The cloud's
+light grids hold its optical depth toward the sun, straight up, and away
+from it and level away from it to the cloud's own far side. The
+sun's light is solved in a slab facing its beam, as deep as the beam's way
+in and as thick as the cloud runs on behind it, for a deck of heaps, and in
+the cloud's column, through which it diffuses down whatever way it fell in,
+for a deck of sheets. A sample seen directly measures its depth down to its
+base, and behind it wherever it is lit as a heap, by short taps out to its
+cloud's far side, which the grids' cells are too coarse to place. The sky's light and the ground's are
+solved in the column, entering by the nearest face the sky lights, the
+ground's as sunlit as it looks from the cloud's floor through the bank's own
+shadow. The light the cloud scatters toward the eye is each diffuse field's
+mean and its first moment, through the full phase's asymmetry. A thin cloud
+thus takes little but its single scattering, a heap's sunlit side shines and
+its base greys, its shaded side is lit by the sky and by what of the sun
+diffuses through it, and a lossless slab sends back or through all the sun
+it takes in, to a percent.
+
+A ray seen directly strides on to where a cloud's uneroded billows stand,
+then steps through them a pixel's footprint or two at a time, its edges cut
+by finer reads of the wisps as far as that footprint resolves them, each
+finer one settling to what it leaves on average; the nearest of its looks
+toward the sun read the edges as finely, so a billow shades its neighbour.
 
 ## Lands
 
@@ -208,6 +220,20 @@ ground's colour shows where less than about 6 cm lies, in patches, and grass
 grows only where it lies thinner than the grass stands, a shoot rooted on the
 snow showing only what stands above it.
 
+Where a farmed land lies under snow, each wall, hedge and fence standing
+between its gaps is a barrier the wind crosses (`snow::Barrier`), as tall as
+the countryside layout has it and letting through what its kind does
+(`Kind::porosity`). Each finer grid lays its own snow, the open depth plus the
+drift about every barrier within sixteen of its heights (`Snowpack::drifted`,
+after Tabler's "Snow Fence Guide", 1991): banked against a wall's lee face as
+high as the wall where enough fell and tailing off over nine of its heights,
+a hedge's lower against it and deepest some three and a half heights clear of
+it, scoured from a barrier's windward foot inside a low ridge, and nothing
+where the wind runs along it. The deepest drift any barrier drops at a place
+is laid there, less the deepest scour. The far grid leaves drifts out; what
+stands is founded on the ground beneath the snow (`Grids::beneath_snow`), so
+a drift buries a wall's foot rather than lifting the wall.
+
 A valley's sides climb as steeply as its rock stands, its floor wandering
 between spurs, and its view is taken from partway up one side with what it
 looks at in sight. A work may dig cuttings into a land (`land::Build::site`):
@@ -238,6 +264,139 @@ the tile. Each tile shares the plates along its edges with every other, so
 the few drawn meet in any order without a seam. A tile is laid only where
 its ground lies within a centimetre of its plane, in the land's own silt,
 bleached paler, over its earth gone damp beneath.
+
+## Fields
+
+A farmed land's boundaries (`compose::fields`) are set out from its
+countryside layout (`docs/src/lib/countryside.md`) a bounded unit at a time,
+each drawn from its own key and nearest the eye first, at the heights the
+layout gives them.
+
+- **Woodlots** are planted as jittered lattices of the scene's trees, but
+  where a tree would wall off the view. The land's other trees take only to
+  its streams' banks (`wood::Rooting::banks`); its fields are kept clear.
+- **Hedges** are planted shrub by shrub in two staggered rows of thorn and
+  hazel out to 420 m at `Simple` and 1500 m at `Maximum`, swelling and thinning
+  along their length, an oak standing in some, a collapsed stretch mended with
+  post and rail.
+- **Walls** are laid stone by stone (`fields::drystone`, see Geometry) out to
+  where a wall's typical stone spans 3 pixels at `Simple` and 1.5 at
+  `Maximum`, a wall to each core.
+- **Fences** stand true where kept. One let go leans, sags and loses rails,
+  and a snapped rail hangs from its post, resting on the ground at most, its
+  free end torn across its grain (`fracture`) with its splinters pulled from
+  its underside. What is let go — those fences, a mended gap, a gate off its
+  hinge — is timber older and damper than what is kept: silvered, lichened and
+  mossed.
+- **Gates** hang shut, swung into a field or off a hinge; paths cross by a
+  stile, a squeeze between two slabs in a wall.
+
+Beyond where they stand built, hedges and walls stand on as one mesh
+(`fields::far`) to where they shrink below a pixel, across the view and far
+enough either side of it to shadow what is seen. Its stations stand four
+pixels apart; its section is a hedge's lumpy crown, as broad as its shrubs'
+crowns spread and its rows stand apart, or a wall's battered faces and cap,
+breached where the wall tumbled, its run taking up exactly where the wall's
+built bays end. Leaf and stone are too small to tell apart there, so each is
+coloured as they are on the mean: a hedge in clumps of its shrubs' leaves
+(`Pigment::Clumped`) under their own leaf finish, or of its twigs' bark when
+bare in winter; a wall as its own stone massed (`masonry::Massed`), cells a
+typical stone across that settle to the mean of stones and voids. Both were
+measured against the same hedges and walls built near. Where neither is built,
+their foot is painted on the ground.
+
+One farmed land in five lies under snow, drifted against its walls and
+hedges (see Lands), its trees and hedges bare, snow on what faces the sky of
+its walls, fences and far hedges.
+
+## Crops
+
+Each vertex of a farmed land carries what its field grows (`farmed`): a byte
+naming its use — grazed, mown or cut for hay, orchard, vineyard, woodlot,
+left to grow over, or an arable field's crop at the stage the season has it
+at — and a byte for the way its rows run, along the field's length. Both are
+read at the nearest vertex and never blended, so a field's edge never mixes
+two crops into a third, and a tilled field leaves a margin of grass 0.4 to
+2.5 m broad along its edge.
+
+- **Stages.** Cereals stand green in spring, the winter sowing taller than the
+  spring sowing beside it; ripe in summer, some fields already cut; in autumn
+  cut, ploughed or drilled again; in winter young shoots or ploughed. Maize is
+  drilled in spring, stands green through summer and is cut in autumn; rape
+  flowers in spring and is in pod in summer; a ley is now and then cut for
+  silage.
+- **In the sward** (`compose::crops`) a field grows its crop in place of the
+  wild grasses, each crop at each stage a kind of its own: shoots in rows
+  along the field, 12.5 cm apart for cereals and ley, 25 cm for rape and 75
+  cm for maize, under their own heads — wheat's ear, barley's awns, oats'
+  panicle, maize's tassel, rape's racemes. Tramlines run 12 to 24 m apart, two
+  wheel tracks 1.8 m apart and 45 cm wide where nothing grows. Stubble stands
+  short in its rows over its cut straw. Arable ground grows nothing wild: its
+  tilth shows between the rows, ploughed in furrow slices or drilled in fine
+  passes. Far off, where the sward has faded, the ground paints each field its
+  crop's colour.
+- **Maize near the eye stands as plants** (`stand`, `compose::fields::maize`).
+  Out to 60 m at `Simple` and 180 m at `Maximum`, each field's plants are
+  hashed from a lattice laid along its rows, a plant every 15 cm along each,
+  94 of every hundred seeds coming up, none in a tramline or within 1.5 m of
+  the eye; they thin away over the last fifth of that reach, where the sward
+  takes the crop on. Each plant roots in the ground beneath any snow. A ray
+  walks the lattice's cells over the field while low enough to meet a plant,
+  meeting each plant whose leaves could reach it as it comes within reach, as
+  a wood far off is walked. Six plants are built a
+  stage: a stalk jointed at its nodes, each leaf's sheath wrapping it to the
+  collar, 13 to 16 leaves alternating up it — arching out and drooping, the
+  longest about the ear, each folded along its midrib with its margins
+  rippling and the lowest drying back — brace roots at its foot, a branching
+  tassel, and an ear or two in their husks with silks spilling from their
+  tips (`maize` colours the leaves). Ripe in autumn the plant has gone to
+  straw, its leaves hanging and its ears bowed. A lookout is never taken
+  among maize standing taller than the eye, nor within 8 m of it.
+- **Bales** (`fields::bales`). A cut field lies with its one kind of bale or
+  stack: small oblong bales where the baler dropped them along its rows, big
+  round bales scattered with their axes across its way, big square bales here
+  and there, a few side by side or stacked two high; sheaves stooked in rows
+  on a cereal's stubble and a meadow's hay heaped in cocks; a cut ley's
+  silage in big bales wrapped in black or green film. Every bale, sheaf and
+  stook stands on cut ground. Straw is the roughest face a farm leaves
+  (`straw`): its stalks stand in true relief on the bale — crested, bundled,
+  parted in shadowed gaps and frayed about every arris — an oblong bale
+  pressed in flakes and tied with orange twine looping over its top and its
+  ends, a round bale's end wound in the spiral it was rolled in and its side
+  netted. Within 45 m loose stalk ends stand out of every face, lying round
+  with the winding on a round bale's end.
+
+## Pasture, orchards and vineyards
+
+- **Pasture** (`grazing`, `fields::pats`). Stock bite a grazed field's
+  grass to 7 cm whatever its kind, and its stems and seed heads with it. About
+  each of their pats they shun some nine times its area, so out to three of
+  its radii the grass grows rank and greener, up to 22 cm and in seed: none
+  about a fresh pat, the most about one some weeks old, less again as it
+  crumbles and they graze it down. Nothing grows beneath a pat. The pats are
+  hashed from a lattice of 3 m cells, about one to twenty square metres and
+  more where the stock gathered, each lying well inside its cell, so the grass
+  reads its own cell's pat from the same draws the pat is laid from. Out to
+  80 m at `Simple` and 200 m at `Maximum` each is laid on grazed ground as a
+  coiled mound with a ragged edge — fresh and wet, crusted, or old and
+  crumbling — the nearest first where the scene has room for fewer, on the
+  ground beneath any snow, and none where the snow lies deeper than it stands.
+- **Orchards** are planted as woodlots are, but in rows along the field's
+  length, 4.2 to 5.2 m apart along a row and 5.6 to 6.8 m between rows, with
+  apple trees (`plants::Kind::Apple`): a short bole and an open, spreading
+  crown, pink-white with blossom in spring, hung with small green fruit in
+  summer and red apples in autumn (`tree::Fruit`), each a lobed fruit on its
+  stalk beneath a twig, bare in winter.
+- **Vineyards** (`fields::vines`) stand as a stand of vines on rows 2.2 m
+  apart, a vine every 1.1 m trained along its row, a post in place of every
+  fifth, and the trellis's wires strung post to post along each row,
+  sagging a little between: the fruiting wire at 0.8 m and pairs of catch
+  wires at 1.15 and 1.5 m. A vine is a gnarled trunk to its two cordon arms,
+  shoots rising from their spurs between the catch wires with palmate leaves:
+  short in spring, a hedge to the top wire in summer with small green bunches
+  beneath, turning yellow and red in autumn with its grapes ripe, black or
+  white, and pruned back to a cane or two in winter. Out to 250 m at `Simple`
+  and 600 m at `Maximum`. No lookout stands among a vineyard's rows.
 
 ## Woods
 
@@ -671,7 +830,10 @@ gather: mats of packed cushions in patches ragged at every scale by a warp,
 tapering at their margins until they break into the cushions they are made
 of, each mat one moss or another, hoary where dry and exposed, browning in
 a dry season; beyond them a lone cushion lodges here and there, most of all
-in a joint. Nothing clings to a floor worn smooth by feet. Lichen colonises
+in a joint. Only masonry is jointed: a timber's arrises gather no grit, so
+moss on a post keeps to its top, its damp shaded side and its splashed foot.
+Nothing clings to a floor worn smooth by feet. Under snow what faces the sky
+on stone, timber and moss alike lies white. Lichen colonises
 over decades: young colonies stand alone, most of them small, their margins
 lobed, and where it grows thick the old crusts have spread until they meet,
 a mosaic whose joins wander, each crust cracked into areoles and edged in

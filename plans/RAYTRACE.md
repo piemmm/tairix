@@ -28,11 +28,11 @@ D503, D505 and D514–D520 (the tracer's open defects).
 | RT10 | Streams close up: pools and riffles, ledges, bars and cut banks, running water over stones worn round, boulders, drift and weeds | done |
 | RT11 | Deltas, beaches and eroding coasts: sand with driftwood, footprints, paw prints, shells, stones and wrack; cliffs, sandbanks, marram binding the dunes | planned |
 | RT12 | Jetties, harbours and fishing villages; gulls and other birds; shoals of fish | planned |
-| RT13 | `lib/countryside`: the renderer-neutral countryside layout — parcels, boundaries, gates, ways, land use, farmsteads, villages and plots — shared with WinterSun | planned |
-| RT14 | Field boundaries as geometry: hedgerows with standard trees and repaired gaps, dry-stone walls, wooden fences kept and decaying, gates open, shut and broken | planned |
-| RT15 | Ways between fields: green lanes between walls or hedges, tracks to gateways churned to mud where stock gather, roads graded by where they lead | planned |
-| RT16 | Crops: maize, wheat, barley, oats, rapeseed and grass ley, in rows and tramlines by season; cut fields with one kind of bale or stack each | planned |
-| RT17 | Pasture, orchards and vineyards: cow-pats with lusher grass about them, fruit trees in rows, vines on trellised rows | planned |
+| RT13 | `lib/countryside`: the renderer-neutral countryside layout — parcels, boundaries, gates, ways, land use, farmsteads, villages and plots — shared with WinterSun | done |
+| RT14 | Field boundaries as geometry: hedgerows with standard trees and repaired gaps, dry-stone walls, wooden fences kept and decaying, gates open, shut and broken, standing on as geometry to where they span a pixel, and snow drifted against them | done |
+| RT15 | Ways between fields: green lanes between walls or hedges, tracks to gateways churned to mud where stock gather, roads graded by where they lead | in progress |
+| RT16 | Crops: maize, wheat, barley, oats, rapeseed and grass ley, in rows and tramlines by season; cut fields with one kind of bale or stack each | done |
+| RT17 | Pasture, orchards and vineyards: cow-pats with lusher grass about them, fruit trees in rows, vines on trellised rows | done |
 | RT18 | Overgrown ground: brambles, nettles, docks, scrub and tall weeds where land is left | planned |
 | RT19 | Flowers and weeds by the score, in patches rather than an even sprinkle: clover, dandelions and their clocks shedding seed, thistles, buttercups, daisies, poppies, roses, ivy, wisteria and more | planned |
 | RT20 | Masonry as geometry: rubble and coursed stone of individual imperfect stones in mortar; brick walls of individual bricks, reclaimed, marked, chipped and now and then missing | done |
@@ -61,6 +61,7 @@ D503, D505 and D514–D520 (the tracer's open defects).
 | RT43 | Water clouds lit by multiple scattering that holds for thin cloud too, in place of the octave, powder and ambient approximations | done |
 | RT44 | Cloud to the horizon: decks over the Earth's curve, mapped in levels about the eye out to as far as they can be seen, the air beneath them shaded by them, each place lit by the sun as it stands there | done |
 | RT45 | No primitive stand-ins: every limb's foot flares into the roots it grows out of, every break torn, every end tapered, cut or broken as the real thing's is, every leaf and flower worn as the real one is — trees, snags, stumps, fallen trunks and their root plates, the snowman's carrot and sticks, saguaro ribs, spines and areoles, a palm's and a shrub's foot, a reed's tip and plume, a reedmace's spike, a lily's pads and flowers and a crowfoot's flower | done |
+| RT46 | Cumulus as they are: heaps as tall as they are broad, fluffy, detailed at every scale a pixel shows, a thick one dark underneath its sunlit top | in progress |
 
 ## Standing rules
 
@@ -604,51 +605,154 @@ less done.
 
 ## RT13 — `lib/countryside`
 
-A new `no_std` crate holding the countryside's *layout*, with no notion of
-how it is drawn: lib/raytrace sets its records out as geometry, and WinterSun
-(WS30, WS35) as world objects. It obeys WinterSun's world rules, which are
-the stricter: random access keyed by place rather than drawn in sequence, so
-a region laid out in pieces matches one laid out whole and neighbouring tiles
-meet without a seam; placement by priority rule, not first come; `f64` with
-`mathf` only and integer tie-breaks. Vocabularies with meaning in a world —
-which settlement kinds exist, what a building is — stay with each consumer;
-the crate holds the geometry and the algorithms.
+A `no_std` crate holding the countryside's *layout*, with no notion of how
+it is drawn (`docs/src/lib/countryside.md`): lib/raytrace sets its records out
+as geometry, and WinterSun (WS30, WS35) as world objects. It obeys WinterSun's
+world rules: every draw a word keyed by its purpose and place, so a region
+laid out in pieces matches one laid out whole and neighbouring tiles meet
+without a seam; placement by priority rule, not first come; `mathf` maths and
+integer tie-breaks. Vocabularies with meaning in a world — which settlement
+kinds exist, what a building is — stay with each consumer; the crate holds
+the geometry and the algorithms.
 
-- **Ways**: a looped network (relative-neighbourhood graph) between
-  settlements, farmsteads and gateways, ranked road, lane, track and path,
-  routed over the terrain by `lib/terrain`'s router with each rank's pricing.
-- **Parcels**: the land between ways and water split into fields by recursive
-  cuts biased to the contour and to the ways, sized by rank and terrain;
-  never crossing water or a way.
-- **Boundaries**: each parcel edge a hedge, wall, fence or ditch by region and
-  rock, with gates where a track meets it and the gaps a gate leaves.
+- **Ways**: roads and lanes over a relative-neighbourhood graph of the
+  settlements, footpaths along the Gabriel graph's edges the lanes leave out,
+  tracks from each holding out to its fields' gateways, all routed over the
+  terrain by `lib/terrain`'s A\* priced by rank; highways the consumer's.
+- **Parcels**: the land between ways and water cut into fields by recursive
+  cuts biased to the contour and to the ways, sized by their ground; never
+  crossing water or a way.
+- **Boundaries**: each field's edge a hedge, wall, fence or ditch by region
+  and ground, at a height drawn with its kind, every field gated and a stile
+  where a path crosses.
 - **Land use**: arable by crop, pasture, meadow, orchard, vineyard, woodlot,
   left to grow over; one bale kind per cut field.
-- **Settlements**: farmsteads of a house and outbuildings about a yard;
-  villages of plots by frontage along their streets, with front and back
-  gardens and their fences.
+- **Settlements**: farmsteads of a house and outbuildings about a yard on
+  holdings that can be farmed; villages of plots by frontage along their
+  streets, with front and back gardens and most of them fenced.
+- **Steps**: route points and batches of features bounded a core, at most 64
+  routes at once; each step between phases one pass over the region.
 
-## RT14–RT19 — Fields and what grows in them
+## RT14, RT15 — Boundaries and ways
 
-Boundaries are instanced geometry along their polylines: hedges as dense
-shrub masses of leaf-bearing prototypes, varying in height and width, with a
-standard tree now and then and a repaired gap of post and rail where one
-collapsed; dry-stone walls of field stones, each face built up haphazard,
-every stone let fall where the work stands lowest to settle in the nook it
-fits (Visscher and Bolsterli's packing, squeezed along the wall so its
-stones lie flat and longer than tall), the largest at the foot, broken
-angular along the planes it split on and never squared, set by its rough face
-flush with the batter so the face reads as a wall, battered, hearted and
-capped with big stones across the top, collapsing here and there, lichen on
-their faces, moss in a few damp patches and grass at their foot, laid window by
-window from where each stretch starts so where a detail stops building never
-changes a stone nearer the eye; snow drifting against a wall's lee face and scoured from its windward
-one where a land lies under snow (RT29); fences of posts and rails, true where
-kept and leaning, moss-green and missing rails where not; gates hung on posts, open, shut or off a hinge, with
-mud and hoof-churned ruts in a pasture's gateway. Crops are lawns of their own
-blades and heads in drilled rows with tramlines; cut fields stand stubble and
-bales of one kind. Flowers and weeds are drawn per species in patches seeded
-by the field's history, never sprinkled evenly.
+`compose::fields::Fielding` sets a farmed land's boundaries out from the
+layout a bounded unit at a time, nearest the eye first, each boundary drawn
+from its own key at the height the layout gives it (`Boundary::height`), so
+where a detail stops building never changes what stands nearer.
+
+- **Built near.** Hedges are shrub masses of leaf-bearing prototypes in two
+  staggered rows, swelling and thinning along them, an oak standing in some,
+  a collapsed stretch mended with post and rail, out to `Bounds::hedges`.
+  Dry-stone walls (`fields::drystone`) are laid stone by stone, each face
+  built up haphazard, every stone let fall where the work stands lowest to
+  settle in the nook it fits (Visscher and Bolsterli's packing, squeezed
+  along the wall so its stones lie flat), broken angular, set flush with the
+  batter, hearted, capped and tumbled here and there, window by window, out
+  to where a typical stone spans `Bounds::stones` pixels, a wall to each core.
+  Fences stand true where kept; one let go leans, sags and loses rails, a
+  snapped rail hanging from its post with its free end torn across its grain
+  (`fracture`, its splinters scaled to the depth it was bent across). What is
+  let go is timber older and damper than what is kept. Gates hang shut, open
+  or off a hinge; paths cross by stiles.
+- **Far off.** Beyond where they are built, hedges and walls stand on as one
+  mesh (`fields::far`) out to where they span a pixel, across the view: a
+  hedge's lumpy crown or a wall's battered faces and cap, coloured on the mean
+  of what they are made of (`Pigment::Clumped`, `masonry::Massed`), measured
+  against the same boundaries built near.
+- **Under snow** (one farmed land in five): what stands is founded beneath
+  the snow, which each finer grid drifts against every barrier
+  (`Snowpack::drifted`) — banked in a wall's lee, lower and further out
+  behind a hedge, scoured from a windward foot — and lies white on what faces
+  the sky. Its trees and hedges stand bare.
+- **Trees.** The land's free-standing trees take only to stream banks
+  (`Rooting::banks`); its fields are kept clear and its woods are its
+  woodlots.
+- **Ways.** Lanes run between their boundaries, green where the region keeps
+  them so, their tracks bare only in their ruts and trodden grass between;
+  ranks grade by where a way leads. A grazed field's gateway is trodden to
+  bare, wet mud, carved and pocked at the land grid's resolution.
+
+Remaining (RT15): hoof prints in a gateway's mud as geometry near the eye,
+from the impressions RT11's footprints and paw prints are laid with.
+
+## RT16–RT19 — What grows in the fields
+
+- **What the land is used for, in the land** (`farmed`). Each grid vertex
+  carries a categorical byte of its parcel's use from the layout (none,
+  grazed, mown, hayed, each crop at the season's stage, orchard, vineyard,
+  overgrown, woodlot) and a byte for the way its rows run, read at the
+  nearest vertex wherever a category decides something (the sward's kind,
+  which crop grows, where a bale may lie) and, far off, mapped to colours at
+  each corner before the corners are blended (`heightfield::Grows`), so a
+  field's edge never blends two codes into a third. A tilled field keeps a
+  0.4–2.5 m grass margin. Arable ground grows nothing wild: its tilth shows
+  between the rows, ploughed in furrow slices or drilled in passes.
+- **Crops** (`compose::crops`) are sward kinds of their own, by growth
+  code, in drilled rows along each field's long axis (`farmed::Drill`),
+  wheel-free tramlines every 12–24 m, by kind and season: cereals young and
+  green in spring, ripe in summer with their own heads (wheat's ear, barley's
+  awns, oats' panicle), stubble in autumn, or ploughed and newly drilled; rape
+  in yellow flower in spring and in pod in summer; ley as a sown grass. Far
+  off a field is its crop's colour (`ground::Tilled`), handed over at the
+  sward's fade.
+- **Maize** stands as plants near the eye (`stand`, `compose::fields::maize`):
+  each field's plants are hashed from a lattice along its drill's rows out to
+  `Bounds::crops` (60 m at *Simple*, 180 m at *Maximum*), thinning over the
+  last fifth into the sward's maize, which gives way to them over the same
+  band (`GrassKind::stood`) and carries the crop on as a canopy beyond. A ray
+  walks the lattice as a wood far off is walked (`walk::about`, `ahead`,
+  `passing`, shared), clipped to the field grown by the leaves' reach; a test
+  holds the walk to meeting every plant one by one. Six plants are built per
+  stage (summer green and tasselled, autumn ripe and gone to straw): jointed
+  stalk, sheaths, 13–16 alternating leaves as folded, rippling meshes drying
+  from the lowest, brace roots, tassel, ears in husks with silks; the leaves
+  share their palette with the sward's maize. No lookout stands among maize
+  taller than the eye or within 8 m of it.
+- **Bales** (`compose::fields::bales`, `straw`): each cut field's one kind of
+  bale or stack, every unit of it on cut ground; straw in true relief within
+  a slope bound a test holds to, its shade centred on its noise's means so a
+  bale far off is as light as near, loose stalks within 45 m, orange twine,
+  a round bale's end wound in its spiral.
+- **Pasture, orchards and vineyards** (RT17). A grazed field's wild sward is
+  bitten to `GRAZED` metres and its stems eaten (`Stand::bitten`, packed in
+  a canopy grid's last byte), but rank to `SHUNNED` and in seed within
+  `grazing::RANK` radii of a pat as long as its age has stock shun it
+  (`Pat::rank_at`), and smothered beneath it: pats hashed from a 3 m
+  lattice, each kept inside its cell so the lawn reads one cell's pat, and
+  laid about the eye on grazed ground out to `Bounds::pats`, nearest first,
+  founded beneath any snow and left out where it buries them
+  (`fields::pats`, three ages of coiled mound). Orchards
+  are planted on the woodlots' lattice in rows along the field with
+  `Kind::Apple`, whose stock bears `tree::Fruit` hung beneath its twigs in
+  summer and autumn. Vineyards are stands of trained vines on 2.2 m rows,
+  a post every fifth place (`stand::Sowing::posts`, listed by `Stand::posts`)
+  and the wires strung post to post, out to `Bounds::vines`. Lookouts keep
+  clear of anything as tall as the eye (`fields::tall`).
+- **Overgrown ground** (RT18). A field left (`Grown::Overgrown`) draws from
+  its key how many years it has lain, which sets how far it has gone over.
+  - *Its sward* stands rank: its wild grasses taller and tussocky, in seed,
+    their dead leaves standing among the live (`Lawn::grown`, as grazing
+    modulates a pasture's; a sward has no slot for another kind).
+  - *Its plants* are square patches (`rough`, grown as `waterside`'s are):
+    brambles as mounds of arching canes, rooting where their tips touch
+    down, their leaflets in threes and fives, flowering in summer and black
+    with fruit in autumn; nettles in dense clonal beds of square stems and
+    opposite toothed leaves, hung with catkins in summer, dead brown stalks
+    in winter; docks as rosettes of broad leaves under rust-red seed spikes;
+    rosebay willowherb in magenta spikes, then in seed down; hogweed's white
+    umbels drying to skeletons. Each takes the ground it likes — nettles the
+    rich ground by yards and gateways, brambles creeping in from the
+    boundaries, willowherb the open — in patches of its own.
+  - *Setting them out* is the waterside's machine, hoisted into one shared
+    engine (`compose::patches`) that both drive: near and far lattices about
+    the eye read across the cores, each cell holding the patch of the plant
+    the place suits best, kept nearest the eye, set out a unit at a time
+    with their prototypes planned as first wanted.
+  - *Scrub* — hawthorn, gorse on the dry ground, young birch — is planted on
+    the woodlots' lattice (`fields::Lot`), sparse in a field lately left and
+    closing into thicket in one long abandoned.
+- **Flowers and weeds** (RT19) are drawn per species in patches seeded by the
+  field's history, never sprinkled evenly.
 
 ## RT20, RT21, RT31 — Masonry, its cover and its weathering
 
@@ -938,19 +1042,22 @@ Every light out of doors comes of a published measurement, nothing tuned
   droplet phase of a forward lobe (g 0.9) and a twentieth's backward one
   (g −0.3); every further order by the δ-Eddington two-stream solution, its
   albedo 0.99998 and asymmetry the lobes' mean. The light grids hold the
-  cloud's optical depth toward the sun, away from it, straight up, and level
-  away from it (the last two in steps growing from 10 m out to 32 km). The
-  sun's light is solved in a slab facing its beam, as deep as its way in and
-  as thick as the cloud runs on behind, as a heap lit from aside is; and in
-  its column, as a deck is, through which the light diffuses down whatever
-  way it fell in — blended toward the deck's the further the cloud runs
-  across than down, from four times to twelve. The sky's light and the
-  ground's are solved in the column, entering by its nearest face the sky
-  lights. The scattered
-  light toward the eye is each diffuse field's mean and first moment through
-  the full phase's asymmetry. Energy holds to a percent in a lossless slab, a
-  thin cloud takes little but its single scattering, a shaded side greys
-  under the sky's light, and nothing overflows however thick the cloud.
+  cloud's optical depth toward the sun, straight up, away from it and level
+  away from it (the last two in steps growing from 10 m, to the cloud's far
+  side where clear air opens past it). The sun's light is solved in a slab
+  facing its beam, as deep as its way in and as thick as the cloud runs on
+  behind, for a heap; and in its column, through which the light diffuses
+  down whatever way it fell in, for a sheet — by the deck's form
+  (`HEAPED`). A sample seen directly takes its depths behind it and down to
+  its base by short taps to its own cloud's far side (`Reader::own_depth`),
+  the grids answering past the last. The sky's light and the ground's are
+  solved in the column, entering by its nearest face the sky lights, the
+  ground's as sunlit as it looks from the floor through the bank's own
+  shadow (`Level::ground`). The scattered light toward the eye is each
+  diffuse field's mean and first moment through the full phase's
+  asymmetry. Energy holds to a percent in a lossless slab, a thin cloud
+  takes little but its single scattering, a shaded side greys under the
+  sky's light, and nothing overflows however thick the cloud.
 
 ## RT44 — Cloud to the horizon
 
@@ -1007,6 +1114,64 @@ outward; far cloud lit by the sun at its own place; far cloud shading the
 ground from a low sun; an overcast grey to the horizon; the aerial table
 keeping its near slices; a point drawn along the air falling as its sunlight
 is gathered; and a resolved sum keeping only the octaves its footprint holds.
+
+## RT46 — Cumulus as they are
+
+Fair-weather cumulus (Farmland, seed 4, the sun 67° up) read as smooth,
+globular blobs, not fluffy, not detailed enough, and pale underneath, where
+a thick heap with the sun above it is darker under than on top. The ground
+truth is a Monte Carlo of the light through a cube of droplet cloud, the
+model's own phase and albedo: under that sun a cube 80 optical depths deep
+sends from its base 0.12 of a white plate's light and from its top 0.56; one
+30 deep 0.28 and 0.35; one 10 deep glows brighter beneath than above.
+
+Corrected:
+
+- *Opacity.* A deck's `thickness` is the extinction through the body of its
+  clouds, where the eroded billows stand at their median density (`CORE`),
+  each form's from its liquid water and droplets, 3·LWC / (2·ρ·r) (Stephens,
+  1978); a cumulus field's cloudy columns run a median of about 17 optical
+  depths.
+- *Heaps and sheets.* A deck's form says whether its clouds are lit through
+  the slab facing the sun or through their column (`HEAPED`); the depths
+  away from the sun and level away from it end at clear air past the cloud
+  (`OUTWARD_GAP`).
+- *A base in its slab.* A sample seen directly takes its depth behind it
+  and down to its base by short taps to its own cloud's far side
+  (`Reader::own_depth`), which the grids' coarse cells would blur into the
+  clear air beneath, setting a base deep in its slab where the light is
+  brighter. The slab's base matches the Monte Carlo to a few percent for
+  clouds 30–80 deep.
+- *The ground in its shade.* A base is lit by the ground as sunlit as it
+  looks from the floor through the bank's own shadow (`Level::ground`).
+- *Detail.* Finer reads of the wisps' texture cut the edges to a metre or
+  two as far as the footprint resolves them (`FINER`); a ray seen directly
+  strides to the billows' bounds and steps through them a pixel or two at a
+  time (`SHARP`); its nearest taps toward the sun read the edges as finely.
+
+Remaining:
+
+- *Too shallow.* Most columns are about 700 m deep, their depth growing
+  with the local cover, and only their lower part holds cloud: lenses a few
+  hundred metres thick where fair-weather cumulus stand 0.5–2 km, as tall as
+  they are broad, 30–150 optical depths deep — which is what darkens a thick
+  heap's base beneath its sunlit top. The heap's profile is to be rebuilt: a
+  flat base, a body rising into domes.
+- *Globular.* The billows are large lobes eroded at their edges; cumulus are
+  rounded turrets on turrets, each sunlit on one side and shaded on the
+  other, so the turrets are to be built up at several scales, not only
+  carved, and shaded by the resolved taps.
+- *Pale bases.* Bases in the scene still send a third to two-fifths of
+  their tops' light; once the heaps stand tall, they are to be held to the
+  Monte Carlo and to photographs.
+- *The slab's top.* A finite heap's top sends 0.35–0.56 of a white plate
+  where the endless slab says 0.8–0.96, the rest leaking from its sides.
+- *The clear sky.* The atmosphere's zenith at noon is 0.065 of the ground's
+  sunlight over π, where clear skies measure about 0.12 and Preetham's model
+  0.3; it sets how bright cloud reads against the sky, so it is to be
+  checked against measurements.
+- *The far field.* Distant heaps near the horizon stack in flat, streaked
+  layers.
 
 ## RT45 — No primitive stand-ins
 

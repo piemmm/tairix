@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 
 use tairix_util::mathf;
 
-use crate::bvh::{Builder, Bvh, Walk};
+use crate::bvh::{Builder, Bvh, Item, Walk};
 use crate::cut::{meet_relieved, Cutting, Seeking};
 use crate::flare::Flare;
 use crate::leaf::Outline;
@@ -388,24 +388,64 @@ pub(crate) struct Building {
     normals: Vec<[f32; 3]>,
     coords: Vec<[f32; 2]>,
     flares: Vec<Flare>,
-    builder: Builder,
+    /// The parts bounded so far, while they are, and the box they lie in;
+    /// then the hierarchy being built over them.
+    items: Vec<Item>,
     bounds: Aabb,
+    builder: Option<Builder>,
+}
+
+/// The box a prototype lying in `bounds` holds: a point where it has no parts,
+/// so every box built on it is one.
+fn held(bounds: Aabb) -> Aabb {
+    if bounds.min.x > bounds.max.x {
+        Aabb::around(Vec3::ZERO, 1e-3)
+    } else {
+        bounds
+    }
 }
 
 /// Parts' worth of a prototype's hierarchy built in one step.
 pub(crate) const BUILD_UNIT: usize = 24_000;
 
 impl Building {
-    /// Build about `budget` parts' worth more of the hierarchy; whether it
-    /// is whole.
-    pub(crate) fn step(&mut self, budget: usize) -> bool {
-        self.builder.step(budget)
+    /// Bound about `budget` more of its parts, or, once all are, build about
+    /// that many parts' worth more of its hierarchy; whether it is whole, or
+    /// `None` when the heap will not hold it or a part names what the
+    /// prototype lacks.
+    pub(crate) fn step(&mut self, budget: usize) -> Option<bool> {
+        if let Some(builder) = self.builder.as_mut() {
+            return Some(builder.step(budget));
+        }
+        let end = self
+            .items
+            .len()
+            .saturating_add(budget)
+            .min(self.parts.len());
+        for index in self.items.len()..end {
+            let extent = part_bounds(self.parts.get(index)?, &self.vertices, &self.flares)?;
+            self.bounds = self.bounds.union(extent);
+            self.items
+                .push(Item::new(u32::try_from(index).ok()?, extent));
+        }
+        if self.items.len() < self.parts.len() {
+            return Some(false);
+        }
+        self.bounds = held(self.bounds);
+        self.builder = Some(Builder::over(core::mem::take(&mut self.items))?);
+        Some(false)
     }
 
-    /// The box the prototype will lie in, in its own frame.
+    /// The box the prototype will lie in, in its own frame, worked out from
+    /// its parts however far it is bounded.
     #[cfg(test)]
-    pub(crate) const fn bounds(&self) -> Aabb {
-        self.bounds
+    pub(crate) fn bounds(&self) -> Aabb {
+        held(
+            self.parts
+                .iter()
+                .filter_map(|part| part_bounds(part, &self.vertices, &self.flares))
+                .fold(Aabb::EMPTY, Aabb::union),
+        )
     }
 
     /// Its parts.
@@ -414,24 +454,30 @@ impl Building {
         &self.parts
     }
 
+    /// Where its vertex `index` lies, if it has one.
+    #[cfg(test)]
+    pub(crate) fn vertex(&self, index: u32) -> Option<Vec3> {
+        self.vertices.get(index as usize).copied().map(point)
+    }
+
     /// The prototype, its hierarchy built whole at once.
     #[cfg(test)]
     pub(crate) fn whole(mut self) -> Prototype {
-        self.step(usize::MAX);
-        self.finish()
+        while !self.step(usize::MAX).expect("a sound prototype") {}
+        self.finish().expect("a whole hierarchy")
     }
 
-    /// The prototype, once its hierarchy is whole.
-    pub(crate) fn finish(self) -> Prototype {
-        Prototype {
+    /// The prototype, once its hierarchy is whole; `None` before.
+    pub(crate) fn finish(self) -> Option<Prototype> {
+        Some(Prototype {
             parts: self.parts,
             vertices: self.vertices,
             normals: self.normals,
             coords: self.coords,
             flares: self.flares,
-            bvh: self.builder.finish(),
+            bvh: self.builder?.finish(),
             bounds: self.bounds,
-        }
+        })
     }
 }
 
@@ -445,12 +491,14 @@ impl Prototype {
         vertices: Vec<[f32; 3]>,
         normals: Vec<[f32; 3]>,
     ) -> Option<Self> {
-        Some(Self::building(parts, vertices, normals)?.whole())
+        let mut building = Self::building(parts, vertices, normals)?;
+        while !building.step(usize::MAX)? {}
+        building.finish()
     }
 
     /// The prototype of `parts`, whose facets index `vertices` and their
-    /// `normals`, its hierarchy to build step by step; `None` when the heap
-    /// will not hold it, or a facet names a vertex it lacks.
+    /// `normals`, its parts to bound and its hierarchy to build step by step;
+    /// `None` when the heap will not hold it.
     pub(crate) fn building(
         parts: Vec<Part>,
         vertices: Vec<[f32; 3]>,
@@ -459,8 +507,9 @@ impl Prototype {
         Self::flared(parts, (vertices, normals), Vec::new())
     }
 
-    /// [`Self::building`], its limbs' feet swelling in `flares`; `None` too
-    /// when a limb names a flare it lacks.
+    /// [`Self::building`], its limbs' feet swelling in `flares`. A part
+    /// naming a vertex or a flare the prototype lacks refuses its building
+    /// as it is bounded.
     pub(crate) fn flared(
         parts: Vec<Part>,
         (vertices, normals): (Vec<[f32; 3]>, Vec<[f32; 3]>),
@@ -469,29 +518,17 @@ impl Prototype {
         if normals.len() != vertices.len() {
             return None;
         }
-        let mut boxes = Vec::new();
-        if boxes.try_reserve_exact(parts.len()).is_err() {
-            return None;
-        }
-        let mut bounds = Aabb::EMPTY;
-        for (index, part) in parts.iter().enumerate() {
-            let extent = part_bounds(part, &vertices, &flares)?;
-            bounds = bounds.union(extent);
-            boxes.push((u32::try_from(index).ok()?, extent));
-        }
-        let builder = Builder::new(&boxes)?;
-        // A prototype of no parts is a point, so every box built on it is one.
-        if bounds.min.x > bounds.max.x {
-            bounds = Aabb::around(Vec3::ZERO, 1e-3);
-        }
+        let mut items = Vec::new();
+        items.try_reserve_exact(parts.len()).ok()?;
         Some(Building {
             parts,
             vertices,
             normals,
             coords: Vec::new(),
             flares,
-            builder,
-            bounds,
+            items,
+            bounds: Aabb::EMPTY,
+            builder: None,
         })
     }
 

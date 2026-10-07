@@ -22,9 +22,10 @@ use tairix_countryside::usage::Mix;
 use tairix_countryside::{self as countryside, Point};
 
 use super::architecture::Aqueduct;
-use super::fields;
 use super::courses::{Dressing, Mason, Opening, Quarry, Ring, Wall, Weathering};
 use super::cracked;
+use super::crops;
+use super::fields;
 use super::plants::{self, Character, Fallen, Grassland, Grove, Kind, Stand, Tier};
 use super::plants::{Dead, Drift};
 use super::snowman;
@@ -38,8 +39,9 @@ use crate::solid::Form;
 
 use crate::channel::{Section, Station};
 use crate::course::Mark;
+use crate::farmed::Grown;
 use crate::grass::Seen;
-use crate::ground::{Ground, Palette, Rock};
+use crate::ground::{Ground, Palette, Rock, Tilled};
 use crate::heightfield::Heightfield;
 use crate::land::{
     self, Build, Crossing, Farming, Fields, Horizon, Laid, Land, Lie, NearWater, Nest, Plan,
@@ -210,6 +212,7 @@ pub(super) fn ground(
         seed: dice.seed(),
         ways: None,
         bounds: None,
+        tilled: None,
         floor: None,
     };
     // Grain a few centimetres across: the land's own grids carry every
@@ -379,7 +382,9 @@ pub(super) enum Scheme {
     /// A scene already set out and seen, on a land about it.
     Set(Set),
     Meadow,
-    Farmland,
+    Farmland {
+        season: Season,
+    },
     Forest {
         glade: f64,
     },
@@ -478,7 +483,7 @@ impl Scheme {
                 let rise = dice.range(1.6, 3.0);
                 overlook(survey, dice, rise)
             }
-            Self::Farmland => lane_vantage(survey, dice)
+            Self::Farmland { .. } => lane_vantage(survey, dice)
                 .filter(|_| dice.chance(0.45))
                 .unwrap_or_else(|| {
                     let rise = dice.range(1.6, 4.0);
@@ -555,10 +560,9 @@ impl Scheme {
             siting.cuttings = aqueduct.cuttings(&|x, z| survey.height(x, z))?;
             siting.lead = Aqueduct::lead(&vantage);
         }
+        // A farmed land's paths are its countryside's own.
         let paths = match self {
             Self::Meadow | Self::Valley => 0.4,
-            // A farmed land's paths are its countryside's own.
-            Self::Farmland => 0.0,
             Self::Forest { .. } => 0.5,
             Self::Alpine { .. } | Self::Winter { .. } => 0.25,
             _ => 0.0,
@@ -592,7 +596,7 @@ impl Scheme {
         match self {
             Self::Set(set) => set.plant(stage, dice),
             Self::Meadow => meadow_scene(stage, dice, land, vantage?),
-            Self::Farmland => farmland_scene(stage, dice, land, vantage?),
+            Self::Farmland { season } => farmland_scene(stage, dice, land, (vantage?, season)),
             Self::Forest { glade } => forest_scene(stage, dice, land, (vantage?, glade)),
             Self::Alpine { lake } => alpine_scene(stage, dice, land, (vantage?, lake)),
             Self::Coast { centre, out } => coast_scene(stage, dice, land, (vantage?, centre, out)),
@@ -642,16 +646,63 @@ fn bridges(stage: &mut Stage, dice: &mut Dice, land: &Land) -> Option<()> {
     };
     let age = dice.range(0.4, 0.9);
     let work = stage.stonework(dice, quarry, (age, weathering))?;
-    let mut mason = Mason::new(work, dice.seed())?;
-    for crossing in &land.crossings {
-        let (from, to) = (crossing.from, crossing.to);
-        let length = mathf::hypot(to.x - from.x, to.z - from.z);
-        if length >= 1.0 {
-            bridge(stage, dice, &mut mason, (crossing, length))?;
-        }
-    }
-    stage.raise(mason, Pose::new(Vec3::ZERO, Frame::WORLD), dice.seed())?;
+    stage.bridging = Some(Bridging {
+        mason: Some(Mason::new(work, dice.seed())?),
+        next: 0,
+        count: land.crossings.len(),
+        seed: dice.wide(),
+        key: dice.seed(),
+    });
     Some(())
+}
+
+/// A land's bridges being laid, a few a unit, each drawn from its own key so
+/// how many there are never changes what the rest of a scene draws; then
+/// raised.
+#[derive(Debug)]
+pub(super) struct Bridging {
+    mason: Option<Mason>,
+    /// The next crossing to bridge, of how many.
+    next: usize,
+    count: usize,
+    seed: u64,
+    key: u32,
+}
+
+/// How many of a bridge's units a unit of the bridging lays before it stops
+/// after the bridge in hand.
+const BRIDGED_A_UNIT: u32 = 1500;
+
+impl Bridging {
+    /// The next unit of laying `land`'s bridges on `stage`; whether they are
+    /// all laid and raised, or `None` when the heap will not hold them.
+    pub(super) fn step(&mut self, stage: &mut Stage, land: &Land) -> Option<bool> {
+        let mason = self.mason.as_mut()?;
+        let start = mason.laid();
+        while let Some(crossing) = land.crossings.get(self.next) {
+            if mason.laid().wrapping_sub(start) >= BRIDGED_A_UNIT {
+                return Some(false);
+            }
+            let mut draws = Dice::keyed(self.seed, self.next);
+            self.next += 1;
+            let (from, to) = (crossing.from, crossing.to);
+            let length = mathf::hypot(to.x - from.x, to.z - from.z);
+            if length >= 1.0 {
+                bridge(stage, &mut draws, mason, (crossing, length))?;
+            }
+        }
+        stage.raise(
+            self.mason.take()?,
+            Pose::new(Vec3::ZERO, Frame::WORLD),
+            self.key,
+        )?;
+        Some(true)
+    }
+
+    /// How far the bridging has come, as a share.
+    pub(super) fn done(&self) -> f64 {
+        crate::vector::share(self.next, self.count)
+    }
 }
 
 /// The rings of a bridge's `openings` through its body standing at `foot`,
@@ -1245,9 +1296,28 @@ fn prospect(height: &dyn Fn(f64, f64) -> f64, eye: Vec3, heading: f64) -> f64 {
     far.min(0.12) - near.max(-0.12) - 3.0 * (near - 0.01).max(0.0)
 }
 
+/// How far from a crop standing as tall as the eye a lookout keeps, so its
+/// view is not walled in.
+const CROPS_CLEAR: f64 = 8.0;
+
+/// Whether the eye at `spot` on the land `survey` shows would stand among a
+/// crop standing as tall as it, or so near one as to be walled in by it.
+fn among_crops(survey: &Survey<'_>, spot: (f64, f64)) -> bool {
+    [
+        (0.0, 0.0),
+        (CROPS_CLEAR, 0.0),
+        (-CROPS_CLEAR, 0.0),
+        (0.0, CROPS_CLEAR),
+        (0.0, -CROPS_CLEAR),
+    ]
+    .into_iter()
+    .any(|(dx, dz)| fields::tall(Grown::of(survey.lie(spot.0 + dx, spot.1 + dz).grown)))
+}
+
 /// A place on a hillside of the far land looking out across it: of a few
-/// dry spots on ground level enough to stand on, and a few ways from each,
-/// the one with the best prospect, the eye `rise` above the ground.
+/// dry spots on ground level enough to stand on, clear of tall crops, and a
+/// few ways from each, the one with the best prospect, the eye `rise` above
+/// the ground.
 fn overlook(survey: &Survey<'_>, dice: &mut Dice, rise: f64) -> Vantage {
     let (centre, reach) = survey.extent();
     let spread = 0.4 * reach;
@@ -1259,7 +1329,11 @@ fn overlook(survey: &Survey<'_>, dice: &mut Dice, rise: f64) -> Vantage {
             centre.1 + dice.range(-spread, spread),
         );
         let lie = survey.lie(spot.0, spot.1);
-        if lie.upright < 0.88 || lie.road > 0.05 || survey.wet_at(spot.0, spot.1) {
+        if lie.upright < 0.88
+            || lie.road > 0.05
+            || survey.wet_at(spot.0, spot.1)
+            || among_crops(survey, spot)
+        {
             continue;
         }
         let eye = Vec3::new(spot.0, lie.height + rise, spot.1);
@@ -1487,11 +1561,20 @@ pub(super) fn sward(
     let beside = inset_of(eye, middle);
     let near = Seen::from(eye, (LITTER_FADE * beside, beside));
     let tiered: Vec<Tier> = fallible::collected(tiers.len(), tiers.into_iter().flatten())?;
-    // From afar, the land's grass is this sward's.
+    // From afar, the land's grass is this sward's, and its fields' crops
+    // are the ones it stands nearer.
     let (green, straw) = grassland.afar();
     if let Some(soil) = ground_of(stage, land) {
         soil.palette.grass = green;
         soil.palette.dry = straw;
+        if land.layout.is_some() {
+            soil.tilled = Some(Tilled {
+                far: grassland.sowing.far,
+                by_growth: grassland.sowing.by_growth,
+                eye,
+                fade: seen.fade,
+            });
+        }
     }
     plants::Laying::new(
         stage,
@@ -1570,7 +1653,7 @@ fn moorland(stage: &mut Stage, dice: &mut Dice, vantage: &Vantage, season: Seaso
 /// Whether a stone can lie on the ground `lie` describes: off the road, and
 /// not so steep it would roll.
 fn lies_still(lie: &Lie) -> bool {
-    lie.road < 0.1 && lie.upright > 0.7
+    lie.road < 0.1 && lie.path < 0.3 && lie.upright > 0.7
 }
 
 /// A large ball of something that shows light off, resting in the land
@@ -1945,6 +2028,7 @@ pub(super) fn farmland(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
         None
     };
     let spacing = dice.range(420.0, 620.0);
+    let season = dice.pick(&FARM_SEASONS)?;
     let farming = Farming {
         spacing,
         villages: Villages {
@@ -1958,8 +2042,9 @@ pub(super) fn farmland(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
         stone: region.stone,
         reach: FARMED,
         lanes: region.lanes,
+        season,
     };
-    let plan = Plan {
+    let mut plan = Plan {
         relief,
         reach,
         sea: None,
@@ -1995,14 +2080,42 @@ pub(super) fn farmland(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
         seed: dice.seed(),
     };
     let material = ground(stage, dice, &region.soil, (-1e3, NO_SNOW, 0.72), 4.0)?;
+    till(stage, material)?;
     let water = river(stage, dice)?;
+    if season == Season::Winter {
+        plan.snowpack = Some(Snowpack {
+            heading: dice.range(0.0, TAU),
+            fallen: dice.range(0.12, 0.35),
+            seed: dice.seed(),
+        });
+    }
     let build = lay(stage, plan, material, Some(water))?;
     Some(Composed::Landed(Landing {
         build,
-        scheme: Scheme::Farmland,
+        scheme: Scheme::Farmland { season },
         vantage: None,
     }))
 }
+
+/// The ground `material` as a farmed land's: its grain tilled where its
+/// fields are.
+fn till(stage: &mut Stage, material: usize) -> Option<()> {
+    let made = stage.materials.get_mut(material)?;
+    if let Some(&Relief::Grain { depth, scale, seed }) = made.relief.as_ref() {
+        made.relief = Some(Relief::Tilled { depth, scale, seed });
+    }
+    Some(())
+}
+
+/// The seasons a farmed land stands in, each as likely as another: summer
+/// twice over, and one land in five under snow.
+const FARM_SEASONS: [Season; 5] = [
+    Season::Spring,
+    Season::Summer,
+    Season::Summer,
+    Season::Autumn { fallen: 10 },
+    Season::Winter,
+];
 
 /// How far about a farmed land's middle its countryside is laid out: out to
 /// where the horizon's land takes over from the far grid's.
@@ -2022,7 +2135,9 @@ fn lane_vantage(survey: &Survey<'_>, dice: &mut Dice) -> Option<Vantage> {
                 .is_some_and(|(near, _)| near.distance < 900.0)
     };
     let lanes: Vec<&countryside::layout::Way> = layout.ways().filter(near).collect();
-    let lane = lanes.get(usize::try_from(dice.count(0, u32::try_from(lanes.len()).ok()?.checked_sub(1)?)).ok()?)?;
+    let lane = lanes.get(
+        usize::try_from(dice.count(0, u32::try_from(lanes.len()).ok()?.checked_sub(1)?)).ok()?,
+    )?;
     let stations = &lane.line.stations;
     let middle = stations.len() / 2 + usize::try_from(dice.count(0, 10)).ok()?;
     let (here, ahead) = (stations.get(middle)?, stations.get(middle + 8)?);
@@ -2037,30 +2152,35 @@ fn lane_vantage(survey: &Survey<'_>, dice: &mut Dice) -> Option<Vantage> {
     })
 }
 
-fn farmland_scene(stage: &mut Stage, dice: &mut Dice, land: &Land, vantage: Vantage) -> Option<Look> {
+fn farmland_scene(
+    stage: &mut Stage,
+    dice: &mut Dice,
+    land: &Land,
+    (vantage, season): (Vantage, Season),
+) -> Option<Look> {
     bridges(stage, dice, land)?;
     let kinds: &[Kind] = match dice.count(0, 2) {
         0 => &[Kind::Oak, Kind::Willow, Kind::Poplar],
         1 => &[Kind::Oak, Kind::Birch, Kind::Cherry],
         _ => &[Kind::Maple, Kind::Oak, Kind::Poplar],
     };
-    let season = dice.pick(&[
-        Season::Spring,
-        Season::Summer,
-        Season::Summer,
-        Season::Autumn { fallen: 10 },
-    ])?;
     let grove = Grove::new(stage, dice, (kinds, season), Stand::Open)?;
     let eye = vantage.eye;
     stage.keep_open((eye.x, eye.z), 2.5)?;
+    let meadow = plants::grassland(dice, Character::Meadow, season);
     let grassland = Grassland {
         fallen: grove
             .of(kinds[0])
             .and_then(|grown| Fallen::from(&grown, season, 0.4)),
-        ..plants::grassland(dice, Character::Meadow, season)
+        sowing: crops::sowing(
+            season,
+            meadow.shoots,
+            fields::maize::standing(&stage.densities.bounds),
+        ),
+        ..meadow
     };
     // A farmed land's woods are its woodlots, which its fields stand; the
-    // rest of its trees take to its streams.
+    // rest of its trees take to its streams' banks, its fields kept clear.
     let woodland = Woodland {
         cover: 0.0,
         patch: 180.0,
@@ -2070,12 +2190,20 @@ fn farmland_scene(stage: &mut Stage, dice: &mut Dice, land: &Land, vantage: Vant
         most: stage.densities.woods.meadow,
         open: (4.0, 0.6),
     };
-    fields::set_out(stage, dice, land, (&vantage, season, &grove))?;
+    if let Some(layout) = land.layout.as_ref() {
+        stage.fielding = Some(fields::Fielding::new(
+            stage,
+            dice,
+            layout,
+            (&vantage, season, &grove),
+        )?);
+    }
     stage.sow(Wood {
         grove,
         woodland,
         rooting: Rooting {
             streams: 0.6,
+            banks: Some((0.55, 0.85)),
             ..ANYWHERE
         },
         vantage,
@@ -2083,11 +2211,21 @@ fn farmland_scene(stage: &mut Stage, dice: &mut Dice, land: &Land, vantage: Vant
         deadfall: None,
     })?;
     waterside::margins(stage, dice, ((eye.x, eye.z), season, None))?;
+    // Its pastures' grass stands rank about the very pats laid in them.
+    let grazing = stage.fielding.as_ref().map(fields::Fielding::grazing);
     stage.sward = Some(Lawning {
         eye: (eye.x, eye.z),
-        grassland,
+        grassland: Grassland {
+            grazing,
+            ..grassland
+        },
     });
-    let weather = weather::outdoors(stage, dice, &MEADOW, vantage.heading)?;
+    let climate = if season == Season::Winter {
+        &WINTER
+    } else {
+        &MEADOW
+    };
+    let weather = weather::outdoors(stage, dice, climate, vantage.heading)?;
     let fov = dice.angle(46.0, 62.0);
     let view = view(stage, land, &vantage, (fov, dice.range(0.52, 0.68)));
     Some(look(weather, view, 1.0))
@@ -2968,30 +3106,7 @@ fn desert_of(stage: &mut Stage, dice: &mut Dice, dunes: bool) -> Option<Composed
         seed: dice.seed(),
     };
     let material = if dunes {
-        let ground = Ground {
-            palette: DUNE.palette(),
-            shore: -1e3,
-            snow_line: NO_SNOW,
-            cliff: 0.3,
-            bedding: 2.0,
-            seed: dice.seed(),
-            ways: None,
-            bounds: None,
-            floor: None,
-        };
-        // Wind ripples in the sand: a narrow band of lengths, steep, their
-        // crests fading and sharpening across the dune in patches.
-        let ripples = Relief::waves(
-            Wind {
-                slope_variance: dice.range(0.04, 0.09),
-                lengths: (dice.range(0.14, 0.2), 0.07),
-                spread: 0.35,
-                gusts: (dice.range(0.4, 0.8), dice.range(3.0, 10.0)),
-            },
-            dice.seed(),
-        )?;
-        stage
-            .material(Material::new(Pigment::Ground(ground), Finish::Ground).with_relief(ripples))?
+        sand(stage, dice)?
     } else {
         let soil = dice.pick(&[RED_ROCK, SCRUB])?;
         ground(stage, dice, &soil, (-1e3, NO_SNOW, 0.8), 1.2)?
@@ -3002,6 +3117,35 @@ fn desert_of(stage: &mut Stage, dice: &mut Dice, dunes: bool) -> Option<Composed
         scheme: Scheme::Desert { dunes },
         vantage: None,
     }))
+}
+
+/// The sand of a sea of dunes, wind ripples running over it; the stage's
+/// material, or `None` when the stage will not hold it.
+fn sand(stage: &mut Stage, dice: &mut Dice) -> Option<usize> {
+    let ground = Ground {
+        palette: DUNE.palette(),
+        shore: -1e3,
+        snow_line: NO_SNOW,
+        cliff: 0.3,
+        bedding: 2.0,
+        seed: dice.seed(),
+        ways: None,
+        bounds: None,
+        tilled: None,
+        floor: None,
+    };
+    // Wind ripples in the sand: a narrow band of lengths, steep, their
+    // crests fading and sharpening across the dune in patches.
+    let ripples = Relief::waves(
+        Wind {
+            slope_variance: dice.range(0.04, 0.09),
+            lengths: (dice.range(0.14, 0.2), 0.07),
+            spread: 0.35,
+            gusts: (dice.range(0.4, 0.8), dice.range(3.0, 10.0)),
+        },
+        dice.seed(),
+    )?;
+    stage.material(Material::new(Pigment::Ground(ground), Finish::Ground).with_relief(ripples))
 }
 
 /// Beside the land's road, looking down it, if it has a road the eye can
@@ -3162,7 +3306,9 @@ fn room_ahead(survey: &Survey<'_>, vantage: Vantage) -> Vantage {
     let mut nearest: Option<(f64, (f64, f64))> = None;
     for ring in 1..=ROOM_RINGS {
         let distance = ROOM_STEP * f64::from(ring);
-        let around = (TAU * distance / ROOM_STEP) as u32;
+        let around = u32::try_from(mathf::round_i32(mathf::floor(TAU * distance / ROOM_STEP)))
+            .unwrap_or(1)
+            .max(1);
         for step in 0..around {
             let angle = TAU * f64::from(step) / f64::from(around);
             let spot = (
@@ -3192,7 +3338,7 @@ fn surveyed_room(survey: &Survey<'_>, at: (f64, f64), radius: f64) -> bool {
     let (mut low, mut high) = (f64::INFINITY, f64::NEG_INFINITY);
     for (x, z) in rim_and_middle(at, radius) {
         let lie = survey.lie(x, z);
-        if lie.road > 0.05 || survey.wet_at(x, z) {
+        if lie.road > 0.05 || lie.path > 0.3 || survey.wet_at(x, z) {
             return false;
         }
         low = low.min(lie.height);

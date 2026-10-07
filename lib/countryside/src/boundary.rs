@@ -39,6 +39,48 @@ pub enum Kind {
     Open,
 }
 
+impl Kind {
+    /// The least and the most a boundary of this kind kept as it should be
+    /// stands over the ground: a wall to the top of its cap, a hedge cut to a
+    /// height, a fence to its posts' tops; nought for a ditch or nothing.
+    #[must_use]
+    pub const fn stands(self) -> (f64, f64) {
+        match self {
+            Self::Wall => (1.25, 1.7),
+            Self::Hedge => (1.7, 2.6),
+            Self::Fence => (1.12, 1.32),
+            Self::Ditch | Self::Open => (0.0, 0.0),
+        }
+    }
+
+    /// How tall a boundary of this kind stands, drawn from `draws`: as it is
+    /// kept, but for a hedge left to grow out now and then.
+    fn height(self, draws: &mut Draws) -> f64 {
+        let (low, high) = self.stands();
+        match self {
+            Self::Hedge if !draws.chance(0.7) => draws.range(high, GROWN_OUT),
+            Self::Wall | Self::Hedge | Self::Fence => draws.range(low, high),
+            Self::Ditch | Self::Open => 0.0,
+        }
+    }
+
+    /// How much of the wind blowing across a boundary of this kind passes
+    /// through it: none through a wall, about half through a hedge, most
+    /// between a fence's rails, all where nothing stands.
+    #[must_use]
+    pub const fn porosity(self) -> f64 {
+        match self {
+            Self::Wall => 0.0,
+            Self::Hedge => 0.5,
+            Self::Fence => 0.8,
+            Self::Ditch | Self::Open => 1.0,
+        }
+    }
+}
+
+/// How tall a hedge left to grow out stands at most.
+const GROWN_OUT: f64 = 3.8;
+
 /// What lies to one side of a boundary.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum Side {
@@ -72,7 +114,8 @@ pub enum Owner {
     /// node among its parcels.
     Cut(HoldingId, u32),
     /// Edge `n` of a holding, anticlockwise from its first corner, laid by the
-    /// lesser of the two holdings it parts.
+    /// lesser of the two holdings it parts, or by the greater where nobody
+    /// farms the lesser.
     Edge(HoldingId, u8),
     /// One side of a bounded way where it runs beside a holding's fields.
     Side(WayId, HoldingId, Hand),
@@ -172,6 +215,8 @@ pub struct Boundary {
     pub right: Side,
     /// The gaps left in it, in order along it.
     pub gaps: Vec<Gap>,
+    /// How tall it stands over the ground, as [`Kind`] draws it.
+    pub height: f64,
     /// The word everything drawn of it is keyed from.
     pub key: u64,
 }
@@ -200,7 +245,10 @@ impl Style {
         [
             (
                 Kind::Hedge,
-                self.hedge * (1.0 - 0.75 * lie.stony) * (1.0 - 0.4 * lie.wet) * (0.4 + 0.6 * lie.fertile),
+                self.hedge
+                    * (1.0 - 0.75 * lie.stony)
+                    * (1.0 - 0.4 * lie.wet)
+                    * (0.4 + 0.6 * lie.fertile),
             ),
             (Kind::Wall, self.wall * (0.1 + 1.6 * lie.stony)),
             (Kind::Fence, self.fence * (0.35 + lie.wooded)),
@@ -352,7 +400,12 @@ fn either(survey: &dyn Survey, at: Point, way: Point) -> (Side, Side) {
 
 /// The boundary `run` is, as `id` names it: its kind drawn by the ground at
 /// its middle and `custom`, or nothing at all by `open`'s chance.
-fn laid(key: Key, (style, survey): (&Style, &dyn Survey), (id, run): (BoundaryId, Run), (custom, open): (Kind, f64)) -> Boundary {
+fn laid(
+    key: Key,
+    (style, survey): (&Style, &dyn Survey),
+    (id, run): (BoundaryId, Run),
+    (custom, open): (Kind, f64),
+) -> Boundary {
     let word = id.word(key);
     let mut draws = key.draws_for(Stage::Boundary, word);
     let length = plane::length(&run.line);
@@ -369,6 +422,7 @@ fn laid(key: Key, (style, survey): (&Style, &dyn Survey), (id, run): (BoundaryId
         left: run.left,
         right: run.right,
         gaps: Vec::new(),
+        height: kind.height(&mut draws),
         key: word,
     }
 }
@@ -408,13 +462,20 @@ pub(crate) fn cuts(
             (Side::Field(a), Side::Field(b)) => a != b && ours(a) && ours(b),
             _ => false,
         };
-        let found = runs(&[chord.0, chord.1], &|at, way| either(survey, at, way), &keeps)?;
+        let found = runs(
+            &[chord.0, chord.1],
+            &|at, way| either(survey, at, way),
+            &keeps,
+        )?;
         for (run, found) in found.into_iter().enumerate() {
             let id = BoundaryId {
                 owner: Owner::Cut(holding.id, node),
                 run: u32::try_from(run).map_err(|_| Error::Shape)?,
             };
-            push(&mut boundaries, laid(key, (style, survey), (id, found), (holding.custom, 0.0)))?;
+            push(
+                &mut boundaries,
+                laid(key, (style, survey), (id, found), (holding.custom, 0.0)),
+            )?;
         }
     }
     Ok(boundaries)
@@ -448,7 +509,10 @@ pub(crate) fn edges(
                 owner: Owner::Edge(holding.id, u8::try_from(edge).map_err(|_| Error::Shape)?),
                 run: u32::try_from(run).map_err(|_| Error::Shape)?,
             };
-            push(&mut boundaries, laid(key, (style, survey), (id, found), (holding.custom, 0.0)))?;
+            push(
+                &mut boundaries,
+                laid(key, (style, survey), (id, found), (holding.custom, 0.0)),
+            )?;
         }
     }
     Ok(boundaries)
@@ -470,13 +534,18 @@ pub(crate) fn yard(
     // Its corners run anticlockwise, so the plot lies to the left, a way
     // through it at times.
     let sides = |at: Point, way: Point| either(survey, at, way);
-    let keeps = |inner: Side, outer: Side| matches!((inner, outer), (Side::Plot | Side::Way(_), Side::Field(_)));
+    let keeps = |inner: Side, outer: Side| {
+        matches!((inner, outer), (Side::Plot | Side::Way(_), Side::Field(_)))
+    };
     for (run, found) in runs(&line, &sides, &keeps)?.into_iter().enumerate() {
         let id = BoundaryId {
             owner: Owner::Yard(holding.id),
             run: u32::try_from(run).map_err(|_| Error::Shape)?,
         };
-        push(&mut boundaries, laid(key, (style, survey), (id, found), (holding.custom, 0.0)))?;
+        push(
+            &mut boundaries,
+            laid(key, (style, survey), (id, found), (holding.custom, 0.0)),
+        )?;
     }
     Ok(boundaries)
 }
@@ -516,14 +585,21 @@ pub(crate) fn sides(
             }
         };
         let keeps = |left: Side, right: Side| {
-            matches!(if hand == Hand::Left { left } else { right }, Side::Field(_))
+            matches!(
+                if hand == Hand::Left { left } else { right },
+                Side::Field(_)
+            )
         };
         for found in runs(&side, &reads, &keeps)? {
-            let ((Side::Field(field), _) | (_, Side::Field(field))) = (found.left, found.right) else {
+            let ((Side::Field(field), _) | (_, Side::Field(field))) = (found.left, found.right)
+            else {
                 continue;
             };
             let holding = field.holding;
-            let run = if let Some((_, _, count)) = runs_of.iter_mut().find(|(h, s, _)| *h == holding && *s == hand) {
+            let run = if let Some((_, _, count)) = runs_of
+                .iter_mut()
+                .find(|(h, s, _)| *h == holding && *s == hand)
+            {
                 *count += 1;
                 *count
             } else {
@@ -537,7 +613,12 @@ pub(crate) fn sides(
             };
             push(
                 &mut boundaries,
-                laid(key, (style, survey), (id, found), (customs(holding), unbounded(way.rank))),
+                laid(
+                    key,
+                    (style, survey),
+                    (id, found),
+                    (customs(holding), unbounded(way.rank)),
+                ),
             )?;
         }
     }
@@ -582,7 +663,11 @@ pub(crate) fn end(
     let across = forward.left();
     let reads = |at: Point, way: Point| (survey.side(at + way.left() * OFF), Side::Way(id));
     let keeps = |beyond: Side, _: Side| matches!(beyond, Side::Field(_));
-    let found = runs(&[middle + across * half, middle - across * half], &reads, &keeps)?;
+    let found = runs(
+        &[middle + across * half, middle - across * half],
+        &reads,
+        &keeps,
+    )?;
     let Some(found) = found
         .into_iter()
         .max_by(|a, b| plane::length(&a.line).total_cmp(&plane::length(&b.line)))
@@ -597,11 +682,19 @@ pub(crate) fn end(
         owner: Owner::End(id, field.holding),
         run: 0,
     };
-    let mut boundary = laid(key, (style, survey), (boundary_id, found), (customs(field.holding), 0.0));
+    let mut boundary = laid(
+        key,
+        (style, survey),
+        (boundary_id, found),
+        (customs(field.holding), 0.0),
+    );
     let mut draws = key.draws_for(Stage::Gate, boundary.key);
     let width = (last.width + 0.6).min(length - 0.4);
     if width > 1.0 {
-        boundary.gaps.try_reserve(1).map_err(|_| Error::OutOfMemory)?;
+        boundary
+            .gaps
+            .try_reserve(1)
+            .map_err(|_| Error::OutOfMemory)?;
         boundary.gaps.push(Gap {
             along: 0.5 * length,
             width,
@@ -691,9 +784,9 @@ impl Entry<'_> {
     /// The index of the holding's field on `side`, where one is.
     fn ours(&self, side: Side) -> Option<usize> {
         match side {
-            Side::Field(field) if field.holding == self.holding => {
-                usize::try_from(field.index).ok().filter(|&index| index < self.fields)
-            }
+            Side::Field(field) if field.holding == self.holding => usize::try_from(field.index)
+                .ok()
+                .filter(|&index| index < self.fields),
             _ => None,
         }
     }
@@ -707,7 +800,11 @@ impl Entry<'_> {
 
     /// A gateway hung in boundary `index`, where it is long enough for one.
     fn hung(&self, index: u32, gates: &mut Vec<(u32, Gap)>) -> Result<bool, Error> {
-        let Some(gap) = self.boundaries.get(index as usize).and_then(|boundary| gateway(self.key, boundary)) else {
+        let Some(gap) = self
+            .boundaries
+            .get(index as usize)
+            .and_then(|boundary| gateway(self.key, boundary))
+        else {
             return Ok(false);
         };
         gates.try_reserve(1).map_err(|_| Error::OutOfMemory)?;
@@ -721,7 +818,10 @@ impl Entry<'_> {
         let mut best: Vec<Option<(u8, f64, BoundaryId, u32)>> =
             tairix_util::fallible::filled(self.fields, None).ok_or(Error::OutOfMemory)?;
         for (index, boundary) in self.touching() {
-            let Some(field) = self.ours(boundary.left).or_else(|| self.ours(boundary.right)) else {
+            let Some(field) = self
+                .ours(boundary.left)
+                .or_else(|| self.ours(boundary.right))
+            else {
                 continue;
             };
             if matches!(boundary.id.owner, Owner::End(..)) {
@@ -731,8 +831,15 @@ impl Entry<'_> {
             let Some(preference) = entered_from(boundary.id.owner, self.holding) else {
                 continue;
             };
-            let candidate = (preference, plane::length(&boundary.line), boundary.id, index);
-            if best[field].is_none_or(|held| (candidate.0, -candidate.1, candidate.2) < (held.0, -held.1, held.2)) {
+            let candidate = (
+                preference,
+                plane::length(&boundary.line),
+                boundary.id,
+                index,
+            );
+            if best[field].is_none_or(|held| {
+                (candidate.0, -candidate.1, candidate.2) < (held.0, -held.1, held.2)
+            }) {
                 best[field] = Some(candidate);
             }
         }
@@ -750,9 +857,11 @@ impl Entry<'_> {
     fn inward(&self, reached: &mut [bool], gates: &mut Vec<(u32, Gap)>) -> Result<(), Error> {
         let mut cuts: Vec<(usize, usize, f64, BoundaryId, u32)> = Vec::new();
         for (index, boundary) in self.touching() {
-            if let (Owner::Cut(..), Some(a), Some(b)) =
-                (boundary.id.owner, self.ours(boundary.left), self.ours(boundary.right))
-            {
+            if let (Owner::Cut(..), Some(a), Some(b)) = (
+                boundary.id.owner,
+                self.ours(boundary.left),
+                self.ours(boundary.right),
+            ) {
                 cuts.try_reserve(1).map_err(|_| Error::OutOfMemory)?;
                 cuts.push((a, b, plane::length(&boundary.line), boundary.id, index));
             }
@@ -811,7 +920,10 @@ impl Entry<'_> {
             }
             let length = plane::length(&boundary.line);
             let owner = boundary.id.owner;
-            match across.iter_mut().find(|entry| entry.0 == field && entry.1 == owner) {
+            match across
+                .iter_mut()
+                .find(|entry| entry.0 == field && entry.1 == owner)
+            {
                 Some(entry) if (-length, boundary.id) < (-entry.2, entry.3) => {
                     *entry = (field, owner, length, boundary.id, index);
                 }
@@ -832,7 +944,11 @@ impl Entry<'_> {
 
 /// The stiles the paths `paths` cross `boundary` by, the `index`th of the
 /// boundaries: one wherever a path's line crosses its line.
-pub(crate) fn stiles(key: Key, (index, boundary): (u32, &Boundary), paths: &[(Rect, &Line)]) -> Result<Vec<(u32, Gap)>, Error> {
+pub(crate) fn stiles(
+    key: Key,
+    (index, boundary): (u32, &Boundary),
+    paths: &[(Rect, &Line)],
+) -> Result<Vec<(u32, Gap)>, Error> {
     let mut stiles = Vec::new();
     let Some(bounds) = Rect::of(boundary.line.iter().copied()) else {
         return Ok(stiles);
@@ -887,19 +1003,57 @@ pub(crate) fn hang(boundaries: &mut [Boundary], mut gaps: Vec<(u32, Gap)>) -> Re
         let Some(boundary) = boundaries.get_mut(index as usize) else {
             continue;
         };
-        let clashes = boundary
-            .gaps
-            .iter()
-            .any(|hung| (hung.along - gap.along).abs() < f64::midpoint(hung.width, gap.width) + 0.5);
+        let clashes = boundary.gaps.iter().any(|hung| {
+            (hung.along - gap.along).abs() < f64::midpoint(hung.width, gap.width) + 0.5
+        });
         if !clashes {
-            boundary.gaps.try_reserve(1).map_err(|_| Error::OutOfMemory)?;
+            boundary
+                .gaps
+                .try_reserve(1)
+                .map_err(|_| Error::OutOfMemory)?;
             boundary.gaps.push(gap);
         }
     }
     for boundary in boundaries {
-        boundary.gaps.sort_unstable_by(|a, b| a.along.total_cmp(&b.along));
+        boundary
+            .gaps
+            .sort_unstable_by(|a, b| a.along.total_cmp(&b.along));
     }
     Ok(())
+}
+
+/// The stretches of `from`..`to` along a boundary that its `gaps`, in order
+/// along it, leave standing, each at least `least` long.
+///
+/// # Errors
+///
+/// [`Error::OutOfMemory`] when the heap will not hold them.
+pub fn standing(
+    gaps: &[Gap],
+    (from, to): (f64, f64),
+    least: f64,
+) -> Result<Vec<(f64, f64)>, Error> {
+    let mut stretches = Vec::new();
+    let mut start = from;
+    let mut keep = |stretch: (f64, f64)| -> Result<(), Error> {
+        stretches.try_reserve(1).map_err(|_| Error::OutOfMemory)?;
+        stretches.push(stretch);
+        Ok(())
+    };
+    for gap in gaps {
+        let (open, close) = (gap.along - 0.5 * gap.width, gap.along + 0.5 * gap.width);
+        if close <= start || open >= to {
+            continue;
+        }
+        if open - start >= least {
+            keep((start, open))?;
+        }
+        start = close;
+    }
+    if to - start >= least {
+        keep((start, to))?;
+    }
+    Ok(stretches)
 }
 
 #[cfg(test)]

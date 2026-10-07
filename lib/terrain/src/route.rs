@@ -129,7 +129,9 @@ impl Router {
             return Ok(Routed::Unreachable);
         };
         let (grid, goal, least) = (search.grid, search.goal, search.least);
-        self.advance_guided(budget, price, &|index| heuristic(grid, (index, goal), least))
+        self.advance_guided(budget, price, &|index| {
+            heuristic(grid, (index, goal), least)
+        })
     }
 
     /// Settle up to `budget` more samples, each step priced by `price` and

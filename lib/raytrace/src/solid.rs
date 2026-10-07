@@ -26,6 +26,7 @@ use crate::pigment::Pigment;
 use crate::prototype::point;
 use crate::sample::{mix32, unit};
 use crate::shape::{reciprocal, Aabb, Hit};
+use crate::straw::{self, Shows, Straw};
 use crate::vector::{singles, Frame, Pose, Ray, Vec3};
 
 /// The form a solid is dressed to.
@@ -69,6 +70,9 @@ pub(crate) struct Wear {
     /// How wide a crack running into it gapes at its face, in metres; nought
     /// for none.
     pub(crate) crack: f64,
+    /// How far the loose stalks of a unit of straw stand proud of it, in
+    /// metres, as its material's straw lays them; nought for any other unit.
+    pub(crate) bristle: f64,
 }
 
 /// A unit of a structure: a stone, a brick, a drum, a timber.
@@ -84,8 +88,9 @@ pub(crate) struct Solid {
     key: u32,
     form: Form,
     /// Its arris and its lumps in half millimetres, its chips, its pits in
-    /// 40ths of a millimetre, its crack in 50ths.
-    worn: [u8; 5],
+    /// 40ths of a millimetre, its crack in 50ths, and its bristle in half
+    /// millimetres.
+    worn: [u8; 6],
     /// How readily moss lodges on it, in 255ths: a joint's mortar most, a
     /// dressed face least.
     affinity: u8,
@@ -170,6 +175,7 @@ impl Solid {
                 quantised(wear.lumps, 5e-4),
                 quantised(wear.pits, 2.5e-5),
                 quantised(wear.crack, 2e-5),
+                quantised(wear.bristle, 5e-4),
             ],
             affinity: quantised(affinity, 1.0 / 255.0),
         }
@@ -210,13 +216,14 @@ impl Solid {
 
     /// How it has worn, as it holds it.
     pub(crate) fn wear(&self) -> Wear {
-        let [arris, chips, lumps, pits, crack] = self.worn;
+        let [arris, chips, lumps, pits, crack, bristle] = self.worn;
         Wear {
             arris: f64::from(arris) * 5e-4,
             chips,
             lumps: f64::from(lumps) * 5e-4,
             pits: f64::from(pits) * 2.5e-5,
             crack: f64::from(crack) * 2e-5,
+            bristle: f64::from(bristle) * 5e-4,
         }
     }
 
@@ -242,7 +249,8 @@ impl Solid {
             Form::Rock { .. } => half,
         };
         let cover = if self.cover == BARE { 0.0 } else { DEEPEST };
-        widest + Vec3::splat(self.wear().lumps + cover + 1e-4)
+        let wear = self.wear();
+        widest + Vec3::splat(wear.lumps + wear.bristle + cover + 1e-4)
     }
 
     /// The box it lies in, in its prototype's frame.
@@ -378,8 +386,8 @@ struct Crack {
 }
 
 /// How much of a solid's wear shows at a point: its lumps, and how far they
-/// turn the light, its chips, its pits and its crack, each `0.0..=1.0`, and
-/// its cover's relief.
+/// turn the light, its chips, its pits and its crack, each `0.0..=1.0`; its
+/// cover's relief; and a straw unit's single stalks and their bundles.
 #[derive(Copy, Clone, Debug)]
 struct Showing {
     lumps: f64,
@@ -390,6 +398,7 @@ struct Showing {
     pits: f64,
     crack: f64,
     cover: Shown,
+    straw: Shows,
 }
 
 impl Showing {
@@ -404,6 +413,7 @@ impl Showing {
             shoots: 1.0,
             crusts: 1.0,
         },
+        straw: Shows::ALL,
     };
 
     /// How much shows of features `wear` sizes, its deepest chip `chips`
@@ -412,6 +422,12 @@ impl Showing {
     fn at((footprint, scale): (f64, f64), wear: &Wear, (chips, breadth): (f64, f64)) -> Self {
         let shows = |size: f64| smoothstep(SPANS.0, SPANS.1, size / footprint.max(1e-12));
         let lumps = shows(wear.lumps);
+        // A straw unit's stalks are laid in metres.
+        let straw = if wear.bristle > 0.0 {
+            Shows::at(footprint * scale, SPANS)
+        } else {
+            Shows::NONE
+        };
         Self {
             lumps,
             turning: shows(breadth).max(lumps),
@@ -419,13 +435,14 @@ impl Showing {
             pits: shows(wear.pits),
             crack: shows(wear.crack),
             cover: Shown::at(footprint * scale, SPANS),
+            straw,
         }
     }
 
     /// Whether any wear shows as relief, so the surface's own normal is its
     /// relief's.
     fn relieved(&self) -> bool {
-        self.pits > 0.0 || self.crack > 0.0 || self.cover.any()
+        self.pits > 0.0 || self.crack > 0.0 || self.cover.any() || self.straw.any()
     }
 }
 
@@ -447,6 +464,9 @@ struct Shaped<'a> {
     faceted: usize,
     crack: Option<Crack>,
     cover: Option<&'a Cover>,
+    /// The straw a straw unit's material binds it in, whose stalks stand on
+    /// it in relief.
+    straw: Option<&'a Straw>,
     view: Option<View>,
 }
 
@@ -485,6 +505,13 @@ impl<'a> Shaped<'a> {
             .filter(|_| solid.cover != BARE)
             .and_then(|cutting| cutting.materials.get(usize::from(solid.cover)))
             .and_then(covering);
+        let straw = cutting
+            .filter(|_| wear.bristle > 0.0)
+            .and_then(|cutting| cutting.materials.get(usize::from(solid.material)))
+            .and_then(|made| match &made.pigment {
+                Pigment::Straw(straw) => Some(straw),
+                _ => None,
+            });
         let view = cutting.map(|cutting| View {
             eye: frame.to_local(cutting.eye - centre),
             pixel: cutting.pixel,
@@ -512,6 +539,7 @@ impl<'a> Shaped<'a> {
             faceted: 0,
             crack: None,
             cover,
+            straw,
             view,
         };
         if let Form::Rock { facets, .. } = solid.form {
@@ -526,7 +554,9 @@ impl<'a> Shaped<'a> {
     /// where it has weathered further, never past its least half extent.
     fn rock_round(&self, round: u8) -> f64 {
         let least = self.half.x.min(self.half.y).min(self.half.z);
-        (least * f64::from(round) / 255.0).max(self.wear.arris).min(least)
+        (least * f64::from(round) / 255.0)
+            .max(self.wear.arris)
+            .min(least)
     }
 
     /// How far a field stone's body reaches along the unit way `out`.
@@ -539,13 +569,17 @@ impl<'a> Shaped<'a> {
     /// broken body ends, its arrises taken sharp.
     fn rock_extent(&self, out: Vec3) -> f64 {
         let half = self.half;
-        let boxed = (half.x / out.x.abs()).min(half.y / out.y.abs()).min(half.z / out.z.abs());
+        let boxed = (half.x / out.x.abs())
+            .min(half.y / out.y.abs())
+            .min(half.z / out.z.abs());
         self.facets
             .iter()
             .take(self.faceted)
             .map(|facet| (facet.offset, facet.normal.dot(out)))
             .filter(|&(_, toward)| toward > 0.0)
-            .fold(boxed, |nearest, (offset, toward)| nearest.min(offset / toward))
+            .fold(boxed, |nearest, (offset, toward)| {
+                nearest.min(offset / toward)
+            })
     }
 
     /// Break a field stone along `count` planes its key places: first the
@@ -565,7 +599,10 @@ impl<'a> Shaped<'a> {
             let salted = u32::try_from(index).unwrap_or(0);
             let draw = |salt: u32| unit(mix32(key ^ mix32(salted.wrapping_mul(0x7f4b) ^ salt)));
             let tilt = |salt: u32, most: f64| 2.0 * most * (draw(salt) - 0.5);
-            let through = |normal: Vec3, at: Vec3| Facet { normal, offset: normal.dot(at) };
+            let through = |normal: Vec3, at: Vec3| Facet {
+                normal,
+                offset: normal.dot(at),
+            };
             let facet = match index {
                 0 => through(
                     Vec3::new(tilt(1, 0.1), -1.0, tilt(2, 0.1)).normalized(),
@@ -584,7 +621,8 @@ impl<'a> Shaped<'a> {
                     let angle = SIDES.0 + (SIDES.1 - SIDES.0) * share;
                     let across = tilt(2, 0.1);
                     let round = mathf::sqrt(1.0 - across * across);
-                    let normal = Vec3::new(round * mathf::cos(angle), round * mathf::sin(angle), across);
+                    let normal =
+                        Vec3::new(round * mathf::cos(angle), round * mathf::sin(angle), across);
                     Facet {
                         normal,
                         offset: self.rock_reach(normal) * (0.74 + 0.18 * draw(3)),
@@ -719,7 +757,11 @@ impl<'a> Shaped<'a> {
             Some(view) => {
                 let footprint = (q - view.eye).length() * view.pixel;
                 let breadth = self.half.x.min(self.half.y).min(self.half.z) / LUMPS;
-                Showing::at((footprint, view.scale), &self.wear, (self.deepest_chip, breadth))
+                Showing::at(
+                    (footprint, view.scale),
+                    &self.wear,
+                    (self.deepest_chip, breadth),
+                )
             }
             None => Showing::ALL,
         }
@@ -796,7 +838,9 @@ impl<'a> Shaped<'a> {
                 self.facets
                     .iter()
                     .take(self.faceted)
-                    .fold(body, |d, facet| smooth_max(d, facet.normal.dot(q) - facet.offset, worn))
+                    .fold(body, |d, facet| {
+                        smooth_max(d, facet.normal.dot(q) - facet.offset, worn)
+                    })
             }
         }
     }
@@ -876,7 +920,10 @@ impl<'a> Shaped<'a> {
     /// its lumps reach: two octaves, the broader about as broad as the solid
     /// is thin.
     fn lumping(&self, q: Vec3) -> f64 {
-        let (key, scale) = (self.solid.key, LUMPS / self.half.x.min(self.half.y).min(self.half.z));
+        let (key, scale) = (
+            self.solid.key,
+            LUMPS / self.half.x.min(self.half.y).min(self.half.z),
+        );
         0.65 * noise3(q * scale, key ^ 0x1a) + 0.35 * noise3(q * (2.7 * scale), key ^ 0x1b)
     }
 
@@ -929,6 +976,9 @@ impl<'a> Shaped<'a> {
     /// as much of each as `showing` has it.
     fn standing(&self, q: Vec3, showing: &Showing) -> f64 {
         let worn = self.worn(q, showing);
+        if let Some(straw) = self.straw {
+            return self.bristling(straw, (q, worn), showing);
+        }
         match (self.cover, self.view) {
             (Some(cover), Some(view)) if showing.cover.any() => {
                 // Beyond what its cover could reach, the cover cannot change
@@ -941,6 +991,29 @@ impl<'a> Shaped<'a> {
             }
             _ => worn,
         }
+    }
+
+    /// How far local point `q`, `worn` outside the worn solid, stands outside
+    /// the stalks `straw` lays on it, as much of them as `showing` has.
+    ///
+    /// Beyond the stalks' reach they cannot change which side of the surface
+    /// a point stands; within it the distance is told short by as much as
+    /// the stalks' steep relief outruns the solid's own, so a march stepping
+    /// as the solid alone allows never steps through a stalk.
+    fn bristling(&self, straw: &Straw, (q, worn): (Vec3, f64), showing: &Showing) -> f64 {
+        let shows = showing.straw;
+        if !shows.any() {
+            return worn;
+        }
+        // The stalks are laid in metres, the solid in its prototype's units.
+        let scale = self.view.map_or(1.0, |view| view.scale);
+        let reach = straw::BRISTLE / scale;
+        if worn > reach {
+            return worn - reach;
+        }
+        let alone = self.steepest(showing);
+        let short = alone / (alone + MARGIN * straw.steepest(shows));
+        (worn - straw.proud(q * scale, self.half * scale, shows) / scale) * short
     }
 
     /// Where local point `q` lies as its cover grows there: in its
@@ -974,7 +1047,9 @@ impl<'a> Shaped<'a> {
             Form::Drum { flutes, .. } => {
                 4.0 * FLUTE_DEPTH * f64::from(flutes) / core::f64::consts::TAU
             }
-            Form::Block { .. } | Form::Turned { .. } | Form::Scroll { .. } | Form::Rock { .. } => 0.0,
+            Form::Block { .. } | Form::Turned { .. } | Form::Scroll { .. } | Form::Rock { .. } => {
+                0.0
+            }
         };
         let lumps =
             self.wear.lumps * showing.lumps * NOISE_SLOPE * LUMPS / least * (0.65 + 0.35 * 2.7);
@@ -1111,7 +1186,14 @@ impl<'a> Shaped<'a> {
             }
             _ => normal,
         };
-        let (face, on_face) = self.face(q);
+        // A straw unit is read in its stalks' own terms.
+        let (face, on_face, girth) = self.straw.map_or_else(
+            || {
+                let (face, on_face) = self.face(q);
+                (face, on_face, 0.0)
+            },
+            |straw| straw.surface(q, self.half),
+        );
         let (material, uv) = match self.cover {
             Some(cover) => match cover.growth(&self.lodging(q)) {
                 Growth::Bare => (self.solid.material, on_face),
@@ -1126,7 +1208,7 @@ impl<'a> Shaped<'a> {
             mark: self.solid.key,
             along: face,
             uv,
-            girth: 0.0,
+            girth,
             material: Some(u32::from(material)),
             tangent: self.frame.x,
             relieved: showing.relieved(),

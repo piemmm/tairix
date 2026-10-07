@@ -8,7 +8,9 @@ use core::f64::consts::{FRAC_PI_2, PI, TAU};
 use tairix_util::mathf::{self, Phasor};
 
 use crate::bark::{Bark, OnLimb};
-use crate::noise::{fbm2, noise3, smoothstep};
+use crate::farmed::{self, Drill, Grown, Stage, FURROW};
+use crate::heightfield::{Grows, Mix};
+use crate::noise::{cell, fbm2, noise2, noise3, smoothstep};
 use crate::pigment::Pigment;
 use crate::sample::{mix32, unit};
 use crate::vector::Vec3;
@@ -277,6 +279,9 @@ pub(crate) enum Relief {
     /// stone, snow, ground. `depth` is the most it tilts the normal, all its
     /// octaves together, and `scale` how fine the coarsest of them is.
     Grain { depth: f64, scale: f64, seed: u32 },
+    /// A farmed land's ground: grained as `Grain` is, and where its fields
+    /// are tilled, turned in furrows or raked to a tilth as each lies.
+    Tilled { depth: f64, scale: f64, seed: u32 },
     /// The ridges and furrows of a bark, `depth` metres deep, over its limb.
     Bark { bark: Bark, depth: f64 },
 }
@@ -284,7 +289,8 @@ pub(crate) enum Relief {
 /// Where a relief is read: the point in its object's texture frame; the
 /// surface's own coordinates, grain and girth there; the key its instance was
 /// placed under; how wide a patch of it one pixel covers, and how long a
-/// stretch along the view, which a slanting view draws out.
+/// stretch along the view, which a slanting view draws out; and on a farmed
+/// land, what grows about it.
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct Bump {
     pub(crate) p: Vec3,
@@ -294,6 +300,7 @@ pub(crate) struct Bump {
     pub(crate) instance: u32,
     pub(crate) width: f64,
     pub(crate) stretch: f64,
+    pub(crate) grows: Grows,
 }
 
 impl Relief {
@@ -318,7 +325,7 @@ impl Relief {
     pub(crate) const fn as_waves(&self) -> Option<&Waves> {
         match self {
             Self::Waves(waves) => Some(waves),
-            Self::Grain { .. } | Self::Bark { .. } => None,
+            Self::Grain { .. } | Self::Tilled { .. } | Self::Bark { .. } => None,
         }
     }
 
@@ -333,6 +340,7 @@ impl Relief {
         match self {
             Self::Waves(waves) => waves.tilt(normal, p, bump.stretch),
             &Self::Grain { depth, scale, seed } => grained(normal, bump, (depth, scale, seed)),
+            &Self::Tilled { depth, scale, seed } => tilled(normal, bump, (depth, scale, seed)),
             Self::Bark { bark, depth } => {
                 let along_limb = bump.tangent - normal * bump.tangent.dot(normal);
                 if along_limb.length() < 1e-9 {
@@ -405,6 +413,95 @@ fn grained(normal: Vec3, bump: &Bump, (depth, scale, seed): (f64, f64, u32)) -> 
     Tilt {
         normal: (normal + across).normalized(),
         unresolved,
+    }
+}
+
+/// How high a furrow slice stands over the furrow beside it at its most, and
+/// how high a newly drilled field's ridges stand over its drill's lines.
+const FURROW_DEPTH: f64 = 0.08;
+const DRILL_RIDGE: f64 = 0.012;
+
+/// The steepest a tilled field's ridges tilt the ground, as rise over run.
+const STEEPEST_TILTH: f64 = 1.0;
+
+/// `normal` grained `depth` steep from `scale` under `seed`, where `bump`
+/// lies on a tilled field turned in ridges and its clods raise the grain: a
+/// ploughed field's furrow slices, each turned soil cresting lumpily along
+/// its length and the lines between them wandering, among big clods; a newly
+/// drilled field's low ridges along its drill's lines; and the finer crumb a
+/// tilth settles to under its crop. What the footprint cannot resolve of the
+/// ridges roughens the ground instead.
+fn tilled(normal: Vec3, bump: &Bump, (depth, scale, seed): (f64, f64, u32)) -> Tilt {
+    if !bump
+        .grows
+        .corners
+        .iter()
+        .any(|&(grown, _)| Grown::of(grown).bare())
+    {
+        return grained(normal, bump, (depth, scale, seed));
+    }
+    let ((slope, variance), clods) = bump.grows.blended(|(grown, rows)| match Grown::of(grown) {
+        Grown::Sown(crop, stage) if Grown::of(grown).bare() => {
+            let drill = Drill::of(farmed::row_spacing(crop), (grown, rows));
+            ridged(stage, &drill, bump, seed)
+        }
+        _ => ((Vec3::ZERO, 0.0), 1.0),
+    });
+    let steep = slope.length();
+    let slope = if steep > STEEPEST_TILTH {
+        slope * (STEEPEST_TILTH / steep)
+    } else {
+        slope
+    };
+    let grain = grained(normal, bump, (depth * clods, scale, seed));
+    Tilt {
+        normal: (grain.normal - slope).normalized(),
+        unresolved: grain.unresolved + variance,
+    }
+}
+
+/// How the ground at `bump` on a field drilled as `drill` lying at `stage`
+/// slopes across its ridges, with the slope variance its footprint cannot
+/// resolve of them; and how many times its clods raise the ground's grain.
+fn ridged(stage: Stage, drill: &Drill, bump: &Bump, seed: u32) -> ((Vec3, f64), f64) {
+    let (x, z) = (bump.p.x, bump.p.z);
+    let (nx, nz) = drill.normal();
+    // A ridge `height` high across `period`, rising as `rise` says: its slope
+    // across, and the slope variance the footprint cannot resolve of it.
+    let ridge = |(period, height): (f64, f64), rise: f64| {
+        let kept = 1.0 - smoothstep(0.25, 1.0, bump.stretch / period);
+        let steep = height / period;
+        let slope = Vec3::new(nx, 0.0, nz) * (steep * rise * kept);
+        // Both ridges' rise swings as far as pi either way, sinusoidally.
+        (slope, 0.5 * PI * PI * steep * steep * (1.0 - kept * kept))
+    };
+    match stage {
+        Stage::Ploughed => {
+            // Each slice its own height, lumpy along its length.
+            let furrow = drill.furrow((x, z));
+            let own = 0.7 + 0.6 * unit(mix32(furrow.slice ^ drill.key() ^ 0x5f1c));
+            let along = drill.along((x, z));
+            let lumps = 0.75 + 0.5 * noise2(along / 0.6, f64::from(furrow.slice), seed ^ 0x2b9);
+            let (_, rise) = furrow.rise();
+            (ridge((FURROW, FURROW_DEPTH * own * lumps), rise), 5.0)
+        }
+        Stage::Drilled => {
+            let (_, within) = cell(drill.across((x, z)) / drill.spacing());
+            (
+                ridge(
+                    (drill.spacing(), DRILL_RIDGE),
+                    PI * mathf::sin(TAU * within),
+                ),
+                2.5,
+            )
+        }
+        _ => ((Vec3::ZERO, 0.0), 1.6),
+    }
+}
+
+impl Mix for ((Vec3, f64), f64) {
+    fn mix(self, other: Self, t: f64) -> Self {
+        (self.0.mix(other.0, t), self.1 + (other.1 - self.1) * t)
     }
 }
 

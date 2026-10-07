@@ -285,6 +285,9 @@ struct Form {
     scale: (f64, f64),
     stretch: (f64, f64),
     billow: (f64, f64),
+    /// Extinction per metre through the body of its clouds: for water,
+    /// 3·LWC / (2·ρ·r) of the liquid water it holds as droplets of effective
+    /// radius r (Stephens, 1978).
     thickness: (f64, f64),
     medium: Medium,
 }
@@ -315,7 +318,8 @@ const CUMULUS: Form = Form {
     scale: (1800.0, 3400.0),
     stretch: (1.0, 1.3),
     billow: (300.0, 450.0),
-    thickness: (0.05, 0.05),
+    // 0.3–0.8 g/m³ of droplets 9 µm in radius.
+    thickness: (0.05, 0.13),
     medium: DROPLETS,
 };
 /// Small, flat heaps under a mackerel sky.
@@ -327,7 +331,8 @@ const HUMILIS: Form = Form {
     scale: (1500.0, 2600.0),
     stretch: (1.0, 1.3),
     billow: (260.0, 380.0),
-    thickness: (0.045, 0.045),
+    // 0.2–0.4 g/m³ of droplets 7 µm in radius.
+    thickness: (0.043, 0.086),
     medium: DROPLETS,
 };
 /// A broken sheet of lumpy cloud, more cloud than sky.
@@ -339,7 +344,8 @@ const STRATOCUMULUS: Form = Form {
     scale: (2500.0, 5000.0),
     stretch: (1.0, 1.6),
     billow: (380.0, 560.0),
-    thickness: (0.04, 0.04),
+    // 0.15–0.4 g/m³ of droplets 9 µm in radius.
+    thickness: (0.025, 0.067),
     medium: DROPLETS,
 };
 /// Heaps grown into towers.
@@ -351,7 +357,8 @@ const CONGESTUS: Form = Form {
     scale: (2200.0, 4200.0),
     stretch: (1.0, 1.3),
     billow: (420.0, 680.0),
-    thickness: (0.05, 0.05),
+    // 0.5–1.2 g/m³ of droplets 11 µm in radius.
+    thickness: (0.068, 0.16),
     medium: DROPLETS,
 };
 /// A grey ceiling.
@@ -363,7 +370,8 @@ const STRATUS: Form = Form {
     scale: (3000.0, 6000.0),
     stretch: (1.0, 1.4),
     billow: (600.0, 900.0),
-    thickness: (0.035, 0.035),
+    // 0.15–0.35 g/m³ of droplets 8 µm in radius.
+    thickness: (0.028, 0.066),
     medium: DROPLETS,
 };
 /// A middle layer of small billows.
@@ -375,7 +383,8 @@ const ALTOCUMULUS: Form = Form {
     scale: (2500.0, 4500.0),
     stretch: (2.0, 3.0),
     billow: (220.0, 320.0),
-    thickness: (0.02, 0.02),
+    // 0.05–0.25 g/m³ of droplets 6 µm in radius.
+    thickness: (0.0125, 0.0625),
     medium: DROPLETS,
 };
 /// A thin grey middle sheet above an overcast.
@@ -387,7 +396,8 @@ const ALTOSTRATUS: Form = Form {
     scale: (3000.0, 6000.0),
     stretch: (1.5, 2.5),
     billow: (400.0, 600.0),
-    thickness: (0.02, 0.02),
+    // 0.05–0.15 g/m³ of droplets 6 µm in radius.
+    thickness: (0.0125, 0.0375),
     medium: DROPLETS,
 };
 /// A mackerel sky: rows of small, high billows.
@@ -399,7 +409,8 @@ const MACKEREL: Form = Form {
     scale: (1500.0, 3000.0),
     stretch: (2.0, 4.0),
     billow: (150.0, 240.0),
-    thickness: (0.025, 0.025),
+    // 0.05–0.12 g/m³ of droplets 5 µm in radius.
+    thickness: (0.015, 0.036),
     medium: DROPLETS,
 };
 /// A sky of cirrus: thin sheets and streaks of ice high above everything,
@@ -413,7 +424,7 @@ const CIRRUS: Form = Form {
     scale: (1500.0, 3000.0),
     stretch: (4.0, 8.0),
     billow: (180.0, 320.0),
-    thickness: (4e-4, 1.5e-3),
+    thickness: (8e-5, 3e-4),
     medium: ICE,
 };
 /// A few streaks of cirrus above other cloud.

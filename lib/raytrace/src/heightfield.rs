@@ -86,17 +86,115 @@ struct Waiting {
 /// attributes there, empty for a grid that carries none.
 pub(crate) type Row<'a> = (usize, &'a mut [f32], &'a mut [Attributes]);
 
-/// The channels of what a land is like that a grid carries at each vertex:
-/// how wet, what the water laid down or wore away, how much of a road and of
-/// a path is there, how much grows, and how deep snow lies. Each is one
-/// quantity, so blending vertices blends it.
-pub(crate) const CHANNELS: usize = 6;
+/// The channels of what a land is like that a grid carries at each vertex.
+/// First its quantities, each blended between vertices: how wet, what the
+/// water laid down or wore away, how much of a road and of a path is there,
+/// how much grows, and how deep snow lies. Then what a farmed land grows
+/// there and the way its rows run (`farmed`): categories, read at the nearest
+/// vertex and never blended.
+pub(crate) const QUANTITIES: usize = 6;
+pub(crate) const CHANNELS: usize = QUANTITIES + 2;
 pub(crate) const WET: usize = 0;
 pub(crate) const SEDIMENT: usize = 1;
 pub(crate) const GREEN: usize = 4;
+pub(crate) const SNOW: usize = QUANTITIES - 1;
+pub(crate) const GROWN: usize = QUANTITIES;
+pub(crate) const ROWS: usize = QUANTITIES + 1;
 
 /// What a land is like at one vertex, a byte to a channel.
 pub(crate) type Attributes = [u8; CHANNELS];
+
+/// What the four vertices about a place carry, and how far across and down
+/// between them the place lies.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub(crate) struct Patch {
+    corners: [Attributes; 4],
+    across: f64,
+    down: f64,
+}
+
+impl Patch {
+    /// Its quantities, blended as the place lies between its corners, each
+    /// `0.0..=1.0`.
+    pub(crate) fn quantities(&self) -> [f64; QUANTITIES] {
+        core::array::from_fn(|channel| self.quantity(channel))
+    }
+
+    /// Its quantity `channel`, blended as the place lies between its corners,
+    /// `0.0..=1.0`; nought for one it does not carry.
+    pub(crate) fn quantity(&self, channel: usize) -> f64 {
+        let value = |corner: Attributes| {
+            corner
+                .get(channel)
+                .map_or(0.0, |&value| f64::from(value) / 255.0)
+        };
+        bilinear(self.corners.map(value), (self.across, self.down))
+    }
+
+    /// What grows about the place.
+    pub(crate) fn grows(&self) -> Grows {
+        Grows {
+            corners: self.corners.map(|corner| (corner[GROWN], corner[ROWS])),
+            across: self.across,
+            down: self.down,
+        }
+    }
+}
+
+/// What grows about a place, as the four vertices about it carry it: each
+/// corner's growth and rows, and how far across and down between them the
+/// place lies.
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub(crate) struct Grows {
+    pub(crate) corners: [(u8, u8); 4],
+    pub(crate) across: f64,
+    pub(crate) down: f64,
+}
+
+impl Grows {
+    /// The growth and rows of the corner nearest the place.
+    pub(crate) fn nearest(&self) -> (u8, u8) {
+        let index = usize::from(self.across >= 0.5) + 2 * usize::from(self.down >= 0.5);
+        self.corners.get(index).copied().unwrap_or_default()
+    }
+
+    /// What each corner's growth and rows look like by `look`, blended as the
+    /// place lies between them, so two growths meet in a blend of their looks
+    /// and never in a third growth. Corners alike are looked at once.
+    pub(crate) fn blended<T: Mix>(&self, look: impl Fn((u8, u8)) -> T) -> T {
+        let [first, second, third, fourth] = self.corners;
+        let a = look(first);
+        let pick = |corner: (u8, u8), earlier: &[((u8, u8), T)]| {
+            earlier
+                .iter()
+                .find(|&&(other, _)| other == corner)
+                .map_or_else(|| look(corner), |&(_, seen)| seen)
+        };
+        let b = pick(second, &[(first, a)]);
+        let c = pick(third, &[(first, a), (second, b)]);
+        let d = pick(fourth, &[(first, a), (second, b), (third, c)]);
+        let top = a.mix(b, self.across);
+        top.mix(c.mix(d, self.across), self.down)
+    }
+}
+
+/// What the corners of a patch can be blended as.
+pub(crate) trait Mix: Copy {
+    /// `t` of the way from this to `other`.
+    fn mix(self, other: Self, t: f64) -> Self;
+}
+
+impl Mix for Vec3 {
+    fn mix(self, other: Self, t: f64) -> Self {
+        self.lerp(other, t)
+    }
+}
+
+impl Mix for (Vec3, f64) {
+    fn mix(self, other: Self, t: f64) -> Self {
+        (self.0.lerp(other.0, t), self.1 + (other.1 - self.1) * t)
+    }
+}
 
 /// The grid `written` of `fields` to write, and the grid `read` it is
 /// written from; `None` unless both are there and apart.
@@ -123,7 +221,7 @@ pub(crate) const ABSENT: f32 = f32::NEG_INFINITY;
 /// What a grid carrying no attributes is like everywhere: dry, neither worn
 /// nor built up, on no road or path, green enough for anything to grow, and
 /// bare of snow.
-pub(crate) const PLAIN: [f64; CHANNELS] = [0.0, 0.5, 0.0, 0.0, 1.0, 0.0];
+pub(crate) const PLAIN: [f64; QUANTITIES] = [0.0, 0.5, 0.0, 0.0, 1.0, 0.0];
 
 impl Heightfield {
     /// Its rows `range`, as disjoint bands `rows` rows high, each with the
@@ -323,9 +421,41 @@ impl Heightfield {
 
     /// The attributes at world `(x, z)`, blended from the vertices about it,
     /// each `0.0..=1.0`; [`PLAIN`] for a grid that carries none.
-    pub(crate) fn attributes_at(&self, x: f64, z: f64) -> [f64; CHANNELS] {
+    pub(crate) fn attributes_at(&self, x: f64, z: f64) -> [f64; QUANTITIES] {
+        self.patch_at(x, z)
+            .map_or(PLAIN, |patch| patch.quantities())
+    }
+
+    /// What grows about world `(x, z)`: nothing farmed on a grid that
+    /// carries no attributes.
+    pub(crate) fn grows_at(&self, x: f64, z: f64) -> Grows {
+        self.patch_at(x, z)
+            .map_or_else(Grows::default, |patch| patch.grows())
+    }
+
+    /// [`Self::attributes_at`] and [`Self::grows_at`] both, from one look at
+    /// the vertices about world `(x, z)`.
+    pub(crate) fn carried_at(&self, x: f64, z: f64) -> ([f64; QUANTITIES], Grows) {
+        self.patch_at(x, z)
+            .map_or((PLAIN, Grows::default()), |patch| {
+                (patch.quantities(), patch.grows())
+            })
+    }
+
+    /// The quantity `channel` at world `(x, z)`, blended from the vertices
+    /// about it, `0.0..=1.0`: [`PLAIN`]'s on a grid that carries none.
+    pub(crate) fn quantity_at(&self, x: f64, z: f64, channel: usize) -> f64 {
+        self.patch_at(x, z).map_or_else(
+            || PLAIN.get(channel).copied().unwrap_or(0.0),
+            |patch| patch.quantity(channel),
+        )
+    }
+
+    /// The attributes of the four vertices about world `(x, z)`, and where
+    /// between them it lies; `None` on a grid that carries none.
+    pub(crate) fn patch_at(&self, x: f64, z: f64) -> Option<Patch> {
         if !self.carries {
-            return PLAIN;
+            return None;
         }
         let (column, across) = self.split((x - self.origin.0) / self.step);
         let (row, down) = self.split((z - self.origin.1) / self.step);
@@ -335,18 +465,16 @@ impl Heightfield {
                 .copied()
                 .unwrap_or([0; CHANNELS])
         };
-        let corners = [
-            at(column, row),
-            at(column + 1, row),
-            at(column, row + 1),
-            at(column + 1, row + 1),
-        ];
-        let mut out = [0.0; CHANNELS];
-        for (channel, slot) in out.iter_mut().enumerate() {
-            let value = |corner: Attributes| f64::from(corner[channel]) / 255.0;
-            *slot = bilinear(corners.map(value), (across, down));
-        }
-        out
+        Some(Patch {
+            corners: [
+                at(column, row),
+                at(column + 1, row),
+                at(column, row + 1),
+                at(column + 1, row + 1),
+            ],
+            across,
+            down,
+        })
     }
 
     /// Whether cell `(column, row)` has a surface.

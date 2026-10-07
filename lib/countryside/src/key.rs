@@ -117,7 +117,11 @@ impl Draws {
                 return Some(choice);
             }
         }
-        weights.iter().rev().find(|&&(_, weight)| weight > 0.0).map(|&(choice, _)| choice)
+        weights
+            .iter()
+            .rev()
+            .find(|&&(_, weight)| weight > 0.0)
+            .map(|&(choice, _)| choice)
     }
 
     /// Whether the next draw falls within `chance`.

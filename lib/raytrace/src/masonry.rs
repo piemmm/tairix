@@ -11,9 +11,16 @@
 //! black where rain never washes, algae greens the foot of a wall and its
 //! damp side, and a reclaimed brick keeps the lime mortar of the wall it was
 //! taken from.
+//!
+//! Masonry too far off to be laid unit by unit is [`Massed`]: its face is
+//! cut into cells a unit across, each coloured as a unit, which settle to
+//! the mean of them wherever a cell is finer than a pixel.
 
-use crate::noise::{noise3, smoothstep};
-use crate::pigment::{speckle, Spot};
+use tairix_util::mathf;
+
+use crate::heightfield::{Grows, QUANTITIES};
+use crate::noise::{cells3, noise3, smoothstep};
+use crate::pigment::{lying, speckle, Spot, SNOW};
 use crate::sample::{mix32, unit};
 use crate::vector::Vec3;
 
@@ -50,7 +57,28 @@ pub(crate) struct Masonry {
     pub(crate) foot: f64,
     pub(crate) unit: Unit,
     pub(crate) seed: u32,
+    pub(crate) massed: Option<Massed>,
+    /// How much of what faces the sky the snow lying on it covers.
+    pub(crate) snow: f64,
 }
+
+/// Masonry set too far off to lay unit by unit: cells `size` across stand
+/// for its units, and settle to `faces` on an upright face and `tops` on one
+/// facing the sky, the mean of them and the voids between them.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct Massed {
+    size: f64,
+    faces: Vec3,
+    tops: Vec3,
+}
+
+/// How far into a massed cell from its edge the void between it and the
+/// next reaches, as a share of a cell, and how dark it is: as deep in shade
+/// as a field-stone wall's face is between and under its stones, measured
+/// against walls laid stone by stone; and how many places a massed face's
+/// mean is read at.
+const VOID: (f64, f64) = (0.35, 0.85);
+const MEAN_READS: u32 = 1024;
 
 /// The black crust soot and gypsum lay on stone where rain never washes it.
 const CRUST: Vec3 = Vec3::new(0.035, 0.032, 0.028);
@@ -73,9 +101,72 @@ const RUST: Vec3 = Vec3::new(1.12, 0.88, 0.66);
 
 impl Masonry {
     /// The colour at `spot`: the unit its mark names, at the place on it
-    /// its coordinates name.
+    /// its coordinates name; where it is massed, the cell it lies in.
     pub(crate) fn colour(&self, spot: &Spot) -> Vec3 {
-        let key = mix32(spot.mark ^ self.seed);
+        let Some(massed) = &self.massed else {
+            return self.unit_colour(spot, mix32(spot.mark ^ self.seed));
+        };
+        let mean = massed
+            .faces
+            .lerp(massed.tops, smoothstep(0.35, 0.8, spot.normal.y));
+        let resolved = 1.0 - smoothstep(0.3, 1.5, spot.width / massed.size);
+        if resolved <= 0.0 {
+            return mean;
+        }
+        mean.lerp(self.cell_colour(spot, massed.size), resolved)
+    }
+
+    /// This masonry set too far off to lay unit by unit, its units `size`
+    /// across.
+    pub(crate) fn massed(&self, size: f64) -> Self {
+        let laid = Self {
+            massed: None,
+            ..self.clone()
+        };
+        let mean = |normal: Vec3| {
+            let mut sum = Vec3::ZERO;
+            for read in 0..MEAN_READS {
+                let draw =
+                    |salt: u32| unit(mix32(read.wrapping_mul(0x9E37_79B9) ^ salt ^ self.seed));
+                let p = Vec3::new(draw(1), draw(2), draw(3)) * (64.0 * size);
+                let spot = Spot {
+                    p,
+                    normal,
+                    height: p.y,
+                    width: 1e-4 * size,
+                    mark: 0,
+                    along: 0.0,
+                    uv: (0.0, 0.0),
+                    girth: 0.0,
+                    instance: 0,
+                    front: true,
+                    ground: [0.0; QUANTITIES],
+                    grows: Grows::default(),
+                    thatch: 0.0,
+                    cover: None,
+                };
+                sum += laid.cell_colour(&spot, size);
+            }
+            sum * (1.0 / f64::from(MEAN_READS))
+        };
+        let (faces, tops) = (mean(Vec3::new(1.0, 0.0, 0.0)), mean(Vec3::UP));
+        Self {
+            massed: Some(Massed { size, faces, tops }),
+            ..laid
+        }
+    }
+
+    /// The colour at `spot` of the cell `size` across it lies in: a unit's,
+    /// darkened in the void between it and the next.
+    fn cell_colour(&self, spot: &Spot, size: f64) -> Vec3 {
+        let found = cells3(spot.p * (1.0 / size), self.seed ^ 0x66, 1.0);
+        let edge = mathf::sqrt(found.second) - mathf::sqrt(found.nearest);
+        let void = 1.0 - smoothstep(0.0, VOID.0, edge);
+        self.unit_colour(spot, mix32(found.id ^ self.seed)) * (1.0 - VOID.1 * void)
+    }
+
+    /// The colour at `spot` of the unit keyed `key`.
+    fn unit_colour(&self, spot: &Spot, key: u32) -> Vec3 {
         let shade = match self.unit {
             Unit::Field => GATHERED * self.shade,
             Unit::Stone | Unit::Brick { .. } | Unit::Mortar => self.shade,
@@ -92,7 +183,9 @@ impl Masonry {
             spot.width * self.grain,
         );
         match self.unit {
-            Unit::Brick { burnt, reclaimed } => colour = brick(colour, spot, (burnt, reclaimed), key),
+            Unit::Brick { burnt, reclaimed } => {
+                colour = brick(colour, spot, (burnt, reclaimed), key);
+            }
             Unit::Field => colour = blotched(colour, spot, key),
             Unit::Stone | Unit::Mortar => {}
         }
@@ -144,6 +237,7 @@ impl Masonry {
             .lerp(GRIME, 0.5 * grimed)
             .lerp(CRUST, 0.8 * sheltered)
             .lerp(ALGAE, 0.6 * algae)
+            .lerp(SNOW, lying(self.snow, normal))
     }
 }
 

@@ -70,11 +70,24 @@ impl Node {
     }
 }
 
+/// An object as a hierarchy is built over it: which it is, its box padded,
+/// and the box's middle.
 #[derive(Copy, Clone, Debug)]
-struct Item {
+pub(crate) struct Item {
     object: u32,
     bounds: Aabb,
     centre: Vec3,
+}
+
+impl Item {
+    /// Object `object`, lying in `bounds`.
+    pub(crate) fn new(object: u32, bounds: Aabb) -> Self {
+        Self {
+            object,
+            bounds: bounds.padded(),
+            centre: bounds.centre(),
+        }
+    }
 }
 
 /// The hierarchy.
@@ -270,14 +283,17 @@ impl Builder {
     /// A build over `bounds`, one per item; `None` when the heap will not
     /// hold it.
     pub(crate) fn new(bounds: &[(u32, Aabb)]) -> Option<Self> {
-        let items: Vec<Item> = fallible::collected(
+        Self::over(fallible::collected(
             bounds.len(),
-            bounds.iter().map(|&(object, bounds)| Item {
-                object,
-                bounds: bounds.padded(),
-                centre: bounds.centre(),
-            }),
-        )?;
+            bounds
+                .iter()
+                .map(|&(object, bounds)| Item::new(object, bounds)),
+        )?)
+    }
+
+    /// A build over `items`, taken as they stand; `None` when the heap will
+    /// not hold it.
+    pub(crate) fn over(items: Vec<Item>) -> Option<Self> {
         let mut builder = Self {
             nodes: Vec::new(),
             order: Vec::new(),

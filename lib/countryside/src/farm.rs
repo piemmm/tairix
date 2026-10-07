@@ -1,14 +1,15 @@
-//! A farmstead's layout: a yard on its site, squared to the contour or to
-//! the way that serves it, its house on the side it faces out from, its
-//! barn across the yard and its other ranges about it as its plan has them,
-//! and a garden before the house.
+//! A farmstead's layout: a yard on its site, squared to the contour, or on
+//! level ground to the nearest place a lane may join it from, and opening
+//! toward that place; its house on the side it faces out from, its barn
+//! across the yard and its other ranges about it as its plan has them, and a
+//! garden before the house.
 
 use alloc::vec::Vec;
 
 use tairix_util::mathf;
 
 use crate::ground::{self, Ground};
-use crate::key::{Key, Stage};
+use crate::key::{Draws, Key, Stage};
 use crate::plane::{Convex, Point};
 use crate::site::{Settled, Settlement};
 use crate::Error;
@@ -47,9 +48,15 @@ pub struct Footprint {
 }
 
 impl Footprint {
-    /// Its outline, anticlockwise.
+    /// Its corners, anticlockwise.
     #[must_use]
-    pub fn outline(&self) -> Convex {
+    pub fn corners(&self) -> [Point; 4] {
+        corners(self.middle, self.along, (self.length, self.depth))
+    }
+
+    /// Its outline; `None` where the heap will not hold it.
+    #[must_use]
+    pub fn outline(&self) -> Option<Convex> {
         rectangle(self.middle, self.along, (self.length, self.depth))
     }
 }
@@ -80,19 +87,31 @@ pub struct Farmstead {
     pub buildings: Vec<Footprint>,
     /// How they stand about the yard.
     pub plan: Plan,
-    /// The middle of the yard's edge it opens on to the way that serves it.
+    /// Where the yard's front opens on to the way that serves it: toward the
+    /// end of the front away from the house.
     pub gate: Point,
     /// The whole of its plot: its yard, its buildings and its garden.
     pub plot: Convex,
 }
 
-/// The rectangle `length` along the unit `along` and `depth` across it,
-/// about `middle`, anticlockwise.
-pub(crate) fn rectangle(middle: Point, along: Point, (length, depth): (f64, f64)) -> Convex {
+/// The corners of the rectangle `length` along the unit `along` and `depth`
+/// across it, about `middle`, anticlockwise.
+fn corners(middle: Point, along: Point, (length, depth): (f64, f64)) -> [Point; 4] {
     let (a, b) = (along * (0.5 * length), along.left() * (0.5 * depth));
-    Convex {
-        corners: alloc::vec![middle - a - b, middle + a - b, middle + a + b, middle - a + b],
-    }
+    [
+        middle - a - b,
+        middle + a - b,
+        middle + a + b,
+        middle - a + b,
+    ]
+}
+
+/// That rectangle; `None` where the heap will not hold it.
+pub(crate) fn rectangle(middle: Point, along: Point, size: (f64, f64)) -> Option<Convex> {
+    let corners = corners(middle, along, size);
+    Some(Convex {
+        corners: tairix_util::fallible::collected(corners.len(), corners.into_iter())?,
+    })
 }
 
 /// The least convex polygon holding every point of `points`, anticlockwise
@@ -141,15 +160,23 @@ pub(crate) fn lay_out(
     let (slope, rise) = ground::slope(ground, farm.at, 10.0);
     // Its ranges stand along the contour where the ground falls, else square
     // to its way out; and never quite true to either.
-    let base = if slope > 0.02 { rise.left() } else { toward.left() };
+    let base = if slope > 0.02 {
+        rise.left()
+    } else {
+        toward.left()
+    };
     let lean = draws.range(-0.18, 0.18);
     let along = turned(base, lean);
     let across = along.left();
     // The yard opens toward its way: the side of it facing the way's side.
-    let front = if across.dot(toward) >= 0.0 { across } else { -across };
+    let front = if across.dot(toward) >= 0.0 {
+        across
+    } else {
+        -across
+    };
     let (width, depth) = (draws.range(24.0, 40.0), draws.range(18.0, 30.0));
     let middle = farm.at;
-    let yard = rectangle(middle, along, (width, depth));
+    let yard = rectangle(middle, along, (width, depth)).ok_or(Error::OutOfMemory)?;
     let plan = match draws.below(20) {
         0..=7 => Plan::Courtyard,
         8..=14 => Plan::Ell,
@@ -160,7 +187,9 @@ pub(crate) fn lay_out(
     // its garden; the yard opens to its way at the front's other end.
     let end = if draws.chance(0.5) { 1.0 } else { -1.0 };
     let house = Footprint {
-        middle: middle + front * (0.5 * depth + 3.5 + gap) + along * (end * draws.range(0.2, 0.32) * width),
+        middle: middle
+            + front * (0.5 * depth + 3.5 + gap)
+            + along * (end * draws.range(0.2, 0.32) * width),
         along,
         length: draws.range(9.0, 14.0),
         depth: draws.range(6.0, 8.5),
@@ -168,10 +197,16 @@ pub(crate) fn lay_out(
         standing: Standing::Dwelling,
     };
     let mut buildings = Vec::new();
-    buildings.try_reserve_exact(4).map_err(|_| Error::OutOfMemory)?;
+    buildings
+        .try_reserve_exact(4)
+        .map_err(|_| Error::OutOfMemory)?;
     buildings.push(house);
     let barn_depth = draws.range(7.0, 10.0);
-    let barn_lean = if plan == Plan::Loose { draws.range(-0.3, 0.3) } else { 0.0 };
+    let barn_lean = if plan == Plan::Loose {
+        draws.range(-0.3, 0.3)
+    } else {
+        0.0
+    };
     let barn_length = draws.range(16.0, 26.0).min(width + 4.0);
     // A barn standing askew swings its corners toward the yard: it stands
     // back by as much.
@@ -185,6 +220,45 @@ pub(crate) fn lay_out(
         front: turned(front, barn_lean),
         standing: Standing::Range,
     });
+    outbuildings(
+        &mut draws,
+        plan,
+        (middle, along, front),
+        (width, depth, gap),
+        &mut buildings,
+    );
+    let garden_depth = draws.range(10.0, 18.0);
+    let garden = rectangle(
+        house.middle + front * (0.5 * house.depth + 0.5 * garden_depth + 1.0),
+        along,
+        (house.length + draws.range(4.0, 12.0), garden_depth),
+    )
+    .ok_or(Error::OutOfMemory)?;
+    let plot = plot_of((&yard, &garden), &buildings)?;
+    Ok(Farmstead {
+        settled: farm.settled,
+        at: farm.at,
+        gate: middle + front * (0.5 * depth) - along * (end * 0.3 * width),
+        yard,
+        garden,
+        buildings,
+        plan,
+        plot,
+    })
+}
+
+/// The byre and the shed a farmstead laid out as `plan` stands about its
+/// yard into `buildings`: the yard `(width, depth)` across about `middle`,
+/// its ranges along `along` and opening to `front`, each building `gap`
+/// clear of it.
+fn outbuildings(
+    draws: &mut Draws,
+    plan: Plan,
+    (middle, along, front): (Point, Point, Point),
+    (width, depth, gap): (f64, f64, f64),
+    buildings: &mut Vec<Footprint>,
+) {
+    let across = along.left();
     let side = if draws.chance(0.5) { along } else { -along };
     if plan != Plan::Loose {
         let byre_depth = draws.range(5.5, 7.0);
@@ -218,32 +292,20 @@ pub(crate) fn lay_out(
             standing: Standing::Shed,
         });
     }
-    let garden_depth = draws.range(10.0, 18.0);
-    let garden = rectangle(
-        house.middle + front * (0.5 * house.depth + 0.5 * garden_depth + 1.0),
-        along,
-        (house.length + draws.range(4.0, 12.0), garden_depth),
-    );
+}
+
+/// The whole plot of a farmstead of `yard` and `garden` and `buildings`.
+fn plot_of((yard, garden): (&Convex, &Convex), buildings: &[Footprint]) -> Result<Convex, Error> {
     let mut corners = Vec::new();
     corners
         .try_reserve(4 * (buildings.len() + 2))
         .map_err(|_| Error::OutOfMemory)?;
     corners.extend_from_slice(&yard.corners);
     corners.extend_from_slice(&garden.corners);
-    for building in &buildings {
-        corners.extend_from_slice(&building.outline().corners);
+    for building in buildings {
+        corners.extend_from_slice(&building.corners());
     }
-    let plot = hull(&corners).ok_or(Error::OutOfMemory)?;
-    Ok(Farmstead {
-        settled: farm.settled,
-        at: farm.at,
-        gate: middle + front * (0.5 * depth) - along * (end * 0.3 * width),
-        yard,
-        garden,
-        buildings,
-        plan,
-        plot,
-    })
+    hull(&corners).ok_or(Error::OutOfMemory)
 }
 
 /// The unit way `way` turned `angle` radians anticlockwise.

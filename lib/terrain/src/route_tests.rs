@@ -100,7 +100,8 @@ fn a_guided_search_finds_as_cheap_a_path_and_settles_far_less() {
     let grid = Grid::new(24);
     // Every step costs four times the least, so octile distance bounds the
     // rest of the way loosely and four times it exactly.
-    let price = |_: usize, _: usize, diagonal: bool| Some(if diagonal { 6 * LEAST } else { 4 * LEAST });
+    let price =
+        |_: usize, _: usize, diagonal: bool| Some(if diagonal { 6 * LEAST } else { 4 * LEAST });
     let ends = (grid.index(1, 20), grid.index(22, 2));
     let exact = |index: usize| 4 * heuristic(grid, (index, ends.1), LEAST);
     let mut router = Router::new(grid.area()).expect("a router");
@@ -124,7 +125,10 @@ fn a_guided_search_finds_as_cheap_a_path_and_settles_far_less() {
     let (loose, loosely) = search(false);
     let (tight, tightly) = search(true);
     assert_eq!(cost(&tight, grid), cost(&loose, grid));
-    assert!(4 * tightly < loosely, "{tightly} settles guided, {loosely} not");
+    assert!(
+        4 * tightly < loosely,
+        "{tightly} settles guided, {loosely} not"
+    );
 }
 
 #[test]

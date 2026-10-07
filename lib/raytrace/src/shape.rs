@@ -12,6 +12,7 @@ use crate::lanes::Corners;
 use crate::material::Material;
 use crate::pigment::Pigment;
 use crate::prototype::Prototype;
+use crate::stand::Stand;
 use crate::vector::{Pose, Ray, Vec3};
 
 /// Where a ray met a shape.
@@ -33,8 +34,8 @@ pub(crate) struct Hit {
     /// limb's distance along its stem and its angle round it, a leaf's place
     /// along and across its midrib.
     pub(crate) uv: (f64, f64),
-    /// A limb's radius where the ray met it; nought where the surface is no
-    /// limb.
+    /// A limb's radius where the ray met it, or the side of a round unit of
+    /// straw's, which its stalks wind round; nought on any other surface.
     pub(crate) girth: f64,
     /// The material the part met is made of, where a shape of many parts
     /// sets its own; `None` for the object's.
@@ -85,6 +86,7 @@ pub(crate) struct Geometry<'a> {
     pub(crate) prototypes: &'a [Prototype],
     pub(crate) lawns: &'a [Lawn],
     pub(crate) far_woods: &'a [FarWood],
+    pub(crate) stands: &'a [Stand],
     pub(crate) materials: &'a [Material],
     pub(crate) view: Option<Viewpoint>,
 }
@@ -277,6 +279,10 @@ pub(crate) enum Shape {
         wood: u32,
         tile: Tile,
     },
+    /// The scene's stand of a field's crop `stand`.
+    Stand {
+        stand: u32,
+    },
 }
 
 impl Shape {
@@ -348,6 +354,7 @@ impl Shape {
             Self::FarWood { wood, tile } => {
                 geometry.far_woods.get(wood as usize).map(|_| tile.bounds())
             }
+            Self::Stand { stand } => geometry.stands.get(stand as usize).map(Stand::bounds),
             Self::Instance {
                 prototype,
                 pose,
@@ -417,6 +424,12 @@ impl Shape {
                     .get(wood as usize)?
                     .intersect(&tile, ray, (near, far), geometry)
             }
+            Self::Stand { stand } => {
+                geometry
+                    .stands
+                    .get(stand as usize)?
+                    .intersect(ray, (near, far), geometry)
+            }
         }
     }
 
@@ -434,6 +447,10 @@ impl Shape {
                 .far_woods
                 .get(wood as usize)
                 .is_some_and(|wood| wood.occludes(&tile, ray, (near, far), geometry)),
+            Self::Stand { stand } => geometry
+                .stands
+                .get(stand as usize)
+                .is_some_and(|stand| stand.occludes(ray, (near, far), geometry)),
             _ => self.intersect(ray, near, far, geometry).is_some(),
         }
     }

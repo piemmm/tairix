@@ -2,12 +2,17 @@ use alloc::collections::BinaryHeap;
 use core::cmp::Reverse;
 
 use super::*;
-use crate::ground::{self, Lie};
+use crate::ground::{self, Lie, Waters};
 use crate::testing::Flat;
 
 const KEY: Key = Key::new(23);
 
-fn routed(rank: Rank, ends: (Point, Point), (greater, barred): (&[(Rank, &Line)], &[Convex]), ground: &dyn Ground) -> Line {
+fn routed(
+    rank: Rank,
+    ends: (Point, Point),
+    (greater, barred): (&[(Rank, &Line)], &[&Convex]),
+    ground: &dyn Ground,
+) -> Line {
     let mut routing = Routing::new(rank, ends).expect("a lattice");
     routing.prepare(greater, barred).expect("room");
     loop {
@@ -20,7 +25,7 @@ fn routed(rank: Rank, ends: (Point, Point), (greater, barred): (&[(Rank, &Line)]
 /// Flat dry land with a round lake.
 struct Lake;
 
-impl Ground for Lake {
+impl Waters for Lake {
     fn height(&self, _: Point) -> f64 {
         10.0
     }
@@ -28,7 +33,9 @@ impl Ground for Lake {
     fn water(&self, at: Point) -> Option<f64> {
         ((at - Point::new(500.0, 0.0)).length() < 120.0).then_some(11.0)
     }
+}
 
+impl Ground for Lake {
     fn lie(&self, _: Point) -> Lie {
         Lie::default()
     }
@@ -38,18 +45,32 @@ impl Ground for Lake {
 fn over_level_open_ground_a_road_runs_almost_straight_between_its_ends() {
     let ends = (Point::new(0.0, 0.0), Point::new(900.0, 300.0));
     let line = routed(Rank::Road, ends, (&[], &[]), &Flat);
-    assert_eq!(line.stations.first().map(|station| station.at), Some(ends.0));
+    assert_eq!(
+        line.stations.first().map(|station| station.at),
+        Some(ends.0)
+    );
     assert_eq!(line.stations.last().map(|station| station.at), Some(ends.1));
     let length = plane::length(&line.places().collect::<Vec<_>>());
     let direct = (ends.1 - ends.0).length();
     assert!(length < 1.03 * direct, "{length} against {direct}");
-    assert!(line.stations.iter().all(|station| (station.width - 5.5).abs() < 1.0));
+    assert!(line
+        .stations
+        .iter()
+        .all(|station| (station.width - 5.5).abs() < 1.0));
 }
 
 #[test]
 fn a_road_goes_round_a_lake_it_can_pass_cheaply() {
-    let line = routed(Rank::Road, (Point::new(0.0, 0.0), Point::new(1000.0, 0.0)), (&[], &[]), &Lake);
-    assert!(line.stations.iter().all(|station| !ground::wet(&Lake, station.at)));
+    let line = routed(
+        Rank::Road,
+        (Point::new(0.0, 0.0), Point::new(1000.0, 0.0)),
+        (&[], &[]),
+        &Lake,
+    );
+    assert!(line
+        .stations
+        .iter()
+        .all(|station| !ground::wet(&Lake, station.at)));
     assert!(line.stations.iter().all(|station| station.water.is_none()));
 }
 
@@ -66,15 +87,23 @@ fn a_route_keeps_clear_of_what_bars_it_but_about_its_ends() {
     let line = routed(
         Rank::Lane,
         (Point::new(0.0, 0.0), Point::new(520.0, 0.0)),
-        (&[], core::slice::from_ref(&barred)),
+        (&[], &[&barred]),
         &Flat,
     );
-    assert!(line.stations.iter().all(|station| !barred.contains(station.at)));
+    assert!(line
+        .stations
+        .iter()
+        .all(|station| !barred.contains(station.at)));
 }
 
 #[test]
 fn a_lane_follows_the_road_that_leads_its_way() {
-    let road = routed(Rank::Road, (Point::new(-100.0, 0.0), Point::new(1100.0, 0.0)), (&[], &[]), &Flat);
+    let road = routed(
+        Rank::Road,
+        (Point::new(-100.0, 0.0), Point::new(1100.0, 0.0)),
+        (&[], &[]),
+        &Flat,
+    );
     let lane = routed(
         Rank::Lane,
         (Point::new(0.0, 40.0), Point::new(1000.0, 40.0)),
@@ -84,9 +113,16 @@ fn a_lane_follows_the_road_that_leads_its_way() {
     let beside = lane
         .stations
         .iter()
-        .filter(|station| road.nearest(station.at).is_some_and(|(near, _)| near.distance < 6.0))
+        .filter(|station| {
+            road.nearest(station.at)
+                .is_some_and(|(near, _)| near.distance < 6.0)
+        })
         .count();
-    assert!(4 * beside > 3 * lane.stations.len(), "{beside} of {} beside the road", lane.stations.len());
+    assert!(
+        4 * beside > 3 * lane.stations.len(),
+        "{beside} of {} beside the road",
+        lane.stations.len()
+    );
 }
 
 #[test]
@@ -109,23 +145,28 @@ fn the_guide_never_overestimates_the_rest_of_a_route_nor_falls_by_more_than_a_st
             })
             .collect(),
     };
-    let mut routing = Routing::new(Rank::Lane, (Point::new(0.0, 0.0), Point::new(200.0, 30.0))).expect("a lattice");
+    let mut routing = Routing::new(Rank::Lane, (Point::new(0.0, 0.0), Point::new(200.0, 30.0)))
+        .expect("a lattice");
     routing.prepare(&[(Rank::Road, &road)], &[]).expect("room");
     let view = View {
         rank: routing.rank,
         square: routing.square,
         samples: &routing.samples,
         ground: &crate::testing::Hills,
+        barred: &routing.barred,
     };
     let columns = routing.square.columns();
     let goal = routing.square.index_of(routing.ends.1);
     let reach = routing.goal_reach;
     let neighbours = |index: usize| {
         let (x, y) = (index % columns, index / columns);
-        (-1isize..=1).flat_map(move |dy| (-1isize..=1).map(move |dx| (dx, dy))).filter_map(move |(dx, dy)| {
-            let (nx, ny) = (x.checked_add_signed(dx)?, y.checked_add_signed(dy)?);
-            ((dx, dy) != (0, 0) && nx < columns && ny < columns).then_some((ny * columns + nx, dx != 0 && dy != 0))
-        })
+        (-1isize..=1)
+            .flat_map(move |dy| (-1isize..=1).map(move |dx| (dx, dy)))
+            .filter_map(move |(dx, dy)| {
+                let (nx, ny) = (x.checked_add_signed(dx)?, y.checked_add_signed(dy)?);
+                ((dx, dy) != (0, 0) && nx < columns && ny < columns)
+                    .then_some((ny * columns + nx, dx != 0 && dy != 0))
+            })
     };
     // The least cost of the rest of the way from every point: a search out
     // from the goal over every step reversed.
@@ -155,6 +196,40 @@ fn the_guide_never_overestimates_the_rest_of_a_route_nor_falls_by_more_than_a_st
             if let Some(step) = view.price(index, next, diagonal) {
                 let onward = u64::from(view.guide(next, (goal, reach)));
                 assert!(guide <= u64::from(step) + onward, "{index} to {next}");
+            }
+        }
+    }
+}
+
+/// A way keeps its breadth, as it is laid, clear of buildings smaller than
+/// its lattice's step, however they stand between its points.
+#[test]
+fn a_route_keeps_its_breadth_clear_of_sheds_smaller_than_its_lattice() {
+    let mut draws = KEY.draws(Stage::Route, (5, 5));
+    let sheds: Vec<Convex> = (0..40)
+        .map(|_| {
+            let middle = Point::new(draws.range(40.0, 560.0), draws.range(-25.0, 25.0));
+            let way = Point::toward(draws.range(0.0, core::f64::consts::PI));
+            crate::farm::rectangle(middle, way, (draws.range(2.0, 5.0), draws.range(2.0, 4.0)))
+                .expect("room")
+        })
+        .collect();
+    let barred: Vec<&Convex> = sheds.iter().collect();
+    for rank in [Rank::Lane, Rank::Track, Rank::Path] {
+        let line = routed(
+            rank,
+            (Point::new(0.0, 0.0), Point::new(600.0, 0.0)),
+            (&[], &barred),
+            &Flat,
+        );
+        for pair in line.stations.windows(2) {
+            let half = 0.5 * pair[0].width.max(pair[1].width);
+            for shed in &sheds {
+                let apart = shed.segment_distance((pair[0].at, pair[1].at));
+                assert!(
+                    apart >= half - 1e-9,
+                    "{rank:?} passes {apart} m from a shed"
+                );
             }
         }
     }

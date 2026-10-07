@@ -27,6 +27,9 @@ const OVERCAST: Deck = Deck {
     ..CUMULUS
 };
 
+/// The extinction through a veil of cloud too thin to scatter light twice.
+const VEIL: f64 = 4e-5;
+
 /// A middle deck of small billows above the heaps.
 const ALTOCUMULUS: Deck = Deck {
     base: 4200.0,
@@ -77,7 +80,7 @@ fn lit(mut bank: Cloudbank) -> Cloudbank {
         cosines: (-1.0, 1.0),
         toward,
         above: Vec3::new(0.6, 0.8, 1.2),
-        below: Vec3::splat(0.3),
+        below: (Vec3::ZERO, Vec3::splat(0.3)),
     });
     bank
 }
@@ -127,10 +130,13 @@ fn far(runner: &dyn JobRunner) -> Cloudbank {
     )
 }
 
-/// The cloud a ray meets, if any: its light, what shows through, and its
-/// distance.
+/// The angle a pixel of the tests' pictures spans.
+const PIXEL: f64 = 5e-4;
+
+/// The cloud a ray meets, if any, seen directly through a pixel where
+/// `fine`: its light, what shows through, and its distance.
 fn cloud(bank: &Cloudbank, origin: Vec3, dir: Vec3, fine: bool) -> Option<(Vec3, f64, f64)> {
-    bank.seen(origin, dir, fine, 0.5)
+    bank.seen(origin, dir, fine.then_some(PIXEL), 0.5)
         .and_then(|seen| seen.cloud)
 }
 
@@ -179,7 +185,7 @@ fn rays_up_through_the_bank_meet_cloud_and_rays_past_its_reach_do_not() {
     assert!(hidden > 10, "{hidden} are thick enough to hide the sky");
     assert!(met < 400, "and some are clear");
     let overhead = bank
-        .seen(Vec3::ZERO, Vec3::UP, true, 0.5)
+        .seen(Vec3::ZERO, Vec3::UP, Some(PIXEL), 0.5)
         .expect("runs through the bank");
     assert!(
         (overhead.leave - bank.ceiling).abs() < 1e-6,
@@ -192,7 +198,7 @@ fn rays_up_through_the_bank_meet_cloud_and_rays_past_its_reach_do_not() {
         0.0,
     );
     assert!(
-        bank.seen(beyond, Vec3::UP, true, 0.5).is_none(),
+        bank.seen(beyond, Vec3::UP, Some(PIXEL), 0.5).is_none(),
         "past its reach"
     );
 }
@@ -243,8 +249,8 @@ fn a_bank_built_across_workers_matches_one_built_alone() {
         // Low rays among them, which run on through the coarser levels.
         let dir = heading(f64::from(step) * 0.7, 0.002 + 0.01 * f64::from(step % 7));
         assert_eq!(
-            alone.seen(origin, dir, true, 0.25),
-            spread.seen(origin, dir, true, 0.25)
+            alone.seen(origin, dir, Some(PIXEL), 0.25),
+            spread.seen(origin, dir, Some(PIXEL), 0.25)
         );
         assert_eq!(
             alone.shadow(origin, dir).to_bits(),
@@ -254,8 +260,8 @@ fn a_bank_built_across_workers_matches_one_built_alone() {
 }
 
 /// What fraction of the light from beyond a ray's stretch through the bank
-/// comes through it, integrated in `step`-metre steps: the reference a
-/// march must agree with.
+/// comes through it, integrated in `step`-metre steps, its edges resolved as
+/// a test pixel holds them: the reference a march must agree with.
 fn integrated(bank: &Cloudbank, origin: Vec3, dir: Vec3, step: f64) -> f64 {
     let Some((enter, leave)) = bank.crossing(origin, dir) else {
         return 1.0;
@@ -264,7 +270,7 @@ fn integrated(bank: &Cloudbank, origin: Vec3, dir: Vec3, step: f64) -> f64 {
     let mut optical = 0.0;
     let mut t = enter + 0.5 * step;
     while t < leave && optical < 10.0 {
-        if let Some(sample) = reader.density(origin + dir * t, true) {
+        if let Some(sample) = reader.density(origin + dir * t, Edges::Resolved(PIXEL * t)) {
             optical += sample.density * sample.thickness * step;
         }
         t += step;
@@ -462,7 +468,7 @@ fn no_cloud_stands_outside_its_weather_cells_band() {
                     .clear(&bank.course(point, Vec3::UP), height, 0.0)
                     .is_some();
                 clear += u32::from(jumped);
-                if reader.density(point, false).is_some() {
+                if reader.density(point, Edges::Bounding).is_some() {
                     cloudy += 1;
                     assert!(!jumped, "cloud at {point:?} lies outside its band");
                 }
@@ -542,7 +548,7 @@ fn a_march_sees_the_same_cloud_however_its_steps_are_staggered() {
         );
         let origin = Vec3::new(f64::from(step % 7) * 400.0, 2.0, -1500.0);
         let kept = |jitter: f64| {
-            bank.seen(origin, dir, true, jitter)
+            bank.seen(origin, dir, Some(PIXEL), jitter)
                 .and_then(|seen| seen.cloud)
                 .map_or(1.0, |(_, kept, _)| kept)
         };
@@ -659,7 +665,7 @@ fn a_far_cloud_is_lit_by_the_sun_at_its_own_place() {
             cosines,
             toward: sun,
             above: Vec3::ZERO,
-            below: Vec3::ZERO,
+            below: (Vec3::ZERO, Vec3::ZERO),
         });
     };
     let eye = Vec3::new(0.0, 2.0, 0.0);
@@ -782,7 +788,7 @@ fn ice_is_drawn_out_along_its_heading() {
     };
     let density = |point: Vec3| {
         reader
-            .density(point, true)
+            .density(point, Edges::Resolved(PIXEL * point.length()))
             .map_or(0.0, |sample| sample.density)
     };
     let (mut along, mut across) = (0.0, 0.0);
@@ -877,7 +883,10 @@ fn a_bank_lit_from_beneath_its_level_keeps_a_finite_light() {
 fn column(bank: &Cloudbank, point: Vec3) -> f64 {
     let reader = Reader { bank };
     (0..8000u32)
-        .filter_map(|metre| reader.density(point + Vec3::UP * (f64::from(metre) + 0.5), true))
+        .filter_map(|metre| {
+            let height = f64::from(metre) + 0.5;
+            reader.density(point + Vec3::UP * height, Edges::Resolved(PIXEL * height))
+        })
         .map(|sample| sample.density * sample.thickness)
         .sum()
 }
@@ -886,10 +895,12 @@ fn column(bank: &Cloudbank, point: Vec3) -> f64 {
 /// back up from its sunlit top and lets less down through its grey base, as
 /// much less as its own optical depth has it — the diffusion limit's τ(1−g)/2
 /// of a lossless slab, the light it is shaded by coming of the very cloud a
-/// ray sees; and a veil too thin to scatter it twice is barely lit at all.
+/// ray sees, with no ground beneath lighting its base; and a veil too thin
+/// to scatter it twice is barely lit at all.
 #[test]
 fn a_thick_deck_shines_above_and_greys_below_and_a_thin_veil_barely_glows() {
-    let deck = bank_of(OVERCAST, high_sun(), None);
+    let mut deck = bank_of(OVERCAST, high_sun(), None);
+    deck.lighting.as_mut().expect("lit").below = (Vec3::ZERO, Vec3::ZERO);
     let (above, below) = (Vec3::new(0.0, 6000.0, 0.0), Vec3::ZERO);
     let (top, _, _) = cloud(&deck, above, -Vec3::UP, true).expect("its top");
     let (base, kept, _) = cloud(&deck, below, Vec3::UP, true).expect("its base");
@@ -904,14 +915,15 @@ fn a_thick_deck_shines_above_and_greys_below_and_a_thin_veil_barely_glows() {
         (seen / expected - 1.0).abs() < 0.15,
         "{top:?} above, {base:?} below: {seen} where its depth asks {expected}"
     );
-    let veil = bank_of(
+    let mut veil = bank_of(
         Deck {
-            thickness: 2e-4,
+            thickness: VEIL,
             ..OVERCAST
         },
         high_sun(),
         None,
     );
+    veil.lighting.as_mut().expect("lit").below = (Vec3::ZERO, Vec3::ZERO);
     let (faint, shows, _) = cloud(&veil, below, Vec3::UP, true).expect("the veil");
     assert!(shows > 0.5, "{shows}");
     assert!(faint.y < 0.5 * base.y, "{faint:?} beside {base:?}");
@@ -954,29 +966,83 @@ fn a_coarse_march_lets_through_what_the_cloud_does_on_the_whole() {
     );
 }
 
-/// A texture's quantiles are the values that split its texels into equal
-/// shares, in order.
+/// A histogram's quantiles are the values that split what it counts into
+/// equal shares, in order.
 #[test]
-fn a_textures_quantiles_split_its_texels_evenly() {
-    let mut tile = Tile::new(4).expect("a texture");
-    for (index, texel) in tile.texels.iter_mut().enumerate() {
-        *texel = u8::try_from(index * 4).expect("a byte");
+fn a_histograms_quantiles_split_what_it_counts_evenly() {
+    // 64 bytes 0, 4, …, 252: each share of sixteen centred on its middle.
+    let mut counts = [0usize; 256];
+    for index in 0..64 {
+        counts[index * 4] = 1;
     }
-    let quantiles: [f32; 4] = tile.quantiles();
-    // 64 texels 0, 4, …, 252: each share of sixteen centred on its middle.
-    for (index, &quantile) in quantiles.iter().enumerate() {
+    let split: [f32; 4] = quantiles(&counts);
+    for (index, &quantile) in split.iter().enumerate() {
         let middle = (16 * index + 8) * 4;
         assert!(
             (f64::from(quantile) - real(middle) / 255.0).abs() < 1e-6,
             "{index}: {quantile}"
         );
     }
-    let mut level = Tile::new(2).expect("a texture");
-    level.texels.fill(77);
-    let quantiles: [f32; 8] = level.quantiles();
-    assert!(quantiles
+    let mut level = [0usize; 256];
+    level[77] = 8;
+    let split: [f32; 8] = quantiles(&level);
+    assert!(split
         .iter()
         .all(|&q| (f64::from(q) - 77.0 / 255.0).abs() < 1e-6));
+}
+
+/// Read resolving every finer octave, the wisps are cut finer about their
+/// texture's own mean, which they keep; a footprint too broad for any of
+/// them reads the texture alone; and a coarse march's quantiles are the
+/// sharp read's.
+#[test]
+fn the_finer_wisps_cut_about_the_textures_mean() {
+    let bank = built(&tairix_parallel::SERIAL);
+    let side = bank.detail.side;
+    let (mut own, mut sharp, mut moved) = (0.0, 0.0, 0.0);
+    let count = side * side * side;
+    for index in 0..count {
+        let texel = Vec3::new(
+            real(index % side) + 0.5,
+            real(index / side % side) + 0.5,
+            real(index / (side * side)) + 0.5,
+        );
+        let (alone, cut) = (
+            bank.wisp_at(texel, [0.0; FINER.len()]),
+            bank.wisp_at(texel, [1.0; FINER.len()]),
+        );
+        assert!(
+            (alone - bank.detail.at(texel)).abs() < 1e-12,
+            "a broad footprint reads the texture alone"
+        );
+        own += alone;
+        sharp += cut;
+        moved += (cut - alone).abs();
+    }
+    let (own, sharp, moved) = (own / real(count), sharp / real(count), moved / real(count));
+    assert!(
+        (own - bank.wisp_mean).abs() < 2e-3,
+        "{own} about {}",
+        bank.wisp_mean
+    );
+    assert!(
+        (sharp - bank.wisp_mean).abs() < 0.02,
+        "{sharp} about {}",
+        bank.wisp_mean
+    );
+    assert!(
+        moved > 0.02,
+        "the finer reads cut the wisps by {moved} on average"
+    );
+    let sharp: [f32; WISP_QUANTILES] = bank.sharp_quantiles();
+    assert!(
+        bank.wisps
+            .iter()
+            .zip(sharp)
+            .all(|(kept, read)| kept.to_bits() == read.to_bits()),
+        "a coarse march's quantiles {:?} are not the sharp read's {sharp:?}",
+        bank.wisps
+    );
 }
 
 /// Beneath a deck the clear sky straight overhead shows only as far as the
@@ -1007,7 +1073,7 @@ fn a_deck_sheds_its_own_light_down_in_place_of_the_sky_it_hides() {
             + (down(slab::skylit(
                 DROPLETS,
                 base,
-                (lighting.above, lighting.below),
+                (lighting.above, lighting.below.1),
             )) - lighting.above * open)
                 .max(Vec3::ZERO);
         assert!(
@@ -1019,7 +1085,7 @@ fn a_deck_sheds_its_own_light_down_in_place_of_the_sky_it_hides() {
     let (thick, glowing) = shed(OVERCAST);
     assert!(thick < 0.01, "a thick deck hides the sky: {thick}");
     let (veil, faint) = shed(Deck {
-        thickness: 2e-4,
+        thickness: VEIL,
         ..OVERCAST
     });
     assert!(veil > 0.9, "a veil leaves it open: {veil}");
@@ -1032,5 +1098,154 @@ fn a_deck_sheds_its_own_light_down_in_place_of_the_sky_it_hides() {
         bank.beneath(Vec3::new(0.0, 9000.0, 0.0)),
         (1.0, Vec3::ZERO),
         "nothing overhead above it"
+    );
+}
+
+/// Points across the test field's middle, a few kilometres either way.
+fn across_the_field(count: u32) -> impl Iterator<Item = (f64, f64)> {
+    (0..count).map(|index| {
+        (
+            9000.0 * unit(mix32(index ^ 0x51)) - 4500.0,
+            9000.0 * unit(mix32(index ^ 0x93)) - 4500.0,
+        )
+    })
+}
+
+/// A cumulus is as opaque as its droplets make it: its cloudy columns run
+/// some tens of optical depths, as fair-weather cumulus do, because a deck's
+/// extinction is taken through the body of its clouds, where the eroded
+/// billows stand at the density the calibration names.
+#[test]
+fn a_cumulus_field_is_as_opaque_as_its_droplets_make_it() {
+    let bank = built(&tairix_parallel::SERIAL);
+    let reader = Reader { bank: &bank };
+    let (mut depths, mut inside) = (Vec::new(), Vec::new());
+    for (x, z) in across_the_field(600) {
+        let mut depth = 0.0;
+        for metre in (0..4000u32).step_by(4) {
+            let height = f64::from(metre) + 2.0;
+            let point = Vec3::new(x, bank.height_at(height, (x, z)), z);
+            if let Some(sample) = reader.density(point, Edges::Resolved(PIXEL * 3000.0)) {
+                depth += sample.density * sample.thickness * 4.0;
+                inside.push(sample.density);
+            }
+        }
+        if depth > 0.1 {
+            depths.push(depth);
+        }
+    }
+    let median = |values: &mut Vec<f64>| {
+        values.sort_by(f64::total_cmp);
+        values.get(values.len() / 2).copied().unwrap_or(0.0)
+    };
+    let (column, density) = (median(&mut depths), median(&mut inside));
+    assert!(depths.len() > 150, "{} cloudy columns", depths.len());
+    assert!(
+        (8.0..40.0).contains(&column),
+        "a cloudy column's median depth is {column}"
+    );
+    assert!(
+        (density / CORE - 1.0).abs() < 0.3,
+        "the billows stand at {density} inside cloud, not {CORE}"
+    );
+}
+
+/// A deck's form decides how its clouds are lit: a deck of heaps through
+/// the slab facing the sun, a deck of sheets through its column.
+#[test]
+fn heaps_are_lit_through_the_beam_and_sheets_through_their_column() {
+    assert!(sheeted(CUMULUS.heap) < 1e-9, "a heap lit as a sheet");
+    assert!(sheeted(OVERCAST.heap) > 1.0 - 1e-9, "a sheet lit as a heap");
+}
+
+/// Just inside a cloud's base, a point's taps find the cloud beneath it as
+/// it lies, metre by metre, where the light grid's coarse layers blur the
+/// base into the clear air below it.
+#[test]
+fn a_point_at_a_clouds_base_finds_the_cloud_beneath_it_as_it_lies() {
+    let bank = built(&tairix_parallel::SERIAL);
+    let reader = Reader { bank: &bank };
+    let (mut tapped, mut gridded, mut met) = (0.0, 0.0, 0u32);
+    for (x, z) in across_the_field(400) {
+        let at = |height: f64| Vec3::new(x, bank.height_at(height, (x, z)), z);
+        let read = |height: f64| reader.density(at(height), Edges::Resolved(PIXEL * height));
+        // Up from the ground to where its first cloud thickens, and on in.
+        let Some(base) = (0..4000u32)
+            .map(f64::from)
+            .find(|&height| read(height).is_some_and(|sample| sample.density > 0.3))
+        else {
+            continue;
+        };
+        let height = base + 3.0;
+        let truth: f64 = (0..4 * mathf::round_i32(height).max(0))
+            .filter_map(|quarter| read(0.25 * f64::from(quarter) + 0.125))
+            .map(|sample| sample.density * sample.thickness * 0.25)
+            .sum();
+        let edges = Edges::Resolved(PIXEL * height);
+        let beneath = reader.beneath(at(height), (edges, CUMULUS.billow));
+        let (above, whole) = reader
+            .column_at(at(height), bank.altitude(at(height)))
+            .expect("over the bank");
+        tapped += (beneath - truth).abs();
+        gridded += ((whole - above).max(0.0) - truth).abs();
+        met += 1;
+    }
+    assert!(met > 40, "{met} bases met");
+    assert!(
+        tapped < 0.5 * gridded,
+        "taps stray {tapped} from the cloud beneath the bases, the grid {gridded}"
+    );
+}
+
+/// The ground beneath an overcast lies in its shadow, so it lights the
+/// deck's base far less than the open ground would; the ground under a
+/// field of heaps is lit as its gaps let the sun through.
+#[test]
+fn the_ground_beneath_a_cloud_lies_in_its_shadow() {
+    let overcast = bank_of(OVERCAST, Vec3::UP, None);
+    let field = bank_of(CUMULUS, Vec3::UP, None);
+    let lit = |bank: &Cloudbank| {
+        across_the_field(200)
+            .map(|(x, z)| bank.ground_lit(Vec3::new(x, bank.floor, z)))
+            .sum::<f64>()
+            / 200.0
+    };
+    let (under, broken) = (lit(&overcast), lit(&field));
+    assert!(under < 0.05, "an overcast's ground looks {under} sunlit");
+    assert!(
+        broken > 2.0 * under && broken < 0.95,
+        "a field of heaps' ground looks {broken} sunlit"
+    );
+}
+
+/// With the sun overhead, a thick heap is darker beneath than on top: its
+/// base sends down what of the sun diffuses through it, its top sends back
+/// up most of the rest.
+#[test]
+fn a_thick_heap_is_darker_beneath_than_on_top_with_the_sun_above() {
+    let mut bank = bank_of(CUMULUS, Vec3::UP, None);
+    bank.lighting.as_mut().expect("lit").below = (Vec3::ZERO, Vec3::ZERO);
+    let (mut base, mut top, mut thick) = (0.0, 0.0, 0u32);
+    for (x, z) in across_the_field(1500) {
+        if column(&bank, Vec3::new(x, 0.0, z)) < 60.0 {
+            continue;
+        }
+        let looked = |origin: Vec3, dir: Vec3| {
+            cloud(&bank, origin, dir, true).filter(|&(_, kept, _)| kept < 0.05)
+        };
+        let (Some((below, ..)), Some((above, ..))) = (
+            looked(Vec3::new(x, 0.0, z), Vec3::UP),
+            looked(Vec3::new(x, 9000.0, z), -Vec3::UP),
+        ) else {
+            continue;
+        };
+        base += below.luminance();
+        top += above.luminance();
+        thick += 1;
+    }
+    assert!(thick > 10, "{thick} thick heaps");
+    assert!(
+        base < 0.5 * top,
+        "a thick heap sends {base} down from its base against {top} up from its top"
     );
 }

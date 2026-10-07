@@ -20,16 +20,33 @@ fn a_farmsteads_buildings_stand_apart_about_its_yard_and_within_its_plot() {
             let laid = lay_out(KEY, &farm(index), toward, ground).expect("room");
             assert_eq!(laid.at, farm(index).at);
             assert_eq!(laid.buildings[0].standing, Standing::Dwelling);
-            let outlines: Vec<Convex> = laid.buildings.iter().map(Footprint::outline).collect();
+            let outlines: Vec<Convex> = laid
+                .buildings
+                .iter()
+                .map(|building| building.outline().expect("room"))
+                .collect();
             for (n, outline) in outlines.iter().enumerate() {
-                assert!(!outline.overlaps(&laid.yard), "{index}: building {n} stands in the yard");
+                assert!(
+                    !outline.overlaps(&laid.yard),
+                    "{index}: building {n} stands in the yard"
+                );
                 for other in &outlines[n + 1..] {
                     assert!(!outline.overlaps(other), "{index}: buildings overlap");
                 }
-                assert!(outline.corners.iter().all(|&corner| laid.plot.contains(corner)));
+                assert!(outline
+                    .corners
+                    .iter()
+                    .all(|&corner| laid.plot.contains(corner)));
             }
-            assert!(!outlines[0].overlaps(&laid.garden), "the garden lies before the house");
-            assert!(laid.garden.corners.iter().all(|&corner| laid.plot.contains(corner)));
+            assert!(
+                !outlines[0].overlaps(&laid.garden),
+                "the garden lies before the house"
+            );
+            assert!(laid
+                .garden
+                .corners
+                .iter()
+                .all(|&corner| laid.plot.contains(corner)));
             let on_edge = laid
                 .yard
                 .edges()

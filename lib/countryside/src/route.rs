@@ -3,8 +3,8 @@
 //! rank is laid, with its level and its breadth along it.
 //!
 //! A route is a pure function of its ends, its rank, the ground, the greater
-//! ways it may follow and the plots it keeps clear of, so whoever asks for a
-//! way gets the same line. Its search reads the ground only where it reaches,
+//! ways it may follow, the plots it keeps clear of and the key its wander is
+//! drawn under, so whoever asks for a way gets the same line. Its search reads the ground only where it reaches,
 //! bounded below by how far each point lies from a greater way.
 
 use core::ops::RangeInclusive;
@@ -122,6 +122,17 @@ impl Line {
         self.stations.iter().map(|station| station.at)
     }
 
+    /// A copy of it; `None` where the heap will not hold one.
+    #[must_use]
+    pub fn copied(&self) -> Option<Self> {
+        Some(Self {
+            stations: tairix_util::fallible::collected(
+                self.stations.len(),
+                self.stations.iter().copied(),
+            )?,
+        })
+    }
+
     /// The rectangle it lies in, grown by `by`; `None` for no stations.
     #[must_use]
     pub fn bounds(&self, by: f64) -> Option<Rect> {
@@ -233,11 +244,13 @@ impl Clone for Slot {
 }
 
 /// A sample's flags: whether its ground has been read, lies under water,
-/// carries a greater way, or is barred to the route.
+/// carries a greater way, is barred to the route, or lies near enough what
+/// bars it that a step from it is tested against the shapes themselves.
 const READ: u8 = 1;
 const WATER: u8 = 2;
 const TAKEN: u8 = 4;
 const BARRED: u8 = 8;
+const NEAR: u8 = 16;
 
 /// The square lattice a route is searched over.
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -289,7 +302,11 @@ impl Square {
     /// Point `index`'s place.
     fn place(&self, index: usize) -> Point {
         let side = self.columns().max(1);
-        self.origin + Point::new(real(index % side) * self.step, real(index / side) * self.step)
+        self.origin
+            + Point::new(
+                real(index % side) * self.step,
+                real(index / side) * self.step,
+            )
     }
 
     /// The point nearest `at`.
@@ -307,8 +324,14 @@ impl Square {
         let top = f64::from(self.side - 1);
         let first = |low: f64, origin: f64| mathf::ceil((low - origin) / self.step).max(0.0);
         let last = |high: f64, origin: f64| mathf::floor((high - origin) / self.step).min(top);
-        let (x0, x1) = (first(rect.low.x, self.origin.x), last(rect.high.x, self.origin.x));
-        let (y0, y1) = (first(rect.low.y, self.origin.y), last(rect.high.y, self.origin.y));
+        let (x0, x1) = (
+            first(rect.low.x, self.origin.x),
+            last(rect.high.x, self.origin.x),
+        );
+        let (y0, y1) = (
+            first(rect.low.y, self.origin.y),
+            last(rect.high.y, self.origin.y),
+        );
         if !(x0 <= x1 && y0 <= y1) {
             return None;
         }
@@ -340,10 +363,13 @@ pub(crate) struct Routing {
     /// The greater ways' stretches over its lattice, filed by where they run.
     followed: Vec<Followed>,
     filed: Buckets,
+    /// What its breadth keeps clear of, each with the rectangle it lies in.
+    barred: Vec<(Rect, Convex)>,
 }
 
-/// How many lattice points a unit of a route's search settles.
-const SETTLED_A_UNIT: usize = 24_000;
+/// How many lattice points a unit of a route's search settles: measured, a
+/// unit of a long path's search, the dearest, keeps within about 8 ms.
+const SETTLED_A_UNIT: usize = 10_000;
 
 impl Routing {
     /// A route of `rank` from `from` to `to`.
@@ -357,6 +383,7 @@ impl Routing {
             router: None,
             followed: Vec::new(),
             filed: Buckets::default(),
+            barred: Vec::new(),
         })
     }
 
@@ -379,6 +406,7 @@ impl Routing {
             square: self.square,
             samples: &self.samples,
             ground,
+            barred: &self.barred,
         };
         let goal = self.square.index_of(self.ends.1);
         let goal_reach = self.goal_reach;
@@ -402,15 +430,22 @@ impl Routing {
     /// Mark the lattice — where the greater ways `greater` run, where
     /// `barred` keeps the route from, and how far every point lies from a
     /// greater way — and begin the search.
-    pub(crate) fn prepare(&mut self, greater: &[(Rank, &Line)], barred: &[Convex]) -> Result<(), Error> {
+    pub(crate) fn prepare(
+        &mut self,
+        greater: &[(Rank, &Line)],
+        barred: &[&Convex],
+    ) -> Result<(), Error> {
         let area = self.square.area();
-        self.samples = tairix_util::fallible::filled(area, Slot::default())
-            .ok_or(Error::OutOfMemory)?;
+        self.samples =
+            tairix_util::fallible::filled(area, Slot::default()).ok_or(Error::OutOfMemory)?;
         self.follow(greater)?;
-        self.bar(barred);
+        self.bar(barred)?;
         self.reach();
         let goal = self.square.index_of(self.ends.1);
-        self.goal_reach = self.samples.get(goal).map_or(u16::MAX, |sample| sample.get().reach);
+        self.goal_reach = self
+            .samples
+            .get(goal)
+            .map_or(u16::MAX, |sample| sample.get().reach);
         let grid = Grid::new(self.square.side);
         let mut router = Router::new(grid.area()).map_err(|_| Error::OutOfMemory)?;
         router
@@ -446,7 +481,9 @@ impl Routing {
                 for row in ys {
                     for column in xs.clone() {
                         let index = row * columns + column;
-                        if plane::onto_segment(self.square.place(index), from.at, to.at).1 < reach * reach {
+                        if plane::onto_segment(self.square.place(index), from.at, to.at).1
+                            < reach * reach
+                        {
                             if let Some(sample) = self.samples.get_mut(index) {
                                 sample.change(|sample| sample.flags |= TAKEN);
                             }
@@ -454,7 +491,9 @@ impl Routing {
                     }
                 }
                 let item = u32::try_from(self.followed.len()).map_err(|_| Error::Shape)?;
-                self.followed.try_reserve(1).map_err(|_| Error::OutOfMemory)?;
+                self.followed
+                    .try_reserve(1)
+                    .map_err(|_| Error::OutOfMemory)?;
                 self.followed.push(Followed { from, to, reach });
                 self.filed.file(bounds.grown(self.square.step), item)?;
             }
@@ -464,29 +503,50 @@ impl Routing {
     }
 
     /// Bar the points within reach of `barred` that the way's breadth would
-    /// overlap, but for the points its ends lie at: where a way ends is its
-    /// planner's to keep clear.
-    fn bar(&mut self, barred: &[Convex]) {
+    /// overlap, but for the points its ends lie at — where a way ends is its
+    /// planner's to keep clear — and keep the shapes, marking the points near
+    /// enough them that a step from one could cross a corner between points.
+    fn bar(&mut self, barred: &[&Convex]) -> Result<(), Error> {
         let columns = self.square.columns();
         let laying = self.rank.laying();
         let clearance = 0.5 * laying.width + laying.verge + 0.5;
-        let ends = (self.square.index_of(self.ends.0), self.square.index_of(self.ends.1));
+        // A diagonal step's nearest approach to anything lies within its
+        // length of one of its ends.
+        let near = 0.5 * laying.width + DIAGONAL / STRAIGHT * self.square.step;
+        let ends = (
+            self.square.index_of(self.ends.0),
+            self.square.index_of(self.ends.1),
+        );
+        self.barred
+            .try_reserve_exact(barred.len())
+            .map_err(|_| Error::OutOfMemory)?;
         for shape in barred {
-            let reach = shape.bounds().map(|bounds| bounds.grown(clearance));
-            let Some((xs, ys)) = reach.and_then(|bounds| self.square.covering(bounds)) else {
+            let Some(bounds) = shape.bounds() else {
+                continue;
+            };
+            self.barred
+                .push((bounds, shape.copied().ok_or(Error::OutOfMemory)?));
+            let Some((xs, ys)) = self.square.covering(bounds.grown(clearance.max(near))) else {
                 continue;
             };
             for row in ys {
                 for column in xs.clone() {
                     let index = row * columns + column;
-                    if index != ends.0 && index != ends.1 && shape.distance(self.square.place(index)) < clearance {
-                        if let Some(sample) = self.samples.get_mut(index) {
-                            sample.change(|sample| sample.flags |= BARRED);
-                        }
+                    let apart = shape.distance(self.square.place(index));
+                    let flags = if apart < clearance && index != ends.0 && index != ends.1 {
+                        BARRED | NEAR
+                    } else if apart < near {
+                        NEAR
+                    } else {
+                        0
+                    };
+                    if let Some(sample) = self.samples.get_mut(index) {
+                        sample.change(|sample| sample.flags |= flags);
                     }
                 }
             }
         }
+        Ok(())
     }
 
     /// The point of the greater way it follows that `at` runs on, and that
@@ -518,7 +578,13 @@ impl Routing {
         let rows = self.samples.len() / columns;
         let samples = &mut self.samples;
         for sample in samples.iter_mut() {
-            sample.change(|sample| sample.reach = if sample.flags & TAKEN == 0 { u16::MAX } else { 0 });
+            sample.change(|sample| {
+                sample.reach = if sample.flags & TAKEN == 0 {
+                    u16::MAX
+                } else {
+                    0
+                }
+            });
         }
         for row in 0..rows {
             for column in 0..columns {
@@ -526,8 +592,18 @@ impl Routing {
                 let (west, north) = (column > 0, row > 0);
                 relax(samples, index, west.then(|| index - 1), 2);
                 relax(samples, index, north.then(|| index - columns), 2);
-                relax(samples, index, (north && west).then(|| index - columns - 1), 3);
-                relax(samples, index, (north && column + 1 < columns).then(|| index - columns + 1), 3);
+                relax(
+                    samples,
+                    index,
+                    (north && west).then(|| index - columns - 1),
+                    3,
+                );
+                relax(
+                    samples,
+                    index,
+                    (north && column + 1 < columns).then(|| index - columns + 1),
+                    3,
+                );
             }
         }
         for row in (0..rows).rev() {
@@ -536,8 +612,18 @@ impl Routing {
                 let (east, south) = (column + 1 < columns, row + 1 < rows);
                 relax(samples, index, east.then(|| index + 1), 2);
                 relax(samples, index, south.then(|| index + columns), 2);
-                relax(samples, index, (south && east).then(|| index + columns + 1), 3);
-                relax(samples, index, (south && column > 0).then(|| index + columns - 1), 3);
+                relax(
+                    samples,
+                    index,
+                    (south && east).then(|| index + columns + 1),
+                    3,
+                );
+                relax(
+                    samples,
+                    index,
+                    (south && column > 0).then(|| index + columns - 1),
+                    3,
+                );
             }
         }
     }
@@ -553,18 +639,17 @@ impl Routing {
             square: self.square,
             samples: &self.samples,
             ground,
+            barred: &self.barred,
         };
         let taut = pull(&view, path)?;
         let mut smooth = Vec::new();
-        smooth.try_reserve_exact(taut.len()).map_err(|_| Error::OutOfMemory)?;
+        smooth
+            .try_reserve_exact(taut.len() + 2)
+            .map_err(|_| Error::OutOfMemory)?;
         smooth.extend(taut.iter().map(|&index| self.square.place(index)));
-        if let Some(first) = smooth.first_mut() {
-            *first = self.ends.0;
-        }
-        if let Some(last) = smooth.last_mut() {
-            *last = self.ends.1;
-        }
-        // A corner is cut only where the cut costs no more than the corner.
+        attach(&mut smooth, self.ends, &view);
+        // A corner is cut only where the cut costs no more than the corner,
+        // and keeps the way clear of what bars it.
         let cuts = |before: Point, corner: Point, after: Point| {
             let index = |at: Point| self.square.index_of(at);
             let kept = view
@@ -573,6 +658,7 @@ impl Routing {
                 .map(|(a, b)| a + b);
             view.chord(index(before), index(after))
                 .is_some_and(|cut| kept.is_none_or(|kept| cut <= kept))
+                && view.clear((before, after))
         };
         for _ in 0..laying.rounds {
             smooth = chaikin(&smooth, &cuts)?;
@@ -603,16 +689,25 @@ impl Routing {
             let way = way_at(&stations, index);
             // The wander dies away at either end, where the way meets what it
             // joins.
-            let taper = (walked / 30.0).min((length - walked) / 30.0).clamp(0.0, 1.0);
+            let taper = (walked / 30.0)
+                .min((length - walked) / 30.0)
+                .clamp(0.0, 1.0);
             let wander = laying.wander * taper * swing(seed, walked / 70.0);
-            let at = at + way.left() * wander;
+            let wandered = at + way.left() * wander;
+            // It never wanders into what it keeps clear of.
+            let at = if view.clear((wandered, wandered)) {
+                wandered
+            } else {
+                at
+            };
             let height = ground.height(at);
             let water = ground.water(at).filter(|&level| level > height);
             let wet = ground.lie(at).wet;
             line.stations.push(Station {
                 at,
                 level: height,
-                width: width * (1.0 + 0.1 * swing(seed ^ 0x9e37, walked / 45.0) + 0.25 * wet),
+                width: width
+                    * (1.0 + SWING * swing(seed ^ 0x9e37, walked / 45.0) + WET_SPREAD * wet),
                 water,
             });
         }
@@ -622,6 +717,41 @@ impl Routing {
         Ok(line)
     }
 }
+
+/// Run `points`, a route's lattice points from end to end, from and to its
+/// exact `ends`: each end in place of its lattice point where the straight way
+/// on from it keeps clear, and before it where it would not.
+fn attach(points: &mut Vec<Point>, (from, to): (Point, Point), view: &View<'_>) {
+    let (Some(&second), Some(&before_last)) = (
+        points.get(1),
+        points.len().checked_sub(2).and_then(|at| points.get(at)),
+    ) else {
+        if let Some(first) = points.first_mut() {
+            *first = from;
+        }
+        if let Some(last) = points.last_mut() {
+            *last = to;
+        }
+        return;
+    };
+    if view.clear((before_last, to)) {
+        if let Some(last) = points.last_mut() {
+            *last = to;
+        }
+    } else {
+        points.push(to);
+    }
+    if view.clear((from, second)) {
+        points[0] = from;
+    } else {
+        points.insert(0, from);
+    }
+}
+
+/// How far a way's breadth swings either way along it, and how much broader
+/// it runs over the wettest ground, as shares of its rank's.
+const SWING: f64 = 0.1;
+const WET_SPREAD: f64 = 0.25;
 
 /// How far apart the squares a route files the greater ways' stretches in
 /// lie.
@@ -636,16 +766,22 @@ fn pull(view: &View<'_>, path: &[usize]) -> Result<Vec<usize>, Error> {
     };
     let columns = view.square.columns().max(1);
     let mut spent: Vec<u64> = Vec::new();
-    spent.try_reserve_exact(path.len()).map_err(|_| Error::OutOfMemory)?;
+    spent
+        .try_reserve_exact(path.len())
+        .map_err(|_| Error::OutOfMemory)?;
     spent.push(0);
     for pair in path.windows(2) {
-        let diagonal = pair[0] % columns != pair[1] % columns && pair[0] / columns != pair[1] / columns;
-        let step = view.price(pair[0], pair[1], diagonal).ok_or(Error::Unreachable)?;
+        let diagonal =
+            pair[0] % columns != pair[1] % columns && pair[0] / columns != pair[1] / columns;
+        let step = view
+            .price(pair[0], pair[1], diagonal)
+            .ok_or(Error::Unreachable)?;
         spent.push(spent.last().copied().unwrap_or(0) + u64::from(step));
     }
     let fits = |from: usize, to: usize| {
         view.chord(path[from], path[to])
             .is_some_and(|cost| cost <= spent[to] - spent[from])
+            && view.clear((view.square.place(path[from]), view.square.place(path[to])))
     };
     taut.try_reserve(16).map_err(|_| Error::OutOfMemory)?;
     taut.push(first);
@@ -700,6 +836,7 @@ struct View<'a> {
     square: Square,
     samples: &'a [Slot],
     ground: &'a dyn Ground,
+    barred: &'a [(Rect, Convex)],
 }
 
 impl View<'_> {
@@ -728,11 +865,16 @@ impl View<'_> {
         if next.flags & BARRED != 0 {
             return None;
         }
+        let here = self.sample(from)?;
+        if (next.flags | here.flags) & NEAR != 0
+            && !self.clear((self.square.place(from), self.square.place(to)))
+        {
+            return None;
+        }
         let halves = if diagonal { 3 } else { 2 };
         if next.flags & TAKEN != 0 && next.flags & WATER == 0 {
             return u32::try_from(ON_HALF * halves).ok();
         }
-        let here = self.sample(from)?;
         let laying = self.rank.laying();
         let run = if diagonal { DIAGONAL } else { STRAIGHT };
         let rise = f64::from(next.height - here.height).abs();
@@ -755,6 +897,19 @@ impl View<'_> {
         let cost = run * (1.0 + climb + steep + wet + water);
         let counted = u64::try_from(mathf::round_i32(cost.min(2.0e9))).unwrap_or(u64::MAX);
         u32::try_from(counted.max(OFF_HALF * halves)).ok()
+    }
+
+    /// Whether a way of this rank laid straight from `a` to `b` keeps its
+    /// breadth, as broad as it is ever laid, clear of everything that bars
+    /// it.
+    fn clear(&self, (a, b): (Point, Point)) -> bool {
+        let half = 0.5 * self.rank.laying().width * (1.0 + SWING + WET_SPREAD);
+        let Some(span) = Rect::of([a, b]).map(|rect| rect.grown(half)) else {
+            return true;
+        };
+        self.barred
+            .iter()
+            .all(|(bounds, shape)| !bounds.overlaps(span) || shape.segment_distance((a, b)) >= half)
     }
 
     /// What the straight chord from point `from` to point `to` costs, along
@@ -802,11 +957,13 @@ impl View<'_> {
         );
         let (long, short) = (dx.max(dy), dx.min(dy));
         let halves = u64::try_from(2 * (long - short) + 3 * short).unwrap_or(u64::MAX);
-        let reach = self.samples.get(index).map_or(u16::MAX, |sample| sample.get().reach);
+        let reach = self
+            .samples
+            .get(index)
+            .map_or(u16::MAX, |sample| sample.get().reach);
         let off = OFF_HALF.saturating_mul(halves);
         let along = ON_HALF.saturating_mul(halves).saturating_add(
-            (OFF_HALF - ON_HALF)
-                * (u64::from(reach.saturating_sub(3)) + u64::from(goal_reach)),
+            (OFF_HALF - ON_HALF) * (u64::from(reach.saturating_sub(3)) + u64::from(goal_reach)),
         );
         u32::try_from(off.min(along)).unwrap_or(u32::MAX)
     }
@@ -822,13 +979,17 @@ fn way_place((from, to): (Point, Point)) -> (i64, i64) {
     };
     let (a, b) = (centimetres(from), centimetres(to));
     let (low, high) = if a <= b { (a, b) } else { (b, a) };
-    (low.0 ^ high.1.rotate_left(17), low.1 ^ high.0.rotate_left(29))
+    (
+        low.0 ^ high.1.rotate_left(17),
+        low.1 ^ high.0.rotate_left(29),
+    )
 }
 
 /// A smooth swing in `-1.0..=1.0` along `along`, drawn from `seed`: a sum
 /// of two waves, its phases its seed's.
 fn swing(seed: u64, along: f64) -> f64 {
-    let phase = |shift: u32| tairix_rng::rand::unit_from(seed.rotate_left(shift)) * core::f64::consts::TAU;
+    let phase =
+        |shift: u32| tairix_rng::rand::unit_from(seed.rotate_left(shift)) * core::f64::consts::TAU;
     0.65 * mathf::sin(along * core::f64::consts::TAU + phase(7))
         + 0.35 * mathf::sin(along * 2.71 * core::f64::consts::TAU + phase(31))
 }
@@ -843,7 +1004,10 @@ fn way_at(points: &[Point], index: usize) -> Point {
 /// `points` with every corner but its ends cut a quarter of the way along
 /// each edge (Chaikin, 1974), where `cuts` — told the cut's ends and the
 /// corner between — allows it; a corner it refuses is kept.
-fn chaikin(points: &[Point], cuts: &dyn Fn(Point, Point, Point) -> bool) -> Result<Vec<Point>, Error> {
+fn chaikin(
+    points: &[Point],
+    cuts: &dyn Fn(Point, Point, Point) -> bool,
+) -> Result<Vec<Point>, Error> {
     let mut cut = Vec::new();
     if points.len() < 3 {
         cut.try_reserve_exact(points.len())
@@ -896,10 +1060,12 @@ fn graded(stations: &mut [Station], grade: f64, spacing: f64) {
         return;
     }
     for _ in 0..6 {
-        let levels: Vec<f64> = stations.iter().map(|station| station.level).collect();
+        // The level before each station as it stood before this pass.
+        let mut before = stations[0].level;
         for index in 1..count - 1 {
-            stations[index].level =
-                0.25 * levels[index - 1] + 0.5 * levels[index] + 0.25 * levels[index + 1];
+            let here = stations[index].level;
+            stations[index].level = 0.25 * before + 0.5 * here + 0.25 * stations[index + 1].level;
+            before = here;
         }
     }
     let most = grade * spacing;

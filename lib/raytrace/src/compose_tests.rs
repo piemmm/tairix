@@ -250,6 +250,7 @@ impl<'a> Made<'a> {
             prototypes: &[],
             lawns: self.lawns,
             far_woods: &[],
+            stands: &[],
             materials: &[],
             view: None,
         }
@@ -875,6 +876,7 @@ const STOCK: crate::tree::Stock = crate::tree::Stock {
         rot: 0,
         edge: 0,
     },
+    fruit: None,
 };
 
 /// One of every kind of prototype a scene plans: rocks, a log and a stump,

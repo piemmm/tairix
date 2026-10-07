@@ -9,6 +9,7 @@
 
 use alloc::vec::Vec;
 
+use tairix_countryside::plane::{self, Point};
 use tairix_util::{fallible, mathf};
 
 use crate::vector::real;
@@ -62,6 +63,17 @@ pub(crate) struct Nearest {
     pub(crate) past: f64,
 }
 
+/// A segment of a course as a place lies against it: the segment's first
+/// mark, how far along it the place's nearest point lies as a share of its
+/// length, short of its start or past its end where below nought or above
+/// one, and how far off that nearest point is.
+#[derive(Copy, Clone, Debug)]
+struct Segment {
+    mark: usize,
+    unclamped: f64,
+    distance: f64,
+}
+
 /// How far from a course a point may ask after it: `per_width` times the
 /// course's breadth there, and `beyond` more.
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -108,37 +120,16 @@ impl Courses {
 
     /// The courses of `courses`, indexed over the square from `origin`
     /// `span` across so a point may ask for any course within `reach` of it,
-    /// a broad course reaching further than a narrow one; `None` when the
-    /// heap will not hold them.
+    /// a broad course reaching further than a narrow one, all at once; `None`
+    /// when the heap will not hold them.
     pub(crate) fn new(
         courses: &[Vec<Mark>],
-        (origin, span): ((f64, f64), f64),
+        square: ((f64, f64), f64),
         reach: Reach,
     ) -> Option<Self> {
-        let total: usize = courses.iter().map(Vec::len).sum();
-        let mut marks = Vec::new();
-        let mut along = Vec::new();
-        let mut starts = Vec::new();
-        if !(fallible::reserve(&mut marks, total)
-            && fallible::reserve(&mut along, total)
-            && fallible::reserve(&mut starts, courses.len() + 1))
-        {
-            return None;
-        }
-        for course in courses.iter().filter(|course| course.len() >= 2) {
-            starts.push(u32::try_from(marks.len()).ok()?);
-            marks.extend_from_slice(course);
-            along.extend(travelled(course));
-        }
-        starts.push(u32::try_from(marks.len()).ok()?);
-        let mut courses = Self {
-            marks,
-            starts,
-            along,
-            index: Index::default(),
-        };
-        courses.index = courses.bucket(origin, span, reach)?;
-        Some(courses)
+        let mut indexing = Indexing::copied(courses, square, reach)?;
+        while !indexing.step(usize::MAX)? {}
+        indexing.finish()
     }
 
     /// How many courses there are.
@@ -188,87 +179,57 @@ impl Courses {
         Some(((dx / span, dz / span), (-dz / span, dx / span)))
     }
 
-    /// The first mark of every segment: each mark but its course's last.
-    fn segments(&self) -> impl Iterator<Item = usize> + '_ {
-        self.starts.windows(2).flat_map(|pair| {
-            let (start, end) = (pair[0] as usize, pair[1] as usize);
-            start..end.saturating_sub(1)
-        })
-    }
-
-    fn bucket(&self, origin: (f64, f64), span: f64, reach: Reach) -> Option<Index> {
-        // Squares a typical segment's reach across: a segment lies in the few
-        // within its reach, and a point's own square holds everything within
-        // reach of the point and little more, so a question tests few
-        // segments.
-        let count = self.marks.len().max(1);
-        let mean = self.marks.iter().map(|mark| mark.width).sum::<f64>() / real(count);
-        let size = reach.of(mean).max(span / 1024.0).max(1e-3);
-        let across = |length: f64| {
-            usize::try_from(mathf::round_i32(mathf::ceil(length / size)))
-                .unwrap_or(1)
-                .max(1)
-        };
-        let (columns, rows) = (across(span), across(span));
-        let squares = columns.checked_mul(rows)?;
-        let cell = |value: f64, from: f64, count: usize| {
-            let at = mathf::floor((value - from) / size);
-            usize::try_from(mathf::round_i32(at.max(0.0)))
-                .unwrap_or(0)
-                .min(count - 1)
-        };
-        let mut counts = fallible::filled(squares + 1, 0u32)?;
-        let visit = |mark: usize, visit_square: &mut dyn FnMut(usize)| {
-            let (Some(a), Some(b)) = (self.marks.get(mark), self.marks.get(mark + 1)) else {
-                return;
-            };
-            let widest = a.width.max(b.width);
-            let pad = reach.of(widest) + 0.5 * widest;
-            let (x0, x1) = (a.x.min(b.x) - pad, a.x.max(b.x) + pad);
-            let (z0, z1) = (a.z.min(b.z) - pad, a.z.max(b.z) + pad);
-            for row in cell(z0, origin.1, rows)..=cell(z1, origin.1, rows) {
-                for column in cell(x0, origin.0, columns)..=cell(x1, origin.0, columns) {
-                    visit_square(row * columns + column);
-                }
-            }
-        };
-        for mark in self.segments() {
-            visit(mark, &mut |square| {
-                if let Some(count) = counts.get_mut(square + 1) {
-                    *count = count.saturating_add(1);
-                }
-            });
-        }
-        for square in 0..squares {
-            counts[square + 1] = counts[square + 1].saturating_add(counts[square]);
-        }
-        let total = counts.last().copied().unwrap_or(0) as usize;
-        let mut entries = fallible::filled(total, 0u32)?;
-        let mut fill = fallible::collected(counts.len(), counts.iter().copied())?;
-        for mark in self.segments() {
-            let id = u32::try_from(mark).unwrap_or(u32::MAX);
-            visit(mark, &mut |square| {
-                if let Some(slot) = fill.get_mut(square) {
-                    if let Some(entry) = entries.get_mut(*slot as usize) {
-                        *entry = id;
-                    }
-                    *slot = slot.saturating_add(1);
-                }
-            });
-        }
-        Some(Index {
-            origin,
-            size,
-            columns,
-            rows,
-            offsets: counts,
-            entries,
-        })
-    }
-
     /// The nearest point of any course to `(x, z)` within the reach the
     /// index was built for, if one lies that near.
     pub(crate) fn nearest(&self, x: f64, z: f64) -> Option<Nearest> {
+        let mut best: Option<Segment> = None;
+        for segment in self.segments(x, z)? {
+            if best.is_none_or(|held| segment.distance < held.distance) {
+                best = Some(segment);
+            }
+        }
+        self.reading(best?, (x, z))
+    }
+
+    /// The nearest point to `(x, z)` of each course within the reach the
+    /// index was built for, a course at a time.
+    pub(crate) fn each_nearest(&self, x: f64, z: f64, mut each: impl FnMut(Nearest)) {
+        let Some(segments) = self.segments(x, z) else {
+            return;
+        };
+        // A square lists its segments in the order of their marks, so each
+        // course's run together; `end` is where the course held ends.
+        let mut held: Option<(usize, Segment)> = None;
+        for segment in segments {
+            match held {
+                Some((end, best)) if segment.mark < end => {
+                    if segment.distance < best.distance {
+                        held = Some((end, segment));
+                    }
+                }
+                _ => {
+                    if let Some(near) = held.and_then(|(_, best)| self.reading(best, (x, z))) {
+                        each(near);
+                    }
+                    let course = self
+                        .starts
+                        .partition_point(|&start| start as usize <= segment.mark);
+                    let end = self
+                        .starts
+                        .get(course)
+                        .map_or(self.marks.len(), |&next| next as usize);
+                    held = Some((end, segment));
+                }
+            }
+        }
+        if let Some(near) = held.and_then(|(_, best)| self.reading(best, (x, z))) {
+            each(near);
+        }
+    }
+
+    /// Each segment the index lists about `(x, z)`, in the order of its
+    /// marks, and where the place lies against it; `None` off the index.
+    fn segments(&self, x: f64, z: f64) -> Option<impl Iterator<Item = Segment> + '_> {
         let index = &self.index;
         if index.offsets.is_empty() {
             return None;
@@ -281,12 +242,10 @@ impl Courses {
         let square = usize::try_from(mathf::round_i32(row)).ok()? * index.columns
             + usize::try_from(mathf::round_i32(column)).ok()?;
         let (start, end) = (*index.offsets.get(square)?, *index.offsets.get(square + 1)?);
-        let mut best: Option<Nearest> = None;
-        for &entry in index.entries.get(start as usize..end as usize)? {
+        let entries = index.entries.get(start as usize..end as usize)?;
+        Some(entries.iter().filter_map(move |&entry| {
             let mark = entry as usize;
-            let (Some(here), Some(next)) = (self.marks.get(mark), self.marks.get(mark + 1)) else {
-                continue;
-            };
+            let (here, next) = (self.marks.get(mark)?, self.marks.get(mark + 1)?);
             let (dx, dz) = (next.x - here.x, next.z - here.z);
             let length2 = dx * dx + dz * dz;
             let unclamped = if length2 > 0.0 {
@@ -295,60 +254,92 @@ impl Courses {
                 0.0
             };
             let share = unclamped.clamp(0.0, 1.0);
-            let (px, pz) = (here.x + dx * share, here.z + dz * share);
-            let distance = mathf::hypot(x - px, z - pz);
-            if best.is_some_and(|held| held.distance <= distance) {
-                continue;
-            }
-            let side = dx * (z - here.z) - dz * (x - here.x);
-            let Some(course) = self
-                .starts
-                .partition_point(|&start| start as usize <= mark)
-                .checked_sub(1)
-            else {
-                continue;
-            };
-            let length = mathf::sqrt(length2);
-            let along = self.along.get(mark).copied().unwrap_or(0.0) + share * length;
-            let first = self
-                .starts
-                .get(course)
-                .is_some_and(|&start| start as usize == mark);
-            let last = self
-                .starts
-                .get(course + 1)
-                .map_or(self.marks.len(), |&next| next as usize)
-                == mark + 2;
-            let past = if unclamped > 1.0 && last {
-                (unclamped - 1.0) * length
-            } else if unclamped < 0.0 && first {
-                -unclamped * length
-            } else {
-                0.0
-            };
-            let blend = |from: f64, to: f64| from + (to - from) * share;
-            best = Some(Nearest {
-                course,
-                along,
+            let distance = mathf::hypot(x - (here.x + dx * share), z - (here.z + dz * share));
+            Some(Segment {
+                mark,
+                unclamped,
                 distance,
-                side: if side >= 0.0 { 1.0 } else { -1.0 },
-                level: blend(here.level, next.level),
-                width: blend(here.width, next.width),
-                depth: blend(here.depth, next.depth),
-                run: blend(here.run, next.run),
-                phase: blend(here.phase, next.phase),
-                turn: blend(here.turn, next.turn),
-                fall: blend(here.fall, next.fall),
-                toward: if length > 0.0 {
-                    (dx / length, dz / length)
-                } else {
-                    (0.0, 1.0)
-                },
-                past,
-            });
-        }
-        best
+            })
+        }))
     }
+
+    /// The nearest point of `segment`'s course to `(x, z)`, read on it.
+    fn reading(&self, segment: Segment, (x, z): (f64, f64)) -> Option<Nearest> {
+        let Segment {
+            mark,
+            unclamped,
+            distance,
+        } = segment;
+        let (here, next) = (self.marks.get(mark)?, self.marks.get(mark + 1)?);
+        let (dx, dz) = (next.x - here.x, next.z - here.z);
+        let share = unclamped.clamp(0.0, 1.0);
+        let side = dx * (z - here.z) - dz * (x - here.x);
+        let course = self
+            .starts
+            .partition_point(|&start| start as usize <= mark)
+            .checked_sub(1)?;
+        let length = mathf::hypot(dx, dz);
+        let along = self.along.get(mark).copied().unwrap_or(0.0) + share * length;
+        let first = self
+            .starts
+            .get(course)
+            .is_some_and(|&start| start as usize == mark);
+        let last = self
+            .starts
+            .get(course + 1)
+            .map_or(self.marks.len(), |&next| next as usize)
+            == mark + 2;
+        let past = if unclamped > 1.0 && last {
+            (unclamped - 1.0) * length
+        } else if unclamped < 0.0 && first {
+            -unclamped * length
+        } else {
+            0.0
+        };
+        let blend = |from: f64, to: f64| from + (to - from) * share;
+        Some(Nearest {
+            course,
+            along,
+            distance,
+            side: if side >= 0.0 { 1.0 } else { -1.0 },
+            level: blend(here.level, next.level),
+            width: blend(here.width, next.width),
+            depth: blend(here.depth, next.depth),
+            run: blend(here.run, next.run),
+            phase: blend(here.phase, next.phase),
+            turn: blend(here.turn, next.turn),
+            fall: blend(here.fall, next.fall),
+            toward: if length > 0.0 {
+                (dx / length, dz / length)
+            } else {
+                (0.0, 1.0)
+            },
+            past,
+        })
+    }
+}
+
+/// The marks of `line` from `from` to `to` along it, `width` broad; `None`
+/// when the heap will not hold them or the line has no length.
+pub(crate) fn traced(line: &[Point], (from, to): (f64, f64), width: f64) -> Option<Vec<Mark>> {
+    let mark = |at: Point| Mark {
+        x: at.x,
+        z: at.y,
+        width,
+        ..Mark::default()
+    };
+    let mut marks = Vec::new();
+    marks.try_reserve(line.len() + 2).ok()?;
+    marks.push(mark(plane::at(line, from)?.0));
+    let mut walked = 0.0;
+    for pair in line.windows(2) {
+        walked += (pair[1] - pair[0]).length();
+        if walked > from && walked < to {
+            marks.push(mark(pair[1]));
+        }
+    }
+    marks.push(mark(plane::at(line, to)?.0));
+    Some(marks)
 }
 
 /// `marks` smoothed by Chaikin's corner cutting, `rounds` times over, its two
@@ -375,6 +366,355 @@ pub(crate) fn smoothed(marks: &[Mark], rounds: u32) -> Option<Vec<Mark>> {
         current = next;
     }
     Some(current)
+}
+
+/// The squares an index buckets segments into: where they start, how broad
+/// each is, and how many across and down; and how far a segment reaches.
+#[derive(Copy, Clone, Debug)]
+struct Squares {
+    origin: (f64, f64),
+    size: f64,
+    columns: usize,
+    rows: usize,
+    reach: Reach,
+}
+
+impl Squares {
+    /// Squares a typical one of `marks`' segments reaches across, over the
+    /// square from `origin` `span` across: a segment lies in the few within
+    /// its reach, and a point's own square holds everything within reach of
+    /// the point and little more, so a question tests few segments.
+    fn over(marks: &[Mark], (origin, span): ((f64, f64), f64), reach: Reach) -> Option<Self> {
+        let mean = marks.iter().map(|mark| mark.width).sum::<f64>() / real(marks.len().max(1));
+        let size = reach.of(mean).max(span / 1024.0).max(1e-3);
+        let across = usize::try_from(mathf::round_i32(mathf::ceil(span / size)))
+            .unwrap_or(1)
+            .max(1);
+        across.checked_mul(across)?;
+        Some(Self {
+            origin,
+            size,
+            columns: across,
+            rows: across,
+            reach,
+        })
+    }
+
+    fn count(&self) -> usize {
+        self.columns * self.rows
+    }
+
+    /// The square `value` falls in along an axis of `count` squares from
+    /// `from`.
+    fn cell(&self, value: f64, from: f64, count: usize) -> usize {
+        let at = mathf::floor((value - from) / self.size);
+        usize::try_from(mathf::round_i32(at.max(0.0)))
+            .unwrap_or(0)
+            .min(count - 1)
+    }
+
+    /// Hand `visit` every square the segment from `a` to `b` can reach.
+    fn visit(&self, (a, b): (&Mark, &Mark), visit: &mut dyn FnMut(usize)) {
+        let widest = a.width.max(b.width);
+        let pad = self.reach.of(widest) + 0.5 * widest;
+        let (x0, x1) = (a.x.min(b.x) - pad, a.x.max(b.x) + pad);
+        let (z0, z1) = (a.z.min(b.z) - pad, a.z.max(b.z) + pad);
+        for row in self.cell(z0, self.origin.1, self.rows)..=self.cell(z1, self.origin.1, self.rows)
+        {
+            for column in self.cell(x0, self.origin.0, self.columns)
+                ..=self.cell(x1, self.origin.0, self.columns)
+            {
+                visit(row * self.columns + column);
+            }
+        }
+    }
+}
+
+/// How many marks, segments or squares a unit of an indexing takes.
+pub(crate) const INDEX_UNIT: usize = 1 << 16;
+
+/// Courses being indexed, a bounded share of the work a step: their marks
+/// gathered, then the squares each segment reaches counted, the counts summed
+/// into each square's first entry, and every segment filed in its squares.
+#[derive(Debug)]
+pub(crate) struct Indexing {
+    sources: Vec<Vec<Mark>>,
+    courses: Courses,
+    square: ((f64, f64), f64),
+    reach: Reach,
+    stage: Indexed,
+}
+
+/// Where an indexing stands: gathering from the next source; counting,
+/// summing or filling from a mark or square; or done.
+#[derive(Debug)]
+enum Indexed {
+    Gathering(usize),
+    Counting {
+        squares: Squares,
+        mark: usize,
+        counts: Vec<u32>,
+    },
+    Summing {
+        squares: Squares,
+        square: usize,
+        counts: Vec<u32>,
+    },
+    Filling {
+        squares: Squares,
+        mark: usize,
+        slots: Vec<u32>,
+    },
+    Done,
+}
+
+impl Indexing {
+    /// `courses` to be indexed over the square from `origin` `span` across,
+    /// each to be asked after within `reach` of it, gathered a unit at a time;
+    /// `None` when the heap will not hold them.
+    pub(crate) fn new(
+        courses: Vec<Vec<Mark>>,
+        square: ((f64, f64), f64),
+        reach: Reach,
+    ) -> Option<Self> {
+        let total: usize = courses.iter().map(Vec::len).sum();
+        let mut gathered = Courses::none();
+        if !(fallible::reserve(&mut gathered.marks, total)
+            && fallible::reserve(&mut gathered.along, total)
+            && fallible::reserve(&mut gathered.starts, courses.len() + 1))
+        {
+            return None;
+        }
+        Some(Self {
+            sources: courses,
+            courses: gathered,
+            square,
+            reach,
+            stage: Indexed::Gathering(0),
+        })
+    }
+
+    /// `courses` gathered at once, to be indexed as [`Self::new`]'s are.
+    fn copied(courses: &[Vec<Mark>], square: ((f64, f64), f64), reach: Reach) -> Option<Self> {
+        let mut indexing = Self::new(Vec::new(), square, reach)?;
+        let total: usize = courses.iter().map(Vec::len).sum();
+        let gathered = &mut indexing.courses;
+        if !(fallible::reserve(&mut gathered.marks, total)
+            && fallible::reserve(&mut gathered.along, total)
+            && fallible::reserve(&mut gathered.starts, courses.len() + 1))
+        {
+            return None;
+        }
+        for course in courses {
+            gathered.gather(course)?;
+        }
+        Some(indexing)
+    }
+
+    /// The next unit of the indexing, at most `budget` marks, segments or
+    /// squares; whether it is whole, or `None` when the heap will not hold
+    /// it.
+    pub(crate) fn step(&mut self, budget: usize) -> Option<bool> {
+        let budget = budget.max(1);
+        let courses = &mut self.courses;
+        self.stage = match core::mem::replace(&mut self.stage, Indexed::Done) {
+            Indexed::Gathering(next) => {
+                let mut taken = 0;
+                let mut at = next;
+                while let Some(course) = self.sources.get(at).filter(|_| taken < budget) {
+                    courses.gather(course)?;
+                    taken += course.len().max(1);
+                    at += 1;
+                }
+                if at < self.sources.len() {
+                    Indexed::Gathering(at)
+                } else {
+                    self.sources = Vec::new();
+                    courses
+                        .starts
+                        .push(u32::try_from(courses.marks.len()).ok()?);
+                    let squares = Squares::over(&courses.marks, self.square, self.reach)?;
+                    let counts = fallible::filled(squares.count() + 1, 0u32)?;
+                    Indexed::Counting {
+                        squares,
+                        mark: 0,
+                        counts,
+                    }
+                }
+            }
+            Indexed::Counting {
+                squares,
+                mark,
+                mut counts,
+            } => {
+                let end = courses.walk_segments((mark, budget), &mut |a, b, _| {
+                    squares.visit((a, b), &mut |square| {
+                        if let Some(count) = counts.get_mut(square + 1) {
+                            *count = count.saturating_add(1);
+                        }
+                    });
+                });
+                if end < courses.marks.len() {
+                    Indexed::Counting {
+                        squares,
+                        mark: end,
+                        counts,
+                    }
+                } else {
+                    Indexed::Summing {
+                        squares,
+                        square: 0,
+                        counts,
+                    }
+                }
+            }
+            Indexed::Summing {
+                squares,
+                square,
+                mut counts,
+            } => {
+                let end = square.saturating_add(budget).min(squares.count());
+                for at in square..end {
+                    counts[at + 1] = counts[at + 1].saturating_add(counts[at]);
+                }
+                if end < squares.count() {
+                    Indexed::Summing {
+                        squares,
+                        square: end,
+                        counts,
+                    }
+                } else {
+                    let slots = courses.lay_index(&squares, counts)?;
+                    Indexed::Filling {
+                        squares,
+                        mark: 0,
+                        slots,
+                    }
+                }
+            }
+            Indexed::Filling {
+                squares,
+                mark,
+                mut slots,
+            } => {
+                let end = courses.fill(&squares, (mark, budget), &mut slots);
+                if end < courses.marks.len() {
+                    Indexed::Filling {
+                        squares,
+                        mark: end,
+                        slots,
+                    }
+                } else {
+                    Indexed::Done
+                }
+            }
+            Indexed::Done => Indexed::Done,
+        };
+        Some(matches!(self.stage, Indexed::Done))
+    }
+
+    /// The courses, once indexed; `None` before.
+    pub(crate) fn finish(self) -> Option<Courses> {
+        matches!(self.stage, Indexed::Done).then_some(self.courses)
+    }
+}
+
+impl Courses {
+    /// Gather `course`'s marks and how far along it each lies, where it has
+    /// a segment at all; `None` when it would number past what a start holds.
+    fn gather(&mut self, course: &[Mark]) -> Option<()> {
+        if course.len() >= 2 {
+            self.starts.push(u32::try_from(self.marks.len()).ok()?);
+            self.marks.extend_from_slice(course);
+            self.along.extend(travelled(course));
+        }
+        Some(())
+    }
+
+    /// Hand `visit` each segment from the one starting at mark `from`, as
+    /// many as `budget`, with its first mark; where the walk ends.
+    fn walk_segments(
+        &self,
+        (from, budget): (usize, usize),
+        visit: &mut dyn FnMut(&Mark, &Mark, usize),
+    ) -> usize {
+        Self::walk_marks(&self.marks, &self.starts, (from, budget), visit)
+    }
+
+    /// Lay its index over `squares`, `counts` holding where each square's
+    /// entries begin and one past the last: the slots each square's entries
+    /// are filled in from, its first's to begin with.
+    fn lay_index(&mut self, squares: &Squares, counts: Vec<u32>) -> Option<Vec<u32>> {
+        let total = counts.last().copied().unwrap_or(0) as usize;
+        self.index = Index {
+            origin: squares.origin,
+            size: squares.size,
+            columns: squares.columns,
+            rows: squares.rows,
+            entries: fallible::filled(total, 0u32)?,
+            offsets: Vec::new(),
+        };
+        let slots = fallible::collected(counts.len(), counts.iter().copied())?;
+        self.index.offsets = counts;
+        Some(slots)
+    }
+
+    /// Fill in the index's entries for the segments from mark `from`, as many
+    /// as `budget`, each square's next entry the one its slot in `slots`
+    /// holds; where the walk ends.
+    fn fill(
+        &mut self,
+        squares: &Squares,
+        (from, budget): (usize, usize),
+        slots: &mut [u32],
+    ) -> usize {
+        let entries = &mut self.index.entries;
+        Self::walk_marks(
+            &self.marks,
+            &self.starts,
+            (from, budget),
+            &mut |a, b, first| {
+                let id = u32::try_from(first).unwrap_or(u32::MAX);
+                squares.visit((a, b), &mut |square| {
+                    if let Some(slot) = slots.get_mut(square) {
+                        if let Some(entry) = entries.get_mut(*slot as usize) {
+                            *entry = id;
+                        }
+                        *slot = slot.saturating_add(1);
+                    }
+                });
+            },
+        )
+    }
+
+    /// [`Self::walk_segments`] over `marks` gathered at `starts`.
+    fn walk_marks(
+        marks: &[Mark],
+        starts: &[u32],
+        (from, budget): (usize, usize),
+        visit: &mut dyn FnMut(&Mark, &Mark, usize),
+    ) -> usize {
+        let end = from.saturating_add(budget).min(marks.len());
+        // The course `from` lies in, and where the next one starts.
+        let mut course = starts.partition_point(|&start| start as usize <= from);
+        for first in from..end {
+            while starts
+                .get(course)
+                .is_some_and(|&start| start as usize <= first)
+            {
+                course += 1;
+            }
+            let next_start = starts
+                .get(course)
+                .map_or(marks.len(), |&start| start as usize);
+            if first + 1 < next_start {
+                if let (Some(a), Some(b)) = (marks.get(first), marks.get(first + 1)) {
+                    visit(a, b, first);
+                }
+            }
+        }
+        end
+    }
 }
 
 /// How far along `course` each of its marks lies from its first.

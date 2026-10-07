@@ -137,7 +137,7 @@ fn bank(deck: Deck) -> Cloudbank {
         cosines: (-1.0, 1.0),
         toward: sun,
         above: Vec3::new(0.6, 0.8, 1.2),
-        below: Vec3::splat(0.3),
+        below: (Vec3::ZERO, Vec3::splat(0.3)),
     });
     bank
 }
@@ -196,7 +196,7 @@ fn an_overcast_runs_on_to_the_horizon_and_greys_the_air_beneath_it() {
             mathf::cos(elevation) * mathf::sin(around),
         );
         let seen = bank
-            .seen(air.eye, dir, true, 0.5)
+            .seen(air.eye, dir, CLOSE.spread, 0.5)
             .and_then(|seen| seen.cloud);
         let (_, kept, depth) = seen.unwrap_or_else(|| panic!("{dir:?} meets the overcast"));
         assert!(kept < 0.05, "{dir:?}: {kept} shows through");
@@ -234,7 +234,7 @@ fn an_overcast_runs_on_to_the_horizon_and_greys_the_air_beneath_it() {
     // Low down the overcast lies further off than the old bank ever reached.
     let level = Vec3::new(1.0, 0.0005, 0.0).normalized();
     let (_, _, depth) = bank
-        .seen(air.eye, level, true, 0.5)
+        .seen(air.eye, level, CLOSE.spread, 0.5)
         .and_then(|seen| seen.cloud)
         .expect("meets it at the horizon");
     assert!(depth > 60_000.0, "{depth}");
@@ -353,35 +353,4 @@ fn no_star_shines_through_a_disc_in_the_way() {
     }
     assert!(starry > 0, "stars about the zenith");
     assert_eq!(through, 0, "{through} stars through the disc");
-}
-
-#[test]
-fn zz_split_horizon() {
-    extern crate std;
-    let air = day(35.0);
-    let overcast = under(air, CEILING);
-    let bank = overcast.low.as_ref().expect("a bank");
-    let Dome::Air(atmosphere) = &overcast.dome else {
-        panic!()
-    };
-    for dir in [
-        Vec3::new(0.506_196_9, 0.009_599_16, 0.862_364_5).normalized(),
-        Vec3::new(1.0, 0.000_872_66, 0.0).normalized(),
-    ] {
-        let seen = bank
-            .seen(air.eye, dir, true, 0.5)
-            .and_then(|seen| seen.cloud)
-            .expect("cloud");
-        let (cloud, kept, depth) = seen;
-        let sight = atmosphere.sight(dir);
-        let between = sight.between(depth);
-        let at = air.eye + dir * sight.drawn((0.0, depth), 0.5);
-        let (open, glow) = overcast.beneath(at);
-        std::println!("DIR {dir:?} depth {depth:.0} cloud {cloud:?} kept {kept:.3} air.kept {:?} scatter {:?} sky {:?} open {open:.3} glow {glow:?} sun.toward {:?}", between.kept, between.scatter, between.sky, air.sun);
-        std::println!(
-            "   cloud seen {:?} air glow {:?}",
-            cloud * between.kept,
-            between.scatter * glow
-        );
-    }
 }

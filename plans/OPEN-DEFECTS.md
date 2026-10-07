@@ -22,9 +22,9 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 297 open, 415 closed, 712 total.
+**closed**, and a partial fix stays **open**. 299 open, 415 closed, 714 total.
 
-### Open (297)
+### Open (299)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -325,6 +325,8 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D703 | a kernel MSI-X route (`route_msix`), and a bus driver's `lib/pci` `locate`, turn a function's memory decoding on without knowing every memory BAR was placed, so a BAR left unplaced decodes at whatever it reads back | **low**; noticed moving the virtio feature read onto the mapped common configuration; not absorbed: a host's apertures say where a BAR may decode, not that anything placed it there — a window from bus address 0, as a Pi 5's is, admits a BAR still at reset — so the fix is a per-host placement record (firmware's claimed at enumeration on x86, the assignment's on an FDT host) refusing decode to a function with a BAR outside it or overlapping another. Linux refuses to enable a device with an unclaimed BAR. Only x86_64 routes MSI-X today; an FDT host's route must not override its assignment's choice to leave a function undecoded. `lib/pci/src/enumerate.rs` `enable_memory_space` |
 | D704 | the hardware tree carries no DMA-coherence fact, so a device or translation unit a device tree marks `dma-noncoherent` is driven as coherent | **medium**; noticed writing the RISC-V IOMMU family, whose units state no coherence of their own (an Arm SMMU's `COHACC` does, and the family refuses one without it). Not absorbed: the fact is every DMA master's, so its consumers are every driver's DMA path and every family, and the ports' table write-back (`table_coherence`) exists on none of aarch64 or riscv64. QEMU's `virt` boards are coherent. `lib/fdt`, `kernel/arch/api/src/fdtwalk.rs`, `lib/abi/src/hwtree.rs` |
 | D718 | IO-APIC pins each take a vector at boot, 207 at most across every IO-APIC, so a server whose IO-APICs carry more pins fails to boot with `IrqVectorExhausted` and starves the MSI pool | **medium**; noticed routing IO-APIC sources through interrupt remapping (`plans/IOMMU.md` IOM11); not absorbed, because the fix claims a pin's vector when it is bound, on every port's controller. The `BootError` doc that called ~120 pins the most a platform ships is corrected. `kernel/tairix-kernel/src/x86_64/boot.rs` `discover_and_program_io_apics`, `kernel/tairix-kernel/src/x86_64/ioapic_controller.rs` |
+| D719 | moss on a structure reads as a primitive near the eye: half a metre from an old fence rail a lone cushion is a smooth green dome with a printed speckle and a mat's margin a flat, sharp-edged sheet, where RT21 promises fibrous cushions breaking into the cushions they are made of | low; noticed in a close-up checking RT14's torn rails; not absorbed, the moss relief being RT21's. `lib/raytrace/src/{cover.rs,solid.rs}` |
+| D720 | a farmland meadow's sward half a metre from the eye: a flat, fir-shaped weed reads as a cut-out, and the ground between the blades shows a regular polygonal crack pattern though no mud is laid there | low; noticed in the same close-up; not absorbed, being the sward's and the ground's (RT19 redraws the weeds). `lib/raytrace/src/{grass.rs,ground.rs}` |
 
 ### D453 — a process's scheduling level reaches only its leader thread
 

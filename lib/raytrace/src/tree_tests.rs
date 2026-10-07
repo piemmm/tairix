@@ -12,6 +12,7 @@ const STOCK: Stock = Stock {
         rot: 3,
         edge: 4,
     },
+    fruit: None,
 };
 
 fn species() -> Species {

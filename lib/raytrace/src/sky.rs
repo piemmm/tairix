@@ -65,8 +65,8 @@ pub(crate) struct Sky {
 /// How a ray escaping the scene sees the sky.
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct Seeing {
-    /// Whether it is seen directly or reflected, which takes the clouds'
-    /// finest edges.
+    /// Whether it is seen directly or reflected, which resolves the clouds'
+    /// edges as finely as its spread holds them.
     pub(crate) fine: bool,
     /// The angle the ray's footprint spans, which a star is spread over;
     /// `None` for a ray scattered off a diffuse surface, which takes the
@@ -129,8 +129,10 @@ impl Sky {
                 .map_or(Vec3::ZERO, |arriving| {
                     arriving.kept * air.solar * (arriving.dir.y.max(0.0) * arriving.stretch)
                 });
-            let below =
-                air.albedo * (ground * (1.0 / core::f64::consts::PI) + atmosphere.ambient());
+            let below = (
+                air.albedo * ground * (1.0 / core::f64::consts::PI),
+                air.albedo * atmosphere.ambient(),
+            );
             for bank in [self.high.as_mut(), self.low.as_mut()]
                 .into_iter()
                 .flatten()
@@ -179,8 +181,9 @@ impl Sky {
     /// drawn as the stretch's sunlit air gathers its light: so an overcast
     /// horizon is grey, and shafts of sunlight show between clouds.
     pub(crate) fn radiance(&self, origin: Vec3, dir: Vec3, seeing: Seeing) -> Vec3 {
+        let spread = if seeing.fine { seeing.spread } else { None };
         let met = |bank: Option<&Cloudbank>| {
-            bank.and_then(|bank| bank.seen(origin, dir, seeing.fine, seeing.jitter))
+            bank.and_then(|bank| bank.seen(origin, dir, spread, seeing.jitter))
         };
         let (low, high) = (met(self.low.as_ref()), met(self.high.as_ref()));
         let (mut near, mut far) = (

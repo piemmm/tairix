@@ -1,7 +1,8 @@
 //! A ray's walk across the square cells of a grid laid over the ground, one
-//! cell at a time in the order it crosses them.
+//! cell at a time in the order it crosses them, and the cells about it whose
+//! contents could reach it.
 
-use tairix_util::mathf::fmin;
+use tairix_util::mathf::{self, fmin};
 
 use crate::noise::cell;
 use crate::vector::Ray;
@@ -122,6 +123,87 @@ impl Walk {
 pub(crate) enum Stepped {
     X(u32),
     Z(u32),
+}
+
+/// Every cell within `spread` of `(column, row)`, `spread.0` cells either way
+/// across x and `spread.1` across z: what reaches a walk where it arrives.
+pub(crate) fn about(
+    (column, row): (u32, u32),
+    (across, down): (u32, u32),
+) -> impl Iterator<Item = (u32, u32)> {
+    (0..=2 * down).flat_map(move |z| {
+        (0..=2 * across).map(move |x| {
+            (
+                column.wrapping_add(x).wrapping_sub(across),
+                row.wrapping_add(z).wrapping_sub(down),
+            )
+        })
+    })
+}
+
+/// The cells that come within `spread` of a walk as it steps into
+/// `(column, row)` as `stepped` has it: the column of them ahead across x, or
+/// the row ahead across z.
+pub(crate) fn ahead(
+    (column, row): (u32, u32),
+    stepped: Stepped,
+    (across, down): (u32, u32),
+) -> impl Iterator<Item = (u32, u32)> {
+    let onward = |at: u32, step: u32, by: u32| {
+        if step == 1 {
+            at.wrapping_add(by)
+        } else {
+            at.wrapping_sub(by)
+        }
+    };
+    let (start, count, along_x) = match stepped {
+        Stepped::X(step) => (
+            (onward(column, step, across), row.wrapping_sub(down)),
+            2 * down,
+            false,
+        ),
+        Stepped::Z(step) => (
+            (column.wrapping_sub(across), onward(row, step, down)),
+            2 * across,
+            true,
+        ),
+    };
+    (0..=count).map(move |offset| {
+        if along_x {
+            (start.0.wrapping_add(offset), start.1)
+        } else {
+            (start.0, start.1.wrapping_add(offset))
+        }
+    })
+}
+
+/// Where along `ray`, within `(near, far)`, its track across the ground
+/// passes within `reach` of `(x, z)`; `None` if it never does.
+pub(crate) fn passing(
+    ray: &Ray,
+    (x, z): (f64, f64),
+    reach: f64,
+    (near, far): (f64, f64),
+) -> Option<(f64, f64)> {
+    let (dx, dz) = (ray.dir.x, ray.dir.z);
+    let (ox, oz) = (x - ray.origin.x, z - ray.origin.z);
+    let across = dx * dx + dz * dz;
+    let (first, last) = if across > 1e-18 {
+        let along = (ox * dx + oz * dz) / across;
+        let (px, pz) = (ox - dx * along, oz - dz * along);
+        let left = reach * reach - (px * px + pz * pz);
+        if left < 0.0 {
+            return None;
+        }
+        let half = mathf::sqrt(left / across);
+        (along - half, along + half)
+    } else if ox * ox + oz * oz <= reach * reach {
+        (near, far)
+    } else {
+        return None;
+    };
+    let (first, last) = (first.max(near), last.min(far));
+    (first <= last).then_some((first, last))
 }
 
 #[cfg(test)]

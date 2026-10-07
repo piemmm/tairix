@@ -8,7 +8,7 @@
 use alloc::vec::Vec;
 
 use super::*;
-use crate::heightfield::CHANNELS;
+use crate::heightfield::{Grows, QUANTITIES};
 use crate::vector::Ray;
 
 const ROLLED: Making = Making {
@@ -178,7 +178,8 @@ fn spot(p: Vec3, width: f64) -> Spot {
         girth: 0.0,
         instance: 7,
         front: true,
-        ground: [0.0; CHANNELS],
+        ground: [0.0; QUANTITIES],
+        grows: Grows::default(),
         thatch: 0.0,
         cover: None,
     }

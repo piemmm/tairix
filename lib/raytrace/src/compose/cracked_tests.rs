@@ -10,8 +10,8 @@ use crate::detail::Detail;
 use crate::heightfield::Attributes;
 
 /// Silt a flood laid and left, bare of growth; and the same grassed over.
-const SILT: Attributes = [60, 230, 0, 0, 25, 0];
-const GRASSED: Attributes = [60, 230, 0, 0, 255, 0];
+const SILT: Attributes = [60, 230, 0, 0, 25, 0, 0, 0];
+const GRASSED: Attributes = [60, 230, 0, 0, 255, 0, 0, 0];
 
 /// The eye, a little off a cell's corner.
 const EYE: Vec3 = Vec3::new(0.3, 1.7, 0.4);
@@ -85,6 +85,8 @@ fn mud_dries_only_on_level_bare_silt() {
         path: 0.0,
         green: 0.1,
         snow: 0.0,
+        grown: 0,
+        rows: 0,
     };
     assert!(wash(&dry) && bank(&dry));
     assert!(

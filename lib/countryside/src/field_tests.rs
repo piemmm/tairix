@@ -35,7 +35,10 @@ fn a_holdings_fields_tile_its_land_and_each_is_big_enough_to_be_one() {
         let holding = HoldingId::new(i, j);
         let lattice = Lattice::new(600.0, KEY);
         let middle = lattice.vertex(holding);
-        let road = lane(middle + Point::new(-500.0, -90.0), middle + Point::new(500.0, 110.0));
+        let road = lane(
+            middle + Point::new(-500.0, -90.0),
+            middle + Point::new(500.0, 110.0),
+        );
         let (_, parcels) = holding_parcels(holding, &[(Rank::Lane, &road)]);
         let mut land = alloc::vec![0.0; parcels.fields.len()];
         for row in 0..parcels.rows {
@@ -44,11 +47,16 @@ fn a_holdings_fields_tile_its_land_and_each_is_big_enough_to_be_one() {
                     continue;
                 };
                 let at = parcels.middle(column, row);
-                let field = parcels.field_in(block, at).expect("a field holds every cell of land");
+                let field = parcels
+                    .field_in(block, at)
+                    .expect("a field holds every cell of land");
                 let field = &parcels.fields[field as usize];
                 assert_eq!(field.block, block);
-                let within = lattice.outline(holding).contains(at);
-                assert!(!within || field.cell.contains(at), "a field's land lies in its cell");
+                let within = lattice.holds(holding, at);
+                assert!(
+                    !within || field.cell.contains(at),
+                    "a field's land lies in its cell"
+                );
                 land[field.id.index as usize] += CELL * CELL;
             }
         }
@@ -57,7 +65,11 @@ fn a_holdings_fields_tile_its_land_and_each_is_big_enough_to_be_one() {
             assert!(field.area >= LEAST_FIELD);
             assert!((field.along.length() - 1.0).abs() < 1e-9);
         }
-        assert!(parcels.fields.len() > 3, "{holding:?} has {} fields", parcels.fields.len());
+        assert!(
+            parcels.fields.len() > 3,
+            "{holding:?} has {} fields",
+            parcels.fields.len()
+        );
     }
 }
 
@@ -65,9 +77,16 @@ fn a_holdings_fields_tile_its_land_and_each_is_big_enough_to_be_one() {
 fn no_field_takes_water_or_a_ways_corridor() {
     let lattice = Lattice::new(600.0, KEY);
     // The holdings the test land's river runs through.
-    for holding in [HoldingId::new(0, 0), HoldingId::new(1, -1), HoldingId::new(0, 1)] {
+    for holding in [
+        HoldingId::new(0, 0),
+        HoldingId::new(1, -1),
+        HoldingId::new(0, 1),
+    ] {
         let middle = lattice.vertex(holding);
-        let road = lane(middle + Point::new(-400.0, 300.0), middle + Point::new(400.0, -300.0));
+        let road = lane(
+            middle + Point::new(-400.0, 300.0),
+            middle + Point::new(400.0, -300.0),
+        );
         let (_, parcels) = holding_parcels(holding, &[(Rank::Lane, &road)]);
         for row in 0..parcels.rows {
             for column in 0..parcels.columns {
@@ -85,14 +104,22 @@ fn no_field_takes_water_or_a_ways_corridor() {
 #[test]
 fn every_cut_runs_across_the_piece_it_cut() {
     let (lattice, parcels) = holding_parcels(HoldingId::new(2, 2), &[]);
-    let outline = lattice.outline(HoldingId::new(2, 2));
+    let outline = lattice.outline(HoldingId::new(2, 2)).expect("room");
     let mut cuts = 0;
     for node in &parcels.nodes {
-        if let Node::Cut { at, normal, chord, .. } = *node {
+        if let Node::Cut {
+            at, normal, chord, ..
+        } = *node
+        {
             cuts += 1;
             for end in [chord.0, chord.1] {
-                assert!((end - at).dot(normal).abs() < 1e-6, "a chord's end lies on its line");
-                assert!(outline.bounds().is_some_and(|bounds| bounds.grown(1e-6).contains(end)));
+                assert!(
+                    (end - at).dot(normal).abs() < 1e-6,
+                    "a chord's end lies on its line"
+                );
+                assert!(outline
+                    .bounds()
+                    .is_some_and(|bounds| bounds.grown(1e-6).contains(end)));
             }
             assert!((chord.1 - chord.0).length() > 0.0);
         }

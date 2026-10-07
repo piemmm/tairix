@@ -85,6 +85,34 @@ struct Form {
 /// The deepest drift a grid keeps the depth of; one deeper is kept at it.
 pub(crate) const DEEPEST: f64 = 6.0;
 
+/// A boundary the wind crosses as it moves the snow: how tall it stands, and
+/// how much of the wind passes through it.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub(crate) struct Barrier {
+    pub(crate) height: f64,
+    pub(crate) porosity: f64,
+}
+
+/// How far down the wind from a barrier, in its heights, the drift it drops
+/// runs out: a solid wall's banked against its lee face, a porous hedge's
+/// lower and longer, peaking clear of it where its heights put that; and how
+/// many times the depth that fell a drift may gather against one (Tabler,
+/// "Snow Fence Guide", 1991).
+const LEE: (f64, f64) = (9.0, 16.0);
+const PORE_PEAK: f64 = 3.5;
+const GATHERED: f64 = 5.0;
+
+/// How much of the fall the wind scours from a barrier's windward foot, and
+/// how far out from it, in its heights; and the low ridge it drops upwind of
+/// that: as a share of the drift, how far out, and how broad.
+const SCOUR: (f64, f64) = (0.75, 0.7);
+const RIDGE: (f64, f64, f64) = (0.25, 2.2, 0.9);
+
+/// How far from a barrier `height` tall the snow it moves lies.
+pub(crate) fn reach(height: f64) -> f64 {
+    LEE.1 * height
+}
+
 impl Snowpack {
     /// How sheltered `(x, z)` stands from the wind on the ground `ground`
     /// gives, in radians: the steepest slope up to the ground upwind, the mean
@@ -118,6 +146,43 @@ impl Snowpack {
         let crest = (here - 0.25 * (ahead + behind + left + right)) / reach;
         let climb = (ahead - behind) / (2.0 * reach);
         upwind / real(FAN.len()) - CREST * crest - CLIMB * climb
+    }
+
+    /// How much deeper than `open`, its depth in the open, snow lies
+    /// `downwind` metres down the wind from `barrier` — upwind of it where
+    /// negative — the wind crossing it as squarely as `square` has it, one
+    /// across it and nought along it: banked in its lee as far as the snow
+    /// that fell can fill, and scoured at its windward foot inside a low
+    /// ridge. Negative where scoured, never past bare ground.
+    pub(crate) fn drifted(
+        &self,
+        barrier: Barrier,
+        (downwind, square): (f64, f64),
+        open: f64,
+    ) -> f64 {
+        let Barrier { height, porosity } = barrier;
+        let across = smoothstep(0.15, 0.6, square.abs());
+        if across <= 0.0 || height <= 0.0 {
+            return 0.0;
+        }
+        // What blows through a barrier drops the snow it carries further
+        // down the wind, and the more of it the less the barrier gathers.
+        let solid = (1.0 - porosity) * (1.0 - porosity);
+        let gathered = height.min(GATHERED * self.fallen) * (1.0 - porosity * porosity);
+        let out = downwind / height;
+        let change = if out >= 0.0 {
+            let banked = (1.0 - out / LEE.0).max(0.0);
+            let peaked = (1.0 - out / LEE.1).max(0.0)
+                * (out / PORE_PEAK)
+                * mathf::exp(1.0 - out / PORE_PEAK);
+            let drift = gathered * (solid * banked * banked + (1.0 - solid) * peaked);
+            (drift - open).max(0.0)
+        } else {
+            let (foot, ridge) = (-out / SCOUR.1, (-out - RIDGE.1) / RIDGE.2);
+            let scoured = open * SCOUR.0 * solid * mathf::exp(-foot * foot);
+            RIDGE.0 * gathered * mathf::exp(-ridge * ridge) - scoured
+        };
+        across * change
     }
 
     /// How deep the snow lies at `(x, z)`, `shelter` sheltered on ground

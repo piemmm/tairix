@@ -25,7 +25,8 @@ fn spot(p: Vec3, width: f64) -> Spot {
         girth: 0.0,
         instance: 0,
         front: true,
-        ground: [0.0; CHANNELS],
+        ground: [0.0; QUANTITIES],
+        grows: Grows::default(),
         thatch: 0.0,
         cover: None,
     }
@@ -90,8 +91,8 @@ fn a_checkerboard_alternates_up_close_and_blends_far_off() {
     clippy::too_many_lines,
     reason = "a table of the patterned pigments, one entry each"
 )]
-fn patterns() -> [(Pigment, &'static [Vec3], f64); 9] {
-    [
+fn patterns() -> Vec<(Pigment, &'static [Vec3], f64)> {
+    alloc::vec![
         (
             Pigment::Marble {
                 base: RED,
@@ -254,10 +255,18 @@ fn stripes_band_across_the_texture_y_axis() {
 fn a_crowd_colours_each_member_by_its_kind_and_dries_it_toward_its_tip() {
     let tip = Vec3::new(0.9, 0.9, 0.5);
     let head = Vec3::new(0.6, 0.4, 0.2);
-    let grasses = [RED, BLUE, GREY, RED * 0.5].map(|leaf| Blades {
-        leaves: [leaf, leaf * 0.9],
-        tip,
-        head,
+    // The wild kinds, then the sown ones all green.
+    let leaves = [RED, BLUE, GREY, RED * 0.5];
+    let grasses: [Blades; GRASS_KINDS] = core::array::from_fn(|kind| {
+        let leaf = leaves
+            .get(kind)
+            .copied()
+            .unwrap_or(Vec3::new(0.1, 0.8, 0.1));
+        Blades {
+            leaves: [leaf, leaf * 0.9],
+            tip,
+            head,
+        }
     });
     let blossoms = [
         Vec3::ONE,
@@ -280,9 +289,12 @@ fn a_crowd_colours_each_member_by_its_kind_and_dries_it_toward_its_tip() {
     };
     let apart = |a: Vec3, b: Vec3| (a - b).length();
     for key in 0..64 {
-        // A leaf of the blue kind is blue at its root, whatever its key.
+        // A leaf of the blue kind is blue at its root, whatever its key; and
+        // a sown kind's is its own.
         let root = member(key | marks(1, 15), 0.0);
         assert!(root.z > 2.0 * root.x.max(root.y), "key {key}: {root:?}");
+        let sown = member(key | marks(13, 15), 0.0);
+        assert!(sown.y > 2.0 * sown.x.max(sown.z), "key {key}: {sown:?}");
         // And straw at its tip.
         let (low, high) = (
             member(key | marks(1, 15), 0.2),
@@ -345,12 +357,13 @@ fn ground() -> Pigment {
         seed: 3,
         ways: None,
         bounds: None,
+        tilled: None,
         floor: None,
     })
 }
 
 /// The ground at `height` facing `normal`, the land there as `lie` says.
-fn ground_at(pigment: &Pigment, height: f64, normal: Vec3, lie: [f64; CHANNELS]) -> Vec3 {
+fn ground_at(pigment: &Pigment, height: f64, normal: Vec3, lie: [f64; QUANTITIES]) -> Vec3 {
     pigment.colour(&Spot {
         p: Vec3::new(40.0, height, -30.0),
         normal,
@@ -363,6 +376,7 @@ fn ground_at(pigment: &Pigment, height: f64, normal: Vec3, lie: [f64; CHANNELS])
         instance: 0,
         front: true,
         ground: lie,
+        grows: Grows::default(),
         thatch: 0.0,
         cover: None,
     })
@@ -446,6 +460,7 @@ fn ground_bare_of_snow_shows_none_wherever_its_patches_lie() {
             instance: 0,
             front: true,
             ground: bare,
+            grows: Grows::default(),
             thatch: 0.0,
             cover: None,
         });
@@ -514,6 +529,7 @@ fn a_woods_floor_is_its_fallen_leaves_where_the_open_ground_is_grass() {
             instance: 0,
             front: true,
             ground: [0.0, 0.5, 0.0, 0.0, 1.0, 0.0],
+            grows: Grows::default(),
             thatch: 0.0,
             cover: None,
         })
@@ -561,7 +577,7 @@ fn rock_is_bedded_and_the_same_wherever_it_is_asked() {
 #[test]
 fn ground_grain_shows_up_close_and_settles_to_its_mean_far_off() {
     let pigment = ground();
-    let at = |x: f64, width: f64, (ground, height): ([f64; CHANNELS], f64)| {
+    let at = |x: f64, width: f64, (ground, height): ([f64; QUANTITIES], f64)| {
         pigment.colour(&Spot {
             p: Vec3::new(x, height, 2.0),
             normal: Vec3::UP,
@@ -574,6 +590,7 @@ fn ground_grain_shows_up_close_and_settles_to_its_mean_far_off() {
             instance: 0,
             front: true,
             ground,
+            grows: Grows::default(),
             thatch: 0.0,
             cover: None,
         })
@@ -634,4 +651,49 @@ fn a_spine_greys_as_it_ages_and_a_young_one_darkens_toward_its_tip() {
             "{mark}: an old tip is not"
         );
     }
+}
+
+/// Foliage far off comes in clumps of its leaves' colours, the first kind's
+/// as often as its share, every clump about its own and the whole settling
+/// to their mean once a clump is finer than a pixel.
+#[test]
+fn clumped_foliage_settles_to_the_mean_of_its_leaves() {
+    let (thorn, hazel) = (
+        [RED, RED * 0.8, RED * 0.9, RED * 1.1],
+        [BLUE, BLUE * 0.8, BLUE * 0.9, BLUE * 1.1],
+    );
+    let tones = [
+        thorn[0], thorn[1], thorn[2], thorn[3], hazel[0], hazel[1], hazel[2], hazel[3],
+    ];
+    let clumped = Pigment::Clumped(Clumped::new((tones, 0.7), (1.0 / 0.7, 0.0), 9));
+    let mean = RED * 0.95 * 0.7 + BLUE * 0.95 * 0.3;
+    let far = clumped.colour(&spot(Vec3::new(1.0, 2.0, 3.0), 3.0));
+    assert!(
+        (far - mean).length() < 1e-9,
+        "{far:?} far off, not {mean:?}"
+    );
+    let snowed = Pigment::Clumped(Clumped::new((tones, 0.7), (1.0 / 0.7, 0.85), 9));
+    let topped = snowed.colour(&spot(Vec3::new(1.0, 2.0, 3.0), 3.0));
+    assert!(
+        (topped - mean.lerp(SNOW, 0.85)).length() < 1e-9,
+        "snow lies on its top as {topped:?}"
+    );
+    let near: Vec<Vec3> = points(4000)
+        .map(|p| clumped.colour(&spot(p, 1e-4)))
+        .collect();
+    let reds = near.iter().filter(|colour| colour.x > colour.z).count();
+    assert!(
+        (2600..3000).contains(&reds),
+        "{reds} of 4000 clumps are thorn"
+    );
+    let average = near.iter().fold(Vec3::ZERO, |sum, &colour| sum + colour) * (1.0 / 4000.0);
+    assert!(
+        (average - mean).length() < 0.03,
+        "{average:?} on the mean, not {mean:?}"
+    );
+    assert!(near.iter().all(|colour| within(
+        *colour,
+        &[RED * 0.72, RED * 1.21, BLUE * 0.72, BLUE * 1.21],
+        0.0
+    )));
 }

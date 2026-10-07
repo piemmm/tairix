@@ -45,6 +45,7 @@ fn parts(objects: Vec<Object>) -> Parts {
         prototypes: Vec::new(),
         lawns: Vec::new(),
         far_woods: Vec::new(),
+        stands: Vec::new(),
         materials: vec![
             Material::new(
                 Pigment::Solid(Vec3::splat(0.5)),

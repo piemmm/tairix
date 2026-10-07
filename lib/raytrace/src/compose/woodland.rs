@@ -22,6 +22,8 @@ use tairix_parallel::JobRunner;
 use tairix_util::{fallible, mathf};
 
 use super::chains::Chains;
+use super::fields::Fielding;
+use super::landscape::Bridging;
 use super::landscape::{self, Lawning, Vantage};
 use super::plants::{self, Dead, Grove, Laying, DEAD_VARIANTS};
 use super::stones::{self, Bed};
@@ -88,7 +90,7 @@ const ABOUT: f64 = 160.0;
 
 /// How far either side of the view trees stand beyond that, in radians: the
 /// widest picture's half-width and a margin for the shadows cast into it.
-const ACROSS: f64 = 1.15;
+pub(super) const ACROSS: f64 = 1.15;
 
 /// How many pixels tall a tree far off still spans, at least.
 const SPANNED: f64 = 2.0;
@@ -858,11 +860,17 @@ fn walls_off(open: (f64, f64), vantage: &Vantage, at: (f64, f64), height: f64) -
     mathf::hypot(dx, dz) < open.0 * height && turn.abs() < open.1
 }
 
-/// A scene's woods and sward, grown once its land stands: each wood's trees
-/// and then what grows beneath them, a bounded step at a time, then the
-/// sward under them all, knowing their shade.
+/// A scene's woods and sward, grown once its land stands: a farmed land's
+/// boundaries and woodlots first, then each wood's trees and what grows
+/// beneath them, a bounded step at a time, then the sward under them all,
+/// knowing their shade.
 #[derive(Debug)]
 pub(super) struct Growing {
+    /// A land's bridges and a farmed land's boundaries and woodlots, while
+    /// they are laid, and whether there were any.
+    bridging: Option<Bridging>,
+    fielding: Option<Fielding>,
+    fielded: bool,
     woods: Vec<Wood>,
     /// The plants of the water's edge, set out once the woods' shade is
     /// cast, and a stream's bed, laid and its flow solved before them.
@@ -941,15 +949,21 @@ impl Growing {
     /// from it, their draws keyed from one of `dice`; `None` if it was asked
     /// for none of them.
     pub(super) fn from(stage: &mut Stage, dice: &mut Dice) -> Option<Self> {
+        let bridging = stage.bridging.take();
+        let fielding = stage.fielding.take();
         let woods = core::mem::take(&mut stage.woods);
         let margins = stage.margins.take();
         let bed = stage.bed.take();
         let sward = stage.sward.take();
-        if woods.is_empty() && margins.is_none() && bed.is_none() && sward.is_none() {
+        let laid = bridging.is_some() || fielding.is_some();
+        if !laid && woods.is_empty() && margins.is_none() && bed.is_none() && sward.is_none() {
             return None;
         }
         let seed = dice.wide();
         Some(Self {
+            fielded: laid,
+            bridging,
+            fielding,
             woods,
             margins,
             bedded: bed.is_some(),
@@ -996,8 +1010,17 @@ impl Growing {
                 shading + edging + bedding + laying * sward.done()
             }
         };
-        let parts = self.woods.len() + 1;
-        share(self.next.min(self.woods.len()), parts) + within / real(parts)
+        let fielded = usize::from(self.fielded);
+        let parts = fielded + self.woods.len() + 1;
+        // Bridges are a small share of what is laid first, a farmed land's
+        // boundaries the rest.
+        if let Some(bridging) = &self.bridging {
+            return 0.1 * bridging.done() / real(parts);
+        }
+        if let Some(fielding) = &self.fielding {
+            return (0.1 + 0.9 * fielding.done()) / real(parts);
+        }
+        share(fielded + self.next.min(self.woods.len()), parts) + within / real(parts)
     }
 
     /// Grow the next step on `land`; whether everything is grown, or `None`
@@ -1007,6 +1030,18 @@ impl Growing {
         stage: &mut Stage,
         (land, runner): (&Land, &dyn JobRunner),
     ) -> Option<bool> {
+        if let Some(bridging) = self.bridging.as_mut() {
+            if bridging.step(stage, land)? {
+                self.bridging = None;
+            }
+            return Some(false);
+        }
+        if let Some(fielding) = self.fielding.as_mut() {
+            if fielding.step(stage, (land, runner))? {
+                self.fielding = None;
+            }
+            return Some(false);
+        }
         let phase = core::mem::replace(&mut self.phase, Phase::Sowing);
         let dice = &mut self.dice;
         let Some(wood) = self.woods.get(self.next) else {

@@ -349,6 +349,7 @@ fn an_orb_is_sampled_on_its_near_side_and_lights_as_its_solid_angle_says() {
                     prototypes: &[],
                     lawns: &[],
                     far_woods: &[],
+                    stands: &[],
                     materials: &[],
                     view: None,
                 },

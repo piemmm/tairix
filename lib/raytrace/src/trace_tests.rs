@@ -88,6 +88,7 @@ impl Setup {
             prototypes: Vec::new(),
             lawns: Vec::new(),
             far_woods: Vec::new(),
+            stands: Vec::new(),
             materials: self.materials,
             lights: self.lights,
             sky: self.sky,
@@ -418,7 +419,7 @@ fn a_pattern_turns_with_its_object() {
         (&scene.objects[index], &scene.materials[0]),
         (0.0, super::Cone::PINHOLE),
     );
-    let spot = tracer.spot(&surface, &scene.objects[index], &hit);
+    let spot = Tracer::spot(&surface, &hit);
     // The world's -z face is the turned frame's +x or -x face.
     assert!(
         (spot.normal.x.abs() - 1.0).abs() < 1e-9,
@@ -1307,7 +1308,7 @@ fn a_lenss_glare_spreads_the_share_of_the_sun_it_is_rated_at() {
         );
         let angle = |share: f64| core::f64::consts::PI * share * share;
         let (a, b) = (angle(from), angle(to));
-        let middle = 0.5 * (a + b);
+        let middle = f64::midpoint(a, b);
         let solid = core::f64::consts::TAU * (mathf::cos(a) - mathf::cos(b));
         spread += at(middle) * solid;
     }
@@ -1343,8 +1344,8 @@ fn damp_ground_shines_low_down_and_gives_back_no_more_than_it_takes() {
             (&scene.objects[floor], &earth),
             (0.0, super::Cone::PINHOLE),
         );
-        let samples = 256u32;
-        (0..samples)
+        let count = 256u32;
+        (0..count)
             .map(|index| {
                 let mut sampler = Sampler::new(index, 0);
                 match wet {
@@ -1357,7 +1358,7 @@ fn damp_ground_shines_low_down_and_gives_back_no_more_than_it_takes() {
                 .max_element()
             })
             .sum::<f64>()
-            / f64::from(samples)
+            / f64::from(count)
     };
     for dip in [1.4, 0.8, 0.3, 0.08] {
         let matte = seen(dip, None);

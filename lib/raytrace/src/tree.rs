@@ -154,12 +154,23 @@ pub(crate) enum Season {
 }
 
 /// The materials a tree is made in: its bark, its leaves, and the wood its
-/// breaks show.
+/// breaks show; and the fruit it bears in its season, if it does.
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct Stock {
     pub(crate) bark: u16,
     pub(crate) leaves: u16,
     pub(crate) grain: Grain,
+    pub(crate) fruit: Option<Fruit>,
+}
+
+/// A tree's fruit: the material it is in, how far across it is, and the
+/// share of the places along its twigs a leaf could stand that one hangs
+/// at.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub(crate) struct Fruit {
+    pub(crate) material: u16,
+    pub(crate) radius: f64,
+    pub(crate) share: f64,
 }
 
 /// The most parts one tree may hold: what a forest of its kind costs. A tree
@@ -307,8 +318,8 @@ impl Growth {
                 }
             }
             Stage::Index(mut building) => {
-                if building.step(BUILD_UNIT) {
-                    Stage::Done(building.finish())
+                if building.step(BUILD_UNIT)? {
+                    Stage::Done(building.finish()?)
                 } else {
                     Stage::Index(building)
                 }
@@ -893,6 +904,42 @@ impl Grower {
             }
             let base = from + (to - from) * along;
             self.leaf(base, frame, twig_length)?;
+            if let Some(fruit) = self.stock.fruit {
+                if self.unit() < fruit.share {
+                    self.fruit(base, fruit)?;
+                }
+            }
+        }
+        Some(())
+    }
+
+    /// A fruit hanging from its stalk below `base` on a twig: no two the same
+    /// size, nor quite round, a smaller lobe beneath a larger.
+    fn fruit(&mut self, base: Vec3, fruit: Fruit) -> Option<()> {
+        let radius = fruit.radius * (0.8 + 0.35 * self.unit());
+        let stalk = base - Vec3::UP * (0.02 + 0.01 * self.unit());
+        let centre = stalk - Vec3::UP * radius;
+        let side = Vec3::new(1.0, 0.0, 0.0);
+        let key = self.key;
+        self.push(Part::Tube(Tube::new(
+            (base, stalk),
+            ((0.0015, 0.0012), (0.0, 0.02)),
+            (self.stock.bark, key),
+            side,
+        )))?;
+        let lobe = centre
+            - Vec3::new(
+                0.15 * radius * (self.unit() - 0.5),
+                0.35 * radius,
+                0.15 * radius * (self.unit() - 0.5),
+            );
+        for (at, size) in [(centre, radius), (lobe, 0.8 * radius)] {
+            self.push(Part::Tube(Tube::new(
+                (at, at),
+                ((size, size), (0.0, 0.0)),
+                (fruit.material, key),
+                side,
+            )))?;
         }
         Some(())
     }

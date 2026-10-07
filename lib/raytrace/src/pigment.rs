@@ -12,18 +12,20 @@ use crate::bark::Bark;
 use crate::cover::Cover;
 use crate::grass::{grass_kind, vigour, FLOWER, GRASS_KINDS, HEAD, LITTER, WEED};
 use crate::ground::{Ground, Rock};
-use crate::heightfield::CHANNELS;
+use crate::heightfield::{Grows, QUANTITIES};
 use crate::lily::Lily;
+use crate::maize::Maize;
 use crate::masonry::Masonry;
-use crate::timber::Timber;
 use crate::mud::Mud;
 use crate::noise::{cell, cells2, cells3, noise3, octaves_within, smoothstep, turbulence3};
 use crate::sample::{mix32, unit};
 use crate::snowman::Rolled;
+use crate::straw::Straw;
+use crate::timber::Timber;
 use crate::vector::Vec3;
 
 /// Where a pigment is looked up.
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Default)]
 pub(crate) struct Spot {
     /// The point, in the object's own texture space.
     pub(crate) p: Vec3,
@@ -41,8 +43,9 @@ pub(crate) struct Spot {
     /// along its stem and its angle round it, a leaf's place along and across
     /// its midrib.
     pub(crate) uv: (f64, f64),
-    /// A limb's radius there, which its bark is wrapped round; nought where
-    /// the surface is no limb.
+    /// A limb's radius there, which its bark is wrapped round, or the side of
+    /// a round unit of straw's, which its stalks wind round; nought on any
+    /// other surface.
     pub(crate) girth: f64,
     /// The key the instance met was placed under, so each of a crowd wears
     /// its pattern differently; nought for a shape that is one thing.
@@ -53,7 +56,10 @@ pub(crate) struct Spot {
     /// road or a path, how much grows there, how deep its snow — each
     /// `0.0..=1.0`; off the land, and on one carrying none of this, plain
     /// ground's.
-    pub(crate) ground: [f64; CHANNELS],
+    pub(crate) ground: [f64; QUANTITIES],
+    /// What a farmed land grows about where it was met; nothing farmed off
+    /// one.
+    pub(crate) grows: Grows,
     /// How much of the sky a sward's blades hide from the point, `0.0` in the
     /// open: ground under it shows the thatch at its roots.
     pub(crate) thatch: f64,
@@ -63,6 +69,10 @@ pub(crate) struct Spot {
 }
 
 /// A surface's colour.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "a scene holds at most a few hundred materials, each one pigment, and a box could not fail gracefully"
+)]
 #[derive(Clone, Debug)]
 pub(crate) enum Pigment {
     Solid(Vec3),
@@ -153,6 +163,8 @@ pub(crate) enum Pigment {
     /// Leaves: veined, paler beneath, and in autumn browning at their edges
     /// and spotted.
     Foliage(Foliage),
+    /// Foliage too far off to tell leaf from leaf.
+    Clumped(Clumped),
     /// A cactus's spines, coloured by their age: red-brown and dark-tipped
     /// while young, then tan, then grey, the oldest weathering pale. A spine
     /// is as old as its areole lies below the apex, which its stem carries.
@@ -181,6 +193,10 @@ pub(crate) enum Pigment {
     /// Sawn timber, each post, rail and board its own shade, its grain
     /// along it.
     Timber(Timber),
+    /// Straw or hay bound in a bale or a sheaf.
+    Straw(Straw),
+    /// A maize plant's leaves, each as dry as its key says it is.
+    Maize(Maize),
 }
 
 impl Pigment {
@@ -268,6 +284,7 @@ impl Pigment {
             Self::Bark(bark) => bark.colour(spot),
             Self::Rolled(rolled) => rolled.colour(spot),
             Self::Foliage(foliage) => foliage.colour(spot),
+            Self::Clumped(clumped) => clumped.colour(spot),
             Self::Spines(ages) => spine(ages, spot),
             Self::Lily(lily) => lily.colour(spot),
             Self::Mud(mud) => mud.colour(spot),
@@ -280,6 +297,8 @@ impl Pigment {
             Self::Masonry(masonry) => masonry.colour(spot),
             Self::Cover(cover) => cover.colour(spot),
             Self::Timber(timber) => timber.colour(spot),
+            Self::Straw(straw) => straw.colour(spot),
+            Self::Maize(maize) => maize.colour(spot),
         }
     }
 }
@@ -353,6 +372,62 @@ pub(crate) fn speckle(q: Vec3, (base, flecks): (Vec3, [Vec3; 2]), seed: u32, det
         base
     };
     mean.lerp(mineral * (0.92 + 0.16 * unit(mix32(found.id))), resolved)
+}
+
+/// Foliage too far off to tell leaf from leaf, in clumps settling to their
+/// mean wherever a clump is finer than a pixel.
+#[derive(Clone, Debug)]
+pub(crate) struct Clumped {
+    tones: [Vec3; 8],
+    first: f64,
+    scale: f64,
+    snow: f64,
+    seed: u32,
+    mean: Vec3,
+}
+
+impl Clumped {
+    /// Clumps `scale` to a metre, each one of `tones`, of the first four
+    /// `first` of the time, else of the last four; `snow` of what faces the
+    /// sky under snow.
+    pub(crate) fn new(
+        (tones, first): ([Vec3; 8], f64),
+        (scale, snow): (f64, f64),
+        seed: u32,
+    ) -> Self {
+        let (former, latter) = tones.split_at(4);
+        let average = |four: &[Vec3]| four.iter().fold(Vec3::ZERO, |sum, &tone| sum + tone) * 0.25;
+        let mean = average(latter).lerp(average(former), first);
+        Self {
+            tones,
+            first,
+            scale,
+            snow,
+            seed,
+            mean,
+        }
+    }
+
+    /// The colour at `spot`.
+    pub(crate) fn colour(&self, spot: &Spot) -> Vec3 {
+        let (former, latter) = self.tones.split_at(4);
+        let mean = self.mean;
+        let resolved = 1.0 - smoothstep(0.3, 1.5, spot.width * self.scale);
+        let leaves = if resolved <= 0.0 {
+            mean
+        } else {
+            let found = cells3(spot.p * self.scale, self.seed, 1.0);
+            let kind = if unit(found.id) < self.first {
+                former
+            } else {
+                latter
+            };
+            let pick = usize::try_from(mix32(found.id) & 3).unwrap_or(0);
+            let tone = kind.get(pick).copied().unwrap_or(mean);
+            mean.lerp(tone * (0.9 + 0.2 * unit(mix32(found.id ^ 0x5a))), resolved)
+        };
+        leaves.lerp(SNOW, lying(self.snow, spot.normal))
+    }
 }
 
 /// Snow lying on a tree.

@@ -12,13 +12,15 @@ use core::f64::consts::TAU;
 use tairix_parallel::JobRunner;
 use tairix_util::{fallible, mathf};
 
+use super::crops::Sowing;
 use super::{rgb, Dice, Recipe, Stage};
 use crate::bark::{Bark, BarkKind};
 use crate::cactus::{Flesh, Ribs, FELT, RIB_DEPTH};
 use crate::deadwood::{Decay, Fungus, Habit as Shelving, Sprouting, Top, Woods};
 use crate::fracture::Grain;
 use crate::grass::{
-    Cover, Grass, GrassKind, Habit as Tufting, Head, Lawn, Litter, Seen, Weeds, GRASS_KINDS,
+    Cover, Grass, GrassKind, Habit as Tufting, Head, Lawn, Litter, Seen, Sown, Weeds, GRASS_KINDS,
+    WILD_KINDS,
 };
 use crate::leaf::Outline;
 use crate::material::{Finish, Material, Relief};
@@ -26,7 +28,7 @@ use crate::noise::smoothstep;
 use crate::pigment::{Blades, Crowd, Foliage, Pigment};
 use crate::shade::{Rect, Sampling, Shade, Shades};
 use crate::shape::Shape;
-use crate::tree::{Envelope, Leafing, Level, Season, Species, Stock};
+use crate::tree::{Envelope, Fruit, Leafing, Level, Season, Species, Stock};
 use crate::vector::{real, share, Frame, Pose, Vec3};
 use crate::wood::{Affinity, Habit, KINDS, VARIANTS};
 
@@ -43,6 +45,9 @@ pub(super) enum Kind {
     Spruce,
     Olive,
     Cherry,
+    /// An orchard's apple: low and spreading, pruned open, pink-white with
+    /// blossom in spring and hung with apples by autumn.
+    Apple,
     Palm,
     Saguaro,
     Hazel,
@@ -89,6 +94,7 @@ impl Kind {
             Self::Oak => (0.5, 0.15),
             Self::Hazel => (0.52, 0.52),
             Self::Hawthorn => (0.48, 0.48),
+            Self::Apple => (0.55, 0.2),
             Self::Box => (0.47, 0.47),
             Self::Olive => (0.43, 0.135),
             Self::Beech => (0.42, 0.13),
@@ -577,7 +583,7 @@ fn dead_bark_material(
         moss: 0.5 * smoothstep(0.3, 0.95, age),
         ..dead_bark(kind, dice.seed())
     };
-    let snow = if season == Season::Winter { 0.85 } else { 0.0 };
+    let snow = snowed(season);
     stage.material(
         Material::new(
             Pigment::Bark(Bark {
@@ -758,7 +764,7 @@ fn grow(
     if kind == Kind::Saguaro {
         return grow_saguaro(stage, dice, season);
     }
-    let snow = if season == Season::Winter { 0.85 } else { 0.0 };
+    let snow = snowed(season);
     let pattern = bark(kind, dice.seed());
     let bark = stage.material(
         Material::new(
@@ -791,16 +797,58 @@ fn grow(
         rot: u16::try_from(rot_material(stage, dice)?).ok()?,
         edge: u16::try_from(edge_material(stage, dice)?).ok()?,
     };
+    // An apple bears small green fruit through the summer, swelling red by
+    // autumn.
+    let fruit = match (kind, leafing) {
+        (Kind::Apple, Season::Summer) => Some((0x86_A2_40, 0.022, 0.008)),
+        (Kind::Apple, Season::Autumn { .. }) => Some((0xA0_24_1A, 0.034, 0.012)),
+        _ => None,
+    };
+    let fruit = match fruit {
+        Some((colour, radius, share)) => Some(Fruit {
+            material: u16::try_from(stage.material(Material::new(
+                Pigment::Solid(rgb(colour)),
+                Finish::Coated { roughness: 0.3 },
+            ))?)
+            .ok()?,
+            radius,
+            share,
+        }),
+        None => None,
+    };
     let stock = Stock {
         bark: u16::try_from(bark).ok()?,
         leaves: u16::try_from(leaves).ok()?,
         grain,
+        fruit,
     };
     let roots = if kind == Kind::Palm {
         u16::try_from(palm_roots(stage, dice)?).ok()?
     } else {
         stock.bark
     };
+    let (prototypes, heights) = variants(stage, dice, (kind, stand, leafing), (stock, roots))?;
+    Some(Grown {
+        kind,
+        habit: Habit {
+            affinity: affinity(kind),
+            prototypes,
+            heights,
+            bark,
+            crown: kind.crown(stand),
+            scaled: SCALED,
+        },
+    })
+}
+
+/// Plan the variants of `kind` standing as `stand` in the `leafing` season,
+/// of `stock` and rooted in `roots`: each one's prototype and its height.
+fn variants(
+    stage: &mut Stage,
+    dice: &mut Dice,
+    (kind, stand, leafing): (Kind, Stand, Season),
+    (stock, roots): (Stock, u16),
+) -> Option<([u32; VARIANTS], [f64; VARIANTS])> {
     let mut prototypes = [0u32; VARIANTS];
     let mut heights = [0.0f64; VARIANTS];
     for (variant, (prototype, height)) in prototypes.iter_mut().zip(heights.iter_mut()).enumerate()
@@ -838,17 +886,7 @@ fn grow(
         };
         *prototype = stage.plan(&recipe)?;
     }
-    Some(Grown {
-        kind,
-        habit: Habit {
-            affinity: affinity(kind),
-            prototypes,
-            heights,
-            bark,
-            crown: kind.crown(stand),
-            scaled: SCALED,
-        },
-    })
+    Some((prototypes, heights))
 }
 
 /// The material a palm's mat of roots is made in: smooth, tan where it is
@@ -936,7 +974,7 @@ fn flesh_material(stage: &mut Stage, ribs: Ribs, (girth, snow): (f64, f64)) -> O
 /// and its arms' ribs as many as their girths ask, and its spines coloured by
 /// their age.
 fn grow_saguaro(stage: &mut Stage, dice: &mut Dice, season: Season) -> Option<Grown> {
-    let snow = if season == Season::Winter { 0.85 } else { 0.0 };
+    let snow = snowed(season);
     let spines = stage.material(Material::new(
         Pigment::Spines(palette(Kind::Saguaro, season).map(rgb)),
         Finish::Leaf {
@@ -1203,6 +1241,64 @@ fn species(kind: Kind) -> Species {
                 fold: 0.2,
                 angle: 50.0,
                 toward_light: 0.7,
+            },
+            evergreen: false,
+            snapped: false,
+        },
+        // Pruned to a short bole and an open, spreading crown its limbs
+        // reach out level from.
+        Kind::Apple => Species {
+            envelope: Envelope::Spherical,
+            height: (3.5, 5.5),
+            base: 0.28,
+            girth: 0.034,
+            flare: 0.5,
+            stubs: 0.6,
+            ratio_power: 1.3,
+            trunks: 1,
+            levels: [
+                trunk(0.55, 18.0, 6, (0.16, 28.0)),
+                level(
+                    10.0,
+                    (0.62, 0.12),
+                    0.85,
+                    (62.0, 14.0),
+                    (140.0, 25.0),
+                    (-18.0, 12.0, 36.0),
+                    7,
+                    (0.12, 22.0),
+                ),
+                level(
+                    16.0,
+                    (0.48, 0.1),
+                    0.9,
+                    (45.0, 15.0),
+                    (140.0, 30.0),
+                    (-6.0, 6.0, 34.0),
+                    5,
+                    (0.0, 0.0),
+                ),
+                level(
+                    30.0,
+                    (0.38, 0.1),
+                    1.0,
+                    (45.0, 15.0),
+                    (140.0, 30.0),
+                    (0.0, 0.0, 30.0),
+                    2,
+                    (0.0, 0.0),
+                ),
+            ],
+            depth: 4,
+            attraction: (0.04, 0.0),
+            leafing: Leafing {
+                outline: Outline::Ovate { teeth: 10 },
+                per_twig: 18,
+                length: 0.075,
+                breadth: 0.55,
+                fold: 0.25,
+                angle: 50.0,
+                toward_light: 0.65,
             },
             evergreen: false,
             snapped: false,
@@ -1684,7 +1780,7 @@ fn shrub(kind: Kind) -> Species {
 }
 
 /// `kind`'s bark: a saguaro's skin as a stem of middling girth wears it.
-fn bark(kind: Kind, seed: u32) -> Bark {
+pub(super) fn bark(kind: Kind, seed: u32) -> Bark {
     let (bark_kind, light, dark, accent, rise) = match kind {
         Kind::Saguaro => {
             return flesh(Ribs {
@@ -1700,6 +1796,8 @@ fn bark(kind: Kind, seed: u32) -> Bark {
         Kind::Hawthorn => (BarkKind::Furrowed, 0x76_6C_62, 0x34_2E_2A, 0x8E_92_78, 0.0),
         // Glossy mahogany, darker than it looks in the sun, peeling coppery.
         Kind::Cherry => (BarkKind::Banded, 0x4E_2C_26, 0x1C_11_0F, 0x74_5E_52, 0.0),
+        // Grey-brown, flaking in small scales on an old tree's trunk.
+        Kind::Apple => (BarkKind::Scaly, 0x7A_6C_5C, 0x36_2C_24, 0x8A_92_72, 0.0),
         Kind::Birch => (BarkKind::Papery, 0xC8_C4_BC, 0x22_20_1E, 0xBC_AC_9C, 0.0),
         Kind::Beech => (BarkKind::Smooth, 0x9A_98_92, 0x6A_68_62, 0x84_90_76, 0.0),
         Kind::Willow | Kind::Olive => (BarkKind::Furrowed, 0x7A_70_62, 0x3A_32_2A, 0x92_96_7A, 0.0),
@@ -1746,7 +1844,7 @@ fn sloughs(kind: Kind) -> f64 {
         Kind::Oak | Kind::Olive => 0.25,
         Kind::Palm | Kind::Saguaro | Kind::Fern | Kind::Box | Kind::Heather | Kind::Gorse => 0.3,
         Kind::Cherry => 0.4,
-        Kind::Maple | Kind::Hazel | Kind::Hawthorn => 0.45,
+        Kind::Maple | Kind::Hazel | Kind::Hawthorn | Kind::Apple => 0.45,
         Kind::Pine | Kind::Willow | Kind::Poplar => 0.5,
         Kind::Spruce => 0.65,
         Kind::Beech => 0.75,
@@ -1759,7 +1857,7 @@ fn bark_depth(kind: Kind) -> f64 {
         Kind::Oak | Kind::Pine => 0.024,
         Kind::Poplar | Kind::Willow | Kind::Olive => 0.012,
         Kind::Saguaro => RIB_DEPTH * saguaro_girth(5.5) / (1.0 - FELT),
-        Kind::Maple | Kind::Hazel | Kind::Hawthorn => 0.008,
+        Kind::Maple | Kind::Hazel | Kind::Hawthorn | Kind::Apple => 0.008,
         Kind::Palm => 0.006,
         Kind::Birch => 0.005,
         Kind::Spruce | Kind::Box | Kind::Heather | Kind::Gorse => 0.004,
@@ -1768,8 +1866,18 @@ fn bark_depth(kind: Kind) -> f64 {
     }
 }
 
+/// How much of what faces the sky the snow lying in `season` covers on
+/// what stands out in it: none but in winter.
+pub(super) fn snowed(season: Season) -> f64 {
+    if season == Season::Winter {
+        0.85
+    } else {
+        0.0
+    }
+}
+
 /// How much of the light on a leaf's back `kind`'s leaves let through.
-fn translucency(kind: Kind) -> f64 {
+pub(super) fn translucency(kind: Kind) -> f64 {
     match kind {
         Kind::Pine | Kind::Spruce | Kind::Box | Kind::Heather | Kind::Gorse | Kind::Olive => 0.2,
         Kind::Palm | Kind::Fern => 0.3,
@@ -1804,7 +1912,7 @@ fn foliage(kind: Kind, season: Season) -> Foliage {
 }
 
 /// The four colours `kind`'s leaves are in `season`.
-fn palette(kind: Kind, season: Season) -> [u32; 4] {
+pub(super) fn palette(kind: Kind, season: Season) -> [u32; 4] {
     let autumn = matches!(season, Season::Autumn { .. });
     let spring = season == Season::Spring;
     match kind {
@@ -1815,6 +1923,10 @@ fn palette(kind: Kind, season: Season) -> [u32; 4] {
         Kind::Maple => [0x4A_7A_2A, 0x5A_8A_33, 0x3E_6A_24, 0x68_94_3A],
         Kind::Cherry if spring => [0xF4_C0_D4, 0xFF_E4_EE, 0xE8_A0_BC, 0xFF_F6_F8],
         Kind::Cherry if autumn => [0xC8_50_28, 0xD8_7A_30, 0xA8_3A_20, 0xE0_A0_40],
+        // In blossom among its first leaves; turning late and yellowing.
+        Kind::Apple if spring => [0xF6_E2_E6, 0xEC_C2_CC, 0x6E_96_3E, 0xFF_F4_F4],
+        Kind::Apple if autumn => [0x7A_8E_36, 0x9C_9A_3A, 0x6A_80_30, 0xB4_A0_40],
+        Kind::Apple => [0x3E_68_28, 0x4A_76_2E, 0x36_5E_22, 0x56_80_34],
         Kind::Cherry => [0x3E_6A_26, 0x4C_78_2E, 0x34_5C_20, 0x5A_84_34],
         Kind::Birch | Kind::Poplar if autumn => [0xE0_B8_30, 0xF0_CC_48, 0xC8_9C_24, 0xD8_A8_38],
         Kind::Birch => [0x6A_94_34, 0x7C_A4_3C, 0x58_84_2C, 0x94_B4_4C],
@@ -1844,13 +1956,17 @@ fn palette(kind: Kind, season: Season) -> [u32; 4] {
     }
 }
 
-/// The grass a land grows: up to four kinds of it and their colours; how
-/// many shoots stand to a square metre where it grows best; the share of
-/// them ending in a wildflower, and the wildflowers' colours; the share of
-/// the ground weeds take, and their colours; and the leaves fallen on it.
+/// The grass a land grows: up to four kinds of it and their colours; what a
+/// farmed land's fields grow in it instead, and the seed its pastures' pats
+/// are scattered under; how many shoots stand to a square metre where it
+/// grows best; the share of them ending in a wildflower, and the
+/// wildflowers' colours; the share of the ground weeds take, and their
+/// colours; and the leaves fallen on it.
 #[derive(Copy, Clone, Debug)]
 pub(super) struct Grassland {
-    pub(super) kinds: [Option<(GrassKind, Blades)>; GRASS_KINDS],
+    pub(super) kinds: [Option<(GrassKind, Blades)>; WILD_KINDS],
+    pub(super) sowing: Sowing,
+    pub(super) grazing: Option<u32>,
     pub(super) shoots: f64,
     pub(super) flowers: f64,
     pub(super) blossoms: [u32; 4],
@@ -1892,9 +2008,12 @@ const RYE: Sort = Sort {
         thickness: 1.0,
         tufted: 0.45,
         stems: 0.1,
-        head: Head::Spike,
+        head: Some(Head::Spike),
+        nod: 0.0,
         habit: Tufting::Open,
         share: 1.0,
+        rows: 0.0,
+        stood: None,
     },
     leaves: [0x3E_6E_26, 0x4E_7E_2E],
     tip: 0xA8_B0_58,
@@ -1922,9 +2041,12 @@ const FESCUE: Sort = Sort {
         thickness: 1.7,
         tufted: 0.2,
         stems: 0.04,
-        head: Head::Plume,
+        head: Some(Head::Plume),
+        nod: 0.0,
         habit: Tufting::Dry,
         share: 0.5,
+        rows: 0.0,
+        stood: None,
     },
     leaves: [0x4A_6A_3A, 0x56_76_42],
     tip: 0xB0_A8_70,
@@ -1939,9 +2061,12 @@ const BENT: Sort = Sort {
         thickness: 1.3,
         tufted: 0.3,
         stems: 0.16,
-        head: Head::Plume,
+        head: Some(Head::Plume),
+        nod: 0.0,
         habit: Tufting::Trodden,
         share: 0.35,
+        rows: 0.0,
+        stood: None,
     },
     leaves: [0x56_78_34, 0x66_84_3C],
     tip: 0xC0_B0_70,
@@ -1956,9 +2081,12 @@ const HAIR_GRASS: Sort = Sort {
         thickness: 1.3,
         tufted: 1.0,
         stems: 0.08,
-        head: Head::Plume,
+        head: Some(Head::Plume),
+        nod: 0.0,
         habit: Tufting::Wet,
         share: 0.6,
+        rows: 0.0,
+        stood: None,
     },
     leaves: [0x3A_58_26, 0x46_62_2C],
     tip: 0xB8_A8_68,
@@ -1973,9 +2101,12 @@ const RUSH: Sort = Sort {
         thickness: 1.1,
         tufted: 0.9,
         stems: 0.05,
-        head: Head::Spike,
+        head: Some(Head::Spike),
+        nod: 0.0,
         habit: Tufting::Wet,
         share: 0.45,
+        rows: 0.0,
+        stood: None,
     },
     leaves: [0x30_50_20, 0x3A_5A_24],
     tip: 0x6A_6A_3A,
@@ -1990,9 +2121,12 @@ const MARRAM: Sort = Sort {
         thickness: 0.8,
         tufted: 0.7,
         stems: 0.1,
-        head: Head::Spike,
+        head: Some(Head::Spike),
+        nod: 0.0,
         habit: Tufting::Dry,
         share: 0.7,
+        rows: 0.0,
+        stood: None,
     },
     leaves: [0x7A_8A_60, 0x8A_96_6C],
     tip: 0xC8_C0_90,
@@ -2007,9 +2141,12 @@ const MOWN: Sort = Sort {
         thickness: 2.0,
         tufted: 0.05,
         stems: 0.0,
-        head: Head::Spike,
+        head: Some(Head::Spike),
+        nod: 0.0,
         habit: Tufting::Open,
         share: 1.0,
+        rows: 0.0,
+        stood: None,
     },
     leaves: [0x3A_6E_24, 0x46_7A_2C],
     tip: 0x5E_84_34,
@@ -2083,7 +2220,7 @@ pub(super) fn grassland(dice: &mut Dice, character: Character, season: Season) -
         (Character::Upland | Character::Coast, Season::Summer) => dice.range(0.0, 0.35),
         _ => 0.0,
     };
-    let mixed: [Option<(&Sort, f64)>; GRASS_KINDS] = match character {
+    let mixed: [Option<(&Sort, f64)>; WILD_KINDS] = match character {
         Character::Meadow => [
             Some((if dice.chance(0.5) { &RYE } else { &TIMOTHY }, 1.0)),
             Some((&FESCUE, 0.5)),
@@ -2135,6 +2272,8 @@ pub(super) fn grassland(dice: &mut Dice, character: Character, season: Season) -
     };
     Grassland {
         kinds: mixed.map(|sort| sort.map(|(sort, share)| sort.grown(season, cured, rank, share))),
+        sowing: Sowing::NONE,
+        grazing: None,
         shoots: shoots * dice.range(0.85, 1.15),
         flowers,
         blossoms,
@@ -2167,14 +2306,32 @@ impl Grassland {
             tip: Vec3::ZERO,
             head: Vec3::ZERO,
         };
+        let mut grasses = [none; GRASS_KINDS];
+        let kinds = self.kinds.iter().chain(self.sowing.kinds.iter());
+        for (slot, kind) in grasses.iter_mut().zip(kinds) {
+            *slot = kind.map_or(none, |(_, blades)| blades);
+        }
         Pigment::Crowd(Crowd {
-            grasses: self
-                .kinds
-                .map(|kind| kind.map_or(none, |(_, blades)| blades)),
+            grasses,
             blossoms: self.blossoms.map(rgb),
             weeds: self.weed_colours.map(rgb),
             fallen: fallen.map(rgb),
         })
+    }
+
+    /// The sward it grows over the land: its wild grasses, and what its
+    /// fields grow in their place.
+    fn grass(&self) -> Grass {
+        Grass {
+            kinds: self.kinds.map(|kind| kind.map(|(kind, _)| kind)),
+            sown: Sown {
+                kinds: self.sowing.kinds.map(|kind| kind.map(|(kind, _)| kind)),
+                by_growth: self.sowing.by_growth,
+            },
+            grazing: self.grazing,
+            shoots: self.shoots,
+            flowers: self.flowers,
+        }
     }
 }
 
@@ -2279,11 +2436,7 @@ impl Laying {
             grassland.crowd(fallen_colours),
             Finish::Leaf { translucency: 0.3 },
         ))?;
-        let grass = Cover::Grass(Grass {
-            kinds: grassland.kinds.map(|kind| kind.map(|(kind, _)| kind)),
-            shoots: grassland.shoots,
-            flowers: grassland.flowers,
-        });
+        let grass = Cover::Grass(grassland.grass());
         let weeds = (grassland.weeds > 0.0).then_some(Cover::Weeds(Weeds {
             share: grassland.weeds,
             leaves: (5, 9),

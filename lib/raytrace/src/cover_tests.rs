@@ -17,7 +17,9 @@ fn cover(substrate: Substrate) -> Cover {
         foot: -10.0,
         shade: Vec3::new(1.0, 0.0, 0.0),
         substrate,
+        jointed: true,
         seed: 11,
+        snow: 0.0,
     }
 }
 
@@ -207,6 +209,38 @@ fn moss_spreads_from_the_joints() {
     assert!(
         beside > 3 * away / 2,
         "{beside} beside a joint, {away} away from one"
+    );
+}
+
+/// A timber's arrises are no joints: moss on an upright face of it keeps to
+/// its damp, shaded side and its splashed foot, and gathers no more by its
+/// edges than anywhere on it.
+#[test]
+fn moss_gathers_by_no_arris_of_unjointed_work() {
+    let timber = Cover {
+        moss: 0.9,
+        jointed: false,
+        ..cover(Substrate::Siliceous)
+    };
+    let share = |joint: f64| {
+        (0..6000)
+            .filter(|&index| {
+                let at = Lodging {
+                    joint,
+                    ..lodged(
+                        scattered(index) + Vec3::new(0.0, 2.0, 0.0),
+                        Vec3::new(-1.0, 0.0, 0.0),
+                        0.55,
+                    )
+                };
+                matches!(timber.growth(&at), Growth::Moss(_))
+            })
+            .count()
+    };
+    assert_eq!(
+        share(0.005),
+        share(0.5),
+        "moss gathers by a timber's arrises"
     );
 }
 

@@ -517,6 +517,7 @@ fn pool(slope_variance: f64) -> crate::scene::Scene {
         prototypes: Vec::new(),
         lawns: Vec::new(),
         far_woods: Vec::new(),
+        stands: Vec::new(),
         materials: vec![water, sand],
         lights: vec![Light::Sun {
             toward,

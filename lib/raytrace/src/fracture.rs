@@ -7,7 +7,7 @@
 //! tatters. A break that has lain long has lost its finer splinters, greyed,
 //! and its heart has rotted hollow.
 
-use core::f64::consts::TAU;
+use core::f64::consts::{PI, TAU};
 
 use tairix_rng::{NonCryptoRng, RandU64};
 use tairix_util::mathf;
@@ -135,19 +135,22 @@ pub(crate) fn tear(brk: &Break<'_>, grain: Grain, dice: &mut NonCryptoRng) -> Op
         .unwrap_or(0)
         .clamp(SPOKES.0, SPOKES.1);
     let rotten = past(brk.age, HOLLOWS);
-    // However broad a break, it is torn as deep as its wood is thick.
+    // However broad a break, it is torn as deep as its wood was bent across:
+    // a rail broken under its load splinters along its depth.
+    let bent = f64::midpoint((brk.outline)(brk.tension), (brk.outline)(brk.tension + PI));
     let face = Face {
         brk,
         // Fresh, the tension side stands far above the crushed side; long
         // weathered, its crest has broken down.
-        climb: narrowest * range(dice, (0.3, 1.0)) * (1.0 - 0.5 * brk.age),
-        fibres: narrowest * range(dice, (0.12, 0.3)) * (1.0 - 0.6 * brk.age),
+        climb: bent * range(dice, (0.3, 1.0)) * (1.0 - 0.5 * brk.age),
+        fibres: bent * range(dice, (0.12, 0.3)) * (1.0 - 0.6 * brk.age),
         hollow: (
             (0.3 + 0.45 * rotten) * f64::from(u8::from(rotten > 0.0)),
             narrowest * range(dice, (0.4, 1.2)) * rotten,
         ),
         salt: dice.next_u32(),
         size: narrowest,
+        bent,
     };
     let mut torn = Mesh::default();
     let rings = u32::try_from(RINGS.len()).ok()?;
@@ -220,7 +223,8 @@ pub(crate) fn tear(brk: &Break<'_>, grain: Grain, dice: &mut NonCryptoRng) -> Op
 /// The face a break tears across: how far its tension side climbs above its
 /// crushed side, how far its fibres stand proud of one another, how far out
 /// its heart has rotted as a share of its radius and how deep, the salt its
-/// fibres are drawn under, and how thick its wood is across its narrowest.
+/// fibres are drawn under, how thick its wood is across its narrowest, and
+/// how far it reaches from its middle the way it was bent.
 struct Face<'a> {
     brk: &'a Break<'a>,
     climb: f64,
@@ -228,6 +232,7 @@ struct Face<'a> {
     hollow: (f64, f64),
     salt: u32,
     size: f64,
+    bent: f64,
 }
 
 /// How far across `brk` is at its narrowest and at its broadest.
@@ -310,7 +315,7 @@ fn lath(
     let lean = range(dice, (0.04, 0.35));
     let twist = range(dice, (-0.15, 0.15));
     let up = (brk.frame.y * mathf::cos(lean) + out * mathf::sin(lean) + round * twist).normalized();
-    let length = thickness * range(dice, (0.25, 1.3)) * (1.0 - 0.6 * brk.age);
+    let length = face.bent * range(dice, (0.25, 1.3)) * (1.0 - 0.6 * brk.age);
     let width = (thickness * range(dice, (0.05, 0.14))).max(0.003);
     let thick = width * range(dice, (0.25, 0.5));
     // Its wide faces lie along the wood's rays, its thin ones round it.

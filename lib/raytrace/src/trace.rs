@@ -34,7 +34,7 @@ use crate::band;
 use crate::detail::Records;
 use crate::grass::Canopy;
 use crate::ground::Moisture;
-use crate::heightfield::PLAIN;
+use crate::heightfield::{Grows, Patch, PLAIN};
 use crate::light::Light;
 use crate::material::{
     fresnel, refract, schlick, schlick_scalar, thin_film, widened, Bump, Finish, Foam, Material,
@@ -293,6 +293,8 @@ struct Surface {
     /// The slope variance of relief too fine for the pixel to resolve, which
     /// roughens the surface instead.
     unresolved: f64,
+    /// What the land's grid carries about the point, where a land was met.
+    land: Option<Patch>,
 }
 
 /// How a specular lobe reflects: Schlick's approximation from a reflectance,
@@ -600,13 +602,13 @@ impl<'a> Tracer<'a> {
         })
     }
 
-    /// Fill `cells`, row `row` of a radiosity record's hemisphere cut as
-    /// `records` has it, with what its rays bring back to `site`, each
-    /// followed as a path of its own.
+    /// Fill `cells`, the cells of a radiosity record's hemisphere cut as
+    /// `records` has it from cell `first`, with what their rays bring back to
+    /// `site`, each followed as a path of its own.
     pub(crate) fn gather(
         &self,
         site: &Site,
-        (records, row): (&Records, usize),
+        (records, first): (&Records, usize),
         cells: &mut [Cell],
     ) {
         let frame = Frame::around(site.normal);
@@ -621,8 +623,8 @@ impl<'a> Tracer<'a> {
             channel: None,
             scattered: true,
         };
-        let first = u32::try_from(row * records.columns).unwrap_or(u32::MAX);
-        for (index, cell) in (first..).zip(cells.iter_mut().take(records.columns)) {
+        let first = u32::try_from(first).unwrap_or(u32::MAX);
+        for (index, cell) in (first..).zip(cells.iter_mut()) {
             let mut sampler = Sampler::new(site.seed, index);
             let dir = frame.to_world(radiosity::direction(
                 records,
@@ -856,7 +858,7 @@ impl<'a> Tracer<'a> {
         let (mut surface, outside) =
             self.surface(ray, &hit, (object, material), (path.travelled, path.cone));
         surface.canopy = self.scene.canopy(surface.point);
-        let spot = self.spot(&surface, object, &hit);
+        let spot = Self::spot(&surface, &hit);
         let pigment = || material.pigment.colour(&spot);
         match material.finish {
             Finish::Coated { roughness } => self.coated(
@@ -982,6 +984,14 @@ impl<'a> Tracer<'a> {
         let (placing, instance) = object.placing(hit, self.scene.geometry());
         let texture = placing.point_to_local(point);
         let width = cone.width(self.pixel_angle, travelled + hit.t);
+        let land = match object.shape {
+            Shape::Land { field } => self
+                .scene
+                .fields
+                .get(field as usize)
+                .and_then(|grid| grid.patch_at(point.x, point.z)),
+            _ => None,
+        };
         let bump = Bump {
             p: texture,
             uv: hit.uv,
@@ -990,6 +1000,7 @@ impl<'a> Tracer<'a> {
             instance,
             width,
             stretch: along_view(width, hit.shading, toward_eye),
+            grows: land.map_or_else(Grows::default, |patch| patch.grows()),
         };
         let untilted = Tilt {
             normal: hit.shading,
@@ -1016,20 +1027,18 @@ impl<'a> Tracer<'a> {
             front: outside,
             canopy: None,
             unresolved: tilt.unresolved,
+            land,
         };
         (surface, outside)
     }
 
-    /// Where `object`'s pigment is looked up for `surface`: in the object's
+    /// Where the pigment of what `hit` met is looked up for `surface`: in its
     /// own texture frame, normal and all, so a pattern turns with it; on a
     /// land, with what the land is like there.
-    fn spot(&self, surface: &Surface, object: &Object, hit: &Hit) -> Spot {
-        let ground = match object.shape {
-            Shape::Land { field } => self.scene.fields.get(field as usize).map_or(PLAIN, |grid| {
-                grid.attributes_at(surface.point.x, surface.point.z)
-            }),
-            _ => PLAIN,
-        };
+    fn spot(surface: &Surface, hit: &Hit) -> Spot {
+        let (ground, grows) = surface.land.map_or((PLAIN, Grows::default()), |patch| {
+            (patch.quantities(), patch.grows())
+        });
         Spot {
             p: surface.texture,
             normal: surface.frame.to_local(surface.normal),
@@ -1042,6 +1051,7 @@ impl<'a> Tracer<'a> {
             instance: surface.instance,
             front: surface.front,
             ground,
+            grows,
             thatch: surface.canopy.map_or(0.0, |canopy| 1.0 - canopy.diffuse()),
             cover: hit.cover.map(f64::from),
         }

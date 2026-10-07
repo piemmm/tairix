@@ -53,6 +53,11 @@ pub(crate) struct Rooting {
     /// How strongly wet ground draws trees to it, out of the wood's patches
     /// as well as in them: willows along a stream across open fields.
     pub(crate) streams: f64,
+    /// How wet ground must be before it draws them at all, and where it
+    /// draws them fully, where only a stream's banks do: farmed fields are
+    /// kept clear of trees however damp they lie. Wherever wet ground does,
+    /// as wet as it is, where not.
+    pub(crate) banks: Option<(f64, f64)>,
     /// How readily it roots where nothing grows green: under snow, where the
     /// land's green gives out though the trees stand on.
     pub(crate) bare: f64,
@@ -68,6 +73,7 @@ pub(crate) struct Rooting {
 pub(crate) const ANYWHERE: Rooting = Rooting {
     upright: (0.74, 0.88),
     streams: 0.0,
+    banks: None,
     bare: 0.0,
     above: None,
     below: None,
@@ -75,6 +81,14 @@ pub(crate) const ANYWHERE: Rooting = Rooting {
 };
 
 impl Rooting {
+    /// How strongly ground `wet` draws the wood's trees to it.
+    fn drawn(&self, wet: f64) -> f64 {
+        self.streams
+            * self
+                .banks
+                .map_or(wet, |(low, high)| smoothstep(low, high, wet))
+    }
+
     /// How well the ground `lie` describes at `at` suits the wood's trees,
     /// `0.0..=1.0`.
     pub(crate) fn suits(&self, lie: &Lie, at: (f64, f64)) -> f64 {
@@ -92,7 +106,7 @@ impl Rooting {
         lie.green.max(self.bare)
             * smoothstep(self.upright.0, self.upright.1, lie.upright)
             * (1.0 - lie.road)
-            * (1.0 - 0.95 * lie.path)
+            * (1.0 - smoothstep(0.05, 0.3, lie.path))
             * above
             * below
     }
@@ -400,7 +414,7 @@ impl Reader {
         } = *sprout;
         let patches = self.seeds.0;
         let lie = grids.lie(fields, at.0, at.1);
-        let wooded = in_patches.max(self.rooting.streams * lie.wet).min(1.0);
+        let wooded = in_patches.max(self.rooting.drawn(lie.wet)).min(1.0);
         let suits = wooded * light * self.rooting.suits(&lie, at);
         if suits <= 0.0 || grids.wet_over(fields, at, lie.height) {
             return None;
@@ -515,10 +529,11 @@ fn rank(draw: u32) -> f64 {
 }
 
 /// The height a trunk `height` tall is based at on ground `lie` describes:
-/// sunk far enough that its flare meets the ground on its downhill side.
+/// on the ground beneath any snow, sunk far enough that its flare meets the
+/// ground on its downhill side.
 pub(crate) fn rooted(lie: &Lie, height: f64) -> f64 {
     let slope = mathf::sqrt((1.0 - lie.upright * lie.upright).max(0.0)) / lie.upright.max(0.1);
-    lie.height - 0.08 - 0.035 * height * slope
+    lie.height - lie.snow - 0.08 - 0.035 * height * slope
 }
 
 #[cfg(test)]

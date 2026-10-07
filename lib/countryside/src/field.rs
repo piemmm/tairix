@@ -68,12 +68,23 @@ pub struct Field {
     pub along: Point,
     /// The block of its holding's land it was cut from.
     pub(crate) block: u16,
-    /// How steeply its land lies, as rise over run, on the whole.
+    /// How steeply its land lies at its middle, as rise over run.
     pub slope: f64,
-    /// The unit way its land falls; nought where it lies level.
+    /// The unit way its land falls at its middle; nought where it lies level.
     pub fall: Point,
-    /// How wet its land lies, on the whole.
+    /// How wet its land lies at its middle.
     pub wet: f64,
+}
+
+impl Field {
+    /// A copy of it; `None` where the heap will not hold one.
+    #[must_use]
+    pub fn copied(&self) -> Option<Self> {
+        Some(Self {
+            cell: self.cell.copied()?,
+            ..*self
+        })
+    }
 }
 
 /// A cut of a block: the line through `at` across `normal`, the land behind
@@ -126,7 +137,13 @@ impl Parcels {
                     behind,
                     ahead,
                     ..
-                } => node = if (at - on).dot(normal) <= 0.0 { behind } else { ahead },
+                } => {
+                    node = if (at - on).dot(normal) <= 0.0 {
+                        behind
+                    } else {
+                        ahead
+                    }
+                }
             }
         }
     }
@@ -166,7 +183,11 @@ impl Parcels {
 
     /// The middle of cell `index`.
     fn middle_of(&self, index: usize) -> Point {
-        centre(self.origin, index % self.columns.max(1), index / self.columns.max(1))
+        centre(
+            self.origin,
+            index % self.columns.max(1),
+            index / self.columns.max(1),
+        )
     }
 }
 
@@ -197,7 +218,7 @@ pub(crate) fn parcels(
     holding: HoldingId,
     surround: &Surround<'_>,
 ) -> Result<Parcels, Error> {
-    let outline = lattice.outline(holding);
+    let outline = lattice.outline(holding).ok_or(Error::OutOfMemory)?;
     let bounds = outline.bounds().ok_or(Error::Shape)?;
     let origin = Point::new(
         mathf::floor(bounds.low.x / CELL) * CELL,
@@ -242,7 +263,12 @@ pub(crate) fn parcels(
         .map_err(|_| Error::OutOfMemory)?;
     for (block, members) in blocks.into_iter().enumerate() {
         let block = u16::try_from(block).map_err(|_| Error::Shape)?;
-        let root = cut(&mut parcels, (key, holding, block), (&outline, members), surround)?;
+        let root = cut(
+            &mut parcels,
+            (key, holding, block),
+            (&outline, members),
+            surround,
+        )?;
         parcels.roots.push(root);
     }
     Ok(parcels)
@@ -251,7 +277,11 @@ pub(crate) fn parcels(
 /// Mark every cell a bounded way's corridor reaches: within its breadth and
 /// verges, and the half diagonal of a cell more, so no land either side of it
 /// touches the other's by a corner.
-fn corridors(cells: &mut [Cell], (origin, columns, rows): (Point, usize, usize), ways: &[(Rank, &Line)]) {
+fn corridors(
+    cells: &mut [Cell],
+    (origin, columns, rows): (Point, usize, usize),
+    ways: &[(Rank, &Line)],
+) {
     let half_diagonal = CELL * core::f64::consts::FRAC_1_SQRT_2 + 1e-6;
     for (rank, line) in ways {
         if !rank.bounded() {
@@ -350,13 +380,11 @@ fn cut(
     let root = u32::try_from(parcels.nodes.len()).map_err(|_| Error::Shape)?;
     push(&mut parcels.nodes, Node::Field(u32::MAX))?;
     let mut pending = Vec::new();
-    pending
-        .try_reserve(32)
-        .map_err(|_| Error::OutOfMemory)?;
+    pending.try_reserve(32).map_err(|_| Error::OutOfMemory)?;
     pending.push((
         root,
         Piece {
-            cell: outline.clone(),
+            cell: outline.copied().ok_or(Error::OutOfMemory)?,
             members,
         },
         0u32,
@@ -408,9 +436,7 @@ fn cut(
             ahead: behind_node + 1,
             chord,
         };
-        pending
-            .try_reserve(2)
-            .map_err(|_| Error::OutOfMemory)?;
+        pending.try_reserve(2).map_err(|_| Error::OutOfMemory)?;
         pending.push((behind_node + 1, ahead, depth + 1));
         pending.push((behind_node, behind, depth + 1));
     }
@@ -444,10 +470,16 @@ fn frame_of(
                 let (near, _) = line.nearest(middle)?;
                 let ahead = line.stations.get(near.segment + 1)?.at;
                 let here = line.stations.get(near.segment)?.at;
-                Some((near.distance + 40.0 * f64::from(*rank as u8), (ahead - here).normalized()))
+                Some((
+                    near.distance + 40.0 * f64::from(*rank as u8),
+                    (ahead - here).normalized(),
+                ))
             })
             .min_by(|a, b| a.0.total_cmp(&b.0))
-            .map_or_else(|| Point::toward(draws.range(0.0, core::f64::consts::PI)), |(_, way)| way)
+            .map_or_else(
+                || Point::toward(draws.range(0.0, core::f64::consts::PI)),
+                |(_, way)| way,
+            )
     };
     let (cos, sin) = (mathf::cos(lean), mathf::sin(lean));
     Point::new(along.x * cos - along.y * sin, along.x * sin + along.y * cos)
@@ -469,7 +501,9 @@ fn split(
             .members
             .iter()
             .map(|&index| place(index).dot(axis))
-            .fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), v| (low.min(v), high.max(v)))
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), v| {
+                (low.min(v), high.max(v))
+            })
     };
     let (along_reach, across_reach) = (reach(along), reach(across));
     let normal = if along_reach.1 - along_reach.0 >= across_reach.1 - across_reach.0 {
@@ -526,10 +560,15 @@ fn centre_of(parcels: &Parcels, members: &[usize]) -> Point {
 /// The way a field's land runs longest, of its frame's two axes.
 fn long_axis(parcels: &Parcels, members: &[usize], along: Point) -> Point {
     let reach = |axis: Point| {
-        let (low, high) = members.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), &index| {
-            let at = Point::new(real(index % parcels.columns), real(index / parcels.columns)).dot(axis);
-            (low.min(at), high.max(at))
-        });
+        let (low, high) =
+            members
+                .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), &index| {
+                    let at =
+                        Point::new(real(index % parcels.columns), real(index / parcels.columns))
+                            .dot(axis);
+                    (low.min(at), high.max(at))
+                });
         high - low
     };
     if reach(along) >= reach(along.left()) {

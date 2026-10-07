@@ -216,6 +216,7 @@ fn bump_at(p: Vec3, width: f64) -> Bump {
         instance: 0,
         width,
         stretch: width,
+        grows: Grows::default(),
     }
 }
 
@@ -479,6 +480,7 @@ fn bark_relief_leans_the_normal_away_from_where_the_bark_rises() {
         instance: 0,
         width: 1e-4,
         stretch: 1e-4,
+        grows: Grows::default(),
     };
     let tilted = relief.tilt(normal, &bump).normal;
     assert!(

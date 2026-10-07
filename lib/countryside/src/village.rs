@@ -1,7 +1,7 @@
 //! A village's layout: plots by frontage along each street through it, on
 //! both sides, each with its house at its front, its front garden and back
-//! garden, the fence about it and its garden gate; and now and then a green
-//! at its middle no plot takes.
+//! garden, and most of them a fence about it and a garden gate; and now and
+//! then a green at its middle no plot takes.
 
 use alloc::vec::Vec;
 
@@ -69,15 +69,21 @@ pub(crate) const REACH: (f64, f64) = (150.0, 260.0);
 pub(crate) fn lay_out(
     key: Key,
     village: &Settlement,
-    (streets, barred): (&[(WayId, &Line)], &[Convex]),
+    (streets, barred): (&[(WayId, &Line)], &[&Convex]),
     ground: &dyn Ground,
 ) -> Result<Village, Error> {
     let mut draws = key.draws(Stage::Plot, village.settled.place());
     let reach = draws.range(REACH.0, REACH.1);
-    let green = draws.chance(0.5).then(|| {
+    let green = if draws.chance(0.5) {
         let side = draws.range(30.0, 60.0);
-        rectangle(village.at, Point::toward(draws.range(0.0, core::f64::consts::PI)), (side, side * draws.range(0.6, 1.0)))
-    });
+        let way = Point::toward(draws.range(0.0, core::f64::consts::PI));
+        Some(
+            rectangle(village.at, way, (side, side * draws.range(0.6, 1.0)))
+                .ok_or(Error::OutOfMemory)?,
+        )
+    } else {
+        None
+    };
     let mut plots: Vec<Plot> = Vec::new();
     for (ordinal, &(street, line)) in streets.iter().enumerate() {
         if !street.rank.bounded() || street.rank == Rank::Track {
@@ -103,27 +109,41 @@ pub(crate) fn lay_out(
                     ),
                 );
                 let frontage = place.range(9.0, 18.0);
-                next = walked + frontage + if place.chance(0.12) { place.range(4.0, 14.0) } else { 0.6 };
+                next = walked
+                    + frontage
+                    + if place.chance(0.12) {
+                        place.range(4.0, 14.0)
+                    } else {
+                        0.6
+                    };
                 let way = (b.at - a.at).normalized();
                 let out = way.left() * sign;
                 let edge = a.at + out * (0.5 * a.width + 1.0);
                 let toward = 1.0 - 0.45 * (a.at - village.at).length() / reach;
                 let wanted = place.range(26.0, 50.0) * toward;
-                let Some(plot) = [1.0, 0.75, 0.55]
-                    .into_iter()
-                    .map(|share| wanted * share)
-                    .filter(|&depth| depth >= 18.0)
-                    .find_map(|depth| {
-                        let among = Among {
-                            plots: &plots,
-                            green: green.as_ref(),
-                            streets,
-                            barred,
-                            ground,
-                        };
-                        fitted((street, edge, way, out), (frontage, depth), &among, &mut place)
-                    })
-                else {
+                let mut found = None;
+                for depth in [1.0, 0.75, 0.55].map(|share| wanted * share) {
+                    if depth < 18.0 {
+                        continue;
+                    }
+                    let among = Among {
+                        plots: &plots,
+                        green: green.as_ref(),
+                        streets,
+                        barred,
+                        ground,
+                    };
+                    found = fitted(
+                        (street, edge, way, out),
+                        (frontage, depth),
+                        &among,
+                        &mut place,
+                    )?;
+                    if found.is_some() {
+                        break;
+                    }
+                }
+                let Some(plot) = found else {
                     continue;
                 };
                 plots.try_reserve(1).map_err(|_| Error::OutOfMemory)?;
@@ -153,22 +173,26 @@ struct Among<'a> {
     plots: &'a [Plot],
     green: Option<&'a Convex>,
     streets: &'a [(WayId, &'a Line)],
-    barred: &'a [Convex],
+    barred: &'a [&'a Convex],
     ground: &'a dyn Ground,
 }
 
 /// A plot `width` along the street and `depth` out from it, fronting `edge`
 /// with its street running `way` and its land lying `out` of it; `None` where
-/// it would overlap anything it is fitted `among`, another street or water.
+/// it would overlap anything it is fitted `among`, another street or water,
+/// and `Err` where the heap will not hold it.
 fn fitted(
     (street, edge, way, out): (WayId, Point, Point, Point),
     (width, depth): (f64, f64),
     among: &Among<'_>,
     draws: &mut crate::key::Draws,
-) -> Option<Plot> {
+) -> Result<Option<Plot>, Error> {
     let middle = edge + way * (0.5 * width) + out * (0.5 * depth);
-    let outline = rectangle(middle, way, (width, depth));
-    if among.plots.iter().any(|plot| plot.outline.overlaps(&outline))
+    let outline = rectangle(middle, way, (width, depth)).ok_or(Error::OutOfMemory)?;
+    if among
+        .plots
+        .iter()
+        .any(|plot| plot.outline.overlaps(&outline))
         || among.green.is_some_and(|green| green.overlaps(&outline))
         || among.barred.iter().any(|shape| shape.overlaps(&outline))
         || outline
@@ -177,16 +201,21 @@ fn fitted(
             .chain(core::iter::once(&middle))
             .any(|&at| ground::wet(among.ground, at))
     {
-        return None;
+        return Ok(None);
     }
     let crosses = among.streets.iter().any(|&(other, line)| {
         other != street
-            && outline.corners.iter().chain(core::iter::once(&middle)).any(|&at| {
-                line.nearest(at).is_some_and(|(near, station)| near.distance < 0.5 * station.width + 1.5)
-            })
+            && outline
+                .corners
+                .iter()
+                .chain(core::iter::once(&middle))
+                .any(|&at| {
+                    line.nearest(at)
+                        .is_some_and(|(near, station)| near.distance < 0.5 * station.width + 1.5)
+                })
     });
     if crosses {
-        return None;
+        return Ok(None);
     }
     let setback = draws.range(1.0, 6.0);
     let house_depth = draws.range(6.0, 9.0);
@@ -204,15 +233,17 @@ fn fitted(
         edge + way * (0.5 * width) + out * (0.5 * setback),
         way,
         (width, setback),
-    );
+    )
+    .ok_or(Error::OutOfMemory)?;
     let behind = depth - setback - house_depth;
     let back = rectangle(
         edge + way * (0.5 * width) + out * (setback + house_depth + 0.5 * behind),
         way,
         (width, behind),
-    );
+    )
+    .ok_or(Error::OutOfMemory)?;
     let fencing = FENCINGS[draws.below(FENCINGS.len())];
-    Some(Plot {
+    Ok(Some(Plot {
         street,
         outline,
         frontage: (edge, edge + way * width),
@@ -221,7 +252,7 @@ fn fitted(
         back,
         fencing,
         gate: edge + way * (0.5 * width + offset),
-    })
+    }))
 }
 
 #[cfg(test)]

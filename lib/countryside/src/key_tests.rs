@@ -8,9 +8,21 @@ fn a_draw_is_its_key_stage_and_place_and_owes_nothing_to_order() {
     let mut again = KEY.draws(Stage::Cut, (3, -7));
     let words: [u64; 4] = core::array::from_fn(|_| first.word());
     assert_eq!(words, core::array::from_fn(|_| again.word()));
-    assert_ne!(words[0], KEY.draws(Stage::Gate, (3, -7)).word(), "another purpose");
-    assert_ne!(words[0], KEY.draws(Stage::Cut, (4, -7)).word(), "another place");
-    assert_ne!(words[0], Key::new(1).draws(Stage::Cut, (3, -7)).word(), "another key");
+    assert_ne!(
+        words[0],
+        KEY.draws(Stage::Gate, (3, -7)).word(),
+        "another purpose"
+    );
+    assert_ne!(
+        words[0],
+        KEY.draws(Stage::Cut, (4, -7)).word(),
+        "another place"
+    );
+    assert_ne!(
+        words[0],
+        Key::new(1).draws(Stage::Cut, (3, -7)).word(),
+        "another key"
+    );
     assert_ne!(words[0], words[1]);
 }
 
@@ -40,7 +52,11 @@ fn a_pick_is_as_likely_as_its_weight_and_never_a_weightless_one() {
     }
     let share = f64::from(counts[0]) / 20_000.0;
     assert!((share - 0.25).abs() < 0.015, "{share}");
-    assert_eq!(KEY.draws(Stage::Use, (0, 2)).pick(&[('a', 0.0), ('b', -1.0)]), None);
+    assert_eq!(
+        KEY.draws(Stage::Use, (0, 2))
+            .pick(&[('a', 0.0), ('b', -1.0)]),
+        None
+    );
 }
 
 #[test]
@@ -52,5 +68,8 @@ fn an_identity_hashed_twice_alike_draws_alike() {
     };
     assert_eq!(word(9), word(9));
     assert_ne!(word(9), word(10));
-    assert_eq!(KEY.draws_for(Stage::Gate, word(9)).word(), KEY.draws_for(Stage::Gate, word(9)).word());
+    assert_eq!(
+        KEY.draws_for(Stage::Gate, word(9)).word(),
+        KEY.draws_for(Stage::Gate, word(9)).word()
+    );
 }

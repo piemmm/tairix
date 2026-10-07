@@ -4,7 +4,7 @@
 
 use tairix_util::mathf;
 
-use crate::ground::{Ground, Lie};
+use crate::ground::{Ground, Lie, Waters};
 use crate::plane::Point;
 
 /// Rolling hills and their river.
@@ -36,7 +36,7 @@ impl Hills {
     }
 }
 
-impl Ground for Hills {
+impl Waters for Hills {
     fn height(&self, at: Point) -> f64 {
         let across = Self::from_river(at);
         let level = Self::river_level(at);
@@ -52,7 +52,9 @@ impl Ground for Hills {
     fn water(&self, at: Point) -> Option<f64> {
         (Self::from_river(at) < RIVER).then(|| Self::river_level(at))
     }
+}
 
+impl Ground for Hills {
     fn lie(&self, at: Point) -> Lie {
         let height = self.height(at);
         let across = Self::from_river(at);
@@ -69,7 +71,7 @@ impl Ground for Hills {
 #[derive(Copy, Clone, Debug, Default)]
 pub(crate) struct Flat;
 
-impl Ground for Flat {
+impl Waters for Flat {
     fn height(&self, _: Point) -> f64 {
         10.0
     }
@@ -77,7 +79,9 @@ impl Ground for Flat {
     fn water(&self, _: Point) -> Option<f64> {
         None
     }
+}
 
+impl Ground for Flat {
     fn lie(&self, _: Point) -> Lie {
         Lie {
             wet: 0.0,

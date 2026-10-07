@@ -152,6 +152,7 @@ fn a_placed_prototype_is_met_where_its_placing_puts_it() {
         prototypes: &prototypes,
         lawns: &[],
         far_woods: &[],
+        stands: &[],
         materials: &[],
         view: None,
     };
@@ -189,6 +190,7 @@ fn a_scaled_limb_is_met_at_its_placed_girth_and_its_placed_way_along_its_stem() 
         prototypes: &prototypes,
         lawns: &[],
         far_woods: &[],
+        stands: &[],
         materials: &[],
         view: None,
     };
@@ -261,6 +263,7 @@ fn a_placed_prototype_lies_within_its_box() {
         prototypes: &prototypes,
         lawns: &[],
         far_woods: &[],
+        stands: &[],
         materials: &[],
         view: None,
     };

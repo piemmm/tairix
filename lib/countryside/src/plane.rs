@@ -161,7 +161,8 @@ impl Rect {
     /// Whether `point` lies within it.
     #[must_use]
     pub fn contains(self, point: Point) -> bool {
-        (self.low.x..=self.high.x).contains(&point.x) && (self.low.y..=self.high.y).contains(&point.y)
+        (self.low.x..=self.high.x).contains(&point.x)
+            && (self.low.y..=self.high.y).contains(&point.y)
     }
 
     /// Whether it and `other` share any place.
@@ -231,7 +232,9 @@ pub fn nearest(line: &[Point], p: Point) -> Option<Nearest> {
 /// How long `line` runs.
 #[must_use]
 pub fn length(line: &[Point]) -> f64 {
-    line.windows(2).map(|pair| (pair[1] - pair[0]).length()).sum()
+    line.windows(2)
+        .map(|pair| (pair[1] - pair[0]).length())
+        .sum()
 }
 
 /// The point `along` the way along `line` from its start, and its way there;
@@ -302,6 +305,17 @@ pub fn crossing((a0, a1): (Point, Point), (b0, b1): (Point, Point)) -> Option<(f
     ((0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u)).then_some((t, u))
 }
 
+/// Whether `p` lies within the convex polygon of `corners`, anticlockwise,
+/// its edges included.
+pub(crate) fn contains(corners: &[Point], p: Point) -> bool {
+    let count = corners.len();
+    count >= 3
+        && (0..count).all(|index| {
+            let (a, b) = (corners[index], corners[(index + 1) % count]);
+            (b - a).cross(p - a) >= 0.0
+        })
+}
+
 /// A convex polygon, its corners anticlockwise.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Convex {
@@ -339,7 +353,18 @@ impl Convex {
     /// Whether `p` lies within it, its edges included.
     #[must_use]
     pub fn contains(&self, p: Point) -> bool {
-        self.corners.len() >= 3 && self.edges().all(|(a, b)| (b - a).cross(p - a) >= 0.0)
+        contains(&self.corners, p)
+    }
+
+    /// A copy of it; `None` where the heap will not hold one.
+    #[must_use]
+    pub fn copied(&self) -> Option<Self> {
+        Some(Self {
+            corners: tairix_util::fallible::collected(
+                self.corners.len(),
+                self.corners.iter().copied(),
+            )?,
+        })
     }
 
     /// The part of it on the side of the line through `on` that `normal`
@@ -378,8 +403,16 @@ impl Convex {
             let crossing = a.lerp(b, sa / (sa - sb));
             ends = Some(ends.map_or((crossing, crossing), |(first, last)| {
                 (
-                    if along(crossing) < along(first) { crossing } else { first },
-                    if along(crossing) > along(last) { crossing } else { last },
+                    if along(crossing) < along(first) {
+                        crossing
+                    } else {
+                        first
+                    },
+                    if along(crossing) > along(last) {
+                        crossing
+                    } else {
+                        last
+                    },
                 )
             }));
         }
@@ -399,6 +432,44 @@ impl Convex {
         )
     }
 
+    /// How far within it `p` lies of its nearest edge; nought or less outside
+    /// it, and for a polygon with no inside.
+    #[must_use]
+    pub fn inset(&self, p: Point) -> f64 {
+        let nearest = self
+            .edges()
+            .filter_map(|(a, b)| {
+                let edge = b - a;
+                let length = edge.length();
+                (length > 1e-12).then(|| edge.cross(p - a) / length)
+            })
+            .fold(f64::INFINITY, f64::min);
+        if self.corners.len() < 3 || !nearest.is_finite() {
+            return f64::NEG_INFINITY;
+        }
+        nearest
+    }
+
+    /// How far the segment from `a` to `b` passes from it: nought where it
+    /// meets it.
+    #[must_use]
+    pub fn segment_distance(&self, (a, b): (Point, Point)) -> f64 {
+        if self.contains(a) || self.contains(b) {
+            return 0.0;
+        }
+        let mut least = f64::INFINITY;
+        for (p, q) in self.edges() {
+            if crossing((a, b), (p, q)).is_some() {
+                return 0.0;
+            }
+            least = least
+                .min(onto_segment(p, a, b).1)
+                .min(onto_segment(a, p, q).1)
+                .min(onto_segment(b, p, q).1);
+        }
+        mathf::sqrt(least)
+    }
+
     /// The bounding rectangle; `None` for no corners.
     #[must_use]
     pub fn bounds(&self) -> Option<Rect> {
@@ -412,7 +483,9 @@ impl Convex {
         let parted = |by: &Self, them: &Self| {
             by.edges().any(|(a, b)| {
                 let normal = (b - a).left();
-                them.corners.iter().all(|&corner| (corner - a).dot(normal) <= 0.0)
+                them.corners
+                    .iter()
+                    .all(|&corner| (corner - a).dot(normal) <= 0.0)
             })
         };
         !(parted(self, other) || parted(other, self))
@@ -434,7 +507,9 @@ pub(crate) struct Buckets {
 impl Buckets {
     /// Empty squares `size` across over `extent`.
     pub(crate) fn over(extent: Rect, size: f64) -> Self {
-        let count = |span: f64| u32::try_from(mathf::round_i32(mathf::ceil(span / size).clamp(1.0, 1.0e6))).unwrap_or(1);
+        let count = |span: f64| {
+            u32::try_from(mathf::round_i32(mathf::ceil(span / size).clamp(1.0, 1.0e6))).unwrap_or(1)
+        };
         Self {
             origin: extent.low,
             size,
@@ -448,17 +523,32 @@ impl Buckets {
     /// corner falls in, held to the `count` there are.
     fn square(&self, offset: f64, count: u32) -> u32 {
         let whole = mathf::round_i32(mathf::floor(offset / self.size).clamp(0.0, 1.0e6));
-        u32::try_from(whole).unwrap_or(0).min(count.saturating_sub(1))
+        u32::try_from(whole)
+            .unwrap_or(0)
+            .min(count.saturating_sub(1))
     }
 
     /// File `item` in every square `rect` reaches.
     pub(crate) fn file(&mut self, rect: Rect, item: u32) -> Result<(), Error> {
-        let (high_x, high_y) = (self.origin.x + self.size * f64::from(self.columns), self.origin.y + self.size * f64::from(self.rows));
-        if rect.high.x < self.origin.x || rect.high.y < self.origin.y || rect.low.x > high_x || rect.low.y > high_y {
+        let (high_x, high_y) = (
+            self.origin.x + self.size * f64::from(self.columns),
+            self.origin.y + self.size * f64::from(self.rows),
+        );
+        if rect.high.x < self.origin.x
+            || rect.high.y < self.origin.y
+            || rect.low.x > high_x
+            || rect.low.y > high_y
+        {
             return Ok(());
         }
-        let (x0, x1) = (self.square(rect.low.x - self.origin.x, self.columns), self.square(rect.high.x - self.origin.x, self.columns));
-        let (y0, y1) = (self.square(rect.low.y - self.origin.y, self.rows), self.square(rect.high.y - self.origin.y, self.rows));
+        let (x0, x1) = (
+            self.square(rect.low.x - self.origin.x, self.columns),
+            self.square(rect.high.x - self.origin.x, self.columns),
+        );
+        let (y0, y1) = (
+            self.square(rect.low.y - self.origin.y, self.rows),
+            self.square(rect.high.y - self.origin.y, self.rows),
+        );
         for y in y0..=y1 {
             for x in x0..=x1 {
                 self.filed.try_reserve(1).map_err(|_| Error::OutOfMemory)?;
@@ -481,8 +571,11 @@ impl Buckets {
             && y >= 0.0
             && x < self.size * f64::from(self.columns)
             && y < self.size * f64::from(self.rows);
-        let bucket = inside.then(|| self.square(y, self.rows) * self.columns + self.square(x, self.columns));
-        let from = bucket.map_or(self.filed.len(), |bucket| self.filed.partition_point(|entry| entry.0 < bucket));
+        let bucket =
+            inside.then(|| self.square(y, self.rows) * self.columns + self.square(x, self.columns));
+        let from = bucket.map_or(self.filed.len(), |bucket| {
+            self.filed.partition_point(|entry| entry.0 < bucket)
+        });
         self.filed[from..]
             .iter()
             .take_while(move |entry| Some(entry.0) == bucket)

@@ -33,13 +33,28 @@ const NONE: Mix = Mix {
 
 #[test]
 fn a_region_of_one_use_puts_every_field_to_it() {
-    let pasture = Mix { pasture: 1.0, ..NONE };
-    let arable = Mix { arable: 1.0, ..NONE };
+    let pasture = Mix {
+        pasture: 1.0,
+        ..NONE
+    };
+    let arable = Mix {
+        arable: 1.0,
+        ..NONE
+    };
     for index in 0..200 {
         let level = field(index, (0.01, Point::new(0.0, 1.0), 0.1));
-        assert_eq!(usage(KEY, &pasture, &level, (None, Point::new(0.0, -1.0))).used, Use::Pasture);
+        assert_eq!(
+            usage(KEY, &pasture, &level, (None, Point::new(0.0, -1.0))).used,
+            Use::Pasture
+        );
         assert!(matches!(
-            usage(KEY, &arable, &level, (Some(Point::new(0.0, 0.0)), Point::new(0.0, -1.0))).used,
+            usage(
+                KEY,
+                &arable,
+                &level,
+                (Some(Point::new(0.0, 0.0)), Point::new(0.0, -1.0))
+            )
+            .used,
             Use::Arable(_)
         ));
     }
@@ -77,7 +92,12 @@ fn only_a_field_cut_for_hay_or_straw_is_baled() {
     };
     for index in 0..400 {
         let parcel = field(index, (0.06, Point::new(0.0, -1.0), 0.3));
-        let used = usage(KEY, &mix, &parcel, (Some(Point::new(150.0, 0.0)), Point::new(0.0, -1.0)));
+        let used = usage(
+            KEY,
+            &mix,
+            &parcel,
+            (Some(Point::new(150.0, 0.0)), Point::new(0.0, -1.0)),
+        );
         let cut = matches!(
             used.used,
             Use::Meadow | Use::Arable(Crop::Wheat | Crop::Barley | Crop::Oats | Crop::Ley)

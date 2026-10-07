@@ -59,16 +59,22 @@ pub(crate) struct Densities {
     pub(crate) bounds: Bounds,
 }
 
-/// How far from the eye a farmed land's boundaries stand built, each kind,
-/// and its hedgerow trees, which stand on where its hedges are only painted
-/// on the ground; and the share of a scene's room its hedges may take.
+/// How far from the eye a farmed land's hedges, fences and hedgerow trees
+/// stand built, its trees standing on where its hedges do not; the fewest
+/// pixels a wall's typical stone spans where walls are laid stone by stone;
+/// the share of a scene's room its hedges may take; how far from the eye a
+/// field's maize stands as plants before its sward carries it on; how far a
+/// vineyard stands as vines; and how far its pastures' pats are laid.
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct Bounds {
     pub(crate) hedges: f64,
-    pub(crate) walls: f64,
+    pub(crate) stones: f64,
     pub(crate) fences: f64,
     pub(crate) standards: f64,
     pub(crate) share: f64,
+    pub(crate) crops: f64,
+    pub(crate) vines: f64,
+    pub(crate) pats: f64,
 }
 
 /// The most spines a cactus's areole bears: its centrals and its radials.
@@ -224,10 +230,13 @@ const SIMPLE: Densities = Densities {
     mud: 18.0,
     bounds: Bounds {
         hedges: 420.0,
-        walls: 300.0,
+        stones: 3.0,
         fences: 300.0,
         standards: 1400.0,
         share: 0.35,
+        crops: 60.0,
+        vines: 250.0,
+        pats: 80.0,
     },
 };
 
@@ -282,9 +291,12 @@ const MAXIMUM: Densities = Densities {
     mud: 36.0,
     bounds: Bounds {
         hedges: 1500.0,
-        walls: 900.0,
+        stones: 1.5,
         fences: 800.0,
         standards: 3600.0,
         share: 0.45,
+        crops: 180.0,
+        vines: 600.0,
+        pats: 200.0,
     },
 };

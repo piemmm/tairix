@@ -33,6 +33,7 @@ use crate::sample::{cosine_hemisphere, GOLDEN_RATIO};
 use crate::shade::Shades;
 use crate::shape::{Aabb, Face, Geometry, Hit, Shape};
 use crate::sky::{Dome, Seeing, Sky};
+use crate::stand::Stand;
 use crate::trace::Meter;
 use crate::vector::{Members, Pose, Ray, Vec3};
 
@@ -87,16 +88,21 @@ pub(crate) struct Object {
 impl Object {
     /// The frame the part `hit` met has its pattern fixed in, and the key of
     /// the placing it belongs to: the object's own, but for a tree of a wood
-    /// far off, placed afresh from its cell.
+    /// far off or a plant of a stand, placed afresh from its cell.
     pub(crate) fn placing(&self, hit: &Hit, geometry: Geometry<'_>) -> (Pose, u32) {
-        if let (Shape::FarWood { wood, .. }, Some(cell)) = (&self.shape, hit.member) {
-            let tree = geometry
+        let placed = match (&self.shape, hit.member) {
+            (Shape::FarWood { wood, .. }, Some(cell)) => geometry
                 .far_woods
                 .get(*wood as usize)
-                .and_then(|wood| wood.placing(cell, geometry.fields));
-            if let Some(placed) = tree {
-                return placed;
-            }
+                .and_then(|wood| wood.placing(cell, geometry.fields)),
+            (Shape::Stand { stand }, Some(cell)) => geometry
+                .stands
+                .get(*stand as usize)
+                .and_then(|stand| stand.placing(cell, geometry.fields)),
+            _ => None,
+        };
+        if let Some(placed) = placed {
+            return placed;
         }
         (self.texture, self.shape.instance())
     }
@@ -132,6 +138,7 @@ pub(crate) struct Parts {
     pub(crate) prototypes: Vec<Prototype>,
     pub(crate) lawns: Vec<Lawn>,
     pub(crate) far_woods: Vec<FarWood>,
+    pub(crate) stands: Vec<Stand>,
     pub(crate) materials: Vec<Material>,
     pub(crate) lights: Vec<Light>,
     pub(crate) sky: Sky,
@@ -362,6 +369,7 @@ pub struct Scene {
     pub(crate) prototypes: Vec<Prototype>,
     pub(crate) lawns: Vec<Lawn>,
     pub(crate) far_woods: Vec<FarWood>,
+    pub(crate) stands: Vec<Stand>,
     pub(crate) materials: Vec<Material>,
     pub(crate) lights: Vec<Light>,
     pub(crate) sky: Sky,
@@ -490,6 +498,7 @@ impl Building {
             prototypes: parts.prototypes,
             lawns: parts.lawns,
             far_woods: parts.far_woods,
+            stands: parts.stands,
             materials: parts.materials,
             daylight: daylight(&parts.sky, &parts.lights, parts.camera.eye()),
             lights: parts.lights,
@@ -542,6 +551,7 @@ impl Scene {
             prototypes: &parts.prototypes,
             lawns: &parts.lawns,
             far_woods: &parts.far_woods,
+            stands: &parts.stands,
             materials: &parts.materials,
             view: None,
         };
@@ -600,6 +610,7 @@ impl Scene {
             prototypes: &self.prototypes,
             lawns: &self.lawns,
             far_woods: &self.far_woods,
+            stands: &self.stands,
             materials: &self.materials,
             view: Some(self.view),
         }

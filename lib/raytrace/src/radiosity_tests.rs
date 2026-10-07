@@ -329,6 +329,7 @@ fn courtyard() -> Scene {
         prototypes: Vec::new(),
         lawns: Vec::new(),
         far_woods: Vec::new(),
+        stands: Vec::new(),
         materials: alloc::vec![matte(0.6), matte(0.8)],
         lights: alloc::vec![Light::Sun {
             toward: Vec3::new(-0.6, 0.5, 0.2).normalized(),
@@ -384,6 +385,25 @@ fn gathering_lays_the_same_records_on_one_thread_as_on_several() {
     }
 }
 
+/// A runner wider than any unit of the work could be split for takes the
+/// work a whole stage at once, laying the same records, rather than
+/// overflowing the size of a unit.
+#[test]
+fn gathering_takes_the_widest_runner_a_stage_at_once() {
+    let scene = courtyard();
+    let alone = gathered(&scene, &SERIAL, Detail::Simple);
+    let widest = gathered(
+        &scene,
+        &tairix_parallel::Reversed::new(usize::MAX),
+        Detail::Simple,
+    );
+    assert_eq!(alone.records.len(), widest.records.len());
+    for (a, b) in alone.records.iter().zip(&widest.records) {
+        assert_eq!(a.point, b.point);
+        assert_eq!(a.light, b.light);
+    }
+}
+
 #[test]
 fn the_records_stand_for_what_every_sample_would_trace() {
     let scene = courtyard();
@@ -402,7 +422,11 @@ fn the_records_stand_for_what_every_sample_would_trace() {
             let mut cells = alloc::vec![Cell::DARK; RECORDS.cells()];
             let mean = |seed: u32, cells: &mut [Cell]| {
                 for (row, piece) in cells.chunks_mut(RECORDS.columns).enumerate() {
-                    tracer.gather(&Site { seed, ..site }, (RECORDS, row), piece);
+                    tracer.gather(
+                        &Site { seed, ..site },
+                        (RECORDS, row * RECORDS.columns),
+                        piece,
+                    );
                 }
                 cells.iter().map(|cell| cell.light.x).sum::<f64>() / real(RECORDS.cells())
             };

@@ -14,6 +14,7 @@ const NOTHING: Geometry<'static> = Geometry {
     prototypes: &[],
     lawns: &[],
     far_woods: &[],
+    stands: &[],
     materials: &[],
     view: None,
 };

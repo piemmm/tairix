@@ -1,6 +1,6 @@
 //! Where the countryside's people live: villages spaced by a priority rule,
-//! and on every holding a village does not gather in, its own farmstead on
-//! the best ground it has.
+//! and on every holding a village does not gather in and whose ground can be
+//! farmed at all, its own farmstead on the best ground it has.
 
 use core::hash::Hasher;
 
@@ -14,8 +14,8 @@ use crate::key::{Key, Stage};
 use crate::plane::{Point, Rect};
 
 /// A tier of villages: one offered in every square of a lattice `spacing`
-/// apart, standing where its ground suits it and no better-ranked village
-/// lies within `exclusion` of it.
+/// apart, standing where its ground suits it and no better-ranked offer
+/// whose ground suits it lies within `exclusion` of it.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct Villages {
     /// The side of a square of the lattice villages are offered on.
@@ -81,7 +81,12 @@ pub(crate) fn suitability(ground: &dyn Ground, at: Point) -> f64 {
 
 /// The village square `(x, y)` offers, and its rank: where it would stand,
 /// if its ground suits it.
-fn offer(key: Key, tier: &Villages, ground: &dyn Ground, (x, y): (i32, i32)) -> Option<(Point, u64)> {
+fn offer(
+    key: Key,
+    tier: &Villages,
+    ground: &dyn Ground,
+    (x, y): (i32, i32),
+) -> Option<(Point, u64)> {
     let mut draws = key.draws(Stage::Village, (i64::from(x), i64::from(y)));
     let at = Point::new(
         (f64::from(x) + 0.15 + 0.7 * draws.unit()) * tier.spacing,
@@ -90,7 +95,12 @@ fn offer(key: Key, tier: &Villages, ground: &dyn Ground, (x, y): (i32, i32)) -> 
     let stands = draws.unit() < suitability(ground, at);
     // The rank comes of the square alone, so a village refused its ground
     // leaves every other's as it was.
-    stands.then(|| (at, key.word(Stage::Village, (i64::from(x), i64::from(y)), u32::MAX)))
+    stands.then(|| {
+        (
+            at,
+            key.word(Stage::Village, (i64::from(x), i64::from(y)), u32::MAX),
+        )
+    })
 }
 
 /// The villages standing in `rect`, in their squares' order; `None` where
@@ -119,9 +129,12 @@ pub(crate) fn villages(
             let outranked = (-1..=1).any(|dy| {
                 (-1..=1).any(|dx| {
                     (dx, dy) != (0, 0)
-                        && offer(key, tier, ground, (x + dx, y + dy)).is_some_and(|(other, theirs)| {
-                            (theirs, (x + dx, y + dy)) > (rank, (x, y)) && (other - at).length() < reach
-                        })
+                        && offer(key, tier, ground, (x + dx, y + dy)).is_some_and(
+                            |(other, theirs)| {
+                                (theirs, (x + dx, y + dy)) > (rank, (x, y))
+                                    && (other - at).length() < reach
+                            },
+                        )
                 })
             });
             if !outranked {
@@ -156,7 +169,6 @@ pub(crate) fn farmstead(
     if gatherer(villages, middle, gathers).is_some() {
         return None;
     }
-    let outline = lattice.outline(holding);
     let mut draws = key.draws(Stage::Farmstead, holding.place());
     let reach = 0.32 * lattice.spacing();
     let mut best: Option<(f64, Point)> = None;
@@ -166,7 +178,7 @@ pub(crate) fn farmstead(
             reach * mathf::sqrt(draws.unit()),
         );
         let spot = middle + Point::toward(angle) * distance;
-        if !outline.contains(spot) {
+        if !lattice.holds(holding, spot) {
             continue;
         }
         let score = suitability(ground, spot) - 0.15 * distance / reach;

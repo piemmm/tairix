@@ -1,6 +1,6 @@
 [package]
 name = "tairix-countryside"
-description = "TAIRiX countryside layout, renderer-neutral: the holdings a land is farmed in, the farmsteads, villages and towns on it, the road, lane, track and path network between them routed over the ground, the fields the land between ways and water is cut into, each field's boundary, gates and use, and the plots of a farmstead's yard and a village's streets. Keyed by place, seam-free, no_std, forbids unsafe, and bit-identical on every Tier-1 target."
+description = "TAIRiX countryside layout, renderer-neutral: the holdings a land is farmed in, the farmsteads and villages on it, the roads, lanes, tracks and paths between them routed over the ground beside the highways its consumer brings, the fields the land between ways and water is cut into, each field's boundary, gates and use, and the plots of a farmstead's yard and a village's streets. Keyed by place, seam-free, no_std, forbids unsafe, and bit-identical on every Tier-1 target."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -34,6 +34,7 @@ const MOST_MOVES: u32 = 64;
 /// stone set in it, in the order set, the farthest any reaches, and their ids
 /// in order along the stretch; and the top of the work every `SAMPLE` along
 /// it.
+#[derive(Debug)]
 pub(super) struct Pile {
     start: f64,
     end: f64,
@@ -126,7 +127,9 @@ impl Pile {
         self.along.try_reserve(1).ok()?;
         self.stones.push(stone);
         self.largest = self.largest.max(r);
-        let place = self.along.partition_point(|&other| self.stone(other).is_some_and(|other| other.x <= x));
+        let place = self
+            .along
+            .partition_point(|&other| self.stone(other).is_some_and(|other| other.x <= x));
         self.along.insert(place, id);
         for sample in self.samples((x - r, x + r)) {
             let dx = self.x_of(sample) - x;
@@ -144,7 +147,9 @@ impl Pile {
 
     /// The stones whose middles lie from `from` to `to` along the face.
     fn near(&self, (from, to): (f64, f64)) -> impl Iterator<Item = Stone> + '_ {
-        let first = self.along.partition_point(|&id| self.stone(id).is_some_and(|stone| stone.x < from));
+        let first = self
+            .along
+            .partition_point(|&id| self.stone(id).is_some_and(|stone| stone.x < from));
         self.along
             .get(first..)
             .unwrap_or(&[])
@@ -189,25 +194,32 @@ impl Pile {
     /// lands: on the foundation, or on the stone it then rests on.
     fn fall(&self, (x, y): (f64, f64), r: f64) -> (f64, Option<Stone>) {
         let reach = r + self.largest;
-        self.near((x - reach, x + reach)).fold((r, None), |(high, on), stone| {
-            let (touch, run) = (r + stone.r, x - stone.x);
-            if run.abs() >= touch {
-                return (high, on);
-            }
-            let contact = stone.y + mathf::sqrt(touch * touch - run * run);
-            if contact < y - TOUCH && contact > high {
-                (contact, Some(stone))
-            } else {
-                (high, on)
-            }
-        })
+        self.near((x - reach, x + reach))
+            .fold((r, None), |(high, on), stone| {
+                let (touch, run) = (r + stone.r, x - stone.x);
+                if run.abs() >= touch {
+                    return (high, on);
+                }
+                let contact = stone.y + mathf::sqrt(touch * touch - run * run);
+                if contact < y - TOUCH && contact > high {
+                    (contact, Some(stone))
+                } else {
+                    (high, on)
+                }
+            })
     }
 
     /// Roll a stone reaching `r` at `at` over `pivot` toward `side` until it
     /// stops: on the foundation, against the wall's head at `heads`, in the
     /// nook it meets a stone ahead of it in, rolling on over a stone it
     /// meets behind, or off the pivot's side to fall again.
-    fn roll(&self, at: (f64, f64), r: f64, (pivot, side): (Stone, f64), (left, right): (f64, f64)) -> Rolled {
+    fn roll(
+        &self,
+        at: (f64, f64),
+        r: f64,
+        (pivot, side): (Stone, f64),
+        (left, right): (f64, f64),
+    ) -> Rolled {
         let head = if side > 0.0 { right } else { left };
         if side * (at.0 - head) >= -TOUCH {
             return Rolled::Rest(at);
@@ -218,7 +230,12 @@ impl Pile {
             let gone = side * (angle - from);
             (gone > TOUCH && side * angle <= FRAC_PI_2 + TOUCH).then_some(gone)
         };
-        let place = |angle: f64| (pivot.x + around * mathf::sin(angle), pivot.y + around * mathf::cos(angle));
+        let place = |angle: f64| {
+            (
+                pivot.x + around * mathf::sin(angle),
+                pivot.y + around * mathf::cos(angle),
+            )
+        };
         // The first thing it meets, how far round the pivot, and what.
         let mut first: Option<(f64, f64, Option<Stone>)> = None;
         let mut meet = |angle: f64, what: Option<Stone>| {
@@ -236,7 +253,10 @@ impl Pile {
         if reach.abs() <= 1.0 {
             meet(mathf::asin(reach), None);
         }
-        let span = (pivot.x - around - r - self.largest, pivot.x + around + r + self.largest);
+        let span = (
+            pivot.x - around - r - self.largest,
+            pivot.x + around + r + self.largest,
+        );
         for stone in self.near(span).filter(|stone| *stone != pivot) {
             for angle in crossings(pivot, stone, r) {
                 meet(angle, Some(stone));
@@ -259,7 +279,10 @@ impl Pile {
 
 /// The first sample at or past `x` along a face starting at `start`.
 fn sample_at(start: f64, x: f64) -> Option<usize> {
-    usize::try_from(mathf::round_i32(mathf::ceil(((x - start) / SAMPLE).clamp(0.0, 1.0e8)))).ok()
+    usize::try_from(mathf::round_i32(mathf::ceil(
+        ((x - start) / SAMPLE).clamp(0.0, 1.0e8),
+    )))
+    .ok()
 }
 
 /// How far round `pivot` from straight above it, toward its right, a
@@ -269,15 +292,20 @@ fn crossings(pivot: Stone, other: Stone, r: f64) -> impl Iterator<Item = f64> {
     let (to_pivot, to_other) = (r + pivot.r, r + other.r);
     let (dx, dy) = (other.x - pivot.x, other.y - pivot.y);
     let apart = mathf::hypot(dx, dy);
-    let meets = apart > TOUCH && apart <= to_pivot + to_other && apart >= (to_pivot - to_other).abs();
-    let toward = (to_pivot * to_pivot - to_other * to_other + apart * apart) / (2.0 * apart.max(TOUCH));
+    let meets =
+        apart > TOUCH && apart <= to_pivot + to_other && apart >= (to_pivot - to_other).abs();
+    let toward =
+        (to_pivot * to_pivot - to_other * to_other + apart * apart) / (2.0 * apart.max(TOUCH));
     let off = mathf::sqrt((to_pivot * to_pivot - toward * toward).max(0.0));
     let (ux, uy) = (dx / apart.max(TOUCH), dy / apart.max(TOUCH));
     let (px, py) = (toward * ux, toward * uy);
-    [(px - off * uy, py + off * ux), (px + off * uy, py - off * ux)]
-        .into_iter()
-        .filter(move |_| meets)
-        .map(|(x, y)| mathf::atan2(x, y))
+    [
+        (px - off * uy, py + off * ux),
+        (px + off * uy, py - off * ux),
+    ]
+    .into_iter()
+    .filter(move |_| meets)
+    .map(|(x, y)| mathf::atan2(x, y))
 }
 
 #[cfg(test)]

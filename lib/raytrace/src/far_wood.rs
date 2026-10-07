@@ -29,7 +29,7 @@ use crate::prototype::Prototype;
 use crate::sample::{mix32, unit};
 use crate::shape::{meet_placed, occluded_by_placed, reciprocal, Aabb, Geometry, Hit};
 use crate::vector::{above, below, real, share, wrapped, Pose, Ray, Vec3};
-use crate::walk::{Stepped, Walk};
+use crate::walk::{self, Stepped, Walk};
 use crate::wood::{Habit, Reader, Sprout, Tree, PACKED};
 
 /// How far short of where it begins a wood far off is matched to the trees
@@ -1132,41 +1132,19 @@ struct Meeting<'a> {
 
 impl Meeting<'_> {
     /// Meet every tree whose crown could reach `cell`.
-    fn around(&mut self, (column, row): (u32, u32)) {
+    fn around(&mut self, cell: (u32, u32)) {
         let spread = self.wood.spread;
-        for down in 0..=2 * spread {
-            for across in 0..=2 * spread {
-                self.meet((
-                    column.wrapping_add(across).wrapping_sub(spread),
-                    row.wrapping_add(down).wrapping_sub(spread),
-                ));
-            }
+        for about in walk::about(cell, (spread, spread)) {
+            self.meet(about);
         }
     }
 
     /// Meet the trees that come within reach as the walk steps into `cell`
     /// as `stepped` has it: a column of cells across x, or a row across z.
-    fn entering(&mut self, (column, row): (u32, u32), stepped: Stepped) {
+    fn entering(&mut self, cell: (u32, u32), stepped: Stepped) {
         let spread = self.wood.spread;
-        let ahead = |at: u32, step: u32| {
-            if step == 1 {
-                at.wrapping_add(spread)
-            } else {
-                at.wrapping_sub(spread)
-            }
-        };
-        for offset in 0..=2 * spread {
-            let cell = match stepped {
-                Stepped::X(step) => (
-                    ahead(column, step),
-                    row.wrapping_add(offset).wrapping_sub(spread),
-                ),
-                Stepped::Z(step) => (
-                    column.wrapping_add(offset).wrapping_sub(spread),
-                    ahead(row, step),
-                ),
-            };
-            self.meet(cell);
+        for ahead in walk::ahead(cell, stepped, (spread, spread)) {
+            self.meet(ahead);
         }
     }
 
@@ -1184,7 +1162,8 @@ impl Meeting<'_> {
         };
         let fields = self.geometry.fields;
         let place @ (at, draw) = wood.place(cell);
-        let Some((first, last)) = self.within(at, wood.reach) else {
+        let Some((first, last)) = walk::passing(self.ray, at, wood.reach, (self.near, self.reach))
+        else {
             return;
         };
         let ray = self.ray;
@@ -1237,32 +1216,6 @@ impl Meeting<'_> {
         hit.member = Some(cell);
         self.reach = hit.t;
         self.best = Some(hit);
-    }
-
-    /// Where along the ray, within the stretch still to walk, its track
-    /// across the ground passes within `reach` of the trunk at `at`; `None`
-    /// if it never does.
-    fn within(&self, at: (f64, f64), reach: f64) -> Option<(f64, f64)> {
-        let ray = self.ray;
-        let (dx, dz) = (ray.dir.x, ray.dir.z);
-        let (ox, oz) = (at.0 - ray.origin.x, at.1 - ray.origin.z);
-        let across = dx * dx + dz * dz;
-        let (first, last) = if across > 1e-18 {
-            let along = (ox * dx + oz * dz) / across;
-            let (px, pz) = (ox - dx * along, oz - dz * along);
-            let left = reach * reach - (px * px + pz * pz);
-            if left < 0.0 {
-                return None;
-            }
-            let half = mathf::sqrt(left / across);
-            (along - half, along + half)
-        } else if ox * ox + oz * oz <= reach * reach {
-            (self.near, self.reach)
-        } else {
-            return None;
-        };
-        let (first, last) = (first.max(self.near), last.min(self.reach));
-        (first <= last).then_some((first, last))
     }
 }
 

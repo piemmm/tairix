@@ -704,7 +704,10 @@ fn a_vertex_with_no_height_takes_its_cells_out_and_leaves_its_neighbours_sound()
 #[test]
 fn a_places_attributes_are_its_vertices_blended() {
     let mut field = Heightfield::new(4, (10.0, -2.0), 2.0, false).expect("a grid");
-    assert_eq!(field.attributes_at(11.0, 0.0), PLAIN);
+    assert_eq!(
+        field.attributes_at(11.0, 0.0).map(f64::to_bits),
+        PLAIN.map(f64::to_bits)
+    );
     let side = field.side();
     assert!(field.carry_attributes());
     {
@@ -717,6 +720,8 @@ fn a_places_attributes_are_its_vertices_blended() {
                 u8::try_from(column * row * 10).expect("a byte"),
                 0,
                 255,
+                0,
+                0,
                 0,
             ];
         }

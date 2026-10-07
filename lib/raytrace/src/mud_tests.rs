@@ -3,7 +3,7 @@
 //! two tiles meet edge to edge in whole plates without a seam.
 
 use super::*;
-use crate::heightfield::CHANNELS;
+use crate::heightfield::{Grows, QUANTITIES};
 use crate::prototype::Prototype;
 use crate::vector::{share, Ray};
 
@@ -198,7 +198,8 @@ fn a_plates_face_dries_pale_over_its_damp_wall() {
         girth: 0.2,
         instance: 0,
         front: true,
-        ground: [0.0; CHANNELS],
+        ground: [0.0; QUANTITIES],
+        grows: Grows::default(),
         thatch: 0.0,
         cover: None,
     };

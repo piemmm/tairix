@@ -460,7 +460,13 @@ fn no_tree_stands_on_a_bridges_deck() {
         let decks: Vec<Deck> = land
             .crossings
             .iter()
-            .map(|deck| ((deck.from.x, deck.from.z), (deck.to.x, deck.to.z), deck.from.width))
+            .map(|deck| {
+                (
+                    (deck.from.x, deck.from.z),
+                    (deck.to.x, deck.to.z),
+                    deck.from.width,
+                )
+            })
             .collect();
         crossed += decks.len();
         for trunk in trunks(&composition) {

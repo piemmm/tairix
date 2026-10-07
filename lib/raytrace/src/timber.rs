@@ -10,7 +10,7 @@
 use tairix_util::mathf;
 
 use crate::noise::{noise3, smoothstep};
-use crate::pigment::Spot;
+use crate::pigment::{lying, Spot, SNOW};
 use crate::sample::{mix32, unit};
 use crate::vector::Vec3;
 
@@ -28,6 +28,8 @@ pub(crate) struct Timber {
     /// The paint it was given, if any, and how much of it has flaked away.
     pub(crate) paint: Option<(Vec3, f64)>,
     pub(crate) seed: u32,
+    /// How much of what faces the sky the snow lying on it covers.
+    pub(crate) snow: f64,
 }
 
 /// Weathered timber's silver-grey.
@@ -46,12 +48,16 @@ impl Timber {
     /// The colour at `spot`: the unit its mark names, read along its grain.
     pub(crate) fn colour(&self, spot: &Spot) -> Vec3 {
         let key = mix32(spot.mark ^ self.seed);
-        let base = self.bases[0].lerp(self.bases[1], unit(key)) * (0.9 + 0.2 * unit(mix32(key ^ 1)));
+        let base =
+            self.bases[0].lerp(self.bases[1], unit(key)) * (0.9 + 0.2 * unit(mix32(key ^ 1)));
         let (along, across) = spot.uv;
         let fine = 1.0 - smoothstep(0.004, 0.03, spot.width);
         let grain = if spot.along == END {
             // The end grain: rings about the heart, off its middle.
-            let (dx, dy) = (along - 0.3 * (unit(mix32(key ^ 2)) - 0.5), across - 0.3 * (unit(mix32(key ^ 3)) - 0.5));
+            let (dx, dy) = (
+                along - 0.3 * (unit(mix32(key ^ 2)) - 0.5),
+                across - 0.3 * (unit(mix32(key ^ 3)) - 0.5),
+            );
             let rings = 0.5 + 0.5 * mathf::sin(28.0 * mathf::hypot(dx, dy) + 6.0 * unit(key));
             0.82 + 0.18 * rings * fine
         } else {
@@ -78,7 +84,10 @@ impl Timber {
             if unit(salt) > 0.55 {
                 continue;
             }
-            let (at, side) = (2.0 * unit(mix32(salt ^ 1)) - 1.0, 1.6 * unit(mix32(salt ^ 2)) - 0.8);
+            let (at, side) = (
+                2.0 * unit(mix32(salt ^ 1)) - 1.0,
+                1.6 * unit(mix32(salt ^ 2)) - 0.8,
+            );
             let apart = mathf::hypot((along - at) * 6.0, (across - side) * 1.2);
             colour = colour.lerp(colour * 0.45, 1.0 - smoothstep(0.08, 0.16, apart));
         }
@@ -87,7 +96,12 @@ impl Timber {
         if check < 0.25 + 0.5 * self.weathering {
             let line = 1.6 * unit(mix32(key ^ 0x51)) - 0.8;
             let open = 1.0 - smoothstep(0.004, 0.012, (across - line).abs());
-            let reach = 1.0 - smoothstep(0.4, 0.9, (along - (2.0 * unit(mix32(key ^ 0x52)) - 1.0)).abs());
+            let reach = 1.0
+                - smoothstep(
+                    0.4,
+                    0.9,
+                    (along - (2.0 * unit(mix32(key ^ 0x52)) - 1.0)).abs(),
+                );
             colour = colour.lerp(colour * 0.25, open * reach * self.weathering.max(0.2));
         }
         colour
@@ -121,6 +135,7 @@ impl Timber {
             .lerp(SILVER * (0.85 + 0.3 * unit(mix32(key ^ 0x73))), silvered)
             .lerp(LICHEN, 0.6 * lichen)
             .lerp(ALGAE, 0.55 * algae)
+            .lerp(SNOW, lying(self.snow, spot.normal))
     }
 }
 

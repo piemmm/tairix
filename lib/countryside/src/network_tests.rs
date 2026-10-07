@@ -11,6 +11,40 @@ fn scattered(count: usize) -> Vec<Node> {
         .collect()
 }
 
+/// Every edge of `graph` over `nodes`, node by node, as a layout plans it.
+fn graph_of(
+    graph: Graph,
+    nodes: &[Node],
+    longest: f64,
+    keeps: &dyn Fn(&Node, &Node) -> bool,
+) -> Vec<(usize, usize)> {
+    let filed = Filed::new(nodes.iter().map(|node| node.at), longest).expect("room");
+    (0..nodes.len())
+        .flat_map(|a| {
+            edges_from(graph, (nodes, &filed), (a, longest), keeps)
+                .expect("room")
+                .into_iter()
+                .map(move |b| (a, b))
+        })
+        .collect()
+}
+
+fn neighbourhood(
+    nodes: &[Node],
+    longest: f64,
+    keeps: &dyn Fn(&Node, &Node) -> bool,
+) -> Vec<(usize, usize)> {
+    graph_of(Graph::Neighbourhood, nodes, longest, keeps)
+}
+
+fn gabriel_only(
+    nodes: &[Node],
+    longest: f64,
+    keeps: &dyn Fn(&Node, &Node) -> bool,
+) -> Vec<(usize, usize)> {
+    graph_of(Graph::GabrielOnly, nodes, longest, keeps)
+}
+
 fn connected(count: usize, edges: &[(usize, usize)]) -> bool {
     let mut reached = alloc::vec![false; count];
     let mut stack = alloc::vec![0];
@@ -31,8 +65,11 @@ fn connected(count: usize, edges: &[(usize, usize)]) -> bool {
 #[test]
 fn the_neighbourhood_graph_joins_every_node_and_no_third_lies_in_any_lune() {
     let nodes = scattered(160);
-    let edges = neighbourhood(&nodes, 2000.0, &|_, _| true).expect("room");
-    assert!(connected(nodes.len(), &edges), "a relative-neighbourhood graph is connected");
+    let edges = neighbourhood(&nodes, 2000.0, &|_, _| true);
+    assert!(
+        connected(nodes.len(), &edges),
+        "a relative-neighbourhood graph is connected"
+    );
     for &(a, b) in &edges {
         let span = squared(nodes[a].at, nodes[b].at);
         for (c, node) in nodes.iter().enumerate() {
@@ -46,7 +83,9 @@ fn the_neighbourhood_graph_joins_every_node_and_no_third_lies_in_any_lune() {
     for (a, node) in nodes.iter().enumerate() {
         let nearest = (0..nodes.len())
             .filter(|&b| b != a)
-            .min_by(|&x, &y| squared(nodes[x].at, node.at).total_cmp(&squared(nodes[y].at, node.at)))
+            .min_by(|&x, &y| {
+                squared(nodes[x].at, node.at).total_cmp(&squared(nodes[y].at, node.at))
+            })
             .expect("others");
         assert!(edges.contains(&(a.min(nearest), a.max(nearest))));
     }
@@ -55,8 +94,8 @@ fn the_neighbourhood_graph_joins_every_node_and_no_third_lies_in_any_lune() {
 #[test]
 fn a_shortcut_is_a_gabriel_edge_the_neighbourhood_graph_leaves_out() {
     let nodes = scattered(120);
-    let lanes = neighbourhood(&nodes, 2000.0, &|_, _| true).expect("room");
-    let paths = gabriel_only(&nodes, 2000.0, &|_, _| true).expect("room");
+    let lanes = neighbourhood(&nodes, 2000.0, &|_, _| true);
+    let paths = gabriel_only(&nodes, 2000.0, &|_, _| true);
     assert!(!paths.is_empty());
     for &(a, b) in &paths {
         assert!(lanes.binary_search(&(a, b)).is_err());
@@ -85,15 +124,15 @@ fn the_graph_is_the_same_whatever_order_its_nodes_come_in() {
         named.sort_unstable();
         named
     };
-    let forward = named(&nodes, neighbourhood(&nodes, 400.0, &|_, _| true).expect("room"));
-    let backward = named(&reversed, neighbourhood(&reversed, 400.0, &|_, _| true).expect("room"));
+    let forward = named(&nodes, neighbourhood(&nodes, 400.0, &|_, _| true));
+    let backward = named(&reversed, neighbourhood(&reversed, 400.0, &|_, _| true));
     assert_eq!(forward, backward);
 }
 
 #[test]
 fn no_edge_is_longer_than_the_longest_or_one_keeps_refuses() {
     let nodes = scattered(100);
-    let edges = neighbourhood(&nodes, 150.0, &|a, b| a.at.x < 500.0 && b.at.x < 500.0).expect("room");
+    let edges = neighbourhood(&nodes, 150.0, &|a, b| a.at.x < 500.0 && b.at.x < 500.0);
     for (a, b) in edges {
         assert!(squared(nodes[a].at, nodes[b].at) <= 150.0 * 150.0);
         assert!(nodes[a].at.x < 500.0 && nodes[b].at.x < 500.0);

@@ -11,10 +11,13 @@
 
 use core::f64::consts::{FRAC_PI_2, TAU};
 
+use tairix_countryside::usage::Crop;
 use tairix_util::mathf;
 
 use crate::course::{Courses, Nearest};
-use crate::land::{Surface, Ways, DAMP_BANK, SOAKED, SURFACES, TRACK_GAUGE};
+use crate::farmed::{self, Drill, Grown, Stage, CODES};
+use crate::grass::{CROP_KINDS, WILD_KINDS};
+use crate::land::{Surface, Ways, DAMP_BANK, RUT, SOAKED, SURFACES, TRACK_GAUGE};
 use crate::noise::{cell, cells2, fbm2, hash3, noise2, octaves_within, smoothstep};
 use crate::pigment::Spot;
 use crate::sample::{mix32, unit};
@@ -44,6 +47,11 @@ const SNOW_EDGES: f64 = 0.6;
 /// metre.
 const BEDS: f64 = 0.22;
 const PEBBLES: f64 = 30.0;
+
+/// The mean shade of a tilth's clods and the shadowed gaps between them.
+const CLOD_MEAN: f64 = 0.88;
+/// How broad a strip one pass of a drill works.
+const PASS: f64 = 3.0;
 
 /// A region's ground colours.
 #[derive(Copy, Clone, Debug)]
@@ -91,6 +99,8 @@ pub(crate) struct Ground {
     pub(crate) ways: Option<Ways>,
     /// The boundaries across a farmed land, painted where they run.
     pub(crate) bounds: Option<Bounds>,
+    /// What a farmed land's fields grow, painted where they are tilled.
+    pub(crate) tilled: Option<Tilled>,
     /// The floor of the woods on the land, where they stand.
     pub(crate) floor: Option<Floor>,
 }
@@ -116,6 +126,42 @@ const LINED: (f64, f64) = (4.5, 5.2);
 pub(crate) struct Bounds {
     pub(crate) hedges: Courses,
     pub(crate) walls: Courses,
+}
+
+/// What a farmed land's fields show of themselves on its ground: what each
+/// sown kind looks like too far off for its sward to stand it, and which
+/// kind each byte a grid keeps a growth in grows as, as the sward's own
+/// table has it; and where that sward is seen from and how it fades with
+/// distance from there, which the ground's own painting of it takes over
+/// across.
+#[derive(Clone, Debug)]
+pub(crate) struct Tilled {
+    pub(crate) far: [Option<Far>; CROP_KINDS],
+    pub(crate) by_growth: [u8; CODES],
+    pub(crate) eye: (f64, f64),
+    pub(crate) fade: (f64, f64),
+}
+
+impl Tilled {
+    /// What growth `grown` looks like from afar, by the sown kind it grows
+    /// as; nothing for one growing none.
+    fn far(&self, grown: u8) -> Option<Far> {
+        let index = usize::from(*self.by_growth.get(usize::from(grown))?);
+        self.far
+            .get(index.checked_sub(WILD_KINDS)?)
+            .copied()
+            .flatten()
+    }
+}
+
+/// A growth too far off to make out a leaf: its colour, how much of its
+/// tilth it hides from above, and the colour and share of the tilth its own
+/// cut straw or leaves lie over.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub(crate) struct Far {
+    pub(crate) colour: Vec3,
+    pub(crate) cover: f64,
+    pub(crate) strewn: (Vec3, f64),
 }
 
 /// What the water in a land's ground does to its surface.
@@ -174,13 +220,13 @@ fn joint_set(p: Vec3, (angle, spacing): (f64, f64), seed: u32) -> (u32, f64) {
 
 /// `value`, a pattern `detail` of its own periods across a pixel, faded to
 /// its mean of nought as the pixel comes to span it.
-fn fade(value: f64, detail: f64) -> f64 {
+pub(crate) fn fade(value: f64, detail: f64) -> f64 {
     value * (1.0 - smoothstep(0.25, 1.0, detail))
 }
 
 /// How much of a footprint `footprint` across, centred `distance` from a
 /// line's middle, the line `half` either side of it covers.
-fn coverage(distance: f64, half: f64, footprint: f64) -> f64 {
+pub(crate) fn coverage(distance: f64, half: f64, footprint: f64) -> f64 {
     let soft = 0.5 * footprint.max(1e-5);
     let within = 1.0 - smoothstep(half - soft, half + soft, distance);
     within * (2.0 * half / (2.0 * half).max(footprint))
@@ -333,26 +379,8 @@ impl Ground {
         if cut > 0.0 {
             soil = soil.lerp(self.cut_bank(p, width), cut);
         }
-        // The bed a river's floods scour, under its water or bared by it: the
-        // gravel and sand of the land's own rock, sand where the slack water
-        // dropped it, and the bare rock of a ledge.
         if bed > 0.0 {
-            let sandy = smoothstep(0.1, 0.45, laid);
-            let mut floor = if sandy >= 1.0 {
-                self.sand_bed(p, width)
-            } else if sandy > 0.0 {
-                self.gravel_bed(p, width)
-                    .lerp(self.sand_bed(p, width), sandy)
-            } else {
-                self.gravel_bed(p, width)
-            };
-            // A river's bare rock is stained dark with the film of algae and
-            // silt its water leaves.
-            if let Some(rock) = rock {
-                let stained = rock.lerp(palette.moss * 0.6, 0.35) * 0.7;
-                floor = floor.lerp(stained, smoothstep(-0.25, -0.7, laid));
-            }
-            soil = soil.lerp(floor, bed);
+            soil = soil.lerp(self.river_bed((p, width), laid, rock), bed);
         }
         let grit = self.grit(p, width);
         let soil = soil * (0.9 + 0.12 * mottle) * grit;
@@ -377,6 +405,9 @@ impl Ground {
                 colour = colour.lerp(self.litter(floor, p, width, (wet, mottle, grit)), littered);
             }
         }
+        if let Some(tilled) = &self.tilled {
+            colour = self.farmed(colour, spot, tilled, (soil, mottle));
+        }
         if let Some(rock) = rock {
             colour = colour.lerp(rock, bare);
         }
@@ -398,6 +429,147 @@ impl Ground {
             patch,
         );
         colour.lerp(palette.snow * (0.95 + 0.05 * mottle), snowed)
+    }
+
+    /// The bed a river's floods scour at `p`, a footprint `width` across,
+    /// under its water or bared by it: the gravel and sand of the land's own
+    /// rock, sand where the slack water dropped it as `laid` says, and the
+    /// bare `rock` of a ledge.
+    fn river_bed(&self, (p, width): (Vec3, f64), laid: f64, rock: Option<Vec3>) -> Vec3 {
+        let sandy = smoothstep(0.1, 0.45, laid);
+        let floor = if sandy >= 1.0 {
+            self.sand_bed(p, width)
+        } else if sandy > 0.0 {
+            self.gravel_bed(p, width)
+                .lerp(self.sand_bed(p, width), sandy)
+        } else {
+            self.gravel_bed(p, width)
+        };
+        // A river's bare rock is stained dark with the film of algae and silt
+        // its water leaves.
+        rock.map_or(floor, |rock| {
+            let stained = rock.lerp(self.palette.moss * 0.6, 0.35) * 0.7;
+            floor.lerp(stained, smoothstep(-0.25, -0.7, laid))
+        })
+    }
+
+    /// `colour`, the ground at `spot` as it lies untilled, where `fields` are
+    /// tilled: each corner about the spot looking as its growth does, or as
+    /// `colour` where it is not tilled, blended as the spot lies between
+    /// them, on the land's `soil` mottled by `mottle`.
+    fn farmed(
+        &self,
+        colour: Vec3,
+        spot: &Spot,
+        fields: &Tilled,
+        (soil, mottle): (Vec3, f64),
+    ) -> Vec3 {
+        let grows = spot.grows;
+        if !grows
+            .corners
+            .iter()
+            .any(|&(grown, _)| Grown::of(grown).tilled())
+        {
+            return colour;
+        }
+        let (x, z) = (spot.p.x, spot.p.z);
+        // The sward stands each crop's own shoots over its tilth near the
+        // eye, thinning as the ground takes over painting them.
+        let painted = smoothstep(
+            fields.fade.0,
+            fields.fade.1,
+            mathf::hypot(x - fields.eye.0, z - fields.eye.1),
+        );
+        grows.blended(|(grown, rows)| {
+            let Grown::Sown(crop, stage) = Grown::of(grown) else {
+                return colour;
+            };
+            let drill = Drill::of(farmed::row_spacing(crop), (grown, rows));
+            // Its tramlines run once it is drilled, treading its tilth and
+            // parting its crop alike.
+            let tracked = if stage == Stage::Ploughed {
+                0.0
+            } else {
+                drill.tracked((x, z), spot.width.max(1e-5))
+            };
+            // A ley stands on the sod it was sown into.
+            let under = if crop == Crop::Ley {
+                colour
+            } else {
+                self.tilth(spot, (&drill, stage, tracked), (soil, mottle))
+            };
+            let Some(far) = fields.far(grown) else {
+                return under;
+            };
+            let (residue, strewn) = far.strewn;
+            let lying = strewn * (0.75 + 0.5 * mottle).min(1.0);
+            let ground = under.lerp(residue * (0.8 + 0.2 * mottle), lying);
+            let standing = far.cover * painted * (1.0 - tracked);
+            ground.lerp(far.colour * (0.94 + 0.12 * mottle), standing)
+        })
+    }
+
+    /// Tilled soil at `spot`, `soil` mottled by `mottle`, as a field drilled
+    /// as `drill` lies at `stage`: freshly turned and dark when ploughed, its
+    /// clods' tops dried paler; raked fine and a little paler once drilled;
+    /// and settled to a dry crust once its crop is up, `tracked` of the spot
+    /// its tramlines' wheel tracks trodden darker. Its furrows and ridges are
+    /// its relief's.
+    fn tilth(
+        &self,
+        spot: &Spot,
+        (drill, stage, tracked): (&Drill, Stage, f64),
+        (soil, mottle): (Vec3, f64),
+    ) -> Vec3 {
+        let (p, width) = (spot.p, spot.width.max(1e-5));
+        let seed = self.seed;
+        let damp = smoothstep(
+            -0.3,
+            0.6,
+            fbm2(p.x / 6.0, p.z / 6.0, seed ^ 0xc3, (2, 0.5, 2.0)),
+        );
+        // How dark the worked soil lies, how far its tops have dried, and
+        // how big its clods are.
+        let (shade, dried, clod) = match stage {
+            Stage::Ploughed => (0.6, 0.3, 0.13),
+            Stage::Drilled => (0.72, 0.25, 0.035),
+            _ => (0.84, 0.4, 0.03),
+        };
+        // Each clod its own shade, the gaps between them in their shadow,
+        // settling to their mean once a pixel spans a few.
+        let crumbs = cells2(p.x / clod, p.z / clod, seed ^ 0xc5, 0.9);
+        let own = (0.8 + 0.4 * unit(crumbs.id))
+            * (1.0 - 0.55 * (1.0 - smoothstep(0.02, 0.14, crumbs.wall())));
+        let clods = CLOD_MEAN + (own - CLOD_MEAN) * (1.0 - smoothstep(0.3, 1.2, width / clod));
+        // A ploughed furrow's floor lies in the slices' shade.
+        let furrowed = if stage == Stage::Ploughed {
+            let (rise, _) = drill.furrow((p.x, p.z)).rise();
+            1.0 + fade(0.3 * (rise - 0.55), width / farmed::FURROW)
+        } else {
+            1.0
+        };
+        // Each pass of the harrow and drill worked its strip a little
+        // differently, which shows as faint strips along the field far off.
+        let passes = if stage == Stage::Ploughed {
+            1.0
+        } else {
+            let (pass, _) = cell(drill.across((p.x, p.z)) / PASS);
+            1.0 + fade(0.14 * (unit(mix32(pass ^ drill.key())) - 0.5), width / PASS)
+        };
+        let patches = 1.0 + 0.1 * fbm2(p.x / 2.5, p.z / 2.5, seed ^ 0xc7, (2, 0.5, 2.0));
+        let worked = soil
+            * (shade
+                * (1.0 - 0.12 * damp)
+                * clods
+                * furrowed
+                * passes
+                * patches
+                * (0.94 + 0.12 * mottle));
+        // Fresh soil shows its own brown; a dried crust greys toward the
+        // light it has bleached in.
+        let grey = Vec3::splat(worked.luminance());
+        let worked = worked.lerp(grey, 0.15 + 0.5 * dried);
+        worked * (1.0 - 0.22 * tracked)
     }
 
     /// A wood's floor: its fallen leaves lying in drifts, each its own shade
@@ -616,12 +788,18 @@ impl Ground {
         let share = |courses: &Courses| {
             courses.nearest(p.x, p.z).map_or(0.0, |near| {
                 let half = 0.5 * near.width;
-                1.0 - smoothstep(half - 0.25 - 0.5 * spot.width, half + 0.25 + 0.5 * spot.width, near.distance)
+                1.0 - smoothstep(
+                    half - 0.25 - 0.5 * spot.width,
+                    half + 0.25 + 0.5 * spot.width,
+                    near.distance,
+                )
             })
         };
         let hedge = self.palette.moss * (0.36 + 0.12 * mottle);
         let wall = self.palette.rock * (0.78 + 0.2 * mottle);
-        colour.lerp(hedge, share(&bounds.hedges)).lerp(wall, share(&bounds.walls))
+        colour
+            .lerp(hedge, share(&bounds.hedges))
+            .lerp(wall, share(&bounds.walls))
     }
 
     /// Tarmac: its stone showing through where wheels wear it, patched and
@@ -656,7 +834,9 @@ impl Ground {
         }
         let (_, dash) = cell(near.along / 9.0);
         let dashed = 1.0 - smoothstep(0.33 - 0.5 * width / 9.0, 0.33 + 0.5 * width / 9.0, dash);
-        let centre = coverage(across.abs(), 0.05, width) * dashed * f64::from(u8::from(near.width >= LINED.1));
+        let centre = coverage(across.abs(), 0.05, width)
+            * dashed
+            * f64::from(u8::from(near.width >= LINED.1));
         let edges = coverage((across.abs() - (half - 0.3)).abs(), 0.05, width);
         colour = colour.lerp(paint, centre.max(edges) * (1.0 - 0.35 * worn));
         colour
@@ -688,7 +868,7 @@ impl Ground {
         let across = near.distance * near.side;
         let rut = [-TRACK_GAUGE, TRACK_GAUGE]
             .iter()
-            .map(|wheel| coverage((across - wheel).abs(), 0.2 + 0.05 * mottle, width))
+            .map(|wheel| coverage((across - wheel).abs(), RUT + 0.05 * mottle, width))
             .fold(0.0, f64::max);
         let earth = self.palette.earth
             * (0.75 + 0.2 * fade(noise2(p.x * 5.0, p.z * 5.0, self.seed ^ 0x81), width * 5.0));

@@ -7,7 +7,7 @@ use crate::tree::Growth;
 
 /// Every kind grown as a tree's stems are: all but the palm, the saguaro and
 /// the fern, each made in a shape of its own.
-const KINDS: [Kind; 15] = [
+const KINDS: [Kind; 16] = [
     Kind::Oak,
     Kind::Maple,
     Kind::Birch,
@@ -18,6 +18,7 @@ const KINDS: [Kind; 15] = [
     Kind::Spruce,
     Kind::Olive,
     Kind::Cherry,
+    Kind::Apple,
     Kind::Hazel,
     Kind::Hawthorn,
     Kind::Box,
@@ -38,6 +39,7 @@ fn grown(kind: Kind, stand: Stand, seed: u64) -> (Prototype, f64) {
             rot: 3,
             edge: 4,
         },
+        fruit: None,
     };
     let mut growth = Growth::new(&species, height, (Season::Summer, stock), seed).expect("grows");
     while !growth.step().expect("grows") {}
@@ -169,4 +171,39 @@ fn a_stumps_shoots_are_leafy_but_in_winter() {
     };
     assert!(leaves(Season::Summer).is_some());
     assert!(leaves(Season::Winter).is_none());
+}
+
+/// An apple tree hangs its fruit beneath its twigs where it bears leaves,
+/// and none once they have fallen.
+#[test]
+fn an_apple_tree_bears_its_fruit_among_its_leaves() {
+    let species = species(Kind::Apple);
+    let height = f64::midpoint(species.height.0, species.height.1);
+    let fruit = Fruit {
+        material: 9,
+        radius: 0.034,
+        share: 0.012,
+    };
+    let apples = |season| {
+        let stock = Stock {
+            bark: 0,
+            leaves: 1,
+            grain: crate::fracture::Grain {
+                wood: 2,
+                rot: 3,
+                edge: 4,
+            },
+            fruit: Some(fruit),
+        };
+        let mut growth = Growth::new(&species, height, (season, stock), 3).expect("grows");
+        while !growth.step().expect("grows") {}
+        let tree = growth.finish().expect("a tree");
+        tree.parts()
+            .iter()
+            .filter(|part| matches!(part, crate::prototype::Part::Tube(tube) if tube.material == fruit.material))
+            .count()
+    };
+    let ripe = apples(Season::Autumn { fallen: 0 });
+    assert!(ripe > 100, "{ripe} apples");
+    assert_eq!(apples(Season::Winter), 0, "apples on a bare tree");
 }

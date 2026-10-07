@@ -26,28 +26,31 @@ world objects. The staged design is `plans/RAYTRACE.md` RT13. The crate is
   exclusion. Rank comes from the square alone, so a village depends on the
   squares about it and no further.
 - **Farmsteads.** A holding no village gathers has its own farmstead, on the
-  best ground near its middle. A farmstead is laid out as a yard squared to the
-  contour or to the way it faces. Its house stands at one end of the front with
-  a garden before it, its barn across the yard, and its byre and sheds as its
-  plan has them: courtyard, ell or loose.
+  best ground near its middle, where any of its ground can be farmed; one
+  whose ground cannot is left to nobody: it has no fields, and its land reads
+  as waste. A farmstead is laid out as a yard squared to the contour, or on
+  level ground to the nearest place a lane may join it from, and opening
+  toward that place. Its house stands at one end of the front with a garden
+  before it and the gate toward the other end, its barn across the yard, and
+  its byre and sheds as its plan has them: courtyard, ell or loose.
 - **Village plots.** A village's plots line the streets that pass it, on both
   sides. Each plot has a frontage, a house set back from the street, front and
-  back gardens, a fence and a gate. They keep clear of each other, the green,
-  the farmsteads, other streets and water.
+  back gardens, and four in five a fence and a gate. They keep clear of each
+  other, the green, the farmsteads, other streets and water.
 
 ## Ways
 
 Ways are ranked: highway, road, lane, track, path.
 
-- **Highways** are the consumer's.
+- **Highways** are the consumer's, kept as given.
 - **Roads** join villages by a relative-neighbourhood graph, so the network
   loops rather than branching as a tree. A village near a highway also takes a
   road to it.
 - **Lanes** join farmsteads to each other and to villages by the same graph. A
-  farmstead hard by a road takes a short lane to it.
-- **Tracks** run from a holding's farmstead to its fields' gateways. A holding
-  whose farm a village gathers starts its tracks from the nearest greater way
-  instead.
+  farmstead hard by a road or a highway takes a short lane to it.
+- **Tracks** run from a holding's farmstead out to one or two of its fields'
+  gateways. A holding whose farm a village gathers starts its tracks from the
+  nearest greater way instead.
 - **Paths** take the Gabriel-graph shortcuts the lanes leave out.
 
 Each way is routed over a lattice about its two ends by `lib/terrain`'s integer
@@ -57,8 +60,9 @@ A\*, priced by its rank:
 - wet ground;
 - water, by what crossing its rank would build.
 
-Each way follows the greater ways its lattice reaches: their points cost a
-third as much, and once laid its line runs on theirs. It keeps clear of
+Each way follows the greater ways its lattice reaches, but for the tracks,
+which nothing follows: their points cost a third as much, and once laid its
+line runs on theirs. It keeps clear of
 farmstead buildings and gardens. Tracks and paths also keep clear of village
 plots.
 
@@ -70,8 +74,9 @@ make it settle. It reads the ground only where it reaches.
 
 The lattice's path is then laid as a line:
 
-1. **Pulled taut.** From each point, the line runs to the farthest point ahead
-   whose straight chord costs no more than the path there.
+1. **Pulled taut.** From each point, the line runs as far ahead as a chord that
+   costs no more than the path there reaches: it gallops ahead, doubling the
+   reach, and bisects back once a chord costs more.
 2. **Smoothed.** Corners are cut wherever the cut costs no more than the corner,
    so smoothing never carries a way into a building or water.
 3. **Wandered.** The line wanders as its rank does: a path most, a highway not
@@ -91,7 +96,7 @@ field is therefore the block's land within one convex cell of the holding.
 A boundary runs wherever a field meets what is not that field:
 
 - another field, across a cut or a holding's edge (the lesser holding lays the
-  edge);
+  edge, or the greater where nobody farms the lesser);
 - a bounded way's side;
 - a track's end;
 - a farmstead's yard.
@@ -103,6 +108,12 @@ Water and village plots bound a field by themselves.
 A boundary's kind is drawn by the ground at its middle and the region's
 `Style`: walls where stone is at hand, ditches where the ground is wet, fences
 near woods, hedges on deep soil. Each holding keeps mostly to its own custom.
+Its height is drawn with its kind, as `Kind::stands` has a kept one stand: a
+wall 1.25–1.7 m to the top of its cap, a hedge cut to 1.7–2.6 m or, three times
+in ten, grown out to 2.6–3.8 m, a fence 1.12–1.32 m to its posts' tops, a ditch
+or nothing not at all. `Kind::porosity` says how much of the wind each lets
+through: none through a wall, half through a hedge, most through a fence.
+`boundary::standing` gives the stretches of a boundary its gaps leave standing.
 
 Every field is entered by a gateway, chosen in this order:
 
@@ -117,16 +128,16 @@ A path crosses each boundary it meets by a stile.
 
 Each field's use is drawn from the region's `Mix`, weighed by its ground:
 
-- arable on good level ground near the farm;
+- arable on dry, level ground near the farm;
 - pasture on slopes and wet ground;
-- orchards and vineyards on warm slopes;
-- woodlots and overgrown land on the poorest ground.
+- orchards on warm, dry ground near the farm, vineyards on warm, dry slopes;
+- woodlots and overgrown land on steep or wet ground far from the farm.
 
 A field cut for hay or straw has one kind of bale.
 
 ## Laying a region
 
-A `Laying` lays a region out a unit at a time across a `JobRunner`, in this
+A `Laying` lays a region out a step at a time across a `JobRunner`, in this
 order:
 
 1. settlements and yards;
@@ -138,8 +149,15 @@ order:
 7. gates and stiles;
 8. uses.
 
-Only as many routes run at once as the runner is wide, so the working memory
-is bounded by the runner's width, not the region's size.
+It reads the land through its consumer's `Ground`: the ground's height and the
+water standing on it (`Waters`, all that `Layout::side_at` and `parcel_at`
+read afterwards), and how wet, stony, wooded and fertile it lies. A step
+settles a bounded number of route points, at most 64 routes searching at
+once, or lays a bounded batch of holdings, ways or fields a core. The step
+between two phases is one pass over the region's holdings or ways, a few
+milliseconds for the lands the ray tracer lays. The layout holds every
+holding, way, boundary and field of its region, so its memory grows with the
+region; what the routes search over is bounded by how many search at once.
 
 Each part is worked out over as much land as its making reads. For example, a
 lane is routed wherever a track or path may follow it, and a field's edge reads

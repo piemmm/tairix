@@ -674,9 +674,9 @@ pub(crate) fn slope(p: Vec3, step: f64, field: impl Fn(Vec3) -> f64) -> Vec3 {
 fn differences(p: Vec3, step: f64, field: impl Fn(Vec3) -> f64) -> Vec3 {
     // Four samples at a tetrahedron's corners find as much as six along the
     // axes would.
-    TETRAHEDRON
-        .iter()
-        .fold(Vec3::ZERO, |sum, &corner| sum + corner * field(p + corner * step))
+    TETRAHEDRON.iter().fold(Vec3::ZERO, |sum, &corner| {
+        sum + corner * field(p + corner * step)
+    })
 }
 
 /// The corners of a tetrahedron about the origin, each a step along every

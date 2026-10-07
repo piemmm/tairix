@@ -542,7 +542,11 @@ fn dunes(seed: u64) -> Option<(Stage, Land, Vantage, Dice)> {
         let survey = landing.build.survey(&stage.fields)?;
         let (sited, siting) = landing.scheme.site(&mut dice, &survey, &runner)?;
         vantage = sited;
-        landing.build.site(siting.focus, siting.lead, (siting.path.as_deref(), &siting.cuttings))?;
+        landing.build.site(
+            siting.focus,
+            siting.lead,
+            (siting.path.as_deref(), &siting.cuttings),
+        )?;
     }
     let land = landing.build.finish()?;
     Some((stage, land, vantage?, dice))
@@ -557,7 +561,9 @@ fn a_deserts_pyramids_stand_clear_of_its_road() {
         let (mut stage, land, vantage, mut dice) = dunes(seed).expect("a sea of dunes");
         // Whether its road runs through the ground a pyramid is drawn on.
         let crossed = (8..28)
-            .flat_map(|step| (-5..=5).map(move |turn| (50.0 * f64::from(step), 0.1 * f64::from(turn))))
+            .flat_map(|step| {
+                (-5..=5).map(move |turn| (50.0 * f64::from(step), 0.1 * f64::from(turn)))
+            })
             .map(|(distance, turn)| ahead(&vantage, distance, turn))
             .any(|(x, z)| land.grids.lie(&stage.fields, x, z).road > 0.05);
         roads += usize::from(crossed);
@@ -573,9 +579,15 @@ fn a_deserts_pyramids_stand_clear_of_its_road() {
             }
             for (x, z) in rim_and_middle(centre, reach) {
                 let lie = land.grids.lie(&stage.fields, x, z);
-                assert!(lie.road <= 0.05 && lie.path <= 0.3, "{seed}: a pyramid stands on a way at {x}, {z}");
+                assert!(
+                    lie.road <= 0.05 && lie.path <= 0.3,
+                    "{seed}: a pyramid stands on a way at {x}, {z}"
+                );
             }
         }
     }
-    assert!(roads > 0, "no desert's road ran where its pyramids are drawn");
+    assert!(
+        roads > 0,
+        "no desert's road ran where its pyramids are drawn"
+    );
 }

@@ -12,7 +12,7 @@ use crate::heightfield::Attributes;
 use crate::shape::Shape;
 
 /// Dry ground neither worn nor built up, on no road, bare of snow.
-const DRY: Attributes = [0, 128, 0, 0, 255, 0];
+const DRY: Attributes = [0, 128, 0, 0, 255, 0, 0, 0];
 
 /// The stage's stones, as where each lies and how large.
 fn stones(stage: &Stage) -> Vec<((f64, f64), f64)> {
@@ -121,7 +121,7 @@ fn scree_lies_below_a_crag_and_the_larger_rolled_the_further() {
 
 #[test]
 fn pebbles_drift_only_where_water_washed_the_ground() {
-    let washed: Attributes = [140, 160, 0, 0, 255, 0];
+    let washed: Attributes = [140, 160, 0, 0, 255, 0, 0, 0];
     for (lie, drifted) in [(DRY, false), (washed, true)] {
         let mut stage = Stage::new(Detail::Simple.densities()).expect("a stage");
         let land = land(&mut stage, &|_, _| 0.0, lie);

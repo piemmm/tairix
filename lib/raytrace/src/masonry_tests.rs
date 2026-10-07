@@ -2,7 +2,7 @@
 //! weathered as water and age leave it.
 
 use super::*;
-use crate::heightfield::CHANNELS;
+use crate::heightfield::{Grows, QUANTITIES};
 
 fn masonry(unit: Unit) -> Masonry {
     Masonry {
@@ -15,6 +15,8 @@ fn masonry(unit: Unit) -> Masonry {
         foot: 0.0,
         unit,
         seed: 3,
+        massed: None,
+        snow: 0.0,
     }
 }
 
@@ -31,7 +33,8 @@ fn spot(mark: u32, (p, normal): (Vec3, Vec3), (along, uv): (f64, (f64, f64))) ->
         girth: 0.0,
         instance: 0,
         front: true,
-        ground: [0.0; CHANNELS],
+        ground: [0.0; QUANTITIES],
+        grows: Grows::default(),
         thatch: 0.0,
         cover: None,
     }
@@ -71,7 +74,9 @@ fn each_unit_wears_its_own_shade() {
 fn a_field_stone_is_blotched_and_wanders_further_in_shade_than_a_quarried_one() {
     let (quarried, gathered) = (masonry(Unit::Stone), masonry(Unit::Field));
     let range = |shades: &mut dyn Iterator<Item = f64>| {
-        shades.fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), shade| (low.min(shade), high.max(shade)))
+        shades.fold((f64::INFINITY, f64::NEG_INFINITY), |(low, high), shade| {
+            (low.min(shade), high.max(shade))
+        })
     };
     let between = |stone: &Masonry| {
         let (low, high) = range(&mut (0..64).map(|mark| stone.colour(&face(mark)).luminance()));
@@ -87,12 +92,22 @@ fn a_field_stone_is_blotched_and_wanders_further_in_shade_than_a_quarried_one() 
         let (low, high) = range(&mut (0..64).map(|index| {
             let draw = |salt: u32| unit(mix32(index ^ salt)) - 0.5;
             let p = Vec3::new(0.3 * draw(1), 1.0 + 0.2 * draw(2), 0.0);
-            stone.colour(&spot(7, (p, Vec3::new(0.0, 0.0, 1.0)), (2.0, (0.0, 0.0)))).luminance()
+            stone
+                .colour(&spot(7, (p, Vec3::new(0.0, 0.0, 1.0)), (2.0, (0.0, 0.0))))
+                .luminance()
         }));
         (high - low) / high
     };
-    assert!(across(&gathered) > 0.15, "a field stone's face is even: {}", across(&gathered));
-    assert!(across(&quarried) < 0.02, "a quarried stone's face is blotched: {}", across(&quarried));
+    assert!(
+        across(&gathered) > 0.15,
+        "a field stone's face is even: {}",
+        across(&gathered)
+    );
+    assert!(
+        across(&quarried) < 0.02,
+        "a quarried stone's face is blotched: {}",
+        across(&quarried)
+    );
 }
 
 #[test]
@@ -191,5 +206,58 @@ fn a_brick_is_burnt_at_its_end_and_keeps_old_mortar_at_its_edges() {
     assert!(
         edges > middle * 1.2,
         "{edges} at its edges against {middle} in its middle"
+    );
+}
+
+/// Masonry too far off to lay stone by stone is cut into cells a stone
+/// across, each coloured as a stone, with dark voids between them: up close
+/// the cells differ, and they settle to the mean of them, voids and all,
+/// once a cell is finer than a pixel.
+#[test]
+fn massed_masonry_settles_to_the_mean_of_its_cells_and_their_voids() {
+    let field = Masonry {
+        weathering: 0.6,
+        ..masonry(Unit::Field)
+    };
+    let massed = field.massed(0.2);
+    let at = |p: Vec3, width: f64| {
+        massed.colour(&Spot {
+            width,
+            ..spot(0, (p, Vec3::new(1.0, 0.0, 0.0)), (0.0, (0.0, 0.0)))
+        })
+    };
+    let places = (0..2000u32).map(|index| {
+        let draw = |salt: u32| unit(mix32(index.wrapping_mul(0x85EB_CA6B) ^ salt));
+        Vec3::new(draw(1), draw(2), draw(3)) * 9.0
+    });
+    let near: alloc::vec::Vec<Vec3> = places.map(|p| at(p, 1e-4)).collect();
+    let average = near.iter().fold(Vec3::ZERO, |sum, &colour| sum + colour) * (1.0 / 2000.0);
+    let far = at(Vec3::new(1.0, 2.0, 3.0), 1.0);
+    assert!(
+        (average - far).length() < 0.04 * far.length(),
+        "{average:?} up close on the mean, {far:?} far off"
+    );
+    let darkest = near
+        .iter()
+        .map(|colour| colour.luminance())
+        .fold(f64::INFINITY, f64::min);
+    let lightest = near
+        .iter()
+        .map(|colour| colour.luminance())
+        .fold(0.0, f64::max);
+    assert!(
+        darkest < 0.5 * lightest,
+        "no voids or no stones between {darkest} and {lightest}"
+    );
+    let laid = (0..512u32).fold(Vec3::ZERO, |sum, mark| {
+        sum + field.colour(&spot(
+            mix32(mark),
+            (Vec3::new(0.3, 1.0, 0.0), Vec3::new(1.0, 0.0, 0.0)),
+            (0.0, (0.0, 0.0)),
+        ))
+    }) * (1.0 / 512.0);
+    assert!(
+        far.luminance() < laid.luminance(),
+        "massed {far:?} is no darker than its stones {laid:?}"
     );
 }

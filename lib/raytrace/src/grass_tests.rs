@@ -30,14 +30,19 @@ const MEADOW: GrassKind = GrassKind {
     thickness: 1.0,
     tufted: 0.5,
     stems: 0.15,
-    head: Head::Plume,
+    head: Some(Head::Plume),
+    nod: 0.0,
     habit: Habit::Open,
     share: 1.0,
+    rows: 0.0,
+    stood: None,
 };
 
 fn grass(flowers: f64) -> Grass {
     Grass {
         kinds: [Some(MEADOW), None, None, None],
+        sown: Sown::NONE,
+        grazing: None,
         shoots: 700.0,
         flowers,
     }
@@ -106,6 +111,7 @@ fn met(lawn: &Lawn, field: Heightfield, (rays, height): (u32, f64)) -> Vec<(Ray,
         prototypes: &[],
         lawns: &[],
         far_woods: &[],
+        stands: &[],
         materials: &[],
         view: None,
     };
@@ -228,6 +234,7 @@ fn what_a_cover_holds_is_met_nearest_first() {
         prototypes: &[],
         lawns: &[],
         far_woods: &[],
+        stands: &[],
         materials: &[],
         view: None,
     };
@@ -283,6 +290,7 @@ fn rays_crossing_a_lawn_together_meet_what_each_meets_alone() {
         prototypes: &[],
         lawns: &[],
         far_woods: &[],
+        stands: &[],
         materials: &[],
         view: None,
     };
@@ -438,7 +446,11 @@ fn fallen_leaves_slide_off_a_steep_bank() {
 fn grass_shows_only_what_stands_above_the_snow() {
     let tallest = |depth: f64| {
         let kept = crate::snow::kept(depth);
-        let hits = met(&lawn(0.0), level(Some([0, 128, 0, 0, 255, kept])), (3000, 0.6));
+        let hits = met(
+            &lawn(0.0),
+            level(Some([0, 128, 0, 0, 255, kept, 0, 0])),
+            (3000, 0.6),
+        );
         hits.iter()
             .map(|(ray, hit)| ray.at(hit.t).y)
             .fold(0.0f64, f64::max)
@@ -449,11 +461,97 @@ fn grass_shows_only_what_stands_above_the_snow() {
     assert!(deep.abs() < 1e-12, "buried: {deep}");
 }
 
+/// Stock bite a pasture's sward to one height and eat its stems, but about a
+/// pat it stands rank and in seed, and beneath one nothing grows; packed for
+/// a canopy grid and read back, a stand keeps how far it was bitten.
+#[test]
+fn stock_bite_a_pasture_short_but_shun_their_pats() {
+    let field = level(Some([0, 128, 0, 0, 255, 0, Grown::Grazed.code(), 0]));
+    let (seed, pat) = (0..64)
+        .find_map(|seed| {
+            grazing::about((0.0, 0.0), 2.4, seed)
+                .find(|pat| (0.35..0.6).contains(&pat.age))
+                .map(|pat| (seed, pat))
+        })
+        .expect("a pat some weeks old on the lawn");
+    let grass = Grass {
+        grazing: Some(seed),
+        ..grass(0.0)
+    };
+    // Cells fine enough that the one about a pat's middle lies beneath it.
+    let lawn = Lawn {
+        from: (-3.0, -3.0),
+        to: (3.0, 3.0),
+        ..cover(&Cover::Grass(grass), 0.05)
+    };
+    assert!(
+        stand_at(&lawn, &field, pat.at).is_none(),
+        "grass grows beneath a pat"
+    );
+    let stems = |stand: &Stand| {
+        (0..400)
+            .filter(|&index| lawn.sprout(stand, (7, index)).stem)
+            .count()
+    };
+    let (beside, most) = (-12..=12)
+        .flat_map(|row| (-12..=12).map(move |column| (f64::from(column), f64::from(row))))
+        .map(|(column, row)| {
+            lawn.cell_of((pat.at.0 + column * lawn.cell, pat.at.1 + row * lawn.cell))
+                .1
+        })
+        .filter_map(|middle| Some((middle, grazing::rank(middle, seed)?)))
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .expect("grass about the pat");
+    assert!(most > 0.8, "its grass stands only {most} rank");
+    let rank = stand_at(&lawn, &field, beside).expect("rank grass beside the pat");
+    let tallest = MEADOW.height.1 * rank.stature;
+    assert!(
+        rank.bitten < 0.2 && tallest > GRAZED && tallest <= SHUNNED + 1e-9,
+        "{rank:?}"
+    );
+    assert!(stems(&rank) > 0, "no stems beside the pat");
+    let grazed = (-5..=5)
+        .flat_map(|row| (-5..=5).map(move |column| (0.5 * f64::from(column), 0.5 * f64::from(row))))
+        .map(|at| lawn.cell_of(at).1)
+        .find(|&middle| grazing::rank(middle, seed) == Some(0.0))
+        .expect("grazed ground clear of every pat");
+    let bitten = stand_at(&lawn, &field, grazed).expect("a grazed sward");
+    assert!(
+        bitten.bitten > 0.999 && MEADOW.height.1 * bitten.stature <= GRAZED + 1e-9,
+        "{bitten:?}"
+    );
+    assert_eq!(stems(&bitten), 0, "a stem stands where stock graze");
+    for stand in [rank, bitten] {
+        let kept = lawn
+            .unpack(&grass, lawn.pack(&grass, &stand), grazed)
+            .expect("kept");
+        assert!(
+            (kept.bitten - stand.bitten).abs() <= 0.5 / 255.0 + 1e-12,
+            "{kept:?} against {stand:?}"
+        );
+    }
+}
+
 #[test]
 fn nothing_grows_on_a_road_and_less_on_a_path() {
-    let open = met(&lawn(0.0), level(Some([0, 128, 0, 0, 255, 0])), (3000, 0.6)).len();
-    let road = met(&lawn(0.0), level(Some([0, 128, 255, 0, 255, 0])), (3000, 0.6)).len();
-    let path = met(&lawn(0.0), level(Some([0, 128, 0, 241, 255, 0])), (3000, 0.6)).len();
+    let open = met(
+        &lawn(0.0),
+        level(Some([0, 128, 0, 0, 255, 0, 0, 0])),
+        (3000, 0.6),
+    )
+    .len();
+    let road = met(
+        &lawn(0.0),
+        level(Some([0, 128, 255, 0, 255, 0, 0, 0])),
+        (3000, 0.6),
+    )
+    .len();
+    let path = met(
+        &lawn(0.0),
+        level(Some([0, 128, 0, 241, 255, 0, 0, 0])),
+        (3000, 0.6),
+    )
+    .len();
     assert_eq!(road, 0, "no grass on a road");
     assert!(
         path < open && path > 0,
@@ -507,6 +605,7 @@ fn nothing_is_met_above_the_shoots_or_beside_the_lawn() {
         prototypes: &[],
         lawns: &[],
         far_woods: &[],
+        stands: &[],
         materials: &[],
         view: None,
     };
@@ -536,6 +635,7 @@ fn a_finer_lawn_keeps_the_ground_it_covers_to_itself() {
         prototypes: &[],
         lawns: &[],
         far_woods: &[],
+        stands: &[],
         materials: &[],
         view: None,
     };
@@ -786,7 +886,7 @@ fn greening(edge: f64) -> Heightfield {
     let attributes = field.rows_mut(0..side).1;
     for (index, slot) in attributes.iter_mut().enumerate() {
         let x = -4.0 + 0.5 * f64::from(u32::try_from(index % side).expect("a column"));
-        *slot = [0, 128, 0, 0, if x < edge { 255 } else { 0 }, 0];
+        *slot = [0, 128, 0, 0, if x < edge { 255 } else { 0 }, 0, 0, 0];
     }
     field.seal();
     field
@@ -823,7 +923,7 @@ fn a_swards_shade_on_the_ground_runs_smoothly_from_cell_to_cell() {
 fn grass_thinning_out_grows_short_as_well_as_sparse() {
     let lawn = lawn(0.0);
     let statures = |green: u8| {
-        let field = level(Some([0, 128, 0, 0, green, 0]));
+        let field = level(Some([0, 128, 0, 0, green, 0, 0, 0]));
         let (count, total) = (0..60)
             .filter_map(|index| {
                 let at = (-0.95 + 0.032 * f64::from(index), 0.3);
@@ -881,7 +981,7 @@ fn canopy_grid(
 #[test]
 fn a_blocks_canopy_is_read_from_its_own_vertex() {
     let block = 2u32;
-    let ground = || level(Some([0, 128, 0, 0, 255, 0]));
+    let ground = || level(Some([0, 128, 0, 0, 255, 0, 0, 0]));
     let green = ground();
     let mut lawn = lawn(0.0);
     let grid = canopy_grid(&lawn, block, &|at| lawn.canopy_at(&green, at, block));
@@ -924,7 +1024,7 @@ fn a_blocks_canopy_is_read_from_its_own_vertex() {
 #[test]
 fn a_large_lawns_canopy_is_read_from_its_grid() {
     let block = 2u32;
-    let green = level(Some([0, 128, 0, 0, 255, 0]));
+    let green = level(Some([0, 128, 0, 0, 255, 0, 0, 0]));
     let mut lawn = lawn(0.0);
     let grid = canopy_grid(&lawn, block, &|at| lawn.canopy_at(&green, at, block));
     lawn.tops = Some(Tops { field: 1, block });
@@ -933,7 +1033,7 @@ fn a_large_lawns_canopy_is_read_from_its_grid() {
     let grown = lawn.canopy(at, &fields).expect("grass over the point");
     let [_, grid] = fields;
     let kept = lawn
-        .canopy(at, &[level(Some([0, 128, 0, 0, 0, 0])), grid])
+        .canopy(at, &[level(Some([0, 128, 0, 0, 0, 0, 0, 0])), grid])
         .expect("the grid still keeps it");
     assert_eq!(grown.density.to_bits(), kept.density.to_bits());
     assert_eq!(grown.up.to_bits(), kept.up.to_bits());
@@ -951,6 +1051,7 @@ fn a_lawn_is_met_only_within_its_box() {
         prototypes: &[],
         lawns: &lawns,
         far_woods: &[],
+        stands: &[],
         materials: &[],
         view: None,
     };

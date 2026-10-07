@@ -47,7 +47,7 @@ fn rising(slope: f64) -> Vec<Heightfield> {
             let row = crate::vector::real(index / side);
             *height = crate::vector::single(slope * (-2000.0 + row * 4000.0 / 512.0));
         }
-        attributes.fill([0, 128, 0, 0, 255, 0]);
+        attributes.fill([0, 128, 0, 0, 255, 0, 0, 0]);
     }
     field.seal();
     vec![field]
@@ -146,6 +146,7 @@ fn geometry<'a>(
         prototypes,
         lawns: &[],
         far_woods: woods,
+        stands: &[],
         materials: &[],
         view: None,
     }

@@ -13,21 +13,41 @@ fn key() -> Key {
 
 #[test]
 fn no_two_villages_stand_nearer_than_their_exclusion_and_none_on_water() {
-    let villages = villages(key(), &TIER, &Hills, Rect::around(Point::new(0.0, 0.0), 12_000.0)).expect("room");
+    let villages = villages(
+        key(),
+        &TIER,
+        &Hills,
+        Rect::around(Point::new(0.0, 0.0), 12_000.0),
+    )
+    .expect("room");
     assert!(villages.len() > 20, "{} villages", villages.len());
     for (index, a) in villages.iter().enumerate() {
         assert!(!ground::wet(&Hills, a.at));
         for b in &villages[index + 1..] {
-            assert!((a.at - b.at).length() >= TIER.exclusion * TIER.spacing, "{a:?} {b:?}");
+            assert!(
+                (a.at - b.at).length() >= TIER.exclusion * TIER.spacing,
+                "{a:?} {b:?}"
+            );
         }
     }
 }
 
 #[test]
 fn villages_laid_in_pieces_are_those_laid_whole() {
-    let whole = villages(key(), &TIER, &Hills, Rect::around(Point::new(0.0, 0.0), 6000.0)).expect("room");
+    let whole = villages(
+        key(),
+        &TIER,
+        &Hills,
+        Rect::around(Point::new(0.0, 0.0), 6000.0),
+    )
+    .expect("room");
     let mut pieces = Vec::new();
-    for (x, y) in [(-3000.0, -3000.0), (3000.0, -3000.0), (-3000.0, 3000.0), (3000.0, 3000.0)] {
+    for (x, y) in [
+        (-3000.0, -3000.0),
+        (3000.0, -3000.0),
+        (-3000.0, 3000.0),
+        (3000.0, 3000.0),
+    ] {
         let piece = Rect::around(Point::new(x, y), 3000.0);
         for village in villages(key(), &TIER, &Hills, piece).expect("room") {
             if !pieces.contains(&village) {
@@ -56,10 +76,13 @@ fn a_holding_a_village_gathers_has_no_farmstead_and_any_other_stands_in_its_own_
             gathered += 1;
         } else if let Some(farm) = farm {
             assert_eq!(farm.settled, Settled::Farmstead(holding));
-            assert!(lattice.outline(holding).contains(farm.at));
+            assert!(lattice.holds(holding, farm.at));
             assert!(!ground::wet(&Hills, farm.at));
             farms += 1;
         }
     }
-    assert!(gathered > 0 && farms > 100, "{gathered} gathered, {farms} farms");
+    assert!(
+        gathered > 0 && farms > 100,
+        "{gathered} gathered, {farms} farms"
+    );
 }

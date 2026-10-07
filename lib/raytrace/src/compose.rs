@@ -12,6 +12,7 @@ mod architecture;
 mod chains;
 mod courses;
 mod cracked;
+mod crops;
 mod fields;
 mod footprint;
 mod landscape;
@@ -59,6 +60,7 @@ use crate::shade::{Crown, Shades};
 use crate::shape::{Aabb, Face, Geometry, Shape};
 use crate::sky::{Dome, Sky};
 use crate::snowman::{carrot, stick, Ball, Rolling};
+use crate::stand::Stand;
 use crate::terrain::Sea;
 use crate::tree::{fern, palm, Growth, Season, Species, Stock};
 use crate::vector::{real, share, Frame, Pose, Ray, Vec3};
@@ -341,13 +343,11 @@ impl Work {
                     Self::Rolling(rolling)
                 }
             }
-            Self::Indexing(mut building) => {
-                if building.step(BUILD_UNIT) {
-                    Self::Grown(building.finish())
-                } else {
-                    Self::Indexing(building)
-                }
-            }
+            Self::Indexing(mut building) => match building.step(BUILD_UNIT) {
+                Some(true) => building.finish().map_or(Self::Refused, Self::Grown),
+                Some(false) => Self::Indexing(building),
+                None => Self::Refused,
+            },
             done @ (Self::Grown(_) | Self::Refused) => done,
         };
     }
@@ -1014,6 +1014,8 @@ struct Stage {
     /// measured by grow.
     far_woods: Vec<FarWood>,
     beyond: Vec<Matching>,
+    /// The fields' crops standing as plants about the eye.
+    stands: Vec<Stand>,
     /// The prototypes planned, grown in order into `prototypes` before the
     /// scene is traced, and the structures laid unit by unit among them.
     recipes: Vec<Recipe>,
@@ -1033,6 +1035,10 @@ struct Stage {
     /// A stream's bed, laid with the water's edge.
     bed: Option<Bed>,
     sward: Option<Lawning>,
+    /// A land's bridges, laid before anything grows on it, and a farmed
+    /// land's boundaries and woodlots, set out before its woods.
+    bridging: Option<landscape::Bridging>,
+    fielding: Option<fields::Fielding>,
     /// The shade the woods cast once they stand.
     shades: Option<Shades>,
     /// Around every piece the camera frames.
@@ -1061,6 +1067,7 @@ const MAX_LIGHTS: usize = 12;
 const MAX_PROTOTYPES: usize = 96;
 const MAX_WOODS: usize = 8;
 const MAX_LAWNS: usize = 16;
+const MAX_STANDS: usize = 16;
 
 /// How much of the light crossing a soap bubble its skin lets through, the
 /// rest reflected by its two faces.
@@ -1081,6 +1088,7 @@ impl Stage {
             lawns: Vec::new(),
             far_woods: Vec::new(),
             beyond: Vec::new(),
+            stands: Vec::new(),
             recipes: Vec::new(),
             assembled: VecDeque::new(),
             fills: Vec::new(),
@@ -1092,6 +1100,8 @@ impl Stage {
             margins: None,
             bed: None,
             sward: None,
+            bridging: None,
+            fielding: None,
             shades: None,
             subject: Aabb::EMPTY,
             pixel: MIDDLING_FOV / 1080.0,
@@ -1113,6 +1123,7 @@ impl Stage {
             prototypes: &self.prototypes,
             lawns: &self.lawns,
             far_woods: &self.far_woods,
+            stands: &self.stands,
             materials: &self.materials,
             view: None,
         }
@@ -1392,6 +1403,20 @@ impl Stage {
         Some(())
     }
 
+    /// Trace `stand`, a field's crop standing as plants, as an object of its
+    /// own, its plants' parts in their own materials or `material`. `None`
+    /// when the stage will not hold it.
+    fn stand(&mut self, stand: Stand, material: usize) -> Option<()> {
+        let index = u32::try_from(push(&mut self.stands, MAX_STANDS, stand)?).ok()?;
+        self.add(
+            Shape::Stand { stand: index },
+            material,
+            Pose::new(Vec3::ZERO, Frame::WORLD),
+            false,
+        )
+        .map(|_| ())
+    }
+
     /// How many more objects the stage will hold.
     const fn room(&self) -> usize {
         self.densities.objects.saturating_sub(self.objects.len())
@@ -1483,6 +1508,7 @@ impl Stage {
             prototypes: self.prototypes,
             lawns: self.lawns,
             far_woods: self.far_woods,
+            stands: self.stands,
             materials: self.materials,
             lights: self.lights,
             sky: look.sky,

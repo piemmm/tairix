@@ -154,7 +154,13 @@ fn a_built_land_lies_as_its_grids_hold_it() {
         }
     }
     for course in 0..land.ways.of(Surface::Track).len() {
-        for mark in land.ways.of(Surface::Track).course(course).iter().step_by(4) {
+        for mark in land
+            .ways
+            .of(Surface::Track)
+            .course(course)
+            .iter()
+            .step_by(4)
+        {
             if land.grids.lie(&fields, mark.x, mark.z).road > 0.5 {
                 on_road += 1;
             }
@@ -266,14 +272,18 @@ fn a_roads_edge_thins_to_plain_ground_and_is_never_read_as_a_path() {
         let (_, attributes) = grid.rows_mut(0..side);
         for (index, slot) in attributes.iter_mut().enumerate() {
             let road = if index % side == 0 { 255 } else { 0 };
-            *slot = [0, 128, road, 0, 255, 0];
+            *slot = [0, 128, road, 0, 255, 0, 0, 0];
         }
     }
     grid.seal();
     for step in 0..=20u32 {
         let x = f64::from(step) / 20.0;
         let lie = lie_on(&grid, x, 1.5);
-        assert!((lie.road - (1.0 - x)).abs() < 1e-9, "at {x}: road {}", lie.road);
+        assert!(
+            (lie.road - (1.0 - x)).abs() < 1e-9,
+            "at {x}: road {}",
+            lie.road
+        );
         assert!(lie.path == 0.0, "at {x}: read as a path {}", lie.path);
     }
 }
@@ -504,7 +514,7 @@ fn a_channel_stands_as_carved_against_the_droplets() {
                 "({x}, {z}): {height} against the bed's {}",
                 section.bed(across)
             );
-            let [_, sediment, _, _, _, _] = grid.attributes_of(column, row);
+            let [_, sediment, ..] = grid.attributes_of(column, row);
             let sediment = 2.0 * f64::from(sediment) / 255.0 - 1.0;
             assert!(
                 (sediment - banked.laid(across)).abs() < 0.01,
@@ -745,7 +755,7 @@ fn snow_lies_on_a_land_as_the_wind_drifted_it() {
     let (mut depths, mut deepest, mut thinnest) = (Vec::new(), 0.0f64, f64::INFINITY);
     for row in (8..side - 8).step_by(7) {
         for column in (8..side - 8).step_by(7) {
-            let [_, _, _, _, green, kept] = snowy.attributes_of(column, row);
+            let [_, _, _, _, green, kept, ..] = snowy.attributes_of(column, row);
             let depth = snow::depth_of(f64::from(kept) / 255.0);
             let at = row * side + column;
             let risen = f64::from(snowy.heights()[at] - bare.heights()[at]);
@@ -837,7 +847,10 @@ fn a_bridges_deck_clears_its_river_and_carries_its_road_level() {
             let at = |mark: &Mark| {
                 course
                     .iter()
-                    .position(|other| other.x == mark.x && other.z == mark.z)
+                    .position(|other| {
+                        other.x.to_bits() == mark.x.to_bits()
+                            && other.z.to_bits() == mark.z.to_bits()
+                    })
                     .expect("a crossing's ends lie on its road")
             };
             let (from, to) = (at(&crossing.from), at(&crossing.to));

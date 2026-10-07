@@ -16,7 +16,7 @@ use crate::cover::{Cover, Substrate};
 use crate::masonry::{Masonry, Unit};
 use crate::material::{Finish, Material, Relief};
 use crate::pigment::Pigment;
-use crate::prototype::{Assembly, Building, Part};
+use crate::prototype::{Assembly, Building, Mesh, Part};
 use crate::sample::{mix32, unit};
 use crate::shape::Shape;
 use crate::solid::{Form, Solid, Wear};
@@ -31,8 +31,6 @@ pub(super) enum Quarry {
     Sandstone,
     RedSandstone,
     Granite,
-    /// Split thin for a roof: blue-grey, fine-grained, barely weathering.
-    Slate,
 }
 
 impl Quarry {
@@ -78,12 +76,6 @@ impl Quarry {
                 220.0,
                 0.08,
             ),
-            Self::Slate => (
-                [0x4A_50_58, 0x3A_3E_46],
-                [0x2E_32_38, 0x62_68_70],
-                1400.0,
-                0.08,
-            ),
         }
     }
 
@@ -94,14 +86,14 @@ impl Quarry {
             Self::Marble => 0.8,
             Self::Limestone => 0.7,
             Self::Sandstone | Self::RedSandstone => 0.85,
-            Self::Granite | Self::Slate => 0.15,
+            Self::Granite => 0.15,
         }
     }
 
     const fn substrate(self) -> Substrate {
         match self {
             Self::Marble | Self::Limestone => Substrate::Calcareous,
-            Self::Sandstone | Self::RedSandstone | Self::Granite | Self::Slate => Substrate::Siliceous,
+            Self::Sandstone | Self::RedSandstone | Self::Granite => Substrate::Siliceous,
         }
     }
 
@@ -110,7 +102,7 @@ impl Quarry {
     const fn roughness(self) -> f64 {
         match self {
             Self::Marble => 0.45,
-            Self::Granite | Self::Slate => 0.6,
+            Self::Granite => 0.6,
             Self::Limestone | Self::Sandstone | Self::RedSandstone => 0.85,
         }
     }
@@ -252,6 +244,7 @@ impl Stage {
             foot: exposure.foot,
             paint,
             seed: dice.seed(),
+            snow: 0.0,
         };
         let material = Material::new(
             Pigment::Timber(timber),
@@ -261,8 +254,11 @@ impl Stage {
         )
         .with_relief(Relief::grain(0.04, 90.0, dice.seed()));
         let wood = u16::try_from(self.material(material)?).ok()?;
-        let cover = match grown(dice, (age, exposure), Substrate::Siliceous) {
-            Some(cover) => Some(u16::try_from(self.material(Material::new(Pigment::Cover(cover), Finish::Matte))?).ok()?),
+        let cover = match grown(dice, (age, exposure), (Substrate::Siliceous, false)) {
+            Some(cover) => Some(
+                u16::try_from(self.material(Material::new(Pigment::Cover(cover), Finish::Matte))?)
+                    .ok()?,
+            ),
             None => None,
         };
         Some(Stonework {
@@ -285,7 +281,7 @@ impl Stage {
         (substrate, softness): (Substrate, f64),
     ) -> Option<Stonework> {
         let mortar = self.mortar(dice, (age, exposure))?;
-        let cover = match grown(dice, (age, exposure), substrate) {
+        let cover = match grown(dice, (age, exposure), (substrate, true)) {
             Some(cover) => {
                 let material = Material::new(Pigment::Cover(cover), Finish::Matte);
                 Some(u16::try_from(self.material(material)?).ok()?)
@@ -318,6 +314,8 @@ impl Stage {
             foot: exposure.foot,
             unit,
             seed: dice.seed(),
+            massed: None,
+            snow: 0.0,
         };
         let material = Material::new(
             Pigment::Masonry(masonry),
@@ -344,11 +342,12 @@ impl Stage {
 }
 
 /// The cover a structure `age` old has grown where `exposure` has it, on
-/// stone of `substrate`, if anything has grown on it yet.
+/// units of `substrate` meeting in joints where `jointed`, if anything has
+/// grown on it yet.
 fn grown(
     dice: &mut Dice,
     (age, exposure): (f64, Weathering),
-    substrate: Substrate,
+    (substrate, jointed): (Substrate, bool),
 ) -> Option<Cover> {
     let moss = age * exposure.damp * dice.range(0.5, 1.0);
     // Lichen takes decades to colonise stone, so a kept monument carries
@@ -366,7 +365,9 @@ fn grown(
         foot: exposure.foot,
         shade: Vec3::new(mathf::sin(heading), 0.0, mathf::cos(heading)),
         substrate,
+        jointed,
         seed: dice.seed(),
+        snow: 0.0,
     })
 }
 
@@ -378,6 +379,23 @@ fn smooth_age(age: f64) -> f64 {
 }
 
 impl Stage {
+    /// Lay snow covering `snow` of what faces the sky on `work`: its stone,
+    /// its mortar and what grows on it.
+    pub(super) fn snow_on(&mut self, work: Stonework, snow: f64) -> Option<()> {
+        for index in [Some(work.stone), Some(work.mortar), work.cover]
+            .into_iter()
+            .flatten()
+        {
+            match &mut self.materials.get_mut(usize::from(index))?.pigment {
+                Pigment::Masonry(masonry) => masonry.snow = snow,
+                Pigment::Timber(timber) => timber.snow = snow,
+                Pigment::Cover(cover) => cover.snow = snow,
+                _ => {}
+            }
+        }
+        Some(())
+    }
+
     /// Raise the structure `mason` laid, its own frame at `pose`, keyed
     /// `key`: its prototype to grow with the scene's, and its placing.
     pub(super) fn raise(&mut self, mason: Mason, pose: Pose, key: u32) -> Option<usize> {
@@ -684,6 +702,11 @@ impl Mason {
         self.laid == 0
     }
 
+    /// How many units it has laid.
+    pub(super) const fn laid(&self) -> u32 {
+        self.laid
+    }
+
     fn key(&mut self) -> u32 {
         self.laid = self.laid.wrapping_add(1);
         mix32(self.seed ^ mix32(self.laid))
@@ -711,6 +734,11 @@ impl Mason {
             (material, cover, dressing.affinity()),
             key,
         )))
+    }
+
+    /// Take `torn`, the break a unit of the structure snapped at, into it.
+    pub(super) fn torn(&mut self, torn: &Mesh) -> Option<()> {
+        self.assembly.mesh(&torn.points, &torn.faces)
     }
 
     /// Bed mortar filling the box `half` each way about `pose`'s origin.
@@ -743,6 +771,7 @@ impl Mason {
                 lumps: 0.0,
                 pits: 0.004 * weathered * draw(4),
                 crack: cracked(0.03 + 0.2 * age, 0.002 * (0.3 + age)),
+                bristle: 0.0,
             },
             Dressing::Squared => Wear {
                 arris: 0.006 + 0.02 * weathered * (0.5 + draw(1)),
@@ -750,6 +779,7 @@ impl Mason {
                 lumps: least * (0.04 + 0.04 * draw(2)),
                 pits: 0.003 * weathered * draw(4),
                 crack: cracked(0.02 + 0.1 * age, 0.002),
+                bristle: 0.0,
             },
             Dressing::Rubble => Wear {
                 arris: least * (0.18 + 0.12 * draw(1)),
@@ -757,6 +787,7 @@ impl Mason {
                 lumps: least * (0.08 + 0.08 * draw(2)),
                 pits: 0.004 * weathered * draw(4),
                 crack: 0.0,
+                bristle: 0.0,
             },
             // Its form already wears its arrises round, so its wear is its
             // broken faces' wandering, the scars where frost spalled them and
@@ -767,6 +798,7 @@ impl Mason {
                 lumps: least * (0.14 + 0.1 * draw(2)),
                 pits: 0.0008 + 0.0025 * weathered * draw(4),
                 crack: 0.0,
+                bristle: 0.0,
             },
             Dressing::Brick => Wear {
                 arris: 0.0015 + 0.004 * age * draw(1),
@@ -774,6 +806,7 @@ impl Mason {
                 lumps: 0.0006 * draw(2),
                 pits: 0.0015 * age * draw(4),
                 crack: cracked(0.02 + 0.06 * age, 0.0008),
+                bristle: 0.0,
             },
             Dressing::Mortar => Wear {
                 arris: 0.0,
@@ -781,6 +814,7 @@ impl Mason {
                 lumps: 0.0,
                 pits: 0.002 + 0.004 * age,
                 crack: 0.0,
+                bristle: 0.0,
             },
             Dressing::Timber => Wear {
                 arris: 0.002 + 0.008 * age * (0.5 + draw(1)),
@@ -788,6 +822,7 @@ impl Mason {
                 lumps: 0.0,
                 pits: 0.0008 * age * draw(4),
                 crack: cracked(0.15 + 0.5 * age, 0.004 * (0.3 + age)),
+                bristle: 0.0,
             },
         }
     }

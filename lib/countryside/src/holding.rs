@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use tairix_util::mathf;
 
 use crate::key::{Key, Stage};
-use crate::plane::{Convex, Point, Rect};
+use crate::plane::{self, Convex, Point, Rect};
 
 /// Where a holding lies on its lattice.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash, Ord, PartialOrd)]
@@ -73,7 +73,10 @@ impl Lattice {
     /// wandered a drawn way.
     fn vertex_mm(&self, (i, j): (i32, i32)) -> (i64, i64) {
         let mut draws = self.key.draws(Stage::Holding, (i64::from(i), i64::from(j)));
-        let (angle, reach) = (draws.range(0.0, core::f64::consts::TAU), JITTER * mathf::sqrt(draws.unit()));
+        let (angle, reach) = (
+            draws.range(0.0, core::f64::consts::TAU),
+            JITTER * mathf::sqrt(draws.unit()),
+        );
         let x = (f64::from(i) + 0.5 * f64::from(j) + reach * mathf::cos(angle)) * self.spacing;
         let y = (f64::from(j) * ROW + reach * mathf::sin(angle)) * self.spacing;
         let mm = |metres: f64| i64::from(mathf::round_i32((metres * 1000.0).clamp(-2.0e9, 2.0e9)));
@@ -86,20 +89,37 @@ impl Lattice {
         Point::new(millimetres(x), millimetres(y))
     }
 
-    /// The outline of `holding`: the middles of the six triangles about its
+    /// The corners of `holding`: the middles of the six triangles about its
     /// vertex, anticlockwise.
-    pub(crate) fn outline(&self, holding: HoldingId) -> Convex {
+    fn corners(&self, holding: HoldingId) -> [Point; 6] {
         let (i, j) = (holding.i, holding.j);
         let centre = self.vertex_mm((i, j));
-        let around = AROUND.map(|(di, dj)| self.vertex_mm((i + di, j + dj)));
-        let corners = (0..6)
-            .map(|k| {
-                let (a, b) = (around[k], around[(k + 1) % 6]);
-                let sum = (centre.0 + a.0 + b.0, centre.1 + a.1 + b.1);
-                Point::new(millimetres(sum.0) / 3.0, millimetres(sum.1) / 3.0)
-            })
-            .collect();
-        Convex { corners }
+        let around =
+            AROUND.map(|(di, dj)| self.vertex_mm((i.saturating_add(di), j.saturating_add(dj))));
+        core::array::from_fn(|k| {
+            let (a, b) = (around[k], around[(k + 1) % 6]);
+            let sum = (centre.0 + a.0 + b.0, centre.1 + a.1 + b.1);
+            Point::new(millimetres(sum.0) / 3.0, millimetres(sum.1) / 3.0)
+        })
+    }
+
+    /// The outline of `holding`; `None` where the heap will not hold it.
+    pub(crate) fn outline(&self, holding: HoldingId) -> Option<Convex> {
+        let corners = self.corners(holding);
+        Some(Convex {
+            corners: tairix_util::fallible::collected(corners.len(), corners.into_iter())?,
+        })
+    }
+
+    /// Whether `at` lies within `holding`'s outline, worked out where it
+    /// stands rather than kept.
+    pub(crate) fn holds(&self, holding: HoldingId, at: Point) -> bool {
+        plane::contains(&self.corners(holding), at)
+    }
+
+    /// The rectangle `holding`'s outline lies in.
+    pub(crate) fn bounds(&self, holding: HoldingId) -> Option<Rect> {
+        Rect::of(self.corners(holding))
     }
 
     /// The lattice vertex nearest `at`, as the lattice lies before it wanders.
@@ -114,7 +134,11 @@ impl Lattice {
     /// nearest, the first in their order to hold it, `known` telling of each
     /// holding asked about whether its outline holds `at` and where its
     /// vertex lies, for a caller that holds the outlines already.
-    pub(crate) fn locate(&self, at: Point, known: &dyn Fn(HoldingId) -> (bool, Point)) -> HoldingId {
+    pub(crate) fn locate(
+        &self,
+        at: Point,
+        known: &dyn Fn(HoldingId) -> (bool, Point),
+    ) -> HoldingId {
         let (i, j) = self.nearest_vertex(at);
         let mut nearest = (f64::INFINITY, HoldingId::new(i, j));
         for dj in -1..=1 {
@@ -148,20 +172,39 @@ impl Lattice {
             self.nearest_vertex(Point::new(rect.high.x, rect.low.y)),
         ];
         let (i0, i1) = (
-            corners.iter().map(|c| c.0).min().unwrap_or(0) - 2,
-            corners.iter().map(|c| c.0).max().unwrap_or(0) + 2,
+            corners
+                .iter()
+                .map(|c| c.0)
+                .min()
+                .unwrap_or(0)
+                .saturating_sub(2),
+            corners
+                .iter()
+                .map(|c| c.0)
+                .max()
+                .unwrap_or(0)
+                .saturating_add(2),
         );
         let (j0, j1) = (
-            corners.iter().map(|c| c.1).min().unwrap_or(0) - 2,
-            corners.iter().map(|c| c.1).max().unwrap_or(0) + 2,
+            corners
+                .iter()
+                .map(|c| c.1)
+                .min()
+                .unwrap_or(0)
+                .saturating_sub(2),
+            corners
+                .iter()
+                .map(|c| c.1)
+                .max()
+                .unwrap_or(0)
+                .saturating_add(2),
         );
         let mut holdings = Vec::new();
         for j in j0..=j1 {
             for i in i0..=i1 {
                 let holding = HoldingId::new(i, j);
                 if self
-                    .outline(holding)
-                    .bounds()
+                    .bounds(holding)
                     .is_some_and(|bounds| bounds.overlaps(rect))
                 {
                     holdings.try_reserve(1).ok()?;
