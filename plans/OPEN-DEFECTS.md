@@ -22,9 +22,9 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 299 open, 415 closed, 714 total.
+**closed**, and a partial fix stays **open**. 300 open, 415 closed, 715 total.
 
-### Open (299)
+### Open (300)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -327,6 +327,7 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D718 | IO-APIC pins each take a vector at boot, 207 at most across every IO-APIC, so a server whose IO-APICs carry more pins fails to boot with `IrqVectorExhausted` and starves the MSI pool | **medium**; noticed routing IO-APIC sources through interrupt remapping (`plans/IOMMU.md` IOM11); not absorbed, because the fix claims a pin's vector when it is bound, on every port's controller. The `BootError` doc that called ~120 pins the most a platform ships is corrected. `kernel/tairix-kernel/src/x86_64/boot.rs` `discover_and_program_io_apics`, `kernel/tairix-kernel/src/x86_64/ioapic_controller.rs` |
 | D719 | moss on a structure reads as a primitive near the eye: half a metre from an old fence rail a lone cushion is a smooth green dome with a printed speckle and a mat's margin a flat, sharp-edged sheet, where RT21 promises fibrous cushions breaking into the cushions they are made of | low; noticed in a close-up checking RT14's torn rails; not absorbed, the moss relief being RT21's. `lib/raytrace/src/{cover.rs,solid.rs}` |
 | D720 | a farmland meadow's sward half a metre from the eye: a flat, fir-shaped weed reads as a cut-out, and the ground between the blades shows a regular polygonal crack pattern though no mud is laid there | low; noticed in the same close-up; not absorbed, being the sward's and the ground's (RT19 redraws the weeds). `lib/raytrace/src/{grass.rs,ground.rs}` |
+| D721 | every thread dispatch takes one global lock to ask whether the thread is stopped: the kthread shim's `procsignal::task_is_stopped` is a `BTreeSet` lookup under the `STOPPED_TASKS` spin lock, taken even when nothing is stopped, because a stopped thread is parked like any blocked one, so an unrelated broadcast wake makes it runnable and the shim dispatches it only to park it again | **medium**, unmeasured: scalability on the dispatch path, not correctness; noticed reviewing the signal design; logged rather than absorbed, by the user's decision for this change. Closed by a stopped state an ordinary wake does not leave, as Linux's `TASK_STOPPED`, so dispatch checks nothing, with a test that a broadcast wake leaves a stopped thread parked. D273's intake has the same shape, a global map keyed by task id. `kernel/core/src/kthread.rs` `spawn_control`, `kernel/core/src/procsignal.rs`, `kernel/sched/api` |
 
 ### D453 — a process's scheduling level reaches only its leader thread
 
